@@ -177,6 +177,8 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// System diagnostics and dependency checks
+    Doctor,
     /// Build a microVM image from a Mvmfile.toml config or Nix flake
     Build {
         /// Image name (built-in like "openclaw") or path to directory with Mvmfile.toml
@@ -780,6 +782,7 @@ pub fn run() -> Result<()> {
         Commands::Status => cmd_status(),
         Commands::Destroy => cmd_destroy(),
         Commands::Upgrade { check, force } => cmd_upgrade(check, force),
+        Commands::Doctor => cmd_doctor(),
         Commands::Build {
             path,
             output,
@@ -1431,6 +1434,10 @@ fn cmd_status() -> Result<()> {
 
 fn cmd_upgrade(check: bool, force: bool) -> Result<()> {
     upgrade::upgrade(check, force)
+}
+
+fn cmd_doctor() -> Result<()> {
+    crate::doctor::run()
 }
 
 fn cmd_build(path: &str, output: Option<&str>) -> Result<()> {
