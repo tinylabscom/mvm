@@ -286,22 +286,26 @@ fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
 
         # If rootfs.ext4 is missing, (re)build it from squashfs
         if [ ! -f rootfs.ext4 ]; then
-            if [ ! -f rootfs.squashfs ]; then
-                echo '[mvm] Downloading builder rootfs...'
-                latest_ubuntu_key=$(curl -s \
-                    "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/{fc_short}/{arch}/ubuntu-&list-type=2" \
-                    | grep -oP '(?<=<Key>)(firecracker-ci/{fc_short}/{arch}/ubuntu-[0-9]+\.[0-9]+\.squashfs)(?=</Key>)' \
-                    | sort -V | tail -1)
+            echo '[mvm] Downloading builder rootfs (fresh)...'
+            latest_ubuntu_key=$(curl -s \
+                "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/{fc_short}/{arch}/ubuntu-&list-type=2" \
+                | grep -oP '(?<=<Key>)(firecracker-ci/{fc_short}/{arch}/ubuntu-[0-9]+\\.[0-9]+\\.squashfs)(?=</Key>)' \
+                | sort -V | tail -1)
 
-                wget -q --show-progress -O rootfs.squashfs \
-                    "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"
-            else
-                echo '[mvm] Using cached rootfs.squashfs'
-            fi
+            rm -f rootfs.squashfs
+            wget -q --show-progress -O rootfs.squashfs \
+                "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"
 
             echo '[mvm] Preparing builder rootfs...'
             rm -rf squashfs-root
-            unsquashfs -d squashfs-root rootfs.squashfs
+            if ! unsquashfs -d squashfs-root rootfs.squashfs; then
+                echo '[mvm] Corrupt squashfs; re-downloading...'
+                rm -f rootfs.squashfs
+                wget -q --show-progress -O rootfs.squashfs \
+                    "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"
+                rm -rf squashfs-root
+                unsquashfs -d squashfs-root rootfs.squashfs
+            fi
 
             mkdir -p squashfs-root/root/.ssh
             mkdir -p squashfs-root/nix
@@ -310,7 +314,7 @@ fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
             truncate -s 4G rootfs.ext4
             mkfs.ext4 -d squashfs-root -F rootfs.ext4
 
-            rm -rf squashfs-root
+            rm -rf squashfs-root rootfs.squashfs
             echo '[mvm] Builder rootfs prepared.'
         fi
         "#,
@@ -733,7 +737,81 @@ fn record_build_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::tenant::TenantNet;
+    use mvm_core::{pool::PoolSpec, tenant::TenantNet};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct FakeEnv {
+        stdout: Mutex<VecDeque<String>>,
+        cmds: Mutex<Vec<String>>,
+        visible_cmds: Mutex<Vec<String>>,
+    }
+
+    impl FakeEnv {
+        fn new(stdout_responses: &[&str]) -> Self {
+            Self {
+                stdout: Mutex::new(
+                    stdout_responses
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<VecDeque<_>>(),
+                ),
+                cmds: Mutex::new(Vec::new()),
+                visible_cmds: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl BuildEnvironment for FakeEnv {
+        fn shell_exec(&self, script: &str) -> Result<()> {
+            self.cmds.lock().unwrap().push(script.to_string());
+            Ok(())
+        }
+
+        fn shell_exec_stdout(&self, _script: &str) -> Result<String> {
+            let mut q = self.stdout.lock().unwrap();
+            q.pop_front()
+                .ok_or_else(|| anyhow::anyhow!("no stdout response queued"))
+        }
+
+        fn shell_exec_visible(&self, script: &str) -> Result<()> {
+            self.visible_cmds.lock().unwrap().push(script.to_string());
+            Ok(())
+        }
+
+        fn load_pool_spec(&self, _tenant_id: &str, _pool_id: &str) -> Result<PoolSpec> {
+            unreachable!()
+        }
+
+        fn load_tenant_config(&self, _tenant_id: &str) -> Result<mvm_core::tenant::TenantConfig> {
+            unreachable!()
+        }
+
+        fn ensure_bridge(&self, _net: &TenantNet) -> Result<()> {
+            unreachable!()
+        }
+
+        fn setup_tap(&self, _net: &InstanceNet, _bridge_name: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn teardown_tap(&self, _tap_dev: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        fn record_revision(
+            &self,
+            _tenant_id: &str,
+            _pool_id: &str,
+            _revision: &BuildRevision,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        fn log_info(&self, _msg: &str) {}
+
+        fn log_success(&self, _msg: &str) {}
+    }
 
     #[test]
     fn test_builder_instance_net() {
@@ -763,5 +841,39 @@ mod tests {
         assert_eq!(BUILDER_VCPUS, 4);
         assert_eq!(BUILDER_MEM_MIB, 4096);
         assert_eq!(DEFAULT_TIMEOUT_SECS, 1800);
+    }
+
+    #[test]
+    fn test_ensure_builder_artifacts_skips_when_present() {
+        let env = FakeEnv::new(&["yes"]);
+        ensure_builder_artifacts(&env).expect("should succeed");
+        assert!(env.cmds.lock().unwrap().is_empty());
+        assert!(env.visible_cmds.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ensure_builder_artifacts_downloads_when_missing() {
+        let env = FakeEnv::new(&["no"]);
+        ensure_builder_artifacts(&env).expect("download path should succeed");
+
+        let cmds = env.cmds.lock().unwrap();
+        let visibles = env.visible_cmds.lock().unwrap();
+
+        assert!(
+            cmds.iter().any(|c: &String| c.contains("mkdir -p")),
+            "expected mkdir/chown command"
+        );
+        assert!(
+            visibles
+                .iter()
+                .any(|c: &String| c.contains("apt-get install")),
+            "expected apt-get install"
+        );
+        assert!(
+            visibles
+                .iter()
+                .any(|c: &String| c.contains("Preparing builder rootfs")),
+            "expected rootfs preparation script"
+        );
     }
 }

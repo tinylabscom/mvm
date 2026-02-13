@@ -88,6 +88,15 @@ else
     info "Installed: $(rustc --version)"
 fi
 
+# -----------------
+# Install pnpm
+# -----------
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://get.pnpm.io/install.sh | sh -
+else
+    wget -qO- https://get.pnpm.io/install.sh | sh -
+fi
+
 # ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
