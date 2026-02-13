@@ -265,6 +265,11 @@ fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
         dir = BUILDER_DIR,
     ))?;
 
+    // Ensure required tools are present (wget/curl, unsquashfs, mkfs.ext4)
+    env.shell_exec_visible(
+        "sudo apt-get update -qq && sudo apt-get install -y -qq wget curl squashfs-tools e2fsprogs",
+    )?;
+
     let fc_short = fc_version_short();
     env.shell_exec_visible(&format!(
         r#"
