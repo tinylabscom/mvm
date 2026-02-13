@@ -297,10 +297,13 @@ fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
                 exit 1;
             fi
 
-            rm -f rootfs.squashfs
+            echo "[mvm] Using key: $latest_ubuntu_key"
+
+            rm -f rootfs.squashfs rootfs.ext4
             for attempt in 1 2; do
                 echo "[mvm] Fetching rootfs.squashfs (attempt $attempt)..."
-                if wget -q --show-progress -O rootfs.squashfs \
+                if curl -fSL --retry 2 --retry-delay 2 \
+                    -o rootfs.squashfs \
                     "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"; then
                     break
                 fi
@@ -317,7 +320,8 @@ fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
             if ! unsquashfs -d squashfs-root rootfs.squashfs; then
                 echo '[mvm] Corrupt squashfs; retrying download...'
                 rm -f rootfs.squashfs
-                if ! wget -q --show-progress -O rootfs.squashfs \
+                if ! curl -fSL --retry 2 --retry-delay 2 \
+                    -o rootfs.squashfs \
                     "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"; then
                     echo '[mvm] ERROR: Re-download failed'
                     exit 1
