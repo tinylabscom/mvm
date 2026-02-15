@@ -13,6 +13,10 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/auser/mvm"
+homepage = "https://github.com/auser/mvm"
+authors = ["mvm contributors"]
 
 [workspace.dependencies]
 # Async runtime
@@ -73,6 +77,10 @@ name = "mvm"
 version.workspace = true
 edition.workspace = true
 description = "Multi-tenant Firecracker microVM fleet manager"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [lib]
 name = "mvm"
@@ -83,13 +91,13 @@ name = "mvm"
 path = "src/main.rs"
 
 [dependencies]
-mvm-core = { path = "crates/mvm-core" }
-mvm-runtime = { path = "crates/mvm-runtime" }
-mvm-build = { path = "crates/mvm-build" }
-mvm-guest = { path = "crates/mvm-guest" }
-mvm-agent = { path = "crates/mvm-agent" }
-mvm-coordinator = { path = "crates/mvm-coordinator" }
-mvm-cli = { path = "crates/mvm-cli" }
+mvm-core = { path = "crates/mvm-core", version = "0.1.0" }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.1.0" }
+mvm-build = { path = "crates/mvm-build", version = "0.1.0" }
+mvm-guest = { path = "crates/mvm-guest", version = "0.1.0" }
+mvm-agent = { path = "crates/mvm-agent", version = "0.1.0" }
+mvm-coordinator = { path = "crates/mvm-coordinator", version = "0.1.0" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.1.0" }
 anyhow.workspace = true
 mimalloc.workspace = true
 

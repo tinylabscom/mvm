@@ -1,0 +1,7 @@
+set -euo pipefail
+sudo mkdir -p {{builder_dir}}
+sudo chown $(whoami) {{builder_dir}}
+rm -f {{key}} {{pub}}
+ssh-keygen -t ed25519 -N '' -f {{key}} -q
+chmod 600 {{key}}
+chmod 644 {{pub}}

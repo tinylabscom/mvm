@@ -46,4 +46,9 @@ pub trait BuildEnvironment: Send + Sync {
 
     /// Log a success message.
     fn log_success(&self, msg: &str);
+
+    /// Log a warning (optional; default no-op for test fakes).
+    fn log_warn(&self, _msg: &str) {
+        // default implementation: no-op
+    }
 }

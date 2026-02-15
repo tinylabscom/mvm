@@ -1,0 +1,209 @@
+set -euo pipefail
+cd {{builder_dir}}
+
+ASSET_BASE="${MVM_FC_ASSET_BASE:-https://s3.amazonaws.com/spec.ccfc.min}"
+FC_SHORT="{{fc_short}}"
+FC_FULL="{{fc_full}}"
+ARCH="{{arch}}"
+BUILDER_PUB="{{builder_pub}}"
+
+head_ok() {
+    local url="$1"
+    curl -IfsL --retry 2 --retry-delay 1 "$url" >/dev/null 2>&1
+}
+
+pick_first() {
+    local out=""
+    for url in "$@"; do
+        echo "[mvm]   probing $url" >&2
+        if head_ok "$url"; then
+            out="$url"
+            break
+        fi
+    done
+    echo "$out"
+}
+
+BASES=(
+    "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_FULL}"
+    "${ASSET_BASE}"
+)
+
+PREFIXES=(
+    ""
+    "firecracker-ci/${FC_SHORT}/${ARCH}"
+    "firecracker-ci/${FC_FULL}/${ARCH}"
+)
+
+if [ -n "${MVM_FC_ASSET_ROOTFS:-}" ]; then
+    ROOTFS_NAMES=("${MVM_FC_ASSET_ROOTFS}")
+else
+    ROOTFS_NAMES=("ubuntu-24.04.squashfs" "ubuntu-22.04.squashfs" "ubuntu-20.04.squashfs")
+fi
+
+if [ -n "${MVM_FC_ASSET_KERNEL:-}" ]; then
+    KERNEL_NAMES=("${MVM_FC_ASSET_KERNEL}")
+else
+    KERNEL_NAMES=("vmlinux-5.10.198" "vmlinux")
+fi
+
+for prefix in "${PREFIXES[@]}"; do
+    [ -z "$prefix" ] && continue
+    list_url="${ASSET_BASE}/?prefix=${prefix}/vmlinux-5.10&list-type=2"
+    if xml=$(curl -fsSL "$list_url" 2>/dev/null); then
+        maybe=$(printf "%s" "$xml" | grep -oP 'vmlinux-5\.10\.\d{3}' | sort -V | tail -1)
+        if [ -n "$maybe" ] && [[ ! " ${KERNEL_NAMES[*]} " =~ " $maybe " ]]; then
+            KERNEL_NAMES=("$maybe" "${KERNEL_NAMES[@]}")
+            break
+        fi
+    fi
+done
+
+if [ ! -f vmlinux ]; then
+    echo '[mvm] Downloading builder kernel...'
+    kernel_urls=()
+    for base in "${BASES[@]}"; do
+        for prefix in "${PREFIXES[@]}"; do
+            for name in "${KERNEL_NAMES[@]}"; do
+                p="$prefix"
+                [ -n "$p" ] && p="$p/"
+                kernel_urls+=("${base}/${p}${name}")
+            done
+        done
+    done
+
+    chosen_kernel=$(pick_first "${kernel_urls[@]}")
+    if [ -z "$chosen_kernel" ]; then
+        echo "[mvm] ERROR: Could not find a reachable kernel. Tried:"
+        printf '  - %s\n' "${kernel_urls[@]}"
+        exit 1
+    fi
+
+    echo "[mvm] Using kernel: $chosen_kernel"
+    curl -fSL --retry 3 --retry-delay 2 --retry-all-errors -o vmlinux "$chosen_kernel"
+fi
+
+if [ ! -f rootfs.ext4 ]; then
+    echo '[mvm] Downloading builder rootfs (fresh)...'
+    rootfs_urls=()
+    for base in "${BASES[@]}"; do
+        for prefix in "${PREFIXES[@]}"; do
+            for name in "${ROOTFS_NAMES[@]}"; do
+                p="$prefix"
+                [ -n "$p" ] && p="$p/"
+                rootfs_urls+=("${base}/${p}${name}")
+            done
+        done
+    done
+
+    chosen_rootfs=$(pick_first "${rootfs_urls[@]}")
+    if [ -z "$chosen_rootfs" ]; then
+        echo "[mvm] No remote rootfs reachable; building a minimal local squashfs (jammy)..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq debootstrap squashfs-tools
+        sudo rm -rf /tmp/mvm-local-rootfs
+        sudo debootstrap --arch="${ARCH}" --variant=minbase jammy /tmp/mvm-local-rootfs http://ports.ubuntu.com
+        if [ "{{inject_ssh}}" = "yes" ]; then
+            sudo mkdir -p /tmp/mvm-local-rootfs/root/.ssh
+            sudo cp "$BUILDER_PUB" /tmp/mvm-local-rootfs/root/.ssh/authorized_keys
+            sudo chmod 700 /tmp/mvm-local-rootfs/root/.ssh
+            sudo chmod 600 /tmp/mvm-local-rootfs/root/.ssh/authorized_keys
+        fi
+        sudo mksquashfs /tmp/mvm-local-rootfs rootfs.squashfs -noappend >/dev/null
+        sudo rm -rf /tmp/mvm-local-rootfs
+        chosen_rootfs="local:rootfs.squashfs"
+    fi
+
+    echo "[mvm] Using rootfs: $chosen_rootfs"
+
+    rm -f rootfs.squashfs rootfs.ext4
+    if [ "$chosen_rootfs" = "local:rootfs.squashfs" ]; then
+        echo "[mvm] Built local rootfs.squashfs"
+    else
+        curl -fSL --retry 3 --retry-delay 2 --retry-all-errors -o rootfs.squashfs "$chosen_rootfs"
+    fi
+    if [ ! -s rootfs.squashfs ]; then
+        echo '[mvm] ERROR: Failed to download builder rootfs'
+        exit 1
+    fi
+
+    echo '[mvm] Preparing builder rootfs...'
+    rm -rf squashfs-root
+    if ! unsquashfs -d squashfs-root rootfs.squashfs; then
+        echo '[mvm] Corrupt squashfs; retrying download/build...'
+        rm -f rootfs.squashfs
+        if [ "$chosen_rootfs" = "local:rootfs.squashfs" ]; then
+            echo "[mvm] Rebuilding local rootfs.squashfs..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq debootstrap squashfs-tools
+            sudo rm -rf /tmp/mvm-local-rootfs
+            sudo debootstrap --arch="${ARCH}" --variant=minbase jammy /tmp/mvm-local-rootfs http://ports.ubuntu.com
+            if [ "{{inject_ssh}}" = "yes" ]; then
+                sudo mkdir -p /tmp/mvm-local-rootfs/root/.ssh
+                printf '%s\n' '{{auth_keys}}' | sudo tee /tmp/mvm-local-rootfs/root/.ssh/authorized_keys >/dev/null
+                sudo chmod 700 /tmp/mvm-local-rootfs/root/.ssh
+                sudo chmod 600 /tmp/mvm-local-rootfs/root/.ssh/authorized_keys
+            fi
+            sudo mksquashfs /tmp/mvm-local-rootfs rootfs.squashfs -noappend >/dev/null
+            sudo rm -rf /tmp/mvm-local-rootfs
+        else
+            if ! curl -fSL --retry 3 --retry-delay 2 --retry-all-errors -o rootfs.squashfs "$chosen_rootfs"; then
+                rc=$?
+                echo "[mvm] ERROR: Re-download failed (curl exit $rc)"
+                exit 1
+            fi
+        fi
+        rm -rf squashfs-root
+        if ! unsquashfs -d squashfs-root rootfs.squashfs; then
+            echo '[mvm] ERROR: Unsquashfs failed after re-download'
+            exit 1
+        fi
+    fi
+
+    if [ "{{inject_ssh}}" = "yes" ]; then
+        mkdir -p squashfs-root/root/.ssh
+        printf '%s\n' '{{auth_keys}}' > squashfs-root/root/.ssh/authorized_keys
+        sudo chmod 700 squashfs-root/root/.ssh
+        sudo chmod 600 squashfs-root/root/.ssh/authorized_keys
+        sudo chown -R 0:0 squashfs-root/root/.ssh || true
+
+        mkdir -p squashfs-root/etc/ssh/sshd_config.d
+        cat > squashfs-root/etc/ssh/sshd_config.d/mvm.conf <<'SSHD'
+PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication no
+SSHD
+    fi
+
+    mkdir -p "$(dirname {{agent_dst}})"
+    cp "{{agent_src}}" "squashfs-root{{agent_dst}}"
+    chmod 755 "squashfs-root{{agent_dst}}"
+    mkdir -p "squashfs-root$(dirname {{agent_service}})"
+    cat > "squashfs-root{{agent_service}}" <<'AGENTEOF'
+[Unit]
+Description=MVM Builder Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{agent_dst}}
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+AGENTEOF
+    mkdir -p "squashfs-root/etc/systemd/system/multi-user.target.wants"
+    ln -snf "{{agent_service}}" "squashfs-root/etc/systemd/system/multi-user.target.wants/mvm-builder-agent.service"
+
+    mkdir -p squashfs-root/nix
+
+    rm -f rootfs.ext4
+    truncate -s 4G rootfs.ext4
+    sudo mkfs.ext4 -d squashfs-root -F rootfs.ext4
+    sudo chown $(whoami) rootfs.ext4
+
+    rm -rf squashfs-root rootfs.squashfs
+    echo '[mvm] Builder rootfs prepared.'
+fi

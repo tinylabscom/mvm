@@ -3,12 +3,16 @@ name = "mvm-agent"
 version.workspace = true
 edition.workspace = true
 description = "Reconcile engine, coordinator client, and ops facade for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
-mvm-core = { path = "../mvm-core" }
-mvm-runtime = { path = "../mvm-runtime" }
-mvm-build = { path = "../mvm-build" }
-mvm-guest = { path = "../mvm-guest" }
+mvm-core = { path = "../mvm-core", version = "0.1.0" }
+mvm-runtime = { path = "../mvm-runtime", version = "0.1.0" }
+mvm-build = { path = "../mvm-build", version = "0.1.0" }
+mvm-guest = { path = "../mvm-guest", version = "0.1.0" }
 anyhow.workspace = true
 chrono.workspace = true
 quinn.workspace = true

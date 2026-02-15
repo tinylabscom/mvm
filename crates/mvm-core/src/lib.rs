@@ -16,5 +16,6 @@ pub mod protocol;
 pub mod retry;
 pub mod routing;
 pub mod signing;
+pub mod template;
 pub mod tenant;
 pub mod time;

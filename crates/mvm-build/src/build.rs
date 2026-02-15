@@ -1,27 +1,68 @@
 use anyhow::{Context, Result};
-
-use mvm_core::build_env::BuildEnvironment;
-use mvm_core::config::{ARCH, fc_version_short};
-use mvm_core::instance::InstanceNet;
-use mvm_core::naming;
-use mvm_core::pool::{ArtifactPaths, BuildRevision, pool_artifacts_dir};
-use mvm_core::tenant::{TenantNet, tenant_ssh_key_path};
-use mvm_core::time::utc_now;
+use std::collections::BTreeMap;
 
 use crate::nix_manifest::NixManifest;
+use crate::scripts::render_script;
+use mvm_core::build_env::BuildEnvironment;
+use mvm_core::instance::InstanceNet;
+use mvm_core::naming;
+use mvm_core::pool::{BuildRevision, pool_artifacts_dir};
+use mvm_core::tenant::TenantNet;
 
 /// Base directory for builder infrastructure.
-const BUILDER_DIR: &str = "/var/lib/mvm/builder";
+pub(crate) const BUILDER_DIR: &str = "/var/lib/mvm/builder";
+pub(crate) const BUILDER_AGENT_GUEST_BIN: &str = "/usr/local/bin/mvm-builder-agent";
+pub(crate) const BUILDER_AGENT_SERVICE: &str = "/etc/systemd/system/mvm-builder-agent.service";
 
 /// Builder VM resource defaults.
-const BUILDER_VCPUS: u8 = 4;
-const BUILDER_MEM_MIB: u32 = 4096;
+pub(crate) const BUILDER_VCPUS: u8 = 4;
+pub(crate) const BUILDER_MEM_MIB: u32 = 4096;
+pub(crate) const BUILDER_OUTPUT_DISK_MIB: u32 = 8192;
+// SSH user for builder VM; default root because upstream FC rootfs images do not
+// always ship an 'ubuntu' user. Override by editing this constant if your image
+// provides a non-root default user.
+pub(crate) const BUILDER_SSH_USER: &str = "root";
 
 /// IP offset reserved for the builder VM within each tenant subnet.
 const BUILDER_IP_OFFSET: u8 = 2;
 
+/// Path to the builder SSH private key on the host (in the VM namespace).
+pub(crate) fn builder_ssh_key_path() -> String {
+    format!("{}/id_rsa", BUILDER_DIR)
+}
+
 /// Default build timeout in seconds (30 minutes).
-const DEFAULT_TIMEOUT_SECS: u64 = 1800;
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 1800;
+
+#[cfg(test)]
+fn candidate_prefixes(fc_short: &str, fc_full: &str, arch: &str) -> Vec<String> {
+    vec![
+        format!("firecracker-ci/{}/{arch}", fc_short),
+        format!("firecracker-ci/{}/{arch}", fc_full),
+    ]
+}
+
+#[cfg(test)]
+fn rootfs_candidates(override_name: Option<&str>) -> Vec<String> {
+    if let Some(name) = override_name {
+        vec![name.to_string()]
+    } else {
+        vec![
+            "ubuntu-24.04.squashfs".into(),
+            "ubuntu-22.04.squashfs".into(),
+            "ubuntu-20.04.squashfs".into(),
+        ]
+    }
+}
+
+#[cfg(test)]
+fn kernel_candidates(override_name: Option<&str>) -> Vec<String> {
+    if let Some(name) = override_name {
+        vec![name.to_string()]
+    } else {
+        vec!["vmlinux-5.10.198".into(), "vmlinux".into()]
+    }
+}
 
 /// Optional overrides for pool builds.
 #[derive(Default)]
@@ -29,48 +70,7 @@ pub struct PoolBuildOpts {
     pub timeout_secs: Option<u64>,
     pub builder_vcpus: Option<u8>,
     pub builder_mem_mib: Option<u32>,
-}
-
-fn maybe_skip_by_lock_hash(
-    env: &dyn BuildEnvironment,
-    tenant_id: &str,
-    pool_id: &str,
-    flake_ref: &str,
-) -> Result<bool> {
-    if flake_ref.contains(':') {
-        return Ok(false); // remote ref: don't hash
-    }
-
-    let hash = match env.shell_exec_stdout(&format!(
-        r#"if [ -f {}/flake.lock ]; then nix hash path {}/flake.lock; else echo ""; fi"#,
-        flake_ref, flake_ref
-    )) {
-        Ok(h) => h,
-        Err(_) => return Ok(false),
-    };
-    let trimmed = hash.trim();
-    if trimmed.is_empty() {
-        return Ok(false);
-    }
-
-    let artifacts_dir = pool_artifacts_dir(tenant_id, pool_id);
-    let lock_hash_path = format!("{}/last_flake_lock.hash", artifacts_dir);
-    let current_exists = env
-        .shell_exec_stdout(&format!(
-            "test -L {}/current && echo yes || echo no",
-            artifacts_dir
-        ))
-        .unwrap_or_default();
-    let existing = env
-        .shell_exec_stdout(&format!("cat {} 2>/dev/null || echo ''", lock_hash_path))
-        .unwrap_or_default();
-
-    if current_exists.trim() == "yes" && existing.trim() == trimmed {
-        env.log_success("flake.lock unchanged — skipping rebuild (cache hit)");
-        return Ok(true);
-    }
-
-    Ok(false)
+    pub force_rebuild: bool,
 }
 
 /// Build artifacts for a pool using an ephemeral Firecracker builder microVM.
@@ -80,12 +80,7 @@ pub fn pool_build(
     pool_id: &str,
     timeout_secs: Option<u64>,
 ) -> Result<()> {
-    let opts = PoolBuildOpts {
-        timeout_secs,
-        builder_vcpus: None,
-        builder_mem_mib: None,
-    };
-    pool_build_with_opts(env, tenant_id, pool_id, opts)
+    crate::orchestrator::pool_build(env, tenant_id, pool_id, timeout_secs)
 }
 
 /// Build artifacts for a pool with optional resource overrides.
@@ -95,132 +90,55 @@ pub fn pool_build_with_opts(
     pool_id: &str,
     opts: PoolBuildOpts,
 ) -> Result<()> {
-    let timeout = opts.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let spec = env.load_pool_spec(tenant_id, pool_id)?;
-    let tenant = env.load_tenant_config(tenant_id)?;
+    crate::orchestrator::pool_build_with_opts(env, tenant_id, pool_id, opts)
+}
 
-    env.log_info(&format!(
-        "Building {}/{} (flake: {}, profile: {})",
-        tenant_id, pool_id, spec.flake_ref, spec.profile
-    ));
+pub(crate) fn create_builder_output_disk(run_dir: &str, size_mib: u32) -> String {
+    format!("{}/build-out-{}m.ext4", run_dir, size_mib)
+}
 
-    if maybe_skip_by_lock_hash(env, tenant_id, pool_id, &spec.flake_ref)? {
-        return Ok(());
+pub(crate) fn create_builder_input_disk(
+    env: &dyn BuildEnvironment,
+    run_dir: &str,
+    flake_ref: &str,
+) -> Result<Option<String>> {
+    if flake_ref.contains(':') {
+        return Ok(None);
     }
 
-    // Step 1: Ensure builder artifacts exist
-    ensure_builder_artifacts(env)?;
-
-    // Step 2: Ensure tenant bridge is up
-    env.ensure_bridge(&tenant.net)?;
-
-    // Step 3: Create a unique build ID for this run
-    let build_id = naming::generate_instance_id().replace("i-", "b-");
-    let build_run_dir = format!("{}/run/{}", BUILDER_DIR, build_id);
-
-    env.shell_exec(&format!("mkdir -p {}", build_run_dir))?;
-
-    env.log_info(&format!("Build ID: {}", build_id));
-
-    // Step 4: Boot ephemeral builder VM
-    let builder_net = builder_instance_net(&tenant.net);
-    let builder_pid = boot_builder(
-        env,
-        &build_run_dir,
-        &builder_net,
-        &tenant.net,
-        opts.builder_vcpus.unwrap_or(BUILDER_VCPUS),
-        opts.builder_mem_mib.unwrap_or(BUILDER_MEM_MIB),
-    )?;
-
-    // Optional: sync local flake into builder if needed
-    let synced_flake = sync_local_flake_if_needed(
-        env,
-        &builder_net.guest_ip,
-        &tenant_ssh_key_path(tenant_id),
-        &spec.flake_ref,
-    );
-    let flake_ref = synced_flake.as_deref().unwrap_or(&spec.flake_ref);
-
-    let lock_hash = flake_lock_hash(
-        env,
-        &builder_net.guest_ip,
-        &tenant_ssh_key_path(tenant_id),
-        flake_ref,
-    );
-
-    ensure_nix_installed(env, &builder_net.guest_ip, &tenant_ssh_key_path(tenant_id))?;
-
-    // Step 5: Wait for builder to be ready, then run the build
-    let result = run_nix_build(
-        env,
-        &builder_net.guest_ip,
-        &tenant_ssh_key_path(tenant_id),
-        flake_ref,
-        &spec.role,
-        &spec.profile,
-        timeout,
-    );
-
-    // Step 6: Extract artifacts if possible, then always tear down
-    let build_result = match result {
-        Ok(nix_output_path) => {
-            env.log_info("Build completed, extracting artifacts...");
-            extract_artifacts(
-                env,
-                &builder_net.guest_ip,
-                &tenant_ssh_key_path(tenant_id),
-                &nix_output_path,
-                tenant_id,
-                pool_id,
-            )
-        }
-        Err(e) => Err(e),
-    };
-
-    // Step 7: Always tear down builder
-    teardown_builder(env, builder_pid, &builder_net, &build_run_dir)?;
-
-    // Propagate build result after cleanup
-    let revision_hash = build_result?;
-
-    // Step 8: Record revision
-    let revision = BuildRevision {
-        revision_hash: revision_hash.clone(),
-        flake_ref: spec.flake_ref.clone(),
-        flake_lock_hash: lock_hash.clone().unwrap_or_else(|| revision_hash.clone()),
-        artifact_paths: ArtifactPaths {
-            vmlinux: "vmlinux".to_string(),
-            rootfs: "rootfs.ext4".to_string(),
-            fc_base_config: "fc-base.json".to_string(),
-        },
-        built_at: utc_now(),
-    };
-
-    env.record_revision(tenant_id, pool_id, &revision)?;
-    record_build_history(env, tenant_id, pool_id, &revision)?;
-
-    if let Some(hash) = lock_hash {
-        let artifacts_dir = pool_artifacts_dir(tenant_id, pool_id);
-        let lock_hash_path = format!("{}/last_flake_lock.hash", artifacts_dir);
-        env.shell_exec(&format!(
-            "mkdir -p {dir} && echo '{hash}' > {path}",
-            dir = artifacts_dir,
-            hash = hash,
-            path = lock_hash_path
-        ))?;
+    let realpath = env
+        .shell_exec_stdout(&format!("realpath {} 2>/dev/null", flake_ref))
+        .unwrap_or_default();
+    let realpath = realpath.trim();
+    if realpath.is_empty() {
+        return Err(anyhow::anyhow!(
+            "failed to resolve local flake path '{}'",
+            flake_ref
+        ));
     }
 
-    env.log_success(&format!(
-        "Build complete: {}/{} revision {}",
-        tenant_id, pool_id, revision_hash
-    ));
+    let staging = format!("{}/flake-input", run_dir);
+    let disk = format!("{}/build-in.ext4", run_dir);
+    env.shell_exec(&format!(
+        r#"
+        set -euo pipefail
+        rm -rf "{staging}"
+        mkdir -p "{staging}"
+        cp -a "{src}/." "{staging}/"
+        truncate -s 4096M "{disk}"
+        mkfs.ext4 -d "{staging}" -F "{disk}" >/dev/null
+        rm -rf "{staging}"
+        "#,
+        staging = staging,
+        src = realpath,
+        disk = disk
+    ))?;
 
-    Ok(())
+    Ok(Some(disk))
 }
 
 /// Construct the InstanceNet for the builder VM (always uses IP offset 2).
-fn builder_instance_net(tenant_net: &TenantNet) -> InstanceNet {
+pub(crate) fn builder_instance_net(tenant_net: &TenantNet) -> InstanceNet {
     let ip_offset = BUILDER_IP_OFFSET;
     let base_ip = &tenant_net.ipv4_subnet;
 
@@ -244,216 +162,8 @@ fn builder_instance_net(tenant_net: &TenantNet) -> InstanceNet {
     }
 }
 
-/// Ensure the builder kernel and rootfs exist.
-fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
-    let kernel_path = format!("{}/vmlinux", BUILDER_DIR);
-    let rootfs_path = format!("{}/rootfs.ext4", BUILDER_DIR);
-    let exists = env.shell_exec_stdout(&format!(
-        "test -f {} && test -f {} && echo yes || echo no",
-        kernel_path, rootfs_path
-    ))?;
-
-    if exists.trim() == "yes" {
-        env.log_info("Builder artifacts found.");
-        return Ok(());
-    }
-
-    env.log_info("Downloading builder artifacts (first time only)...");
-    env.shell_exec(&format!(
-        "sudo mkdir -p {dir} && sudo chown $(whoami) {dir}",
-        dir = BUILDER_DIR,
-    ))?;
-
-    // Ensure required tools are present (wget/curl, unsquashfs, mkfs.ext4)
-    env.shell_exec_visible(
-        "sudo apt-get update -qq && sudo apt-get install -y -qq wget curl squashfs-tools e2fsprogs",
-    )?;
-
-    let fc_short = fc_version_short();
-    env.shell_exec_visible(&format!(
-        r#"
-        set -euo pipefail
-        cd {dir}
-
-        if [ ! -f vmlinux ]; then
-            echo '[mvm] Downloading builder kernel...'
-            latest_kernel_key=$(wget -q \
-                "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/{fc_short}/{arch}/vmlinux-5.10&list-type=2" \
-                -O - | grep -oP '(?<=<Key>)(firecracker-ci/{fc_short}/{arch}/vmlinux-5\.10\.[0-9]{{3}})(?=</Key>)')
-            wget -q --show-progress -O vmlinux \
-                "https://s3.amazonaws.com/spec.ccfc.min/$latest_kernel_key"
-        fi
-
-        # If rootfs.ext4 is missing, (re)build it from squashfs
-        if [ ! -f rootfs.ext4 ]; then
-            echo '[mvm] Downloading builder rootfs (fresh)...'
-            latest_ubuntu_key=$(curl -s \
-                "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/{fc_short}/{arch}/ubuntu-&list-type=2" \
-                | grep -oP '(?<=<Key>)(firecracker-ci/{fc_short}/{arch}/ubuntu-[0-9]+\\.[0-9]+\\.squashfs)(?=</Key>)' \
-                | sort -V | tail -1)
-
-            if [ -z "$latest_ubuntu_key" ]; then
-                echo '[mvm] ERROR: Could not find builder rootfs key';
-                exit 1;
-            fi
-
-            echo "[mvm] Using key: $latest_ubuntu_key"
-
-            rm -f rootfs.squashfs rootfs.ext4
-            for attempt in 1 2; do
-                echo "[mvm] Fetching rootfs.squashfs (attempt $attempt)..."
-                if curl -fSL --retry 2 --retry-delay 2 \
-                    -o rootfs.squashfs \
-                    "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"; then
-                    break
-                fi
-                sleep 2
-            done
-
-            if [ ! -s rootfs.squashfs ]; then
-                echo '[mvm] ERROR: Failed to download builder rootfs'
-                exit 1
-            fi
-
-            echo '[mvm] Preparing builder rootfs...'
-            rm -rf squashfs-root
-            if ! unsquashfs -d squashfs-root rootfs.squashfs; then
-                echo '[mvm] Corrupt squashfs; retrying download...'
-                rm -f rootfs.squashfs
-                if ! curl -fSL --retry 2 --retry-delay 2 \
-                    -o rootfs.squashfs \
-                    "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"; then
-                    echo '[mvm] ERROR: Re-download failed'
-                    exit 1
-                fi
-                rm -rf squashfs-root
-                unsquashfs -d squashfs-root rootfs.squashfs
-            fi
-
-            mkdir -p squashfs-root/root/.ssh
-            mkdir -p squashfs-root/nix
-
-            rm -f rootfs.ext4
-            truncate -s 4G rootfs.ext4
-            mkfs.ext4 -d squashfs-root -F rootfs.ext4
-
-            rm -rf squashfs-root rootfs.squashfs
-            echo '[mvm] Builder rootfs prepared.'
-        fi
-        "#,
-        dir = BUILDER_DIR,
-        arch = ARCH,
-        fc_short = fc_short,
-    ))?;
-
-    env.log_success("Builder artifacts ready.");
-    Ok(())
-}
-
-/// Boot an ephemeral Firecracker builder VM. Returns the FC process PID.
-fn boot_builder(
-    env: &dyn BuildEnvironment,
-    run_dir: &str,
-    builder_net: &InstanceNet,
-    tenant_net: &TenantNet,
-    vcpus: u8,
-    mem_mib: u32,
-) -> Result<u32> {
-    env.log_info("Booting builder VM...");
-
-    // Set up TAP device for builder
-    env.setup_tap(builder_net, &tenant_net.bridge_name)?;
-
-    // Generate FC config inline as JSON (avoids depending on mvm-runtime FcConfig types)
-    let fc_config_json = serde_json::json!({
-        "boot-source": {
-            "kernel_image_path": format!("{}/vmlinux", BUILDER_DIR),
-            "boot_args": format!(
-                "keep_bootcon console=ttyS0 reboot=k panic=1 pci=off ip={}::{}:255.255.255.0::eth0:off",
-                builder_net.guest_ip, builder_net.gateway_ip,
-            ),
-        },
-        "drives": [{
-            "drive_id": "rootfs",
-            "path_on_host": format!("{}/rootfs.ext4", BUILDER_DIR),
-            "is_root_device": true,
-            "is_read_only": false,
-        }],
-        "network-interfaces": [{
-            "iface_id": "net1",
-            "guest_mac": builder_net.mac,
-            "host_dev_name": builder_net.tap_dev,
-        }],
-        "machine-config": {
-            "vcpu_count": vcpus,
-            "mem_size_mib": mem_mib,
-        },
-    });
-
-    let config_json = serde_json::to_string_pretty(&fc_config_json)?;
-    let config_path = format!("{}/fc-builder.json", run_dir);
-    let socket_path = format!("{}/firecracker.socket", run_dir);
-    let log_path = format!("{}/firecracker.log", run_dir);
-    let pid_path = format!("{}/fc.pid", run_dir);
-
-    // Write FC config
-    env.shell_exec(&format!(
-        "cat > {} << 'MVMEOF'\n{}\nMVMEOF",
-        config_path, config_json
-    ))?;
-
-    // Launch Firecracker in background
-    env.shell_exec(&format!(
-        r#"
-        rm -f {socket}
-        firecracker \
-            --api-sock {socket} \
-            --config-file {config} \
-            --log-path {log} \
-            --level Info \
-            &
-        FC_PID=$!
-        echo $FC_PID > {pid}
-        "#,
-        socket = socket_path,
-        config = config_path,
-        log = log_path,
-        pid = pid_path,
-    ))?;
-
-    // Read the PID
-    let pid_str = env.shell_exec_stdout(&format!("cat {}", pid_path))?;
-    let pid: u32 = pid_str
-        .trim()
-        .parse()
-        .with_context(|| format!("Failed to parse builder PID: {:?}", pid_str))?;
-
-    env.log_info(&format!("Builder VM started (PID: {})", pid));
-
-    // Wait for builder VM to be SSH-accessible
-    env.log_info("Waiting for builder VM to become ready...");
-    env.shell_exec(&format!(
-        r#"
-        for i in $(seq 1 60); do
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 \
-                   -o BatchMode=yes -i /dev/null \
-                   root@{ip} true 2>/dev/null; then
-                echo "Builder ready after ${{i}}s"
-                exit 0
-            fi
-            sleep 1
-        done
-        echo "Builder VM did not become ready in 60s" >&2
-        exit 1
-        "#,
-        ip = builder_net.guest_ip,
-    ))?;
-
-    Ok(pid)
-}
-
 /// If flake_ref is a local path, sync it into the builder VM so `nix build .` works.
-fn sync_local_flake_if_needed(
+pub(crate) fn sync_local_flake_if_needed(
     env: &dyn BuildEnvironment,
     builder_ip: &str,
     ssh_key_path: &str,
@@ -479,20 +189,16 @@ fn sync_local_flake_if_needed(
     let tmp_tar = env
         .shell_exec_stdout("mktemp /tmp/mvm-flake-XXXX.tar.gz")
         .ok()?;
-    let script = format!(
-        r#"
-        set -euo pipefail
-        tar czf {tmp} -C {src} .
-        scp -o StrictHostKeyChecking=no -i {key} {tmp} root@{ip}:/tmp/flake.tar.gz
-        ssh -o StrictHostKeyChecking=no -i {key} root@{ip} \
-            'rm -rf /root/project && mkdir -p /root/project && tar xzf /tmp/flake.tar.gz -C /root/project'
-        rm -f {tmp}
-        "#,
-        tmp = tmp_tar,
-        src = realpath,
-        key = ssh_key_path,
-        ip = builder_ip
-    );
+    let mut ctx = BTreeMap::new();
+    ctx.insert("tmp", tmp_tar.clone());
+    ctx.insert("src", realpath.to_string());
+    ctx.insert("key", ssh_key_path.to_string());
+    ctx.insert("ip", builder_ip.to_string());
+    ctx.insert("user", BUILDER_SSH_USER.to_string());
+    let script = match render_script("sync_local_flake", &ctx) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
 
     if env.shell_exec(&script).is_err() {
         env.log_info("Failed to sync local flake; continuing with original ref");
@@ -504,7 +210,7 @@ fn sync_local_flake_if_needed(
 }
 
 /// Compute the hash of flake.lock inside the builder VM (if present).
-fn flake_lock_hash(
+pub(crate) fn flake_lock_hash(
     env: &dyn BuildEnvironment,
     builder_ip: &str,
     ssh_key_path: &str,
@@ -512,12 +218,13 @@ fn flake_lock_hash(
 ) -> Option<String> {
     let cmd = format!(
         r#"
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i {key} root@{ip} \
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=no -o BatchMode=yes -i {key} {user}@{ip} \
             'if [ -f {flake}/flake.lock ]; then nix hash path {flake}/flake.lock; else echo __NOLOCK__; fi'
         "#,
         key = ssh_key_path,
         ip = builder_ip,
-        flake = flake_ref
+        flake = flake_ref,
+        user = BUILDER_SSH_USER,
     );
     let hash = env.shell_exec_stdout(&cmd).ok()?;
     if hash.contains("__NOLOCK__") || hash.trim().is_empty() {
@@ -528,7 +235,7 @@ fn flake_lock_hash(
 }
 
 /// Ensure Nix is available inside the builder VM (first boot installs if missing).
-fn ensure_nix_installed(
+pub(crate) fn ensure_nix_installed(
     env: &dyn BuildEnvironment,
     builder_ip: &str,
     ssh_key_path: &str,
@@ -536,18 +243,19 @@ fn ensure_nix_installed(
     env.log_info("Ensuring Nix is installed in builder...");
     env.shell_exec_visible(&format!(
         r#"
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i {key} root@{ip} '
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=no -o BatchMode=yes -i {key} {user}@{ip} '
             if command -v nix >/dev/null 2>&1; then
                 echo "Nix already present";
                 exit 0;
             fi
             echo "Installing Nix in builder (single-user)..."
             curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
-            . /root/.nix-profile/etc/profile.d/nix.sh
+            . /home/{user}/.nix-profile/etc/profile.d/nix.sh
         '
         "#,
         key = ssh_key_path,
-        ip = builder_ip
+        ip = builder_ip,
+        user = BUILDER_SSH_USER,
     ))?;
     Ok(())
 }
@@ -569,12 +277,13 @@ fn resolve_build_attribute(
 
     // Try to read mvm-profiles.toml from inside the builder VM
     let manifest_check = env.shell_exec_stdout(&format!(
-        "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            -i {key} root@{ip} \
+        "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=no -o BatchMode=yes \
+            -i {key} {user}@{ip} \
             'cat {flake}/mvm-profiles.toml 2>/dev/null || echo __NOT_FOUND__'",
         key = ssh_key_path,
         ip = builder_ip,
         flake = flake_ref,
+        user = BUILDER_SSH_USER,
     ));
 
     if let Ok(content) = manifest_check
@@ -603,7 +312,7 @@ fn resolve_build_attribute(
 }
 
 /// Run `nix build` inside the builder VM via SSH.
-fn run_nix_build(
+pub(crate) fn run_nix_build(
     env: &dyn BuildEnvironment,
     builder_ip: &str,
     ssh_key_path: &str,
@@ -619,20 +328,15 @@ fn run_nix_build(
 
     let log_path = "/tmp/mvm-nix-build.log";
 
-    env.shell_exec_visible(&format!(
-        r#"
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            -i {key} root@{ip} \
-            'timeout {timeout} nix build {attr} --no-link --print-out-paths' \
-            | tee {log}
-        "#,
-        key = ssh_key_path,
-        ip = builder_ip,
-        timeout = timeout_secs,
-        attr = build_attr,
-        log = log_path,
-    ))
-    .with_context(|| format!("nix build failed for {}", build_attr))?;
+    let mut ctx = BTreeMap::new();
+    ctx.insert("key", ssh_key_path.to_string());
+    ctx.insert("ip", builder_ip.to_string());
+    ctx.insert("user", BUILDER_SSH_USER.to_string());
+    ctx.insert("timeout", timeout_secs.to_string());
+    ctx.insert("attr", build_attr.clone());
+    ctx.insert("log", log_path.to_string());
+    env.shell_exec_visible(&render_script("run_nix_build_ssh", &ctx)?)
+        .with_context(|| format!("nix build failed for {}", build_attr))?;
 
     let output = env.shell_exec_stdout(&format!("cat {} 2>/dev/null", log_path))?;
 
@@ -648,7 +352,7 @@ fn run_nix_build(
 }
 
 /// Extract build artifacts from the builder VM to the pool's revisions directory.
-fn extract_artifacts(
+pub(crate) fn extract_artifacts(
     env: &dyn BuildEnvironment,
     builder_ip: &str,
     ssh_key_path: &str,
@@ -667,67 +371,19 @@ fn extract_artifacts(
 
     env.shell_exec(&format!("mkdir -p {}", rev_dir))?;
 
-    env.shell_exec_visible(&format!(
-        r#"
-        set -euo pipefail
-
-        CONTENTS=$(ssh -o StrictHostKeyChecking=no -i {key} root@{ip} \
-            'ls -la {out_path}/ 2>/dev/null || echo "single-output"')
-        echo "Build contents: $CONTENTS"
-
-        scp -o StrictHostKeyChecking=no -i {key} \
-            root@{ip}:'{out_path}/kernel' {rev_dir}/vmlinux 2>/dev/null || \
-        scp -o StrictHostKeyChecking=no -i {key} \
-            root@{ip}:'{out_path}/vmlinux' {rev_dir}/vmlinux 2>/dev/null || \
-            {{ echo 'ERROR: kernel not found in build output' >&2; exit 1; }}
-
-        scp -o StrictHostKeyChecking=no -i {key} \
-            root@{ip}:'{out_path}/rootfs' {rev_dir}/rootfs.ext4 2>/dev/null || \
-        scp -o StrictHostKeyChecking=no -i {key} \
-            root@{ip}:'{out_path}/rootfs.ext4' {rev_dir}/rootfs.ext4 2>/dev/null || \
-            {{ echo 'ERROR: rootfs not found in build output' >&2; exit 1; }}
-
-        cat > {rev_dir}/fc-base.json << 'FCCFGEOF'
-        {{
-            "note": "Base config from build. Overridden at instance start."
-        }}
-FCCFGEOF
-
-        echo "Artifacts stored at {rev_dir}"
-        ls -lh {rev_dir}/
-        "#,
-        key = ssh_key_path,
-        ip = builder_ip,
-        out_path = nix_output_path,
-        rev_dir = rev_dir,
-    ))?;
+    let mut ctx = BTreeMap::new();
+    ctx.insert("key", ssh_key_path.to_string());
+    ctx.insert("ip", builder_ip.to_string());
+    ctx.insert("user", BUILDER_SSH_USER.to_string());
+    ctx.insert("out_path", nix_output_path.to_string());
+    ctx.insert("rev_dir", rev_dir.clone());
+    env.shell_exec_visible(&render_script("extract_artifacts_ssh", &ctx)?)?;
 
     Ok(revision_hash)
 }
 
-/// Tear down the builder VM.
-fn teardown_builder(
-    env: &dyn BuildEnvironment,
-    pid: u32,
-    builder_net: &InstanceNet,
-    run_dir: &str,
-) -> Result<()> {
-    env.log_info("Tearing down builder VM...");
-
-    let _ = env.shell_exec(&format!(
-        "kill {} 2>/dev/null || true; sleep 1; kill -9 {} 2>/dev/null || true",
-        pid, pid
-    ));
-
-    let _ = env.teardown_tap(&builder_net.tap_dev);
-
-    let _ = env.shell_exec(&format!("rm -rf {}", run_dir));
-
-    Ok(())
-}
-
 /// Append a build revision to the pool's build history.
-fn record_build_history(
+pub(crate) fn record_build_history(
     env: &dyn BuildEnvironment,
     tenant_id: &str,
     pool_id: &str,
@@ -763,6 +419,43 @@ mod tests {
     use mvm_core::{pool::PoolSpec, tenant::TenantNet};
     use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[test]
+    fn test_candidate_prefixes_order() {
+        let p = candidate_prefixes("v1.14", "v1.14.1", "aarch64");
+        assert_eq!(
+            p,
+            vec![
+                "firecracker-ci/v1.14/aarch64",
+                "firecracker-ci/v1.14.1/aarch64"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rootfs_candidates_defaults_and_override() {
+        let defaults = rootfs_candidates(None);
+        assert_eq!(
+            defaults,
+            vec![
+                "ubuntu-24.04.squashfs",
+                "ubuntu-22.04.squashfs",
+                "ubuntu-20.04.squashfs"
+            ]
+        );
+
+        let overridden = rootfs_candidates(Some("custom.sq"));
+        assert_eq!(overridden, vec!["custom.sq"]);
+    }
+
+    #[test]
+    fn test_kernel_candidates_defaults_and_override() {
+        let defaults = kernel_candidates(None);
+        assert_eq!(defaults, vec!["vmlinux-5.10.198", "vmlinux"]);
+
+        let overridden = kernel_candidates(Some("myvmlinux"));
+        assert_eq!(overridden, vec!["myvmlinux"]);
+    }
 
     struct FakeEnv {
         stdout: Mutex<VecDeque<String>>,
@@ -834,6 +527,8 @@ mod tests {
         fn log_info(&self, _msg: &str) {}
 
         fn log_success(&self, _msg: &str) {}
+
+        fn log_warn(&self, _msg: &str) {}
     }
 
     #[test]
@@ -868,16 +563,19 @@ mod tests {
 
     #[test]
     fn test_ensure_builder_artifacts_skips_when_present() {
-        let env = FakeEnv::new(&["yes"]);
-        ensure_builder_artifacts(&env).expect("should succeed");
-        assert!(env.cmds.lock().unwrap().is_empty());
+        let env = FakeEnv::new(&["yes", "target/debug/mvm-builder-agent"]);
+        crate::artifacts::ensure_builder_artifacts(&env, true).expect("should succeed");
+        let cmds = env.cmds.lock().unwrap();
+        assert!(!cmds.is_empty()); // key regen + mount refresh
+        assert!(cmds.iter().any(|c| c.contains("authorized_keys")));
         assert!(env.visible_cmds.lock().unwrap().is_empty());
     }
 
     #[test]
     fn test_ensure_builder_artifacts_downloads_when_missing() {
-        let env = FakeEnv::new(&["no"]);
-        ensure_builder_artifacts(&env).expect("download path should succeed");
+        let env = FakeEnv::new(&["no", "target/debug/mvm-builder-agent"]);
+        crate::artifacts::ensure_builder_artifacts(&env, true)
+            .expect("download path should succeed");
 
         let cmds = env.cmds.lock().unwrap();
         let visibles = env.visible_cmds.lock().unwrap();

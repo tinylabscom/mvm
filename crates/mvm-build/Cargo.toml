@@ -3,9 +3,14 @@ name = "mvm-build"
 version.workspace = true
 edition.workspace = true
 description = "Nix builder pipeline and artifact cache for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
-mvm-core = { path = "../mvm-core" }
+mvm-core = { path = "../mvm-core", version = "0.1.0" }
+mvm-guest = { path = "../mvm-guest", version = "0.1.0" }
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true

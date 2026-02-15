@@ -35,6 +35,28 @@ impl fmt::Display for Role {
 // Minimum runtime policy
 // ============================================================================
 
+// ============================================================================
+// Pool metadata
+// ============================================================================
+
+/// Optional metadata for categorizing and tagging pools.
+/// Enables capability-based queries and policies without hardcoding types in Role enum.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PoolMetadata {
+    /// Capability identifier (e.g., "openclaw", "mcp-server", "database").
+    /// Used for grouping pools by functional capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+
+    /// Integration types supported by this pool (e.g., ["telegram", "discord"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integration_types: Vec<String>,
+
+    /// Arbitrary key-value tags for custom categorization.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tags: std::collections::BTreeMap<String, String>,
+}
+
 /// Per-pool runtime policy for minimum runtime enforcement and graceful lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePolicy {
@@ -98,6 +120,9 @@ pub struct PoolSpec {
     /// Minimum runtime policy for this pool's instances.
     #[serde(default)]
     pub runtime_policy: RuntimePolicy,
+    /// Optional metadata for capability tagging and categorization.
+    #[serde(default)]
+    pub metadata: PoolMetadata,
     /// "baseline" | "strict"
     #[serde(default = "default_seccomp")]
     pub seccomp_policy: String,
@@ -116,6 +141,9 @@ pub struct PoolSpec {
     /// into per-integration directories on the secrets drive.
     #[serde(default)]
     pub secret_scopes: Vec<SecretScope>,
+    /// Optional template reference for shared base image.
+    #[serde(default)]
+    pub template_id: String,
 }
 
 /// Scoped secret delivery: only give an integration the secrets it needs.
@@ -229,12 +257,14 @@ mod tests {
                 sleeping: 2,
             },
             runtime_policy: RuntimePolicy::default(),
+            metadata: PoolMetadata::default(),
             seccomp_policy: "baseline".to_string(),
             snapshot_compression: "zstd".to_string(),
             metadata_enabled: false,
             pinned: false,
             critical: false,
             secret_scopes: vec![],
+            template_id: String::new(),
         };
 
         let json = serde_json::to_string(&spec).unwrap();

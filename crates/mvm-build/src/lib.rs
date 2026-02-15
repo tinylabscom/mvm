@@ -1,6 +1,11 @@
-// mvm-build: Nix builder pipeline, artifact cache
-// Depends on mvm-core (narrow interface via BuildEnvironment trait)
-
+pub mod artifacts;
+pub mod backend;
 pub mod build;
+pub mod cache;
 pub mod dev_build;
+pub mod firecracker;
 pub mod nix_manifest;
+pub mod orchestrator;
+pub mod scripts;
+pub mod template_reuse;
+pub mod vsock_builder;

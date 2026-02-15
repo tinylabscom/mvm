@@ -3,9 +3,17 @@ name = "mvm-guest"
 version.workspace = true
 edition.workspace = true
 description = "vsock protocol and openclaw connector mapping for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mvm-builder-agent"
+path = "src/bin/mvm-builder-agent.rs"
 
 [dependencies]
-mvm-core = { path = "../mvm-core" }
+mvm-core = { path = "../mvm-core", version = "0.1.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

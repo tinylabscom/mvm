@@ -48,6 +48,17 @@ We hardened dev workflows in Sprint 11 but saw recurring friction around sync/bo
 - [ ] Release artifacts: checksums + optional SBOM + signature (gitsign or cosign)
 - [ ] Add a `mvm release --dry-run` command that exercises the GH workflow locally
 
+## Phase 2b: Global Templates (shared images, tenant-scoped pools)
+**Status: IN PROGRESS**
+
+- [x] Add `template` CLI group (create/list/info/delete/build) and global cache under `/var/lib/mvm/templates/<template>/`
+- [x] Add `TemplateSpec`/`TemplateRevision` types and path helpers in `mvm-core`
+- [x] Make `pool create` require `--template`; `pool build` reuses template artifacts (template `current` copied into pool). `--force` on pool rebuilds template first.
+- [x] Config-driven template builds (`mvm template build --config template.toml`) to emit multiple role variants
+- [ ] Template build cache key on flake.lock/profile/role; pool build links artifacts, no per-tenant rebuild (partially done, needs cache-key metadata)
+- [ ] Migration helper `template migrate-from-pool <tenant>/<old_pool> <template>` to convert existing pools
+- [ ] Doc polish (CLI reference / examples)
+
 ## Phase 3: Installer/Setup UX
 **Status: PENDING**
 

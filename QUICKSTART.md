@@ -22,6 +22,10 @@ cargo build --release
 cp target/release/mvm ~/.local/bin/
 ```
 
+> Note: If `MVM_FC_VERSION` is set (e.g., via `firecracker --version` output), mvm normalizes it automatically to `vMAJOR.MINOR[.PATCH]`, so you don't need to tweak it manually. If your network blocks the default S3 bucket for builder artifacts, set `MVM_FC_ASSET_BASE` to a reachable S3-compatible endpoint (optionally `MVM_FC_ASSET_ROOTFS` / `MVM_FC_ASSET_KERNEL` to force filenames).
+
+> Templates: Build a base image once and reuse it across tenants/pools. Create (`mvm template create ...`) or from a config (`mvm template build --config docs/examples/template.toml` for multiple roles), build it, then point pools at it (`mvm pool create tenant/pool --template <id> ...`). Pool builds reuse template artifacts; `mvm pool build --force` rebuilds the template first.
+
 ## Dev Mode (Single VM)
 
 Bootstrap everything (Lima, Firecracker, kernel, rootfs) and launch a microVM:

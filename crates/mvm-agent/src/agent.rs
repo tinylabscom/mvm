@@ -536,6 +536,7 @@ fn reconcile_desired(desired: &DesiredState, prune: bool) -> Result<ReconcileRep
                     &dp.profile,
                     dp.instance_resources.clone(),
                     dp.role.clone(),
+                    "",
                 ) {
                     report.errors.push(format!(
                         "Failed to create pool {}/{}: {}",

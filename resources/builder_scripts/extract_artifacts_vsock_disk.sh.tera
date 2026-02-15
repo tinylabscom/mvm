@@ -1,0 +1,8 @@
+set -euo pipefail
+MNT=$(mktemp -d)
+sudo mount -o loop {{disk}} "$MNT"
+cp "$MNT"/vmlinux {{rev}}/vmlinux
+cp "$MNT"/rootfs.ext4 {{rev}}/rootfs.ext4
+cp "$MNT"/fc-base.json {{rev}}/fc-base.json
+sudo umount "$MNT"
+rmdir "$MNT"

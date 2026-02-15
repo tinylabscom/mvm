@@ -1,0 +1,3 @@
+# Reserved script template for future extraction of ensure_builder_artifacts.
+# The current implementation still performs conditional branching in Rust and
+# delegates several sub-steps to dedicated script templates.

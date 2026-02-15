@@ -253,12 +253,14 @@ pub fn pool_fixture(tenant_id: &str, pool_id: &str) -> String {
         },
         desired_counts: mvm_core::pool::DesiredCounts::default(),
         runtime_policy: Default::default(),
+        metadata: mvm_core::pool::PoolMetadata::default(),
         seccomp_policy: "baseline".to_string(),
         snapshot_compression: "none".to_string(),
         metadata_enabled: false,
         pinned: false,
         critical: false,
         secret_scopes: vec![],
+        template_id: String::new(),
     };
     serde_json::to_string_pretty(&spec).unwrap()
 }

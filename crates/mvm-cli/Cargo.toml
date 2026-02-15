@@ -3,13 +3,17 @@ name = "mvm-cli"
 version.workspace = true
 edition.workspace = true
 description = "CLI commands, UI, and bootstrap for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
-mvm-core = { path = "../mvm-core" }
-mvm-agent = { path = "../mvm-agent" }
-mvm-runtime = { path = "../mvm-runtime" }
-mvm-coordinator = { path = "../mvm-coordinator" }
-mvm-build = { path = "../mvm-build" }
+mvm-core = { path = "../mvm-core", version = "0.1.0" }
+mvm-agent = { path = "../mvm-agent", version = "0.1.0" }
+mvm-runtime = { path = "../mvm-runtime", version = "0.1.0" }
+mvm-coordinator = { path = "../mvm-coordinator", version = "0.1.0" }
+mvm-build = { path = "../mvm-build", version = "0.1.0" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -28,6 +32,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 which.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod http;
 pub mod logging;
 pub mod output;
+pub mod template_cmd;
 pub mod ui;
 pub mod upgrade;
 

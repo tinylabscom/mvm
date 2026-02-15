@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use mvm_core::build_env::BuildEnvironment;
 use mvm_core::instance::InstanceNet;
@@ -17,11 +17,28 @@ pub struct RuntimeBuildEnv;
 
 impl BuildEnvironment for RuntimeBuildEnv {
     fn shell_exec(&self, script: &str) -> Result<()> {
-        shell::run_in_vm(script).map(|_| ())
+        let out = shell::run_in_vm(script)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Command failed (exit {}): {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
     }
 
     fn shell_exec_stdout(&self, script: &str) -> Result<String> {
-        shell::run_in_vm_stdout(script)
+        let out = shell::run_in_vm(script)?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "Command failed (exit {}): {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     fn shell_exec_visible(&self, script: &str) -> Result<()> {
@@ -63,5 +80,9 @@ impl BuildEnvironment for RuntimeBuildEnv {
 
     fn log_success(&self, msg: &str) {
         ui::success(msg);
+    }
+
+    fn log_warn(&self, msg: &str) {
+        ui::warn(msg);
     }
 }

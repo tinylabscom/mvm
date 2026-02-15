@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use super::config::CoordinatorConfig;
+use serde::{Deserialize, Serialize};
 
 /// Resolved route for a tenant's gateway pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedRoute {
     pub tenant_id: String,
     pub pool_id: String,
@@ -12,55 +11,48 @@ pub struct ResolvedRoute {
     pub idle_timeout_secs: u64,
 }
 
+use crate::state::StateStore;
 /// Lookup table: listen address -> tenant route.
 ///
 /// In port-based mode, each tenant gets its own listen port. The coordinator
 /// runs one TCP listener per route and uses the listener's address to determine
 /// which tenant the connection belongs to.
-#[derive(Debug)]
+use std::sync::Arc;
+
+/// Lookup table: listen address -> tenant route.
+///
+/// Wraps the async StateStore to provide route lookups.
+#[derive(Clone)]
 pub struct RouteTable {
-    by_listen_addr: HashMap<SocketAddr, ResolvedRoute>,
+    store: Arc<dyn StateStore>,
 }
 
 impl RouteTable {
-    /// Build a route table from coordinator config.
-    pub fn from_config(config: &CoordinatorConfig) -> Self {
-        let mut by_listen_addr = HashMap::new();
-        for route in &config.routes {
-            let resolved = ResolvedRoute {
-                tenant_id: route.tenant_id.clone(),
-                pool_id: route.pool_id.clone(),
-                node: route.node,
-                idle_timeout_secs: route.idle_timeout(&config.coordinator),
-            };
-            by_listen_addr.insert(route.listen, resolved);
+    pub fn new(store: Arc<dyn StateStore>) -> Self {
+        Self { store }
+    }
+
+    /// Look up a route by the listen address.
+    pub async fn lookup(&self, listen_addr: &SocketAddr) -> Option<ResolvedRoute> {
+        self.store.get_route(listen_addr).await.ok().flatten()
+    }
+
+    /// List all unique listen addresses.
+    pub async fn listen_addrs(&self) -> Vec<SocketAddr> {
+        match self.store.list_routes().await {
+            Ok(routes) => routes.into_iter().map(|(k, _)| k).collect(),
+            Err(_) => vec![],
         }
-        Self { by_listen_addr }
     }
 
-    /// Look up a route by the listen address that accepted the connection.
-    pub fn lookup(&self, listen_addr: &SocketAddr) -> Option<&ResolvedRoute> {
-        self.by_listen_addr.get(listen_addr)
+    /// List all routes.
+    pub async fn routes(&self) -> Vec<(SocketAddr, ResolvedRoute)> {
+        self.store.list_routes().await.unwrap_or_default()
     }
 
-    /// All unique listen addresses that need TCP listeners.
-    pub fn listen_addrs(&self) -> Vec<SocketAddr> {
-        self.by_listen_addr.keys().copied().collect()
-    }
-
-    /// All routes in the table.
-    pub fn routes(&self) -> impl Iterator<Item = (&SocketAddr, &ResolvedRoute)> {
-        self.by_listen_addr.iter()
-    }
-
-    /// Number of routes.
-    pub fn len(&self) -> usize {
-        self.by_listen_addr.len()
-    }
-
-    /// Whether the route table is empty.
-    pub fn is_empty(&self) -> bool {
-        self.by_listen_addr.is_empty()
+    /// Check if table is empty.
+    pub async fn is_empty(&self) -> bool {
+        self.listen_addrs().await.is_empty()
     }
 }
 
@@ -68,6 +60,7 @@ impl RouteTable {
 mod tests {
     use super::*;
     use crate::config::CoordinatorConfig;
+    use crate::state::{MemStateStore, StateStore};
 
     fn test_config() -> CoordinatorConfig {
         let toml = r#"
@@ -94,51 +87,65 @@ idle_timeout_secs = 600
         CoordinatorConfig::parse(toml).unwrap()
     }
 
-    #[test]
-    fn test_route_table_from_config() {
-        let config = test_config();
-        let table = RouteTable::from_config(&config);
-        assert_eq!(table.len(), 2);
+    async fn create_table(config: &CoordinatorConfig) -> RouteTable {
+        let store = Arc::new(MemStateStore::new());
+        for route in &config.routes {
+            let resolved = ResolvedRoute {
+                tenant_id: route.tenant_id.clone(),
+                pool_id: route.pool_id.clone(),
+                node: route.node,
+                idle_timeout_secs: route.idle_timeout(&config.coordinator),
+            };
+            store.set_route(&route.listen, &resolved).await.unwrap();
+        }
+        RouteTable::new(store)
     }
 
-    #[test]
-    fn test_lookup_by_listen_addr() {
+    #[tokio::test]
+    async fn test_route_table_len() {
         let config = test_config();
-        let table = RouteTable::from_config(&config);
+        let table = create_table(&config).await;
+        assert_eq!(table.listen_addrs().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_lookup_by_listen_addr() {
+        let config = test_config();
+        let table = create_table(&config).await;
 
         let addr: SocketAddr = "0.0.0.0:8443".parse().unwrap();
-        let route = table.lookup(&addr).unwrap();
+        let route = table.lookup(&addr).await.unwrap();
         assert_eq!(route.tenant_id, "alice");
         assert_eq!(route.pool_id, "gateways");
         assert_eq!(route.idle_timeout_secs, 300); // global default
     }
 
-    #[test]
-    fn test_lookup_with_override() {
+    #[tokio::test]
+    async fn test_lookup_with_override() {
         let config = test_config();
-        let table = RouteTable::from_config(&config);
+        let table = create_table(&config).await;
 
         let addr: SocketAddr = "0.0.0.0:8444".parse().unwrap();
-        let route = table.lookup(&addr).unwrap();
+        let route = table.lookup(&addr).await.unwrap();
         assert_eq!(route.tenant_id, "bob");
         assert_eq!(route.idle_timeout_secs, 600); // per-route override
     }
 
-    #[test]
-    fn test_lookup_missing() {
+    #[tokio::test]
+    async fn test_lookup_missing() {
         let config = test_config();
-        let table = RouteTable::from_config(&config);
+        let table = create_table(&config).await;
 
         let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
-        assert!(table.lookup(&addr).is_none());
+        assert!(table.lookup(&addr).await.is_none());
     }
 
-    #[test]
-    fn test_listen_addrs() {
+    #[tokio::test]
+    async fn test_listen_addrs() {
         let config = test_config();
-        let table = RouteTable::from_config(&config);
+        let table = create_table(&config).await;
 
-        let mut addrs = table.listen_addrs();
+        let mut addrs = table.listen_addrs().await;
         addrs.sort();
         assert_eq!(addrs.len(), 2);
     }

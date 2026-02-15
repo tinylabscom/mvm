@@ -39,11 +39,11 @@ install_linux_deps() {
     info "Installing system build dependencies..."
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update -y
-        sudo apt-get install -y build-essential pkg-config libssl-dev lld clang curl nodejs npm
+        sudo apt-get install -y build-essential pkg-config libssl-dev lld clang curl nodejs npm protobuf-compiler
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel lld clang curl
+        sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel lld clang curl nodejs npm protobuf-compiler
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm base-devel openssl lld clang curl
+        sudo pacman -Sy --noconfirm base-devel openssl lld clang curl nodejs npm protobuf-compiler
     else
         die "No supported package manager found (apt/dnf/pacman). Install manually: gcc, pkg-config, libssl-dev, lld, clang, curl"
     fi

@@ -42,13 +42,27 @@ pub async fn proxy_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    async fn bind_or_skip(addr: &str) -> Option<TcpListener> {
+        match TcpListener::bind(addr).await {
+            Ok(l) => Some(l),
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                eprintln!("skipping proxy test: PermissionDenied binding to {}", addr);
+                None
+            }
+            Err(e) => panic!("failed to bind {}: {}", addr, e),
+        }
+    }
 
     #[tokio::test]
     async fn test_proxy_forwards_data() {
         // Set up a mock "gateway" server
-        let mock_gw = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let Some(mock_gw) = bind_or_skip("127.0.0.1:0").await else {
+            return;
+        };
         let gw_addr = mock_gw.local_addr().unwrap();
 
         // Mock gateway echoes back whatever it receives
@@ -61,7 +75,9 @@ mod tests {
         });
 
         // Set up a mock "client"
-        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let Some(proxy_listener) = bind_or_skip("127.0.0.1:0").await else {
+            return;
+        };
         let proxy_addr = proxy_listener.local_addr().unwrap();
 
         // Spawn the proxy

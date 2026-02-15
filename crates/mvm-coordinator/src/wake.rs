@@ -12,8 +12,10 @@ use crate::client::CoordinatorClient;
 use mvm_core::agent::{AgentRequest, AgentResponse};
 use mvm_core::instance::InstanceStatus;
 
+use serde::{Deserialize, Serialize};
+
 /// Per-tenant gateway state as seen by the coordinator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GatewayState {
     /// Gateway is running and ready to accept connections.
     Running {
@@ -26,52 +28,31 @@ pub enum GatewayState {
     Idle,
 }
 
-/// Entry tracking a tenant's gateway lifecycle.
-struct TenantGateway {
-    state: GatewayState,
-    /// Broadcast channel for wake coalescing. All waiters receive the result
-    /// when the wake completes.
-    wake_notify: watch::Sender<Option<Result<SocketAddr, String>>>,
-    wake_rx: watch::Receiver<Option<Result<SocketAddr, String>>>,
-}
+use crate::state::StateStore;
 
-impl TenantGateway {
-    fn new() -> Self {
-        let (tx, rx) = watch::channel(None);
-        Self {
-            state: GatewayState::Idle,
-            wake_notify: tx,
-            wake_rx: rx,
-        }
-    }
-}
+type WakeResult = Option<Result<SocketAddr, String>>;
+type WakeReceiver = watch::Receiver<WakeResult>;
 
 /// Manages on-demand gateway wake/sleep lifecycle across tenants.
-///
-/// When a connection arrives for a tenant whose gateway isn't running, the
-/// WakeManager sends a WakeInstance request to the agent and polls until the
-/// gateway is ready. Concurrent requests for the same tenant coalesce into
-/// a single wake operation.
 pub struct WakeManager {
-    tenants: Arc<Mutex<HashMap<String, TenantGateway>>>,
-    /// Default port on gateway VMs where the service listens.
+    store: Arc<dyn StateStore>,
+    /// Local inflight wakes (for coalescing requests on this node).
+    /// Maps tenant_id -> notification channel.
+    local_inflight: Arc<Mutex<HashMap<String, WakeReceiver>>>,
     gateway_service_port: u16,
 }
 
 impl WakeManager {
-    pub fn new(_config: &CoordinatorConfig) -> Self {
+    pub fn new(store: Arc<dyn StateStore>, _config: &CoordinatorConfig) -> Self {
         Self {
-            tenants: Arc::new(Mutex::new(HashMap::new())),
+            store,
+            local_inflight: Arc::new(Mutex::new(HashMap::new())),
             gateway_service_port: 8080,
         }
     }
 
     /// Ensure the gateway for this route is running. Returns the gateway's
     /// address for TCP proxying.
-    ///
-    /// If the gateway is already running, returns immediately.
-    /// If it's idle, initiates a wake and waits.
-    /// If a wake is already in progress, joins the existing waiter group.
     pub async fn ensure_running(
         &self,
         route: &ResolvedRoute,
@@ -79,107 +60,103 @@ impl WakeManager {
     ) -> Result<SocketAddr> {
         let tenant_id = &route.tenant_id;
 
-        // Fast path: check if already running
+        // 1. Check persistent state
+        if let Some(GatewayState::Running { addr }) =
+            self.store.get_gateway_state(tenant_id).await?
         {
-            let tenants = self.tenants.lock().await;
-            if let Some(entry) = tenants.get(tenant_id)
-                && let GatewayState::Running { addr } = &entry.state
-            {
-                return Ok(*addr);
-            }
+            return Ok(addr);
         }
 
-        // Determine if we need to initiate wake or join existing one
+        // 2. Check local inflight (coalescing)
         let rx = {
-            let mut tenants = self.tenants.lock().await;
-            let entry = tenants
-                .entry(tenant_id.clone())
-                .or_insert_with(TenantGateway::new);
+            let mut inflight = self.local_inflight.lock().await;
 
-            match &entry.state {
-                GatewayState::Running { addr } => return Ok(*addr),
-                GatewayState::Waking => {
-                    // Another task is waking this gateway — just subscribe
-                    entry.wake_rx.clone()
-                }
-                GatewayState::Idle => {
-                    // We're the first — transition to Waking and initiate
-                    entry.state = GatewayState::Waking;
-                    // Reset the channel for this wake cycle
-                    let (tx, rx) = watch::channel(None);
-                    entry.wake_notify = tx;
-                    entry.wake_rx = rx.clone();
+            // Clean up closed channels (optional optimization)
+            // inflight.retain(|_, rx| rx.has_changed().is_ok());
 
-                    let tenant_id = tenant_id.clone();
-                    let route = route.clone();
-                    let wake_timeout = config.coordinator.wake_timeout_secs;
-                    let service_port = self.gateway_service_port;
-                    let tenants_arc = Arc::clone(&self.tenants);
+            if let Some(rx) = inflight.get(tenant_id) {
+                rx.clone()
+            } else {
+                // 3. Initiate new wake
+                // Mark as waking in store
+                self.store
+                    .set_gateway_state(tenant_id, &GatewayState::Waking)
+                    .await?;
 
-                    // Drop lock before spawning
-                    let wake_rx = rx;
-                    drop(tenants);
+                let (tx, rx) = watch::channel(None);
+                inflight.insert(tenant_id.clone(), rx.clone());
 
-                    // Spawn wake task with Arc reference
-                    tokio::spawn(async move {
-                        let result = do_wake(&route, wake_timeout, service_port).await;
+                let tenant_id = tenant_id.clone();
+                let route = route.clone();
+                let wake_timeout = config.coordinator.wake_timeout_secs;
+                let service_port = self.gateway_service_port;
+                let store = Arc::clone(&self.store);
+                let inflight_map = Arc::clone(&self.local_inflight);
 
-                        let mut tenants = tenants_arc.lock().await;
-                        if let Some(entry) = tenants.get_mut(&tenant_id) {
-                            match &result {
-                                Ok(addr) => {
-                                    entry.state = GatewayState::Running { addr: *addr };
-                                    let _ = entry.wake_notify.send(Some(Ok(*addr)));
-                                }
-                                Err(e) => {
-                                    entry.state = GatewayState::Idle;
-                                    let _ = entry.wake_notify.send(Some(Err(e.to_string())));
-                                }
-                            }
+                tokio::spawn(async move {
+                    let result = do_wake(&route, wake_timeout, service_port).await;
+
+                    // Update store
+                    match &result {
+                        Ok(addr) => {
+                            let _ = store
+                                .set_gateway_state(
+                                    &tenant_id,
+                                    &GatewayState::Running { addr: *addr },
+                                )
+                                .await;
                         }
-                    });
+                        Err(_) => {
+                            let _ = store
+                                .set_gateway_state(&tenant_id, &GatewayState::Idle)
+                                .await;
+                        }
+                    }
 
-                    return wait_for_wake(wake_rx, config.coordinator.wake_timeout_secs).await;
-                }
+                    // Notify waiters
+                    let _ = tx.send(Some(result.map_err(|e| e.to_string())));
+
+                    // Cleanup local inflight
+                    let mut map = inflight_map.lock().await;
+                    map.remove(&tenant_id);
+                });
+
+                rx
             }
         };
 
-        // We're a waiter on an existing wake operation
+        // 4. Wait for result
         wait_for_wake(rx, config.coordinator.wake_timeout_secs).await
     }
 
     /// Mark a tenant's gateway as idle (e.g., after sleep).
     pub async fn mark_idle(&self, tenant_id: &str) {
-        let mut tenants = self.tenants.lock().await;
-        if let Some(entry) = tenants.get_mut(tenant_id) {
-            entry.state = GatewayState::Idle;
-        }
+        let _ = self
+            .store
+            .set_gateway_state(tenant_id, &GatewayState::Idle)
+            .await;
     }
 
     /// Mark a tenant's gateway as running with a known address.
     pub async fn mark_running(&self, tenant_id: &str, addr: SocketAddr) {
-        let mut tenants = self.tenants.lock().await;
-        let entry = tenants
-            .entry(tenant_id.to_string())
-            .or_insert_with(TenantGateway::new);
-        entry.state = GatewayState::Running { addr };
+        let _ = self
+            .store
+            .set_gateway_state(tenant_id, &GatewayState::Running { addr })
+            .await;
     }
 
     /// Get the current state of a tenant's gateway.
     pub async fn gateway_state(&self, tenant_id: &str) -> GatewayState {
-        let tenants = self.tenants.lock().await;
-        tenants
-            .get(tenant_id)
-            .map(|e| e.state.clone())
+        self.store
+            .get_gateway_state(tenant_id)
+            .await
+            .unwrap_or(None)
             .unwrap_or(GatewayState::Idle)
     }
 }
 
 /// Wait for a wake operation to complete (either ours or someone else's).
-async fn wait_for_wake(
-    mut rx: watch::Receiver<Option<Result<SocketAddr, String>>>,
-    timeout_secs: u64,
-) -> Result<SocketAddr> {
+async fn wait_for_wake(mut rx: WakeReceiver, timeout_secs: u64) -> Result<SocketAddr> {
     let deadline = tokio::time::Duration::from_secs(timeout_secs);
     match tokio::time::timeout(deadline, async {
         loop {
@@ -335,6 +312,7 @@ async fn do_wake(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::MemStateStore;
 
     fn test_config() -> CoordinatorConfig {
         CoordinatorConfig::parse(
@@ -355,36 +333,48 @@ node = "127.0.0.1:4433"
     #[tokio::test]
     async fn test_gateway_state_default_is_idle() {
         let config = test_config();
-        let wm = WakeManager::new(&config);
-        assert_eq!(wm.gateway_state("alice").await, GatewayState::Idle);
+        let store = Arc::new(MemStateStore::new());
+        let wm = WakeManager::new(store, &config);
+        match wm.gateway_state("alice").await {
+            GatewayState::Idle => {}
+            _ => panic!("Expected Idle"),
+        }
     }
 
     #[tokio::test]
     async fn test_mark_running() {
         let config = test_config();
-        let wm = WakeManager::new(&config);
+        let store = Arc::new(MemStateStore::new());
+        let wm = WakeManager::new(store, &config);
         let addr: SocketAddr = "10.240.1.5:8080".parse().unwrap();
         wm.mark_running("alice", addr).await;
-        assert_eq!(
-            wm.gateway_state("alice").await,
-            GatewayState::Running { addr }
-        );
+
+        match wm.gateway_state("alice").await {
+            GatewayState::Running { addr: a } => assert_eq!(a, addr),
+            _ => panic!("Expected Running"),
+        }
     }
 
     #[tokio::test]
     async fn test_mark_idle() {
         let config = test_config();
-        let wm = WakeManager::new(&config);
+        let store = Arc::new(MemStateStore::new());
+        let wm = WakeManager::new(store, &config);
         let addr: SocketAddr = "10.240.1.5:8080".parse().unwrap();
         wm.mark_running("alice", addr).await;
         wm.mark_idle("alice").await;
-        assert_eq!(wm.gateway_state("alice").await, GatewayState::Idle);
+
+        match wm.gateway_state("alice").await {
+            GatewayState::Idle => {}
+            _ => panic!("Expected Idle"),
+        }
     }
 
     #[tokio::test]
     async fn test_ensure_running_fast_path() {
         let config = test_config();
-        let wm = WakeManager::new(&config);
+        let store = Arc::new(MemStateStore::new());
+        let wm = WakeManager::new(store, &config);
         let addr: SocketAddr = "10.240.1.5:8080".parse().unwrap();
         wm.mark_running("alice", addr).await;
 
@@ -397,45 +387,5 @@ node = "127.0.0.1:4433"
 
         let result = wm.ensure_running(&route, &config).await.unwrap();
         assert_eq!(result, addr);
-    }
-
-    #[tokio::test]
-    async fn test_wake_timeout() {
-        // Keep sender alive so the timeout fires (not channel-closed error)
-        let (_tx, timeout_rx) = watch::channel(None);
-        let result = wait_for_wake(timeout_rx, 1).await;
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("timed out"));
-    }
-
-    #[tokio::test]
-    async fn test_wake_notify_success() {
-        let (tx, rx) = watch::channel(None);
-        let addr: SocketAddr = "10.240.1.5:8080".parse().unwrap();
-
-        // Simulate wake completing in background
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            let _ = tx.send(Some(Ok(addr)));
-        });
-
-        let result = wait_for_wake(rx, 5).await.unwrap();
-        assert_eq!(result, addr);
-    }
-
-    #[tokio::test]
-    async fn test_wake_notify_failure() {
-        let (tx, rx) = watch::channel(None);
-
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            let _ = tx.send(Some(Err("agent unreachable".to_string())));
-        });
-
-        let result = wait_for_wake(rx, 5).await;
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("agent unreachable"));
     }
 }

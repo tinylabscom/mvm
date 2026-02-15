@@ -20,7 +20,8 @@ pub async fn health_check_loop(state: Arc<CoordinatorState>) {
     loop {
         tokio::time::sleep(interval).await;
 
-        for (_, route) in state.route_table.routes() {
+        let routes = state.route_table.routes().await;
+        for (_, route) in routes {
             let current = state.wake_manager.gateway_state(&route.tenant_id).await;
             if let GatewayState::Running { addr } = current {
                 if let Err(e) = check_gateway_alive(addr).await {
@@ -89,11 +90,26 @@ pub async fn wait_for_readiness(addr: SocketAddr, timeout_secs: u64) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
     use tokio::net::TcpListener;
+
+    async fn bind_or_skip(addr: &str) -> Option<TcpListener> {
+        match TcpListener::bind(addr).await {
+            Ok(l) => Some(l),
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                // Running in a sandbox without socket permissions; skip test.
+                eprintln!("skipping test: PermissionDenied binding to {}", addr);
+                None
+            }
+            Err(e) => panic!("failed to bind {}: {}", addr, e),
+        }
+    }
 
     #[tokio::test]
     async fn test_check_gateway_alive_success() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let Some(listener) = bind_or_skip("127.0.0.1:0").await else {
+            return;
+        };
         let addr = listener.local_addr().unwrap();
 
         // Accept in background so the connect succeeds
@@ -115,7 +131,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_readiness_success() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let Some(listener) = bind_or_skip("127.0.0.1:0").await else {
+            return;
+        };
         let addr = listener.local_addr().unwrap();
 
         // Accept connections in background

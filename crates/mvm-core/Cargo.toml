@@ -3,6 +3,10 @@ name = "mvm-core"
 version.workspace = true
 edition.workspace = true
 description = "Core types, IDs, config, and utilities for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -16,3 +20,4 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+regex = "1"

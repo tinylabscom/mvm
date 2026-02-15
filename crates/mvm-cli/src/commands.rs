@@ -5,6 +5,7 @@ use crate::bootstrap;
 use crate::display;
 use crate::logging::{self, LogFormat};
 use crate::output::{self, OutputFormat};
+use crate::template_cmd;
 use crate::ui;
 use crate::upgrade;
 
@@ -68,7 +69,6 @@ enum Commands {
         #[command(subcommand)]
         action: CoordinatorCmd,
     },
-
     // ---- Dev cluster (local) ----
     /// Development cluster
     DevCluster {
@@ -180,6 +180,11 @@ enum Commands {
     },
     /// System diagnostics and dependency checks
     Doctor,
+    /// Manage global templates (shared base images)
+    Template {
+        #[command(subcommand)]
+        action: TemplateCmd,
+    },
     /// Build a microVM image from a Mvmfile.toml config or Nix flake
     Build {
         /// Image name (built-in like "openclaw") or path to directory with Mvmfile.toml
@@ -298,6 +303,108 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum TemplateCmd {
+    /// Create a new template (single role/profile)
+    Create {
+        name: String,
+        #[arg(long)]
+        flake: String,
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value = "worker")]
+        role: String,
+        #[arg(long)]
+        cpus: u8,
+        #[arg(long)]
+        mem: u32,
+        #[arg(long, default_value = "0")]
+        data_disk: u32,
+    },
+    /// Create multiple role-specific templates (name-role)
+    CreateMulti {
+        base: String,
+        #[arg(long)]
+        flake: String,
+        #[arg(long)]
+        profile: String,
+        /// Comma-separated roles, e.g. gateway,agent
+        #[arg(long)]
+        roles: String,
+        #[arg(long)]
+        cpus: u8,
+        #[arg(long)]
+        mem: u32,
+        #[arg(long, default_value = "0")]
+        data_disk: u32,
+    },
+    /// Build a template (shared image)
+    Build {
+        name: String,
+        #[arg(long)]
+        force: bool,
+        /// Optional template config TOML to build multiple variants
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// List templates
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show template info
+    Info {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a template
+    Delete {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Migrate an existing pool into a template and point the pool to it
+    MigrateFromPool {
+        /// Pool path: <tenant>/<pool>
+        from: String,
+        /// New template name
+        to: String,
+        /// Overwrite template if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Initialize on-disk template layout (idempotent)
+    Init {
+        /// Template ID
+        name: String,
+        /// Create locally instead of inside the VM (/var/lib/mvm/templates)
+        #[arg(long)]
+        local: bool,
+        /// Force VM location (overrides --local)
+        #[arg(long)]
+        vm: bool,
+        /// Base directory for local init (default: current dir)
+        #[arg(long, default_value = ".")]
+        dir: String,
+    },
+}
+
+/// Parse a pool path, allowing either `<tenant>/<pool>` or `<pool>` when `tenant` is provided.
+fn parse_pool_path_with_optional_tenant(
+    path: &str,
+    tenant_override: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    if path.contains('/') {
+        let (t, p) = naming::parse_pool_path(path)?;
+        Ok((t.to_string(), p.to_string()))
+    } else if let Some(t) = tenant_override {
+        Ok((t.to_string(), path.to_string()))
+    } else {
+        anyhow::bail!("Pool path must be <tenant>/<pool> or supply --tenant when using just <pool>")
+    }
+}
+
 // --- Tenant subcommands ---
 
 #[derive(Subcommand)]
@@ -380,15 +487,12 @@ enum PoolCmd {
     Create {
         /// Pool path: <tenant>/<pool>
         path: String,
-        /// Nix flake reference
+        /// Tenant ID if path is just <pool>
         #[arg(long)]
-        flake: String,
-        /// Guest profile: minimal, baseline, python
+        tenant: Option<String>,
+        /// Template ID to use (required)
         #[arg(long)]
-        profile: String,
-        /// Instance role: gateway, worker, builder
-        #[arg(long, default_value = "worker")]
-        role: String,
+        template: String,
         /// vCPUs per instance
         #[arg(long)]
         cpus: u8,
@@ -410,6 +514,9 @@ enum PoolCmd {
     Info {
         /// Pool path: <tenant>/<pool>
         path: String,
+        /// Tenant ID if path is just <pool>
+        #[arg(long)]
+        tenant: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -417,6 +524,9 @@ enum PoolCmd {
     Build {
         /// Pool path: <tenant>/<pool>
         path: String,
+        /// Tenant ID if path is just <pool>
+        #[arg(long)]
+        tenant: Option<String>,
         /// Build timeout in seconds
         #[arg(long)]
         timeout: Option<u64>,
@@ -426,11 +536,17 @@ enum PoolCmd {
         /// Builder memory (MiB)
         #[arg(long)]
         builder_mem: Option<u32>,
+        /// Force rebuild even if flake.lock unchanged
+        #[arg(long)]
+        force: bool,
     },
     /// Scale pool desired counts
     Scale {
         /// Pool path: <tenant>/<pool>
         path: String,
+        /// Tenant ID if path is just <pool>
+        #[arg(long)]
+        tenant: Option<String>,
         /// Desired running instances
         #[arg(long)]
         running: Option<u32>,
@@ -445,6 +561,9 @@ enum PoolCmd {
     Destroy {
         /// Pool path: <tenant>/<pool>
         path: String,
+        /// Tenant ID if path is just <pool>
+        #[arg(long)]
+        tenant: Option<String>,
         /// Skip confirmation
         #[arg(long)]
         force: bool,
@@ -453,6 +572,9 @@ enum PoolCmd {
     Gc {
         /// Pool path: <tenant>/<pool>
         path: String,
+        /// Tenant ID if path is just <pool>
+        #[arg(long)]
+        tenant: Option<String>,
         /// Number of revisions to keep
         #[arg(long, default_value = "2")]
         keep: usize,
@@ -828,6 +950,7 @@ pub fn run() -> Result<()> {
         Commands::Instance { action } => cmd_instance(action, out_fmt),
         Commands::Agent { action } => cmd_agent(action),
         Commands::Coordinator { action } => cmd_coordinator(action, out_fmt),
+        Commands::Template { action } => cmd_template(action, out_fmt),
         Commands::DevCluster { action } => cmd_dev_cluster(action),
         Commands::Net { action } => cmd_net(action, out_fmt),
         Commands::Node { action } => cmd_node(action, out_fmt),
@@ -1825,27 +1948,28 @@ fn cmd_pool(action: PoolCmd, out_fmt: OutputFormat) -> Result<()> {
     match action {
         PoolCmd::Create {
             path,
-            flake,
-            profile,
-            role,
+            tenant,
+            template,
             cpus,
             mem,
             data_disk,
         } => {
-            let (tenant_id, pool_id) = naming::parse_pool_path(&path)?;
-            let parsed_role = parse_role(&role)?;
+            let (tenant_id, pool_id) =
+                parse_pool_path_with_optional_tenant(&path, tenant.as_deref())?;
+            let parsed_role = parse_role("worker")?;
             let resources = InstanceResources {
                 vcpus: cpus,
                 mem_mib: mem,
                 data_disk_mib: data_disk,
             };
             let spec = pool::lifecycle::pool_create(
-                tenant_id,
-                pool_id,
-                &flake,
-                &profile,
+                &tenant_id,
+                &pool_id,
+                &format!("template:{}", template),
+                "minimal",
                 resources,
                 parsed_role,
+                &template,
             )?;
             ui::success(&format!(
                 "Pool '{}/{}' created.",
@@ -1880,10 +2004,11 @@ fn cmd_pool(action: PoolCmd, out_fmt: OutputFormat) -> Result<()> {
             output::render_list(&rows, fmt);
             Ok(())
         }
-        PoolCmd::Info { path, json } => {
+        PoolCmd::Info { path, tenant, json } => {
             let fmt = if json { OutputFormat::Json } else { out_fmt };
-            let (tenant_id, pool_id) = naming::parse_pool_path(&path)?;
-            let spec = pool::lifecycle::pool_load(tenant_id, pool_id)?;
+            let (tenant_id, pool_id) =
+                parse_pool_path_with_optional_tenant(&path, tenant.as_deref())?;
+            let spec = pool::lifecycle::pool_load(&tenant_id, &pool_id)?;
             let info = PoolInfo {
                 pool_path: format!("{}/{}", spec.tenant_id, spec.pool_id),
                 role: spec.role.to_string(),
@@ -1902,40 +2027,63 @@ fn cmd_pool(action: PoolCmd, out_fmt: OutputFormat) -> Result<()> {
         }
         PoolCmd::Build {
             path,
+            tenant,
             timeout,
             builder_cpus,
             builder_mem,
+            force,
         } => {
-            let (tenant_id, pool_id) = naming::parse_pool_path(&path)?;
+            let (tenant_id, pool_id) =
+                parse_pool_path_with_optional_tenant(&path, tenant.as_deref())?;
+            // If pool is template-backed and --force was requested, rebuild the template first.
+            if force
+                && let Ok(spec) = pool::lifecycle::pool_load(&tenant_id, &pool_id)
+                && !spec.template_id.is_empty()
+            {
+                ui::info(&format!(
+                    "Force rebuild requested; rebuilding template '{}' first...",
+                    spec.template_id
+                ));
+                template_cmd::build(&spec.template_id, true, None)?;
+            }
             let env = mvm_runtime::build_env::RuntimeBuildEnv;
             let opts = mvm_build::build::PoolBuildOpts {
                 timeout_secs: timeout,
                 builder_vcpus: builder_cpus,
                 builder_mem_mib: builder_mem,
+                force_rebuild: force,
             };
-            mvm_build::build::pool_build_with_opts(&env, tenant_id, pool_id, opts)
+            mvm_build::build::pool_build_with_opts(&env, &tenant_id, &pool_id, opts)
         }
         PoolCmd::Scale {
             path,
+            tenant,
             running,
             warm,
             sleeping,
         } => {
-            let (tenant_id, pool_id) = naming::parse_pool_path(&path)?;
-            pool::lifecycle::pool_scale(tenant_id, pool_id, running, warm, sleeping)?;
+            let (tenant_id, pool_id) =
+                parse_pool_path_with_optional_tenant(&path, tenant.as_deref())?;
+            pool::lifecycle::pool_scale(&tenant_id, &pool_id, running, warm, sleeping)?;
             ui::success(&format!("Pool '{}' scaled.", path));
             Ok(())
         }
-        PoolCmd::Destroy { path, force } => {
-            let (tenant_id, pool_id) = naming::parse_pool_path(&path)?;
-            pool::lifecycle::pool_destroy(tenant_id, pool_id, force)?;
+        PoolCmd::Destroy {
+            path,
+            tenant,
+            force,
+        } => {
+            let (tenant_id, pool_id) =
+                parse_pool_path_with_optional_tenant(&path, tenant.as_deref())?;
+            pool::lifecycle::pool_destroy(&tenant_id, &pool_id, force)?;
             ui::success(&format!("Pool '{}' destroyed.", path));
             Ok(())
         }
-        PoolCmd::Gc { path, keep } => {
-            let (tenant_id, pool_id) = naming::parse_pool_path(&path)?;
+        PoolCmd::Gc { path, tenant, keep } => {
+            let (tenant_id, pool_id) =
+                parse_pool_path_with_optional_tenant(&path, tenant.as_deref())?;
             let removed =
-                mvm_runtime::vm::disk_manager::cleanup_old_revisions(tenant_id, pool_id, keep)?;
+                mvm_runtime::vm::disk_manager::cleanup_old_revisions(&tenant_id, &pool_id, keep)?;
             if removed > 0 {
                 ui::success(&format!(
                     "Cleaned up {} old revisions for '{}'.",
@@ -2290,6 +2438,59 @@ fn cmd_node(action: NodeCmd, out_fmt: OutputFormat) -> Result<()> {
     }
 }
 
+fn cmd_template(action: TemplateCmd, _out_fmt: OutputFormat) -> Result<()> {
+    match action {
+        TemplateCmd::Create {
+            name,
+            flake,
+            profile,
+            role,
+            cpus,
+            mem,
+            data_disk,
+        } => template_cmd::create_single(&name, &flake, &profile, &role, cpus, mem, data_disk),
+        TemplateCmd::CreateMulti {
+            base,
+            flake,
+            profile,
+            roles,
+            cpus,
+            mem,
+            data_disk,
+        } => {
+            let roles_vec: Vec<String> = roles
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            template_cmd::create_multi(&base, &flake, &profile, &roles_vec, cpus, mem, data_disk)
+        }
+        TemplateCmd::Build {
+            name,
+            force,
+            config,
+        } => template_cmd::build(&name, force, config.as_deref()),
+        TemplateCmd::List { json } => template_cmd::list(json),
+        TemplateCmd::Info { name, json } => template_cmd::info(&name, json),
+        TemplateCmd::Delete { name, force } => template_cmd::delete(&name, force),
+        TemplateCmd::MigrateFromPool { from, to, force } => {
+            template_cmd::migrate_from_pool(&from, &to, force)
+        }
+        TemplateCmd::Init {
+            name,
+            local,
+            vm,
+            dir,
+        } => {
+            if local && vm {
+                anyhow::bail!("Specify only one of --local or --vm");
+            }
+            let use_local = if vm { false } else { local };
+            template_cmd::init(&name, use_local, &dir)
+        }
+    }
+}
+
 fn cmd_coordinator(action: CoordinatorCmd, _out_fmt: OutputFormat) -> Result<()> {
     use mvm_coordinator::client::{CoordinatorClient, run_coordinator_command};
     use mvm_core::agent::{AgentRequest, AgentResponse, DesiredState};
@@ -2444,21 +2645,21 @@ fn cmd_coordinator(action: CoordinatorCmd, _out_fmt: OutputFormat) -> Result<()>
         }
         CoordinatorCmd::Routes { config } => {
             use mvm_coordinator::config::CoordinatorConfig;
-            use mvm_coordinator::routing::RouteTable;
 
             let config_path = std::path::Path::new(&config);
             let coord_config = CoordinatorConfig::from_file(config_path)?;
-            let table = RouteTable::from_config(&coord_config);
-
             let header = "IDLE TIMEOUT";
             println!(
                 "{:<20} {:<20} {:<15} {:<25} {}",
                 "TENANT", "POOL", "LISTEN", "NODE", header
             );
-            for (listen, route) in table.routes() {
+            for route in &coord_config.routes {
+                let listen = route.listen;
+                let idle = route.idle_timeout(&coord_config.coordinator);
+                let node = route.node;
                 println!(
                     "{:<20} {:<20} {:<15} {:<25} {}s",
-                    route.tenant_id, route.pool_id, listen, route.node, route.idle_timeout_secs,
+                    route.tenant_id, route.pool_id, listen, node, idle,
                 );
             }
             Ok(())
@@ -2627,6 +2828,7 @@ fn cmd_new(
             pool_tmpl.profile,
             resources,
             pool_tmpl.role.clone(),
+            template.name,
         )?;
     }
 
@@ -2766,6 +2968,7 @@ fn cmd_deploy(manifest_path: &str, watch: bool, interval: u64) -> Result<()> {
                 &mp.profile,
                 resources,
                 mp.role.clone(),
+                "",
             )?;
             ui::info(&format!(
                 "  Created pool '{}/{}'",

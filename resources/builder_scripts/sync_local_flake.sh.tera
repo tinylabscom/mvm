@@ -1,0 +1,6 @@
+set -euo pipefail
+tar czf {{tmp}} -C {{src}} .
+scp -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o BatchMode=yes -i {{key}} {{tmp}} {{user}}@{{ip}}:/tmp/flake.tar.gz
+ssh -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o BatchMode=yes -i {{key}} {{user}}@{{ip}} \
+    'sudo rm -rf /root/project && sudo mkdir -p /root/project && sudo tar xzf /tmp/flake.tar.gz -C /root/project && sudo chown -R root:root /root/project'
+rm -f {{tmp}}

@@ -1,6 +1,8 @@
 name: Publish to crates.io
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -28,8 +30,8 @@ jobs:
       contents: read
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-      TAG_NAME: ${{ inputs.tag }}
-      DRY_RUN: ${{ inputs.dry_run }}
+      TAG_NAME: ${{ inputs.tag || github.ref_name }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
     steps:
       - name: Check token
         run: |
@@ -54,6 +56,12 @@ jobs:
 
       - name: Install Rust toolchain (nightly)
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Run Deploy Guard
+        shell: bash
+        run: |
+          chmod +x scripts/deploy-guard.sh
+          ./scripts/deploy-guard.sh
 
       - name: Publish crates in dependency order
         shell: bash

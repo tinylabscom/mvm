@@ -431,6 +431,7 @@ id = "workers"
                 pool_tmpl.profile,
                 resources,
                 pool_tmpl.role.clone(),
+                template.name,
             )
             .unwrap();
             assert_eq!(spec.tenant_id, "myapp");

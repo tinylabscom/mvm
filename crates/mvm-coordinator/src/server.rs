@@ -19,17 +19,40 @@ pub struct CoordinatorState {
     pub idle_tracker: IdleTracker,
 }
 
+use super::routing::ResolvedRoute;
 /// Run the coordinator server.
 ///
 /// Binds TCP listeners for each route, accepts connections, and dispatches
 /// them through the wake manager and proxy pipeline. Also runs background
 /// health check and idle sweep tasks.
+use super::state::{MemStateStore, StateStore};
+
+// ...
+
 pub async fn serve(config: CoordinatorConfig) -> Result<()> {
-    let route_table = RouteTable::from_config(&config);
-    let wake_manager = WakeManager::new(&config);
+    // Default to in-memory store for now.
+    // TODO: Add config support for EtcdStateStore.
+    let store: Arc<dyn StateStore> = Arc::new(MemStateStore::new());
+
+    // Bootstrap routes from config into the store
+    for route in &config.routes {
+        let resolved = ResolvedRoute {
+            tenant_id: route.tenant_id.clone(),
+            pool_id: route.pool_id.clone(),
+            node: route.node,
+            idle_timeout_secs: route.idle_timeout(&config.coordinator),
+        };
+        store.set_route(&route.listen, &resolved).await?;
+    }
+
+    let route_table = RouteTable::new(store.clone());
+    let wake_manager = WakeManager::new(store.clone(), &config);
     let idle_tracker = IdleTracker::new();
 
-    info!(routes = route_table.len(), "Coordinator starting");
+    info!(
+        routes = route_table.listen_addrs().await.len(),
+        "Coordinator starting"
+    );
 
     let state = Arc::new(CoordinatorState {
         config: config.clone(),
@@ -55,7 +78,7 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
 
     // Spawn a TCP listener for each route
     let mut listener_handles = Vec::new();
-    let listen_addrs = state.route_table.listen_addrs();
+    let listen_addrs = state.route_table.listen_addrs().await;
 
     for addr in &listen_addrs {
         let listener = TcpListener::bind(addr)
@@ -133,6 +156,7 @@ async fn handle_connection(
     let route = state
         .route_table
         .lookup(&listen_addr)
+        .await
         .ok_or_else(|| anyhow::anyhow!("No route for listen address {}", listen_addr))?;
 
     info!(
@@ -149,7 +173,7 @@ async fn handle_connection(
     let result = async {
         let gateway_addr = state
             .wake_manager
-            .ensure_running(route, &state.config)
+            .ensure_running(&route, &state.config)
             .await?;
 
         // Proxy connection
@@ -171,7 +195,8 @@ async fn idle_sweep_loop(state: Arc<CoordinatorState>) {
     loop {
         tokio::time::sleep(interval).await;
 
-        for (_, route) in state.route_table.routes() {
+        let routes = state.route_table.routes().await;
+        for (_, route) in routes {
             let idle_tenants = state
                 .idle_tracker
                 .idle_tenants(route.idle_timeout_secs)

@@ -1,0 +1,16 @@
+template_id = "openclaw"
+flake_ref   = "."
+# Default profile for variants that omit one
+profile     = "minimal"
+
+[[variants]]
+role        = "gateway"
+vcpus       = 2
+mem_mib     = 1024
+data_disk_mib = 0
+
+[[variants]]
+role        = "worker"
+vcpus       = 2
+mem_mib     = 2048
+data_disk_mib = 2048

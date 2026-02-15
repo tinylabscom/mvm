@@ -11,4 +11,5 @@ pub mod disk_manager;
 pub mod instance;
 pub mod lima_state;
 pub mod pool;
+pub mod template;
 pub mod tenant;

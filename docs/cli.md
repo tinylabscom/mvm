@@ -179,14 +179,12 @@ Pools use `<tenant>/<pool>` addressing.
 
 ### `mvm pool create <tenant>/<pool>`
 
-Creates a new worker pool within a tenant.
+Creates a new pool within a tenant. Pools are now template-backed.
 
 ```bash
 mvm pool create acme/workers \
-    --flake github:org/openclaw-worker?rev=abc123 \
-    --profile minimal \
-    --cpus 2 --mem 1024 \
-    --data-disk 2048
+    --template openclaw-worker \
+    --cpus 2 --mem 1024 --data-disk 2048
 ```
 
 ### `mvm pool list <tenant>`
@@ -209,11 +207,11 @@ mvm pool info acme/workers --json
 
 ### `mvm pool build <tenant>/<pool>`
 
-Builds guest artifacts (kernel, rootfs, FC config) inside an ephemeral Firecracker builder microVM using Nix.
+Builds guest artifacts. If the pool references a template, artifacts are reused from the template's current revision. `--force` rebuilds the template first, then the pool.
 
 ```bash
-mvm pool build acme/workers
-mvm pool build acme/workers --timeout 3600
+mvm pool build acme/workers               # reuse template artifacts
+mvm pool build acme/workers --force       # rebuild template then pool
 ```
 
 ### `mvm pool scale <tenant>/<pool>`
@@ -227,6 +225,76 @@ mvm pool scale acme/workers --running 5 --warm 2 --sleeping 3
 ### `mvm pool update <tenant>/<pool>`
 
 Updates pool configuration (flake ref, profile, resources).
+
+---
+
+## Templates (shared base images)
+
+Templates let you build a base image once and reuse it across tenants and pools.
+
+Example config: `docs/examples/template.toml`
+
+### `mvm template create <name>`
+
+Create a single template (one role/profile/resources):
+
+```bash
+mvm template create openclaw-worker \
+    --flake . --profile minimal --role worker \
+    --cpus 2 --mem 2048 --data-disk 2048
+```
+
+### `mvm template create-multi <base>`
+
+Create multiple role-specific templates in one call (names become `<base>-<role>`):
+
+```bash
+mvm template create-multi openclaw \
+    --flake . --profile minimal \
+    --roles gateway,worker \
+    --cpus 2 --mem 2048
+```
+
+### `mvm template build <name>`
+
+Builds the template. With `--config template.toml`, builds multiple variants defined in the file.
+
+```bash
+mvm template build openclaw-worker
+mvm template build openclaw --config template.toml
+```
+
+Example `template.toml`:
+
+```toml
+template_id = "openclaw"
+flake_ref = "."
+profile = "minimal"
+
+[[variants]]
+role = "gateway"
+vcpus = 2
+mem_mib = 1024
+
+[[variants]]
+role = "worker"
+vcpus = 2
+mem_mib = 2048
+data_disk_mib = 2048
+```
+
+### `mvm template list | info | delete`
+
+Standard management commands for templates.
+
+### `mvm template migrate-from-pool --from <tenant/pool> --to <template>`
+
+Creates a template from an existing pool, rebuilds it, and repoints the pool to the new template. Use `--force` to overwrite an existing template.
+
+Workflow recap:
+1. Create/build templates (single or config-driven).
+2. Create pools with `--template <id>`.
+3. `mvm pool build` reuses template artifacts; `--force` rebuilds the template first, then the pool.
 
 ```bash
 mvm pool update acme/workers --flake github:org/app?rev=def456

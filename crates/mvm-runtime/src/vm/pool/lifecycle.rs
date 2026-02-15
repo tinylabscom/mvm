@@ -5,7 +5,7 @@ use crate::shell;
 use crate::vm::tenant::lifecycle::tenant_exists;
 use mvm_core::naming;
 use mvm_core::pool::{
-    DesiredCounts, InstanceResources, PoolSpec, Role, pool_config_path, pool_dir,
+    DesiredCounts, InstanceResources, PoolMetadata, PoolSpec, Role, pool_config_path, pool_dir,
 };
 
 /// Create a new pool under a tenant.
@@ -17,6 +17,7 @@ pub fn pool_create(
     profile: &str,
     resources: InstanceResources,
     role: Role,
+    template_id: &str,
 ) -> Result<PoolSpec> {
     naming::validate_id(tenant_id, "Tenant")?;
     naming::validate_id(pool_id, "Pool")?;
@@ -39,12 +40,14 @@ pub fn pool_create(
         instance_resources: resources,
         desired_counts: DesiredCounts::default(),
         runtime_policy: Default::default(),
+        metadata: PoolMetadata::default(),
         seccomp_policy: "baseline".to_string(),
         snapshot_compression: "none".to_string(),
         metadata_enabled: false,
         pinned: false,
         critical: false,
         secret_scopes: vec![],
+        template_id: template_id.to_string(),
     };
 
     let json = serde_json::to_string_pretty(&spec)?;
@@ -157,6 +160,16 @@ pub fn pool_destroy(tenant_id: &str, pool_id: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Update a pool's template reference and persist to disk.
+pub fn pool_set_template(tenant_id: &str, pool_id: &str, template_id: &str) -> Result<()> {
+    let mut spec = pool_load(tenant_id, pool_id)?;
+    spec.template_id = template_id.to_string();
+    let json = serde_json::to_string_pretty(&spec)?;
+    let path = pool_config_path(tenant_id, pool_id);
+    shell::run_in_vm(&format!("cat > {} << 'MVMEOF'\n{}\nMVMEOF", path, json))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +195,7 @@ mod tests {
             "minimal",
             resources,
             Role::default(),
+            "tmpl",
         )
         .unwrap();
         assert_eq!(spec.pool_id, "workers");
@@ -206,8 +220,16 @@ mod tests {
             mem_mib: 1024,
             data_disk_mib: 0,
         };
-        let spec =
-            pool_create("acme", "gateways", ".", "minimal", resources, Role::Gateway).unwrap();
+        let spec = pool_create(
+            "acme",
+            "gateways",
+            ".",
+            "minimal",
+            resources,
+            Role::Gateway,
+            "tmpl",
+        )
+        .unwrap();
         assert_eq!(spec.role, Role::Gateway);
 
         let loaded = pool_load("acme", "gateways").unwrap();
@@ -244,9 +266,19 @@ mod tests {
             "minimal",
             resources.clone(),
             Role::default(),
+            "tmpl",
         )
         .unwrap();
-        pool_create("acme", "builders", ".", "python", resources, Role::Builder).unwrap();
+        pool_create(
+            "acme",
+            "builders",
+            ".",
+            "python",
+            resources,
+            Role::Builder,
+            "tmpl",
+        )
+        .unwrap();
 
         let mut pools = pool_list("acme").unwrap();
         pools.sort();
@@ -268,6 +300,7 @@ mod tests {
             "minimal",
             resources,
             Role::default(),
+            "tmpl",
         );
         assert!(result.is_err());
     }
@@ -291,6 +324,7 @@ mod tests {
             "minimal",
             resources,
             Role::default(),
+            "tmpl",
         )
         .unwrap();
 
@@ -321,6 +355,7 @@ mod tests {
             "minimal",
             resources,
             Role::default(),
+            "tmpl",
         )
         .unwrap();
         assert!(!pool_list("acme").unwrap().is_empty());
@@ -372,6 +407,7 @@ mod tests {
             "minimal",
             resources,
             Role::default(),
+            "tmpl",
         )
         .unwrap();
 
