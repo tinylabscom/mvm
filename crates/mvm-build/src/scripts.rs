@@ -1,5 +1,13 @@
-use anyhow::{Result, anyhow};
-use std::collections::{BTreeMap, BTreeSet};
+use anyhow::{Context, Result, anyhow};
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+// NOTE: Builder script templates use Tera's `{{ var }}` syntax.
+// If you need to embed a literal `{{...}}` string (e.g. Go templates like `{{.Status}}`)
+// inside a builder script, wrap it in a raw block:
+//   {% raw %}{{.Status}}{% endraw %}
+
+static TERA: OnceLock<Result<tera::Tera>> = OnceLock::new();
 
 fn script_source(name: &str) -> Option<&'static str> {
     match name {
@@ -31,85 +39,104 @@ fn script_source(name: &str) -> Option<&'static str> {
             "../../../resources/builder_scripts/extract_artifacts_ssh.sh.tera"
         )),
         "extract_artifacts_vsock_disk" => Some(include_str!(
-            "../../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera",
+            "../../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
         )),
         _ => None,
     }
 }
 
-fn is_placeholder_key(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
+fn script_names() -> &'static [&'static str] {
+    &[
+        "ensure_builder_artifacts",
+        "launch_firecracker_ssh",
+        "launch_firecracker_vsock",
+        "builder_keygen",
+        "refresh_builder_rootfs",
+        "download_builder_artifacts",
+        "sync_local_flake",
+        "run_nix_build_ssh",
+        "extract_artifacts_ssh",
+        "extract_artifacts_vsock_disk",
+    ]
 }
 
-fn find_placeholders(s: &str) -> BTreeSet<String> {
-    let bytes = s.as_bytes();
-    let mut out = BTreeSet::new();
+fn build_tera() -> Result<tera::Tera> {
+    let mut tera = tera::Tera::default();
+    // Shell scripts must not be HTML-escaped.
+    tera.autoescape_on(vec![]);
 
-    let mut i = 0usize;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            let start = i + 2;
-            let mut j = start;
-            while j + 1 < bytes.len() {
-                if bytes[j] == b'}' && bytes[j + 1] == b'}' {
-                    let inner = s[start..j].trim();
-                    if is_placeholder_key(inner) {
-                        out.insert(inner.to_string());
-                    }
-                    i = j + 2;
-                    break;
-                }
-                j += 1;
-            }
-            if j + 1 >= bytes.len() {
-                break;
-            }
-            continue;
-        }
-        i += 1;
+    for name in script_names() {
+        let src = script_source(name)
+            .ok_or_else(|| anyhow!("builder script template source not found: {name}"))?;
+        tera.add_raw_template(name, src)
+            .map_err(anyhow::Error::new)
+            .with_context(|| format!("Failed to parse builder script template {name}"))?;
     }
 
-    out
+    Ok(tera)
+}
+
+fn tera_instance() -> Result<&'static tera::Tera> {
+    match TERA.get_or_init(build_tera) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            Err(anyhow!(e.to_string())).context("Failed to initialize builder script templates")
+        }
+    }
 }
 
 pub fn render_script(name: &str, context: &BTreeMap<&str, String>) -> Result<String> {
-    let template = script_source(name)
-        .ok_or_else(|| anyhow!("unknown script template: {name}"))?
-        .to_string();
+    let tera = tera_instance()?;
 
-    let required = find_placeholders(&template);
-    let missing: Vec<String> = required
-        .iter()
-        .filter(|k| !context.contains_key(k.as_str()))
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        return Err(anyhow!(
-            "missing template variable(s) for script {name}: {}",
-            missing.join(", ")
-        ));
+    if script_source(name).is_none() {
+        return Err(anyhow!("unknown script template: {name}"));
     }
 
-    let mut out = template;
-
-    for (key, val) in context {
-        out = out.replace(&format!("{{{{{key}}}}}"), val);
+    let mut ctx = tera::Context::new();
+    for (k, v) in context {
+        ctx.insert(*k, v);
     }
 
-    let unresolved = find_placeholders(&out);
-    if !unresolved.is_empty() {
-        return Err(anyhow!(
-            "unresolved template variable(s) in script {name}: {}",
-            unresolved.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+    tera.render(name, &ctx)
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("Failed to render script {name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_templates_parse() {
+        build_tera().expect("builder templates should parse");
     }
 
-    Ok(out)
+    #[test]
+    fn test_missing_var_fails() {
+        let mut ctx = BTreeMap::new();
+        ctx.insert("run_dir", "/tmp".to_string());
+        // launch_firecracker_ssh requires more vars than just run_dir.
+        let err = render_script("launch_firecracker_ssh", &ctx).unwrap_err();
+        let msg = format!("{err:#}");
+        eprintln!("{msg}");
+        assert!(msg.contains("launch_firecracker_ssh"));
+        // Don't overfit the exact wording, but ensure it's a render-time failure surfaced via Tera.
+        assert!(msg.contains("Failed to render script launch_firecracker_ssh"));
+    }
+
+    #[test]
+    fn test_smoke_render_launch_firecracker_ssh() {
+        let mut ctx = BTreeMap::new();
+        ctx.insert("run_dir", "/tmp/mvm".to_string());
+        ctx.insert("socket", "/tmp/mvm/firecracker.socket".to_string());
+        ctx.insert("config", "/tmp/mvm/fc-builder.json".to_string());
+        ctx.insert("log", "/tmp/mvm/firecracker.log".to_string());
+        ctx.insert("pid", "/tmp/mvm/fc.pid".to_string());
+
+        let rendered =
+            render_script("launch_firecracker_ssh", &ctx).expect("render should succeed");
+        assert!(rendered.contains("/tmp/mvm"));
+        assert!(rendered.contains("/tmp/mvm/firecracker.socket"));
+        assert!(rendered.contains("/tmp/mvm/fc-builder.json"));
+    }
 }
