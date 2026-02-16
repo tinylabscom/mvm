@@ -13,7 +13,12 @@ pub fn setup_tap(net: &InstanceNet, bridge_name: &str) -> Result<()> {
 
     shell::run_in_vm(&format!(
         r#"
-        sudo ip tuntap add dev {tap} mode tap
+        # Ensure stale TAP devices don't break new boots (e.g. prior crashes).
+        sudo ip link del {tap} 2>/dev/null || true
+        # Firecracker runs unprivileged; create TAP owned by the current user.
+        UID=$(id -u)
+        GID=$(id -g)
+        sudo ip tuntap add dev {tap} mode tap user $UID group $GID
         sudo ip link set {tap} master {bridge}
         sudo ip link set {tap} up
         "#,
