@@ -104,10 +104,10 @@ fn ensure_mount(dev: &str, mountpoint: &str) {
 }
 
 fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
-    // Check if nix is already on PATH.
+    // Check if nix is already on PATH (including common Nix profile locations).
     if Command::new("sh")
         .arg("-c")
-        .arg("command -v nix >/dev/null 2>&1")
+        .arg("export PATH=\"/nix/var/nix/profiles/default/bin:$PATH\"; command -v nix >/dev/null 2>&1")
         .status()
         .is_ok_and(|s| s.success())
     {
@@ -158,9 +158,10 @@ fn run_build(
     // Ensure Nix is available before attempting the build.
     ensure_nix(reader)?;
 
-    // Source nix profile in case it was just installed.
+    // Ensure Nix is on PATH and source any profile scripts.
     let build_cmd = format!(
         "set -euo pipefail; \
+         export PATH=\"/nix/var/nix/profiles/default/bin:$PATH\"; \
          [ -f /root/.nix-profile/etc/profile.d/nix.sh ] && . /root/.nix-profile/etc/profile.d/nix.sh; \
          [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ] && . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; \
          timeout {t} nix build {flake}#{attr} --no-link --print-out-paths 2>&1",

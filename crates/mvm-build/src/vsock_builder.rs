@@ -18,7 +18,7 @@ pub fn build_via_vsock(
     attr: &str,
     timeout_secs: u64,
 ) -> Result<String> {
-    wait_for_agent_ready(vsock_uds, timeout_secs.clamp(10, 60))?;
+    wait_for_agent_ready(vsock_uds, timeout_secs.clamp(15, 90))?;
 
     let mut stream = UnixStream::connect(vsock_uds)
         .with_context(|| format!("failed to connect vsock UDS {}", vsock_uds))?;

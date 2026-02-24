@@ -186,6 +186,7 @@ After=basic.target
 
 [Service]
 Type=simple
+Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart={{agent_dst}}
 Restart=always
 RestartSec=1
