@@ -6,7 +6,7 @@ firecracker \
     --config-file {{config}} \
     --log-path {{log}} \
     --level Info \
-    &
+    </dev/null >/dev/null 2>&1 &
 FC_PID=$!
 echo "$FC_PID" > {{pid}}
 sleep 1

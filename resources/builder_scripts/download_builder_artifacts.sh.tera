@@ -128,7 +128,7 @@ if [ ! -f rootfs.ext4 ]; then
     fi
 
     echo '[mvm] Preparing builder rootfs...'
-    rm -rf squashfs-root
+    sudo rm -rf squashfs-root
     if ! unsquashfs -d squashfs-root rootfs.squashfs; then
         echo '[mvm] Corrupt squashfs; retrying download/build...'
         rm -f rootfs.squashfs
@@ -153,7 +153,7 @@ if [ ! -f rootfs.ext4 ]; then
                 exit 1
             fi
         fi
-        rm -rf squashfs-root
+        sudo rm -rf squashfs-root
         if ! unsquashfs -d squashfs-root rootfs.squashfs; then
             echo '[mvm] ERROR: Unsquashfs failed after re-download'
             exit 1
@@ -232,6 +232,6 @@ AGENTEOF
     sudo mkfs.ext4 -d squashfs-root -F rootfs.ext4
     sudo chown $(whoami) rootfs.ext4
 
-    rm -rf squashfs-root rootfs.squashfs
+    sudo rm -rf squashfs-root rootfs.squashfs
     echo '[mvm] Builder rootfs prepared.'
 fi

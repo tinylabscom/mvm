@@ -17,3 +17,7 @@ Tenant's customizations come from their pool infrastructure so that when a tenan
 ---
 
 Now that we have our nix templates building, we'll want to make it so that they load a tenant's secrets and configuration. How do we start doing that? Where do these secrets and configuration values exist (and they need to be encrypted).
+
+---
+
+I have a `template.toml` in that directory `/Users/auser/work/tinylabs/aibutler/nix/openclaw` -- can we use this to run our build? This way we can have an easy way to make changes to our build in a file?
