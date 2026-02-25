@@ -7,6 +7,7 @@ use mvm_core::pool::{ArtifactPaths, BuildRevision, pool_artifacts_dir};
 use mvm_core::time::utc_now;
 
 use crate::artifacts::ensure_builder_artifacts;
+use crate::backend::host::HostBackend;
 use crate::backend::ssh::SshBackend;
 use crate::backend::vsock::VsockBackend;
 use crate::backend::{BackendParams, BuilderBackend};
@@ -18,24 +19,31 @@ use crate::template_reuse::reuse_template_artifacts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuilderMode {
-    Auto,
+    /// Run `nix build` directly on the host. Default mode.
+    Host,
+    /// Boot an FC builder VM and communicate via vsock.
     Vsock,
+    /// Boot an FC builder VM and communicate via SSH.
     Ssh,
+    /// Try vsock first, fall back to SSH (FC-based).
+    Auto,
 }
 
 fn builder_mode() -> BuilderMode {
     match env::var("MVM_BUILDER_MODE")
-        .unwrap_or_else(|_| "auto".to_string())
+        .unwrap_or_else(|_| "host".to_string())
         .to_ascii_lowercase()
         .as_str()
     {
         "vsock" => BuilderMode::Vsock,
         "ssh" => BuilderMode::Ssh,
-        _ => BuilderMode::Auto,
+        "auto" => BuilderMode::Auto,
+        _ => BuilderMode::Host,
     }
 }
 
-/// Build artifacts for a pool using an ephemeral Firecracker builder microVM.
+/// Build artifacts for a pool. Default mode runs `nix build` on the host.
+/// Set `MVM_BUILDER_MODE=vsock|ssh|auto` to use FC-based builders instead.
 pub fn pool_build(
     env: &dyn BuildEnvironment,
     tenant_id: &str,
@@ -90,14 +98,17 @@ pub fn pool_build_with_opts(
 
     let mode = builder_mode();
 
-    // Step 1: Ensure builder artifacts exist
-    // In pure vsock mode we must not require/probe SSH keys.
-    ensure_builder_artifacts(env, mode != BuilderMode::Vsock)?;
+    // FC-based builders need rootfs/kernel artifacts and a tenant bridge.
+    let needs_fc = matches!(
+        mode,
+        BuilderMode::Vsock | BuilderMode::Ssh | BuilderMode::Auto
+    );
+    if needs_fc {
+        ensure_builder_artifacts(env, mode != BuilderMode::Vsock)?;
+        env.ensure_bridge(&tenant.net)?;
+    }
 
-    // Step 2: Ensure tenant bridge is up
-    env.ensure_bridge(&tenant.net)?;
-
-    // Step 3: Create a unique build ID for this run
+    // Create a unique build ID for this run.
     let build_id = naming::generate_instance_id().replace("i-", "b-");
     let build_run_dir = format!("{}/run/{}", crate::build::BUILDER_DIR, build_id);
     env.shell_exec(&format!("mkdir -p {}", build_run_dir))?;
@@ -105,11 +116,32 @@ pub fn pool_build_with_opts(
     env.log_info(&format!("Build ID: {}", build_id));
 
     // The build pipeline uses a per-build run directory. Always clean it up, even on failures.
-    // (Backends avoid deleting it to support vsock->ssh fallback in `auto` mode.)
     let build_result: Result<()> = (|| {
-        // Step 4: Build through selected backend (vsock preferred with SSH fallback).
         let builder_net = builder_instance_net(&tenant.net);
+        let params = BackendParams {
+            build_run_dir: &build_run_dir,
+            builder_net: &builder_net,
+            tenant_net: &tenant.net,
+            spec: &spec,
+            timeout,
+            opts: &opts,
+            tenant_id,
+            pool_id,
+        };
+
         let backend_result = match mode {
+            BuilderMode::Host => {
+                env.log_info("Builder backend: host");
+                let mut backend = HostBackend::new(params);
+                let result: Result<_> = (|| {
+                    backend.prepare(env)?;
+                    backend.boot(env)?;
+                    backend.build(env)?;
+                    backend.extract_artifacts(env)
+                })();
+                let _ = backend.teardown(env);
+                result?
+            }
             BuilderMode::Vsock | BuilderMode::Auto => {
                 env.log_info("Builder backend: vsock");
                 let mut vsock_backend = VsockBackend::new(BackendParams {
@@ -155,21 +187,12 @@ pub fn pool_build_with_opts(
                         let _ = ssh_backend.teardown(env);
                         ssh_result?
                     }
-                    (BuilderMode::Ssh, Err(e)) => return Err(e),
+                    _ => unreachable!(),
                 }
             }
             BuilderMode::Ssh => {
                 env.log_info("Builder backend: ssh");
-                let mut ssh_backend = SshBackend::new(BackendParams {
-                    build_run_dir: &build_run_dir,
-                    builder_net: &builder_net,
-                    tenant_net: &tenant.net,
-                    spec: &spec,
-                    timeout,
-                    opts: &opts,
-                    tenant_id,
-                    pool_id,
-                });
+                let mut ssh_backend = SshBackend::new(params);
                 let ssh_result: Result<_> = (|| {
                     ssh_backend.prepare(env)?;
                     ssh_backend.boot(env)?;
@@ -183,7 +206,7 @@ pub fn pool_build_with_opts(
         let revision_hash = backend_result.revision_hash;
         let lock_hash = backend_result.lock_hash;
 
-        // Step 5: Record revision
+        // Record revision.
         let revision = BuildRevision {
             revision_hash: revision_hash.clone(),
             flake_ref: spec.flake_ref.clone(),

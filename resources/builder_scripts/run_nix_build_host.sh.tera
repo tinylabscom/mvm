@@ -1,0 +1,2 @@
+set -euo pipefail
+timeout {{timeout}} nix build {{attr}} --no-link --print-out-paths 2>&1 | tee {{log}}

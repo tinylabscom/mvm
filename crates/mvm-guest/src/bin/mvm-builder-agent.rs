@@ -142,10 +142,10 @@ fn find_nix_bin() -> Option<String> {
         .output()
     {
         let stdout = String::from_utf8_lossy(&out.stdout);
-        if let Some(line) = stdout.lines().next() {
-            if !line.is_empty() {
-                return Some(line.to_string());
-            }
+        if let Some(line) = stdout.lines().next()
+            && !line.is_empty()
+        {
+            return Some(line.to_string());
         }
     }
     None
@@ -153,10 +153,10 @@ fn find_nix_bin() -> Option<String> {
 
 /// Return PATH prefix that includes the directory containing nix.
 fn nix_path_prefix() -> String {
-    if let Some(nix_bin) = find_nix_bin() {
-        if let Some(dir) = std::path::Path::new(&nix_bin).parent() {
-            return dir.to_string_lossy().to_string();
-        }
+    if let Some(nix_bin) = find_nix_bin()
+        && let Some(dir) = std::path::Path::new(&nix_bin).parent()
+    {
+        return dir.to_string_lossy().to_string();
     }
     // Best-effort defaults covering both multi-user and single-user installs.
     "/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin".to_string()

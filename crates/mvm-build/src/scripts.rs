@@ -41,6 +41,12 @@ fn script_source(name: &str) -> Option<&'static str> {
         "extract_artifacts_vsock_disk" => Some(include_str!(
             "../../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
         )),
+        "run_nix_build_host" => Some(include_str!(
+            "../../../resources/builder_scripts/run_nix_build_host.sh.tera"
+        )),
+        "extract_artifacts_host" => Some(include_str!(
+            "../../../resources/builder_scripts/extract_artifacts_host.sh.tera"
+        )),
         _ => None,
     }
 }
@@ -57,6 +63,8 @@ fn script_names() -> &'static [&'static str] {
         "run_nix_build_ssh",
         "extract_artifacts_ssh",
         "extract_artifacts_vsock_disk",
+        "run_nix_build_host",
+        "extract_artifacts_host",
     ]
 }
 
