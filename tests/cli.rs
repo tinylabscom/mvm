@@ -167,7 +167,7 @@ fn test_build_help_shows_flake_options() {
         .success()
         .stdout(predicate::str::contains("--flake"))
         .stdout(predicate::str::contains("--profile"))
-        .stdout(predicate::str::contains("--role"));
+        .stdout(predicate::str::contains("--watch"));
 }
 
 #[test]
@@ -207,7 +207,6 @@ fn test_run_help_shows_flags() {
         .success()
         .stdout(predicate::str::contains("--flake"))
         .stdout(predicate::str::contains("--profile"))
-        .stdout(predicate::str::contains("--role"))
         .stdout(predicate::str::contains("--cpus"))
         .stdout(predicate::str::contains("--memory"));
 }

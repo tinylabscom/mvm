@@ -1,9 +1,6 @@
 use anyhow::{Context, Result};
 
 use mvm_core::build_env::ShellEnvironment;
-use mvm_core::pool::Role;
-
-use crate::nix_manifest::NixManifest;
 
 /// Base directory for dev build artifacts.
 const DEV_BUILDS_DIR: &str = "/var/lib/mvm/dev/builds";
@@ -28,13 +25,15 @@ pub struct DevBuildResult {
 /// Runs `nix build` with visible output, then copies the resulting
 /// kernel and rootfs to a dev build directory keyed by Nix store hash.
 /// Re-running the same build is a near-instant cache hit.
+///
+/// When `profile` is `None`, builds the flake's default package.
+/// When `Some("worker")`, builds `packages.<system>.tenant-worker`, etc.
 pub fn dev_build(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
-    profile: &str,
-    role: &Role,
+    profile: Option<&str>,
 ) -> Result<DevBuildResult> {
-    let attr = resolve_dev_build_attribute(env, flake_ref, role, profile);
+    let attr = resolve_dev_build_attribute(env, flake_ref, profile);
 
     // Step 1: Run nix build with visible output so the user sees progress
     env.log_info(&format!("Building: nix build {}", attr));
@@ -93,46 +92,27 @@ pub fn dev_build(
 
 /// Resolve the Nix attribute for a dev build.
 ///
-/// If `<flake>/mvm-profiles.toml` exists and contains the role+profile,
-/// uses the role-aware attribute `<flake>#packages.<system>.tenant-<role>-<profile>`.
-/// Otherwise falls back to `<flake>#packages.<system>.tenant-<profile>`.
+/// - `None` → builds the flake's `default` package (convention: `default = worker`).
+/// - `Some(profile)` → builds `packages.<system>.tenant-<profile>`.
 fn resolve_dev_build_attribute(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
-    role: &Role,
-    profile: &str,
+    profile: Option<&str>,
 ) -> String {
-    let system = nix_system();
-
-    // Try to read mvm-profiles.toml from the flake directory
-    let manifest_result = env.shell_exec_stdout(&format!(
-        "cat '{}/mvm-profiles.toml' 2>/dev/null || echo __NOT_FOUND__",
-        flake_ref.replace('\'', "'\\''"),
-    ));
-
-    if let Ok(content) = manifest_result
-        && !content.contains("__NOT_FOUND__")
-        && let Ok(manifest) = NixManifest::from_toml(&content)
-        && manifest.resolve(role, profile).is_ok()
-    {
-        let attr = format!(
-            "{}#packages.{}.tenant-{}-{}",
-            flake_ref, system, role, profile
-        );
-        env.log_info(&format!(
-            "Manifest found, using role-aware attribute: {}",
+    match profile {
+        Some(p) => {
+            let system = nix_system();
+            let attr = format!("{}#packages.{}.tenant-{}", flake_ref, system, p);
+            env.log_info(&format!("Build attribute: {}", attr));
             attr
-        ));
-        return attr;
+        }
+        None => {
+            // No profile: build the flake's default package.
+            // mvm flake convention: `default = worker`.
+            env.log_info(&format!("Build attribute: {} (default)", flake_ref));
+            flake_ref.to_string()
+        }
     }
-
-    // Fallback: legacy attribute without role
-    let attr = format!("{}#packages.{}.tenant-{}", flake_ref, system, profile);
-    env.log_info(&format!(
-        "No manifest found, using legacy attribute: {}",
-        attr
-    ));
-    attr
 }
 
 /// Extract the Nix store hash from an output path like `/nix/store/<hash>-name`.
@@ -313,76 +293,38 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_attribute_with_manifest() {
+    fn test_resolve_attribute_with_profile() {
         let env = TestEnv::new();
 
-        let manifest_toml = r#"
-[meta]
-version = 1
-
-[profiles.minimal]
-module = "guests/profiles/minimal.nix"
-
-[roles.worker]
-module = "roles/worker.nix"
-"#;
-
-        env.stub_stdout("mvm-profiles.toml", manifest_toml);
-
-        let attr =
-            resolve_dev_build_attribute(&env, "/home/user/my-project", &Role::Worker, "minimal");
+        let attr = resolve_dev_build_attribute(&env, "/home/user/my-project", Some("worker"));
 
         let system = nix_system();
         assert_eq!(
             attr,
-            format!(
-                "/home/user/my-project#packages.{}.tenant-worker-minimal",
-                system
-            )
+            format!("/home/user/my-project#packages.{}.tenant-worker", system)
         );
     }
 
     #[test]
-    fn test_resolve_attribute_without_manifest() {
+    fn test_resolve_attribute_custom_profile() {
         let env = TestEnv::new();
-        env.stub_stdout("mvm-profiles.toml", "__NOT_FOUND__");
 
-        let attr =
-            resolve_dev_build_attribute(&env, "/home/user/project", &Role::Worker, "minimal");
+        let attr = resolve_dev_build_attribute(&env, "/tmp/flake", Some("gateway"));
 
         let system = nix_system();
         assert_eq!(
             attr,
-            format!("/home/user/project#packages.{}.tenant-minimal", system)
+            format!("/tmp/flake#packages.{}.tenant-gateway", system)
         );
     }
 
     #[test]
-    fn test_resolve_attribute_manifest_missing_role() {
+    fn test_resolve_attribute_default() {
         let env = TestEnv::new();
 
-        // Manifest exists but doesn't have Gateway role
-        let manifest_toml = r#"
-[meta]
-version = 1
+        let attr = resolve_dev_build_attribute(&env, "/tmp/flake", None);
 
-[profiles.minimal]
-module = "guests/profiles/minimal.nix"
-
-[roles.worker]
-module = "roles/worker.nix"
-"#;
-
-        env.stub_stdout("mvm-profiles.toml", manifest_toml);
-
-        let attr = resolve_dev_build_attribute(&env, "/tmp/flake", &Role::Gateway, "minimal");
-
-        // Should fall back to legacy attribute since Gateway isn't in manifest
-        let system = nix_system();
-        assert_eq!(
-            attr,
-            format!("/tmp/flake#packages.{}.tenant-minimal", system)
-        );
+        assert_eq!(attr, "/tmp/flake");
     }
 
     #[test]
@@ -416,7 +358,7 @@ module = "roles/worker.nix"
         // Cache check returns yes
         env.stub_stdout("test -f", "yes");
 
-        let result = dev_build(&env, "/home/user/project", "minimal", &Role::Worker).unwrap();
+        let result = dev_build(&env, "/home/user/project", Some("minimal")).unwrap();
 
         assert!(result.cached);
         assert_eq!(result.revision_hash, "abc123");
@@ -436,12 +378,10 @@ module = "roles/worker.nix"
         let env = TestEnv::new();
 
         env.stub_stdout("--print-out-paths", "/nix/store/xyz789-tenant-minimal\n");
-        // Manifest not found
-        env.stub_stdout("mvm-profiles.toml", "__NOT_FOUND__");
         // Cache miss
         env.stub_stdout("test -f", "no");
 
-        let result = dev_build(&env, "/tmp/flake", "minimal", &Role::Worker).unwrap();
+        let result = dev_build(&env, "/tmp/flake", Some("minimal")).unwrap();
 
         assert!(!result.cached);
         assert_eq!(result.revision_hash, "xyz789");

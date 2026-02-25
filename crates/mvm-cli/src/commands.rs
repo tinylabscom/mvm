@@ -140,12 +140,9 @@ enum Commands {
         /// Nix flake reference (enables flake build mode)
         #[arg(long)]
         flake: Option<String>,
-        /// Guest profile (flake mode, default: minimal)
-        #[arg(long, default_value = "minimal")]
-        profile: String,
-        /// Instance role (flake mode, default: worker)
-        #[arg(long, default_value = "worker")]
-        role: String,
+        /// Flake package variant (e.g. worker, gateway). Omit to use flake default.
+        #[arg(long)]
+        profile: Option<String>,
         /// Watch flake.lock and rebuild on change (flake mode)
         #[arg(long)]
         watch: bool,
@@ -155,12 +152,9 @@ enum Commands {
         /// Nix flake reference (local path or remote URI)
         #[arg(long)]
         flake: String,
-        /// Guest profile (default: minimal)
-        #[arg(long, default_value = "minimal")]
-        profile: String,
-        /// Instance role (default: worker)
-        #[arg(long, default_value = "worker")]
-        role: String,
+        /// Flake package variant (e.g. worker, gateway). Omit to use flake default.
+        #[arg(long)]
+        profile: Option<String>,
         /// vCPU cores
         #[arg(long, default_value = "2")]
         cpus: Option<u32>,
@@ -352,11 +346,10 @@ pub fn run() -> Result<()> {
             output,
             flake,
             profile,
-            role,
             watch,
         } => {
             if let Some(flake_ref) = flake {
-                cmd_build_flake(&flake_ref, &profile, &role, watch)
+                cmd_build_flake(&flake_ref, profile.as_deref(), watch)
             } else {
                 cmd_build(&path, output.as_deref())
             }
@@ -364,15 +357,13 @@ pub fn run() -> Result<()> {
         Commands::Run {
             flake,
             profile,
-            role,
             cpus,
             memory,
             config,
             volume,
         } => cmd_run(
             &flake,
-            &profile,
-            &role,
+            profile.as_deref(),
             cpus,
             memory,
             config.as_deref(),
@@ -962,12 +953,11 @@ fn cmd_build(path: &str, output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_build_flake(flake_ref: &str, profile: &str, role_str: &str, watch: bool) -> Result<()> {
+fn cmd_build_flake(flake_ref: &str, profile: Option<&str>, watch: bool) -> Result<()> {
     if bootstrap::is_lima_required() {
         lima::require_running()?;
     }
 
-    let role = parse_role(role_str)?;
     let resolved = resolve_flake_ref(flake_ref)?;
 
     let env = mvm_runtime::build_env::RuntimeBuildEnv;
@@ -982,16 +972,14 @@ fn cmd_build_flake(flake_ref: &str, profile: &str, role_str: &str, watch: bool) 
         .ok();
 
     loop {
+        let profile_display = profile.unwrap_or("default");
         ui::step(
             1,
             2,
-            &format!(
-                "Building flake {} (profile={}, role={})",
-                resolved, profile, role
-            ),
+            &format!("Building flake {} (profile={})", resolved, profile_display),
         );
 
-        let result = mvm_build::dev_build::dev_build(&env, &resolved, profile, &role)?;
+        let result = mvm_build::dev_build::dev_build(&env, &resolved, profile)?;
 
         ui::step(2, 2, "Build complete");
 
@@ -1046,8 +1034,7 @@ fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
 
 fn cmd_run(
     flake_ref: &str,
-    profile: &str,
-    role_str: &str,
+    profile: Option<&str>,
     cpus: Option<u32>,
     memory: Option<u32>,
     config_path: Option<&str>,
@@ -1057,20 +1044,17 @@ fn cmd_run(
         lima::require_running()?;
     }
 
-    let role = parse_role(role_str)?;
     let resolved = resolve_flake_ref(flake_ref)?;
+    let profile_display = profile.unwrap_or("default");
 
     ui::step(
         1,
         2,
-        &format!(
-            "Building flake {} (profile={}, role={})",
-            resolved, profile, role
-        ),
+        &format!("Building flake {} (profile={})", resolved, profile_display),
     );
 
     let env = mvm_runtime::build_env::RuntimeBuildEnv;
-    let result = mvm_build::dev_build::dev_build(&env, &resolved, profile, &role)?;
+    let result = mvm_build::dev_build::dev_build(&env, &resolved, profile)?;
 
     if result.cached {
         ui::info(&format!("Cache hit — revision {}", result.revision_hash));
@@ -1214,20 +1198,6 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
 // Utilities
 // ============================================================================
 
-fn parse_role(s: &str) -> Result<mvm_core::pool::Role> {
-    use mvm_core::pool::Role;
-    match s {
-        "gateway" => Ok(Role::Gateway),
-        "worker" => Ok(Role::Worker),
-        "builder" => Ok(Role::Builder),
-        "capability-imessage" => Ok(Role::CapabilityImessage),
-        _ => anyhow::bail!(
-            "Unknown role '{}'. Valid roles: gateway, worker, builder, capability-imessage",
-            s
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,46 +1311,25 @@ mod tests {
     // ---- Build --flake tests ----
 
     #[test]
-    fn test_build_flake_parses() {
-        let cli = Cli::try_parse_from([
-            "mvm",
-            "build",
-            "--flake",
-            ".",
-            "--profile",
-            "minimal",
-            "--role",
-            "worker",
-        ])
-        .unwrap();
+    fn test_build_flake_with_profile() {
+        let cli =
+            Cli::try_parse_from(["mvm", "build", "--flake", ".", "--profile", "gateway"]).unwrap();
         match cli.command {
-            Commands::Build {
-                flake,
-                profile,
-                role,
-                ..
-            } => {
+            Commands::Build { flake, profile, .. } => {
                 assert_eq!(flake.as_deref(), Some("."));
-                assert_eq!(profile, "minimal");
-                assert_eq!(role, "worker");
+                assert_eq!(profile.as_deref(), Some("gateway"));
             }
             _ => panic!("Expected Build command"),
         }
     }
 
     #[test]
-    fn test_build_flake_defaults() {
+    fn test_build_flake_defaults_to_no_profile() {
         let cli = Cli::try_parse_from(["mvm", "build", "--flake", "."]).unwrap();
         match cli.command {
-            Commands::Build {
-                flake,
-                profile,
-                role,
-                ..
-            } => {
+            Commands::Build { flake, profile, .. } => {
                 assert_eq!(flake.as_deref(), Some("."));
-                assert_eq!(profile, "minimal");
-                assert_eq!(role, "worker");
+                assert!(profile.is_none(), "profile should be None when omitted");
             }
             _ => panic!("Expected Build command"),
         }
@@ -1438,8 +1387,6 @@ mod tests {
             ".",
             "--profile",
             "full",
-            "--role",
-            "gateway",
             "--cpus",
             "4",
             "--memory",
@@ -1450,15 +1397,13 @@ mod tests {
             Commands::Run {
                 flake,
                 profile,
-                role,
                 cpus,
                 memory,
                 volume: _,
                 config: _,
             } => {
                 assert_eq!(flake, ".");
-                assert_eq!(profile, "full");
-                assert_eq!(role, "gateway");
+                assert_eq!(profile.as_deref(), Some("full"));
                 assert_eq!(cpus, Some(4));
                 assert_eq!(memory, Some(2048));
             }
@@ -1473,15 +1418,13 @@ mod tests {
             Commands::Run {
                 flake,
                 profile,
-                role,
                 cpus,
                 memory,
                 config: _,
                 volume,
             } => {
                 assert_eq!(flake, ".");
-                assert_eq!(profile, "minimal");
-                assert_eq!(role, "worker");
+                assert!(profile.is_none(), "profile should be None when omitted");
                 assert_eq!(cpus, Some(2));
                 assert_eq!(memory, Some(1024));
                 assert_eq!(volume.len(), 0);

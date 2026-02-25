@@ -3,7 +3,7 @@ use mvm_core::template::{TemplateSpec, template_dir, template_spec_path};
 
 use crate::build_env::RuntimeBuildEnv;
 use crate::shell;
-use mvm_core::pool::{ArtifactPaths, Role};
+use mvm_core::pool::ArtifactPaths;
 use mvm_core::template::{TemplateRevision, template_current_symlink, template_revision_dir};
 use mvm_core::time::utc_now;
 
@@ -54,30 +54,20 @@ pub fn template_init(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_role(role: &str) -> Role {
-    match role {
-        "gateway" => Role::Gateway,
-        "builder" => Role::Builder,
-        "capability-imessage" => Role::CapabilityImessage,
-        _ => Role::Worker,
-    }
-}
-
 /// Build a template using the dev build pipeline (local Nix in Lima).
 /// Artifacts are stored in /var/lib/mvm/templates/<id>/artifacts and the current symlink is updated.
 pub fn template_build(id: &str, force: bool) -> Result<()> {
     let spec = template_load(id)?;
     let env = RuntimeBuildEnv;
-    let role = parse_role(&spec.role);
 
     // Use dev_build to produce artifacts via Nix in Lima
     let result = if force {
         // Force: remove any cached artifacts to trigger a fresh build
         let cache_dir = format!("/var/lib/mvm/dev-builds/{}", spec.flake_ref);
         let _ = shell::run_in_vm(&format!("rm -rf {cache_dir}"));
-        mvm_build::dev_build::dev_build(&env, &spec.flake_ref, &spec.profile, &role)?
+        mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?
     } else {
-        mvm_build::dev_build::dev_build(&env, &spec.flake_ref, &spec.profile, &role)?
+        mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?
     };
 
     // Store artifacts in template revision directory
