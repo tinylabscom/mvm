@@ -21,7 +21,7 @@ After=basic.target
 
 [Service]
 Type=simple
-Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart={{agent_dst}}
 Restart=always
 RestartSec=1
@@ -29,6 +29,11 @@ RestartSec=1
 [Install]
 WantedBy=multi-user.target
 AGENTEOF
+sudo mkdir -p "$TMP_MOUNT/etc/nix"
+printf 'experimental-features = nix-command flakes\n' | sudo tee "$TMP_MOUNT/etc/nix/nix.conf" >/dev/null
+sudo mkdir -p "$TMP_MOUNT/root/.config/nix"
+printf 'experimental-features = nix-command flakes\n' | sudo tee "$TMP_MOUNT/root/.config/nix/nix.conf" >/dev/null
+printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' | sudo tee "$TMP_MOUNT/etc/resolv.conf" >/dev/null
 sudo mkdir -p "$TMP_MOUNT/etc/systemd/system/multi-user.target.wants"
 sudo ln -sf "{{agent_service}}" "$TMP_MOUNT/etc/systemd/system/multi-user.target.wants/mvm-builder-agent.service"
 if [ "{{inject_ssh}}" = "yes" ] && grep -q '^ubuntu:' "$TMP_MOUNT/etc/passwd"; then

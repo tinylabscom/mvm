@@ -186,7 +186,7 @@ After=basic.target
 
 [Service]
 Type=simple
-Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart={{agent_dst}}
 Restart=always
 RestartSec=1
@@ -220,6 +220,11 @@ AGENTEOF
             # Add nix to PATH for all users
             mkdir -p squashfs-root/etc/profile.d
             echo 'export PATH="/nix/var/nix/profiles/default/bin:$PATH"' > squashfs-root/etc/profile.d/nix.sh
+            # Enable experimental flake features
+            mkdir -p squashfs-root/etc/nix
+            echo 'experimental-features = nix-command flakes' > squashfs-root/etc/nix/nix.conf
+            mkdir -p squashfs-root/root/.config/nix
+            echo 'experimental-features = nix-command flakes' > squashfs-root/root/.config/nix/nix.conf
             echo '[mvm]   Nix store copied into rootfs.'
         else
             echo '[mvm]   WARNING: Could not determine Nix store closure. Nix will be installed at runtime.'
@@ -227,6 +232,9 @@ AGENTEOF
     else
         echo '[mvm]   WARNING: Nix not found on host. Nix will be installed at runtime.'
     fi
+
+    # DNS resolver for builds that need network access (e.g. fetching flake inputs).
+    printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > squashfs-root/etc/resolv.conf
 
     rm -f rootfs.ext4
     truncate -s 4G rootfs.ext4

@@ -20,7 +20,7 @@ pub fn ensure_tenant_bridge(net: &TenantNet) -> Result<()> {
     shell::run_in_vm(&format!(
         r#"
         # Enable IP forwarding (idempotent)
-        echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+        sudo sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward' 2>/dev/null || true
 
         # Create bridge if it doesn't exist
         if ! ip link show {bridge} >/dev/null 2>&1; then

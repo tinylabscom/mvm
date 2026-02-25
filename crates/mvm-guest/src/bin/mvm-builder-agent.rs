@@ -92,25 +92,80 @@ fn write_resp(reader: &mut BufReader<std::fs::File>, resp: BuilderResponse) {
     let _ = writer.flush();
 }
 
-fn ensure_mount(dev: &str, mountpoint: &str) {
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "mountpoint -q {mp} || (mkdir -p {mp} && mount {dev} {mp})",
-            mp = mountpoint,
-            dev = dev
-        ))
-        .status();
+fn ensure_mount(
+    reader: &mut BufReader<std::fs::File>,
+    dev: &str,
+    mountpoint: &str,
+) -> anyhow::Result<()> {
+    let cmd = format!(
+        "mountpoint -q {mp} || (mkdir -p {mp} && mount {dev} {mp})",
+        mp = mountpoint,
+        dev = dev
+    );
+    let output = Command::new("sh").arg("-c").arg(&cmd).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = format!("mount {} -> {} failed: {}", dev, mountpoint, stderr);
+        write_resp(reader, BuilderResponse::Log { line: msg.clone() });
+        return Err(anyhow::anyhow!("{}", msg));
+    }
+    let msg = format!("mounted {} -> {}", dev, mountpoint);
+    write_resp(reader, BuilderResponse::Log { line: msg });
+    Ok(())
+}
+
+/// Find the nix binary, searching well-known install locations.
+fn find_nix_bin() -> Option<String> {
+    let candidates = [
+        "/nix/var/nix/profiles/default/bin/nix",
+        "/root/.nix-profile/bin/nix",
+        "/nix/var/nix/profiles/per-user/root/profile/bin/nix",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    // Fallback: search /nix/store for the nix binary.
+    if let Ok(out) = Command::new("find")
+        .args([
+            "/nix/store",
+            "-maxdepth",
+            "3",
+            "-name",
+            "nix",
+            "-type",
+            "f",
+            "-path",
+            "*/bin/nix",
+        ])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if let Some(line) = stdout.lines().next() {
+            if !line.is_empty() {
+                return Some(line.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Return PATH prefix that includes the directory containing nix.
+fn nix_path_prefix() -> String {
+    if let Some(nix_bin) = find_nix_bin() {
+        if let Some(dir) = std::path::Path::new(&nix_bin).parent() {
+            return dir.to_string_lossy().to_string();
+        }
+    }
+    // Best-effort defaults covering both multi-user and single-user installs.
+    "/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin".to_string()
 }
 
 fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
-    // Check if nix is already on PATH (including common Nix profile locations).
-    if Command::new("sh")
-        .arg("-c")
-        .arg("export PATH=\"/nix/var/nix/profiles/default/bin:$PATH\"; command -v nix >/dev/null 2>&1")
-        .status()
-        .is_ok_and(|s| s.success())
-    {
+    // Check if nix is already available.
+    if find_nix_bin().is_some() {
+        ensure_nix_conf();
         return Ok(());
     }
 
@@ -121,24 +176,66 @@ fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
         },
     );
 
-    let status = Command::new("sh")
+    // Capture install output for diagnostics.
+    let output = Command::new("sh")
         .arg("-c")
         .arg("curl --retry 3 --retry-delay 2 -L https://nixos.org/nix/install | sh -s -- --no-daemon 2>&1")
-        .status()?;
-    if !status.success() {
+        .output()?;
+
+    let install_log = String::from_utf8_lossy(&output.stdout);
+    // Stream last 10 lines of install log.
+    let lines: Vec<&str> = install_log.lines().collect();
+    let start = lines.len().saturating_sub(10);
+    for line in &lines[start..] {
+        write_resp(
+            reader,
+            BuilderResponse::Log {
+                line: format!("[nix-install] {}", line),
+            },
+        );
+    }
+
+    if !output.status.success() {
         return Err(anyhow::anyhow!(
-            "Failed to install Nix (exit {}). Builder rootfs needs Nix pre-installed or network access.",
-            status
+            "Nix installer failed (exit {}). Builder rootfs needs Nix pre-installed or network access.",
+            output.status
         ));
     }
 
-    write_resp(
-        reader,
-        BuilderResponse::Log {
-            line: "Nix installed successfully.".to_string(),
-        },
-    );
+    ensure_nix_conf();
+
+    // Verify nix is actually available after install.
+    match find_nix_bin() {
+        Some(path) => {
+            let msg = format!("Nix installed at {}", path);
+            write_resp(reader, BuilderResponse::Log { line: msg });
+        }
+        None => {
+            // Log what we can find in /nix for diagnostics.
+            let diag = Command::new("sh")
+                .arg("-c")
+                .arg("ls -la /nix/var/nix/profiles/ 2>&1; echo '---'; ls -la /root/.nix-profile/bin/ 2>&1; echo '---'; find /nix/store -maxdepth 3 -name nix -type f 2>/dev/null | head -5")
+                .output()
+                .ok();
+            let info = diag
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Nix installer exited 0 but nix binary not found. Diagnostics:\n{}",
+                info
+            ));
+        }
+    }
     Ok(())
+}
+
+fn ensure_nix_conf() {
+    let conf = "experimental-features = nix-command flakes\n";
+    let _ = std::fs::create_dir_all("/etc/nix");
+    let _ = std::fs::write("/etc/nix/nix.conf", conf);
+    let _ = std::fs::create_dir_all("/root/.config/nix");
+    let _ = std::fs::write("/root/.config/nix/nix.conf", conf);
 }
 
 fn run_build(
@@ -150,21 +247,27 @@ fn run_build(
     // Disks are attached by the host as:
     // - /dev/vdb -> /build-out (rw)
     // - /dev/vdc -> /build-in (ro, optional local flake)
-    ensure_mount("/dev/vdb", "/build-out");
+    ensure_mount(reader, "/dev/vdb", "/build-out")?;
     if flake_ref == "/build-in" {
-        ensure_mount("/dev/vdc", "/build-in");
+        ensure_mount(reader, "/dev/vdc", "/build-in")?;
     }
 
     // Ensure Nix is available before attempting the build.
     ensure_nix(reader)?;
 
-    // Ensure Nix is on PATH and source any profile scripts.
+    let nix_path = nix_path_prefix();
+    write_resp(
+        reader,
+        BuilderResponse::Log {
+            line: format!("nix PATH: {}", nix_path),
+        },
+    );
+
+    // Build with explicit PATH.
     let build_cmd = format!(
-        "set -euo pipefail; \
-         export PATH=\"/nix/var/nix/profiles/default/bin:$PATH\"; \
-         [ -f /root/.nix-profile/etc/profile.d/nix.sh ] && . /root/.nix-profile/etc/profile.d/nix.sh; \
-         [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ] && . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; \
+        "export PATH=\"{nix_path}:$PATH\"; \
          timeout {t} nix build {flake}#{attr} --no-link --print-out-paths 2>&1",
+        nix_path = nix_path,
         t = timeout,
         flake = flake_ref,
         attr = attr
