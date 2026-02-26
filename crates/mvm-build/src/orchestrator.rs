@@ -206,15 +206,6 @@ pub fn pool_build_with_opts(
         let revision_hash = backend_result.revision_hash;
         let lock_hash = backend_result.lock_hash;
 
-        // Inject the mvm guest agent into the rootfs.
-        let rev_dir = format!(
-            "{}/revisions/{}",
-            pool_artifacts_dir(tenant_id, pool_id),
-            revision_hash
-        );
-        let rootfs_path = format!("{}/rootfs.ext4", rev_dir);
-        crate::guest_agent::ensure_guest_agent(env, &rootfs_path)?;
-
         // Record revision.
         let revision = BuildRevision {
             revision_hash: revision_hash.clone(),

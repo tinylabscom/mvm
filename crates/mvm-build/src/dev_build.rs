@@ -83,10 +83,6 @@ pub fn dev_build(
     // Step 5: Copy artifacts from Nix store to dev build directory
     copy_dev_artifacts(env, &nix_output_path, &build_dir)?;
 
-    // Step 6: Inject guest agent into rootfs
-    let rootfs_path = format!("{}/rootfs.ext4", build_dir);
-    crate::guest_agent::ensure_guest_agent(env, &rootfs_path)?;
-
     env.log_success(&format!("Artifacts stored at {}", build_dir));
 
     let initrd_path = detect_initrd(env, &build_dir);
