@@ -2,6 +2,21 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.3.2] — 2026-02-25
+
+### Added
+- `mvm sync --json` and `mvm build --json` flags for structured JSON event output (`PhaseEvent` with timestamp, command, phase, status)
+- Nix build error capture — `dev_build()` now surfaces full build stderr in the error context instead of losing it to inherited stdio
+- `shell_exec_capture()` method on `ShellEnvironment` trait for capturing both stdout and stderr
+- `run_on_vm_capture()` / `run_in_vm_capture()` shell functions with piped output
+- `mvm doctor --json`, `setup --force`, `template build --force` flags verified in integration tests
+- Improved help text for all `template` subcommands (argument descriptions, flag explanations)
+- README.md for each workspace crate (mvm-core, mvm-guest, mvm-build, mvm-runtime, mvm-cli)
+
+### Changed
+- Archived sprint files renamed to numbered format (`01-foundation.md`, etc.)
+- `CLAUDE.md` sprint naming convention updated to `<NN>-<name>.md`
+
 ## [0.3.0] — 2026-02-17
 
 ### Added

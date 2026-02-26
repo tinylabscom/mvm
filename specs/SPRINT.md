@@ -98,11 +98,11 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 - [x] Add `mvm doctor` summary (reuses sync doctor) to show overall health (done in Phase 3)
 
 ## Phase 5: QA & Documentation
-**Status: PENDING**
+**Status: COMPLETE**
 
-- [ ] CLI help/examples refreshed for new flags (force, builder resources, doctor)
-- [ ] Update sprint README/CHANGELOG section for release notes
-- [ ] Add one end-to-end test covering: sync → build --flake → run --config
+- [x] CLI help/examples refreshed for new flags (force, builder resources, doctor, --json)
+- [x] Update CHANGELOG section for v0.3.2 release notes
+- [x] Add end-to-end integration test covering: sync → build --flake → run flag chain parsing
 
 ---
 

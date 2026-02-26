@@ -260,40 +260,55 @@ enum Commands {
 enum TemplateCmd {
     /// Create a new template (single role/profile)
     Create {
+        /// Template name (e.g. "base", "openclaw")
         name: String,
+        /// Nix flake reference for the template source
         #[arg(long, default_value = ".")]
         flake: String,
+        /// Flake package variant
         #[arg(long, default_value = "default")]
         profile: String,
+        /// VM role (worker or gateway)
         #[arg(long, default_value = "worker")]
         role: String,
+        /// Default vCPU count for VMs using this template
         #[arg(long, default_value = "2")]
         cpus: u8,
+        /// Default memory in MiB for VMs using this template
         #[arg(long, default_value = "1024")]
         mem: u32,
+        /// Data disk size in MiB (0 = no data disk)
         #[arg(long, default_value = "0")]
         data_disk: u32,
     },
     /// Create multiple role-specific templates (name-role)
     CreateMulti {
+        /// Base template name (each role becomes <base>-<role>)
         base: String,
+        /// Nix flake reference for the template source
         #[arg(long, default_value = ".")]
         flake: String,
+        /// Flake package variant
         #[arg(long, default_value = "default")]
         profile: String,
         /// Comma-separated roles, e.g. gateway,agent
         #[arg(long)]
         roles: String,
+        /// Default vCPU count for VMs using this template
         #[arg(long, default_value = "2")]
         cpus: u8,
+        /// Default memory in MiB for VMs using this template
         #[arg(long, default_value = "1024")]
         mem: u32,
+        /// Data disk size in MiB (0 = no data disk)
         #[arg(long, default_value = "0")]
         data_disk: u32,
     },
-    /// Build a template (shared image)
+    /// Build a template (shared image via nix build)
     Build {
+        /// Template name to build
         name: String,
+        /// Rebuild even if a cached revision exists
         #[arg(long)]
         force: bool,
         /// Optional template config TOML to build multiple variants
@@ -302,6 +317,7 @@ enum TemplateCmd {
     },
     /// Push a built template revision to the object storage registry
     Push {
+        /// Template name to push
         name: String,
         /// Revision hash to push (defaults to current)
         #[arg(long)]
@@ -309,6 +325,7 @@ enum TemplateCmd {
     },
     /// Pull a template revision from the object storage registry
     Pull {
+        /// Template name to pull
         name: String,
         /// Revision hash to pull (defaults to registry current)
         #[arg(long)]
@@ -316,36 +333,42 @@ enum TemplateCmd {
     },
     /// Verify a locally installed template revision against checksums.json
     Verify {
+        /// Template name to verify
         name: String,
         /// Revision hash to verify (defaults to current)
         #[arg(long)]
         revision: Option<String>,
     },
-    /// List templates
+    /// List all templates
     List {
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Show template info
+    /// Show template details (spec, revisions, cache key)
     Info {
+        /// Template name
         name: String,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Delete a template
+    /// Delete a template and its artifacts
     Delete {
+        /// Template name to delete
         name: String,
+        /// Skip confirmation prompt
         #[arg(long)]
         force: bool,
     },
     /// Initialize on-disk template layout (idempotent)
     Init {
-        /// Template ID
+        /// Template name to initialize
         name: String,
         /// Create locally instead of in ~/.mvm/templates
         #[arg(long)]
         local: bool,
-        /// Force VM location (overrides --local)
+        /// Create inside the Lima VM (overrides --local)
         #[arg(long)]
         vm: bool,
         /// Base directory for local init (default: current dir)

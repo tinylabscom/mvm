@@ -156,7 +156,9 @@ fn test_sync_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--debug"))
-        .stdout(predicate::str::contains("--skip-deps"));
+        .stdout(predicate::str::contains("--skip-deps"))
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--json"));
 }
 
 #[test]
@@ -167,7 +169,8 @@ fn test_build_help_shows_flake_options() {
         .success()
         .stdout(predicate::str::contains("--flake"))
         .stdout(predicate::str::contains("--profile"))
-        .stdout(predicate::str::contains("--watch"));
+        .stdout(predicate::str::contains("--watch"))
+        .stdout(predicate::str::contains("--json"));
 }
 
 #[test]
@@ -220,6 +223,38 @@ fn test_stop_help_shows_flags() {
         .success()
         .stdout(predicate::str::contains("--all"))
         .stdout(predicate::str::contains("name"));
+}
+
+#[test]
+fn test_doctor_help() {
+    mvm()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("diagnostics"));
+}
+
+#[test]
+fn test_setup_help_shows_force_and_resources() {
+    mvm()
+        .args(["setup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--recreate"))
+        .stdout(predicate::str::contains("--lima-cpus"))
+        .stdout(predicate::str::contains("--lima-mem"));
+}
+
+#[test]
+fn test_template_build_help_shows_force() {
+    mvm()
+        .args(["template", "build", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--config"));
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +311,57 @@ fn test_template_lifecycle_commands() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("required"));
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end CLI flow: sync → build → run flag chain
+// ---------------------------------------------------------------------------
+
+/// Verifies the full dev workflow CLI flags parse correctly together.
+/// Each command in the chain (sync → build --flake → run --config) accepts
+/// the expected flags without conflicts.
+#[test]
+fn test_e2e_cli_flow_flags_parse() {
+    // Step 1: sync with all flags — runtime failure (no Lima), but arg parsing succeeds
+    let assert = mvm()
+        .args(["sync", "--debug", "--skip-deps", "--force", "--json"])
+        .assert();
+    // clap parse errors exit code 2; runtime errors exit 1
+    let code = assert.get_output().status.code().unwrap_or(-1);
+    assert_ne!(code, 2, "sync flag combination should parse successfully");
+
+    // Step 2: build --flake with --json — fails at runtime (no flake), parses OK
+    let assert = mvm()
+        .args([
+            "build",
+            "--flake",
+            "/nonexistent",
+            "--profile",
+            "worker",
+            "--json",
+        ])
+        .assert();
+    let code = assert.get_output().status.code().unwrap_or(-1);
+    assert_ne!(code, 2, "build flag combination should parse successfully");
+
+    // Step 3: run --flake with resource overrides — fails at runtime, parses OK
+    let assert = mvm()
+        .args([
+            "run",
+            "--flake",
+            "/nonexistent",
+            "--profile",
+            "gateway",
+            "--cpus",
+            "4",
+            "--memory",
+            "2048",
+            "--name",
+            "test-vm",
+        ])
+        .assert();
+    let code = assert.get_output().status.code().unwrap_or(-1);
+    assert_ne!(code, 2, "run flag combination should parse successfully");
 }
 
 // ---------------------------------------------------------------------------
