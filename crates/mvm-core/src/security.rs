@@ -281,6 +281,71 @@ pub struct ThreatFinding {
     pub context: String,
 }
 
+// ============================================================================
+// Security posture
+// ============================================================================
+
+/// A security layer that can be evaluated for posture scoring.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SecurityLayer {
+    JailerIsolation,
+    CgroupLimits,
+    SeccompFilter,
+    NetworkIsolation,
+    VsockAuth,
+    EncryptionAtRest,
+    EncryptionInTransit,
+    AuditLogging,
+    SecretManagement,
+    ConfigImmutability,
+    GuestHardening,
+    SupplyChainIntegrity,
+}
+
+impl SecurityLayer {
+    /// All security layers in evaluation order.
+    pub fn all() -> &'static [SecurityLayer] {
+        &[
+            SecurityLayer::JailerIsolation,
+            SecurityLayer::CgroupLimits,
+            SecurityLayer::SeccompFilter,
+            SecurityLayer::NetworkIsolation,
+            SecurityLayer::VsockAuth,
+            SecurityLayer::EncryptionAtRest,
+            SecurityLayer::EncryptionInTransit,
+            SecurityLayer::AuditLogging,
+            SecurityLayer::SecretManagement,
+            SecurityLayer::ConfigImmutability,
+            SecurityLayer::GuestHardening,
+            SecurityLayer::SupplyChainIntegrity,
+        ]
+    }
+}
+
+/// Result of a single posture check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostureCheck {
+    /// Which security layer this check belongs to.
+    pub layer: SecurityLayer,
+    /// Human-readable check name (e.g., "Jailer enabled for Firecracker").
+    pub name: String,
+    /// Whether the check passed.
+    pub passed: bool,
+    /// Explanation of the result.
+    pub detail: String,
+}
+
+/// Overall posture report aggregating all checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostureReport {
+    /// Individual check results.
+    pub checks: Vec<PostureCheck>,
+    /// Overall score: `passed_checks / total_checks * 100`.
+    pub score: f64,
+    /// ISO 8601 timestamp of when the report was generated.
+    pub timestamp: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -613,5 +678,61 @@ mod tests {
         assert_eq!(parsed.category, ThreatCategory::SecretExposure);
         assert_eq!(parsed.pattern_id, "aws_access_key");
         assert_eq!(parsed.severity, Severity::Critical);
+    }
+
+    // -- Posture types --
+
+    #[test]
+    fn test_security_layer_all_count() {
+        assert_eq!(SecurityLayer::all().len(), 12);
+    }
+
+    #[test]
+    fn test_security_layer_serde_roundtrip() {
+        for layer in SecurityLayer::all() {
+            let json = serde_json::to_string(layer).unwrap();
+            let parsed: SecurityLayer = serde_json::from_str(&json).unwrap();
+            assert_eq!(&parsed, layer);
+        }
+    }
+
+    #[test]
+    fn test_posture_check_serde_roundtrip() {
+        let check = PostureCheck {
+            layer: SecurityLayer::JailerIsolation,
+            name: "Jailer enabled".to_string(),
+            passed: true,
+            detail: "Firecracker runs inside jailer".to_string(),
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        let parsed: PostureCheck = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.layer, SecurityLayer::JailerIsolation);
+        assert!(parsed.passed);
+    }
+
+    #[test]
+    fn test_posture_report_serde_roundtrip() {
+        let report = PostureReport {
+            checks: vec![
+                PostureCheck {
+                    layer: SecurityLayer::CgroupLimits,
+                    name: "cgroup v2 limits set".to_string(),
+                    passed: true,
+                    detail: "mem + cpu limits configured".to_string(),
+                },
+                PostureCheck {
+                    layer: SecurityLayer::VsockAuth,
+                    name: "vsock auth enabled".to_string(),
+                    passed: false,
+                    detail: "require_auth is false".to_string(),
+                },
+            ],
+            score: 50.0,
+            timestamp: "2026-02-25T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: PostureReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.checks.len(), 2);
+        assert_eq!(parsed.score, 50.0);
     }
 }

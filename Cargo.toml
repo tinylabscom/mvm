@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/mvm-core",
+    "crates/mvm-security",
     "crates/mvm-runtime",
     "crates/mvm-build",
     "crates/mvm-guest",
@@ -71,6 +72,7 @@ mvm-core = { path = "crates/mvm-core", version = "0.3.2" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.3.2" }
 mvm-build = { path = "crates/mvm-build", version = "0.3.2" }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.3.2" }
+mvm-security = { path = "crates/mvm-security", version = "0.3.2" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.3.2" }
 
 # Dev dependencies
@@ -99,6 +101,7 @@ path = "src/main.rs"
 
 [dependencies]
 mvm-core.workspace = true
+mvm-security.workspace = true
 mvm-runtime.workspace = true
 mvm-build.workspace = true
 mvm-guest.workspace = true

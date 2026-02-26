@@ -78,6 +78,7 @@ jobs:
           CRATES=(
             mvm-core
             mvm-guest
+            mvm-security
             mvm-build
             mvm-runtime
             mvm-cli

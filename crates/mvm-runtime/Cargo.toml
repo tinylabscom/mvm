@@ -11,10 +11,9 @@ autobins = false
 
 [dependencies]
 mvm-core.workspace = true
+mvm-security.workspace = true
 mvm-guest.workspace = true
 mvm-build.workspace = true
-aho-corasick.workspace = true
-regex.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 colored.workspace = true

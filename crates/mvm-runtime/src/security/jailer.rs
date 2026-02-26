@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::shell;
 
-const JAILER_PATH: &str = "/usr/bin/jailer";
+const JAILER_PATH: &str = "/usr/local/bin/jailer";
 
 /// Compute a unique uid/gid for a jailed Firecracker instance.
 ///

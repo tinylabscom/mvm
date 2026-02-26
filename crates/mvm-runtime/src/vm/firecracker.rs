@@ -11,15 +11,38 @@ pub fn is_installed() -> Result<bool> {
     Ok(output.status.success())
 }
 
-/// Install Firecracker inside the Lima VM.
+/// Check if the jailer binary is installed.
+fn jailer_is_installed() -> Result<bool> {
+    let output = run_in_vm("command -v jailer >/dev/null 2>&1")?;
+    Ok(output.status.success())
+}
+
+/// Install Firecracker (and jailer) inside the Lima VM.
+///
+/// Idempotent: skips if both binaries are already present. If firecracker
+/// is installed but the jailer is missing, downloads the release tarball
+/// and extracts just the jailer.
 pub fn install() -> Result<()> {
-    if is_installed()? {
+    let fc_present = is_installed()?;
+    let jailer_present = jailer_is_installed()?;
+
+    if fc_present && jailer_present {
         let version = run_in_vm_stdout("firecracker --version 2>&1 | head -1")?;
-        ui::info(&format!("Firecracker already installed: {}", version));
+        ui::info(&format!(
+            "Firecracker + jailer already installed: {}",
+            version
+        ));
         return Ok(());
     }
 
     let version = fc_version();
+
+    if fc_present && !jailer_present {
+        ui::info("Jailer not found, installing from Firecracker release tarball...");
+        install_jailer_from_tarball(&version)?;
+        return Ok(());
+    }
+
     ui::info(&format!("Installing Firecracker {}...", version));
     run_in_vm_visible(&format!(
         r#"
@@ -28,6 +51,10 @@ pub fn install() -> Result<()> {
         tar -xzf firecracker-{fc_version}-{arch}.tgz
         sudo mv release-{fc_version}-{arch}/firecracker-{fc_version}-{arch} /usr/local/bin/firecracker
         sudo chmod +x /usr/local/bin/firecracker
+        if [ -f release-{fc_version}-{arch}/jailer-{fc_version}-{arch} ]; then
+            sudo mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
+            sudo chmod +x /usr/local/bin/jailer
+        fi
         rm -rf firecracker-{fc_version}-{arch}.tgz release-{fc_version}-{arch}
         firecracker --version
         "#,
@@ -36,6 +63,28 @@ pub fn install() -> Result<()> {
     ))?;
 
     ui::success("Firecracker installed.");
+    Ok(())
+}
+
+/// Download the release tarball and extract just the jailer binary.
+fn install_jailer_from_tarball(version: &str) -> Result<()> {
+    run_in_vm_visible(&format!(
+        r#"
+        cd /tmp
+        wget -q https://github.com/firecracker-microvm/firecracker/releases/download/{fc_version}/firecracker-{fc_version}-{arch}.tgz
+        tar -xzf firecracker-{fc_version}-{arch}.tgz
+        if [ -f release-{fc_version}-{arch}/jailer-{fc_version}-{arch} ]; then
+            sudo mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
+            sudo chmod +x /usr/local/bin/jailer
+            echo "Jailer installed."
+        else
+            echo "Jailer binary not found in release tarball."
+        fi
+        rm -rf firecracker-{fc_version}-{arch}.tgz release-{fc_version}-{arch}
+        "#,
+        fc_version = version,
+        arch = ARCH,
+    ))?;
     Ok(())
 }
 

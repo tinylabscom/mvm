@@ -1,0 +1,15 @@
+[package]
+name = "mvm-security"
+description = "Security modules for mvm: command gating, threat classification, rate limiting, posture scoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-core.workspace = true
+aho-corasick.workspace = true
+regex.workspace = true
+tracing.workspace = true

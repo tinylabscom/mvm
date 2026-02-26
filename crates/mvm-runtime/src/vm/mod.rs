@@ -1,4 +1,5 @@
 // Dev mode
+pub mod backend;
 pub mod firecracker;
 pub mod image;
 pub mod lima;

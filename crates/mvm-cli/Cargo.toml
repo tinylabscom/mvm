@@ -13,6 +13,7 @@ mvm-core.workspace = true
 mvm-guest.workspace = true
 mvm-runtime.workspace = true
 mvm-build.workspace = true
+mvm-security.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 names.workspace = true

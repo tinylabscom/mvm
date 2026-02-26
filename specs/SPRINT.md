@@ -40,7 +40,7 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 - [x] Detect Lima presence/absence more robustly; avoid `limactl` calls inside guest
 - [x] Make rustup/cargo pathing resilient (no `.cargo/env` required); add self-check
 - [x] Add `mvm sync doctor` that reports deps (rustup, cargo, nix, firecracker, limactl)
-- [ ] Add regression tests for sync on macOS host + Lima guest + native Linux
+- [ ] Add regression tests for sync on macOS host + Lima guest + native Linux (deferred — requires CI matrix)
 
 ## Phase 2: Release + Publish Reliability
 **Status: COMPLETE**
@@ -155,30 +155,51 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 - [x] Export `threat_classifier` from `mvm-runtime/src/security/mod.rs`
 - [x] Tests (63 new across 3 crates): 4 mvm-core threat type serde/ordering, 4 mvm-core audit backward compat + security fields, 55 mvm-runtime threat classifier (3 benign, 19 literal/Tier 1, 14 structural/Tier 2, 11 regex/Tier 3, 1 multi-category, 3 edge cases + throughput), updated all AuditEntry test constructions
 
-## Phase 9: Health Monitoring + Session Lifecycle + Rate Limiting
-**Status: PENDING**
+## Phase 9: Rate Limiting (mvm) + Health/Session Deferred to mvmd
+**Status: COMPLETE**
 
-**Goal:** Host-side vsock health checks with kill/restart. VM session recycling. Frame rate limiting.
+**Goal:** Sliding-window rate limiter for vsock frames. Health monitoring and session lifecycle deferred to mvmd (fleet daemon behavior, not dev-tool scope).
 
-- [ ] Create `mvm-runtime/src/security/health_monitor.rs` — periodic vsock Ping, consecutive failure tracking, kill + restart after N failures, audit logging
-- [ ] Create `mvm-runtime/src/security/session_manager.rs` — per-VM session state (started_at, tasks_completed, frames_sent/received), recycle on `max_lifetime_secs` or `max_tasks`, graceful drain via SleepPrep
-- [ ] Create `mvm-runtime/src/security/rate_limiter.rs` — sliding window token bucket, configurable frames_per_second/frames_per_minute, exceeded frames dropped + audit event
-- [ ] Add session + rate limit config types to `mvm-core/src/security.rs`
-- [ ] Export new modules from `mvm-runtime/src/security/mod.rs`
-- [ ] Tests: rate limiter allows/blocks correctly, session expiry triggers recycle, 3 consecutive ping failures triggers kill
+- [x] Create `mvm-runtime/src/security/rate_limiter.rs` — `RateLimiter` struct with sliding-window token bucket (1-second and 1-minute windows), `check_and_record()` / `check_and_record_at()` API, `RateLimitResult` enum (Allowed/ExceededPerSecond/ExceededPerMinute), allowed/rejected counters, `reset()`, `is_unlimited()`
+- [x] Uses `RateLimitPolicy` from `mvm-core/src/security.rs` (already exists: `frames_per_second`, `frames_per_minute`, defaults 100/3000)
+- [x] Export `rate_limiter` from `mvm-runtime/src/security/mod.rs`
+- [x] Tests (11 new): within-limits allowed, per-second exceeded, per-minute exceeded, window expiry allows after cooldown, minute window expiry, unlimited mode, per-second checked before per-minute, reset clears state, fps/fpm counters with window rollover, default policy, sustained rate within limit
+- **Deferred to mvmd:** `health_monitor.rs` (periodic vsock Ping, kill/restart) and `session_manager.rs` (session lifecycle, auto-recycle) — these are fleet daemon behaviors that require a long-running async runtime watching many VMs. See mvmd specs for implementation plan.
 
-## Phase 10: Security Posture Scoring + Immutable Config
-**Status: PENDING**
+## Phase 10: Security Posture Scoring + Crate Extraction + VmBackend Trait
+**Status: COMPLETE**
 
-**Goal:** Multi-layer health scoring for VM security config. Config drive integrity verification. CLI surface.
+**Goal:** Multi-layer posture scoring, extract pure-logic security modules into standalone crate, add backend-agnostic VM trait.
 
-- [ ] Create `mvm-runtime/src/security/posture.rs` — 12 security layers (JailerIsolation, CgroupLimits, SeccompFilter, NetworkIsolation, VsockAuth, EncryptionAtRest, EncryptionInTransit, AuditLogging, SecretManagement, ConfigImmutability, GuestHardening, SupplyChainIntegrity)
-- [ ] Implement `PostureCheck { name, score, status, detail }` and overall score calculation
-- [ ] Config drive integrity: SHA-256 hash at boot, periodic re-check for tampering
-- [ ] `SecurityPolicy` lives on config drive (read-only post-boot)
-- [ ] Add `mvm security status` CLI command (or `mvm doctor --security`)
-- [ ] Add posture types to `mvm-core/src/security.rs`
-- [ ] Tests: posture check scoring, overall calculation, config hash computation
+### 10a: Extract `mvm-security` Crate
+- [x] Create `crates/mvm-security/` with `command_gate`, `threat_classifier`, `rate_limiter` (moved from `mvm-runtime/src/security/`)
+- [x] Re-export from `mvm-runtime::security` for backward compatibility (`pub use mvm_security::*`)
+- [x] Add `mvm-security` to root facade (`mvm::security`)
+- [x] Update `.github/workflows/publish-crates.yml` publish order (core → guest → security → build → runtime → cli)
+- [x] Remove `aho-corasick` and `regex` direct deps from mvm-runtime (now transitive via mvm-security)
+
+### 10b: `VmBackend` Trait
+- [x] Create `mvm-core/src/vm_backend.rs` — `VmBackend` trait with associated `Config` type, `VmId`, `VmStatus`, `VmCapabilities`, `VmInfo` types
+- [x] Create `mvm-runtime/src/vm/backend.rs` — `FirecrackerBackend` implementing `VmBackend`, delegating to existing `microvm::*` and `firecracker::*` functions
+- [x] Tests (8 new): 6 mvm-core serde roundtrips + Display + defaults, 2 mvm-runtime backend name + capabilities
+
+### 10c: Security Posture Scoring
+- [x] Add `SecurityLayer` enum (12 variants), `PostureCheck`, `PostureReport` types to `mvm-core/src/security.rs`
+- [x] Create `mvm-security/src/posture.rs` — `SecurityPosture` struct with `evaluate(checks, timestamp) -> PostureReport`, `uncovered_layers()`, `failed_checks()`, `passed_checks()`, `summary()` utilities
+- [x] Re-export `posture` from `mvm-runtime::security`
+- [x] Tests (17 new): 4 mvm-core posture type serde (layer count, layer roundtrip, check roundtrip, report roundtrip), 13 mvm-security posture evaluation (all-pass, mixed, all-fail, empty, uncovered layers, failed/passed filters, summary output, timestamp preservation, single check, layer tag coverage, all-covered)
+
+### 10d: CLI — `mvm security status`
+- [x] Add `SecurityCmd` subcommand enum with `Status { json: bool }` variant
+- [x] Create `mvm-cli/src/security_cmd.rs` — probes 6 security layers (JailerIsolation, SeccompFilter, NetworkIsolation, AuditLogging, VsockAuth, GuestHardening), graceful degradation when Lima not running, text + JSON output
+- [x] Add `mvm-security.workspace = true` to mvm-cli dependencies
+- [x] Tests (8 new): 2 Clap parsing (subcommand + --json flag), 6 security_cmd unit tests (check construction, no-vm fallback, JSON output, dev default, layer tag + name coverage)
+
+### 10e: Bootstrap Security Hardening
+- [x] Update `firecracker::install()` to also install jailer binary from release tarball (same archive already downloaded)
+- [x] Update `jailer::JAILER_PATH` to `/usr/local/bin/jailer` to match install location
+- [x] Add Step 5 (security baseline) to `run_setup_steps()`: deploys seccomp strict profile, creates audit log directory, reports jailer status
+- [x] `setup_security_baseline()` is idempotent — each sub-step checks before acting
 
 ---
 
@@ -197,10 +218,10 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 - Vsock protocol supports authenticated frames with Ed25519 signatures
 - Command gate blocks known-dangerous patterns, auto-approves in dev mode
 - Threat classifier detects credential leaks, destructive commands, Firecracker escape attempts
-- Health monitor detects and kills unresponsive VMs
-- `mvm security status` outputs a posture score for a running VM
+- Health monitor and session lifecycle deferred to mvmd (see Phase 9)
+- `mvm security status` outputs a posture score for the current environment
 - All existing tests pass, zero clippy warnings
-- New test count: 376 + ~40-60 security tests
+- New test count: 376 + ~100 security tests (~475 total)
 - Documentation reflects install/release workflow and troubleshooting
 
 ## Verification

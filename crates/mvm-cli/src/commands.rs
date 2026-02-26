@@ -156,6 +156,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Security posture and diagnostics
+    Security {
+        #[command(subcommand)]
+        action: SecurityCmd,
+    },
     /// Pre-release checks (deploy guard + cargo publish dry-run)
     Release {
         /// Run cargo publish --dry-run for all crates
@@ -394,6 +399,16 @@ enum VmCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SecurityCmd {
+    /// Show security posture score for the current environment
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 // ============================================================================
 // Structured JSON event output for --json mode
 // ============================================================================
@@ -515,6 +530,7 @@ pub fn run() -> Result<()> {
         Commands::Destroy { yes } => cmd_destroy(yes),
         Commands::Upgrade { check, force } => cmd_upgrade(check, force),
         Commands::Doctor { json } => cmd_doctor(json),
+        Commands::Security { action } => cmd_security(action),
         Commands::Release {
             dry_run,
             guard_only,
@@ -685,11 +701,13 @@ fn cmd_dev(lima_cpus: u32, lima_mem: u32, project: Option<&str>) -> Result<()> {
 }
 
 fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
+    let total = 5;
+
     // Step 1: Lima VM
     if bootstrap::is_lima_required() {
         let lima_status = lima::get_status()?;
         if !force && matches!(lima_status, lima::LimaStatus::Running) {
-            ui::step(1, 4, "Lima VM already running — skipping.");
+            ui::step(1, total, "Lima VM already running — skipping.");
         } else {
             let opts = config::LimaRenderOptions {
                 cpus: Some(lima_cpus),
@@ -701,23 +719,23 @@ fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
                 "Lima VM resources: {} vCPUs, {} GiB memory",
                 lima_cpus, lima_mem,
             ));
-            ui::step(1, 4, "Setting up Lima VM...");
+            ui::step(1, total, "Setting up Lima VM...");
             lima::ensure_running(lima_yaml.path())?;
         }
     } else {
-        ui::step(1, 4, "Native Linux detected — skipping Lima VM setup.");
+        ui::step(1, total, "Native Linux detected — skipping Lima VM setup.");
     }
 
-    // Step 2: Firecracker
+    // Step 2: Firecracker (+ jailer from same release tarball)
     if !force && firecracker::is_installed()? {
-        ui::step(2, 4, "Firecracker already installed — skipping.");
+        ui::step(2, total, "Firecracker already installed — skipping.");
     } else {
-        ui::step(2, 4, "Installing Firecracker...");
+        ui::step(2, total, "Installing Firecracker...");
         firecracker::install()?;
     }
 
     // Step 3: Assets
-    ui::step(3, 4, "Downloading kernel and rootfs...");
+    ui::step(3, total, "Downloading kernel and rootfs...");
     firecracker::download_assets()?;
 
     if !firecracker::validate_rootfs_squashfs()? {
@@ -730,10 +748,38 @@ fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
     }
 
     // Step 4: Rootfs
-    ui::step(4, 4, "Preparing root filesystem...");
+    ui::step(4, total, "Preparing root filesystem...");
     firecracker::prepare_rootfs()?;
 
     firecracker::write_state()?;
+
+    // Step 5: Security hardening
+    ui::step(5, total, "Setting up security baseline...");
+    setup_security_baseline()?;
+
+    Ok(())
+}
+
+/// Deploy baseline security artifacts (seccomp profile, audit directory).
+///
+/// Idempotent — each step checks before acting.
+fn setup_security_baseline() -> Result<()> {
+    use mvm_runtime::security::{jailer, seccomp};
+
+    // Deploy strict seccomp filter profile
+    seccomp::ensure_strict_profile()?;
+    ui::info("  Seccomp strict profile deployed.");
+
+    // Create audit log directory structure
+    shell::run_in_vm("sudo mkdir -p /var/lib/mvm/tenants")?;
+    ui::info("  Audit log directory created.");
+
+    // Report jailer status (installed by firecracker::install() above)
+    match jailer::jailer_available() {
+        Ok(true) => ui::info("  Jailer binary available."),
+        _ => ui::warn("  Jailer binary not found (may not be in this Firecracker release)."),
+    }
+
     Ok(())
 }
 
@@ -1271,6 +1317,12 @@ fn cmd_upgrade(check: bool, force: bool) -> Result<()> {
 
 fn cmd_doctor(json: bool) -> Result<()> {
     crate::doctor::run(json)
+}
+
+fn cmd_security(action: SecurityCmd) -> Result<()> {
+    match action {
+        SecurityCmd::Status { json } => crate::security_cmd::run(json),
+    }
 }
 
 // ============================================================================
@@ -2944,5 +2996,27 @@ edition = "2024"
         // Foundation crate must come first, facade last
         assert_eq!(PUBLISH_CRATES[0], "mvm-core");
         assert_eq!(*PUBLISH_CRATES.last().unwrap(), "mvm");
+    }
+
+    #[test]
+    fn test_security_status_parses() {
+        let cli = Cli::try_parse_from(["mvm", "security", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Security {
+                action: SecurityCmd::Status { json: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_security_status_json_flag() {
+        let cli = Cli::try_parse_from(["mvm", "security", "status", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Security {
+                action: SecurityCmd::Status { json: true }
+            }
+        ));
     }
 }

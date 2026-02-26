@@ -19,10 +19,11 @@ pub fn create_single(
     mem: u32,
     data_disk: u32,
 ) -> Result<()> {
+    let flake_ref = resolve_flake_ref(flake);
     let ts = now_iso();
     let spec = TemplateSpec {
         template_id: name.to_string(),
-        flake_ref: flake.to_string(),
+        flake_ref,
         profile: profile.to_string(),
         role: role.to_string(),
         vcpus: cpus,
@@ -32,6 +33,23 @@ pub fn create_single(
         updated_at: ts,
     };
     tmpl::template_create(&spec)
+}
+
+/// Resolve a flake reference to an absolute path if it's a local path.
+///
+/// Relative paths like "." or "../foo" are resolved against CWD so that
+/// `nix build` works regardless of which directory the build runs from.
+/// Remote flake refs (e.g., "github:user/repo") are passed through unchanged.
+fn resolve_flake_ref(flake: &str) -> String {
+    // Remote flake refs contain ":" (github:, git+https:, path:, etc.)
+    if flake.contains(':') {
+        return flake.to_string();
+    }
+    // Local path — resolve to absolute
+    match std::path::Path::new(flake).canonicalize() {
+        Ok(abs) => abs.to_string_lossy().to_string(),
+        Err(_) => flake.to_string(),
+    }
 }
 
 /// Initialize an empty template directory layout (idempotent).
@@ -53,9 +71,11 @@ pub fn create_multi(
     mem: u32,
     data_disk: u32,
 ) -> Result<()> {
+    // Resolve once so all variants share the same absolute path.
+    let flake_ref = resolve_flake_ref(flake);
     for role in roles {
         let name = format!("{base}-{role}");
-        create_single(&name, flake, profile, role, cpus, mem, data_disk)?;
+        create_single(&name, &flake_ref, profile, role, cpus, mem, data_disk)?;
     }
     Ok(())
 }
@@ -149,7 +169,7 @@ pub fn build(name: &str, force: bool, config: Option<&str>) -> Result<()> {
             let ts = now_iso();
             let spec = TemplateSpec {
                 template_id: template_name.clone(),
-                flake_ref: cfg.flake_ref.clone(),
+                flake_ref: resolve_flake_ref(&cfg.flake_ref),
                 profile: if variant.profile.is_empty() {
                     cfg.profile.clone()
                 } else {

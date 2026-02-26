@@ -57,10 +57,19 @@ impl ShellEnvironment for RuntimeBuildEnv {
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         if !out.status.success() {
-            return Err(anyhow!(
-                "Command failed (exit {}): {}",
-                out.status.code().unwrap_or(-1),
+            // Include both stdout and stderr — callers may use 2>&1 which
+            // merges all output into stdout, leaving stderr empty.
+            let output = if stderr.is_empty() {
+                stdout
+            } else if stdout.is_empty() {
                 stderr
+            } else {
+                format!("{}\n{}", stdout, stderr)
+            };
+            return Err(anyhow!(
+                "Command failed (exit {}):\n{}",
+                out.status.code().unwrap_or(-1),
+                output
             ));
         }
         Ok((stdout, stderr))

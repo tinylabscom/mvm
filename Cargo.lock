@@ -1336,6 +1336,7 @@ dependencies = [
  "mvm-core",
  "mvm-guest",
  "mvm-runtime",
+ "mvm-security",
  "predicates",
 ]
 
@@ -1371,6 +1372,7 @@ dependencies = [
  "mvm-core",
  "mvm-guest",
  "mvm-runtime",
+ "mvm-security",
  "names",
  "predicates",
  "reqwest",
@@ -1417,7 +1419,6 @@ dependencies = [
 name = "mvm-runtime"
 version = "0.3.2"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "base64",
  "colored",
@@ -1427,15 +1428,25 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
+ "mvm-security",
  "opendal",
  "rand 0.8.5",
- "regex",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tera",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "mvm-security"
+version = "0.3.2"
+dependencies = [
+ "aho-corasick",
+ "mvm-core",
+ "regex",
  "tracing",
 ]
 
