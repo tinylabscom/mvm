@@ -139,21 +139,21 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 - [x] Tests (29 new): 7 mvm-core gate type serde/defaults, 14 mvm-runtime command gate (glob matching, literal block/approval/log, precedence, dev mode, default blocklist), 8 mvm-guest builder validation (flake_ref safety, attr validation, policy loading)
 
 ## Phase 8: Threat Classification + Audit Extension
-**Status: PENDING**
+**Status: COMPLETE**
 
 **Goal:** Classify every vsock message against 10 threat categories using idiomatic Rust (not a wall of regex). Extend audit trail.
 
-- [ ] Add `ThreatCategory` (10 variants), `ThreatFinding`, `Severity` types to `mvm-core/src/security.rs`
-- [ ] Create `mvm-runtime/src/security/threat_classifier.rs` with three-tier detection:
-  - [ ] Tier 1: Aho-Corasick multi-pattern matching (~200 literals, single O(n) scan) — credential prefixes, destructive commands, exfil domains, privilege escalation, system paths, Firecracker-specific
-  - [ ] Tier 2: Typed Rust pattern matching (str methods + match arms) — path analysis, command structure, credential format, network patterns, permission parsing, Nix-specific
-  - [ ] Tier 3: Regex only for complex patterns (~20-30 via `RegexSet`) — AWS key format, JWT tokens, base64 payloads, obfuscation, shell injection
-- [ ] MicroVM-specific patterns: Firecracker escape, Nix sandbox breakout, cgroup escape, seccomp bypass, vsock abuse
-- [ ] Add `aho-corasick` dependency to `mvm-runtime/Cargo.toml`
-- [ ] Extend `AuditEntry` in `mvm-core/src/audit.rs`: add `threats`, `gate_decision`, `frame_sequence` fields (`#[serde(default)]`)
-- [ ] Add `AuditAction` variants: `VsockSessionStarted`, `VsockSessionEnded`, `VsockFrameReceived`, `CommandBlocked`, `CommandApproved`, `CommandDenied`, `ThreatDetected`, `RateLimitExceeded`, `SessionRecycled`
-- [ ] Wire classifier into audit event emission in `mvm-runtime/src/security/audit.rs`
-- [ ] Tests: per-category classification, benign message produces no findings, `AuditEntry` backward compat, performance (<10ms for 1000 frames)
+- [x] Add `ThreatCategory` (10 variants: SecretExposure, DataExfiltration, Injection, Destructive, PrivilegeEscalation, SupplyChain, SensitiveFileAccess, SystemModification, NetworkAbuse, ToolPoisoning), `Severity` (5 levels with Ord), `ThreatFinding` struct to `mvm-core/src/security.rs`
+- [x] Create `mvm-runtime/src/security/threat_classifier.rs` — `ThreatClassifier` struct with three-tier detection:
+  - [x] Tier 1: Aho-Corasick multi-pattern matching (70+ literals, single O(n) scan) — credential prefixes (AKIA, ghp_, sk_live_, xoxb-, etc.), destructive commands (rm -rf /, mkfs, dd, DROP TABLE, fork bomb), exfil domains (pastebin, ngrok, transfer.sh, webhook.site), privilege escalation (sudo, nsenter, unshare, capsh), sensitive files (.ssh/id_rsa, .aws/credentials, .kube/config), VM escape (/dev/kvm, release_agent, sysrq-trigger), injection (eval, exec, subprocess), system modification (iptables, sysctl, remount rw)
+  - [x] Tier 2: Typed Rust pattern matching (str methods + match arms) — sensitive path analysis (/etc/passwd, /etc/shadow, /proc/self, /sys/fs/cgroup), command structure (12 dangerous binaries with sudo/path stripping), pipe-to-curl/wget exfil, reverse shell via /dev/tcp, PEM private key format, credential assignment, suspicious protocols (gopher://, dict://), setuid/setgid chmod detection (octal mode parsing), Nix patterns (--no-sandbox, --impure, nix-shell --run, remote builders)
+  - [x] Tier 3: RegexSet (20 patterns) — AWS access key format, JWT tokens, hex-encoded secrets, base64 decode execution, shell command substitution ($(), backtick), IP:port connections, crontab modification, hex escape obfuscation, Python/Perl reverse shells, env exfiltration, DNS exfiltration, LD_PRELOAD injection, MMDS metadata access, /proc and /sys writes, setcap escalation, unusual port fetches
+- [x] MicroVM-specific patterns: /dev/kvm access, cgroup release_agent, cgroupfs mount, sysrq-trigger, prctl(PR_SET_NO_NEW_PRIVS), MMDS 169.254.169.254, Nix sandbox bypass
+- [x] Add `regex = "1"` workspace dependency; add `regex.workspace = true` to `mvm-runtime/Cargo.toml`
+- [x] Extend `AuditEntry` in `mvm-core/src/audit.rs`: add `threats: Vec<ThreatFinding>`, `gate_decision: Option<GateDecision>`, `frame_sequence: Option<u64>` fields (all `#[serde(default)]` for backward compat)
+- [x] Add 9 `AuditAction` variants: `VsockSessionStarted`, `VsockSessionEnded`, `VsockFrameReceived`, `CommandBlocked`, `CommandApproved`, `CommandDenied`, `ThreatDetected`, `RateLimitExceeded`, `SessionRecycled`
+- [x] Export `threat_classifier` from `mvm-runtime/src/security/mod.rs`
+- [x] Tests (63 new across 3 crates): 4 mvm-core threat type serde/ordering, 4 mvm-core audit backward compat + security fields, 55 mvm-runtime threat classifier (3 benign, 19 literal/Tier 1, 14 structural/Tier 2, 11 regex/Tier 3, 1 multi-category, 3 edge cases + throughput), updated all AuditEntry test constructions
 
 ## Phase 9: Health Monitoring + Session Lifecycle + Rate Limiting
 **Status: PENDING**

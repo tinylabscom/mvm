@@ -24,6 +24,9 @@ pub fn log_event(
         instance_id: instance_id.map(|s| s.to_string()),
         action,
         detail: detail.map(|s| s.to_string()),
+        threats: vec![],
+        gate_decision: None,
+        frame_sequence: None,
     };
 
     let json_line =
@@ -117,6 +120,9 @@ mod tests {
             instance_id: Some("i-abc123".to_string()),
             action: AuditAction::InstanceStarted,
             detail: Some("pid=12345".to_string()),
+            threats: vec![],
+            gate_decision: None,
+            frame_sequence: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -134,6 +140,9 @@ mod tests {
             instance_id: None,
             action: AuditAction::TenantCreated,
             detail: None,
+            threats: vec![],
+            gate_decision: None,
+            frame_sequence: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -163,6 +172,15 @@ mod tests {
             AuditAction::SnapshotDeleted,
             AuditAction::TransitionDeferred,
             AuditAction::MinRuntimeOverridden,
+            AuditAction::VsockSessionStarted,
+            AuditAction::VsockSessionEnded,
+            AuditAction::VsockFrameReceived,
+            AuditAction::CommandBlocked,
+            AuditAction::CommandApproved,
+            AuditAction::CommandDenied,
+            AuditAction::ThreatDetected,
+            AuditAction::RateLimitExceeded,
+            AuditAction::SessionRecycled,
         ];
 
         for action in actions {

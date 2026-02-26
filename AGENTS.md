@@ -8,6 +8,7 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 2. **All tests green**: Run `cargo test --workspace` and confirm zero failures. New tests must pass alongside all existing tests.
 3. **Zero clippy warnings**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done.
 4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state.
+5. **Update sprint spec**: After completing any phase, task, or sub-task, update `specs/SPRINT.md` to reflect the current status. Check off completed items (`- [x]`), update phase status labels (e.g. `**Status: COMPLETE**`), and add any new test counts or notes. The sprint spec must always accurately reflect what has been implemented.
 
 ## Test Expectations
 

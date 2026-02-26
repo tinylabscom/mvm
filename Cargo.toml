@@ -22,6 +22,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Pattern matching
 aho-corasick = "1"
+regex = "1"
 
 # Crypto
 base64 = "0.22"

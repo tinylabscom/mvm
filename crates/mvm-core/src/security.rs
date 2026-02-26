@@ -224,6 +224,63 @@ pub struct BlocklistEntry {
     pub action: BlocklistAction,
 }
 
+// ============================================================================
+// Threat classification
+// ============================================================================
+
+/// Threat categories for vsock message classification.
+///
+/// Each category represents a class of security concern. A single message
+/// may trigger findings across multiple categories.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ThreatCategory {
+    /// Credential or secret exposure (API keys, tokens, private keys).
+    SecretExposure,
+    /// Data exfiltration to external endpoints.
+    DataExfiltration,
+    /// Shell injection or code injection attempts.
+    Injection,
+    /// Destructive commands (rm -rf, mkfs, DROP TABLE).
+    Destructive,
+    /// Privilege escalation (sudo, nsenter, setuid).
+    PrivilegeEscalation,
+    /// Supply chain attacks (untrusted installs, impure builds).
+    SupplyChain,
+    /// Access to sensitive system files.
+    SensitiveFileAccess,
+    /// System configuration modification.
+    SystemModification,
+    /// Network abuse (port scanning, reverse shells).
+    NetworkAbuse,
+    /// MicroVM/Firecracker escape and tool poisoning.
+    ToolPoisoning,
+}
+
+/// Severity of a threat finding.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// A single threat finding produced by the classifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatFinding {
+    /// Threat category.
+    pub category: ThreatCategory,
+    /// Identifier for the pattern that matched (e.g., "aws_access_key", "rm_rf_root").
+    pub pattern_id: String,
+    /// Severity of this finding.
+    pub severity: Severity,
+    /// The text that matched (or a representative snippet).
+    pub matched_text: String,
+    /// Additional context about the finding.
+    pub context: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -492,5 +549,69 @@ mod tests {
         let json = "{}";
         let policy: SecurityPolicy = serde_json::from_str(json).unwrap();
         assert!(policy.blocklist.is_empty());
+    }
+
+    // -- Threat classification tests --
+
+    #[test]
+    fn test_threat_category_serde_roundtrip() {
+        let categories = vec![
+            ThreatCategory::SecretExposure,
+            ThreatCategory::DataExfiltration,
+            ThreatCategory::Injection,
+            ThreatCategory::Destructive,
+            ThreatCategory::PrivilegeEscalation,
+            ThreatCategory::SupplyChain,
+            ThreatCategory::SensitiveFileAccess,
+            ThreatCategory::SystemModification,
+            ThreatCategory::NetworkAbuse,
+            ThreatCategory::ToolPoisoning,
+        ];
+        for cat in categories {
+            let json = serde_json::to_string(&cat).unwrap();
+            let parsed: ThreatCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, cat);
+        }
+    }
+
+    #[test]
+    fn test_severity_ordering() {
+        assert!(Severity::Info < Severity::Low);
+        assert!(Severity::Low < Severity::Medium);
+        assert!(Severity::Medium < Severity::High);
+        assert!(Severity::High < Severity::Critical);
+    }
+
+    #[test]
+    fn test_severity_serde_roundtrip() {
+        let severities = vec![
+            Severity::Info,
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ];
+        for sev in severities {
+            let json = serde_json::to_string(&sev).unwrap();
+            let parsed: Severity = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, sev);
+        }
+    }
+
+    #[test]
+    fn test_threat_finding_serde_roundtrip() {
+        let finding = ThreatFinding {
+            category: ThreatCategory::SecretExposure,
+            pattern_id: "aws_access_key".to_string(),
+            severity: Severity::Critical,
+            matched_text: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            context: "AWS access key detected".to_string(),
+        };
+
+        let json = serde_json::to_string(&finding).unwrap();
+        let parsed: ThreatFinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.category, ThreatCategory::SecretExposure);
+        assert_eq!(parsed.pattern_id, "aws_access_key");
+        assert_eq!(parsed.severity, Severity::Critical);
     }
 }

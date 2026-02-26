@@ -5,3 +5,4 @@ pub mod jailer;
 pub mod metadata;
 pub mod seccomp;
 pub mod signing;
+pub mod threat_classifier;
