@@ -4,24 +4,41 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     microvm = {
       url = "github:astro/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { nixpkgs, flake-utils, microvm, ... }:
+  outputs = { nixpkgs, flake-utils, rust-overlay, microvm, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
     in
     flake-utils.lib.eachSystem systems (system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
+        };
+
+        # Rust 1.85+ needed for edition 2024.
+        rustToolchain = pkgs.rust-bin.stable.latest.minimal;
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
 
         # mvm guest agent — vsock management agent for host-to-guest communication.
         # To build from mvm workspace source, set mvmSrc to the workspace root.
         # For standalone templates, point mvmSrc at a local checkout or fetched source.
-        mvm-guest-agent = import ./modules/guest-agent-pkg.nix { inherit pkgs; mvmSrc = ../../.; };
+        mvm-guest-agent = import ./modules/guest-agent-pkg.nix {
+          inherit pkgs rustPlatform;
+          mvmSrc = ../../.;
+        };
 
         mkGuest = modules:
           let

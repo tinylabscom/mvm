@@ -60,7 +60,7 @@ We hardened dev workflows in Sprint 11 but saw recurring friction around sync/bo
 - [ ] Doc polish (CLI reference / examples)
 
 ## Phase 2c: Vsock CLI & Guest Agent
-**Status: IN PROGRESS**
+**Status: COMPLETE**
 
 - [x] Add `mvm vm ping <name>` and `mvm vm status <name> [--json]` CLI commands
 - [x] Enable vsock device (`PUT /vsock`) in dev-mode Firecracker configuration
@@ -74,7 +74,8 @@ We hardened dev workflows in Sprint 11 but saw recurring friction around sync/bo
 - [x] OpenClaw flake imports guest agent module; agent starts automatically on boot
 - [x] Template scaffold emits guest agent module files on `mvm template create`
 - [x] CLI integration tests for `mvm vm` subcommands (help, parsing, graceful errors)
-- [ ] Rebuild images with guest agent and validate `mvm vm ping` end-to-end
+- [x] Add `rust-overlay` to Nix flakes for Rust 1.85+ (edition 2024 support)
+- [x] Rebuild images with guest agent and validate `mvm vm ping` end-to-end
 
 ## Phase 3: Installer/Setup UX
 **Status: PENDING**
