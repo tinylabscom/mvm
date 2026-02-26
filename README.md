@@ -180,9 +180,28 @@ mvm start path/to/image.elf --cpus 4 --memory 2048 --volume ./data:/data:512
 
 ## Templates
 
-Templates are reusable microVM images built from Nix flakes. You scaffold a template locally, customize the NixOS configuration, build it, and then run it -- or share it via an S3-compatible registry.
+Templates are reusable microVM images built from Nix flakes. You can either scaffold a new template from scratch or register an existing Nix flake. Templates are built inside the Lima VM and can be shared via an S3-compatible registry.
 
-### End-to-End Workflow
+### From an Existing Flake
+
+If you already have a Nix flake that produces a microVM image (kernel + rootfs), register and build it directly:
+
+```bash
+# Register the flake as a template (resolves local paths to absolute)
+mvm template create openclaw --flake ../openclaw --profile minimal --role worker
+
+# Build the image (runs nix build inside the Lima VM)
+mvm template build openclaw
+
+# Run a microVM from the built template
+mvm run --flake ../openclaw --profile minimal --cpus 2 --memory 1024
+```
+
+All `template create` flags have defaults: `--flake .`, `--profile default`, `--role worker`, `--cpus 2`, `--mem 1024`. Local flake paths (like `.` or `../openclaw`) are resolved to absolute paths at creation time so builds work regardless of your working directory.
+
+### Scaffold Workflow
+
+Start from scratch with a scaffolded template:
 
 ```bash
 # 1. Scaffold a new template in the current directory
@@ -193,7 +212,7 @@ mvm template init my-service --local
 cd my-service
 $EDITOR flake.nix
 
-# 3. Register the template with mvm (defaults: flake=., profile=default, 2 cpus, 1024 MiB)
+# 3. Register the template with mvm
 mvm template create my-service
 
 # 4. Build the image (runs nix build inside the Lima VM)
@@ -393,6 +412,19 @@ Then connect with `ssh mvm` from any terminal.
 | `mvm template delete <name>` | Delete a template |
 | `mvm template init <name>` | Initialize on-disk template layout (`--local` for scaffold in cwd) |
 
+### MicroVM Diagnostics
+
+| Command | Description |
+|---------|-------------|
+| `mvm vm ping [name]` | Health-check running microVMs via vsock (all if no name given) |
+| `mvm vm status [name]` | Query worker status from running microVMs (`--json` for JSON output) |
+
+### Security
+
+| Command | Description |
+|---------|-------------|
+| `mvm security status` | Show security posture score for the current environment (`--json` for JSON output) |
+
 ### Utilities
 
 | Command | Description |
@@ -425,7 +457,7 @@ mvm --fc-version v1.14.0 setup
 
 ## Architecture
 
-mvm is a Cargo workspace with 5 crates:
+mvm is a Cargo workspace with 6 crates:
 
 | Crate | Purpose |
 |-------|---------|
@@ -433,7 +465,8 @@ mvm is a Cargo workspace with 5 crates:
 | **mvm-guest** | Vsock protocol, integration health checks, guest agent binary |
 | **mvm-build** | Nix builder pipeline (dev_build for local, pool_build for fleet) |
 | **mvm-runtime** | Shell execution, Lima/Firecracker VM lifecycle, UI, template management |
-| **mvm-cli** | Clap CLI, bootstrap, upgrade, doctor, template commands |
+| **mvm-security** | Security posture evaluation, jailer operations, seccomp profiles |
+| **mvm-cli** | Clap CLI, bootstrap, upgrade, doctor, security, template commands |
 
 The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvm::core`, `mvm::runtime`, `mvm::build`, `mvm::guest`. The binary entry point (`src/main.rs`) delegates to `mvm_cli::run()`.
 

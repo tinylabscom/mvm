@@ -415,15 +415,15 @@
         <span class="cmd">mvm build --flake .</span><br>
         <br>
         <span class="comment"># Boot a headless Firecracker VM:</span><br>
-        <span class="cmd">mvm run --flake . --name my-vm</span><br>
+        <span class="cmd">mvm run --flake . --cpus 2 --memory 1024</span><br>
         <br>
-        <span class="comment"># Check VM health via vsock:</span><br>
-        <span class="cmd">mvm vm ping my-vm</span><br>
-        <span class="cmd">mvm vm status my-vm</span><br>
+        <span class="comment"># Or use templates for reusable images:</span><br>
+        <span class="cmd">mvm template create my-app --flake .</span><br>
+        <span class="cmd">mvm template build my-app</span><br>
         <br>
-        <span class="comment"># Multi-VM fleet from config file:</span><br>
-        <span class="cmd">mvm up</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># launch all VMs defined in mvm.toml</span><br>
-        <span class="cmd">mvm down</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># stop them all</span>
+        <span class="comment"># Check VM health and security posture:</span><br>
+        <span class="cmd">mvm vm ping</span><br>
+        <span class="cmd">mvm security status</span>
       </div>
     </section>
 
@@ -444,27 +444,28 @@
           <tr><td><code>mvm destroy</code></td><td class="desc">Tear down Lima VM and all resources</td></tr>
 
           <tr class="category"><td colspan="2">Build &amp; Run</td></tr>
-          <tr><td><code>mvm build --flake &lt;path&gt;</code></td><td class="desc">Build a microVM image from a Nix flake (cached, incremental)</td></tr>
-          <tr><td><code>mvm run --flake &lt;path&gt;</code></td><td class="desc">Build + boot a headless Firecracker VM in one step</td></tr>
-          <tr><td><code>mvm up</code></td><td class="desc">Launch VMs from <code>mvm.toml</code> fleet config or CLI flags</td></tr>
-          <tr><td><code>mvm down</code></td><td class="desc">Stop VMs launched by <code>mvm up</code></td></tr>
+          <tr><td><code>mvm build --flake &lt;ref&gt;</code></td><td class="desc">Build a microVM image from a Nix flake (cached, incremental)</td></tr>
+          <tr><td><code>mvm run --flake &lt;ref&gt;</code></td><td class="desc">Build + boot a headless Firecracker VM in one step</td></tr>
 
           <tr class="category"><td colspan="2">MicroVM Lifecycle</td></tr>
           <tr><td><code>mvm start</code></td><td class="desc">Start a Firecracker microVM (headless, no SSH)</td></tr>
           <tr><td><code>mvm stop</code></td><td class="desc">Stop a running microVM by name or all VMs</td></tr>
           <tr><td><code>mvm status</code></td><td class="desc">Show status of Lima VM and running microVMs</td></tr>
-          <tr><td><code>mvm logs &lt;name&gt;</code></td><td class="desc">Show guest console or hypervisor logs</td></tr>
 
           <tr class="category"><td colspan="2">VM Interaction (vsock)</td></tr>
           <tr><td><code>mvm vm ping</code></td><td class="desc">Health-check running microVMs via vsock</td></tr>
           <tr><td><code>mvm vm status</code></td><td class="desc">Query worker and integration health from guest agent</td></tr>
 
           <tr class="category"><td colspan="2">Templates</td></tr>
-          <tr><td><code>mvm template init</code></td><td class="desc">Scaffold a new template directory with flake.nix and baseline config</td></tr>
+          <tr><td><code>mvm template init --local</code></td><td class="desc">Scaffold a new template directory with flake.nix and baseline config</td></tr>
           <tr><td><code>mvm template create</code></td><td class="desc">Register a template (name, flake, profile, role, resources)</td></tr>
-          <tr><td><code>mvm template build</code></td><td class="desc">Build a template image via Nix</td></tr>
+          <tr><td><code>mvm template build</code></td><td class="desc">Build a template image via Nix inside the Lima VM</td></tr>
           <tr><td><code>mvm template push/pull</code></td><td class="desc">Push/pull template revisions to S3-compatible registry</td></tr>
-          <tr><td><code>mvm template list/info</code></td><td class="desc">List templates or show details</td></tr>
+          <tr><td><code>mvm template list/info</code></td><td class="desc">List templates or show details and revisions</td></tr>
+          <tr><td><code>mvm template verify</code></td><td class="desc">Verify template checksums after pull</td></tr>
+
+          <tr class="category"><td colspan="2">Security</td></tr>
+          <tr><td><code>mvm security status</code></td><td class="desc">Show security posture score (jailer, seccomp, network, audit)</td></tr>
 
           <tr class="category"><td colspan="2">Lima VM</td></tr>
           <tr><td><code>mvm shell</code></td><td class="desc">Open a shell in the Lima VM (where Nix and Firecracker live)</td></tr>
@@ -498,8 +499,8 @@
           <p>Build reusable base images, version them, and share via an S3-compatible registry with <code>template push/pull</code>.</p>
         </div>
         <div class="feature">
-          <h3>Fleet Config</h3>
-          <p>Define multiple VMs in <code>mvm.toml</code> with per-VM profiles, resources, and volumes. Launch all with <code>mvm up</code>.</p>
+          <h3>Security Posture</h3>
+          <p>Evaluate jailer isolation, seccomp filters, network isolation, and audit logging with <code>mvm security status</code>.</p>
         </div>
       </div>
     </section>
