@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# install.sh — download mvm and optionally bootstrap a dev/node/coordinator environment
+# install.sh — download mvmctl and optionally bootstrap a dev/node/coordinator environment
 #
 # Usage:
 #   # Binary-only install (default)
@@ -22,8 +22,8 @@ set -euo pipefail
 #   --coordinator-url URL        Coordinator endpoint (node mode)
 #   --interval-secs N            Agent reconcile interval (default: 15)
 #   --install-service            Install and start systemd unit (node mode, Linux only)
-#   --no-install-mvm             Skip downloading mvm (use existing mvm on PATH)
-#   --mvm-path PATH              Use a specific mvm binary (skips download)
+#   --no-install-mvm             Skip downloading mvmctl (use existing mvmctl on PATH)
+#   --mvm-path PATH              Use a specific mvmctl binary (skips download)
 #
 # Environment overrides:
 #   MVM_VERSION=v0.1.0           GitHub Releases tag (omit or "latest" for latest)
@@ -40,7 +40,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 REPO="auser/mvm"
-BINARY="mvm"
+BINARY="mvmctl"
 INSTALL_DIR="${MVM_INSTALL_DIR:-/usr/local/bin}"
 MVM_VERSION="${MVM_VERSION:-}"
 
@@ -83,7 +83,7 @@ require() { command -v "$1" >/dev/null 2>&1; }
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  install.sh                                    Install mvm binary only
+  install.sh                                    Install mvmctl binary only
   install.sh dev [options]                      Install + dev bootstrap (macOS/Linux)
   install.sh node [options]                     Install + production node bootstrap (Linux)
   install.sh coordinator [options]              Install + coordinator bootstrap
@@ -92,8 +92,8 @@ Options:
   --coordinator-url URL    Coordinator endpoint (required for node agent service)
   --interval-secs N        Agent reconcile interval (default: 15)
   --install-service        Install and enable systemd unit (node mode, Linux only)
-  --no-install-mvm         Skip binary download (use existing mvm on PATH)
-  --mvm-path PATH          Use a specific mvm binary path (skips download)
+  --no-install-mvm         Skip binary download (use existing mvmctl on PATH)
+  --mvm-path PATH          Use a specific mvmctl binary path (skips download)
   -h, --help               Show this help
 
 Environment:
@@ -221,11 +221,11 @@ install_binary() {
 
     # --no-install-mvm
     if [[ "$NO_INSTALL_MVM" == "1" ]]; then
-        if require mvm; then
-            MVM_BIN="$(command -v mvm)"
+        if require mvmctl; then
+            MVM_BIN="$(command -v mvmctl)"
             return
         fi
-        die "--no-install-mvm set but mvm not found on PATH"
+        die "--no-install-mvm set but mvmctl not found on PATH"
     fi
 
     # Resolve version
@@ -257,7 +257,7 @@ install_binary() {
     info "Extracting..."
     tar xzf "${tmpdir}/${archive_name}" -C "$tmpdir"
 
-    # The archive contains mvm-<target>/mvm
+    # The archive contains mvmctl-<target>/mvmctl
     local extracted_dir="${tmpdir}/${BINARY}-${PLATFORM}"
     if [[ ! -f "${extracted_dir}/${BINARY}" ]]; then
         die "Binary not found in archive. Expected ${BINARY}-${PLATFORM}/${BINARY}"
@@ -334,7 +334,7 @@ bootstrap_dev() {
     info "Dev bootstrap complete."
     echo ""
     echo "  Next steps:"
-    echo "    mvm dev          # launch a microVM and SSH in"
+    echo "    mvmctl dev       # launch the dev environment"
     echo ""
     if [[ -n "$COORD_URL" ]]; then
         echo "  Or start the agent:"
@@ -417,7 +417,7 @@ bootstrap_coordinator() {
     if "$MVM_BIN" coordinator --help >/dev/null 2>&1; then
         "$MVM_BIN" coordinator bootstrap || true
     else
-        warn "'mvm coordinator' subcommand not found. Start your coordinator service manually."
+        warn "'mvmctl coordinator' subcommand not found. Start your coordinator service manually."
     fi
 }
 
@@ -442,14 +442,14 @@ main() {
     install_binary
 
     # Verify
-    info "Using mvm: ${MVM_BIN}"
+    info "Using mvmctl: ${MVM_BIN}"
     "${MVM_BIN}" --version 2>/dev/null || true
 
     # Binary-only install (no mode) — done
     if [[ -z "$MODE" ]]; then
         if [[ ":$PATH:" == *":${INSTALL_DIR}:"* ]]; then
             echo ""
-            info "Run 'mvm bootstrap' to get started."
+            info "Run 'mvmctl bootstrap' to get started."
         else
             echo ""
             echo "  ${INSTALL_DIR} may not be in your PATH."

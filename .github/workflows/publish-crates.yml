@@ -74,7 +74,7 @@ jobs:
             PUBLISH_FLAG=""
           fi
 
-          # Root `mvm` crate is publish = false (name taken on crates.io).
+          # Publish in dependency order: leaf crates first, root facade last.
           CRATES=(
             mvm-core
             mvm-guest
@@ -82,6 +82,7 @@ jobs:
             mvm-build
             mvm-runtime
             mvm-cli
+            mvmctl
           )
 
           for CRATE in "${CRATES[@]}"; do

@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mvm_guest::integrations::{
     self, IntegrationEntry, IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
 };
+use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse};
 use serde::Deserialize;
 
@@ -209,6 +210,19 @@ struct IntegrationHealth {
 
 struct IntegrationState {
     integrations: Vec<IntegrationHealth>,
+}
+
+// ============================================================================
+// Probe health state (shared between probe thread and request handlers)
+// ============================================================================
+
+struct ProbeHealth {
+    entry: ProbeEntry,
+    last_result: Option<ProbeResult>,
+}
+
+struct ProbeState {
+    probes: Vec<ProbeHealth>,
 }
 
 // ============================================================================
@@ -401,6 +415,117 @@ fn build_integration_reports(
 }
 
 // ============================================================================
+// Probe health monitoring
+// ============================================================================
+
+/// Run a single probe command.
+fn run_probe(entry: &ProbeEntry) -> ProbeResult {
+    let timeout_cmd = format!("timeout {} {}", entry.timeout_secs, entry.cmd);
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&timeout_cmd)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let json_output = if entry.output_format == ProbeOutputFormat::Json {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                serde_json::from_str(stdout.trim()).ok()
+            } else {
+                None
+            };
+            ProbeResult {
+                name: entry.name.clone(),
+                healthy: true,
+                detail: "ok".to_string(),
+                output: json_output,
+                checked_at: utc_now(),
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = if stderr.trim().is_empty() {
+                format!("exit code {}", out.status.code().unwrap_or(-1))
+            } else {
+                stderr.trim().to_string()
+            };
+            ProbeResult {
+                name: entry.name.clone(),
+                healthy: false,
+                detail,
+                output: None,
+                checked_at: utc_now(),
+            }
+        }
+        Err(e) => ProbeResult {
+            name: entry.name.clone(),
+            healthy: false,
+            detail: format!("failed to execute: {}", e),
+            output: None,
+            checked_at: utc_now(),
+        },
+    }
+}
+
+/// Background loop that periodically runs all loaded probes.
+fn probe_health_loop(state: Arc<Mutex<ProbeState>>) {
+    let count = state.lock().map(|s| s.probes.len()).unwrap_or(0);
+    let mut last_checked: Vec<Option<std::time::Instant>> = vec![None; count];
+
+    loop {
+        let entries: Vec<(usize, ProbeEntry)> = {
+            let Ok(s) = state.lock() else {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            };
+            s.probes
+                .iter()
+                .enumerate()
+                .map(|(i, ph)| (i, ph.entry.clone()))
+                .collect()
+        };
+
+        for (idx, entry) in &entries {
+            let interval = Duration::from_secs(entry.interval_secs);
+            let should_check = match last_checked.get(*idx).copied().flatten() {
+                Some(last) => last.elapsed() >= interval,
+                None => true,
+            };
+            if !should_check {
+                continue;
+            }
+
+            let result = run_probe(entry);
+            if !result.healthy {
+                eprintln!(
+                    "mvm-guest-agent: probe '{}' failed: {}",
+                    entry.name, result.detail
+                );
+            }
+            if let Ok(mut s) = state.lock()
+                && let Some(ph) = s.probes.get_mut(*idx)
+            {
+                ph.last_result = Some(result);
+            }
+            last_checked[*idx] = Some(std::time::Instant::now());
+        }
+
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Build probe reports from cached results.
+fn build_probe_reports(probe_state: &Arc<Mutex<ProbeState>>) -> Vec<ProbeResult> {
+    let Ok(s) = probe_state.lock() else {
+        return vec![];
+    };
+    s.probes
+        .iter()
+        .filter_map(|ph| ph.last_result.clone())
+        .collect()
+}
+
+// ============================================================================
 // Length-prefixed frame I/O (mirrors vsock.rs protocol)
 // ============================================================================
 
@@ -465,6 +590,7 @@ fn handle_client(
     fd: RawFd,
     state: &Arc<Mutex<AgentState>>,
     integration_state: &Arc<Mutex<IntegrationState>>,
+    probe_state: &Arc<Mutex<ProbeState>>,
 ) {
     // SAFETY: fd comes from accept and is a valid file descriptor owned by this function.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -517,6 +643,10 @@ fn handle_client(
                 detail: None,
             }
         }
+
+        GuestRequest::ProbeStatus => GuestResponse::ProbeStatusReport {
+            probes: build_probe_reports(probe_state),
+        },
     };
 
     write_response(&mut file, &resp);
@@ -598,9 +728,26 @@ fn main() {
         std::thread::spawn(move || integration_health_loop(health_state));
     }
 
+    // Scan drop-in probes and start probe execution thread.
+    let probe_entries = probes::load_probe_dropin_dir(probes::PROBES_DROPIN_DIR);
+    let probe_count = probe_entries.len();
+    let probe_state = Arc::new(Mutex::new(ProbeState {
+        probes: probe_entries
+            .into_iter()
+            .map(|e| ProbeHealth {
+                entry: e,
+                last_result: None,
+            })
+            .collect(),
+    }));
+    if probe_count > 0 {
+        let health_probe_state = Arc::clone(&probe_state);
+        std::thread::spawn(move || probe_health_loop(health_probe_state));
+    }
+
     eprintln!(
-        "mvm-guest-agent: listening on vsock port {} ({} integrations)",
-        cfg.port, integration_count
+        "mvm-guest-agent: listening on vsock port {} ({} integrations, {} probes)",
+        cfg.port, integration_count, probe_count
     );
 
     loop {
@@ -609,6 +756,6 @@ fn main() {
         if cfd < 0 {
             continue;
         }
-        handle_client(cfd, &state, &integration_state);
+        handle_client(cfd, &state, &integration_state, &probe_state);
     }
 }

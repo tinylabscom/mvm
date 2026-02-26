@@ -54,8 +54,8 @@ jobs:
       - name: Package binary and generate checksums
         shell: bash
         run: |
-          BIN_NAME="mvm"
-          ARCHIVE_NAME="mvm-${{ matrix.target }}"
+          BIN_NAME="mvmctl"
+          ARCHIVE_NAME="mvmctl-${{ matrix.target }}"
 
           mkdir -p "staging/${ARCHIVE_NAME}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
@@ -71,7 +71,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mvm-${{ matrix.target }}
+          name: mvmctl-${{ matrix.target }}
           path: |
             staging/*.tar.gz
             staging/*.sha256

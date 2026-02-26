@@ -27,13 +27,13 @@ cargo install --path .
 Or via cargo:
 
 ```bash
-cargo install mvm
+cargo install mvmctl
 ```
 
 ## Verify your environment
 
 ```bash
-mvm doctor
+mvmctl doctor
 ```
 
 This checks for required tools (cargo, limactl, firecracker), platform support, KVM access, Lima VM status, and available disk space. Fix any issues it reports before continuing.
@@ -41,7 +41,7 @@ This checks for required tools (cargo, limactl, firecracker), platform support, 
 For machine-readable output:
 
 ```bash
-mvm doctor --json
+mvmctl doctor --json
 ```
 
 ## Bootstrap
@@ -49,7 +49,7 @@ mvm doctor --json
 One command installs Lima (macOS), Firecracker, downloads the kernel and rootfs:
 
 ```bash
-mvm bootstrap
+mvmctl bootstrap
 ```
 
 On re-run, already-completed steps are skipped automatically.
@@ -57,7 +57,7 @@ On re-run, already-completed steps are skipped automatically.
 ## Enter the development environment
 
 ```bash
-mvm dev
+mvmctl dev
 ```
 
 This starts the Lima VM (if needed), installs Firecracker inside it, and drops you into a shell where `/dev/kvm` and `nix` are available.
@@ -68,19 +68,19 @@ Create a template, build it, and launch:
 
 ```bash
 # Create a template from a local flake
-mvm template create my-app --flake ./my-flake --profile minimal
+mvmctl template create my-app --flake ./my-flake --profile minimal
 
 # Build the template (produces kernel + rootfs via Nix)
-mvm template build my-app
+mvmctl template build my-app
 
 # Launch a microVM from the built template
-mvm run --flake ./my-flake
+mvmctl run --flake ./my-flake
 ```
 
 Or run directly from a flake (builds on first launch):
 
 ```bash
-mvm run --flake ./my-flake --profile minimal
+mvmctl run --flake ./my-flake --profile minimal
 ```
 
 ## Launch the default Ubuntu microVM
@@ -88,25 +88,25 @@ mvm run --flake ./my-flake --profile minimal
 If you just want a quick VM without Nix:
 
 ```bash
-mvm start
+mvmctl start
 ```
 
 ## Common commands
 
 | Command | Description |
 |---------|-------------|
-| `mvm doctor` | Check environment health |
-| `mvm bootstrap` | Full setup from scratch |
-| `mvm setup` | Setup Lima + Firecracker (requires limactl) |
-| `mvm setup --force` | Re-run all setup steps |
-| `mvm dev` | Enter development environment |
-| `mvm start` | Launch default Ubuntu microVM |
-| `mvm run --flake .` | Build and run a Nix flake microVM |
-| `mvm status` | Show VM status |
-| `mvm stop` | Stop running microVM |
-| `mvm shell` | Shell into the Lima VM |
-| `mvm sync` | Build mvm from source inside Lima |
-| `mvm template list` | List available templates |
+| `mvmctl doctor` | Check environment health |
+| `mvmctl bootstrap` | Full setup from scratch |
+| `mvmctl setup` | Setup Lima + Firecracker (requires limactl) |
+| `mvmctl setup --force` | Re-run all setup steps |
+| `mvmctl dev` | Enter development environment |
+| `mvmctl start` | Launch default Ubuntu microVM |
+| `mvmctl run --flake .` | Build and run a Nix flake microVM |
+| `mvmctl status` | Show VM status |
+| `mvmctl stop` | Stop running microVM |
+| `mvmctl shell` | Shell into the Lima VM |
+| `mvmctl sync` | Build mvm from source inside Lima |
+| `mvmctl template list` | List available templates |
 
 ## Known-good host matrix
 
@@ -119,14 +119,14 @@ mvm start
 
 ## Troubleshooting
 
-Run `mvm doctor` first — it identifies most common issues.
+Run `mvmctl doctor` first — it identifies most common issues.
 
 For detailed troubleshooting, see [troubleshooting.md](troubleshooting.md).
 
-**Lima VM won't start:** `mvm destroy -y && mvm bootstrap`
+**Lima VM won't start:** `mvmctl destroy -y && mvmctl bootstrap`
 
-**Firecracker not found:** `mvm setup --force`
+**Firecracker not found:** `mvmctl setup --force`
 
 **/dev/kvm not accessible:** On Linux, check `ls -la /dev/kvm` and add your user to the `kvm` group. On macOS, KVM runs inside the Lima VM automatically.
 
-**Nix command not found:** Nix is installed inside the Lima VM, not on the host. Use `mvm shell` to access it.
+**Nix command not found:** Nix is installed inside the Lima VM, not on the host. Use `mvmctl shell` to access it.

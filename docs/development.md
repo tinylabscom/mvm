@@ -107,13 +107,13 @@ Key test infrastructure:
 - **Shell mocks** (`mvm-runtime/src/shell_mock.rs`): simulate Lima/shell execution without a real VM
 - **TestBuildEnv** (`mvm-build/tests/pipeline.rs`): queue-based `BuildEnvironment` implementation for build pipeline tests
 - **MemStateStore** (`mvm-coordinator/src/state.rs`): in-memory async state store for coordinator tests
-- **assert_cmd** (`tests/cli.rs`): binary testing with `Command::cargo_bin("mvm")`
+- **assert_cmd** (`tests/cli.rs`): binary testing with `Command::cargo_bin("mvmctl")`
 
 ### Testing Conventions
 
 - Unit tests go in `#[cfg(test)] mod tests {}` at the bottom of the source file
 - Integration tests go in `crates/<crate>/tests/`
-- CLI binary tests go in root `tests/cli.rs` (the `mvm` binary is defined in the root package)
+- CLI binary tests go in root `tests/cli.rs` (the `mvmctl` binary is defined in the root package)
 - Use `#[serde(default)]` when adding fields to structs used in test fixtures
 
 ## Linting and Formatting

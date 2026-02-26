@@ -4,7 +4,7 @@ Rust CLI for building and running [Firecracker](https://firecracker-microvm.gith
 
 ```
 macOS / Linux Host  -->  Lima VM (Ubuntu)  -->  Firecracker microVM
-      mvm CLI              limactl                  /dev/kvm
+      mvmctl CLI              limactl                  /dev/kvm
 ```
 
 mvm handles the full dev lifecycle: bootstrapping Lima, installing Firecracker, building reproducible VM images from Nix flakes, launching microVMs, and managing reusable templates.
@@ -23,7 +23,7 @@ Or build from source:
 git clone https://github.com/auser/mvm.git
 cd mvm
 cargo build --release
-cp target/release/mvm ~/.local/bin/
+cp target/release/mvmctl ~/.local/bin/
 ```
 
 ## Quick Start
@@ -31,11 +31,11 @@ cp target/release/mvm ~/.local/bin/
 See [QUICKSTART.md](QUICKSTART.md) for a step-by-step walkthrough.
 
 ```bash
-mvm dev        # Bootstrap everything and drop into Lima dev shell
-mvm status     # Check what's running
-mvm shell      # Open a shell in the Lima VM
-mvm stop       # Stop the microVM
-mvm destroy    # Tear down everything
+mvmctl dev        # Bootstrap everything and drop into Lima dev shell
+mvmctl status     # Check what's running
+mvmctl shell      # Open a shell in the Lima VM
+mvmctl stop       # Stop the microVM
+mvmctl destroy    # Tear down everything
 ```
 
 ## Three-Layer Architecture
@@ -44,16 +44,16 @@ mvm runs a nested virtualization stack. Understanding the layers is key to worki
 
 ```
 Layer 1: macOS / Linux Host
-  - mvm CLI runs here natively
-  - All mvm commands are executed from here
+  - mvmctl CLI runs here natively
+  - All mvmctl commands are executed from here
   - Your project files live here
 
 Layer 2: Lima VM (Ubuntu)
   - Provides /dev/kvm on macOS
   - Home directory (~) is mounted read/write
   - Nix and Firecracker are installed here
-  - `mvm shell` drops you into this layer
-  - `mvm build` runs nix build here
+  - `mvmctl shell` drops you into this layer
+  - `mvmctl build` runs nix build here
   - Skipped entirely on native Linux with KVM
 
 Layer 3: Firecracker microVM
@@ -65,7 +65,7 @@ Layer 3: Firecracker microVM
   - Runs as a background daemon process
 ```
 
-**Important**: Firecracker microVMs (Layer 3) are headless workloads with no SSH access. They communicate via vsock only. To work with your project files in a Linux environment, use `mvm shell` or `mvm dev` (Layer 2), where your home directory is mounted. Use `--volume` flags to pass data directories to microVMs.
+**Important**: Firecracker microVMs (Layer 3) are headless workloads with no SSH access. They communicate via vsock only. To work with your project files in a Linux environment, use `mvmctl shell` or `mvmctl dev` (Layer 2), where your home directory is mounted. Use `--volume` flags to pass data directories to microVMs.
 
 ## Setup Flow
 
@@ -73,19 +73,19 @@ mvm has three setup commands with increasing levels of automation:
 
 | Command | What it does |
 |---------|-------------|
-| `mvm bootstrap` | Installs Homebrew dependencies (macOS), Lima, then runs full setup |
-| `mvm setup` | Creates the Lima VM, installs Firecracker, downloads kernel + rootfs |
-| `mvm dev` | Auto-detects missing components, runs bootstrap/setup as needed, then drops into a Lima shell |
+| `mvmctl bootstrap` | Installs Homebrew dependencies (macOS), Lima, then runs full setup |
+| `mvmctl setup` | Creates the Lima VM, installs Firecracker, downloads kernel + rootfs |
+| `mvmctl dev` | Auto-detects missing components, runs bootstrap/setup as needed, then drops into a Lima shell |
 
-For most users, `mvm dev` is the only command needed -- it handles everything automatically. If `mvm dev` fails because Lima or Firecracker are missing, it will bootstrap them.
+For most users, `mvmctl dev` is the only command needed -- it handles everything automatically. If `mvmctl dev` fails because Lima or Firecracker are missing, it will bootstrap them.
 
 ### Lima VM Resources
 
 The Lima VM defaults to 8 vCPUs and 16 GiB memory. Override at setup time:
 
 ```bash
-mvm setup --lima-cpus 4 --lima-mem 8
-mvm dev --lima-cpus 4 --lima-mem 8
+mvmctl setup --lima-cpus 4 --lima-mem 8
+mvmctl dev --lima-cpus 4 --lima-mem 8
 ```
 
 ### Recreating the Environment
@@ -93,14 +93,14 @@ mvm dev --lima-cpus 4 --lima-mem 8
 If things go wrong, recreate from scratch:
 
 ```bash
-mvm destroy     # Deletes the Lima VM and all microVM data
-mvm dev         # Rebuilds everything from scratch
+mvmctl destroy     # Deletes the Lima VM and all microVM data
+mvmctl dev         # Rebuilds everything from scratch
 ```
 
 Or just rebuild the rootfs without destroying the Lima VM:
 
 ```bash
-mvm setup --recreate
+mvmctl setup --recreate
 ```
 
 ## Building Images
@@ -110,13 +110,13 @@ mvm setup --recreate
 Build a microVM image from a Nix flake:
 
 ```bash
-mvm build --flake github:org/app --profile minimal --role worker
+mvmctl build --flake github:org/app --profile minimal --role worker
 ```
 
 Or build and immediately run it:
 
 ```bash
-mvm run --flake github:org/app --profile minimal --cpus 2 --memory 1024
+mvmctl run --flake github:org/app --profile minimal --cpus 2 --memory 1024
 ```
 
 `--profile` selects a NixOS configuration profile. `--role` selects the VM role (worker, gateway, builder, capability-imessage). These map to Nix attributes in the flake.
@@ -126,20 +126,20 @@ mvm run --flake github:org/app --profile minimal --cpus 2 --memory 1024
 Point to a local directory containing a `flake.nix`:
 
 ```bash
-mvm build --flake . --profile minimal --role worker
-mvm run --flake . --cpus 2 --memory 1024
+mvmctl build --flake . --profile minimal --role worker
+mvmctl run --flake . --cpus 2 --memory 1024
 ```
 
 Local flakes support watch mode -- rebuilds automatically when `flake.lock` changes:
 
 ```bash
-mvm build --flake . --profile minimal --watch
+mvmctl build --flake . --profile minimal --watch
 ```
 
 #### Run Options
 
 ```bash
-mvm run --flake . --profile minimal --role worker \
+mvmctl run --flake . --profile minimal --role worker \
     --cpus 4 --memory 2048 \
     --volume ./data:/data:1024 \
     --config runtime.toml
@@ -167,15 +167,15 @@ data = { host = "./data", guest = "/data", size_mb = 512 }
 Then build and start:
 
 ```bash
-mvm build .
-mvm start
+mvmctl build .
+mvmctl start
 ```
 
 ### Starting with a Custom Image
 
 ```bash
-mvm start path/to/image.elf
-mvm start path/to/image.elf --cpus 4 --memory 2048 --volume ./data:/data:512
+mvmctl start path/to/image.elf
+mvmctl start path/to/image.elf --cpus 4 --memory 2048 --volume ./data:/data:512
 ```
 
 ## Templates
@@ -188,13 +188,13 @@ If you already have a Nix flake that produces a microVM image (kernel + rootfs),
 
 ```bash
 # Register the flake as a template (resolves local paths to absolute)
-mvm template create openclaw --flake ../openclaw --profile minimal --role worker
+mvmctl template create openclaw --flake ../openclaw --profile minimal --role worker
 
 # Build the image (runs nix build inside the Lima VM)
-mvm template build openclaw
+mvmctl template build openclaw
 
 # Run a microVM from the built template
-mvm run --flake ../openclaw --profile minimal --cpus 2 --memory 1024
+mvmctl run --flake ../openclaw --profile minimal --cpus 2 --memory 1024
 ```
 
 All `template create` flags have defaults: `--flake .`, `--profile default`, `--role worker`, `--cpus 2`, `--mem 1024`. Local flake paths (like `.` or `../openclaw`) are resolved to absolute paths at creation time so builds work regardless of your working directory.
@@ -205,7 +205,7 @@ Start from scratch with a scaffolded template:
 
 ```bash
 # 1. Scaffold a new template in the current directory
-mvm template init my-service --local
+mvmctl template init my-service --local
 
 # 2. Edit the generated flake.nix to add your workload
 #    (see "What Gets Scaffolded" below)
@@ -213,18 +213,18 @@ cd my-service
 $EDITOR flake.nix
 
 # 3. Register the template with mvm
-mvm template create my-service
+mvmctl template create my-service
 
 # 4. Build the image (runs nix build inside the Lima VM)
-mvm template build my-service
+mvmctl template build my-service
 
 # 5. Run a microVM from the built template
-mvm run --flake .
+mvmctl run --flake .
 ```
 
 ### What Gets Scaffolded
 
-`mvm template init my-service --local` creates:
+`mvmctl template init my-service --local` creates:
 
 ```
 my-service/
@@ -249,7 +249,7 @@ To add your own service to the template, create a role module (e.g. `roles/worke
 { pkgs, ... }:
 {
   # Import the integration health module so the guest agent
-  # monitors your service and reports status via `mvm vm status`.
+  # monitors your service and reports status via `mvmctl vm status`.
   imports = [ ../../../nix/modules/guest-integrations.nix ];
 
   services.mvm-integrations = {
@@ -281,17 +281,17 @@ If you already have a Nix flake, register it directly:
 
 ```bash
 # Single template (override defaults as needed)
-mvm template create base-worker --flake github:org/app --role worker
+mvmctl template create base-worker --flake github:org/app --role worker
 
 # Multiple role variants at once (creates base-worker, base-gateway)
-mvm template create-multi base --flake github:org/app --roles worker,gateway
+mvmctl template create-multi base --flake github:org/app --roles worker,gateway
 ```
 
 ### Build
 
 ```bash
-mvm template build base-worker
-mvm template build base-worker --force    # Rebuild even if cached
+mvmctl template build base-worker
+mvmctl template build base-worker --force    # Rebuild even if cached
 ```
 
 Builds run `nix build` inside the Lima VM (Layer 2) to produce kernel + rootfs artifacts. The **mvm guest agent** is automatically injected into the rootfs after every build, so you don't need to include it manually.
@@ -299,7 +299,7 @@ Builds run `nix build` inside the Lima VM (Layer 2) to produce kernel + rootfs a
 For repeatable multi-role builds, use a TOML config:
 
 ```bash
-mvm template build base-worker --config templates.toml
+mvmctl template build base-worker --config templates.toml
 ```
 
 ### Share via Registry
@@ -307,9 +307,9 @@ mvm template build base-worker --config templates.toml
 Push and pull templates to/from S3-compatible storage (MinIO, AWS S3, etc.):
 
 ```bash
-mvm template push base-worker
-mvm template pull base-worker
-mvm template verify base-worker     # Verify checksums
+mvmctl template push base-worker
+mvmctl template pull base-worker
+mvmctl template verify base-worker     # Verify checksums
 ```
 
 Requires `MVM_TEMPLATE_REGISTRY` environment variable to be set.
@@ -317,10 +317,10 @@ Requires `MVM_TEMPLATE_REGISTRY` environment variable to be set.
 ### Manage
 
 ```bash
-mvm template list                   # List all templates
-mvm template info base-worker       # Show details + revisions
-mvm template delete base-worker     # Remove a template
-mvm template init base-worker       # Initialize on-disk layout
+mvmctl template list                   # List all templates
+mvmctl template info base-worker       # Show details + revisions
+mvmctl template delete base-worker     # Remove a template
+mvmctl template init base-worker       # Initialize on-disk layout
 ```
 
 ## Development Workflow
@@ -330,31 +330,31 @@ mvm template init base-worker       # Initialize on-disk layout
 Access the Lima VM (Layer 2) where Nix and Firecracker are installed:
 
 ```bash
-mvm shell                          # Open a shell in the Lima VM
-mvm shell --project ~/myproject    # Open shell and cd into project dir
+mvmctl shell                          # Open a shell in the Lima VM
+mvmctl shell --project ~/myproject    # Open shell and cd into project dir
 ```
 
 Inside the Lima shell, your host home directory (`~`) is mounted read/write. This is where Nix builds run and where Firecracker binaries live. Use this for debugging build issues or inspecting VM state.
 
-### Sync (Build mvm Inside Lima)
+### Sync (Build mvmctl Inside Lima)
 
-Build and install the mvm binary inside the Lima VM from your host source tree:
+Build and install the mvmctl binary inside the Lima VM from your host source tree:
 
 ```bash
-mvm sync                # Build release, install to /usr/local/bin/ in Lima
-mvm sync --debug        # Debug build (faster compile, slower runtime)
-mvm sync --skip-deps    # Skip apt/rustup dependency checks
-mvm sync --force        # Rebuild even if versions match
+mvmctl sync                # Build release, install to /usr/local/bin/ in Lima
+mvmctl sync --debug        # Debug build (faster compile, slower runtime)
+mvmctl sync --skip-deps    # Skip apt/rustup dependency checks
+mvmctl sync --force        # Rebuild even if versions match
 ```
 
-This is useful for testing mvm changes inside the Lima environment. The synced binary is available when you `mvm shell` into Lima.
+This is useful for testing mvmctl changes inside the Lima environment. The synced binary is available when you `mvmctl shell` into Lima.
 
 ### SSH Configuration
 
 Generate an SSH config entry for connecting to the Lima VM directly:
 
 ```bash
-mvm ssh-config >> ~/.ssh/config
+mvmctl ssh-config >> ~/.ssh/config
 ```
 
 Then connect with `ssh mvm` from any terminal.
@@ -365,71 +365,71 @@ Then connect with `ssh mvm` from any terminal.
 
 | Command | Description |
 |---------|-------------|
-| `mvm bootstrap` | Full setup from scratch: Homebrew deps (macOS), Lima, Firecracker, kernel, rootfs |
-| `mvm setup` | Create Lima VM and install Firecracker assets (requires limactl) |
-| `mvm setup --recreate` | Stop microVM, rebuild rootfs from upstream squashfs |
-| `mvm dev` | Auto-bootstrap if needed, drop into Lima dev shell |
-| `mvm status` | Show platform, Lima VM, Firecracker, and microVM status |
-| `mvm destroy` | Tear down Lima VM and all resources (confirmation required) |
-| `mvm doctor` | Run system diagnostics and dependency checks |
-| `mvm upgrade` | Check for and install mvm updates |
-| `mvm upgrade --check` | Only check for updates, don't install |
+| `mvmctl bootstrap` | Full setup from scratch: Homebrew deps (macOS), Lima, Firecracker, kernel, rootfs |
+| `mvmctl setup` | Create Lima VM and install Firecracker assets (requires limactl) |
+| `mvmctl setup --recreate` | Stop microVM, rebuild rootfs from upstream squashfs |
+| `mvmctl dev` | Auto-bootstrap if needed, drop into Lima dev shell |
+| `mvmctl status` | Show platform, Lima VM, Firecracker, and microVM status |
+| `mvmctl destroy` | Tear down Lima VM and all resources (confirmation required) |
+| `mvmctl doctor` | Run system diagnostics and dependency checks |
+| `mvmctl upgrade` | Check for and install mvmctl updates |
+| `mvmctl upgrade --check` | Only check for updates, don't install |
 
 ### MicroVM Lifecycle
 
 | Command | Description |
 |---------|-------------|
-| `mvm start` | Start the default microVM (headless) |
-| `mvm start <image>` | Start a custom image with optional --cpus, --memory, --volume |
-| `mvm stop` | Stop the running microVM and clean up |
-| `mvm ssh` | Open a shell in the Lima VM (alias for `mvm shell`) |
-| `mvm ssh-config` | Print an SSH config entry for the Lima VM |
-| `mvm shell` | Open a shell in the Lima VM |
-| `mvm sync` | Build mvm from source inside Lima and install to `/usr/local/bin/` |
+| `mvmctl start` | Start the default microVM (headless) |
+| `mvmctl start <image>` | Start a custom image with optional --cpus, --memory, --volume |
+| `mvmctl stop` | Stop the running microVM and clean up |
+| `mvmctl ssh` | Open a shell in the Lima VM (alias for `mvmctl shell`) |
+| `mvmctl ssh-config` | Print an SSH config entry for the Lima VM |
+| `mvmctl shell` | Open a shell in the Lima VM |
+| `mvmctl sync` | Build mvmctl from source inside Lima and install to `/usr/local/bin/` |
 
 ### Building
 
 | Command | Description |
 |---------|-------------|
-| `mvm build <path>` | Build from Mvmfile.toml in the given directory |
-| `mvm build --flake <ref>` | Build from a Nix flake (local or remote) |
-| `mvm build --flake <ref> --watch` | Build and rebuild on flake.lock changes |
-| `mvm run --flake <ref>` | Build from flake and boot a headless Firecracker VM |
+| `mvmctl build <path>` | Build from Mvmfile.toml in the given directory |
+| `mvmctl build --flake <ref>` | Build from a Nix flake (local or remote) |
+| `mvmctl build --flake <ref> --watch` | Build and rebuild on flake.lock changes |
+| `mvmctl run --flake <ref>` | Build from flake and boot a headless Firecracker VM |
 
 ### Templates
 
 | Command | Description |
 |---------|-------------|
-| `mvm template create <name>` | Create a single template definition |
-| `mvm template create-multi <base>` | Create templates for multiple roles |
-| `mvm template build <name>` | Build a template (runs nix build in Lima) |
-| `mvm template build <name> --config <toml>` | Build from a TOML config file |
-| `mvm template push <name>` | Push to S3-compatible registry |
-| `mvm template pull <name>` | Pull from registry |
-| `mvm template verify <name>` | Verify template checksums |
-| `mvm template list` | List all templates |
-| `mvm template info <name>` | Show template details and revisions |
-| `mvm template delete <name>` | Delete a template |
-| `mvm template init <name>` | Initialize on-disk template layout (`--local` for scaffold in cwd) |
+| `mvmctl template create <name>` | Create a single template definition |
+| `mvmctl template create-multi <base>` | Create templates for multiple roles |
+| `mvmctl template build <name>` | Build a template (runs nix build in Lima) |
+| `mvmctl template build <name> --config <toml>` | Build from a TOML config file |
+| `mvmctl template push <name>` | Push to S3-compatible registry |
+| `mvmctl template pull <name>` | Pull from registry |
+| `mvmctl template verify <name>` | Verify template checksums |
+| `mvmctl template list` | List all templates |
+| `mvmctl template info <name>` | Show template details and revisions |
+| `mvmctl template delete <name>` | Delete a template |
+| `mvmctl template init <name>` | Initialize on-disk template layout (`--local` for scaffold in cwd) |
 
 ### MicroVM Diagnostics
 
 | Command | Description |
 |---------|-------------|
-| `mvm vm ping [name]` | Health-check running microVMs via vsock (all if no name given) |
-| `mvm vm status [name]` | Query worker status from running microVMs (`--json` for JSON output) |
+| `mvmctl vm ping [name]` | Health-check running microVMs via vsock (all if no name given) |
+| `mvmctl vm status [name]` | Query worker status from running microVMs (`--json` for JSON output) |
 
 ### Security
 
 | Command | Description |
 |---------|-------------|
-| `mvm security status` | Show security posture score for the current environment (`--json` for JSON output) |
+| `mvmctl security status` | Show security posture score for the current environment (`--json` for JSON output) |
 
 ### Utilities
 
 | Command | Description |
 |---------|-------------|
-| `mvm completions <shell>` | Generate shell completions (bash, zsh, fish, etc.) |
+| `mvmctl completions <shell>` | Generate shell completions (bash, zsh, fish, etc.) |
 
 ## Environment Variables
 
@@ -449,10 +449,10 @@ Override the Firecracker version globally or per-command:
 
 ```bash
 export MVM_FC_VERSION=v1.14.0
-mvm setup
+mvmctl setup
 
 # Or per-command
-mvm --fc-version v1.14.0 setup
+mvmctl --fc-version v1.14.0 setup
 ```
 
 ## Architecture
@@ -468,7 +468,7 @@ mvm is a Cargo workspace with 6 crates:
 | **mvm-security** | Security posture evaluation, jailer operations, seccomp profiles |
 | **mvm-cli** | Clap CLI, bootstrap, upgrade, doctor, security, template commands |
 
-The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvm::core`, `mvm::runtime`, `mvm::build`, `mvm::guest`. The binary entry point (`src/main.rs`) delegates to `mvm_cli::run()`.
+The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`. The binary entry point (`src/main.rs`) delegates to `mvm_cli::run()`.
 
 ### How It Works
 
@@ -485,7 +485,7 @@ Host (macOS/Linux)
 - Firecracker microVM has an isolated filesystem -- no host mounts by default
 - Use `--volume` flags to pass directories to the microVM
 
-**Build pipeline**: `mvm build` and `mvm template build` run `nix build` inside the Lima VM, producing kernel (`vmlinux`) and rootfs (`rootfs.ext4`) artifacts.
+**Build pipeline**: `mvmctl build` and `mvmctl template build` run `nix build` inside the Lima VM, producing kernel (`vmlinux`) and rootfs (`rootfs.ext4`) artifacts.
 
 ### Trait Architecture
 

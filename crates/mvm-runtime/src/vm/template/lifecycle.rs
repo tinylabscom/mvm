@@ -217,7 +217,50 @@ fn require_local_template_fs() -> Result<()> {
     Ok(())
 }
 
-fn current_revision_id(template_id: &str) -> Result<String> {
+/// Resolve a built template to its current artifact paths.
+///
+/// Returns `(spec, vmlinux, initrd, rootfs, revision_hash)`.
+/// The artifact paths are absolute and valid inside the Lima VM.
+pub fn template_artifacts(
+    id: &str,
+) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
+    let spec = template_load(id)?;
+    let rev = current_revision_id(id)?;
+    let rev_dir = template_revision_dir(id, &rev);
+
+    let vmlinux = format!("{rev_dir}/vmlinux");
+    let rootfs = format!("{rev_dir}/rootfs.ext4");
+    let initrd_candidate = format!("{rev_dir}/initrd");
+
+    vm_exec(&format!("test -f {vmlinux}")).with_context(|| {
+        format!(
+            "Template '{}' has no vmlinux (run `mvm template build {}`)",
+            id, id
+        )
+    })?;
+    vm_exec(&format!("test -f {rootfs}")).with_context(|| {
+        format!(
+            "Template '{}' has no rootfs (run `mvm template build {}`)",
+            id, id
+        )
+    })?;
+
+    let has_initrd = vm_exec(&format!("test -f {initrd_candidate}")).is_ok();
+
+    Ok((
+        spec,
+        vmlinux,
+        if has_initrd {
+            Some(initrd_candidate)
+        } else {
+            None
+        },
+        rootfs,
+        rev,
+    ))
+}
+
+pub fn current_revision_id(template_id: &str) -> Result<String> {
     use std::os::unix::ffi::OsStrExt;
 
     let link = template_current_symlink(template_id);

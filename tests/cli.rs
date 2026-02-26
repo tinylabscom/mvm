@@ -3,7 +3,7 @@ use predicates::prelude::*;
 
 fn mvm() -> Command {
     #[allow(deprecated)]
-    Command::cargo_bin("mvm").unwrap()
+    Command::cargo_bin("mvmctl").unwrap()
 }
 
 #[test]
@@ -17,7 +17,7 @@ fn test_version_exits_successfully() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("mvm"));
+        .stdout(predicate::str::contains("mvmctl"));
 }
 
 #[test]

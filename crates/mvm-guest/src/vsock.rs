@@ -46,6 +46,8 @@ pub enum GuestRequest {
     /// Checkpoint named integrations before sleep.
     /// Sent before SleepPrep so integrations can persist session state.
     CheckpointIntegrations { integrations: Vec<String> },
+    /// Query status of all loaded probes.
+    ProbeStatus,
 }
 
 /// Response from guest vsock agent to host.
@@ -77,6 +79,10 @@ pub enum GuestResponse {
         /// Names of integrations that failed to checkpoint.
         failed: Vec<String>,
         detail: Option<String>,
+    },
+    /// Per-probe status report.
+    ProbeStatusReport {
+        probes: Vec<crate::probes::ProbeResult>,
     },
 }
 
@@ -598,6 +604,34 @@ pub fn query_integration_status_at(
     }
 }
 
+/// Query probe status from the guest agent.
+pub fn query_probe_status(instance_dir: &str) -> Result<Vec<crate::probes::ProbeResult>> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::ProbeStatus)?;
+
+    match resp {
+        GuestResponse::ProbeStatusReport { probes } => Ok(probes),
+        GuestResponse::Error { message } => {
+            bail!("Guest probe status error: {}", message);
+        }
+        _ => bail!("Unexpected response to ProbeStatus"),
+    }
+}
+
+/// Query probe status from the guest agent at a specific UDS path.
+pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::ProbeResult>> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::ProbeStatus)?;
+
+    match resp {
+        GuestResponse::ProbeStatusReport { probes } => Ok(probes),
+        GuestResponse::Error { message } => {
+            bail!("Guest probe status error: {}", message);
+        }
+        _ => bail!("Unexpected response to ProbeStatus"),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -619,6 +653,7 @@ mod tests {
             GuestRequest::CheckpointIntegrations {
                 integrations: vec!["whatsapp".to_string(), "telegram".to_string()],
             },
+            GuestRequest::ProbeStatus,
         ];
 
         for req in &variants {
@@ -661,6 +696,15 @@ mod tests {
                 success: true,
                 failed: vec![],
                 detail: Some("all checkpointed".to_string()),
+            },
+            GuestResponse::ProbeStatusReport {
+                probes: vec![crate::probes::ProbeResult {
+                    name: "disk-usage".to_string(),
+                    healthy: true,
+                    detail: "ok".to_string(),
+                    output: Some(serde_json::json!({"usage_pct": 42})),
+                    checked_at: "2026-02-26T12:00:00Z".to_string(),
+                }],
             },
         ];
 
@@ -788,6 +832,12 @@ mod tests {
     #[test]
     fn test_query_integration_status_at_nonexistent_path() {
         let result = query_integration_status_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_probe_status_at_nonexistent_path() {
+        let result = query_probe_status_at("/nonexistent/v.sock");
         assert!(result.is_err());
     }
 

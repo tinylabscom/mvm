@@ -22,9 +22,9 @@ macOS / Linux Host (this CLI) -> Lima VM (Ubuntu) -> Firecracker microVM (/dev/k
 - `mvm-runtime` -- shell execution, Lima/Firecracker VM lifecycle, UI, template management
 - `mvm-cli` -- Clap CLI, bootstrap, upgrade, doctor, template commands
 
-Root package: `src/lib.rs` (facade re-exports `mvm::core`, `mvm::runtime`, `mvm::build`, `mvm::guest`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
+Root package: `src/lib.rs` (facade re-exports `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
 
-Binary: `mvm` (from root, delegates to mvm-cli)
+Binary: `mvmctl` (from root, delegates to mvm-cli)
 
 **Dependency graph:**
 ```
@@ -62,7 +62,7 @@ BuildEnvironment : ShellEnvironment (extends)
   record_revision()
 ```
 
-- **Dev mode** (`mvm build`, `mvm template build`): uses `dev_build()` with `&dyn ShellEnvironment`
+- **Dev mode** (`mvmctl build`, `mvmctl template build`): uses `dev_build()` with `&dyn ShellEnvironment`
 - **Fleet mode** (in mvmd): uses `pool_build()` with `&dyn BuildEnvironment`
 
 The `RuntimeBuildEnv` in mvm-runtime implements only `ShellEnvironment`. The full `BuildEnvironment` impl lives in mvmd-runtime.
@@ -70,13 +70,13 @@ The `RuntimeBuildEnv` in mvm-runtime implements only `ShellEnvironment`. The ful
 ### Key Design Decisions
 
 - **Firecracker-only**: no Docker/containers. Builds run Nix inside the Lima VM.
-- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvm dev` / `mvm shell`), not the microVM.
-- **Dev mode = Lima shell**: `mvm dev` auto-bootstraps then drops into the Lima VM shell. It does NOT start or SSH into a Firecracker microVM.
-- **Headless microVMs**: `mvm start` and `mvm run` boot Firecracker as a daemon. No interactive access to the microVM.
-- **Dev mode isolation**: `mvm start/stop/dev` use a completely separate code path from orchestration.
+- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvmctl dev` / `mvmctl shell`), not the microVM.
+- **Dev mode = Lima shell**: `mvmctl dev` auto-bootstraps then drops into the Lima VM shell. It does NOT start or SSH into a Firecracker microVM.
+- **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. No interactive access to the microVM.
+- **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
 - **Shell scripts inside run_in_vm**: complex ops are bash scripts passed to `limactl shell`. Deliberate -- they run inside the Linux VM.
 - **Idempotent setup**: every step checks if already done before acting.
-- **Templates use dev_build path**: `mvm template build` runs `nix build` locally in the Lima VM (no ephemeral FC builder VMs).
+- **Templates use dev_build path**: `mvmctl template build` runs `nix build` locally in the Lima VM (no ephemeral FC builder VMs).
 - **mvm-core stays whole**: orchestration types (tenant, pool, instance, agent, protocol) remain in mvm-core even though they're only used by mvmd. This avoids a third shared-types crate and keeps the facade dependency simple.
 - **No `clippy::too_many_arguments`**: never suppress this lint. Refactor into smaller functions or a config/params struct.
 

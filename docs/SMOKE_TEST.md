@@ -6,8 +6,8 @@ Manual validation of the full mvm lifecycle. Requires a Linux host with `/dev/kv
 
 **macOS (via Lima):**
 ```bash
-mvm bootstrap          # installs Lima + Firecracker + kernel + rootfs
-mvm status             # verify Lima VM is running, FC "Installed, not running"
+mvmctl bootstrap          # installs Lima + Firecracker + kernel + rootfs
+mvmctl status             # verify Lima VM is running, FC "Installed, not running"
 ```
 
 **Linux (native):**
@@ -16,10 +16,10 @@ mvm status             # verify Lima VM is running, FC "Installed, not running"
 ls -la /dev/kvm
 
 # Bootstrap (downloads Firecracker, installs dependencies)
-mvm bootstrap
+mvmctl bootstrap
 
 # Verify
-mvm node info
+mvmctl node info
 ```
 
 ## 1. Dev Mode Sanity Check
@@ -27,12 +27,12 @@ mvm node info
 Verify the single-VM dev path still works:
 
 ```bash
-mvm dev                # should auto-bootstrap if needed, then SSH into microVM
+mvmctl dev                # should auto-bootstrap if needed, then SSH into microVM
 # inside the VM:
 uname -a               # confirm you're in the guest
 exit                   # exit SSH (VM keeps running)
-mvm status             # should show microVM running
-mvm stop               # clean shutdown
+mvmctl status             # should show microVM running
+mvmctl stop               # clean shutdown
 ```
 
 ## 2. Add Host (Onboarding)
@@ -41,18 +41,18 @@ Prepare a machine to join the fleet with a single command:
 
 ```bash
 # Dev mode (self-signed certs, no signing key)
-mvm add host
+mvmctl add host
 
 # Production mode (with CA and coordinator signing key)
-mvm add host --ca ca.crt --signing-key coordinator.pub --production
+mvmctl add host --ca ca.crt --signing-key coordinator.pub --production
 ```
 
-**Expected**: environment bootstrapped (Lima on macOS, Firecracker, kernel, rootfs), mTLS certificates initialized, signing key copied to `/etc/mvm/trusted_keys/` (if provided). Output shows next step: `mvm agent serve`.
+**Expected**: environment bootstrapped (Lima on macOS, Firecracker, kernel, rootfs), mTLS certificates initialized, signing key copied to `/etc/mvm/trusted_keys/` (if provided). Output shows next step: `mvmctl agent serve`.
 
 Verify with:
 ```bash
-mvm status             # Lima + FC installed
-mvm node info          # node UUID, arch, vCPUs, memory
+mvmctl status             # Lima + FC installed
+mvmctl node info          # node UUID, arch, vCPUs, memory
 ```
 
 ## 3. New Deployment (Onboarding)
@@ -61,25 +61,25 @@ Create a full OpenClaw deployment end-to-end with a single command:
 
 ```bash
 # Auto-allocate network, build, and scale
-mvm new openclaw smoke-app
+mvmctl new openclaw smoke-app
 
 # With explicit network overrides
-mvm new openclaw smoke-app --net-id 99 --subnet 10.240.99.0/24
+mvmctl new openclaw smoke-app --net-id 99 --subnet 10.240.99.0/24
 
 # With a custom flake reference
-mvm new openclaw smoke-app --flake github:myorg/myflake
+mvmctl new openclaw smoke-app --flake github:myorg/myflake
 ```
 
-**Expected**: tenant `smoke-app` created with default quotas, gateway pool created (role: gateway, 2 vCPU, 1024 MiB), worker pool created (role: worker, 2 vCPU, 1024 MiB, 2048 MiB data disk), both pools built, gateway scaled to 1 running, workers scaled to 2 running + 1 warm. Output shows deployment summary and `mvm connect smoke-app` as next step.
+**Expected**: tenant `smoke-app` created with default quotas, gateway pool created (role: gateway, 2 vCPU, 1024 MiB), worker pool created (role: worker, 2 vCPU, 1024 MiB, 2048 MiB data disk), both pools built, gateway scaled to 1 running, workers scaled to 2 running + 1 warm. Output shows deployment summary and `mvmctl connect smoke-app` as next step.
 
 Verify with:
 ```bash
-mvm tenant list                          # smoke-app appears
-mvm tenant info smoke-app                # shows quotas and network
-mvm pool list smoke-app                  # gateways + workers
-mvm pool info smoke-app/gateways         # role: gateway
-mvm pool info smoke-app/workers          # role: worker
-mvm instance list --tenant smoke-app     # instances across both pools
+mvmctl tenant list                          # smoke-app appears
+mvmctl tenant info smoke-app                # shows quotas and network
+mvmctl pool list smoke-app                  # gateways + workers
+mvmctl pool info smoke-app/gateways         # role: gateway
+mvmctl pool info smoke-app/workers          # role: worker
+mvmctl instance list --tenant smoke-app     # instances across both pools
 ```
 
 ## 4. Connect Dashboard (Onboarding)
@@ -87,8 +87,8 @@ mvm instance list --tenant smoke-app     # instances across both pools
 View the deployment dashboard:
 
 ```bash
-mvm connect smoke-app
-mvm connect smoke-app --json    # machine-readable output
+mvmctl connect smoke-app
+mvmctl connect smoke-app --json    # machine-readable output
 ```
 
 **Expected**: shows network info (gateway IP, subnet, bridge), pool summary (roles, resources, counts), instance table (IDs, status, IPs), and quick reference commands for secrets, scaling, and instance listing.
@@ -99,17 +99,17 @@ Test the manual tenant workflow:
 
 ```bash
 # Create a tenant with coordinator-assigned network
-mvm tenant create smoke-test \
+mvmctl tenant create smoke-test \
     --net-id 99 --subnet 10.240.99.0/24 \
     --max-vcpus 8 --max-mem 8192 --max-running 4
 
 # Verify
-mvm tenant list
-mvm tenant info smoke-test
-mvm tenant info smoke-test --json    # confirm JSON output works
+mvmctl tenant list
+mvmctl tenant info smoke-test
+mvmctl tenant info smoke-test --json    # confirm JSON output works
 
 # Check bridge was created
-mvm net verify
+mvmctl net verify
 ```
 
 **Expected**: tenant appears in list, info shows quotas and network config, bridge `br-tenant-99` exists.
@@ -118,24 +118,24 @@ mvm net verify
 
 ```bash
 # Create a pool with explicit role
-mvm pool create smoke-test/gateways \
+mvmctl pool create smoke-test/gateways \
     --flake . --profile minimal \
     --cpus 2 --mem 1024 --role gateway
 
 # Create a worker pool (default role)
-mvm pool create smoke-test/workers \
+mvmctl pool create smoke-test/workers \
     --flake . --profile minimal \
     --cpus 2 --mem 1024
 
 # Verify
-mvm pool list smoke-test
-mvm pool info smoke-test/workers
+mvmctl pool list smoke-test
+mvmctl pool info smoke-test/workers
 
 # Build artifacts (requires Nix inside the VM)
-mvm pool build smoke-test/workers
+mvmctl pool build smoke-test/workers
 
 # Set desired counts
-mvm pool scale smoke-test/workers --running 2 --warm 1 --sleeping 1
+mvmctl pool scale smoke-test/workers --running 2 --warm 1 --sleeping 1
 ```
 
 **Expected**: pools appear in list, info shows flake ref / resources / role / desired counts. Build produces kernel + rootfs under `artifacts/revisions/`.
@@ -144,23 +144,23 @@ mvm pool scale smoke-test/workers --running 2 --warm 1 --sleeping 1
 
 ```bash
 # List instances
-mvm instance list --tenant smoke-test --pool workers
+mvmctl instance list --tenant smoke-test --pool workers
 
 # Start an instance
-INSTANCE_ID=$(mvm instance list --tenant smoke-test --pool workers --json | jq -r '.[0].instance_id')
-mvm instance start smoke-test/workers/$INSTANCE_ID
+INSTANCE_ID=$(mvmctl instance list --tenant smoke-test --pool workers --json | jq -r '.[0].instance_id')
+mvmctl instance start smoke-test/workers/$INSTANCE_ID
 
 # Verify it's running
-mvm instance stats smoke-test/workers/$INSTANCE_ID
+mvmctl instance stats smoke-test/workers/$INSTANCE_ID
 
 # SSH into the instance
-mvm instance ssh smoke-test/workers/$INSTANCE_ID
+mvmctl instance ssh smoke-test/workers/$INSTANCE_ID
 # inside: uname -a, check /run/secrets if secrets were set
 # exit
 
 # Stop the instance
-mvm instance stop smoke-test/workers/$INSTANCE_ID
-mvm instance list --tenant smoke-test --pool workers   # should show Stopped
+mvmctl instance stop smoke-test/workers/$INSTANCE_ID
+mvmctl instance list --tenant smoke-test --pool workers   # should show Stopped
 ```
 
 **Expected**: instance transitions Created -> Running -> Stopped. SSH works, stats show PID/IP/TAP.
@@ -169,19 +169,19 @@ mvm instance list --tenant smoke-test --pool workers   # should show Stopped
 
 ```bash
 # Start the instance again
-mvm instance start smoke-test/workers/$INSTANCE_ID
+mvmctl instance start smoke-test/workers/$INSTANCE_ID
 
 # Sleep it (snapshot to disk)
-mvm instance sleep smoke-test/workers/$INSTANCE_ID
+mvmctl instance sleep smoke-test/workers/$INSTANCE_ID
 
 # Verify snapshot exists
-mvm instance stats smoke-test/workers/$INSTANCE_ID   # should show Sleeping status
+mvmctl instance stats smoke-test/workers/$INSTANCE_ID   # should show Sleeping status
 
 # Wake it back up
-mvm instance wake smoke-test/workers/$INSTANCE_ID
+mvmctl instance wake smoke-test/workers/$INSTANCE_ID
 
 # Verify it's running again with same network identity
-mvm instance stats smoke-test/workers/$INSTANCE_ID
+mvmctl instance stats smoke-test/workers/$INSTANCE_ID
 ```
 
 **Expected**: instance transitions Running -> Sleeping -> Running. Snapshot created and restored. IP and TAP device preserved.
@@ -192,7 +192,7 @@ Generate desired state from the tenants and pools you just created:
 
 ```bash
 # Generate desired state from existing tenant/pool config
-mvm agent desired --file /tmp/desired.json
+mvmctl agent desired --file /tmp/desired.json
 
 # Inspect the generated file
 cat /tmp/desired.json
@@ -201,10 +201,10 @@ cat /tmp/desired.json
 # limactl copy /tmp/desired.json mvm:/tmp/desired.json
 
 # Run one-shot reconcile
-mvm agent reconcile --desired /tmp/desired.json
+mvmctl agent reconcile --desired /tmp/desired.json
 
 # Verify instances match desired state
-mvm instance list --tenant smoke-test --pool workers
+mvmctl instance list --tenant smoke-test --pool workers
 ```
 
 You can also write `desired.json` by hand or generate it from your own tooling. The schema is documented in [docs/agent.md](agent.md).
@@ -215,10 +215,10 @@ You can also write `desired.json` by hand or generate it from your own tooling. 
 
 ```bash
 # Generate certificates
-mvm agent certs init --ca /tmp/ca.crt
+mvmctl agent certs init --ca /tmp/ca.crt
 
 # Start agent daemon in background
-mvm agent serve \
+mvmctl agent serve \
     --desired /tmp/desired.json \
     --interval-secs 30 \
     --listen 127.0.0.1:4433 \
@@ -228,13 +228,13 @@ AGENT_PID=$!
 sleep 3
 
 # Query node status via coordinator client
-mvm coordinator status --node 127.0.0.1:4433
+mvmctl coordinator status --node 127.0.0.1:4433
 
 # Push updated desired state
-mvm coordinator push --desired /tmp/desired.json --node 127.0.0.1:4433
+mvmctl coordinator push --desired /tmp/desired.json --node 127.0.0.1:4433
 
 # List instances via coordinator
-mvm coordinator list-instances --node 127.0.0.1:4433 --tenant smoke-test
+mvmctl coordinator list-instances --node 127.0.0.1:4433 --tenant smoke-test
 
 # Stop agent
 kill $AGENT_PID
@@ -245,8 +245,8 @@ kill $AGENT_PID
 ## 11. Bridge Verification
 
 ```bash
-mvm net verify
-mvm net verify --json
+mvmctl net verify
+mvmctl net verify --json
 ```
 
 **Expected**: clean report — all tenant bridges correct, subnets match, no cross-tenant leakage.
@@ -255,34 +255,34 @@ mvm net verify --json
 
 ```bash
 # Disk usage
-mvm node disk
+mvmctl node disk
 
 # Garbage collection
-mvm pool gc smoke-test/workers
-mvm node gc
+mvmctl pool gc smoke-test/workers
+mvmctl node gc
 
 # Audit events
-mvm events smoke-test
-mvm events smoke-test --last 5 --json
+mvmctl events smoke-test
+mvmctl events smoke-test --last 5 --json
 
 # Shell completions (verify generation)
-mvm completions bash > /dev/null && echo "bash completions OK"
-mvm completions zsh > /dev/null && echo "zsh completions OK"
+mvmctl completions bash > /dev/null && echo "bash completions OK"
+mvmctl completions zsh > /dev/null && echo "zsh completions OK"
 ```
 
 ## 13. Teardown
 
 ```bash
 # Destroy the onboarding deployment
-mvm tenant destroy smoke-app --force
+mvmctl tenant destroy smoke-app --force
 
 # Destroy the granular smoke-test tenant
-mvm tenant destroy smoke-test --force
+mvmctl tenant destroy smoke-test --force
 
 # Verify clean state
-mvm tenant list                # should be empty
-mvm net verify                 # no bridges remaining
-mvm node disk                  # storage freed
+mvmctl tenant list                # should be empty
+mvmctl net verify                 # no bridges remaining
+mvmctl node disk                  # storage freed
 ```
 
 ## Troubleshooting
@@ -292,11 +292,11 @@ mvm node disk                  # storage freed
 | `Lima VM not running` | `limactl list` — start with `limactl start mvm` |
 | `/dev/kvm not found` | Enable nested virtualization in Lima config or use bare-metal Linux |
 | `pool build` fails | Check Nix is installed inside VM: `nix --version` |
-| `instance start` hangs | Check FC logs: `mvm instance logs <path>` |
+| `instance start` hangs | Check FC logs: `mvmctl instance logs <path>` |
 | Bridge not created | Run as root or check `CAP_NET_ADMIN` capability |
 | QUIC connection refused | Verify cert paths and that agent is listening on the correct port |
-| `mvm new` fails at build | Ensure bootstrap completed — run `mvm add host` first |
-| `mvm connect` shows no instances | Deployment may still be building — check `mvm pool info <name>/workers` |
+| `mvmctl new` fails at build | Ensure bootstrap completed — run `mvmctl add host` first |
+| `mvmctl connect` shows no instances | Deployment may still be building — check `mvmctl pool info <name>/workers` |
 
 ## Notes
 

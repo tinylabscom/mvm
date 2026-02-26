@@ -79,9 +79,9 @@ mvm-cli = { path = "crates/mvm-cli", version = "0.3.2" }
 assert_cmd = "2"
 predicates = "3"
 
-# Root facade crate — re-exports all workspace libraries as `mvm`
+# Root facade crate — re-exports all workspace libraries and provides the `mvmctl` binary
 [package]
-name = "mvm"
+name = "mvmctl"
 version.workspace = true
 edition.workspace = true
 description = "Firecracker microVM development tool"
@@ -89,14 +89,13 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-publish = false
 
 [lib]
-name = "mvm"
+name = "mvmctl"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mvm"
+name = "mvmctl"
 path = "src/main.rs"
 
 [dependencies]

@@ -14,7 +14,11 @@ use mvm_runtime::shell;
 use mvm_runtime::vm::{firecracker, image, lima, microvm};
 
 #[derive(Parser)]
-#[command(name = "mvm", version, about = "Firecracker microVM development tool")]
+#[command(
+    name = "mvmctl",
+    version,
+    about = "Firecracker microVM development tool"
+)]
 struct Cli {
     /// Log format: human (default) or json (structured)
     #[arg(long, global = true)]
@@ -88,7 +92,7 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
-    /// Open a shell in the Lima VM (alias for 'mvm shell')
+    /// Open a shell in the Lima VM (alias for 'mvmctl shell')
     Ssh,
     /// Print an SSH config entry for the Lima VM
     SshConfig,
@@ -104,7 +108,7 @@ enum Commands {
         #[arg(long, default_value = "16")]
         lima_mem: u32,
     },
-    /// Build mvm from source inside the Lima VM and install to /usr/local/bin/
+    /// Build mvmctl from source inside the Lima VM and install to /usr/local/bin/
     Sync {
         /// Build in debug mode (faster compile, slower runtime)
         #[arg(long)]
@@ -141,7 +145,7 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Check for and install the latest version of mvm
+    /// Check for and install the latest version of mvmctl
     Upgrade {
         /// Only check for updates, don't install
         #[arg(long)]
@@ -197,10 +201,14 @@ enum Commands {
         json: bool,
     },
     /// Build from a Nix flake and boot a headless Firecracker VM
+    #[command(group(clap::ArgGroup::new("source").required(true)))]
     Run {
         /// Nix flake reference (local path or remote URI)
-        #[arg(long)]
-        flake: String,
+        #[arg(long, group = "source")]
+        flake: Option<String>,
+        /// Run from a pre-built template (skip build)
+        #[arg(long, group = "source")]
+        template: Option<String>,
         /// VM name (auto-generated if omitted)
         #[arg(long)]
         name: Option<String>,
@@ -208,10 +216,10 @@ enum Commands {
         #[arg(long)]
         profile: Option<String>,
         /// vCPU cores
-        #[arg(long, default_value = "2")]
+        #[arg(long)]
         cpus: Option<u32>,
         /// Memory in MiB
-        #[arg(long, default_value = "1024")]
+        #[arg(long)]
         memory: Option<u32>,
         /// Runtime config (TOML) for persistent resources/volumes
         #[arg(long)]
@@ -551,21 +559,23 @@ pub fn run() -> Result<()> {
         }
         Commands::Run {
             flake,
+            template,
             name,
             profile,
             cpus,
             memory,
             config,
             volume,
-        } => cmd_run(
-            &flake,
-            name.as_deref(),
-            profile.as_deref(),
+        } => cmd_run(RunParams {
+            flake_ref: flake.as_deref(),
+            template_name: template.as_deref(),
+            name: name.as_deref(),
+            profile: profile.as_deref(),
             cpus,
             memory,
-            config.as_deref(),
-            &volume,
-        ),
+            config_path: config.as_deref(),
+            volumes: &volume,
+        }),
         Commands::Up {
             name,
             config,
@@ -607,34 +617,34 @@ fn cmd_bootstrap(production: bool) -> Result<()> {
     // Bootstrap uses default Lima resources (8 vCPUs, 16 GiB), never forces
     run_setup_steps(false, 8, 16)?;
 
-    ui::success("\nBootstrap complete! Run 'mvm dev' to enter the development environment.");
+    ui::success("\nBootstrap complete! Run 'mvmctl dev' to enter the development environment.");
     Ok(())
 }
 
 fn cmd_setup(recreate: bool, force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
     if recreate {
         recreate_rootfs()?;
-        ui::success("\nRootfs recreated! Run 'mvm start' or 'mvm dev' to launch.");
+        ui::success("\nRootfs recreated! Run 'mvmctl start' or 'mvmctl dev' to launch.");
         return Ok(());
     }
 
     if !bootstrap::is_lima_required() {
         // Native Linux — just install FC directly
         run_setup_steps(force, lima_cpus, lima_mem)?;
-        ui::success("\nSetup complete! Run 'mvm start' to launch a microVM.");
+        ui::success("\nSetup complete! Run 'mvmctl start' to launch a microVM.");
         return Ok(());
     }
 
     which::which("limactl").map_err(|_| {
         anyhow::anyhow!(
             "'limactl' not found. Install Lima first: brew install lima\n\
-             Or run 'mvm bootstrap' for full automatic setup."
+             Or run 'mvmctl bootstrap' for full automatic setup."
         )
     })?;
 
     run_setup_steps(force, lima_cpus, lima_mem)?;
 
-    ui::success("\nSetup complete! Run 'mvm start' to launch a microVM.");
+    ui::success("\nSetup complete! Run 'mvmctl start' to launch a microVM.");
     Ok(())
 }
 
@@ -687,7 +697,7 @@ fn cmd_dev(lima_cpus: u32, lima_mem: u32, project: Option<&str>) -> Result<()> {
         }
     }
 
-    // Install Firecracker if not present (so it's ready for `mvm start` inside Lima)
+    // Install Firecracker if not present (so it's ready for `mvmctl start` inside Lima)
     if !firecracker::is_installed()? {
         ui::info("Firecracker not installed. Running setup steps...\n");
         firecracker::install()?;
@@ -875,7 +885,7 @@ fn cmd_stop(name: Option<&str>, all: bool) -> Result<()> {
 }
 
 fn cmd_ssh() -> Result<()> {
-    // `mvm ssh` is now an alias for `mvm shell` — drops into the Lima VM.
+    // `mvmctl ssh` is now an alias for `mvmctl shell` — drops into the Lima VM.
     // MicroVMs never have SSH enabled; use vsock for guest communication.
     cmd_shell(None, 8, 16)
 }
@@ -889,7 +899,7 @@ fn cmd_ssh_config() -> Result<()> {
         parse_lima_ssh_config(&lima_ssh_config).unwrap_or_else(|| {
             (
                 "127.0.0.1".to_string(),
-                "# <port>  # run 'mvm setup' first".to_string(),
+                "# <port>  # run 'mvmctl setup' first".to_string(),
                 std::env::var("USER").unwrap_or_else(|_| "lima".to_string()),
                 format!("{}/.lima/_config/user", home_dir),
             )
@@ -962,13 +972,13 @@ fn cmd_shell(project: Option<&str>, _lima_cpus: u32, _lima_mem: u32) -> Result<(
             nix_ver.trim()
         }
     ));
-    let mvm_in_vm = shell::run_in_vm_stdout("test -f /usr/local/bin/mvm && echo yes || echo no")
+    let mvm_in_vm = shell::run_in_vm_stdout("test -f /usr/local/bin/mvmctl && echo yes || echo no")
         .unwrap_or_default();
     if mvm_in_vm.trim() == "yes" {
-        let mvm_ver =
-            shell::run_in_vm_stdout("/usr/local/bin/mvm --version 2>/dev/null").unwrap_or_default();
+        let mvm_ver = shell::run_in_vm_stdout("/usr/local/bin/mvmctl --version 2>/dev/null")
+            .unwrap_or_default();
         ui::info(&format!(
-            "  mvm:         {}",
+            "  mvmctl:      {}",
             if mvm_ver.trim().is_empty() {
                 "installed"
             } else {
@@ -976,7 +986,7 @@ fn cmd_shell(project: Option<&str>, _lima_cpus: u32, _lima_mem: u32) -> Result<(
             }
         ));
     } else {
-        ui::warn("  mvm not installed in VM. Run 'mvm sync' to build and install it.");
+        ui::warn("  mvmctl not installed in VM. Run 'mvmctl sync' to build and install it.");
     }
 
     ui::info(&format!("  Lima VM:     {}\n", config::VM_NAME));
@@ -1016,7 +1026,7 @@ fn sync_build_script(source_dir: &str, debug: bool, vm_arch: &str) -> String {
         "export PATH=\"$HOME/.cargo/bin:$PATH\" && \
          if [ -f \"$HOME/.cargo/env\" ]; then . \"$HOME/.cargo/env\"; fi && \
          cd '{}' && \
-         CARGO_TARGET_DIR='{}' cargo build{} --bin mvm",
+         CARGO_TARGET_DIR='{}' cargo build{} --bin mvmctl",
         source_dir.replace('\'', "'\\''"),
         target_dir,
         release_flag,
@@ -1028,7 +1038,7 @@ fn sync_install_script(source_dir: &str, debug: bool, vm_arch: &str) -> String {
     let target_dir = format!("target/linux-{}", vm_arch);
     format!(
         "sudo install -m 0755 \
-         '{src}/{target}/{profile}/mvm' \
+         '{src}/{target}/{profile}/mvmctl' \
          /usr/local/bin/",
         src = source_dir.replace('\'', "'\\''"),
         target = target_dir,
@@ -1043,8 +1053,10 @@ fn cmd_sync(debug: bool, skip_deps: bool, force: bool, json: bool) -> Result<()>
                 .with_message("Native Linux detected, no sync needed")
                 .emit();
         } else {
-            ui::info("Native Linux detected. The host mvm binary is already Linux-native.");
-            ui::info("No sync needed — mvm is already available. Use --force to rebuild anyway.");
+            ui::info("Native Linux detected. The host mvmctl binary is already Linux-native.");
+            ui::info(
+                "No sync needed — mvmctl is already available. Use --force to rebuild anyway.",
+            );
         }
         return Ok(());
     }
@@ -1085,16 +1097,16 @@ fn cmd_sync(debug: bool, skip_deps: bool, force: bool, json: bool) -> Result<()>
     if !force {
         let desired_version = env!("CARGO_PKG_VERSION");
         if let Ok(current) =
-            shell::run_in_vm_stdout("/usr/local/bin/mvm --version 2>/dev/null || true")
+            shell::run_in_vm_stdout("/usr/local/bin/mvmctl --version 2>/dev/null || true")
             && current.contains(desired_version)
         {
             if json {
                 PhaseEvent::new("sync", "check", "skipped")
-                    .with_message(&format!("mvm {} already installed", desired_version))
+                    .with_message(&format!("mvmctl {} already installed", desired_version))
                     .emit();
             } else {
                 ui::success(&format!(
-                    "mvm {} already installed inside Lima VM. Use --force to rebuild.",
+                    "mvmctl {} already installed inside Lima VM. Use --force to rebuild.",
                     desired_version
                 ));
             }
@@ -1148,7 +1160,7 @@ fn cmd_sync(debug: bool, skip_deps: bool, force: bool, json: bool) -> Result<()>
             .emit();
     } else {
         ui::success(&format!("Sync complete! Installed: {}", version.trim()));
-        ui::info("The mvm binary is now available inside 'mvm shell'.");
+        ui::info("The mvmctl binary is now available inside 'mvmctl shell'.");
     }
 
     Ok(())
@@ -1199,7 +1211,7 @@ fn cmd_status() -> Result<()> {
         let lima_status = lima::get_status()?;
         match lima_status {
             lima::LimaStatus::NotFound => {
-                ui::status_line("Lima VM:", "Not created (run 'mvm setup')");
+                ui::status_line("Lima VM:", "Not created (run 'mvmctl setup')");
                 ui::status_line("Firecracker:", "-");
                 ui::status_line("MicroVM:", "-");
                 return Ok(());
@@ -1334,11 +1346,11 @@ fn with_hints(result: Result<()>) -> Result<()> {
     if let Err(ref e) = result {
         let msg = format!("{:#}", e);
         if msg.contains("limactl: command not found") || msg.contains("limactl: not found") {
-            ui::warn("Hint: Install Lima with 'brew install lima' or run 'mvm bootstrap'.");
+            ui::warn("Hint: Install Lima with 'brew install lima' or run 'mvmctl bootstrap'.");
         } else if msg.contains("firecracker: command not found")
             || msg.contains("firecracker: not found")
         {
-            ui::warn("Hint: Run 'mvm setup' to install Firecracker.");
+            ui::warn("Hint: Run 'mvmctl setup' to install Firecracker.");
         } else if msg.contains("/dev/kvm") {
             ui::warn(
                 "Hint: Enable KVM/virtualization in your BIOS or VM settings.\n      \
@@ -1347,7 +1359,7 @@ fn with_hints(result: Result<()>) -> Result<()> {
         } else if msg.contains("Permission denied") && msg.contains(".mvm") {
             ui::warn("Hint: Check directory permissions on ~/.mvm (set MVM_DATA_DIR to override).");
         } else if msg.contains("nix: command not found") || msg.contains("nix: not found") {
-            ui::warn("Hint: Nix is installed inside the Lima VM. Run 'mvm shell' first.");
+            ui::warn("Hint: Nix is installed inside the Lima VM. Run 'mvmctl shell' first.");
         }
     }
     result
@@ -1364,7 +1376,7 @@ const PUBLISH_CRATES: &[&str] = &[
     "mvm-build",
     "mvm-runtime",
     "mvm-cli",
-    "mvm",
+    "mvmctl",
 ];
 
 fn cmd_release(dry_run: bool, guard_only: bool) -> Result<()> {
@@ -1595,7 +1607,7 @@ fn check_git_tag(expected_tag: &str) -> Result<()> {
 fn cmd_build(path: &str, output: Option<&str>) -> Result<()> {
     let elf_path = image::build(path, output)?;
     ui::success(&format!("\nImage ready: {}", elf_path));
-    ui::info(&format!("Run with: mvm start {}", elf_path));
+    ui::info(&format!("Run with: mvmctl start {}", elf_path));
     Ok(())
 }
 
@@ -1725,21 +1737,31 @@ fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
-fn cmd_run(
-    flake_ref: &str,
-    name: Option<&str>,
-    profile: Option<&str>,
+struct RunParams<'a> {
+    flake_ref: Option<&'a str>,
+    template_name: Option<&'a str>,
+    name: Option<&'a str>,
+    profile: Option<&'a str>,
     cpus: Option<u32>,
     memory: Option<u32>,
-    config_path: Option<&str>,
-    volumes: &[String],
-) -> Result<()> {
+    config_path: Option<&'a str>,
+    volumes: &'a [String],
+}
+
+fn cmd_run(params: RunParams<'_>) -> Result<()> {
+    let RunParams {
+        flake_ref,
+        template_name,
+        name,
+        profile,
+        cpus,
+        memory,
+        config_path,
+        volumes,
+    } = params;
     if bootstrap::is_lima_required() {
         lima::require_running()?;
     }
-
-    let resolved = resolve_flake_ref(flake_ref)?;
-    let profile_display = profile.unwrap_or("default");
 
     // Generate a VM name if not provided
     let vm_name = match name {
@@ -1750,27 +1772,69 @@ fn cmd_run(
         }
     };
 
-    ui::step(
-        1,
-        2,
-        &format!(
-            "Building flake {} (profile={}, name={})",
-            resolved, profile_display, vm_name
-        ),
-    );
-
-    let env = mvm_runtime::build_env::RuntimeBuildEnv;
-    let result = mvm_build::dev_build::dev_build(&env, &resolved, profile)?;
-    mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
-
-    if result.cached {
-        ui::info(&format!("Cache hit — revision {}", result.revision_hash));
+    // Resolve artifact paths from either a pre-built template or a flake build.
+    let (
+        vmlinux_path,
+        initrd_path,
+        rootfs_path,
+        revision_hash,
+        source_flake,
+        source_profile,
+        tmpl_cpus,
+        tmpl_mem,
+    ) = if let Some(tmpl) = template_name {
+        ui::step(
+            1,
+            2,
+            &format!("Loading template '{}' for VM '{}'", tmpl, vm_name),
+        );
+        let (spec, vmlinux, initrd, rootfs, rev) =
+            mvm_runtime::vm::template::lifecycle::template_artifacts(tmpl)?;
+        ui::info(&format!("Using revision {}", rev));
+        (
+            vmlinux,
+            initrd,
+            rootfs,
+            rev,
+            spec.flake_ref.clone(),
+            Some(spec.profile.clone()),
+            Some(spec.vcpus as u32),
+            Some(spec.mem_mib),
+        )
     } else {
-        ui::info(&format!(
-            "Build complete — revision {}",
-            result.revision_hash
-        ));
-    }
+        let flake = flake_ref.expect("--flake or --template required");
+        let resolved = resolve_flake_ref(flake)?;
+        let profile_display = profile.unwrap_or("default");
+        ui::step(
+            1,
+            2,
+            &format!(
+                "Building flake {} (profile={}, name={})",
+                resolved, profile_display, vm_name
+            ),
+        );
+        let env = mvm_runtime::build_env::RuntimeBuildEnv;
+        let result = mvm_build::dev_build::dev_build(&env, &resolved, profile)?;
+        mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
+        if result.cached {
+            ui::info(&format!("Cache hit — revision {}", result.revision_hash));
+        } else {
+            ui::info(&format!(
+                "Build complete — revision {}",
+                result.revision_hash
+            ));
+        }
+        (
+            result.vmlinux_path,
+            result.initrd_path,
+            result.rootfs_path,
+            result.revision_hash,
+            flake.to_string(),
+            profile.map(|s| s.to_string()),
+            None,
+            None,
+        )
+    };
 
     ui::step(2, 2, &format!("Booting Firecracker VM '{}'", vm_name));
 
@@ -1791,8 +1855,14 @@ fn cmd_run(
     const DEFAULT_CPUS: u32 = 2;
     const DEFAULT_MEM: u32 = 1024;
 
-    let final_cpus = cpus.or(rt_config.cpus).unwrap_or(DEFAULT_CPUS);
-    let final_memory = memory.or(rt_config.memory).unwrap_or(DEFAULT_MEM);
+    let final_cpus = cpus
+        .or(rt_config.cpus)
+        .or(tmpl_cpus)
+        .unwrap_or(DEFAULT_CPUS);
+    let final_memory = memory
+        .or(rt_config.memory)
+        .or(tmpl_mem)
+        .unwrap_or(DEFAULT_MEM);
 
     // Allocate a network slot for this VM
     let slot = microvm::allocate_slot(&vm_name)?;
@@ -1800,12 +1870,12 @@ fn cmd_run(
     let run_config = microvm::FlakeRunConfig {
         name: vm_name,
         slot,
-        vmlinux_path: result.vmlinux_path,
-        initrd_path: result.initrd_path,
-        rootfs_path: result.rootfs_path,
-        revision_hash: result.revision_hash,
-        flake_ref: flake_ref.to_string(),
-        profile: profile.map(|s| s.to_string()),
+        vmlinux_path,
+        initrd_path,
+        rootfs_path,
+        revision_hash,
+        flake_ref: source_flake,
+        profile: source_profile,
         cpus: final_cpus,
         memory: final_memory,
         volumes: volume_cfg,
@@ -2083,7 +2153,7 @@ fn cmd_down(name: Option<&str>, config_path: Option<&str>) -> Result<()> {
 
 fn cmd_completions(shell: clap_complete::Shell) -> Result<()> {
     let mut cmd = Cli::command();
-    clap_complete::generate(shell, &mut cmd, "mvm", &mut std::io::stdout());
+    clap_complete::generate(shell, &mut cmd, "mvmctl", &mut std::io::stdout());
     Ok(())
 }
 
@@ -2189,7 +2259,7 @@ fn resolve_running_vm(name: &str) -> Result<String> {
 
     if !firecracker::is_vm_running(&pid_file)? {
         anyhow::bail!(
-            "VM '{}' is not running. Use 'mvm status' to list running VMs.",
+            "VM '{}' is not running. Use 'mvmctl status' to list running VMs.",
             name
         );
     }
@@ -2203,11 +2273,11 @@ fn cmd_vm_ping(name: &str) -> Result<()> {
     // Vsock UDS lives inside the Lima VM — delegate when on macOS
     if bootstrap::is_lima_required() {
         let mvm_installed =
-            shell::run_in_vm_stdout("test -f /usr/local/bin/mvm && echo yes || echo no")?;
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvmctl && echo yes || echo no")?;
         if mvm_installed.trim() != "yes" {
-            anyhow::bail!("mvm is not installed inside the Lima VM. Run 'mvm sync' first.");
+            anyhow::bail!("mvmctl is not installed inside the Lima VM. Run 'mvmctl sync' first.");
         }
-        shell::run_in_vm_visible(&format!("/usr/local/bin/mvm vm ping {}", name))?;
+        shell::run_in_vm_visible(&format!("/usr/local/bin/mvmctl vm ping {}", name))?;
         return Ok(());
     }
 
@@ -2235,13 +2305,13 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
     // Vsock UDS lives inside the Lima VM — delegate when on macOS
     if bootstrap::is_lima_required() {
         let mvm_installed =
-            shell::run_in_vm_stdout("test -f /usr/local/bin/mvm && echo yes || echo no")?;
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvmctl && echo yes || echo no")?;
         if mvm_installed.trim() != "yes" {
-            anyhow::bail!("mvm is not installed inside the Lima VM. Run 'mvm sync' first.");
+            anyhow::bail!("mvmctl is not installed inside the Lima VM. Run 'mvmctl sync' first.");
         }
         let json_flag = if json { " --json" } else { "" };
         shell::run_in_vm_visible(&format!(
-            "/usr/local/bin/mvm vm status {}{}",
+            "/usr/local/bin/mvmctl vm status {}{}",
             name, json_flag
         ))?;
         return Ok(());
@@ -2495,7 +2565,7 @@ mod tests {
 
     #[test]
     fn test_sync_command_parses() {
-        let cli = Cli::try_parse_from(["mvm", "sync"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "sync"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Sync {
@@ -2509,7 +2579,7 @@ mod tests {
 
     #[test]
     fn test_sync_debug_flag() {
-        let cli = Cli::try_parse_from(["mvm", "sync", "--debug"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "sync", "--debug"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Sync {
@@ -2523,7 +2593,7 @@ mod tests {
 
     #[test]
     fn test_sync_skip_deps_flag() {
-        let cli = Cli::try_parse_from(["mvm", "sync", "--skip-deps"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "sync", "--skip-deps"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Sync {
@@ -2537,7 +2607,7 @@ mod tests {
 
     #[test]
     fn test_sync_both_flags() {
-        let cli = Cli::try_parse_from(["mvm", "sync", "--debug", "--skip-deps"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "sync", "--debug", "--skip-deps"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Sync {
@@ -2554,7 +2624,7 @@ mod tests {
         let script = sync_build_script("/home/user/mvm", false, "aarch64");
         assert!(script.contains("--release"));
         assert!(script.contains("CARGO_TARGET_DIR='target/linux-aarch64'"));
-        assert!(script.contains("--bin mvm"));
+        assert!(script.contains("--bin mvmctl"));
         assert!(script.contains("cd '/home/user/mvm'"));
     }
 
@@ -2563,7 +2633,7 @@ mod tests {
         let script = sync_build_script("/home/user/mvm", true, "aarch64");
         assert!(!script.contains("--release"));
         assert!(script.contains("CARGO_TARGET_DIR='target/linux-aarch64'"));
-        assert!(script.contains("--bin mvm"));
+        assert!(script.contains("--bin mvmctl"));
     }
 
     #[test]
@@ -2575,7 +2645,7 @@ mod tests {
     #[test]
     fn test_sync_install_script_release() {
         let script = sync_install_script("/home/user/mvm", false, "aarch64");
-        assert!(script.contains("/target/linux-aarch64/release/mvm"));
+        assert!(script.contains("/target/linux-aarch64/release/mvmctl"));
         assert!(script.contains("/usr/local/bin/"));
         assert!(script.contains("install -m 0755"));
     }
@@ -2583,7 +2653,7 @@ mod tests {
     #[test]
     fn test_sync_install_script_debug() {
         let script = sync_install_script("/home/user/mvm", true, "aarch64");
-        assert!(script.contains("/target/linux-aarch64/debug/mvm"));
+        assert!(script.contains("/target/linux-aarch64/debug/mvmctl"));
     }
 
     #[test]
@@ -2606,8 +2676,8 @@ mod tests {
 
     #[test]
     fn test_build_flake_with_profile() {
-        let cli =
-            Cli::try_parse_from(["mvm", "build", "--flake", ".", "--profile", "gateway"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "build", "--flake", ".", "--profile", "gateway"])
+            .unwrap();
         match cli.command {
             Commands::Build { flake, profile, .. } => {
                 assert_eq!(flake.as_deref(), Some("."));
@@ -2619,7 +2689,7 @@ mod tests {
 
     #[test]
     fn test_build_flake_defaults_to_no_profile() {
-        let cli = Cli::try_parse_from(["mvm", "build", "--flake", "."]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "build", "--flake", "."]).unwrap();
         match cli.command {
             Commands::Build { flake, profile, .. } => {
                 assert_eq!(flake.as_deref(), Some("."));
@@ -2631,7 +2701,7 @@ mod tests {
 
     #[test]
     fn test_build_mvmfile_mode_still_works() {
-        let cli = Cli::try_parse_from(["mvm", "build", "myimage"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "build", "myimage"]).unwrap();
         match cli.command {
             Commands::Build { path, flake, .. } => {
                 assert_eq!(path, "myimage");
@@ -2675,7 +2745,7 @@ mod tests {
     #[test]
     fn test_run_parses_all_flags() {
         let cli = Cli::try_parse_from([
-            "mvm",
+            "mvmctl",
             "run",
             "--flake",
             ".",
@@ -2690,6 +2760,7 @@ mod tests {
         match cli.command {
             Commands::Run {
                 flake,
+                template: _,
                 profile,
                 cpus,
                 memory,
@@ -2697,7 +2768,7 @@ mod tests {
                 volume: _,
                 config: _,
             } => {
-                assert_eq!(flake, ".");
+                assert_eq!(flake, Some(".".to_string()));
                 assert_eq!(profile.as_deref(), Some("full"));
                 assert_eq!(cpus, Some(4));
                 assert_eq!(memory, Some(2048));
@@ -2708,10 +2779,11 @@ mod tests {
 
     #[test]
     fn test_run_defaults() {
-        let cli = Cli::try_parse_from(["mvm", "run", "--flake", "."]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
         match cli.command {
             Commands::Run {
                 flake,
+                template,
                 name,
                 profile,
                 cpus,
@@ -2719,11 +2791,12 @@ mod tests {
                 config: _,
                 volume,
             } => {
-                assert_eq!(flake, ".");
+                assert_eq!(flake, Some(".".to_string()));
+                assert!(template.is_none(), "template should be None when omitted");
                 assert!(name.is_none(), "name should be None when omitted");
                 assert!(profile.is_none(), "profile should be None when omitted");
-                assert_eq!(cpus, Some(2));
-                assert_eq!(memory, Some(1024));
+                assert!(cpus.is_none(), "cpus should be None when omitted");
+                assert!(memory.is_none(), "memory should be None when omitted");
                 assert_eq!(volume.len(), 0);
             }
             _ => panic!("Expected Run command"),
@@ -2731,16 +2804,40 @@ mod tests {
     }
 
     #[test]
-    fn test_run_requires_flake() {
-        let result = Cli::try_parse_from(["mvm", "run"]);
-        assert!(result.is_err(), "run should require --flake");
+    fn test_run_requires_source() {
+        let result = Cli::try_parse_from(["mvmctl", "run"]);
+        assert!(result.is_err(), "run should require --flake or --template");
+    }
+
+    #[test]
+    fn test_run_template_flag() {
+        let cli = Cli::try_parse_from(["mvmctl", "run", "--template", "openclaw"]).unwrap();
+        match cli.command {
+            Commands::Run {
+                flake, template, ..
+            } => {
+                assert!(flake.is_none());
+                assert_eq!(template, Some("openclaw".to_string()));
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_flake_and_template_conflict() {
+        let result =
+            Cli::try_parse_from(["mvmctl", "run", "--flake", ".", "--template", "openclaw"]);
+        assert!(
+            result.is_err(),
+            "--flake and --template should be mutually exclusive"
+        );
     }
 
     // ---- VM subcommand tests ----
 
     #[test]
     fn test_vm_ping_parses() {
-        let cli = Cli::try_parse_from(["mvm", "vm", "ping", "happy-panda"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "ping", "happy-panda"]).unwrap();
         match cli.command {
             Commands::Vm {
                 action: VmCmd::Ping { name },
@@ -2753,7 +2850,7 @@ mod tests {
 
     #[test]
     fn test_vm_ping_no_name_targets_all() {
-        let cli = Cli::try_parse_from(["mvm", "vm", "ping"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "ping"]).unwrap();
         match cli.command {
             Commands::Vm {
                 action: VmCmd::Ping { name },
@@ -2766,7 +2863,7 @@ mod tests {
 
     #[test]
     fn test_vm_status_parses() {
-        let cli = Cli::try_parse_from(["mvm", "vm", "status", "my-vm"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "status", "my-vm"]).unwrap();
         match cli.command {
             Commands::Vm {
                 action: VmCmd::Status { name, json },
@@ -2780,7 +2877,7 @@ mod tests {
 
     #[test]
     fn test_vm_status_no_name_targets_all() {
-        let cli = Cli::try_parse_from(["mvm", "vm", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "status"]).unwrap();
         match cli.command {
             Commands::Vm {
                 action: VmCmd::Status { name, json },
@@ -2794,7 +2891,7 @@ mod tests {
 
     #[test]
     fn test_vm_status_json_flag() {
-        let cli = Cli::try_parse_from(["mvm", "vm", "status", "my-vm", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "status", "my-vm", "--json"]).unwrap();
         match cli.command {
             Commands::Vm {
                 action: VmCmd::Status { name, json },
@@ -2808,7 +2905,7 @@ mod tests {
 
     #[test]
     fn test_vm_requires_subcommand() {
-        let result = Cli::try_parse_from(["mvm", "vm"]);
+        let result = Cli::try_parse_from(["mvmctl", "vm"]);
         assert!(result.is_err(), "vm should require a subcommand");
     }
 
@@ -2816,7 +2913,7 @@ mod tests {
 
     #[test]
     fn test_up_parses_no_args() {
-        let cli = Cli::try_parse_from(["mvm", "up"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "up"]).unwrap();
         match cli.command {
             Commands::Up {
                 name,
@@ -2839,7 +2936,7 @@ mod tests {
 
     #[test]
     fn test_up_parses_with_flake() {
-        let cli = Cli::try_parse_from(["mvm", "up", "--flake", "./nix/openclaw/"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "./nix/openclaw/"]).unwrap();
         match cli.command {
             Commands::Up { flake, name, .. } => {
                 assert_eq!(flake.as_deref(), Some("./nix/openclaw/"));
@@ -2852,7 +2949,7 @@ mod tests {
     #[test]
     fn test_up_parses_with_all_flags() {
         let cli = Cli::try_parse_from([
-            "mvm",
+            "mvmctl",
             "up",
             "gw",
             "-f",
@@ -2889,7 +2986,7 @@ mod tests {
 
     #[test]
     fn test_down_parses_no_args() {
-        let cli = Cli::try_parse_from(["mvm", "down"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "down"]).unwrap();
         match cli.command {
             Commands::Down { name, config } => {
                 assert!(name.is_none());
@@ -2901,7 +2998,7 @@ mod tests {
 
     #[test]
     fn test_down_parses_with_name() {
-        let cli = Cli::try_parse_from(["mvm", "down", "gw"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "down", "gw"]).unwrap();
         match cli.command {
             Commands::Down { name, config } => {
                 assert_eq!(name.as_deref(), Some("gw"));
@@ -2913,7 +3010,7 @@ mod tests {
 
     #[test]
     fn test_down_parses_with_config() {
-        let cli = Cli::try_parse_from(["mvm", "down", "-f", "my-fleet.toml"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "down", "-f", "my-fleet.toml"]).unwrap();
         match cli.command {
             Commands::Down { name, config } => {
                 assert!(name.is_none());
@@ -2927,7 +3024,7 @@ mod tests {
 
     #[test]
     fn test_release_dry_run_parses() {
-        let cli = Cli::try_parse_from(["mvm", "release", "--dry-run"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "release", "--dry-run"]).unwrap();
         match cli.command {
             Commands::Release {
                 dry_run,
@@ -2942,7 +3039,7 @@ mod tests {
 
     #[test]
     fn test_release_guard_only_parses() {
-        let cli = Cli::try_parse_from(["mvm", "release", "--guard-only"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "release", "--guard-only"]).unwrap();
         match cli.command {
             Commands::Release {
                 dry_run,
@@ -2957,7 +3054,7 @@ mod tests {
 
     #[test]
     fn test_release_no_flags_parses() {
-        let cli = Cli::try_parse_from(["mvm", "release"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "release"]).unwrap();
         match cli.command {
             Commands::Release {
                 dry_run,
@@ -2995,12 +3092,12 @@ edition = "2024"
     fn test_publish_crates_order() {
         // Foundation crate must come first, facade last
         assert_eq!(PUBLISH_CRATES[0], "mvm-core");
-        assert_eq!(*PUBLISH_CRATES.last().unwrap(), "mvm");
+        assert_eq!(*PUBLISH_CRATES.last().unwrap(), "mvmctl");
     }
 
     #[test]
     fn test_security_status_parses() {
-        let cli = Cli::try_parse_from(["mvm", "security", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "security", "status"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Security {
@@ -3011,7 +3108,7 @@ edition = "2024"
 
     #[test]
     fn test_security_status_json_flag() {
-        let cli = Cli::try_parse_from(["mvm", "security", "status", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["mvmctl", "security", "status", "--json"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Security {

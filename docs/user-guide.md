@@ -47,7 +47,7 @@ A minimal mvm-compatible flake:
 Profiles are named outputs within your flake. When you create a pool:
 
 ```bash
-mvm pool create acme/workers --flake ./my-flake --profile baseline --cpus 2 --mem 1024
+mvmctl pool create acme/workers --flake ./my-flake --profile baseline --cpus 2 --mem 1024
 ```
 
 mvm builds the `baseline` output from `./my-flake`.
@@ -60,7 +60,7 @@ mvm builds the `baseline` output from `./my-flake`.
 
 ## Build Process
 
-When you run `mvm pool build <tenant>/<pool>`:
+When you run `mvmctl pool build <tenant>/<pool>`:
 
 1. An ephemeral builder microVM starts with Nix pre-installed
 2. The flake is copied into the builder VM
@@ -99,7 +99,7 @@ baseline = pkgs.buildEnv {
 Pools can provision data disks per instance:
 
 ```bash
-mvm pool create acme/workers --flake . --profile baseline --cpus 2 --mem 1024 --data-disk 1024
+mvmctl pool create acme/workers --flake . --profile baseline --cpus 2 --mem 1024 --data-disk 1024
 ```
 
 This creates a 1 GiB ext4 data disk mounted at `/data` inside each instance.
@@ -109,7 +109,7 @@ This creates a 1 GiB ext4 data disk mounted at `/data` inside each instance.
 Tenant-level secrets are injected into instances via a read-only virtio block device mounted at `/run/secrets/`:
 
 ```bash
-mvm tenant secrets set acme --from-file secrets.json
+mvmctl tenant secrets set acme --from-file secrets.json
 ```
 
 Inside the instance, access secrets at `/run/secrets/secrets.json`.
@@ -119,7 +119,7 @@ Inside the instance, access secrets at `/run/secrets/secrets.json`.
 After building, scale the pool:
 
 ```bash
-mvm pool scale acme/workers --running 4 --warm 2 --sleeping 2
+mvmctl pool scale acme/workers --running 4 --warm 2 --sleeping 2
 ```
 
 - **Running** -- actively serving, full CPU
@@ -131,7 +131,7 @@ mvm pool scale acme/workers --running 4 --warm 2 --sleeping 2
 To deploy a new version:
 
 1. Modify your flake
-2. Re-build: `mvm pool build acme/workers`
+2. Re-build: `mvmctl pool build acme/workers`
 3. New instances use the updated revision automatically
 4. Existing running instances continue on the old revision until restarted
 
@@ -140,7 +140,7 @@ To deploy a new version:
 If a new revision is broken:
 
 ```bash
-mvm pool rollback acme/workers --revision <hash>
+mvmctl pool rollback acme/workers --revision <hash>
 ```
 
 This updates the `current` symlink without rebuilding.
@@ -154,7 +154,7 @@ Templates are global, tenant-agnostic base images stored under `~/.mvm/templates
 ### Scaffold a Template Project
 
 ```bash
-mvm template init my-app --local
+mvmctl template init my-app --local
 ```
 
 Creates a minimal directory with a Nix flake:
@@ -173,16 +173,16 @@ The scaffold is intentionally minimal. Add extra NixOS modules, role configs, or
 Register a single template:
 
 ```bash
-mvm template create my-worker --flake ./my-app --profile minimal --role worker --cpus 2 --mem 1024
-mvm template build my-worker
+mvmctl template create my-worker --flake ./my-app --profile minimal --role worker --cpus 2 --mem 1024
+mvmctl template build my-worker
 ```
 
 Or create multiple role variants at once:
 
 ```bash
-mvm template create-multi my-app --flake ./my-app --profile minimal --roles gateway,worker --cpus 2 --mem 1024
-mvm template build my-app-gateway
-mvm template build my-app-worker
+mvmctl template create-multi my-app --flake ./my-app --profile minimal --roles gateway,worker --cpus 2 --mem 1024
+mvmctl template build my-app-gateway
+mvmctl template build my-app-worker
 ```
 
 ### Config-Driven Multi-Variant Builds
@@ -215,23 +215,23 @@ data_disk_mib = 512
 Build all variants:
 
 ```bash
-mvm template build my-app --config template.toml
+mvmctl template build my-app --config template.toml
 ```
 
 ### Inspect Templates
 
 ```bash
-mvm template list              # show all templates (VM + local)
-mvm template list --json       # JSON output
-mvm template info my-worker    # show template details
-mvm template info my-worker --json
+mvmctl template list              # show all templates (VM + local)
+mvmctl template list --json       # JSON output
+mvmctl template info my-worker    # show template details
+mvmctl template info my-worker --json
 ```
 
 ### Delete
 
 ```bash
-mvm template delete my-worker
-mvm template delete my-worker --force   # skip confirmation
+mvmctl template delete my-worker
+mvmctl template delete my-worker --force   # skip confirmation
 ```
 
 ### Template Registry (Push / Pull / Verify)
@@ -253,13 +253,13 @@ export MVM_TEMPLATE_REGISTRY_INSECURE="false"             # allow http://
 Push, pull, and verify:
 
 ```bash
-mvm template push my-worker                  # push current revision
-mvm template push my-worker --revision abc123 # push specific revision
-mvm template pull my-worker                  # pull latest from registry
-mvm template verify my-worker                # verify local checksums
+mvmctl template push my-worker                  # push current revision
+mvmctl template push my-worker --revision abc123 # push specific revision
+mvmctl template pull my-worker                  # pull latest from registry
+mvmctl template verify my-worker                # verify local checksums
 ```
 
-Push/pull/verify must run inside the Linux VM on macOS (`mvm shell`, then rerun).
+Push/pull/verify must run inside the Linux VM on macOS (`mvmctl shell`, then rerun).
 
 ### Cache Keys
 
@@ -270,7 +270,7 @@ Each template revision records a composite cache key: `SHA256(flake.lock hash + 
 When creating a pool, set `--template` to link it to a template:
 
 ```bash
-mvm pool create acme/workers --template my-worker --flake . --profile minimal --cpus 2 --mem 1024
+mvmctl pool create acme/workers --template my-worker --flake . --profile minimal --cpus 2 --mem 1024
 ```
 
-On `mvm pool build acme/workers`, if the template's cache key matches (same flake.lock, profile, and role), artifacts are copied from the template -- no per-tenant rebuild needed. Use `--force` to bypass the cache.
+On `mvmctl pool build acme/workers`, if the template's cache key matches (same flake.lock, profile, and role), artifacts are copied from the template -- no per-tenant rebuild needed. Use `--force` to bypass the cache.

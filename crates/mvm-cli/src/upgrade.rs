@@ -64,7 +64,7 @@ fn strip_v_prefix(tag: &str) -> &str {
 
 /// Download the release archive into the given temp directory.
 fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
-    let archive_name = format!("mvm-{}.tar.gz", target);
+    let archive_name = format!("mvmctl-{}.tar.gz", target);
     let download_url = format!(
         "https://github.com/{}/releases/download/{}/{}",
         GITHUB_REPO, version, archive_name
@@ -95,7 +95,7 @@ fn is_writable(path: &Path) -> bool {
 
 /// Extract the archive and install the binary + resources, replacing the current installation.
 fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Result<()> {
-    let archive_name = format!("mvm-{}.tar.gz", target);
+    let archive_name = format!("mvmctl-{}.tar.gz", target);
     let archive_path = tmp_dir.join(&archive_name);
 
     let output = run_host(
@@ -112,11 +112,11 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         anyhow::bail!("Failed to extract archive");
     }
 
-    let extracted_dir = tmp_dir.join(format!("mvm-{}", target));
-    let new_binary = extracted_dir.join("mvm");
+    let extracted_dir = tmp_dir.join(format!("mvmctl-{}", target));
+    let new_binary = extracted_dir.join("mvmctl");
     if !new_binary.exists() {
         anyhow::bail!(
-            "Binary not found in archive at expected path: mvm-{}/mvm",
+            "Binary not found in archive at expected path: mvmctl-{}/mvmctl",
             target
         );
     }

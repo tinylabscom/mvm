@@ -1325,22 +1325,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm"
-version = "0.3.2"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "mimalloc",
- "mvm-build",
- "mvm-cli",
- "mvm-core",
- "mvm-guest",
- "mvm-runtime",
- "mvm-security",
- "predicates",
-]
-
-[[package]]
 name = "mvm-build"
 version = "0.3.2"
 dependencies = [
@@ -1448,6 +1432,22 @@ dependencies = [
  "mvm-core",
  "regex",
  "tracing",
+]
+
+[[package]]
+name = "mvmctl"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "mimalloc",
+ "mvm-build",
+ "mvm-cli",
+ "mvm-core",
+ "mvm-guest",
+ "mvm-runtime",
+ "mvm-security",
+ "predicates",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ Requires=mvm-hostd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvm agent serve \
+ExecStart=/usr/local/bin/mvmctl agent serve \
     --desired /etc/mvm/desired.json \
     --interval-secs 30 \
     --listen 0.0.0.0:4433 \

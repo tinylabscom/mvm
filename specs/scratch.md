@@ -27,6 +27,6 @@ https://safeclaw.io/
  
  ---
 
- Is there any way we can use better patterns than regex? It seems like we could use rust best practices to avoid writing a bunch of regex. 
+ I think I want to take a different approach. We had a simple development version working without any orchestration work. I think I'd like to take the approach where we keep the simplest version in one repository and then break out the other work in a sibling repository with the orchestrator.
 
- Are we modifying both `mvm` and `mvmd`?
+That way we can have a simplest version working in a single repo and then have the management work, which is more complex

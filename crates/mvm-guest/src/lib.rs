@@ -3,4 +3,5 @@
 
 pub mod builder_agent;
 pub mod integrations;
+pub mod probes;
 pub mod vsock;
