@@ -12,40 +12,40 @@ static TERA: OnceLock<Result<tera::Tera>> = OnceLock::new();
 fn script_source(name: &str) -> Option<&'static str> {
     match name {
         "ensure_builder_artifacts" => Some(include_str!(
-            "../../../resources/builder_scripts/ensure_builder_artifacts.sh.tera"
+            "../resources/builder_scripts/ensure_builder_artifacts.sh.tera"
         )),
         "launch_firecracker_ssh" => Some(include_str!(
-            "../../../resources/builder_scripts/launch_firecracker_ssh.sh.tera"
+            "../resources/builder_scripts/launch_firecracker_ssh.sh.tera"
         )),
         "launch_firecracker_vsock" => Some(include_str!(
-            "../../../resources/builder_scripts/launch_firecracker_vsock.sh.tera"
+            "../resources/builder_scripts/launch_firecracker_vsock.sh.tera"
         )),
         "builder_keygen" => Some(include_str!(
-            "../../../resources/builder_scripts/builder_keygen.sh.tera"
+            "../resources/builder_scripts/builder_keygen.sh.tera"
         )),
         "refresh_builder_rootfs" => Some(include_str!(
-            "../../../resources/builder_scripts/refresh_builder_rootfs.sh.tera"
+            "../resources/builder_scripts/refresh_builder_rootfs.sh.tera"
         )),
         "download_builder_artifacts" => Some(include_str!(
-            "../../../resources/builder_scripts/download_builder_artifacts.sh.tera"
+            "../resources/builder_scripts/download_builder_artifacts.sh.tera"
         )),
         "sync_local_flake" => Some(include_str!(
-            "../../../resources/builder_scripts/sync_local_flake.sh.tera"
+            "../resources/builder_scripts/sync_local_flake.sh.tera"
         )),
         "run_nix_build_ssh" => Some(include_str!(
-            "../../../resources/builder_scripts/run_nix_build_ssh.sh.tera"
+            "../resources/builder_scripts/run_nix_build_ssh.sh.tera"
         )),
         "extract_artifacts_ssh" => Some(include_str!(
-            "../../../resources/builder_scripts/extract_artifacts_ssh.sh.tera"
+            "../resources/builder_scripts/extract_artifacts_ssh.sh.tera"
         )),
         "extract_artifacts_vsock_disk" => Some(include_str!(
-            "../../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
+            "../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
         )),
         "run_nix_build_host" => Some(include_str!(
-            "../../../resources/builder_scripts/run_nix_build_host.sh.tera"
+            "../resources/builder_scripts/run_nix_build_host.sh.tera"
         )),
         "extract_artifacts_host" => Some(include_str!(
-            "../../../resources/builder_scripts/extract_artifacts_host.sh.tera"
+            "../resources/builder_scripts/extract_artifacts_host.sh.tera"
         )),
         _ => None,
     }

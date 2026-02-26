@@ -67,19 +67,27 @@ echo "Verified: All crates use workspace version"
 # 4. Check inter-crate dependency versions match workspace version
 echo "Checking inter-crate dependency versions..."
 
-for cargo_toml in Cargo.toml crates/*/Cargo.toml; do
+# Check [workspace.dependencies] entries for mvm-* crates
+while IFS= read -r line; do
+    dep_version=$(echo "$line" | sed -n 's/.*version *= *"\([^"]*\)".*/\1/p')
+    if [ -n "$dep_version" ] && [ "$dep_version" != "$WORKSPACE_VERSION" ]; then
+        echo "Error: Version mismatch in workspace dependencies"
+        echo "  Found: $line"
+        echo "  Expected version: ${WORKSPACE_VERSION}"
+        FOUND_ERROR=1
+    fi
+done < <(grep -E '^mvm-[a-z]+ *= *\{.*version' Cargo.toml || true)
+
+# Check that subcrate deps use .workspace = true (not hardcoded versions)
+for cargo_toml in crates/*/Cargo.toml; do
     if [ ! -f "$cargo_toml" ]; then
         continue
     fi
-    # Find lines like: mvm-core = { path = "...", version = "X.Y.Z" }
-    # and verify the version matches workspace version
     while IFS= read -r line; do
-        # Extract the version from the dependency line (portable, no -P flag)
         dep_version=$(echo "$line" | sed -n 's/.*version *= *"\([^"]*\)".*/\1/p')
-        if [ -n "$dep_version" ] && [ "$dep_version" != "$WORKSPACE_VERSION" ]; then
-            echo "Error: Version mismatch in $cargo_toml"
+        if [ -n "$dep_version" ]; then
+            echo "Error: Hardcoded inter-crate version in $cargo_toml (use .workspace = true)"
             echo "  Found: $line"
-            echo "  Expected version: ${WORKSPACE_VERSION}"
             FOUND_ERROR=1
         fi
     done < <(grep -E '^mvm-[a-z]+ *= *\{.*version' "$cargo_toml" || true)

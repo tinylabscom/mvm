@@ -17,7 +17,7 @@ name = "mvm-guest-agent"
 path = "src/bin/mvm-guest-agent.rs"
 
 [dependencies]
-mvm-core = { path = "../mvm-core", version = "0.3.0" }
+mvm-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

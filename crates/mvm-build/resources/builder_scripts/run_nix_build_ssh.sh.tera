@@ -1,0 +1,4 @@
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+    -i {{key}} {{user}}@{{ip}} \
+    'timeout {{timeout}} nix build {{attr}} --no-link --print-out-paths' \
+    | tee {{log}}

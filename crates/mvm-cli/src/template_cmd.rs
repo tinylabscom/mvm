@@ -217,7 +217,7 @@ fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
     if !gitignore.exists() {
         fs::write(
             &gitignore,
-            include_str!("../../../resources/template_scaffold/.gitignore"),
+            include_str!("../resources/template_scaffold/.gitignore"),
         )?;
     }
 
@@ -225,14 +225,14 @@ fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
     if !flake_path.exists() {
         fs::write(
             &flake_path,
-            include_str!("../../../resources/template_scaffold/flake.nix"),
+            include_str!("../resources/template_scaffold/flake.nix"),
         )?;
     }
 
     let readme_path = dir.join("README.md");
     if !readme_path.exists() {
-        let content = include_str!("../../../resources/template_scaffold/README.md")
-            .replace("{{name}}", name);
+        let content =
+            include_str!("../resources/template_scaffold/README.md").replace("{{name}}", name);
         fs::write(&readme_path, content)?;
     }
 
@@ -250,10 +250,7 @@ fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
 fn scaffold_mvm_baseline(dir: &Path) -> Result<()> {
     let baseline_path = dir.join("baseline.nix");
     if !baseline_path.exists() {
-        fs::write(
-            &baseline_path,
-            include_str!("../../../nix/openclaw/guests/baseline.nix"),
-        )?;
+        fs::write(&baseline_path, include_str!("../resources/baseline.nix"))?;
     }
     Ok(())
 }

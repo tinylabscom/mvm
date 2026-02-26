@@ -10,9 +10,9 @@ authors.workspace = true
 autobins = false
 
 [dependencies]
-mvm-core = { path = "../mvm-core", version = "0.3.0" }
-mvm-guest = { path = "../mvm-guest", version = "0.3.0" }
-mvm-build = { path = "../mvm-build", version = "0.3.0" }
+mvm-core.workspace = true
+mvm-guest.workspace = true
+mvm-build.workspace = true
 anyhow.workspace = true
 colored.workspace = true
 indicatif.workspace = true

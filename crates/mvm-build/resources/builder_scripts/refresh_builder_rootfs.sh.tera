@@ -1,0 +1,53 @@
+set -euo pipefail
+cd {{builder_dir}}
+TMP_MOUNT=$(mktemp -d)
+sudo mount -o loop rootfs.ext4 "$TMP_MOUNT"
+if [ "{{inject_ssh}}" = "yes" ]; then
+    sudo mkdir -p "$TMP_MOUNT/root/.ssh"
+    printf '%s\n' '{{auth_keys}}' | sudo tee "$TMP_MOUNT/root/.ssh/authorized_keys" >/dev/null
+    sudo chmod 700 "$TMP_MOUNT/root/.ssh"
+    sudo chmod 600 "$TMP_MOUNT/root/.ssh/authorized_keys"
+    sudo mkdir -p "$TMP_MOUNT/etc/ssh/sshd_config.d"
+    printf 'PermitRootLogin yes\nPubkeyAuthentication yes\nPasswordAuthentication no\n' | sudo tee "$TMP_MOUNT/etc/ssh/sshd_config.d/mvm.conf" >/dev/null
+fi
+sudo mkdir -p "$TMP_MOUNT$(dirname {{agent_dst}})"
+sudo cp "{{agent_src}}" "$TMP_MOUNT{{agent_dst}}"
+sudo chmod 755 "$TMP_MOUNT{{agent_dst}}"
+sudo mkdir -p "$TMP_MOUNT$(dirname {{agent_service}})"
+cat <<'AGENTEOF' | sudo tee "$TMP_MOUNT{{agent_service}}" >/dev/null
+[Unit]
+Description=MVM Builder Agent
+After=basic.target
+
+[Service]
+Type=simple
+Environment=PATH=/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart={{agent_dst}}
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+AGENTEOF
+sudo mkdir -p "$TMP_MOUNT/etc/nix"
+printf 'experimental-features = nix-command flakes\n' | sudo tee "$TMP_MOUNT/etc/nix/nix.conf" >/dev/null
+sudo mkdir -p "$TMP_MOUNT/root/.config/nix"
+printf 'experimental-features = nix-command flakes\n' | sudo tee "$TMP_MOUNT/root/.config/nix/nix.conf" >/dev/null
+printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' | sudo tee "$TMP_MOUNT/etc/resolv.conf" >/dev/null
+sudo mkdir -p "$TMP_MOUNT/etc/systemd/system/multi-user.target.wants"
+sudo ln -sf "{{agent_service}}" "$TMP_MOUNT/etc/systemd/system/multi-user.target.wants/mvm-builder-agent.service"
+if [ "{{inject_ssh}}" = "yes" ] && grep -q '^ubuntu:' "$TMP_MOUNT/etc/passwd"; then
+    sudo mkdir -p "$TMP_MOUNT/home/ubuntu/.ssh"
+    printf '%s\n' '{{auth_keys}}' | sudo tee "$TMP_MOUNT/home/ubuntu/.ssh/authorized_keys" >/dev/null
+    UB_IDS=$(awk -F: '/^ubuntu:/{print $3 ":" $4}' "$TMP_MOUNT/etc/passwd" | head -1)
+    if [ -n "$UB_IDS" ]; then
+        sudo chown -R "$UB_IDS" "$TMP_MOUNT/home/ubuntu/.ssh"
+    fi
+    sudo chmod 700 "$TMP_MOUNT/home/ubuntu/.ssh"
+    sudo chmod 600 "$TMP_MOUNT/home/ubuntu/.ssh/authorized_keys"
+fi
+if [ "{{inject_ssh}}" = "yes" ]; then
+    sudo cat "$TMP_MOUNT/root/.ssh/authorized_keys" | sed 's/^/[mvm] injected key: /'
+fi
+sudo umount "$TMP_MOUNT"
+rmdir "$TMP_MOUNT"
