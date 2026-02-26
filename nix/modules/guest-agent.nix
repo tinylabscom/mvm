@@ -19,6 +19,11 @@
 { mvm-guest-agent, ... }:
 
 {
+  # Ensure the integration drop-in directory exists so the agent can scan it.
+  systemd.tmpfiles.rules = [
+    "d /etc/mvm/integrations.d 0755 root root -"
+  ];
+
   systemd.services.mvm-guest-agent = {
     description = "MVM Guest Agent";
     after = [ "basic.target" ];

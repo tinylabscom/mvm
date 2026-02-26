@@ -1429,6 +1429,7 @@ fn cmd_build_flake(flake_ref: &str, profile: Option<&str>, watch: bool) -> Resul
         );
 
         let result = mvm_build::dev_build::dev_build(&env, &resolved, profile)?;
+        mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
         ui::step(2, 2, "Build complete");
 
@@ -1517,6 +1518,7 @@ fn cmd_run(
 
     let env = mvm_runtime::build_env::RuntimeBuildEnv;
     let result = mvm_build::dev_build::dev_build(&env, &resolved, profile)?;
+    mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
     if result.cached {
         ui::info(&format!("Cache hit — revision {}", result.revision_hash));
@@ -1724,6 +1726,7 @@ fn cmd_up(
 
             let env = mvm_runtime::build_env::RuntimeBuildEnv;
             let result = mvm_build::dev_build::dev_build(&env, &resolved_flake, profile)?;
+            mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
             let slot = microvm::allocate_slot(&vm_name)?;
 
@@ -1791,6 +1794,7 @@ fn build_profiles(
         );
 
         let result = mvm_build::dev_build::dev_build(&env, resolved_flake, profile.as_deref())?;
+        mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
         if result.cached {
             ui::info(&format!("Cache hit — revision {}", result.revision_hash));
@@ -2010,11 +2014,28 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
             status,
             last_busy_at,
         } => {
+            // Query integration health (best-effort — old agents return empty list)
+            let integrations =
+                mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+
             if json {
+                let integration_json: Vec<serde_json::Value> = integrations
+                    .iter()
+                    .map(|ig| {
+                        serde_json::json!({
+                            "name": ig.name,
+                            "status": ig.status,
+                            "healthy": ig.health.as_ref().map(|h| h.healthy),
+                            "detail": ig.health.as_ref().map(|h| &h.detail),
+                            "checked_at": ig.health.as_ref().map(|h| &h.checked_at),
+                        })
+                    })
+                    .collect();
                 let obj = serde_json::json!({
                     "name": name,
                     "worker_status": status,
                     "last_busy_at": last_busy_at,
+                    "integrations": integration_json,
                 });
                 println!("{}", serde_json::to_string_pretty(&obj)?);
             } else {
@@ -2022,6 +2043,21 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
                 ui::status_line("Worker status:", &status);
                 let busy = last_busy_at.as_deref().unwrap_or("never");
                 ui::status_line("Last busy:", busy);
+                if !integrations.is_empty() {
+                    println!();
+                    ui::status_line(
+                        "Integrations:",
+                        &format!("{} registered", integrations.len()),
+                    );
+                    for ig in &integrations {
+                        let health_str = match &ig.health {
+                            Some(h) if h.healthy => "healthy".to_string(),
+                            Some(h) => format!("unhealthy: {}", h.detail),
+                            None => "pending".to_string(),
+                        };
+                        println!("  {:<24} {}", ig.name, health_str);
+                    }
+                }
             }
             Ok(())
         }
@@ -2113,13 +2149,20 @@ fn cmd_vm_status_all(json: bool) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        println!("  {:<16} {:<10} {:<24}", "NAME", "STATUS", "LAST BUSY");
-        println!("  {}", "-".repeat(50));
+        let integ_header = "INTEGRATIONS";
+        println!(
+            "  {:<16} {:<10} {:<24} {}",
+            "NAME", "STATUS", "LAST BUSY", integ_header
+        );
+        println!("  {}", "-".repeat(66));
         for name in &names {
             match cmd_vm_status_row(name) {
-                Ok((status, last_busy)) => {
+                Ok((status, last_busy, integrations)) => {
                     let busy = last_busy.as_deref().unwrap_or("never");
-                    println!("  {:<16} {:<10} {:<24}", name, status, busy);
+                    println!(
+                        "  {:<16} {:<10} {:<24} {}",
+                        name, status, busy, integrations
+                    );
                 }
                 Err(e) => {
                     println!("  {:<16} {:<10} {}", name, "error", e);
@@ -2139,11 +2182,28 @@ fn cmd_vm_status_json(name: &str) -> Result<serde_json::Value> {
         mvm_guest::vsock::GuestResponse::WorkerStatus {
             status,
             last_busy_at,
-        } => Ok(serde_json::json!({
-            "name": name,
-            "worker_status": status,
-            "last_busy_at": last_busy_at,
-        })),
+        } => {
+            let integrations =
+                mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+            let integration_json: Vec<serde_json::Value> = integrations
+                .iter()
+                .map(|ig| {
+                    serde_json::json!({
+                        "name": ig.name,
+                        "status": ig.status,
+                        "healthy": ig.health.as_ref().map(|h| h.healthy),
+                        "detail": ig.health.as_ref().map(|h| &h.detail),
+                        "checked_at": ig.health.as_ref().map(|h| &h.checked_at),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "name": name,
+                "worker_status": status,
+                "last_busy_at": last_busy_at,
+                "integrations": integration_json,
+            }))
+        }
         mvm_guest::vsock::GuestResponse::Error { message } => {
             anyhow::bail!("Guest agent error: {}", message)
         }
@@ -2151,8 +2211,8 @@ fn cmd_vm_status_json(name: &str) -> Result<serde_json::Value> {
     }
 }
 
-/// Query a single VM's status and return (status, last_busy_at).
-fn cmd_vm_status_row(name: &str) -> Result<(String, Option<String>)> {
+/// Query a single VM's status and return (status, last_busy_at, integrations_summary).
+fn cmd_vm_status_row(name: &str) -> Result<(String, Option<String>, String)> {
     let abs_dir = resolve_running_vm(name)?;
     let vsock_path = format!("{}/v.sock", abs_dir);
     let resp = mvm_guest::vsock::query_worker_status_at(&vsock_path)?;
@@ -2160,7 +2220,20 @@ fn cmd_vm_status_row(name: &str) -> Result<(String, Option<String>)> {
         mvm_guest::vsock::GuestResponse::WorkerStatus {
             status,
             last_busy_at,
-        } => Ok((status, last_busy_at)),
+        } => {
+            let integrations =
+                mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+            let summary = if integrations.is_empty() {
+                "-".to_string()
+            } else {
+                let healthy = integrations
+                    .iter()
+                    .filter(|ig| ig.health.as_ref().is_some_and(|h| h.healthy))
+                    .count();
+                format!("{}/{} healthy", healthy, integrations.len())
+            };
+            Ok((status, last_busy_at, summary))
+        }
         mvm_guest::vsock::GuestResponse::Error { message } => {
             anyhow::bail!("Guest agent error: {}", message)
         }

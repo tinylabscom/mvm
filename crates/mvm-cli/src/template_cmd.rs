@@ -234,5 +234,24 @@ fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
         fs::write(&readme_path, content)?;
     }
 
+    // Scaffold the baseline NixOS guest config. The guest agent modules
+    // come from the mvm-src flake input automatically.
+    scaffold_mvm_baseline(dir)?;
+
+    Ok(())
+}
+
+/// Write the mvm baseline NixOS config into the scaffold directory.
+///
+/// The guest agent modules come from the `mvm-src` flake input,
+/// but the baseline guest config is scaffolded locally so users can customize it.
+fn scaffold_mvm_baseline(dir: &Path) -> Result<()> {
+    let baseline_path = dir.join("baseline.nix");
+    if !baseline_path.exists() {
+        fs::write(
+            &baseline_path,
+            include_str!("../../../nix/openclaw/guests/baseline.nix"),
+        )?;
+    }
     Ok(())
 }

@@ -358,6 +358,22 @@ pub fn query_worker_status_at(vsock_uds_path: &str) -> Result<GuestResponse> {
     send_request(&mut stream, &GuestRequest::WorkerStatus)
 }
 
+/// Query integration status from the guest agent at a specific UDS path.
+pub fn query_integration_status_at(
+    vsock_uds_path: &str,
+) -> Result<Vec<crate::integrations::IntegrationStateReport>> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::IntegrationStatus)?;
+
+    match resp {
+        GuestResponse::IntegrationStatusReport { integrations } => Ok(integrations),
+        GuestResponse::Error { message } => {
+            bail!("Guest integration status error: {}", message);
+        }
+        _ => bail!("Unexpected response to IntegrationStatus"),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -414,6 +430,7 @@ mod tests {
                     status: IntegrationStatus::Active,
                     last_checkpoint_at: Some("2025-06-01T12:00:00Z".to_string()),
                     state_size_bytes: 8192,
+                    health: None,
                 }],
             },
             GuestResponse::CheckpointResult {
@@ -541,6 +558,12 @@ mod tests {
     #[test]
     fn test_query_worker_status_at_nonexistent_path() {
         let result = query_worker_status_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_integration_status_at_nonexistent_path() {
+        let result = query_integration_status_at("/nonexistent/v.sock");
         assert!(result.is_err());
     }
 

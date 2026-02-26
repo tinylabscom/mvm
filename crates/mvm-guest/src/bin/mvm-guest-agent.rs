@@ -22,6 +22,9 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mvm_guest::integrations::{
+    self, IntegrationEntry, IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
+};
 use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse};
 use serde::Deserialize;
 
@@ -196,6 +199,19 @@ impl AgentState {
 }
 
 // ============================================================================
+// Integration health state (shared between health thread and request handlers)
+// ============================================================================
+
+struct IntegrationHealth {
+    entry: IntegrationEntry,
+    last_result: Option<IntegrationHealthResult>,
+}
+
+struct IntegrationState {
+    integrations: Vec<IntegrationHealth>,
+}
+
+// ============================================================================
 // System monitoring
 // ============================================================================
 
@@ -261,6 +277,130 @@ fn monitoring_loop(state: Arc<Mutex<AgentState>>, busy_threshold: f64, sample_in
 }
 
 // ============================================================================
+// Integration health monitoring
+// ============================================================================
+
+/// Run a single health check command for an integration.
+fn run_health_check(entry: &IntegrationEntry) -> IntegrationHealthResult {
+    let Some(ref cmd) = entry.health_cmd else {
+        return IntegrationHealthResult {
+            healthy: true,
+            detail: "no health_cmd configured".to_string(),
+            checked_at: utc_now(),
+        };
+    };
+
+    let timeout = entry.health_timeout_secs;
+    let timeout_cmd = format!("timeout {} {}", timeout, cmd);
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&timeout_cmd)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => IntegrationHealthResult {
+            healthy: true,
+            detail: "ok".to_string(),
+            checked_at: utc_now(),
+        },
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = if stderr.trim().is_empty() {
+                format!("exit code {}", out.status.code().unwrap_or(-1))
+            } else {
+                stderr.trim().to_string()
+            };
+            IntegrationHealthResult {
+                healthy: false,
+                detail,
+                checked_at: utc_now(),
+            }
+        }
+        Err(e) => IntegrationHealthResult {
+            healthy: false,
+            detail: format!("failed to execute: {}", e),
+            checked_at: utc_now(),
+        },
+    }
+}
+
+/// Background loop that periodically runs health checks for all integrations.
+fn integration_health_loop(state: Arc<Mutex<IntegrationState>>) {
+    let count = state.lock().map(|s| s.integrations.len()).unwrap_or(0);
+    let mut last_checked: Vec<Option<std::time::Instant>> = vec![None; count];
+
+    loop {
+        let entries: Vec<(usize, IntegrationEntry)> = {
+            let Ok(s) = state.lock() else {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            };
+            s.integrations
+                .iter()
+                .enumerate()
+                .map(|(i, ih)| (i, ih.entry.clone()))
+                .collect()
+        };
+
+        for (idx, entry) in &entries {
+            if entry.health_cmd.is_none() {
+                continue;
+            }
+            let interval = Duration::from_secs(entry.health_interval_secs);
+            let should_check = match last_checked.get(*idx).copied().flatten() {
+                Some(last) => last.elapsed() >= interval,
+                None => true,
+            };
+            if !should_check {
+                continue;
+            }
+
+            let result = run_health_check(entry);
+            if !result.healthy {
+                eprintln!(
+                    "mvm-guest-agent: health check failed for '{}': {}",
+                    entry.name, result.detail
+                );
+            }
+            if let Ok(mut s) = state.lock()
+                && let Some(ih) = s.integrations.get_mut(*idx)
+            {
+                ih.last_result = Some(result);
+            }
+            last_checked[*idx] = Some(std::time::Instant::now());
+        }
+
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Build an IntegrationStateReport from cached health data.
+fn build_integration_reports(
+    integration_state: &Arc<Mutex<IntegrationState>>,
+) -> Vec<IntegrationStateReport> {
+    let Ok(s) = integration_state.lock() else {
+        return vec![];
+    };
+    s.integrations
+        .iter()
+        .map(|ih| {
+            let status = match &ih.last_result {
+                Some(r) if r.healthy => IntegrationStatus::Active,
+                Some(r) => IntegrationStatus::Error(r.detail.clone()),
+                None => IntegrationStatus::Pending,
+            };
+            IntegrationStateReport {
+                name: ih.entry.name.clone(),
+                status,
+                last_checkpoint_at: None,
+                state_size_bytes: 0,
+                health: ih.last_result.clone(),
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
 // Length-prefixed frame I/O (mirrors vsock.rs protocol)
 // ============================================================================
 
@@ -321,7 +461,11 @@ fn do_sleep_prep() -> (bool, String) {
     }
 }
 
-fn handle_client(fd: RawFd, state: &Arc<Mutex<AgentState>>) {
+fn handle_client(
+    fd: RawFd,
+    state: &Arc<Mutex<AgentState>>,
+    integration_state: &Arc<Mutex<IntegrationState>>,
+) {
     // SAFETY: fd comes from accept and is a valid file descriptor owned by this function.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
 
@@ -363,7 +507,7 @@ fn handle_client(fd: RawFd, state: &Arc<Mutex<AgentState>>) {
         }
 
         GuestRequest::IntegrationStatus => GuestResponse::IntegrationStatusReport {
-            integrations: vec![],
+            integrations: build_integration_reports(integration_state),
         },
 
         GuestRequest::CheckpointIntegrations { integrations: _ } => {
@@ -437,7 +581,27 @@ fn main() {
     let sample_interval = Duration::from_secs(cfg.sample_interval_secs);
     std::thread::spawn(move || monitoring_loop(monitor_state, busy_threshold, sample_interval));
 
-    eprintln!("mvm-guest-agent: listening on vsock port {}", cfg.port);
+    // Scan drop-in integrations and start health check thread.
+    let entries = integrations::load_dropin_dir(integrations::INTEGRATIONS_DROPIN_DIR);
+    let integration_count = entries.len();
+    let integration_state = Arc::new(Mutex::new(IntegrationState {
+        integrations: entries
+            .into_iter()
+            .map(|e| IntegrationHealth {
+                entry: e,
+                last_result: None,
+            })
+            .collect(),
+    }));
+    if integration_count > 0 {
+        let health_state = Arc::clone(&integration_state);
+        std::thread::spawn(move || integration_health_loop(health_state));
+    }
+
+    eprintln!(
+        "mvm-guest-agent: listening on vsock port {} ({} integrations)",
+        cfg.port, integration_count
+    );
 
     loop {
         // SAFETY: null addr pointers are allowed for accept when peer addr is not needed.
@@ -445,6 +609,6 @@ fn main() {
         if cfd < 0 {
             continue;
         }
-        handle_client(cfd, &state);
+        handle_client(cfd, &state, &integration_state);
     }
 }

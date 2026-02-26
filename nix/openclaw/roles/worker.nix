@@ -19,6 +19,19 @@
 
 { pkgs, ... }:
 {
+  imports = [ ../../../nix/modules/guest-integrations.nix ];
+
+  # Register the OpenClaw worker as an mvm integration so the guest agent
+  # monitors its health and reports it via `mvm vm status`.
+  services.mvm-integrations = {
+    enable = true;
+    integrations.openclaw-worker = {
+      healthCmd = "${pkgs.systemd}/bin/systemctl is-active openclaw-worker.service";
+      healthIntervalSecs = 10;
+      healthTimeoutSecs = 5;
+    };
+  };
+
   users.groups.openclaw = { };
   users.users.openclaw = {
     isSystemUser = true;

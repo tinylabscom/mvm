@@ -69,6 +69,7 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
     } else {
         mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?
     };
+    mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
     // Store artifacts in template revision directory
     let rev = &result.revision_hash;

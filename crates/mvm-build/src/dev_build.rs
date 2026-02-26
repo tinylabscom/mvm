@@ -215,6 +215,175 @@ fn nix_system() -> &'static str {
     }
 }
 
+// ============================================================================
+// Guest agent auto-injection
+// ============================================================================
+
+/// Detect the mvm workspace root for building the guest-agent from source.
+///
+/// Tries in order:
+/// 1. `MVM_SRC` environment variable (explicit override)
+/// 2. Compile-time `CARGO_MANIFEST_DIR` — the build crate lives at
+///    `<workspace>/crates/mvm-build`, so we go up 2 levels.
+fn detect_mvm_src() -> Option<String> {
+    if let Ok(p) = std::env::var("MVM_SRC")
+        && !p.is_empty()
+    {
+        return Some(p);
+    }
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir.parent()?.parent()?;
+    if workspace.join("crates/mvm-guest").is_dir() {
+        return Some(workspace.to_string_lossy().to_string());
+    }
+
+    None
+}
+
+/// Best-effort guest agent injection after a dev build.
+///
+/// Auto-detects the mvm workspace root and injects the guest agent into the
+/// rootfs if it's not already present. Never fails the overall build — logs
+/// a message and returns `Ok(())` if injection cannot be performed.
+pub fn ensure_guest_agent_if_needed(
+    env: &dyn ShellEnvironment,
+    build_result: &DevBuildResult,
+) -> Result<()> {
+    let mvm_src = match detect_mvm_src() {
+        Some(p) => p,
+        None => {
+            env.log_info(
+                "Cannot detect mvm source tree for guest-agent injection. \
+                 Include the guest-agent module in your flake manually.",
+            );
+            return Ok(());
+        }
+    };
+    ensure_guest_agent(env, build_result, &mvm_src)
+}
+
+/// Ensure the guest agent is present in the built rootfs.
+///
+/// Checks whether `mvm-guest-agent` exists in the rootfs. If not, builds it
+/// from the mvm workspace and injects it (binary + systemd service + drop-in dir)
+/// into the ext4 image. This guarantees every mvm-built image has the guest agent
+/// regardless of whether the user's flake explicitly includes it.
+fn ensure_guest_agent(
+    env: &dyn ShellEnvironment,
+    build_result: &DevBuildResult,
+    mvm_src_path: &str,
+) -> Result<()> {
+    let rootfs = &build_result.rootfs_path;
+
+    // Step 1: Check if agent is already in the rootfs
+    let check_script = [
+        "MOUNT=$(mktemp -d)",
+        &format!("sudo mount -o loop,ro {} \"$MOUNT\"", rootfs),
+        "FOUND=$(find \"$MOUNT/nix/store\" -name mvm-guest-agent -type f 2>/dev/null | head -1)",
+        "sudo umount \"$MOUNT\"",
+        "rmdir \"$MOUNT\"",
+        "if [ -n \"$FOUND\" ]; then echo found; else echo missing; fi",
+    ]
+    .join(" && ");
+
+    let check = env.shell_exec_stdout(&check_script)?;
+
+    if check.trim() == "found" {
+        env.log_info("Guest agent already present in rootfs");
+        return Ok(());
+    }
+
+    env.log_info("Guest agent not found in rootfs — injecting...");
+
+    // Step 2: Build the guest-agent from the mvm workspace
+    let build_cmd = format!(
+        "nix-build --no-out-link {}/nix/modules/guest-agent-pkg.nix \
+         --arg pkgs 'import <nixpkgs> {{}}' \
+         --arg mvmSrc {} \
+         --arg rustPlatform '(import <nixpkgs> {{}}).rustPlatform'",
+        mvm_src_path, mvm_src_path,
+    );
+
+    let agent_store_path = match env.shell_exec_stdout(&build_cmd) {
+        Ok(p) if p.trim().starts_with("/nix/store/") => p.trim().to_string(),
+        _ => {
+            env.log_info(
+                "Could not build guest-agent for injection. \
+                 Add the guest-agent module to your flake manually.",
+            );
+            return Ok(());
+        }
+    };
+
+    // Step 3: Get the full nix store closure
+    let closure = env
+        .shell_exec_stdout(&format!("nix-store -qR {}", agent_store_path))
+        .with_context(|| "Failed to query guest-agent closure")?;
+
+    // Step 4: Inject into rootfs
+    inject_agent_into_rootfs(env, rootfs, &agent_store_path, closure.trim())
+}
+
+/// Mount the rootfs, copy the agent closure, create systemd service, unmount.
+fn inject_agent_into_rootfs(
+    env: &dyn ShellEnvironment,
+    rootfs: &str,
+    agent_store_path: &str,
+    closure_lines: &str,
+) -> Result<()> {
+    // Build the injection script. All paths come from nix-store output
+    // (trusted, not user input).
+    let mut script = String::new();
+    script.push_str("set -euo pipefail\n");
+    script.push_str("MOUNT=$(mktemp -d)\n");
+    script.push_str(&format!("sudo mount -o loop {} \"$MOUNT\"\n", rootfs));
+
+    // Copy each store path if not already present
+    for line in closure_lines.lines() {
+        let path = line.trim();
+        if path.is_empty() || !path.starts_with("/nix/store/") {
+            continue;
+        }
+        script.push_str(&format!(
+            "[ -e \"$MOUNT{}\" ] || sudo cp -a {} \"$MOUNT{}\"\n",
+            path, path, path
+        ));
+    }
+
+    // Create systemd service file
+    script.push_str("sudo mkdir -p \"$MOUNT/etc/systemd/system\"\n");
+    script.push_str(&format!(
+        concat!(
+            "printf '[Unit]\\nDescription=MVM Guest Agent\\nAfter=basic.target\\n\\n",
+            "[Service]\\nType=simple\\nExecStart={}/bin/mvm-guest-agent\\n",
+            "Restart=on-failure\\nRestartSec=2s\\n\\n",
+            "[Install]\\nWantedBy=multi-user.target\\n' ",
+            "| sudo tee \"$MOUNT/etc/systemd/system/mvm-guest-agent.service\" > /dev/null\n"
+        ),
+        agent_store_path,
+    ));
+
+    // Enable for multi-user.target
+    script.push_str(
+        "sudo mkdir -p \"$MOUNT/etc/systemd/system/multi-user.target.wants\"\n\
+         sudo ln -sf /etc/systemd/system/mvm-guest-agent.service \
+         \"$MOUNT/etc/systemd/system/multi-user.target.wants/mvm-guest-agent.service\"\n",
+    );
+
+    // Create integrations drop-in directory
+    script.push_str("sudo mkdir -p \"$MOUNT/etc/mvm/integrations.d\"\n");
+
+    // Unmount
+    script.push_str("sudo umount \"$MOUNT\"\nrmdir \"$MOUNT\"\n");
+
+    env.shell_exec(&script)
+        .with_context(|| "Failed to inject guest-agent into rootfs")?;
+
+    env.log_success("Guest agent injected into rootfs");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
