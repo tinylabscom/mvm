@@ -215,6 +215,7 @@ fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
     create_dir_all(dir.join("guests"))?;
     create_dir_all(dir.join("roles"))?;
     create_dir_all(dir.join("guests/profiles"))?;
+    create_dir_all(dir.join("modules"))?;
     // ignore build outputs/artifacts
     let gitignore = dir.join(".gitignore");
     if !gitignore.exists() {

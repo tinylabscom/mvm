@@ -189,19 +189,31 @@ enum Commands {
         #[arg(long, short = 'v')]
         volume: Vec<String>,
     },
-    /// Launch VMs defined in mvm.toml
+    /// Launch microVMs (from mvm.toml or CLI flags)
     Up {
-        /// Launch only this VM from the fleet config
+        /// VM name (from fleet config, or for a new single VM)
         name: Option<String>,
         /// Path to fleet config (default: auto-discover mvm.toml)
         #[arg(long, short = 'f')]
         config: Option<String>,
+        /// Nix flake reference (launches a single VM without config file)
+        #[arg(long)]
+        flake: Option<String>,
+        /// Flake package variant (e.g. worker, gateway)
+        #[arg(long)]
+        profile: Option<String>,
+        /// vCPU cores (overrides config file)
+        #[arg(long)]
+        cpus: Option<u32>,
+        /// Memory in MiB (overrides config file)
+        #[arg(long)]
+        memory: Option<u32>,
     },
-    /// Stop VMs defined in mvm.toml
+    /// Stop microVMs (from mvm.toml, by name, or all)
     Down {
-        /// Stop only this VM
+        /// VM name to stop (or all VMs if omitted)
         name: Option<String>,
-        /// Path to fleet config (default: auto-discover mvm.toml)
+        /// Path to fleet config (stops only VMs defined in config)
         #[arg(long, short = 'f')]
         config: Option<String>,
     },
@@ -435,7 +447,21 @@ pub fn run() -> Result<()> {
             config.as_deref(),
             &volume,
         ),
-        Commands::Up { name, config } => cmd_up(name.as_deref(), config.as_deref()),
+        Commands::Up {
+            name,
+            config,
+            flake,
+            profile,
+            cpus,
+            memory,
+        } => cmd_up(
+            name.as_deref(),
+            config.as_deref(),
+            flake.as_deref(),
+            profile.as_deref(),
+            cpus,
+            memory,
+        ),
         Commands::Down { name, config } => cmd_down(name.as_deref(), config.as_deref()),
         Commands::Completions { shell } => cmd_completions(shell),
         Commands::Template { action } => cmd_template(action),
@@ -1260,13 +1286,177 @@ fn parse_runtime_volume(spec: &str) -> Result<image::RuntimeVolume> {
 // Fleet commands (mvm up / mvm down)
 // ============================================================================
 
-fn cmd_up(name: Option<&str>, file: Option<&str>) -> Result<()> {
+fn cmd_up(
+    name: Option<&str>,
+    config_path: Option<&str>,
+    flake: Option<&str>,
+    profile: Option<&str>,
+    cpus: Option<u32>,
+    memory: Option<u32>,
+) -> Result<()> {
     if bootstrap::is_lima_required() {
         lima::require_running()?;
     }
 
-    // Load fleet config
-    let (fleet_config, base_dir) = match file {
+    // Try to load fleet config (explicit path > auto-discover > none)
+    let fleet_found = load_fleet_config(config_path)?;
+
+    match (fleet_found, flake) {
+        // Fleet mode: config file found (with optional CLI overrides)
+        (Some((fleet_config, base_dir)), _) => {
+            // CLI --flake overrides config file flake
+            let flake_ref = match flake {
+                Some(f) => resolve_flake_ref(f)?,
+                None => {
+                    let flake_path = base_dir.join(&fleet_config.flake);
+                    resolve_flake_ref(&flake_path.to_string_lossy())?
+                }
+            };
+
+            // Filter to requested VM or all
+            let vm_names: Vec<String> = match name {
+                Some(n) => {
+                    if !fleet_config.vms.contains_key(n) {
+                        let available: Vec<&str> =
+                            fleet_config.vms.keys().map(|s| s.as_str()).collect();
+                        anyhow::bail!(
+                            "VM '{}' not defined in config. Available: {:?}",
+                            n,
+                            available
+                        );
+                    }
+                    vec![n.to_string()]
+                }
+                None => fleet_config.vms.keys().cloned().collect(),
+            };
+
+            if vm_names.is_empty() {
+                anyhow::bail!("No VMs defined in config. Add [vms.<name>] sections.");
+            }
+
+            // Build once per unique profile (deduplication)
+            // CLI --profile overrides all VMs when set
+            let profiles: std::collections::BTreeSet<Option<String>> = vm_names
+                .iter()
+                .filter_map(|n| fleet_config.vms.get(n))
+                .map(|vm| {
+                    profile.map(|p| p.to_string()).or_else(|| {
+                        vm.profile
+                            .clone()
+                            .or_else(|| fleet_config.defaults.profile.clone())
+                    })
+                })
+                .collect();
+
+            let builds = build_profiles(&profiles, &flake_ref)?;
+
+            // Launch each VM
+            let total = vm_names.len();
+            for (idx, vm_name) in vm_names.iter().enumerate() {
+                let mut resolved = fleet::resolve_vm(&fleet_config, vm_name)?;
+
+                // CLI flags override config values
+                if let Some(p) = profile {
+                    resolved.profile = Some(p.to_string());
+                }
+                if let Some(c) = cpus {
+                    resolved.cpus = c;
+                }
+                if let Some(m) = memory {
+                    resolved.memory = m;
+                }
+
+                let build_result = builds.get(&resolved.profile).ok_or_else(|| {
+                    anyhow::anyhow!("No build for profile {:?}", resolved.profile)
+                })?;
+
+                let volumes: Vec<image::RuntimeVolume> = resolved
+                    .volumes
+                    .iter()
+                    .map(|v| parse_runtime_volume(v))
+                    .collect::<Result<_>>()?;
+
+                ui::step(
+                    (idx + 1) as u32,
+                    total as u32,
+                    &format!("Launching VM '{}'", vm_name),
+                );
+
+                let slot = microvm::allocate_slot(vm_name)?;
+
+                let run_config = microvm::FlakeRunConfig {
+                    name: vm_name.clone(),
+                    slot,
+                    vmlinux_path: build_result.vmlinux_path.clone(),
+                    initrd_path: build_result.initrd_path.clone(),
+                    rootfs_path: build_result.rootfs_path.clone(),
+                    revision_hash: build_result.revision_hash.clone(),
+                    flake_ref: flake_ref.clone(),
+                    profile: resolved.profile,
+                    cpus: resolved.cpus,
+                    memory: resolved.memory,
+                    volumes,
+                };
+
+                microvm::run_from_build(&run_config)?;
+            }
+
+            ui::success(&format!("{} VMs running", vm_names.len()));
+            Ok(())
+        }
+
+        // Single VM mode: no config file, use CLI flags
+        (None, Some(flake_ref)) => {
+            let resolved_flake = resolve_flake_ref(flake_ref)?;
+
+            let vm_name = match name {
+                Some(n) => n.to_string(),
+                None => {
+                    let mut generator = names::Generator::default();
+                    generator.next().unwrap_or_else(|| "vm-0".to_string())
+                }
+            };
+
+            const DEFAULT_CPUS: u32 = 2;
+            const DEFAULT_MEM: u32 = 1024;
+
+            let env = mvm_runtime::build_env::RuntimeBuildEnv;
+            let result = mvm_build::dev_build::dev_build(&env, &resolved_flake, profile)?;
+
+            let slot = microvm::allocate_slot(&vm_name)?;
+
+            let run_config = microvm::FlakeRunConfig {
+                name: vm_name,
+                slot,
+                vmlinux_path: result.vmlinux_path,
+                initrd_path: result.initrd_path,
+                rootfs_path: result.rootfs_path,
+                revision_hash: result.revision_hash,
+                flake_ref: flake_ref.to_string(),
+                profile: profile.map(|s| s.to_string()),
+                cpus: cpus.unwrap_or(DEFAULT_CPUS),
+                memory: memory.unwrap_or(DEFAULT_MEM),
+                volumes: vec![],
+            };
+
+            microvm::run_from_build(&run_config)
+        }
+
+        // No config, no flake — nothing to do
+        (None, None) => {
+            anyhow::bail!(
+                "No mvm.toml found and no --flake specified.\n\
+                 Use 'mvm up --flake <path>' or create an mvm.toml."
+            );
+        }
+    }
+}
+
+/// Load fleet config from an explicit path or auto-discover mvm.toml.
+fn load_fleet_config(
+    config_path: Option<&str>,
+) -> Result<Option<(fleet::FleetConfig, std::path::PathBuf)>> {
+    match config_path {
         Some(path) => {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to read {}", path))?;
@@ -1276,66 +1466,29 @@ fn cmd_up(name: Option<&str>, file: Option<&str>) -> Result<()> {
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .to_path_buf();
-            (config, dir)
+            Ok(Some((config, dir)))
         }
-        None => fleet::find_fleet_config()?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "No mvm.toml found. Create one or use 'mvm run --flake ...' for single VMs."
-            )
-        })?,
-    };
-
-    if fleet_config.vms.is_empty() {
-        anyhow::bail!("No VMs defined in mvm.toml. Add [vms.<name>] sections.");
+        None => fleet::find_fleet_config(),
     }
+}
 
-    // Filter to requested VM or all
-    let vm_names: Vec<String> = match name {
-        Some(n) => {
-            if !fleet_config.vms.contains_key(n) {
-                let available: Vec<&str> = fleet_config.vms.keys().map(|s| s.as_str()).collect();
-                anyhow::bail!(
-                    "VM '{}' not defined in mvm.toml. Available: {:?}",
-                    n,
-                    available
-                );
-            }
-            vec![n.to_string()]
-        }
-        None => fleet_config.vms.keys().cloned().collect(),
-    };
-
-    // Resolve flake ref relative to mvm.toml directory
-    let flake_path = base_dir.join(&fleet_config.flake);
-    let resolved_flake = resolve_flake_ref(&flake_path.to_string_lossy())?;
-
-    // Build once per unique profile (deduplication)
-    let profiles: std::collections::BTreeSet<Option<String>> = vm_names
-        .iter()
-        .filter_map(|n| fleet_config.vms.get(n))
-        .map(|vm| {
-            vm.profile
-                .clone()
-                .or_else(|| fleet_config.defaults.profile.clone())
-        })
-        .collect();
-
-    let profile_count = profiles.len();
-    let mut builds: std::collections::HashMap<
-        Option<String>,
-        mvm_build::dev_build::DevBuildResult,
-    > = std::collections::HashMap::new();
+/// Build once per unique profile. Returns map from profile -> build result.
+fn build_profiles(
+    profiles: &std::collections::BTreeSet<Option<String>>,
+    resolved_flake: &str,
+) -> Result<std::collections::HashMap<Option<String>, mvm_build::dev_build::DevBuildResult>> {
+    let mut builds = std::collections::HashMap::new();
+    let env = mvm_runtime::build_env::RuntimeBuildEnv;
 
     for (idx, profile) in profiles.iter().enumerate() {
         let label = profile.as_deref().unwrap_or("default");
         ui::step(
             (idx + 1) as u32,
-            (profile_count + vm_names.len()) as u32,
+            profiles.len() as u32,
             &format!("Building profile '{}'", label),
         );
 
-        let env = mvm_runtime::build_env::RuntimeBuildEnv;
-        let result = mvm_build::dev_build::dev_build(&env, &resolved_flake, profile.as_deref())?;
+        let result = mvm_build::dev_build::dev_build(&env, resolved_flake, profile.as_deref())?;
 
         if result.cached {
             ui::info(&format!("Cache hit — revision {}", result.revision_hash));
@@ -1348,67 +1501,15 @@ fn cmd_up(name: Option<&str>, file: Option<&str>) -> Result<()> {
 
         builds.insert(profile.clone(), result);
     }
-
-    // Launch each VM
-    let total_steps = profile_count + vm_names.len();
-    for (idx, vm_name) in vm_names.iter().enumerate() {
-        let resolved = fleet::resolve_vm(&fleet_config, vm_name)?;
-
-        let build_result = builds
-            .get(&resolved.profile)
-            .ok_or_else(|| anyhow::anyhow!("No build for profile {:?}", resolved.profile))?;
-
-        let volumes: Vec<image::RuntimeVolume> = resolved
-            .volumes
-            .iter()
-            .map(|v| parse_runtime_volume(v))
-            .collect::<Result<_>>()?;
-
-        ui::step(
-            (profile_count + idx + 1) as u32,
-            total_steps as u32,
-            &format!("Launching VM '{}'", vm_name),
-        );
-
-        let slot = microvm::allocate_slot(vm_name)?;
-
-        let run_config = microvm::FlakeRunConfig {
-            name: vm_name.clone(),
-            slot,
-            vmlinux_path: build_result.vmlinux_path.clone(),
-            initrd_path: build_result.initrd_path.clone(),
-            rootfs_path: build_result.rootfs_path.clone(),
-            revision_hash: build_result.revision_hash.clone(),
-            flake_ref: fleet_config.flake.clone(),
-            profile: resolved.profile,
-            cpus: resolved.cpus,
-            memory: resolved.memory,
-            volumes,
-        };
-
-        microvm::run_from_build(&run_config)?;
-    }
-
-    ui::success(&format!("Fleet ready: {} VMs running", vm_names.len()));
-    Ok(())
+    Ok(builds)
 }
 
 fn cmd_down(name: Option<&str>, config_path: Option<&str>) -> Result<()> {
     match name {
         Some(n) => microvm::stop_vm(n),
         None => {
-            // Load fleet config from explicit path or auto-discover
-            let found = match config_path {
-                Some(path) => {
-                    let content = std::fs::read_to_string(path)
-                        .with_context(|| format!("Failed to read {}", path))?;
-                    let config: fleet::FleetConfig = toml::from_str(&content)
-                        .with_context(|| format!("Failed to parse {}", path))?;
-                    Some(config)
-                }
-                None => fleet::find_fleet_config()?.map(|(c, _)| c),
-            };
-            if let Some(fleet_config) = found {
+            let found = load_fleet_config(config_path)?;
+            if let Some((fleet_config, _base_dir)) = found {
                 let mut stopped = 0;
                 for vm_name in fleet_config.vms.keys() {
                     if microvm::stop_vm(vm_name).is_ok() {
@@ -1933,45 +2034,70 @@ mod tests {
     fn test_up_parses_no_args() {
         let cli = Cli::try_parse_from(["mvm", "up"]).unwrap();
         match cli.command {
-            Commands::Up { name, config } => {
+            Commands::Up {
+                name,
+                config,
+                flake,
+                profile,
+                cpus,
+                memory,
+            } => {
                 assert!(name.is_none());
                 assert!(config.is_none());
+                assert!(flake.is_none());
+                assert!(profile.is_none());
+                assert!(cpus.is_none());
+                assert!(memory.is_none());
             }
             _ => panic!("Expected Up command"),
         }
     }
 
     #[test]
-    fn test_up_parses_with_name() {
-        let cli = Cli::try_parse_from(["mvm", "up", "gw"]).unwrap();
+    fn test_up_parses_with_flake() {
+        let cli = Cli::try_parse_from(["mvm", "up", "--flake", "./nix/openclaw/"]).unwrap();
         match cli.command {
-            Commands::Up { name, config } => {
-                assert_eq!(name.as_deref(), Some("gw"));
-                assert!(config.is_none());
-            }
-            _ => panic!("Expected Up command"),
-        }
-    }
-
-    #[test]
-    fn test_up_parses_with_config() {
-        let cli = Cli::try_parse_from(["mvm", "up", "-f", "fleet.toml"]).unwrap();
-        match cli.command {
-            Commands::Up { name, config } => {
+            Commands::Up { flake, name, .. } => {
+                assert_eq!(flake.as_deref(), Some("./nix/openclaw/"));
                 assert!(name.is_none());
-                assert_eq!(config.as_deref(), Some("fleet.toml"));
             }
             _ => panic!("Expected Up command"),
         }
     }
 
     #[test]
-    fn test_up_parses_name_and_config() {
-        let cli = Cli::try_parse_from(["mvm", "up", "gw", "-f", "fleet.toml"]).unwrap();
+    fn test_up_parses_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "mvm",
+            "up",
+            "gw",
+            "-f",
+            "fleet.toml",
+            "--flake",
+            ".",
+            "--profile",
+            "gateway",
+            "--cpus",
+            "4",
+            "--memory",
+            "2048",
+        ])
+        .unwrap();
         match cli.command {
-            Commands::Up { name, config } => {
+            Commands::Up {
+                name,
+                config,
+                flake,
+                profile,
+                cpus,
+                memory,
+            } => {
                 assert_eq!(name.as_deref(), Some("gw"));
                 assert_eq!(config.as_deref(), Some("fleet.toml"));
+                assert_eq!(flake.as_deref(), Some("."));
+                assert_eq!(profile.as_deref(), Some("gateway"));
+                assert_eq!(cpus, Some(4));
+                assert_eq!(memory, Some(2048));
             }
             _ => panic!("Expected Up command"),
         }

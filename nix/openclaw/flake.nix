@@ -11,6 +11,10 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        # mvm guest agent — vsock management agent for all mvm microVMs.
+        # Built from the workspace, only the guest-agent binary.
+        mvm-guest-agent = import ../../nix/modules/guest-agent-pkg.nix { inherit pkgs; mvmSrc = ../../.; };
+
         # Build a NixOS guest and package kernel + initrd + rootfs for Firecracker.
         #
         # The output derivation contains:
@@ -25,7 +29,9 @@
           let
             eval = nixpkgs.lib.nixosSystem {
               inherit system;
+              specialArgs = { inherit mvm-guest-agent; };
               modules = [
+                ../../nix/modules/guest-agent.nix
                 ./guests/baseline.nix
               ] ++ modules;
             };
