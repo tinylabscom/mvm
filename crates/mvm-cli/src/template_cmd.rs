@@ -39,7 +39,6 @@ pub fn init(name: &str, local: bool, base_dir: &str) -> Result<()> {
     if local {
         let dir = std::path::Path::new(base_dir).join(name);
         scaffold_template_files(&dir, name)?;
-        scaffold_template_config(&dir, name)?;
         return Ok(());
     }
     tmpl::template_init(name)
@@ -210,148 +209,30 @@ fn local_templates(base: &Path) -> Result<Vec<String>> {
 }
 
 fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
-    // Ensure base directories
-    create_dir_all(dir)?;
-    create_dir_all(dir.join("guests"))?;
-    create_dir_all(dir.join("roles"))?;
-    create_dir_all(dir.join("guests/profiles"))?;
-    create_dir_all(dir.join("modules"))?;
-    // ignore build outputs/artifacts
+    fs::create_dir_all(dir)?;
+
     let gitignore = dir.join(".gitignore");
     if !gitignore.exists() {
-        write_file(
+        fs::write(
             &gitignore,
             include_str!("../../../resources/template_scaffold/.gitignore"),
         )?;
     }
 
-    // flake.nix (microvm-aware scaffold)
     let flake_path = dir.join("flake.nix");
     if !flake_path.exists() {
-        write_file(
+        fs::write(
             &flake_path,
             include_str!("../../../resources/template_scaffold/flake.nix"),
         )?;
     }
 
-    // mvm-profiles.toml
-    let profiles_path = dir.join("mvm-profiles.toml");
-    if !profiles_path.exists() {
-        write_file(
-            &profiles_path,
-            include_str!("../../../resources/template_scaffold/mvm-profiles.toml"),
-        )?;
-    }
-
-    // guests/baseline.nix (stub)
-    let guest_baseline = dir.join("guests").join("baseline.nix");
-    if !guest_baseline.exists() {
-        write_file(
-            &guest_baseline,
-            include_str!("../../../resources/template_scaffold/guests/baseline.nix"),
-        )?;
-    }
-
-    // guest profiles stubs (gateway/worker)
-    let gw_profile = dir.join("guests/profiles").join("gateway.nix");
-    if !gw_profile.exists() {
-        write_file(
-            &gw_profile,
-            include_str!("../../../resources/template_scaffold/guests/profiles/gateway.nix"),
-        )?;
-    }
-    let worker_profile = dir.join("guests/profiles").join("worker.nix");
-    if !worker_profile.exists() {
-        write_file(
-            &worker_profile,
-            include_str!("../../../resources/template_scaffold/guests/profiles/worker.nix"),
-        )?;
-    }
-
-    // roles/worker.nix stub
-    let role_worker = dir.join("roles").join("worker.nix");
-    if !role_worker.exists() {
-        write_file(
-            &role_worker,
-            include_str!("../../../resources/template_scaffold/roles/worker.nix"),
-        )?;
-    }
-
-    // roles/gateway.nix stub
-    let role_gateway = dir.join("roles").join("gateway.nix");
-    if !role_gateway.exists() {
-        write_file(
-            &role_gateway,
-            include_str!("../../../resources/template_scaffold/roles/gateway.nix"),
-        )?;
-    }
-
-    // guests/default.nix (stub)
-    let guest_default = dir.join("guests").join("default.nix");
-    if !guest_default.exists() {
-        write_file(
-            &guest_default,
-            include_str!("../../../resources/template_scaffold/guests/default.nix"),
-        )?;
-    }
-
-    // roles/README (guidance)
-    let roles_readme = dir.join("roles").join("README.md");
-    if !roles_readme.exists() {
-        write_file(
-            &roles_readme,
-            include_str!("../../../resources/template_scaffold/roles/README.md"),
-        )?;
-    }
-
-    // modules/guest-agent.nix (shared mvm guest agent NixOS module)
-    let agent_module = dir.join("modules").join("guest-agent.nix");
-    if !agent_module.exists() {
-        write_file(
-            &agent_module,
-            include_str!("../../../nix/modules/guest-agent.nix"),
-        )?;
-    }
-
-    // modules/guest-agent-pkg.nix (builds the agent from the workspace)
-    let agent_pkg = dir.join("modules").join("guest-agent-pkg.nix");
-    if !agent_pkg.exists() {
-        write_file(
-            &agent_pkg,
-            include_str!("../../../nix/modules/guest-agent-pkg.nix"),
-        )?;
-    }
-
-    // README
     let readme_path = dir.join("README.md");
     if !readme_path.exists() {
         let content = include_str!("../../../resources/template_scaffold/README.md")
             .replace("{{name}}", name);
-        write_file(&readme_path, &content)?;
+        fs::write(&readme_path, content)?;
     }
 
     Ok(())
-}
-
-fn create_dir_all(path: impl AsRef<Path>) -> Result<()> {
-    fs::create_dir_all(path)?;
-    Ok(())
-}
-
-fn write_file(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, content)?;
-    Ok(())
-}
-
-fn scaffold_template_config(dir: &Path, name: &str) -> Result<()> {
-    let cfg_path = dir.join("template.toml");
-    if cfg_path.exists() {
-        return Ok(());
-    }
-    let content = include_str!("../../../resources/template_scaffold/template.toml")
-        .replace("{{name}}", name);
-    write_file(&cfg_path, &content)
 }

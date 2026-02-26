@@ -157,21 +157,16 @@ Templates are global, tenant-agnostic base images stored under `/var/lib/mvm/tem
 mvm template init my-app --local
 ```
 
-Creates a directory with a Nix flake, guest profiles, role configs, and a guest agent module:
+Creates a minimal directory with a Nix flake:
 
 ```
 my-app/
-  flake.nix
-  mvm-profiles.toml
-  template.toml
-  guests/baseline.nix
-  guests/profiles/gateway.nix
-  guests/profiles/worker.nix
-  roles/worker.nix
-  roles/gateway.nix
-  modules/guest-agent.nix
-  modules/guest-agent-pkg.nix
+  flake.nix     # NixOS microvm flake (edit to customize)
+  .gitignore
+  README.md
 ```
+
+The scaffold is intentionally minimal. Add extra NixOS modules, role configs, or guest agent integration as needed.
 
 ### Create and Build
 

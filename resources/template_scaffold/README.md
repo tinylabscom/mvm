@@ -1,8 +1,7 @@
 # {{name}}
 
-Scaffolded template.
+mvm microVM template.
 
-- Edit `flake.nix` to build your guest rootfs/kernel.
-- Add guest derivations under `guests/` (baseline.nix, profiles/*).
-- Define roles under `roles/`.
-- Adjust `mvm-profiles.toml` for profiles/resources.
+- Edit `flake.nix` to customize your guest image.
+- `mvm template create {{name}} --flake . --profile minimal --role worker --cpus 2 --mem 1024`
+- `mvm template build {{name}}`
