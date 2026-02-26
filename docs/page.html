@@ -147,6 +147,13 @@
       color: var(--text);
     }
 
+    /* Override Prism theme background to match our surface color */
+    .content pre[class*="language-"],
+    .content code[class*="language-"] {
+      background: var(--surface);
+      text-shadow: none;
+    }
+
     .content blockquote {
       border-left: 3px solid var(--accent);
       padding: 8px 16px;
@@ -256,6 +263,13 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1/themes/prism-tomorrow.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-rust.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-nix.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-toml.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-json.min.js"></script>
   <script>
     (function () {
       var contentEl = document.getElementById('content');
@@ -295,11 +309,16 @@
             '[$1](page.html?doc=$2)');
 
           var rawHtml = marked.parse(md);
-          var cleanHtml = DOMPurify.sanitize(rawHtml);
+          var cleanHtml = DOMPurify.sanitize(rawHtml, {
+            ADD_ATTR: ['class']
+          });
           contentEl.textContent = '';
           var wrapper = document.createElement('div');
           wrapper.innerHTML = cleanHtml;
           contentEl.appendChild(wrapper);
+
+          // Run Prism on all code blocks
+          Prism.highlightAllUnder(wrapper);
         })
         .catch(function () {
           showError('Could not load "' + doc + '".');
