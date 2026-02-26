@@ -165,18 +165,17 @@ pub fn vsock_uds_path(instance_dir: &str) -> String {
     format!("{}/runtime/v.sock", instance_dir)
 }
 
-/// Connect to the guest vsock agent via Firecracker's vsock UDS proxy.
+/// Connect to the guest vsock agent via a direct UDS path.
 ///
 /// Firecracker exposes guest vsock as a Unix domain socket. The connect protocol:
-/// 1. Open Unix stream to `<inst_dir>/runtime/v.sock`
+/// 1. Open Unix stream to the given UDS path
 /// 2. Write `CONNECT <port>\n`
 /// 3. Read `OK <port>\n`
 /// 4. Then use length-prefixed JSON frames
-fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStream> {
-    let uds_path = vsock_uds_path(instance_dir);
+fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
 
-    let stream = UnixStream::connect(&uds_path)
+    let stream = UnixStream::connect(uds_path)
         .with_context(|| format!("Failed to connect to vsock UDS at {}", uds_path))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -202,6 +201,13 @@ fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStream> {
     }
 
     Ok(stream)
+}
+
+/// Connect to the guest vsock agent via the fleet-mode instance directory convention.
+///
+/// Resolves the UDS path as `<instance_dir>/runtime/v.sock`.
+fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStream> {
+    connect_to(&vsock_uds_path(instance_dir), timeout_secs)
 }
 
 /// Send a request and receive a response over a vsock connection.
@@ -333,6 +339,23 @@ pub fn checkpoint_integrations(
         }
         _ => bail!("Unexpected response to CheckpointIntegrations"),
     }
+}
+
+// ============================================================================
+// Direct-path API (for dev-mode VMs where v.sock is not under runtime/)
+// ============================================================================
+
+/// Ping the guest vsock agent at a specific UDS path.
+pub fn ping_at(vsock_uds_path: &str) -> Result<bool> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::Ping)?;
+    Ok(matches!(resp, GuestResponse::Pong))
+}
+
+/// Query worker status from the guest vsock agent at a specific UDS path.
+pub fn query_worker_status_at(vsock_uds_path: &str) -> Result<GuestResponse> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    send_request(&mut stream, &GuestRequest::WorkerStatus)
 }
 
 // ============================================================================
@@ -507,6 +530,18 @@ mod tests {
             let json2 = serde_json::to_string(&parsed).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    #[test]
+    fn test_ping_at_nonexistent_path() {
+        let result = ping_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_worker_status_at_nonexistent_path() {
+        let result = query_worker_status_at("/nonexistent/v.sock");
+        assert!(result.is_err());
     }
 
     #[test]

@@ -161,6 +161,16 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         ),
     )?;
 
+    ui::info("Setting vsock device...");
+    api_put(
+        "/vsock",
+        &format!(
+            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{dir}/v.sock"}}"#,
+            cid = mvm_guest::vsock::GUEST_CID,
+            dir = abs_dir,
+        ),
+    )?;
+
     Ok(())
 }
 
@@ -197,6 +207,9 @@ pub fn start() -> Result<()> {
     ui::info("Starting microVM...");
     std::thread::sleep(std::time::Duration::from_millis(15));
     api_put("/actions", r#"{"action_type": "InstanceStart"}"#)?;
+
+    // Make vsock socket accessible to the current user
+    let _ = run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir));
 
     ui::banner(&[
         "MicroVM is running!",
@@ -242,6 +255,7 @@ pub fn stop() -> Result<()> {
         sudo pkill -x firecracker 2>/dev/null || true
         sudo rm -f {socket}
         rm -f {dir}/.mvm-run-info
+        rm -f {dir}/v.sock
         "#,
         dir = MICROVM_DIR,
         socket = API_SOCKET,
@@ -373,6 +387,9 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         r#"{"action_type": "InstanceStart"}"#,
     )?;
 
+    // Make vsock socket accessible to the current user
+    let _ = run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir));
+
     // Persist run info for `mvm status`
     write_vm_run_info(config, &abs_dir)?;
 
@@ -470,6 +487,30 @@ pub fn stop_all_vms() -> Result<()> {
     Ok(())
 }
 
+/// Show console logs from a named VM's firecracker.log.
+pub fn logs(name: &str, follow: bool, lines: u32) -> Result<()> {
+    require_linux_env()?;
+
+    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let log_file = format!("{}/{}/firecracker.log", abs_vms, name);
+
+    // Check the log file exists
+    let exists = run_in_vm_stdout(&format!("[ -f {} ] && echo yes || echo no", log_file))?;
+    if exists.trim() != "yes" {
+        anyhow::bail!("No logs found for VM '{}' (is the name correct?)", name);
+    }
+
+    if follow {
+        // tail -f needs to stream to the user's terminal
+        run_in_vm_visible(&format!("tail -f {}", log_file))?;
+    } else {
+        let output = run_in_vm_stdout(&format!("tail -n {} {}", lines, log_file))?;
+        print!("{}", output);
+    }
+
+    Ok(())
+}
+
 /// List all running VMs by scanning ~/microvm/vms/*/run-info.json.
 pub fn list_vms() -> Result<Vec<RunInfo>> {
     let output = run_in_vm_stdout(&format!(
@@ -526,6 +567,69 @@ pub fn allocate_slot(name: &str) -> Result<VmSlot> {
     }
 
     anyhow::bail!("No free VM slots available (max 253 VMs)")
+}
+
+/// Create a config drive (mvm-config label) with config.json and role-specific toml.
+fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result<String> {
+    let path = format!("{}/config.ext4", abs_dir);
+    let slot = &config.slot;
+
+    let config_json = serde_json::json!({
+        "instance_id": config.name,
+        "guest_ip": slot.guest_ip,
+        "role": config.profile.as_deref().unwrap_or("worker"),
+    });
+    let escaped_json = config_json.to_string().replace('\'', "'\\''");
+
+    // Determine role-specific config filename and stub content
+    let role = config.profile.as_deref().unwrap_or("worker");
+    let toml_name = format!("{}.toml", role);
+    let toml_content = format!("# Dev-mode {} config stub\n", role);
+    let escaped_toml = toml_content.replace('\'', "'\\''");
+
+    run_in_vm(&format!(
+        r#"
+        rm -f {path}
+        truncate -s 4M {path}
+        mkfs.ext4 -q -L mvm-config {path}
+
+        MOUNT_DIR=$(mktemp -d)
+        sudo mount {path} "$MOUNT_DIR"
+        echo '{json}' | sudo tee "$MOUNT_DIR/config.json" >/dev/null
+        echo '{toml}' | sudo tee "$MOUNT_DIR/{toml_name}" >/dev/null
+        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}"
+        sudo umount "$MOUNT_DIR"
+        rmdir "$MOUNT_DIR"
+        chmod 0644 {path}
+        "#,
+        path = path,
+        json = escaped_json,
+        toml = escaped_toml,
+        toml_name = toml_name,
+    ))?;
+    Ok(path)
+}
+
+/// Create a secrets drive (mvm-secrets label) with a stub secrets.json.
+fn create_dev_secrets_drive(abs_dir: &str) -> Result<String> {
+    let path = format!("{}/secrets.ext4", abs_dir);
+    run_in_vm(&format!(
+        r#"
+        rm -f {path}
+        truncate -s 4M {path}
+        mkfs.ext4 -q -L mvm-secrets {path}
+
+        MOUNT_DIR=$(mktemp -d)
+        sudo mount {path} "$MOUNT_DIR"
+        echo '{{}}' | sudo tee "$MOUNT_DIR/secrets.json" >/dev/null
+        sudo chmod 0400 "$MOUNT_DIR/secrets.json"
+        sudo umount "$MOUNT_DIR"
+        rmdir "$MOUNT_DIR"
+        chmod 0600 {path}
+        "#,
+        path = path,
+    ))?;
+    Ok(path)
 }
 
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
@@ -596,6 +700,30 @@ fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str)
         ),
     )?;
 
+    // Create and attach mvm-config drive (config.json + role.toml)
+    ui::info("Creating config drive...");
+    let config_drive = create_dev_config_drive(abs_dir, config)?;
+    api_put_socket(
+        socket,
+        "/drives/config",
+        &format!(
+            r#"{{"drive_id": "config", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+            path = config_drive,
+        ),
+    )?;
+
+    // Create and attach mvm-secrets drive (stub secrets.json)
+    ui::info("Creating secrets drive...");
+    let secrets_drive = create_dev_secrets_drive(abs_dir)?;
+    api_put_socket(
+        socket,
+        "/drives/secrets",
+        &format!(
+            r#"{{"drive_id": "secrets", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+            path = secrets_drive,
+        ),
+    )?;
+
     for (idx, vol) in config.volumes.iter().enumerate() {
         let drive_id = format!("vol{}", idx);
         ui::info(&format!(
@@ -624,6 +752,17 @@ fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str)
             r#"{{"iface_id": "net1", "guest_mac": "{mac}", "host_dev_name": "{tap}"}}"#,
             mac = slot.mac,
             tap = slot.tap_dev,
+        ),
+    )?;
+
+    ui::info("Setting vsock device...");
+    api_put_socket(
+        socket,
+        "/vsock",
+        &format!(
+            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{dir}/v.sock"}}"#,
+            cid = mvm_guest::vsock::GUEST_CID,
+            dir = abs_dir,
         ),
     )?;
 

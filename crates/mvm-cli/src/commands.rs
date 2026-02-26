@@ -111,6 +111,17 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Show console logs from a running microVM
+    Logs {
+        /// Name of the VM
+        name: String,
+        /// Follow log output (like tail -f)
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// Number of lines to show (default 50)
+        #[arg(long, short = 'n', default_value = "50")]
+        lines: u32,
+    },
     /// Show status of Lima VM and microVM
     Status,
     /// Tear down Lima VM and all resources
@@ -176,6 +187,11 @@ enum Commands {
         /// Volume override (format: host_path:guest_mount:size). Repeatable.
         #[arg(long, short = 'v')]
         volume: Vec<String>,
+    },
+    /// Interact with a running microVM via vsock
+    Vm {
+        #[command(subcommand)]
+        action: VmCmd,
     },
     /// Generate shell completions
     Completions {
@@ -283,6 +299,23 @@ enum TemplateCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum VmCmd {
+    /// Health-check a running microVM via vsock
+    Ping {
+        /// Name of the VM
+        name: String,
+    },
+    /// Query worker status (idle/busy) from a running microVM
+    Status {
+        /// Name of the VM
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 // ============================================================================
 // Entry point
 // ============================================================================
@@ -346,6 +379,11 @@ pub fn run() -> Result<()> {
             skip_deps,
             force,
         } => cmd_sync(debug, skip_deps, force),
+        Commands::Logs {
+            name,
+            follow,
+            lines,
+        } => cmd_logs(&name, follow, lines),
         Commands::Status => cmd_status(),
         Commands::Destroy { yes } => cmd_destroy(yes),
         Commands::Upgrade { check, force } => cmd_upgrade(check, force),
@@ -382,6 +420,7 @@ pub fn run() -> Result<()> {
         ),
         Commands::Completions { shell } => cmd_completions(shell),
         Commands::Template { action } => cmd_template(action),
+        Commands::Vm { action } => cmd_vm(action),
     }
 }
 
@@ -876,6 +915,10 @@ fn cmd_sync(debug: bool, skip_deps: bool, force: bool) -> Result<()> {
     Ok(())
 }
 
+fn cmd_logs(name: &str, follow: bool, lines: u32) -> Result<()> {
+    microvm::logs(name, follow, lines)
+}
+
 fn cmd_status() -> Result<()> {
     ui::status_header();
 
@@ -917,9 +960,7 @@ fn cmd_status() -> Result<()> {
     );
 
     if firecracker::is_running()? {
-        let pid = shell::run_in_vm_stdout("cat ~/microvm/.fc-pid 2>/dev/null || echo '?'")
-            .unwrap_or_else(|_| "?".to_string());
-        ui::status_line("Firecracker:", &format!("Running (PID {})", pid));
+        ui::status_line("Firecracker:", "Running");
     } else {
         if firecracker::is_installed()? {
             let fc_ver = shell::run_in_vm_stdout("firecracker --version 2>/dev/null | head -1")
@@ -941,13 +982,29 @@ fn cmd_status() -> Result<()> {
     // Show running named VMs (multi-VM mode)
     let vms = microvm::list_vms().unwrap_or_default();
     if !vms.is_empty() {
+        // Check vsock availability for each VM
+        let abs_vms =
+            shell::run_in_vm_stdout(&format!("echo {}", config::VMS_DIR)).unwrap_or_default();
+        let vsock_check = shell::run_in_vm_stdout(&format!(
+            "for d in {dir}/*/; do \
+                name=$(basename \"$d\"); \
+                [ -S \"$d/v.sock\" ] && echo \"$name:yes\" || echo \"$name:no\"; \
+            done",
+            dir = abs_vms,
+        ))
+        .unwrap_or_default();
+        let vsock_map: std::collections::HashMap<&str, &str> = vsock_check
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .collect();
+
         ui::status_line("MicroVMs:", &format!("{} running", vms.len()));
         println!();
         println!(
-            "  {:<16} {:<10} {:<16} {:<14} STATUS",
-            "NAME", "PROFILE", "GUEST IP", "REVISION"
+            "  {:<16} {:<10} {:<16} {:<14} {:<8} STATUS",
+            "NAME", "PROFILE", "GUEST IP", "REVISION", "VSOCK"
         );
-        println!("  {}", "-".repeat(70));
+        println!("  {}", "-".repeat(78));
         for vm in &vms {
             let name = vm.name.as_deref().unwrap_or("?");
             let profile = vm.profile.as_deref().unwrap_or("default");
@@ -957,9 +1014,10 @@ fn cmd_status() -> Result<()> {
                 .as_deref()
                 .map(|r| if r.len() > 10 { &r[..10] } else { r })
                 .unwrap_or("?");
+            let vsock = vsock_map.get(name).copied().unwrap_or("?");
             println!(
-                "  {:<16} {:<10} {:<16} {:<14} Running",
-                name, profile, ip, rev
+                "  {:<16} {:<10} {:<16} {:<14} {:<8} Running",
+                name, profile, ip, rev, vsock
             );
         }
     } else if let Some(info) = microvm::read_run_info()
@@ -1259,6 +1317,120 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
 }
 
 // ============================================================================
+// VM interaction commands (vsock)
+// ============================================================================
+
+fn cmd_vm(action: VmCmd) -> Result<()> {
+    match action {
+        VmCmd::Ping { name } => cmd_vm_ping(&name),
+        VmCmd::Status { name, json } => cmd_vm_status(&name, json),
+    }
+}
+
+/// Resolve a VM name to its absolute directory path inside the Lima VM
+/// and verify it is running.
+fn resolve_running_vm(name: &str) -> Result<String> {
+    if bootstrap::is_lima_required() {
+        lima::require_running()?;
+    }
+
+    let abs_vms = shell::run_in_vm_stdout(&format!("echo {}", config::VMS_DIR))?;
+    let abs_dir = format!("{}/{}", abs_vms, name);
+    let pid_file = format!("{}/fc.pid", abs_dir);
+
+    if !firecracker::is_vm_running(&pid_file)? {
+        anyhow::bail!(
+            "VM '{}' is not running. Use 'mvm status' to list running VMs.",
+            name
+        );
+    }
+
+    Ok(abs_dir)
+}
+
+fn cmd_vm_ping(name: &str) -> Result<()> {
+    let abs_dir = resolve_running_vm(name)?;
+
+    // Vsock UDS lives inside the Lima VM — delegate when on macOS
+    if bootstrap::is_lima_required() {
+        let mvm_installed =
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvm && echo yes || echo no")?;
+        if mvm_installed.trim() != "yes" {
+            anyhow::bail!("mvm is not installed inside the Lima VM. Run 'mvm sync' first.");
+        }
+        shell::run_in_vm_visible(&format!("/usr/local/bin/mvm vm ping {}", name))?;
+        return Ok(());
+    }
+
+    // Native Linux / inside Lima — call vsock directly
+    let vsock_path = format!("{}/v.sock", abs_dir);
+    match mvm_guest::vsock::ping_at(&vsock_path) {
+        Ok(true) => {
+            ui::success(&format!("VM '{}' is alive (pong received)", name));
+            Ok(())
+        }
+        Ok(false) => {
+            ui::error(&format!("VM '{}' did not respond to ping", name));
+            anyhow::bail!("Ping failed")
+        }
+        Err(e) => {
+            ui::error(&format!("Failed to connect to VM '{}': {}", name, e));
+            Err(e)
+        }
+    }
+}
+
+fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
+    let abs_dir = resolve_running_vm(name)?;
+
+    // Vsock UDS lives inside the Lima VM — delegate when on macOS
+    if bootstrap::is_lima_required() {
+        let mvm_installed =
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvm && echo yes || echo no")?;
+        if mvm_installed.trim() != "yes" {
+            anyhow::bail!("mvm is not installed inside the Lima VM. Run 'mvm sync' first.");
+        }
+        let json_flag = if json { " --json" } else { "" };
+        shell::run_in_vm_visible(&format!(
+            "/usr/local/bin/mvm vm status {}{}",
+            name, json_flag
+        ))?;
+        return Ok(());
+    }
+
+    // Native Linux / inside Lima — call vsock directly
+    let vsock_path = format!("{}/v.sock", abs_dir);
+    let resp = mvm_guest::vsock::query_worker_status_at(&vsock_path)
+        .with_context(|| format!("Failed to query status for VM '{}'", name))?;
+
+    match resp {
+        mvm_guest::vsock::GuestResponse::WorkerStatus {
+            status,
+            last_busy_at,
+        } => {
+            if json {
+                let obj = serde_json::json!({
+                    "name": name,
+                    "worker_status": status,
+                    "last_busy_at": last_busy_at,
+                });
+                println!("{}", serde_json::to_string_pretty(&obj)?);
+            } else {
+                ui::status_line("VM:", name);
+                ui::status_line("Worker status:", &status);
+                let busy = last_busy_at.as_deref().unwrap_or("never");
+                ui::status_line("Last busy:", busy);
+            }
+            Ok(())
+        }
+        mvm_guest::vsock::GuestResponse::Error { message } => {
+            anyhow::bail!("Guest agent error: {}", message)
+        }
+        _ => anyhow::bail!("Unexpected response from guest agent"),
+    }
+}
+
+// ============================================================================
 // Utilities
 // ============================================================================
 
@@ -1504,5 +1676,60 @@ mod tests {
     fn test_run_requires_flake() {
         let result = Cli::try_parse_from(["mvm", "run"]);
         assert!(result.is_err(), "run should require --flake");
+    }
+
+    // ---- VM subcommand tests ----
+
+    #[test]
+    fn test_vm_ping_parses() {
+        let cli = Cli::try_parse_from(["mvm", "vm", "ping", "happy-panda"]).unwrap();
+        match cli.command {
+            Commands::Vm {
+                action: VmCmd::Ping { name },
+            } => {
+                assert_eq!(name, "happy-panda");
+            }
+            _ => panic!("Expected Vm Ping command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_status_parses() {
+        let cli = Cli::try_parse_from(["mvm", "vm", "status", "my-vm"]).unwrap();
+        match cli.command {
+            Commands::Vm {
+                action: VmCmd::Status { name, json },
+            } => {
+                assert_eq!(name, "my-vm");
+                assert!(!json);
+            }
+            _ => panic!("Expected Vm Status command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_status_json_flag() {
+        let cli = Cli::try_parse_from(["mvm", "vm", "status", "my-vm", "--json"]).unwrap();
+        match cli.command {
+            Commands::Vm {
+                action: VmCmd::Status { name, json },
+            } => {
+                assert_eq!(name, "my-vm");
+                assert!(json);
+            }
+            _ => panic!("Expected Vm Status command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_requires_subcommand() {
+        let result = Cli::try_parse_from(["mvm", "vm"]);
+        assert!(result.is_err(), "vm should require a subcommand");
+    }
+
+    #[test]
+    fn test_vm_ping_requires_name() {
+        let result = Cli::try_parse_from(["mvm", "vm", "ping"]);
+        assert!(result.is_err(), "vm ping should require a name");
     }
 }

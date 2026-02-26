@@ -166,9 +166,10 @@ pub fn is_running() -> Result<bool> {
 }
 
 /// Check if a specific VM's Firecracker process is alive (by PID file path).
+/// Uses /proc/<pid>/comm instead of kill -0 because firecracker runs as root.
 pub fn is_vm_running(pid_file: &str) -> Result<bool> {
     let result = run_in_vm_stdout(&format!(
-        "[ -f {pid} ] && kill -0 $(cat {pid}) 2>/dev/null && echo yes || echo no",
+        r#"[ -f {pid} ] && p=$(cat {pid}) && [ -f "/proc/$p/comm" ] && [ "$(cat /proc/$p/comm)" = "firecracker" ] && echo yes || echo no"#,
         pid = pid_file,
     ))?;
     Ok(result.trim() == "yes")

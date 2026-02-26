@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 mvm-core = { path = "../mvm-core", version = "0.3.0" }
+mvm-guest = { path = "../mvm-guest", version = "0.3.0" }
 mvm-runtime = { path = "../mvm-runtime", version = "0.3.0" }
 mvm-build = { path = "../mvm-build", version = "0.3.0" }
 anyhow.workspace = true

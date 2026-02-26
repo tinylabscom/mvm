@@ -119,30 +119,34 @@
     };
   };
 
-  # --- mvm config drive (read-only, per-instance metadata) ---
-  # Contains config.json with instance_id, tenant_id, pool_id, guest_ip, etc.
-  # Also used by roles to read app-specific config (gateway.toml, worker.toml).
+  # --- mvm drives (config, secrets, data) ---
+  # Firecracker drive ordering is deterministic:
+  #   /dev/vda = rootfs (always present)
+  #   /dev/vdb = config drive (per-instance metadata)
+  #   /dev/vdc = secrets drive (ephemeral tenant secrets)
+  #   /dev/vdd = data drive (optional persistent storage)
+  #
+  # We use device paths instead of by-label because our minimal initrd
+  # (includeDefaultModules = false) doesn't include the udev rules that
+  # create /dev/disk/by-label/ symlinks for post-boot block devices.
   fileSystems."/mnt/config" = {
-    device = "/dev/disk/by-label/mvm-config";
+    device = "/dev/vdb";
     fsType = "ext4";
-    options = [ "ro" "noexec" "nosuid" "nodev" "nofail" "x-systemd.device-timeout=1s" ];
-    neededForBoot = false;
+    options = [ "ro" "noexec" "nosuid" "nodev" "nofail" ];
+    neededForBoot = true;
   };
 
-  # --- mvm secrets drive (read-only, ephemeral tenant secrets) ---
-  # Contains secrets.json with tenant API keys, certs, etc.
-  # Recreated on every instance start/wake; never persisted to disk on host.
   fileSystems."/mnt/secrets" = {
-    device = "/dev/disk/by-label/mvm-secrets";
+    device = "/dev/vdc";
     fsType = "ext4";
-    options = [ "ro" "noexec" "nosuid" "nodev" "nofail" "x-systemd.device-timeout=1s" ];
-    neededForBoot = false;
+    options = [ "ro" "noexec" "nosuid" "nodev" "nofail" ];
+    neededForBoot = true;
   };
 
-  # --- mvm data drive (read-write, persistent per-instance storage) ---
-  # Optional — only present when pool spec has data_disk_mib > 0.
+  # Data drive is optional — only present when pool spec has data_disk_mib > 0.
+  # Use a short timeout so boot isn't blocked when the drive doesn't exist.
   fileSystems."/mnt/data" = {
-    device = "/dev/disk/by-label/mvm-data";
+    device = "/dev/vdd";
     fsType = "ext4";
     options = [ "noexec" "nosuid" "nodev" "nofail" "x-systemd.device-timeout=1s" ];
     neededForBoot = false;

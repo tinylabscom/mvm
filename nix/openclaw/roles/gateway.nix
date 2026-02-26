@@ -33,6 +33,9 @@
     wants = [ "network-online.target" "mnt-config.mount" "mnt-secrets.mount" ];
     wantedBy = [ "multi-user.target" ];
 
+    startLimitBurst = 3;
+    startLimitIntervalSec = 30;
+
     serviceConfig = {
       Type = "simple";
       User = "openclaw";
