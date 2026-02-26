@@ -47,6 +47,9 @@ fn script_source(name: &str) -> Option<&'static str> {
         "extract_artifacts_host" => Some(include_str!(
             "../../../resources/builder_scripts/extract_artifacts_host.sh.tera"
         )),
+        "inject_guest_agent" => Some(include_str!(
+            "../../../resources/builder_scripts/inject_guest_agent.sh.tera"
+        )),
         _ => None,
     }
 }
@@ -65,6 +68,7 @@ fn script_names() -> &'static [&'static str] {
         "extract_artifacts_vsock_disk",
         "run_nix_build_host",
         "extract_artifacts_host",
+        "inject_guest_agent",
     ]
 }
 

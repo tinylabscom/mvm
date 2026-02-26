@@ -1,0 +1,44 @@
+set -euo pipefail
+
+AGENT_BIN="{{agent_bin}}"
+ROOTFS="{{rootfs}}"
+
+echo "Injecting mvm-guest-agent into rootfs: $ROOTFS"
+
+# Expand rootfs by 10 MiB to accommodate the agent binary + systemd unit.
+truncate -s +10M "$ROOTFS"
+e2fsck -fy "$ROOTFS" >/dev/null 2>&1 || true
+resize2fs "$ROOTFS" >/dev/null 2>&1
+
+MOUNT_DIR=$(mktemp -d /tmp/mvm-rootfs-inject-XXXX)
+sudo mount -o loop "$ROOTFS" "$MOUNT_DIR"
+trap 'sudo umount "$MOUNT_DIR" 2>/dev/null; rmdir "$MOUNT_DIR" 2>/dev/null' EXIT
+
+# Copy agent binary
+sudo mkdir -p "$MOUNT_DIR/opt/mvm/bin"
+sudo cp "$AGENT_BIN" "$MOUNT_DIR/opt/mvm/bin/mvm-guest-agent"
+sudo chmod 755 "$MOUNT_DIR/opt/mvm/bin/mvm-guest-agent"
+
+# Write systemd unit
+sudo mkdir -p "$MOUNT_DIR/etc/systemd/system"
+sudo tee "$MOUNT_DIR/etc/systemd/system/mvm-guest-agent.service" > /dev/null << 'UNIT'
+[Unit]
+Description=MVM Guest Agent
+After=basic.target
+
+[Service]
+Type=simple
+ExecStart=/opt/mvm/bin/mvm-guest-agent
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Enable the service for multi-user.target
+sudo mkdir -p "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants"
+sudo ln -sf ../mvm-guest-agent.service \
+    "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/mvm-guest-agent.service"
+
+echo "Guest agent injected successfully"

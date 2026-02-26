@@ -4,6 +4,7 @@ pub mod build;
 pub mod cache;
 pub mod dev_build;
 pub mod firecracker;
+pub mod guest_agent;
 pub mod nix_manifest;
 pub mod orchestrator;
 pub mod scripts;
