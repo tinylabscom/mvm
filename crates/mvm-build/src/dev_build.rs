@@ -39,26 +39,11 @@ pub fn dev_build(
 ) -> Result<DevBuildResult> {
     let attr = resolve_dev_build_attribute(env, flake_ref, profile);
 
-    // Step 1: Run nix build, capturing output for error reporting
+    // Step 1: Run nix build with visible output so the user sees progress
     env.log_info(&format!("Building: nix build {}", attr));
-    let build_cmd = format!("nix build {} --no-link 2>&1", attr);
-    match env.shell_exec_capture(&build_cmd) {
-        Ok((stdout, _stderr)) => {
-            if !stdout.is_empty() {
-                env.log_info(&stdout);
-            }
-        }
-        Err(e) => {
-            let err_msg = e.to_string();
-            // Surface the captured build logs in the error context
-            return Err(e).with_context(|| {
-                format!(
-                    "nix build failed for {}\n\nBuild output:\n{}",
-                    attr, err_msg
-                )
-            });
-        }
-    }
+    let build_cmd = format!("nix build {} --no-link", attr);
+    env.shell_exec_visible(&build_cmd)
+        .with_context(|| format!("nix build failed for {}", attr))?;
 
     // Step 2: Capture the output path (instant, uses Nix cache)
     let output = env

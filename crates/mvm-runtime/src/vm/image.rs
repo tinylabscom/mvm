@@ -365,16 +365,8 @@ fn repair_dev_null() -> Result<()> {
 /// Ensure the base rootfs (S3 squashfs) and kernel are available and valid.
 fn ensure_base_assets() -> Result<()> {
     let sp = ui::spinner("Checking base assets...");
-    let has_kernel = run_in_vm(&format!(
-        "ls {dir}/vmlinux-* >/dev/null 2>&1",
-        dir = MICROVM_DIR,
-    ))?;
-    let has_rootfs = run_in_vm(&format!(
-        "ls {dir}/ubuntu-*.squashfs.upstream >/dev/null 2>&1",
-        dir = MICROVM_DIR,
-    ))?;
 
-    if !has_kernel.status.success() || !has_rootfs.status.success() {
+    if !firecracker::has_base_assets()? {
         sp.finish_and_clear();
         ui::info("Downloading base assets...");
         firecracker::download_assets()?;
@@ -385,19 +377,16 @@ fn ensure_base_assets() -> Result<()> {
     // Use -l to list all files, which reads inode/directory tables — catches more
     // corruption than -s which only reads the superblock.
     sp.set_message("Validating base rootfs integrity...");
-    let valid = run_in_vm(&format!(
-        "unsquashfs -l {dir}/ubuntu-*.squashfs.upstream >/dev/null 2>&1",
-        dir = MICROVM_DIR,
-    ))?;
-    sp.finish_and_clear();
-
-    if !valid.status.success() {
+    if !firecracker::validate_rootfs_squashfs()? {
+        sp.finish_and_clear();
         ui::warn("Base rootfs is corrupted. Re-downloading...");
         run_in_vm(&format!(
             "rm -f {dir}/ubuntu-*.squashfs.upstream",
             dir = MICROVM_DIR
         ))?;
         firecracker::download_assets()?;
+    } else {
+        sp.finish_and_clear();
     }
     Ok(())
 }

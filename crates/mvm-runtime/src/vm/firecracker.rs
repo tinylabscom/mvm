@@ -11,6 +11,29 @@ pub fn is_installed() -> Result<bool> {
     Ok(output.status.success())
 }
 
+/// Check if the kernel image exists in ~/microvm/.
+pub fn has_kernel() -> Result<bool> {
+    let output = run_in_vm(&format!(
+        "ls {dir}/vmlinux-* >/dev/null 2>&1",
+        dir = MICROVM_DIR,
+    ))?;
+    Ok(output.status.success())
+}
+
+/// Check if the upstream squashfs rootfs exists in ~/microvm/.
+pub fn has_squashfs() -> Result<bool> {
+    let output = run_in_vm(&format!(
+        "ls {dir}/ubuntu-*.squashfs.upstream >/dev/null 2>&1",
+        dir = MICROVM_DIR,
+    ))?;
+    Ok(output.status.success())
+}
+
+/// Check if both kernel and squashfs assets are present.
+pub fn has_base_assets() -> Result<bool> {
+    Ok(has_kernel()? && has_squashfs()?)
+}
+
 /// Check if the jailer binary is installed.
 fn jailer_is_installed() -> Result<bool> {
     let output = run_in_vm("command -v jailer >/dev/null 2>&1")?;
@@ -89,6 +112,8 @@ fn install_jailer_from_tarball(version: &str) -> Result<()> {
 }
 
 /// Download kernel and rootfs into ~/microvm/ inside the Lima VM.
+///
+/// Downloads run in parallel when both are needed.
 pub fn download_assets() -> Result<()> {
     let fc_short = fc_version_short();
     ui::info("Downloading kernel and rootfs...");
@@ -97,24 +122,29 @@ pub fn download_assets() -> Result<()> {
         set -euo pipefail
         mkdir -p {dir} && cd {dir}
 
-        if ls vmlinux-* >/dev/null 2>&1; then
-            echo '[mvm] Kernel already downloaded.'
-        else
-            echo '[mvm] Downloading kernel...'
+        need_kernel=0
+        need_rootfs=0
+        ls vmlinux-* >/dev/null 2>&1 || need_kernel=1
+        ls ubuntu-*.squashfs.upstream >/dev/null 2>&1 || need_rootfs=1
+
+        if [ "$need_kernel" -eq 0 ] && [ "$need_rootfs" -eq 0 ]; then
+            echo '[mvm] Kernel and rootfs already downloaded.'
+            exit 0
+        fi
+
+        # Resolve latest versions from S3 index
+        if [ "$need_kernel" -eq 1 ]; then
+            echo '[mvm] Looking up latest kernel...'
             latest_kernel_key=$(wget "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/{fc_short}/{arch}/vmlinux-5.10&list-type=2" -O - 2>/dev/null \
                 | grep -oP '(?<=<Key>)(firecracker-ci/{fc_short}/{arch}/vmlinux-5\.10\.[0-9]{{3}})(?=</Key>)')
             if [ -z "$latest_kernel_key" ]; then
                 echo '[mvm] ERROR: Failed to find kernel.' >&2
                 exit 1
             fi
-            wget --progress=bar:force:noscroll "https://s3.amazonaws.com/spec.ccfc.min/$latest_kernel_key"
-            echo '[mvm] Kernel downloaded.'
         fi
 
-        if ls ubuntu-*.squashfs.upstream >/dev/null 2>&1; then
-            echo '[mvm] RootFS already downloaded.'
-        else
-            echo '[mvm] Downloading Ubuntu rootfs...'
+        if [ "$need_rootfs" -eq 1 ]; then
+            echo '[mvm] Looking up latest rootfs...'
             latest_ubuntu_key=$(curl -s "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/{fc_short}/{arch}/ubuntu-&list-type=2" \
                 | grep -oP '(?<=<Key>)(firecracker-ci/{fc_short}/{arch}/ubuntu-[0-9]+\.[0-9]+\.squashfs)(?=</Key>)' \
                 | sort -V | tail -1)
@@ -123,9 +153,36 @@ pub fn download_assets() -> Result<()> {
                 exit 1
             fi
             ubuntu_version=$(basename $latest_ubuntu_key .squashfs | grep -oE '[0-9]+\.[0-9]+')
-            wget --progress=bar:force:noscroll -O "ubuntu-${{ubuntu_version}}.squashfs.upstream" "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key"
-            echo "[mvm] RootFS downloaded (Ubuntu ${{ubuntu_version}})."
         fi
+
+        # Download in parallel when both are needed
+        pids=""
+        if [ "$need_kernel" -eq 1 ]; then
+            echo '[mvm] Downloading kernel...'
+            wget -q --show-progress --progress=bar:force:noscroll \
+                "https://s3.amazonaws.com/spec.ccfc.min/$latest_kernel_key" &
+            pids="$pids $!"
+        else
+            echo '[mvm] Kernel already downloaded.'
+        fi
+
+        if [ "$need_rootfs" -eq 1 ]; then
+            echo '[mvm] Downloading rootfs...'
+            wget -q --show-progress --progress=bar:force:noscroll \
+                -O "ubuntu-${{ubuntu_version}}.squashfs.upstream" \
+                "https://s3.amazonaws.com/spec.ccfc.min/$latest_ubuntu_key" &
+            pids="$pids $!"
+        else
+            echo '[mvm] RootFS already downloaded.'
+        fi
+
+        # Wait for all background downloads and fail if any failed
+        for pid in $pids; do
+            wait "$pid" || {{ echo '[mvm] ERROR: A download failed.' >&2; exit 1; }}
+        done
+
+        [ "$need_kernel" -eq 1 ] && echo '[mvm] Kernel downloaded.'
+        [ "$need_rootfs" -eq 1 ] && echo "[mvm] RootFS downloaded (Ubuntu ${{ubuntu_version:-unknown}})."
         "#,
         dir = MICROVM_DIR,
         arch = ARCH,

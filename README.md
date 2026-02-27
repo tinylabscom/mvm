@@ -57,15 +57,16 @@ Layer 2: Lima VM (Ubuntu)
   - Skipped entirely on native Linux with KVM
 
 Layer 3: Firecracker microVM
-  - Minimal guest OS (Ubuntu by default)
+  - Minimal guest OS (NixOS-based, built from Nix flakes)
   - Isolated filesystem -- NO host mounts by default
   - Headless -- no SSH, no interactive access
   - Communicates via vsock only
   - Network: 172.16.0.2 (NAT via Lima)
   - Runs as a background daemon process
+  - Dev builds support `mvmctl vm exec` for debugging (see below)
 ```
 
-**Important**: Firecracker microVMs (Layer 3) are headless workloads with no SSH access. They communicate via vsock only. To work with your project files in a Linux environment, use `mvmctl shell` or `mvmctl dev` (Layer 2), where your home directory is mounted. Use `--volume` flags to pass data directories to microVMs.
+**Important**: Firecracker microVMs (Layer 3) are headless workloads with no SSH access. They communicate via vsock only. To work with your project files in a Linux environment, use `mvmctl shell` or `mvmctl dev` (Layer 2), where your home directory is mounted. Use `--volume` flags to pass data directories to microVMs. For debugging, dev-mode guest agents support `mvmctl vm exec <name> -- <command>` to run commands inside the microVM via vsock.
 
 ## Setup Flow
 
@@ -418,6 +419,8 @@ Then connect with `ssh mvm` from any terminal.
 |---------|-------------|
 | `mvmctl vm ping [name]` | Health-check running microVMs via vsock (all if no name given) |
 | `mvmctl vm status [name]` | Query worker status from running microVMs (`--json` for JSON output) |
+| `mvmctl vm inspect <name>` | Deep-dive inspection of a single VM (probes, integrations, worker status) |
+| `mvmctl vm exec <name> -- <cmd>` | Run a command inside a running microVM (dev-only, requires `dev-shell` guest agent) |
 
 ### Security
 
@@ -472,11 +475,11 @@ The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvm
 
 ### How It Works
 
-On macOS, all Linux operations run inside the Lima VM via `limactl shell mvm bash -c "..."`. On Linux with KVM, Lima is skipped and operations run natively. Firecracker microVMs run using `/dev/kvm` for hardware virtualization.
+All Linux operations are routed through a **`LinuxEnv`** abstraction defined in `mvm-core`. On macOS, the default implementation (`LimaEnv`) delegates commands via `limactl shell mvm bash -c "..."`. On Linux with KVM, `NativeEnv` runs commands directly via `bash -c`. The rest of the codebase is unaware of which backend is in use.
 
 ```
 Host (macOS/Linux)
-  └── Lima VM (Ubuntu, /dev/kvm) -- skipped on native Linux
+  └── Linux environment (Lima VM on macOS, native on Linux)
         └── Firecracker microVM (your workload)
 ```
 
@@ -485,16 +488,18 @@ Host (macOS/Linux)
 - Firecracker microVM has an isolated filesystem -- no host mounts by default
 - Use `--volume` flags to pass directories to the microVM
 
-**Build pipeline**: `mvmctl build` and `mvmctl template build` run `nix build` inside the Lima VM, producing kernel (`vmlinux`) and rootfs (`rootfs.ext4`) artifacts.
+**Build pipeline**: `mvmctl build` and `mvmctl template build` run `nix build` inside the Linux environment, producing kernel (`vmlinux`) and rootfs (`rootfs.ext4`) artifacts.
 
 ### Trait Architecture
 
-The `BuildEnvironment` trait is split into two traits in `mvm-core`:
+Key abstractions in `mvm-core`:
 
-- **`ShellEnvironment`** (base): `shell_exec()`, `shell_exec_stdout()`, `shell_exec_visible()`, `log_info()`, `log_success()`, `log_warn()`
-- **`BuildEnvironment`** (extends `ShellEnvironment`): `load_pool_spec()`, `load_tenant_config()`, `ensure_bridge()`, `setup_tap()`, `teardown_tap()`, `record_revision()`
+- **`LinuxEnv`**: Where Linux commands execute -- `run()`, `run_visible()`, `run_stdout()`, `run_capture()`. Implementations: `LimaEnv` (macOS), `NativeEnv` (Linux with KVM).
+- **`ShellEnvironment`**: Build-time shell execution -- `shell_exec()`, `shell_exec_stdout()`, `shell_exec_visible()`, `log_info()`, `log_success()`, `log_warn()`
+- **`BuildEnvironment`** (extends `ShellEnvironment`): Fleet build orchestration -- `load_pool_spec()`, `load_tenant_config()`, `ensure_bridge()`, `setup_tap()`, `teardown_tap()`, `record_revision()`
+- **`VmBackend`**: VM lifecycle abstraction -- `start()`, `stop()`, `status()`, `capabilities()`. Current implementation: `FirecrackerBackend`.
 
-mvm uses only `ShellEnvironment` (via `dev_build()`). The full `BuildEnvironment` is used by [mvmd](https://github.com/auser/mvmd) for fleet orchestration builds.
+mvm uses `LinuxEnv` for all command execution and `ShellEnvironment` for dev builds (via `dev_build()`). The full `BuildEnvironment` and `VmBackend` dispatch are used by [mvmd](https://github.com/auser/mvmd) for fleet orchestration.
 
 ## Network Layout (Dev Mode)
 

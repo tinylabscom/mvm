@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::bootstrap;
 use crate::fleet;
 use crate::logging::{self, LogFormat};
+use crate::shell_init;
 use crate::template_cmd;
 use crate::ui;
 use crate::upgrade;
@@ -267,6 +268,8 @@ enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Print shell configuration (completions + dev aliases) to stdout
+    ShellInit,
 }
 
 #[derive(Subcommand)]
@@ -612,6 +615,7 @@ pub fn run() -> Result<()> {
         ),
         Commands::Down { name, config } => cmd_down(name.as_deref(), config.as_deref()),
         Commands::Completions { shell } => cmd_completions(shell),
+        Commands::ShellInit => shell_init::print_shell_init(),
         Commands::Template { action } => cmd_template(action),
         Commands::Vm { action } => cmd_vm(action),
     };
@@ -716,14 +720,22 @@ fn cmd_dev(lima_cpus: u32, lima_mem: u32, project: Option<&str>) -> Result<()> {
         }
     }
 
-    // Install Firecracker if not present (so it's ready for `mvmctl start` inside Lima)
+    // Install Firecracker binary if not present
     if !firecracker::is_installed()? {
-        ui::info("Firecracker not installed. Running setup steps...\n");
+        ui::info("Firecracker not installed. Installing...\n");
         firecracker::install()?;
+    }
+
+    // Download kernel + squashfs only if missing
+    if !firecracker::has_base_assets()? {
+        ui::info("Downloading kernel and rootfs...\n");
         firecracker::download_assets()?;
         firecracker::prepare_rootfs()?;
         firecracker::write_state()?;
     }
+
+    // Ensure shell completions and dev aliases are in ~/.zshrc
+    shell_init::ensure_shell_init()?;
 
     // Drop into the Lima VM shell (the development environment)
     cmd_shell(project, lima_cpus, lima_mem)
@@ -763,11 +775,19 @@ fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
         firecracker::install()?;
     }
 
-    // Step 3: Assets
-    ui::step(3, total, "Downloading kernel and rootfs...");
-    firecracker::download_assets()?;
+    // Step 3: Assets (kernel + squashfs)
+    if !force && firecracker::has_base_assets()? {
+        ui::step(
+            3,
+            total,
+            "Kernel and rootfs already present \u{2014} skipping.",
+        );
+    } else {
+        ui::step(3, total, "Downloading kernel and rootfs...");
+        firecracker::download_assets()?;
+    }
 
-    if !firecracker::validate_rootfs_squashfs()? {
+    if firecracker::has_squashfs()? && !firecracker::validate_rootfs_squashfs()? {
         ui::warn("Downloaded rootfs is corrupted. Re-downloading...");
         shell::run_in_vm(&format!(
             "rm -f {dir}/ubuntu-*.squashfs.upstream",
@@ -1010,12 +1030,18 @@ fn cmd_shell(project: Option<&str>, _lima_cpus: u32, _lima_mem: u32) -> Result<(
 
     ui::info(&format!("  Lima VM:     {}\n", config::VM_NAME));
 
+    // Ensure shell completions and dev aliases are in the VM's ~/.zshrc
+    // (the host's ~/.zshrc is separate from the VM's)
+    if let Err(e) = shell_init::ensure_shell_init_in_vm() {
+        ui::warn(&format!("Shell init in VM failed: {e}"));
+    }
+
     match project {
         Some(path) => {
             let cmd = format!("cd {} && exec bash -l", shell_escape(path));
             shell::replace_process("limactl", &["shell", config::VM_NAME, "bash", "-c", &cmd])
         }
-        None => shell::replace_process("limactl", &["shell", config::VM_NAME]),
+        None => shell::replace_process("limactl", &["shell", config::VM_NAME, "bash", "-l"]),
     }
 }
 

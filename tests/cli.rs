@@ -55,6 +55,7 @@ fn test_help_lists_all_subcommands() {
         "destroy",
         "upgrade",
         "run",
+        "shell-init",
     ] {
         assert!(
             output.contains(cmd),
@@ -489,5 +490,37 @@ fn test_vm_inspect_nonexistent_fails_gracefully() {
             || combined.contains("limactl"),
         "vm inspect should fail gracefully, got: {}",
         combined
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shell init
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_shell_init_help() {
+    mvm()
+        .args(["shell-init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completions"))
+        .stdout(predicate::str::contains("aliases"));
+}
+
+#[test]
+fn test_shell_init_prints_block() {
+    let assert = mvm().arg("shell-init").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("mvmctl completions"),
+        "shell-init should include completions"
+    );
+    assert!(
+        stdout.contains("alias cr="),
+        "shell-init should include cr alias"
+    );
+    assert!(
+        stdout.contains("alias crd="),
+        "shell-init should include crd alias"
     );
 }

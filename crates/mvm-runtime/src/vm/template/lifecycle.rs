@@ -99,12 +99,19 @@ pub fn template_init(id: &str) -> Result<()> {
 /// Build a template using the dev build pipeline (local Nix in Lima).
 /// Artifacts are stored in ~/.mvm/templates/<id>/artifacts and the current symlink is updated.
 pub fn template_build(id: &str, force: bool) -> Result<()> {
+    use crate::ui;
+
     let spec = template_load(id)?;
     let env = RuntimeBuildEnv;
 
+    ui::info(&format!(
+        "Building template '{}' (flake: {}, profile: {})",
+        id, spec.flake_ref, spec.profile
+    ));
+
     // Use dev_build to produce artifacts via Nix in Lima
     let result = if force {
-        // Force: remove any cached artifacts to trigger a fresh build
+        ui::info("Force build: clearing cached artifacts");
         let data_dir = mvm_core::config::mvm_data_dir();
         let cache_dir = format!("{}/dev/builds/{}", data_dir, spec.flake_ref);
         let _ = shell::run_in_vm(&format!("rm -rf {cache_dir}"));
@@ -115,6 +122,7 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
     mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
     // Store artifacts in template revision directory
+    ui::info("Storing artifacts in template revision directory...");
     let rev = &result.revision_hash;
     let rev_dst = template_revision_dir(id, rev);
     shell::run_in_vm(&format!("mkdir -p {rev_dst}"))?;
@@ -196,6 +204,11 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
         "cat > {rev_meta_path} << 'MVMEOF'\n{rev_json}\nMVMEOF"
     ))?;
 
+    ui::success(&format!(
+        "Template '{}' built successfully (revision: {})",
+        id,
+        &rev[..rev.len().min(12)]
+    ));
     Ok(())
 }
 

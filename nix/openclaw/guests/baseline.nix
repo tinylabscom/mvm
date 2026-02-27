@@ -5,7 +5,7 @@
 # - Console on ttyS0 (Firecracker serial)
 # - Root filesystem on /dev/vda (ext4, the Nix-built rootfs image)
 # - Network via systemd-networkd, IP passed from host via kernel cmdline
-# - Mount points for mvm drives (config, secrets, data) by filesystem label
+# - Mount points for mvm drives (config, secrets, data) by device path
 # - Automatic init of the NixOS system on boot
 #
 # mvm's drive model:
@@ -14,8 +14,9 @@
 #   /dev/vd*  = data drive (ext4, label=mvm-data, read-write) — optional persistent storage
 #   /dev/vd*  = secrets drive (ext4, label=mvm-secrets, read-only) — ephemeral tenant secrets
 #
-# Drives are mounted by filesystem label (not device path) so the guest
-# config is independent of Firecracker drive ordering.
+# Drives are mounted by device path (not filesystem label) because the
+# minimal initrd doesn't include udev rules for /dev/disk/by-label/.
+# Firecracker drive ordering is deterministic, so device paths are stable.
 #
 # Networking:
 #   The host assigns each VM a static IP and passes it via Firecracker

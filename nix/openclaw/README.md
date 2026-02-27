@@ -28,9 +28,11 @@ config and secrets drives.
 └─────────────────────────────────────────────────┘
 ```
 
-All drives are mounted by filesystem label (`mvm-config`, `mvm-secrets`,
-`mvm-data`), not device path, so the guest config is independent of
-Firecracker drive ordering.
+Drives are mounted by device path (`/dev/vdb`, `/dev/vdc`, `/dev/vdd`),
+not by filesystem label, because the minimal initrd
+(`includeDefaultModules = false`) doesn't include the udev rules that
+create `/dev/disk/by-label/` symlinks. Firecracker drive ordering is
+deterministic, so device paths are stable.
 
 ## Variants
 
@@ -41,10 +43,10 @@ Firecracker drive ordering.
 
 ## Build
 
-Build with mvm (from repo root):
+Build with mvmctl (from repo root):
 
 ```bash
-mvm template build openclaw
+mvmctl template build openclaw
 ```
 
 Or directly with Nix:
@@ -60,20 +62,22 @@ ready for Firecracker.
 
 ## Usage
 
+Fleet orchestration commands (tenants, pools, scaling) live in [mvmd](https://github.com/auser/mvmd):
+
 ```bash
 # Create tenant with network isolation
-mvm tenant create acme --net-id 3 --subnet 10.240.3.0/24
+mvmd tenant create acme --net-id 3 --subnet 10.240.3.0/24
 
 # Create pools from template
-mvm pool create acme/gateways --template openclaw --role gateway
-mvm pool create acme/workers --template openclaw --role worker
+mvmd pool create acme/gateways --template openclaw --role gateway
+mvmd pool create acme/workers --template openclaw --role worker
 
 # Build (one image per role, shared across all tenants)
-mvm pool build acme/gateways
-mvm pool build acme/workers
+mvmd pool build acme/gateways
+mvmd pool build acme/workers
 
 # Scale — each instance gets its own config/secrets drives
-mvm pool scale acme/workers --running 5
+mvmd pool scale acme/workers --running 5
 ```
 
 ## File Structure
