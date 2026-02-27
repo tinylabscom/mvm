@@ -1,9 +1,11 @@
 use anyhow::Result;
 use mvm_core::vm_backend::{VmBackend, VmCapabilities, VmId, VmInfo, VmStatus};
 
-use super::{firecracker, microvm};
+use super::{firecracker, microvm, microvm_nix};
 use crate::config::VMS_DIR;
 use crate::shell::run_in_vm_stdout;
+
+pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -70,6 +72,9 @@ impl VmBackend for FirecrackerBackend {
                     guest_ip: info.guest_ip,
                     cpus: info.cpus,
                     memory_mib: info.memory,
+                    profile: info.profile,
+                    revision: info.revision,
+                    flake_ref: info.flake_ref,
                 })
             })
             .collect())
@@ -99,6 +104,126 @@ impl VmBackend for FirecrackerBackend {
     }
 }
 
+/// Backend-agnostic dispatch enum.
+///
+/// Wraps concrete backends so CLI commands don't need to know which
+/// backend is active. Each variant delegates to its inner implementation.
+pub enum AnyBackend {
+    Firecracker(FirecrackerBackend),
+    MicrovmNix(MicrovmNixBackend),
+}
+
+impl AnyBackend {
+    /// Create the default backend (Firecracker).
+    pub fn default_backend() -> Self {
+        Self::Firecracker(FirecrackerBackend)
+    }
+
+    /// Select backend based on whether the build output includes a
+    /// microvm.nix runner script.
+    pub fn from_build_output(has_runner: bool) -> Self {
+        if has_runner {
+            Self::MicrovmNix(MicrovmNixBackend)
+        } else {
+            Self::Firecracker(FirecrackerBackend)
+        }
+    }
+
+    /// Select backend by hypervisor name.
+    ///
+    /// Currently supported: `"firecracker"` (default), `"qemu"` (via
+    /// microvm.nix runner). Unknown names fall back to Firecracker.
+    pub fn from_hypervisor(name: &str) -> Self {
+        match name {
+            "qemu" => Self::MicrovmNix(MicrovmNixBackend),
+            _ => Self::Firecracker(FirecrackerBackend),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Firecracker(b) => b.name(),
+            Self::MicrovmNix(b) => b.name(),
+        }
+    }
+
+    pub fn capabilities(&self) -> VmCapabilities {
+        match self {
+            Self::Firecracker(b) => b.capabilities(),
+            Self::MicrovmNix(b) => b.capabilities(),
+        }
+    }
+
+    /// Start a VM using the Firecracker backend (manual API calls).
+    pub fn start_firecracker(&self, config: &FirecrackerConfig) -> Result<VmId> {
+        match self {
+            Self::Firecracker(b) => b.start(config),
+            Self::MicrovmNix(_) => {
+                anyhow::bail!("Cannot start Firecracker config with microvm.nix backend")
+            }
+        }
+    }
+
+    /// Start a VM using the microvm.nix runner backend.
+    pub fn start_microvm_nix(&self, config: &MicrovmNixConfig) -> Result<VmId> {
+        match self {
+            Self::MicrovmNix(b) => b.start(config),
+            Self::Firecracker(_) => {
+                anyhow::bail!("Cannot start microvm.nix config with Firecracker backend")
+            }
+        }
+    }
+
+    pub fn stop(&self, id: &VmId) -> Result<()> {
+        match self {
+            Self::Firecracker(b) => b.stop(id),
+            Self::MicrovmNix(b) => b.stop(id),
+        }
+    }
+
+    pub fn stop_all(&self) -> Result<()> {
+        match self {
+            Self::Firecracker(b) => b.stop_all(),
+            Self::MicrovmNix(b) => b.stop_all(),
+        }
+    }
+
+    pub fn status(&self, id: &VmId) -> Result<VmStatus> {
+        match self {
+            Self::Firecracker(b) => b.status(id),
+            Self::MicrovmNix(b) => b.status(id),
+        }
+    }
+
+    pub fn list(&self) -> Result<Vec<VmInfo>> {
+        match self {
+            Self::Firecracker(b) => b.list(),
+            Self::MicrovmNix(b) => b.list(),
+        }
+    }
+
+    pub fn logs(&self, id: &VmId, lines: u32, hypervisor: bool) -> Result<String> {
+        match self {
+            Self::Firecracker(b) => b.logs(id, lines, hypervisor),
+            Self::MicrovmNix(b) => b.logs(id, lines, hypervisor),
+        }
+    }
+
+    pub fn is_available(&self) -> Result<bool> {
+        match self {
+            Self::Firecracker(b) => b.is_available(),
+            Self::MicrovmNix(b) => b.is_available(),
+        }
+    }
+
+    pub fn install(&self) -> Result<()> {
+        match self {
+            Self::Firecracker(b) => b.install(),
+            Self::MicrovmNix(b) => b.install(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +240,66 @@ mod tests {
         let caps = backend.capabilities();
         assert!(caps.pause_resume);
         assert!(caps.snapshots);
+        assert!(caps.vsock);
+        assert!(caps.tap_networking);
+    }
+
+    #[test]
+    fn test_microvm_nix_backend_name() {
+        let backend = MicrovmNixBackend;
+        assert_eq!(backend.name(), "microvm-nix");
+    }
+
+    #[test]
+    fn test_microvm_nix_capabilities() {
+        let backend = MicrovmNixBackend;
+        let caps = backend.capabilities();
+        assert!(!caps.pause_resume);
+        assert!(!caps.snapshots);
+        assert!(caps.vsock);
+        assert!(caps.tap_networking);
+    }
+
+    #[test]
+    fn test_any_backend_default_is_firecracker() {
+        let backend = AnyBackend::default_backend();
+        assert_eq!(backend.name(), "firecracker");
+    }
+
+    #[test]
+    fn test_any_backend_from_build_output_no_runner() {
+        let backend = AnyBackend::from_build_output(false);
+        assert_eq!(backend.name(), "firecracker");
+    }
+
+    #[test]
+    fn test_any_backend_from_build_output_with_runner() {
+        let backend = AnyBackend::from_build_output(true);
+        assert_eq!(backend.name(), "microvm-nix");
+    }
+
+    #[test]
+    fn test_any_backend_from_hypervisor_firecracker() {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        assert_eq!(backend.name(), "firecracker");
+    }
+
+    #[test]
+    fn test_any_backend_from_hypervisor_qemu() {
+        let backend = AnyBackend::from_hypervisor("qemu");
+        assert_eq!(backend.name(), "microvm-nix");
+    }
+
+    #[test]
+    fn test_any_backend_from_hypervisor_unknown_defaults() {
+        let backend = AnyBackend::from_hypervisor("unknown");
+        assert_eq!(backend.name(), "firecracker");
+    }
+
+    #[test]
+    fn test_any_backend_capabilities() {
+        let backend = AnyBackend::default_backend();
+        let caps = backend.capabilities();
         assert!(caps.vsock);
         assert!(caps.tap_networking);
     }

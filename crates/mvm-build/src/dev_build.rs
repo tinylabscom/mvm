@@ -22,6 +22,11 @@ pub struct DevBuildResult {
     pub revision_hash: String,
     /// Whether the build was a cache hit (artifacts already existed).
     pub cached: bool,
+    /// Path to the microvm.nix runner directory, if the build output
+    /// contains runner scripts (e.g. `bin/microvm-run`). When present,
+    /// the microvm.nix backend can be used instead of manual Firecracker
+    /// API calls.
+    pub runner_dir: Option<String>,
 }
 
 /// Build a microVM image from a Nix flake directly in the Lima VM.
@@ -73,6 +78,7 @@ pub fn dev_build(
     if check_cache(env, &revision_hash)? {
         env.log_success(&format!("Cache hit: {}", build_dir));
         let initrd_path = detect_initrd(env, &build_dir);
+        let runner_dir = detect_runner(env, &build_dir);
         return Ok(DevBuildResult {
             vmlinux_path: format!("{}/vmlinux", build_dir),
             initrd_path,
@@ -80,6 +86,7 @@ pub fn dev_build(
             build_dir,
             revision_hash,
             cached: true,
+            runner_dir,
         });
     }
 
@@ -89,6 +96,7 @@ pub fn dev_build(
     env.log_success(&format!("Artifacts stored at {}", build_dir));
 
     let initrd_path = detect_initrd(env, &build_dir);
+    let runner_dir = detect_runner(env, &build_dir);
     Ok(DevBuildResult {
         vmlinux_path: format!("{}/vmlinux", build_dir),
         initrd_path,
@@ -96,6 +104,7 @@ pub fn dev_build(
         build_dir,
         revision_hash,
         cached: false,
+        runner_dir,
     })
 }
 
@@ -185,6 +194,13 @@ fn copy_dev_artifacts(
             exit 1
         fi
 
+        # Copy microvm.nix runner scripts if present
+        if [ -d {out}/bin ] && [ -x {out}/bin/microvm-run ]; then
+            mkdir -p {dir}/bin
+            cp -rL {out}/bin/* {dir}/bin/
+            chmod +x {dir}/bin/*
+        fi
+
         echo "Artifacts:"
         ls -lh {dir}/
         "#,
@@ -202,6 +218,23 @@ fn detect_initrd(env: &dyn ShellEnvironment, build_dir: &str) -> Option<String> 
         .ok()?;
     if result.trim() == "yes" {
         Some(path)
+    } else {
+        None
+    }
+}
+
+/// Check whether a microvm.nix runner script exists in the build directory.
+///
+/// The root flake's `mkGuest` copies the runner to `$out/bin/microvm-run`
+/// when the microvm.nix runner is available. If found, returns the runner
+/// directory path (parent of `bin/`).
+fn detect_runner(env: &dyn ShellEnvironment, build_dir: &str) -> Option<String> {
+    let runner_path = format!("{}/bin/microvm-run", build_dir);
+    let result = env
+        .shell_exec_stdout(&format!("test -x {} && echo yes || echo no", runner_path))
+        .ok()?;
+    if result.trim() == "yes" {
+        Some(build_dir.to_string())
     } else {
         None
     }
@@ -596,6 +629,7 @@ mod tests {
             rootfs_path: format!("{dir}/rootfs.ext4"),
             revision_hash: "hash123".to_string(),
             cached: false,
+            runner_dir: None,
         };
 
         assert!(result.vmlinux_path.starts_with(&result.build_dir));
@@ -607,5 +641,22 @@ mod tests {
                 .unwrap()
                 .starts_with(&result.build_dir)
         );
+    }
+
+    #[test]
+    fn test_dev_build_result_with_runner() {
+        let dir = dev_build_dir("hash456");
+        let result = DevBuildResult {
+            build_dir: dir.clone(),
+            vmlinux_path: format!("{dir}/vmlinux"),
+            initrd_path: None,
+            rootfs_path: format!("{dir}/rootfs.ext4"),
+            revision_hash: "hash456".to_string(),
+            cached: false,
+            runner_dir: Some(dir.clone()),
+        };
+
+        assert!(result.runner_dir.is_some());
+        assert_eq!(result.runner_dir.as_ref().unwrap(), &dir);
     }
 }

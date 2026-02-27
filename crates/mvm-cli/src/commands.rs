@@ -10,8 +10,10 @@ use crate::template_cmd;
 use crate::ui;
 use crate::upgrade;
 
+use mvm_core::vm_backend::VmId;
 use mvm_runtime::config;
 use mvm_runtime::shell;
+use mvm_runtime::vm::backend::{AnyBackend, FirecrackerConfig};
 use mvm_runtime::vm::{firecracker, image, lima, microvm};
 
 #[derive(Parser)]
@@ -228,6 +230,9 @@ enum Commands {
         /// Volume override (format: host_path:guest_mount:size). Repeatable.
         #[arg(long, short = 'v')]
         volume: Vec<String>,
+        /// Hypervisor backend (firecracker, qemu). Default: firecracker.
+        #[arg(long, default_value = "firecracker")]
+        hypervisor: String,
     },
     /// Launch microVMs (from mvm.toml or CLI flags)
     Up {
@@ -248,6 +253,9 @@ enum Commands {
         /// Memory in MiB (overrides config file)
         #[arg(long)]
         memory: Option<u32>,
+        /// Hypervisor backend (firecracker, qemu). Default: firecracker.
+        #[arg(long, default_value = "firecracker")]
+        hypervisor: String,
     },
     /// Stop microVMs (from mvm.toml, by name, or all)
     Down {
@@ -588,6 +596,7 @@ pub fn run() -> Result<()> {
             memory,
             config,
             volume,
+            hypervisor,
         } => cmd_run(RunParams {
             flake_ref: flake.as_deref(),
             template_name: template.as_deref(),
@@ -597,6 +606,7 @@ pub fn run() -> Result<()> {
             memory,
             config_path: config.as_deref(),
             volumes: &volume,
+            hypervisor: &hypervisor,
         }),
         Commands::Up {
             name,
@@ -605,6 +615,7 @@ pub fn run() -> Result<()> {
             profile,
             cpus,
             memory,
+            hypervisor,
         } => cmd_up(
             name.as_deref(),
             config.as_deref(),
@@ -612,6 +623,7 @@ pub fn run() -> Result<()> {
             profile.as_deref(),
             cpus,
             memory,
+            &hypervisor,
         ),
         Commands::Down { name, config } => cmd_down(name.as_deref(), config.as_deref()),
         Commands::Completions { shell } => cmd_completions(shell),
@@ -908,14 +920,15 @@ fn shell_escape(s: &str) -> String {
 }
 
 fn cmd_stop(name: Option<&str>, all: bool) -> Result<()> {
+    let backend = AnyBackend::default_backend();
     match (name, all) {
-        (Some(n), _) => microvm::stop_vm(n),
-        (None, true) => microvm::stop_all_vms(),
+        (Some(n), _) => backend.stop(&VmId::from(n)),
+        (None, true) => backend.stop_all(),
         (None, false) => {
             // Default: stop all VMs (both named and legacy)
-            let vms = microvm::list_vms().unwrap_or_default();
+            let vms = backend.list().unwrap_or_default();
             if !vms.is_empty() {
-                microvm::stop_all_vms()
+                backend.stop_all()
             } else {
                 microvm::stop()
             }
@@ -1308,7 +1321,8 @@ fn cmd_status() -> Result<()> {
     }
 
     // Show running named VMs (multi-VM mode)
-    let vms = microvm::list_vms().unwrap_or_default();
+    let backend = AnyBackend::default_backend();
+    let vms = backend.list().unwrap_or_default();
     if !vms.is_empty() {
         // Check vsock availability for each VM
         let abs_vms =
@@ -1334,7 +1348,7 @@ fn cmd_status() -> Result<()> {
         );
         println!("  {}", "-".repeat(78));
         for vm in &vms {
-            let name = vm.name.as_deref().unwrap_or("?");
+            let name = &vm.name;
             let profile = vm.profile.as_deref().unwrap_or("default");
             let ip = vm.guest_ip.as_deref().unwrap_or("?");
             let rev = vm
@@ -1342,7 +1356,7 @@ fn cmd_status() -> Result<()> {
                 .as_deref()
                 .map(|r| if r.len() > 10 { &r[..10] } else { r })
                 .unwrap_or("?");
-            let vsock = vsock_map.get(name).copied().unwrap_or("?");
+            let vsock = vsock_map.get(name.as_str()).copied().unwrap_or("?");
             println!(
                 "  {:<16} {:<10} {:<16} {:<14} {:<8} Running",
                 name, profile, ip, rev, vsock
@@ -1791,6 +1805,7 @@ struct RunParams<'a> {
     memory: Option<u32>,
     config_path: Option<&'a str>,
     volumes: &'a [String],
+    hypervisor: &'a str,
 }
 
 fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -1803,6 +1818,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         memory,
         config_path,
         volumes,
+        hypervisor,
     } = params;
     if bootstrap::is_lima_required() {
         lima::require_running()?;
@@ -1926,7 +1942,9 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volumes: volume_cfg,
     };
 
-    microvm::run_from_build(&run_config)
+    let backend = AnyBackend::from_hypervisor(hypervisor);
+    backend.start_firecracker(&FirecrackerConfig { run_config })?;
+    Ok(())
 }
 
 fn parse_runtime_volume(spec: &str) -> Result<image::RuntimeVolume> {
@@ -1955,6 +1973,7 @@ fn cmd_up(
     profile: Option<&str>,
     cpus: Option<u32>,
     memory: Option<u32>,
+    hypervisor: &str,
 ) -> Result<()> {
     if bootstrap::is_lima_required() {
         lima::require_running()?;
@@ -2060,7 +2079,8 @@ fn cmd_up(
                     volumes,
                 };
 
-                microvm::run_from_build(&run_config)?;
+                let backend = AnyBackend::from_hypervisor(hypervisor);
+                backend.start_firecracker(&FirecrackerConfig { run_config })?;
             }
 
             ui::success(&format!("{} VMs running", vm_names.len()));
@@ -2102,7 +2122,9 @@ fn cmd_up(
                 volumes: vec![],
             };
 
-            microvm::run_from_build(&run_config)
+            let backend = AnyBackend::from_hypervisor(hypervisor);
+            backend.start_firecracker(&FirecrackerConfig { run_config })?;
+            Ok(())
         }
 
         // No config, no flake — nothing to do
@@ -2169,20 +2191,21 @@ fn build_profiles(
 }
 
 fn cmd_down(name: Option<&str>, config_path: Option<&str>) -> Result<()> {
+    let backend = AnyBackend::default_backend();
     match name {
-        Some(n) => microvm::stop_vm(n),
+        Some(n) => backend.stop(&VmId::from(n)),
         None => {
             let found = load_fleet_config(config_path)?;
             if let Some((fleet_config, _base_dir)) = found {
                 let mut stopped = 0;
                 for vm_name in fleet_config.vms.keys() {
-                    if microvm::stop_vm(vm_name).is_ok() {
+                    if backend.stop(&VmId::from(vm_name.as_str())).is_ok() {
                         stopped += 1;
                     }
                 }
 
                 // Clean up bridge if no VMs remain
-                let remaining = microvm::list_vms().unwrap_or_default();
+                let remaining = backend.list().unwrap_or_default();
                 if remaining.is_empty() {
                     let _ = mvm_runtime::vm::network::bridge_teardown();
                 }
@@ -2190,7 +2213,7 @@ fn cmd_down(name: Option<&str>, config_path: Option<&str>) -> Result<()> {
                 ui::success(&format!("Stopped {} VMs", stopped));
                 Ok(())
             } else {
-                microvm::stop_all_vms()
+                backend.stop_all()
             }
         }
     }
@@ -2370,8 +2393,25 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
 
     // Native Linux / inside Lima — call vsock directly
     let vsock_path = format!("{}/v.sock", abs_dir);
-    let resp = mvm_guest::vsock::query_worker_status_at(&vsock_path)
-        .with_context(|| format!("Failed to query status for VM '{}'", name))?;
+    let resp = match mvm_guest::vsock::query_worker_status_at(&vsock_path) {
+        Ok(resp) => resp,
+        Err(e) => {
+            let err_msg = format!("{}", e);
+            if json {
+                let obj = serde_json::json!({
+                    "name": name,
+                    "worker_status": "unreachable",
+                    "error": err_msg,
+                });
+                println!("{}", serde_json::to_string_pretty(&obj)?);
+            } else {
+                ui::status_line("VM:", name);
+                ui::status_line("Worker status:", "unreachable");
+                ui::warn(&format!("Could not reach guest agent: {}", err_msg));
+            }
+            return Ok(());
+        }
+    };
 
     match resp {
         mvm_guest::vsock::GuestResponse::WorkerStatus {
@@ -2467,8 +2507,9 @@ fn list_running_vm_names() -> Result<Vec<String>> {
     if bootstrap::is_lima_required() {
         lima::require_running()?;
     }
-    let vms = microvm::list_vms().unwrap_or_default();
-    Ok(vms.into_iter().filter_map(|vm| vm.name).collect())
+    let backend = AnyBackend::default_backend();
+    let vms = backend.list().unwrap_or_default();
+    Ok(vms.into_iter().map(|vm| vm.name).collect())
 }
 
 fn cmd_vm_ping_all() -> Result<()> {
@@ -3076,13 +3117,10 @@ mod tests {
         match cli.command {
             Commands::Run {
                 flake,
-                template: _,
                 profile,
                 cpus,
                 memory,
-                name: _,
-                volume: _,
-                config: _,
+                ..
             } => {
                 assert_eq!(flake, Some(".".to_string()));
                 assert_eq!(profile.as_deref(), Some("full"));
@@ -3104,8 +3142,9 @@ mod tests {
                 profile,
                 cpus,
                 memory,
-                config: _,
                 volume,
+                hypervisor,
+                ..
             } => {
                 assert_eq!(flake, Some(".".to_string()));
                 assert!(template.is_none(), "template should be None when omitted");
@@ -3114,6 +3153,7 @@ mod tests {
                 assert!(cpus.is_none(), "cpus should be None when omitted");
                 assert!(memory.is_none(), "memory should be None when omitted");
                 assert_eq!(volume.len(), 0);
+                assert_eq!(hypervisor, "firecracker");
             }
             _ => panic!("Expected Run command"),
         }
@@ -3322,6 +3362,7 @@ mod tests {
                 profile,
                 cpus,
                 memory,
+                hypervisor,
             } => {
                 assert!(name.is_none());
                 assert!(config.is_none());
@@ -3329,6 +3370,7 @@ mod tests {
                 assert!(profile.is_none());
                 assert!(cpus.is_none());
                 assert!(memory.is_none());
+                assert_eq!(hypervisor, "firecracker");
             }
             _ => panic!("Expected Up command"),
         }
@@ -3372,6 +3414,7 @@ mod tests {
                 profile,
                 cpus,
                 memory,
+                hypervisor,
             } => {
                 assert_eq!(name.as_deref(), Some("gw"));
                 assert_eq!(config.as_deref(), Some("fleet.toml"));
@@ -3379,6 +3422,7 @@ mod tests {
                 assert_eq!(profile.as_deref(), Some("gateway"));
                 assert_eq!(cpus, Some(4));
                 assert_eq!(memory, Some(2048));
+                assert_eq!(hypervisor, "firecracker");
             }
             _ => panic!("Expected Up command"),
         }

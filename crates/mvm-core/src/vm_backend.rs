@@ -65,11 +65,21 @@ pub struct VmInfo {
     /// Current status.
     pub status: VmStatus,
     /// Guest IP address, if networking is configured.
+    #[serde(default)]
     pub guest_ip: Option<String>,
     /// Number of vCPUs.
     pub cpus: u32,
     /// Memory in MiB.
     pub memory_mib: u32,
+    /// Flake profile name (e.g. "worker", "gateway").
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Nix store revision hash.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Original flake reference.
+    #[serde(default)]
+    pub flake_ref: Option<String>,
 }
 
 /// Backend-agnostic VM lifecycle trait.
@@ -200,6 +210,9 @@ mod tests {
             guest_ip: Some("172.16.0.2".to_string()),
             cpus: 2,
             memory_mib: 512,
+            profile: Some("worker".to_string()),
+            revision: Some("abc123".to_string()),
+            flake_ref: Some("/home/user/project".to_string()),
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: VmInfo = serde_json::from_str(&json).unwrap();
@@ -208,5 +221,19 @@ mod tests {
         assert_eq!(parsed.cpus, 2);
         assert_eq!(parsed.memory_mib, 512);
         assert_eq!(parsed.guest_ip.as_deref(), Some("172.16.0.2"));
+        assert_eq!(parsed.profile.as_deref(), Some("worker"));
+        assert_eq!(parsed.revision.as_deref(), Some("abc123"));
+        assert_eq!(parsed.flake_ref.as_deref(), Some("/home/user/project"));
+    }
+
+    #[test]
+    fn test_vm_info_serde_without_optional_fields() {
+        let json = r#"{"id":"vm-1","name":"w","status":"Running","cpus":1,"memory_mib":256}"#;
+        let parsed: VmInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.name, "w");
+        assert!(parsed.guest_ip.is_none());
+        assert!(parsed.profile.is_none());
+        assert!(parsed.revision.is_none());
+        assert!(parsed.flake_ref.is_none());
     }
 }

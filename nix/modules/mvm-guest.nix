@@ -1,18 +1,18 @@
 # Baseline NixOS configuration for mvm Firecracker guests.
 #
-# This module configures the guest OS for Firecracker:
-# - Minimal kernel for VM boot
+# This module configures the guest OS for running inside Firecracker:
+# - Minimal kernel with only virtio drivers
 # - Console on ttyS0 (Firecracker serial)
 # - Root filesystem on /dev/vda (ext4, the Nix-built rootfs image)
 # - Network via systemd-networkd, IP passed from host via kernel cmdline
 # - Mount points for mvm drives (config, secrets, data) by device path
-# - Automatic init of the NixOS system on boot
+# - Security hardening: no SSH, no sudo, no mutable users
 #
 # mvm's drive model:
 #   /dev/vda  = rootfs (ext4, read-write) — always present, contains NixOS + nix store
-#   /dev/vd*  = config drive (ext4, label=mvm-config, read-only) — per-instance metadata
-#   /dev/vd*  = data drive (ext4, label=mvm-data, read-write) — optional persistent storage
-#   /dev/vd*  = secrets drive (ext4, label=mvm-secrets, read-only) — ephemeral tenant secrets
+#   /dev/vdb  = config drive (ext4, label=mvm-config, read-only) — per-instance metadata
+#   /dev/vdc  = secrets drive (ext4, label=mvm-secrets, read-only) — ephemeral tenant secrets
+#   /dev/vdd  = data drive (ext4, label=mvm-data, read-write) — optional persistent storage
 #
 # Drives are mounted by device path (not filesystem label) because the
 # minimal initrd doesn't include udev rules for /dev/disk/by-label/.

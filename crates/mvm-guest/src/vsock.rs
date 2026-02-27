@@ -22,6 +22,12 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
 /// Maximum response frame size (256 KiB).
 const MAX_FRAME_SIZE: usize = 256 * 1024;
 
+/// Number of CONNECT handshake retries before giving up.
+const CONNECT_RETRIES: u32 = 3;
+
+/// Delay between CONNECT handshake retries.
+const CONNECT_RETRY_DELAY_MS: u64 = 500;
+
 // ============================================================================
 // Guest agent protocol (JSON over vsock)
 // ============================================================================
@@ -407,14 +413,16 @@ pub fn vsock_uds_path(instance_dir: &str) -> String {
     format!("{}/runtime/v.sock", instance_dir)
 }
 
-/// Connect to the guest vsock agent via a direct UDS path.
-///
-/// Firecracker exposes guest vsock as a Unix domain socket. The connect protocol:
-/// 1. Open Unix stream to the given UDS path
-/// 2. Write `CONNECT <port>\n`
-/// 3. Read `OK <port>\n`
-/// 4. Then use length-prefixed JSON frames
-fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
+/// Check if an IO error is a timeout (EAGAIN/EWOULDBLOCK or TimedOut).
+fn is_timeout_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// Single attempt to connect and perform the Firecracker CONNECT handshake.
+fn try_connect_once(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
 
     let stream = UnixStream::connect(uds_path)
@@ -422,7 +430,6 @@ fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
 
-    // Firecracker vsock connect handshake
     let mut stream = stream;
     writeln!(stream, "CONNECT {}", GUEST_AGENT_PORT).with_context(|| "Failed to send CONNECT")?;
     stream.flush()?;
@@ -430,9 +437,17 @@ fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     // Read response line: "OK <port>\n"
     let mut reader = BufReader::new(&stream);
     let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .with_context(|| "Failed to read CONNECT response")?;
+    reader.read_line(&mut response_line).map_err(|e| {
+        if is_timeout_error(&e) {
+            anyhow::anyhow!(
+                "Guest agent did not respond within {}s \
+                 (the agent may not be running or the microVM may be unhealthy)",
+                timeout_secs
+            )
+        } else {
+            anyhow::anyhow!("Failed to read CONNECT response: {}", e)
+        }
+    })?;
 
     if !response_line.starts_with("OK ") {
         bail!(
@@ -443,6 +458,42 @@ fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     }
 
     Ok(stream)
+}
+
+/// Connect to the guest vsock agent via a direct UDS path, with retries.
+///
+/// Firecracker exposes guest vsock as a Unix domain socket. The connect protocol:
+/// 1. Open Unix stream to the given UDS path
+/// 2. Write `CONNECT <port>\n`
+/// 3. Read `OK <port>\n`
+/// 4. Then use length-prefixed JSON frames
+///
+/// Retries up to [`CONNECT_RETRIES`] times on timeout errors, skipping retries
+/// for definitive failures (connection refused, socket not found).
+fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
+    let mut last_err = None;
+
+    for attempt in 1..=CONNECT_RETRIES {
+        match try_connect_once(uds_path, timeout_secs) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                let is_timeout = e.to_string().contains("did not respond within");
+
+                // Don't retry definitive failures (VM not running at all)
+                if !is_timeout {
+                    return Err(e);
+                }
+
+                last_err = Some(e);
+
+                if attempt < CONNECT_RETRIES {
+                    std::thread::sleep(Duration::from_millis(CONNECT_RETRY_DELAY_MS));
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to connect to vsock")))
 }
 
 /// Connect to the guest vsock agent via the fleet-mode instance directory convention.
@@ -470,9 +521,13 @@ fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResp
 
     // Read response length
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .with_context(|| "Failed to read response length")?;
+    stream.read_exact(&mut len_buf).map_err(|e| {
+        if is_timeout_error(&e) {
+            anyhow::anyhow!("Guest agent timed out while waiting for response")
+        } else {
+            anyhow::anyhow!("Failed to read response length: {}", e)
+        }
+    })?;
     let resp_len = u32::from_be_bytes(len_buf) as usize;
 
     if resp_len > MAX_FRAME_SIZE {
@@ -485,9 +540,13 @@ fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResp
 
     // Read response body
     let mut buf = vec![0u8; resp_len];
-    stream
-        .read_exact(&mut buf)
-        .with_context(|| "Failed to read response body")?;
+    stream.read_exact(&mut buf).map_err(|e| {
+        if is_timeout_error(&e) {
+            anyhow::anyhow!("Guest agent timed out while reading response body")
+        } else {
+            anyhow::anyhow!("Failed to read response body: {}", e)
+        }
+    })?;
 
     serde_json::from_slice(&buf).with_context(|| "Failed to deserialize response")
 }
@@ -879,6 +938,50 @@ mod tests {
     fn test_query_probe_status_at_nonexistent_path() {
         let result = query_probe_status_at("/nonexistent/v.sock");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_timeout_error_would_block() {
+        let err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block");
+        assert!(is_timeout_error(&err));
+    }
+
+    #[test]
+    fn test_is_timeout_error_timed_out() {
+        let err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        assert!(is_timeout_error(&err));
+    }
+
+    #[test]
+    fn test_is_timeout_error_other() {
+        let err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        assert!(!is_timeout_error(&err));
+    }
+
+    #[test]
+    fn test_try_connect_once_nonexistent_path() {
+        let result = try_connect_once("/nonexistent/v.sock", 1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to connect to vsock UDS"),
+            "Error was: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_connect_to_nonexistent_no_retry_delay() {
+        // Definitive failure (socket not found) should fail fast without retries
+        let start = std::time::Instant::now();
+        let result = connect_to("/nonexistent/v.sock", 1);
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        assert!(
+            elapsed.as_secs() < 2,
+            "connect_to took {:?}, suggesting unnecessary retries",
+            elapsed
+        );
     }
 
     #[test]

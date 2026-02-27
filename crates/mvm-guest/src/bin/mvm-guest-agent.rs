@@ -291,6 +291,61 @@ fn monitoring_loop(state: Arc<Mutex<AgentState>>, busy_threshold: f64, sample_in
 }
 
 // ============================================================================
+// Shell command execution
+// ============================================================================
+
+/// Run a shell command with a timeout, returning the captured output.
+///
+/// Uses `/bin/sh -c` (absolute path — NixOS systemd services may not have
+/// `/bin` in PATH, but `/bin/sh` always exists as a symlink to bash).
+/// Timeout is enforced natively via `try_wait` polling to avoid depending
+/// on the `timeout` binary from coreutils being in PATH.
+fn run_shell_with_timeout(cmd: &str, timeout: Duration) -> std::io::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Poll until the child exits or the timeout fires.
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(std::process::Output {
+                    status: std::process::ExitStatus::default(),
+                    stdout: Vec::new(),
+                    stderr: format!("timed out after {}s", timeout.as_secs()).into_bytes(),
+                });
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+
+    // Child has exited — read remaining pipe output.
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut r) = child.stdout.take() {
+        let _ = r.read_to_end(&mut stdout);
+    }
+    if let Some(mut r) = child.stderr.take() {
+        let _ = r.read_to_end(&mut stderr);
+    }
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+// ============================================================================
 // Integration health monitoring
 // ============================================================================
 
@@ -304,14 +359,8 @@ fn run_health_check(entry: &IntegrationEntry) -> IntegrationHealthResult {
         };
     };
 
-    let timeout = entry.health_timeout_secs;
-    let timeout_cmd = format!("timeout {} {}", timeout, cmd);
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&timeout_cmd)
-        .output();
-
-    match output {
+    let timeout = Duration::from_secs(entry.health_timeout_secs);
+    match run_shell_with_timeout(cmd, timeout) {
         Ok(out) if out.status.success() => IntegrationHealthResult {
             healthy: true,
             detail: "ok".to_string(),
@@ -420,11 +469,8 @@ fn build_integration_reports(
 
 /// Run a single probe command.
 fn run_probe(entry: &ProbeEntry) -> ProbeResult {
-    let timeout_cmd = format!("timeout {} {}", entry.timeout_secs, entry.cmd);
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&timeout_cmd)
-        .output();
+    let timeout = Duration::from_secs(entry.timeout_secs);
+    let output = run_shell_with_timeout(&entry.cmd, timeout);
 
     match output {
         Ok(out) if out.status.success() => {
@@ -595,7 +641,7 @@ const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 fn do_exec(command: &str, stdin_data: Option<&str>, _timeout_secs: u64) -> GuestResponse {
     use std::process::{Command, Stdio};
 
-    let mut child = match Command::new("sh")
+    let mut child = match Command::new("/bin/sh")
         .arg("-c")
         .arg(command)
         .stdin(if stdin_data.is_some() {

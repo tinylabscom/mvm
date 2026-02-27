@@ -5,5 +5,6 @@ pub mod image;
 pub mod lima;
 pub mod lima_state;
 pub mod microvm;
+pub mod microvm_nix;
 pub mod network;
 pub mod template;

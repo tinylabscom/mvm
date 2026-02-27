@@ -25,6 +25,15 @@ impl Platform {
     pub fn has_kvm(self) -> bool {
         matches!(self, Platform::LinuxNative)
     }
+
+    /// Whether the microvm.nix runner can execute natively (without Lima).
+    ///
+    /// On native Linux with KVM, the runner scripts execute directly.
+    /// On macOS or Linux without KVM, they are routed through Lima
+    /// via the [`LinuxEnv`] abstraction.
+    pub fn supports_native_runner(self) -> bool {
+        matches!(self, Platform::LinuxNative)
+    }
 }
 
 impl std::fmt::Display for Platform {
@@ -93,10 +102,18 @@ mod tests {
     }
 
     #[test]
+    fn test_supports_native_runner() {
+        assert!(!Platform::MacOS.supports_native_runner());
+        assert!(Platform::LinuxNative.supports_native_runner());
+        assert!(!Platform::LinuxNoKvm.supports_native_runner());
+    }
+
+    #[test]
     fn test_current_platform_valid() {
         let p = current();
         // On any platform, we should get a valid result
         let _ = p.needs_lima();
         let _ = p.has_kvm();
+        let _ = p.supports_native_runner();
     }
 }
