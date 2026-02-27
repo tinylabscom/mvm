@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use crate::config::VM_NAME;
+use crate::linux_env;
 use mvm_core::platform;
 
 /// Run a command on the host, capturing output.
@@ -34,11 +35,20 @@ pub fn run_host_visible(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Run a bash script in the Linux execution environment, capturing output.
+/// Run a bash script in the Linux environment, capturing output.
 ///
 /// On native Linux with KVM: runs `bash -c` directly on the host.
 /// On macOS or Linux without KVM: runs via `limactl shell` inside a Lima VM.
+///
+/// When `vm_name` matches the default VM name, this delegates to the
+/// [`LinuxEnv`](mvm_core::linux_env::LinuxEnv) abstraction. For custom
+/// VM names, it uses the platform-specific command directly.
 pub fn run_on_vm(vm_name: &str, script: &str) -> Result<Output> {
+    if vm_name == VM_NAME {
+        return linux_env::default_env().run(script);
+    }
+
+    // Custom VM name — can't use the default LinuxEnv (it's bound to VM_NAME)
     if let Some(output) = crate::shell_mock::intercept(script) {
         return Ok(output);
     }
@@ -56,8 +66,12 @@ pub fn run_on_vm(vm_name: &str, script: &str) -> Result<Output> {
     }
 }
 
-/// Run a bash script in the Linux execution environment, with output visible to user.
+/// Run a bash script in the Linux environment, with output visible to user.
 pub fn run_on_vm_visible(vm_name: &str, script: &str) -> Result<()> {
+    if vm_name == VM_NAME {
+        return linux_env::default_env().run_visible(script);
+    }
+
     let status = if platform::current().needs_lima() {
         Command::new("limactl")
             .args(["shell", vm_name, "bash", "-c", script])
@@ -90,34 +104,41 @@ pub fn run_on_vm_visible(vm_name: &str, script: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run a bash script in the Linux execution environment, returning stdout as String.
+/// Run a bash script in the Linux environment, returning stdout as String.
 pub fn run_on_vm_stdout(vm_name: &str, script: &str) -> Result<String> {
+    if vm_name == VM_NAME {
+        return linux_env::default_env().run_stdout(script);
+    }
     let output = run_on_vm(vm_name, script)?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Run a bash script in the default execution environment, capturing output.
+/// Run a bash script in the default Linux environment, capturing output.
 pub fn run_in_vm(script: &str) -> Result<Output> {
-    run_on_vm(VM_NAME, script)
+    linux_env::default_env().run(script)
 }
 
-/// Run a bash script in the default execution environment, with output visible to user.
+/// Run a bash script in the default Linux environment, with output visible to user.
 pub fn run_in_vm_visible(script: &str) -> Result<()> {
-    run_on_vm_visible(VM_NAME, script)
+    linux_env::default_env().run_visible(script)
 }
 
-/// Run a bash script in the default execution environment, returning stdout as String.
+/// Run a bash script in the default Linux environment, returning stdout as String.
 pub fn run_in_vm_stdout(script: &str) -> Result<String> {
-    run_on_vm_stdout(VM_NAME, script)
+    linux_env::default_env().run_stdout(script)
 }
 
-/// Run a bash script in the Linux execution environment, capturing stdout and stderr
+/// Run a bash script in the Linux environment, capturing stdout and stderr
 /// into an `Output` struct (piped, not inherited).
 ///
 /// Unlike `run_on_vm_visible`, the output is **not** shown to the user in real time.
 /// Use this when you need to capture error messages (e.g., nix build failures) for
 /// structured reporting.
 pub fn run_on_vm_capture(vm_name: &str, script: &str) -> Result<Output> {
+    if vm_name == VM_NAME {
+        return linux_env::default_env().run_capture(script);
+    }
+
     if let Some(output) = crate::shell_mock::intercept(script) {
         return Ok(output);
     }
@@ -139,9 +160,9 @@ pub fn run_on_vm_capture(vm_name: &str, script: &str) -> Result<Output> {
     }
 }
 
-/// Run a bash script in the default execution environment, capturing stdout and stderr.
+/// Run a bash script in the default Linux environment, capturing stdout and stderr.
 pub fn run_in_vm_capture(script: &str) -> Result<Output> {
-    run_on_vm_capture(VM_NAME, script)
+    linux_env::default_env().run_capture(script)
 }
 
 /// Heuristic: are we currently executing inside a Lima guest VM?
@@ -153,7 +174,7 @@ pub fn inside_lima() -> bool {
 }
 
 /// Replace the current process with an interactive command (for SSH/TTY).
-/// Uses Unix exec() — the Rust process is fully replaced, no return on success.
+/// Uses Unix's process replacement — the Rust process is fully replaced, no return on success.
 /// Note: This is safe because all arguments are passed as an array, not via shell interpolation.
 #[cfg(unix)]
 pub fn replace_process(cmd: &str, args: &[&str]) -> Result<()> {
@@ -167,5 +188,24 @@ pub fn replace_process(cmd: &str, args: &[&str]) -> Result<()> {
         .exec();
 
     // exec() only returns on error
-    Err(err).with_context(|| format!("Failed to exec: {} {}", cmd, args.join(" ")))
+    Err(err).with_context(|| format!("Failed to replace process: {} {}", cmd, args.join(" ")))
+}
+
+/// Replace the current process with `cmd args...`, wrapped for the VM runtime.
+///
+/// On macOS (or Linux without KVM): exec `limactl shell <VM_NAME> <cmd> <args...>`
+/// On native Linux with KVM: exec `<cmd> <args...>` directly
+///
+/// This mirrors [`run_in_vm`] but uses process replacement (Unix exec) instead
+/// of spawning a child process. Needed for interactive TTY pass-through
+/// (e.g., SSH sessions, interactive shells).
+#[cfg(unix)]
+pub fn replace_process_in_vm(cmd: &str, args: &[&str]) -> Result<()> {
+    if platform::current().needs_lima() {
+        let mut lima_args = vec!["shell", VM_NAME, cmd];
+        lima_args.extend_from_slice(args);
+        replace_process("limactl", &lima_args)
+    } else {
+        replace_process(cmd, args)
+    }
 }
