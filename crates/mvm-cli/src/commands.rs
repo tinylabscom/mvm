@@ -405,6 +405,25 @@ enum VmCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Deep-dive inspection of a single VM (probes, integrations, worker status)
+    Inspect {
+        /// Name of the VM to inspect
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a command inside a running microVM (dev-only, requires dev-shell guest agent)
+    Exec {
+        /// Name of the VM
+        name: String,
+        /// Command to run (pass after --)
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+        /// Timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2243,6 +2262,12 @@ fn cmd_vm(action: VmCmd) -> Result<()> {
             json,
         } => cmd_vm_status(&name, json),
         VmCmd::Status { name: None, json } => cmd_vm_status_all(json),
+        VmCmd::Inspect { name, json } => cmd_vm_inspect(&name, json),
+        VmCmd::Exec {
+            name,
+            command,
+            timeout,
+        } => cmd_vm_exec(&name, &command, timeout),
     }
 }
 
@@ -2327,9 +2352,10 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
             status,
             last_busy_at,
         } => {
-            // Query integration health (best-effort — old agents return empty list)
+            // Query health data (best-effort — old agents return empty lists)
             let integrations =
                 mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+            let probes = mvm_guest::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
 
             if json {
                 let integration_json: Vec<serde_json::Value> = integrations
@@ -2344,11 +2370,24 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
                         })
                     })
                     .collect();
+                let probe_json: Vec<serde_json::Value> = probes
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "name": p.name,
+                            "healthy": p.healthy,
+                            "detail": p.detail,
+                            "output": p.output,
+                            "checked_at": p.checked_at,
+                        })
+                    })
+                    .collect();
                 let obj = serde_json::json!({
                     "name": name,
                     "worker_status": status,
                     "last_busy_at": last_busy_at,
                     "integrations": integration_json,
+                    "probes": probe_json,
                 });
                 println!("{}", serde_json::to_string_pretty(&obj)?);
             } else {
@@ -2356,6 +2395,22 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
                 ui::status_line("Worker status:", &status);
                 let busy = last_busy_at.as_deref().unwrap_or("never");
                 ui::status_line("Last busy:", busy);
+                if !probes.is_empty() {
+                    println!();
+                    ui::status_line("Probes:", &format!("{} registered", probes.len()));
+                    for p in &probes {
+                        let status_str = if p.healthy { "ok" } else { "FAIL" };
+                        let detail = if p.healthy {
+                            match &p.output {
+                                Some(v) => format!("{}", v),
+                                None => "ok".to_string(),
+                            }
+                        } else {
+                            p.detail.clone()
+                        };
+                        println!("  {:<24} {:<6} {}", p.name, status_str, detail);
+                    }
+                }
                 if !integrations.is_empty() {
                     println!();
                     ui::status_line(
@@ -2462,7 +2517,7 @@ fn cmd_vm_status_all(json: bool) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        let integ_header = "INTEGRATIONS";
+        let integ_header = "HEALTH";
         println!(
             "  {:<16} {:<10} {:<24} {}",
             "NAME", "STATUS", "LAST BUSY", integ_header
@@ -2498,6 +2553,7 @@ fn cmd_vm_status_json(name: &str) -> Result<serde_json::Value> {
         } => {
             let integrations =
                 mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+            let probes = mvm_guest::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
             let integration_json: Vec<serde_json::Value> = integrations
                 .iter()
                 .map(|ig| {
@@ -2510,11 +2566,24 @@ fn cmd_vm_status_json(name: &str) -> Result<serde_json::Value> {
                     })
                 })
                 .collect();
+            let probe_json: Vec<serde_json::Value> = probes
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "healthy": p.healthy,
+                        "detail": p.detail,
+                        "output": p.output,
+                        "checked_at": p.checked_at,
+                    })
+                })
+                .collect();
             Ok(serde_json::json!({
                 "name": name,
                 "worker_status": status,
                 "last_busy_at": last_busy_at,
                 "integrations": integration_json,
+                "probes": probe_json,
             }))
         }
         mvm_guest::vsock::GuestResponse::Error { message } => {
@@ -2524,7 +2593,7 @@ fn cmd_vm_status_json(name: &str) -> Result<serde_json::Value> {
     }
 }
 
-/// Query a single VM's status and return (status, last_busy_at, integrations_summary).
+/// Query a single VM's status and return (status, last_busy_at, health_summary).
 fn cmd_vm_status_row(name: &str) -> Result<(String, Option<String>, String)> {
     let abs_dir = resolve_running_vm(name)?;
     let vsock_path = format!("{}/v.sock", abs_dir);
@@ -2536,14 +2605,19 @@ fn cmd_vm_status_row(name: &str) -> Result<(String, Option<String>, String)> {
         } => {
             let integrations =
                 mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
-            let summary = if integrations.is_empty() {
+            let probes = mvm_guest::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
+
+            let total = integrations.len() + probes.len();
+            let healthy = integrations
+                .iter()
+                .filter(|ig| ig.health.as_ref().is_some_and(|h| h.healthy))
+                .count()
+                + probes.iter().filter(|p| p.healthy).count();
+
+            let summary = if total == 0 {
                 "-".to_string()
             } else {
-                let healthy = integrations
-                    .iter()
-                    .filter(|ig| ig.health.as_ref().is_some_and(|h| h.healthy))
-                    .count();
-                format!("{}/{} healthy", healthy, integrations.len())
+                format!("{}/{} ok", healthy, total)
             };
             Ok((status, last_busy_at, summary))
         }
@@ -2551,6 +2625,222 @@ fn cmd_vm_status_row(name: &str) -> Result<(String, Option<String>, String)> {
             anyhow::bail!("Guest agent error: {}", message)
         }
         _ => anyhow::bail!("Unexpected response"),
+    }
+}
+
+// ============================================================================
+// VM inspect command
+// ============================================================================
+
+fn cmd_vm_inspect(name: &str, json: bool) -> Result<()> {
+    let abs_dir = resolve_running_vm(name)?;
+
+    // Vsock UDS lives inside the Lima VM — delegate when on macOS
+    if bootstrap::is_lima_required() {
+        let mvm_installed =
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvmctl && echo yes || echo no")?;
+        if mvm_installed.trim() != "yes" {
+            anyhow::bail!("mvmctl is not installed inside the Lima VM. Run 'mvmctl sync' first.");
+        }
+        let json_flag = if json { " --json" } else { "" };
+        shell::run_in_vm_visible(&format!(
+            "/usr/local/bin/mvmctl vm inspect {}{}",
+            name, json_flag
+        ))?;
+        return Ok(());
+    }
+
+    // Native Linux / inside Lima — call vsock directly
+    let vsock_path = format!("{}/v.sock", abs_dir);
+
+    let resp = mvm_guest::vsock::query_worker_status_at(&vsock_path)
+        .with_context(|| format!("Failed to query status for VM '{}'", name))?;
+
+    let (worker_status, last_busy_at) = match resp {
+        mvm_guest::vsock::GuestResponse::WorkerStatus {
+            status,
+            last_busy_at,
+        } => (status, last_busy_at),
+        mvm_guest::vsock::GuestResponse::Error { message } => {
+            anyhow::bail!("Guest agent error: {}", message)
+        }
+        _ => anyhow::bail!("Unexpected response from guest agent"),
+    };
+
+    // Best-effort queries — old agents may not support these
+    let integrations =
+        mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+    let probes = mvm_guest::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
+
+    if json {
+        render_inspect_json(name, &worker_status, &last_busy_at, &integrations, &probes)?;
+    } else {
+        render_inspect_human(name, &worker_status, &last_busy_at, &integrations, &probes);
+    }
+
+    Ok(())
+}
+
+fn cmd_vm_exec(name: &str, command: &[String], timeout: u64) -> Result<()> {
+    let abs_dir = resolve_running_vm(name)?;
+
+    if command.is_empty() {
+        anyhow::bail!("No command specified. Usage: mvmctl vm exec <name> -- <command>");
+    }
+
+    let cmd_str = command.join(" ");
+
+    // Vsock UDS lives inside the Lima VM — delegate when on macOS
+    if bootstrap::is_lima_required() {
+        let mvm_installed =
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvmctl && echo yes || echo no")?;
+        if mvm_installed.trim() != "yes" {
+            anyhow::bail!("mvmctl is not installed inside the Lima VM. Run 'mvmctl sync' first.");
+        }
+        let escaped = cmd_str.replace('\'', "'\\''");
+        shell::run_in_vm_visible(&format!(
+            "/usr/local/bin/mvmctl vm exec {} --timeout {} -- {}",
+            name, timeout, escaped
+        ))?;
+        return Ok(());
+    }
+
+    // Native Linux / inside Lima — call vsock directly
+    let vsock_path = format!("{}/v.sock", abs_dir);
+    match mvm_guest::vsock::exec_at(&vsock_path, &cmd_str, None, timeout)? {
+        mvm_guest::vsock::GuestResponse::ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+        } => {
+            if !stdout.is_empty() {
+                print!("{}", stdout);
+            }
+            if !stderr.is_empty() {
+                eprint!("{}", stderr);
+            }
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+            Ok(())
+        }
+        mvm_guest::vsock::GuestResponse::Error { message } => {
+            anyhow::bail!("Guest agent error: {}", message)
+        }
+        _ => anyhow::bail!("Unexpected response from guest agent"),
+    }
+}
+
+fn render_inspect_json(
+    name: &str,
+    worker_status: &str,
+    last_busy_at: &Option<String>,
+    integrations: &[mvm_guest::integrations::IntegrationStateReport],
+    probes: &[mvm_guest::probes::ProbeResult],
+) -> Result<()> {
+    let integration_json: Vec<serde_json::Value> = integrations
+        .iter()
+        .map(|ig| {
+            serde_json::json!({
+                "name": ig.name,
+                "status": ig.status,
+                "healthy": ig.health.as_ref().map(|h| h.healthy),
+                "detail": ig.health.as_ref().map(|h| &h.detail),
+                "checked_at": ig.health.as_ref().map(|h| &h.checked_at),
+            })
+        })
+        .collect();
+
+    let probe_json: Vec<serde_json::Value> = probes
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "healthy": p.healthy,
+                "detail": p.detail,
+                "output": p.output,
+                "checked_at": p.checked_at,
+            })
+        })
+        .collect();
+
+    let total_checks = integrations.len() + probes.len();
+    let healthy_checks = integrations
+        .iter()
+        .filter(|ig| ig.health.as_ref().is_some_and(|h| h.healthy))
+        .count()
+        + probes.iter().filter(|p| p.healthy).count();
+
+    let obj = serde_json::json!({
+        "name": name,
+        "worker_status": worker_status,
+        "last_busy_at": last_busy_at,
+        "health_summary": {
+            "total": total_checks,
+            "healthy": healthy_checks,
+            "summary": format!("{}/{} ok", healthy_checks, total_checks),
+        },
+        "probes": probe_json,
+        "integrations": integration_json,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&obj)?);
+    Ok(())
+}
+
+fn render_inspect_human(
+    name: &str,
+    worker_status: &str,
+    last_busy_at: &Option<String>,
+    integrations: &[mvm_guest::integrations::IntegrationStateReport],
+    probes: &[mvm_guest::probes::ProbeResult],
+) {
+    ui::status_line("VM:", name);
+    ui::status_line("Worker status:", worker_status);
+    ui::status_line("Last busy:", last_busy_at.as_deref().unwrap_or("never"));
+
+    let total_checks = integrations.len() + probes.len();
+    let healthy_checks = integrations
+        .iter()
+        .filter(|ig| ig.health.as_ref().is_some_and(|h| h.healthy))
+        .count()
+        + probes.iter().filter(|p| p.healthy).count();
+    if total_checks > 0 {
+        let summary = format!("{}/{} ok", healthy_checks, total_checks);
+        ui::status_line("Health:", &summary);
+    }
+
+    if !probes.is_empty() {
+        println!();
+        ui::status_line("Probes:", &format!("{} registered", probes.len()));
+        for p in probes {
+            let status_str = if p.healthy { "ok" } else { "FAIL" };
+            let detail = if p.healthy {
+                match &p.output {
+                    Some(v) => format!("{}", v),
+                    None => "ok".to_string(),
+                }
+            } else {
+                p.detail.clone()
+            };
+            println!("  {:<24} {:<6} {}", p.name, status_str, detail);
+        }
+    }
+
+    if !integrations.is_empty() {
+        println!();
+        ui::status_line(
+            "Integrations:",
+            &format!("{} registered", integrations.len()),
+        );
+        for ig in integrations {
+            let health_str = match &ig.health {
+                Some(h) if h.healthy => "healthy".to_string(),
+                Some(h) => format!("unhealthy: {}", h.detail),
+                None => "pending".to_string(),
+            };
+            println!("  {:<24} {}", ig.name, health_str);
+        }
     }
 }
 
@@ -2907,6 +3197,90 @@ mod tests {
     fn test_vm_requires_subcommand() {
         let result = Cli::try_parse_from(["mvmctl", "vm"]);
         assert!(result.is_err(), "vm should require a subcommand");
+    }
+
+    #[test]
+    fn test_vm_inspect_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "inspect", "my-vm"]).unwrap();
+        match cli.command {
+            Commands::Vm {
+                action: VmCmd::Inspect { name, json },
+            } => {
+                assert_eq!(name, "my-vm");
+                assert!(!json);
+            }
+            _ => panic!("Expected Vm Inspect command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_inspect_json_flag() {
+        let cli = Cli::try_parse_from(["mvmctl", "vm", "inspect", "my-vm", "--json"]).unwrap();
+        match cli.command {
+            Commands::Vm {
+                action: VmCmd::Inspect { name, json },
+            } => {
+                assert_eq!(name, "my-vm");
+                assert!(json);
+            }
+            _ => panic!("Expected Vm Inspect command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_inspect_requires_name() {
+        let result = Cli::try_parse_from(["mvmctl", "vm", "inspect"]);
+        assert!(result.is_err(), "inspect should require a name");
+    }
+
+    #[test]
+    fn test_vm_exec_parses() {
+        let cli =
+            Cli::try_parse_from(["mvmctl", "vm", "exec", "my-vm", "--", "uname", "-a"]).unwrap();
+        match cli.command {
+            Commands::Vm {
+                action:
+                    VmCmd::Exec {
+                        name,
+                        command,
+                        timeout,
+                    },
+            } => {
+                assert_eq!(name, "my-vm");
+                assert_eq!(command, vec!["uname", "-a"]);
+                assert_eq!(timeout, 30);
+            }
+            _ => panic!("Expected Vm Exec command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_exec_custom_timeout() {
+        let cli = Cli::try_parse_from([
+            "mvmctl",
+            "vm",
+            "exec",
+            "my-vm",
+            "--timeout",
+            "60",
+            "--",
+            "ls",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Vm {
+                action: VmCmd::Exec { timeout, .. },
+            } => {
+                assert_eq!(timeout, 60);
+            }
+            _ => panic!("Expected Vm Exec command"),
+        }
+    }
+
+    #[test]
+    fn test_vm_exec_requires_name_and_command() {
+        let result = Cli::try_parse_from(["mvmctl", "vm", "exec"]);
+        assert!(result.is_err(), "exec should require a name");
     }
 
     // ---- Up/Down command tests ----

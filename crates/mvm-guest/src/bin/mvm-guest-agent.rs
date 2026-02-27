@@ -586,6 +586,71 @@ fn do_sleep_prep() -> (bool, String) {
     }
 }
 
+/// Maximum output size per stream (1 MiB) to prevent OOM from unbounded output.
+#[cfg(feature = "dev-shell")]
+const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
+
+/// Run a command via `sh -c` and capture output (dev-only, feature-gated).
+#[cfg(feature = "dev-shell")]
+fn do_exec(command: &str, stdin_data: Option<&str>, _timeout_secs: u64) -> GuestResponse {
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(if stdin_data.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return GuestResponse::ExecResult {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: format!("failed to spawn: {}", e),
+            };
+        }
+    };
+
+    if let Some(data) = stdin_data {
+        if let Some(ref mut pipe) = child.stdin {
+            let _ = pipe.write_all(data.as_bytes());
+        }
+    }
+    drop(child.stdin.take());
+
+    match child.wait_with_output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let truncate = |s: &str| -> String {
+                if s.len() > MAX_EXEC_OUTPUT {
+                    let mut t = s[..MAX_EXEC_OUTPUT].to_string();
+                    t.push_str("\n... (truncated)");
+                    t
+                } else {
+                    s.to_string()
+                }
+            };
+            GuestResponse::ExecResult {
+                exit_code: out.status.code().unwrap_or(-1),
+                stdout: truncate(&stdout),
+                stderr: truncate(&stderr),
+            }
+        }
+        Err(e) => GuestResponse::ExecResult {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("wait failed: {}", e),
+        },
+    }
+}
+
 fn handle_client(
     fd: RawFd,
     state: &Arc<Mutex<AgentState>>,
@@ -646,6 +711,32 @@ fn handle_client(
 
         GuestRequest::ProbeStatus => GuestResponse::ProbeStatusReport {
             probes: build_probe_reports(probe_state),
+        },
+
+        #[cfg(feature = "dev-shell")]
+        GuestRequest::Exec {
+            command,
+            stdin,
+            timeout_secs,
+        } => {
+            eprintln!("[audit] exec request: {:?}", command);
+            let allowed = mvm_guest::builder_agent::load_security_policy()
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.access.debug_exec);
+            if !allowed {
+                GuestResponse::Error {
+                    message: "exec rejected: access.debug_exec not enabled in security policy"
+                        .to_string(),
+                }
+            } else {
+                do_exec(&command, stdin.as_deref(), timeout_secs.unwrap_or(30))
+            }
+        }
+
+        #[cfg(not(feature = "dev-shell"))]
+        GuestRequest::Exec { .. } => GuestResponse::Error {
+            message: "exec not available: guest agent built without dev-shell feature".to_string(),
         },
     };
 

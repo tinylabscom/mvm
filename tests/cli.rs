@@ -375,7 +375,19 @@ fn test_vm_help_lists_subcommands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ping"))
-        .stdout(predicate::str::contains("status"));
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("inspect"))
+        .stdout(predicate::str::contains("exec"));
+}
+
+#[test]
+fn test_vm_exec_help() {
+    mvm()
+        .args(["vm", "exec", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev-only"))
+        .stdout(predicate::str::contains("--timeout"));
 }
 
 #[test]
@@ -445,6 +457,37 @@ fn test_vm_status_nonexistent_fails_gracefully() {
             || combined.contains("Error")
             || combined.contains("limactl"),
         "vm status should fail gracefully, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn test_vm_inspect_help() {
+    mvm()
+        .args(["vm", "inspect", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("inspection"));
+}
+
+#[test]
+fn test_vm_inspect_nonexistent_fails_gracefully() {
+    let assert = mvm().args(["vm", "inspect", "nonexistent-vm"]).assert();
+    let output = assert.get_output();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("nonexistent-vm")
+            || combined.contains("not found")
+            || combined.contains("No running")
+            || combined.contains("error")
+            || combined.contains("Error")
+            || combined.contains("limactl"),
+        "vm inspect should fail gracefully, got: {}",
         combined
     );
 }

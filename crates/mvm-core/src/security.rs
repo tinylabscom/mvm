@@ -111,6 +111,10 @@ pub struct AccessPolicy {
     /// Allow host communication (host-bound vsock requests).
     #[serde(default = "default_true")]
     pub host_communication: bool,
+
+    /// Allow debug command execution via vsock (dev-only, disabled by default).
+    #[serde(default)]
+    pub debug_exec: bool,
 }
 
 impl Default for AccessPolicy {
@@ -120,6 +124,7 @@ impl Default for AccessPolicy {
             network: true,
             build: true,
             host_communication: true,
+            debug_exec: false,
         }
     }
 }
@@ -435,6 +440,7 @@ mod tests {
         assert!(policy.access.network);
         assert!(policy.access.build);
         assert!(policy.access.host_communication);
+        assert!(!policy.access.debug_exec);
         assert_eq!(policy.rate_limits.frames_per_second, 100);
         assert_eq!(policy.rate_limits.frames_per_minute, 3000);
         assert_eq!(policy.session.max_lifetime_secs, 0);
@@ -478,6 +484,7 @@ mod tests {
                 network: true,
                 build: false,
                 host_communication: true,
+                debug_exec: true,
             },
             rate_limits: RateLimitPolicy {
                 frames_per_second: 200,
@@ -501,6 +508,7 @@ mod tests {
         assert!(parsed.require_auth);
         assert!(!parsed.access.filesystem);
         assert!(!parsed.access.build);
+        assert!(parsed.access.debug_exec);
         assert_eq!(parsed.rate_limits.frames_per_second, 200);
         assert_eq!(parsed.session.max_lifetime_secs, 3600);
         assert_eq!(parsed.session.max_tasks, 100);

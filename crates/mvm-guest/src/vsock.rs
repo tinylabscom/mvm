@@ -48,6 +48,12 @@ pub enum GuestRequest {
     CheckpointIntegrations { integrations: Vec<String> },
     /// Query status of all loaded probes.
     ProbeStatus,
+    /// Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).
+    Exec {
+        command: String,
+        stdin: Option<String>,
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// Response from guest vsock agent to host.
@@ -83,6 +89,12 @@ pub enum GuestResponse {
     /// Per-probe status report.
     ProbeStatusReport {
         probes: Vec<crate::probes::ProbeResult>,
+    },
+    /// Result of an Exec request.
+    ExecResult {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
     },
 }
 
@@ -632,6 +644,24 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
     }
 }
 
+/// Execute a command inside the guest via vsock at a specific UDS path (dev-only).
+pub fn exec_at(
+    vsock_uds_path: &str,
+    command: &str,
+    stdin: Option<String>,
+    timeout_secs: u64,
+) -> Result<GuestResponse> {
+    let mut stream = connect_to(vsock_uds_path, timeout_secs)?;
+    send_request(
+        &mut stream,
+        &GuestRequest::Exec {
+            command: command.to_string(),
+            stdin,
+            timeout_secs: Some(timeout_secs),
+        },
+    )
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -654,6 +684,11 @@ mod tests {
                 integrations: vec!["whatsapp".to_string(), "telegram".to_string()],
             },
             GuestRequest::ProbeStatus,
+            GuestRequest::Exec {
+                command: "uname -a".to_string(),
+                stdin: Some("hello".to_string()),
+                timeout_secs: Some(10),
+            },
         ];
 
         for req in &variants {
@@ -705,6 +740,11 @@ mod tests {
                     output: Some(serde_json::json!({"usage_pct": 42})),
                     checked_at: "2026-02-26T12:00:00Z".to_string(),
                 }],
+            },
+            GuestResponse::ExecResult {
+                exit_code: 0,
+                stdout: "Linux\n".to_string(),
+                stderr: String::new(),
             },
         ];
 

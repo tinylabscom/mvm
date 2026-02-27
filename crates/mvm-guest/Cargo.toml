@@ -16,6 +16,9 @@ path = "src/bin/mvm-builder-agent.rs"
 name = "mvm-guest-agent"
 path = "src/bin/mvm-guest-agent.rs"
 
+[features]
+dev-shell = []
+
 [dependencies]
 mvm-core.workspace = true
 anyhow.workspace = true

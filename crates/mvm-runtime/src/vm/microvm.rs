@@ -610,6 +610,9 @@ fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result<Str
     let toml_content = format!("# Dev-mode {} config stub\n", role);
     let escaped_toml = toml_content.replace('\'', "'\\''");
 
+    // Dev-mode security policy enables debug_exec for vsock exec support
+    let security_policy = r#"{"access":{"debug_exec":true}}"#;
+
     run_in_vm(&format!(
         r#"
         rm -f {path}
@@ -620,7 +623,8 @@ fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result<Str
         sudo mount {path} "$MOUNT_DIR"
         echo '{json}' | sudo tee "$MOUNT_DIR/config.json" >/dev/null
         echo '{toml}' | sudo tee "$MOUNT_DIR/{toml_name}" >/dev/null
-        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}"
+        echo '{security_policy}' | sudo tee "$MOUNT_DIR/security-policy.json" >/dev/null
+        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}" "$MOUNT_DIR/security-policy.json"
         sudo umount "$MOUNT_DIR"
         rmdir "$MOUNT_DIR"
         chmod 0644 {path}
@@ -629,6 +633,7 @@ fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result<Str
         json = escaped_json,
         toml = escaped_toml,
         toml_name = toml_name,
+        security_policy = security_policy,
     ))?;
     Ok(path)
 }
