@@ -87,12 +87,10 @@ nix/openclaw/
 ├── flake.nix              Nix flake: builds vmlinux + rootfs.ext4 per role
 ├── mvm-profiles.toml      Profile/role → NixOS module mapping (consumed by mvm)
 ├── template.toml          mvm template metadata (variants, resources)
-├── guests/
-│   ├── baseline.nix       Firecracker guest base (drive mounts, boot, security)
-│   └── profiles/
-│       ├── gateway.nix    Gateway OS config (hostname, firewall ports)
-│       └── worker.nix     Worker OS config (hostname, firewall ports)
+├── pkgs/
+│   └── openclaw.nix       OpenClaw Node.js gateway package derivation
 └── roles/
+    ├── common.nix         Shared config (user, tmpfs, init service) — parameterized
     ├── gateway.nix        Gateway systemd service (reads /mnt/config, /mnt/secrets)
     └── worker.nix         Worker systemd service (reads /mnt/config, /mnt/secrets)
 ```

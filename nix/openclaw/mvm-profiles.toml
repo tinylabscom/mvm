@@ -2,10 +2,10 @@
 version = 1
 
 [profiles.gateway]
-module = "guests/profiles/gateway.nix"
+module = "roles/gateway.nix"
 
 [profiles.worker]
-module = "guests/profiles/worker.nix"
+module = "roles/worker.nix"
 
 [roles.gateway]
 module = "roles/gateway.nix"

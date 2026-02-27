@@ -55,7 +55,14 @@
                 microvm.nixosModules.microvm
                 ./nix/modules/mvm-guest.nix
                 ./nix/modules/guest-agent.nix
-                { microvm.hypervisor = hypervisor; }
+                {
+                  microvm.hypervisor = hypervisor;
+                  # mvm builds a single ext4 rootfs containing the full NixOS
+                  # closure (/nix/store included).  Disable microvm.nix's default
+                  # separate nix-store volume — it would add a mount for
+                  # /dev/disk/by-label/nix-store that doesn't exist.
+                  microvm.writableStoreOverlay = null;
+                }
               ] ++ modules;
             };
             cfg = eval.config;

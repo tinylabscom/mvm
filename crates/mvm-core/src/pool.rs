@@ -197,6 +197,9 @@ pub struct ArtifactPaths {
     pub vmlinux: String,
     pub rootfs: String,
     pub fc_base_config: String,
+    /// NixOS initrd (optional — present when the flake produces one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initrd: Option<String>,
 }
 
 // --- Filesystem paths ---

@@ -16,6 +16,11 @@ scp -o StrictHostKeyChecking=no -i {{key}} \
     {{user}}@{{ip}}:'{{out_path}}/rootfs.ext4' {{rev_dir}}/rootfs.ext4 2>/dev/null || \
     { echo 'ERROR: rootfs not found in build output' >&2; exit 1; }
 
+# Copy initrd if present (NixOS guests need it)
+scp -o StrictHostKeyChecking=no -i {{key}} \
+    {{user}}@{{ip}}:'{{out_path}}/initrd' {{rev_dir}}/initrd 2>/dev/null && \
+    echo "initrd copied" || true
+
 cat > {{rev_dir}}/fc-base.json << 'FCCFGEOF'
 {
     "note": "Base config from build. Overridden at instance start."

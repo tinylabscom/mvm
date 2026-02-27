@@ -207,6 +207,17 @@ pub fn pool_build_with_opts(
         let lock_hash = backend_result.lock_hash;
 
         // Record revision.
+        // Check if initrd was produced (NixOS guests generate one)
+        let arts_dir = pool_artifacts_dir(tenant_id, pool_id);
+        let rev_dir = format!("{}/revisions/{}", arts_dir, revision_hash);
+        let has_initrd = env
+            .shell_exec_stdout(&format!(
+                "test -f {}/initrd && echo yes || echo no",
+                rev_dir
+            ))
+            .map(|s| s.trim() == "yes")
+            .unwrap_or(false);
+
         let revision = BuildRevision {
             revision_hash: revision_hash.clone(),
             flake_ref: spec.flake_ref.clone(),
@@ -215,6 +226,11 @@ pub fn pool_build_with_opts(
                 vmlinux: "vmlinux".to_string(),
                 rootfs: "rootfs.ext4".to_string(),
                 fc_base_config: "fc-base.json".to_string(),
+                initrd: if has_initrd {
+                    Some("initrd".to_string())
+                } else {
+                    None
+                },
             },
             built_at: utc_now(),
         };

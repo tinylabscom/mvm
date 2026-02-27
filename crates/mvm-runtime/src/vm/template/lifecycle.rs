@@ -109,16 +109,15 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
         id, spec.flake_ref, spec.profile
     ));
 
-    // Use dev_build to produce artifacts via Nix in Lima
-    let result = if force {
-        ui::info("Force build: clearing cached artifacts");
-        let data_dir = mvm_core::config::mvm_data_dir();
-        let cache_dir = format!("{}/dev/builds/{}", data_dir, spec.flake_ref);
-        let _ = shell::run_in_vm(&format!("rm -rf {cache_dir}"));
-        mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?
-    } else {
-        mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?
-    };
+    // Use dev_build to produce artifacts via Nix in Lima.
+    // The dev build cache is keyed by Nix store hash at ~/.mvm/dev/builds/<hash>/,
+    // so --force must clear the entire builds directory.
+    if force {
+        ui::info("Force build: clearing dev build cache");
+        let builds_dir = format!("{}/dev/builds", mvm_core::config::mvm_data_dir());
+        let _ = shell::run_in_vm(&format!("rm -rf {builds_dir}"));
+    }
+    let result = mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?;
     mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
     // Store artifacts in template revision directory
@@ -190,6 +189,7 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
             vmlinux: "vmlinux".to_string(),
             rootfs: "rootfs.ext4".to_string(),
             fc_base_config: "fc-base.json".to_string(),
+            initrd: None,
         },
         built_at: utc_now(),
         profile: spec.profile.clone(),
