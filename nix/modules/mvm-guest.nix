@@ -24,7 +24,7 @@
 #   systemd service reads /proc/cmdline and writes a networkd config
 #   before systemd-networkd starts.  No DHCP needed.
 
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 {
   system.stateVersion = "25.11";
 
@@ -43,6 +43,31 @@
     # Reduce kernel log verbosity during boot
     "quiet"
     "loglevel=4"
+    # Trust CPU for entropy — avoid blocking on random seed in Firecracker
+    "random.trust_cpu=on"
+    # Suppress systemd status lines on serial (synchronous = slow)
+    "systemd.show_status=false"
+    "rd.systemd.show_status=false"
+    # Mask services that are useless inside Firecracker.
+    # udevd: scans for hardware — FC has exactly 3 virtio devices, no scanning needed.
+    # We mount by device path (/dev/vda, /dev/vdb) not by-label, so udev is unnecessary.
+    "systemd.mask=systemd-udevd.service"
+    "systemd.mask=systemd-udevd-control.socket"
+    "systemd.mask=systemd-udevd-kernel.socket"
+    "systemd.mask=systemd-udev-trigger.service"
+    "systemd.mask=systemd-udev-settle.service"
+    # random-seed: no persistent storage for seed in ephemeral VMs
+    "systemd.mask=systemd-random-seed.service"
+    # utmp: no login accounting in headless VMs
+    "systemd.mask=systemd-update-utmp.service"
+    # Skip keyboard controller probes (no keyboard in Firecracker)
+    "i8042.noaux"
+    "i8042.nomux"
+    "i8042.nopnp"
+    "i8042.nokbd"
+    # Firecracker-specific: no APIC, trust host TSC
+    "noapic"
+    "tsc=reliable"
   ];
 
   # Only include the virtio drivers we actually need.
@@ -51,6 +76,76 @@
   boot.initrd.includeDefaultModules = false;
   boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" ];
   boot.initrd.kernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" ];
+
+  # Use systemd-based initrd instead of the scripted shell stage-1.
+  # The systemd initrd parallelizes device discovery and mounting instead
+  # of running them sequentially.  microvm.nix uses this by default.
+  boot.initrd.systemd.enable = true;
+  boot.initrd.systemd.tpm2.enable = false;
+
+  # --- Custom kernel for Firecracker ---
+  # The stock NixOS kernel probes hundreds of hardware subsystems (ACPI, USB,
+  # SCSI, NUMA, sound, GPU) that don't exist in Firecracker.  Disabling them
+  # eliminates device-probing latency during boot.
+  boot.kernelPatches = [{
+    name = "firecracker-minimal";
+    patch = null;
+    structuredExtraConfig = with lib.kernel; {
+      # Disable nonexistent hardware
+      ACPI = no;
+      NUMA = no;
+      HIBERNATION = no;
+      PM = no;
+      CPU_FREQ = no;
+      CPU_IDLE = no;
+      USB_SUPPORT = no;
+      SOUND = no;
+      DRM = no;
+      WIRELESS = no;
+      WLAN = no;
+      BLUETOOTH = no;
+      NFC = no;
+      INPUT_MOUSE = no;
+      INPUT_TOUCHSCREEN = no;
+      INPUT_TABLET = no;
+      INPUT_JOYSTICK = no;
+      HID = no;
+      MEDIA_SUPPORT = no;
+      HWMON = no;
+      THERMAL = no;
+      WATCHDOG = no;
+      IOMMU_SUPPORT = no;
+      PCCARD = no;
+      HOTPLUG_PCI = no;
+
+      # Disable unused filesystems
+      XFS_FS = no;
+      BTRFS_FS = no;
+      NFS_FS = no;
+      CIFS = no;
+
+      # Disable unused network features
+      BRIDGE = no;
+
+      # Firecracker guest essentials
+      KVM_GUEST = yes;
+      PARAVIRT = yes;
+      HYPERVISOR_GUEST = yes;
+      VIRTIO = yes;
+      VIRTIO_PCI = yes;
+      VIRTIO_BLK = yes;
+      VIRTIO_NET = yes;
+      VIRTIO_MMIO = yes;
+      VIRTIO_CONSOLE = yes;
+      VIRTIO_BALLOON = no;
+      SERIAL_8250 = yes;
+      SERIAL_8250_CONSOLE = yes;
+
+      # Reduce kernel size and boot time
+      DEBUG_INFO_NONE = yes;
+      KALLSYMS = no;
+    };
+  }];
 
   # --- Minimize boot time ---
   documentation.enable = false;
@@ -61,16 +156,20 @@
   systemd.tpm2.enable = false;
   system.switch.enable = false;
   services.nscd.enable = false;
+  system.nssModules = pkgs.lib.mkForce [];
   services.logrotate.enable = false;
   programs.command-not-found.enable = false;
   nix.enable = false;  # no nix-daemon inside the microVM
 
+  # Replace slow Perl update-users-groups.pl with native C systemd-sysusers.
+  systemd.sysusers.enable = true;
+
   # Short timeouts — don't wait 90s for anything in an ephemeral VM.
-  systemd.extraConfig = ''
-    DefaultTimeoutStartSec=10s
-    DefaultTimeoutStopSec=10s
-    DefaultDeviceTimeoutSec=5s
-  '';
+  systemd.settings.Manager = {
+    DefaultTimeoutStartSec = "10s";
+    DefaultTimeoutStopSec = "10s";
+    DefaultDeviceTimeoutSec = "5s";
+  };
 
   # Skip fsck — these are ephemeral VMs, rootfs is rebuilt on every deploy
   boot.initrd.checkJournalingFS = false;
@@ -81,16 +180,22 @@
   fileSystems."/" = {
     device = "/dev/vda";
     fsType = "ext4";
-    options = [ "noatime" ];
+    # nobarrier: skip write barriers — safe for ephemeral VMs (data isn't precious).
+    # commit=60: batch journal commits (reduce I/O during boot).
+    options = [ "noatime" "nobarrier" "commit=60" ];
     neededForBoot = true;
   };
 
   # --- Console ---
   systemd.services."serial-getty@ttyS0".enable = true;
-  # Forward journal to serial console so `mvmctl logs` shows service errors.
+  boot.consoleLogLevel = 0;  # minimize synchronous serial output during boot
+  # Volatile journal — no disk flush for ephemeral VMs.
+  # Forward to serial console so `mvmctl logs` still shows service errors.
+  services.journald.storage = "volatile";
   services.journald.extraConfig = ''
     ForwardToConsole=yes
     MaxLevelConsole=info
+    RuntimeMaxUse=8M
   '';
 
   # --- Networking (systemd-networkd + kernel cmdline IP) ---
@@ -178,10 +283,9 @@
   systemd.tmpfiles.rules = [ "d /mnt/data 0755 root root -" ];
 
   # --- Minimal packages ---
-  environment.systemPackages = with pkgs; [
-    curl
-    jq
-  ];
+  # Keep the system closure small — only include what's needed at the base level.
+  # Role-specific tools (curl, jq) should be added in the role module's service PATH.
+  environment.systemPackages = [ ];
 
   # --- Security hardening ---
   # microVMs are headless workloads — no SSH, no interactive login.

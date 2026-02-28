@@ -31,8 +31,8 @@
 
   systemd.services.openclaw-worker = {
     description = "OpenClaw Worker";
-    after = [ "network-online.target" "openclaw-init.service" ];
-    wants = [ "network-online.target" ];
+    after = [ "systemd-networkd.service" "openclaw-init.service" ];
+    wants = [ "systemd-networkd.service" ];
     requires = [ "openclaw-init.service" ];
     wantedBy = [ "multi-user.target" ];
 

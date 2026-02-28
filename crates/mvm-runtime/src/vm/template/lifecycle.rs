@@ -130,7 +130,7 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
         shell::run_in_vm(&format!("cp -a {} {rev_dst}/initrd", initrd))?;
     }
     shell::run_in_vm(&format!(
-        "cp -a {} {rev_dst}/rootfs.ext4",
+        "cp -a {} {rev_dst}/rootfs.ext4 && chmod u+w {rev_dst}/rootfs.ext4",
         result.rootfs_path
     ))?;
 

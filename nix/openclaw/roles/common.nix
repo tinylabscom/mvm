@@ -43,7 +43,7 @@
     description = "Prepare OpenClaw directories and config";
     before = [ "${serviceName}.service" ];
     requiredBy = [ "${serviceName}.service" ];
-    after = [ "mnt-config.mount" "mnt-secrets.mount" "mnt-data.mount" ];
+    after = [ "mnt-config.mount" "mnt-secrets.mount" ];
 
     serviceConfig = {
       Type = "oneshot";
