@@ -957,14 +957,19 @@ fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str)
         ),
     )?;
 
-    // Boot args: pass guest IP and gateway via kernel cmdline so the
-    // NixOS guest (systemd-networkd + mvm-network-config service) can
-    // configure eth0 without DHCP.
-    let boot_args = format!(
+    // Boot args: pass guest IP and gateway via kernel cmdline.
+    // When initrd is present (NixOS guest), the initrd handles root mounting.
+    // When initrd is absent (minimal guest), the kernel mounts root directly.
+    let base_args = format!(
         "console=ttyS0 reboot=k panic=1 net.ifnames=0 mvm.ip={ip}/24 mvm.gw={gw}",
         ip = slot.guest_ip,
         gw = BRIDGE_IP,
     );
+    let boot_args = if config.initrd_path.is_some() {
+        base_args
+    } else {
+        format!("root=/dev/vda rw rootwait init=/init {base_args}")
+    };
 
     ui::info(&format!("Setting boot source: {}", config.vmlinux_path));
     let boot_source = match &config.initrd_path {
