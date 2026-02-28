@@ -2,11 +2,7 @@
   description = "mvm — Firecracker microVM development tool";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
-    microvm = {
-      url = "github:astro/microvm.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,7 +10,7 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, microvm, rust-overlay, flake-utils, ... }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
         pkgs = import nixpkgs {
@@ -37,32 +33,22 @@
       in {
         # ── User-facing API ──────────────────────────────────────────
         #
-        # mvm.lib.<system>.mkGuest { name, modules, hypervisor? }
+        # mvm.lib.<system>.mkGuest { name, modules? }
         #
         # Builds a NixOS microVM guest image producing:
         #   $out/vmlinux       — uncompressed kernel for Firecracker
         #   $out/initrd        — initial ramdisk (NixOS stage-1)
         #   $out/rootfs.ext4   — ext4 root filesystem image
         #   $out/toplevel-path — NixOS closure reference
-        #   $out/bin/          — runner scripts (when microvm.nix provides them)
         #
-        lib.mkGuest = { name, modules ? [], hypervisor ? "firecracker" }:
+        lib.mkGuest = { name, modules ? [] }:
           let
             eval = nixpkgs.lib.nixosSystem {
               inherit system;
               specialArgs = { inherit mvm-guest-agent; };
               modules = [
-                microvm.nixosModules.microvm
                 ./nix/modules/mvm-guest.nix
                 ./nix/modules/guest-agent.nix
-                {
-                  microvm.hypervisor = hypervisor;
-                  # mvm builds a single ext4 rootfs containing the full NixOS
-                  # closure (/nix/store included).  Disable microvm.nix's default
-                  # separate nix-store volume — it would add a mount for
-                  # /dev/disk/by-label/nix-store that doesn't exist.
-                  microvm.writableStoreOverlay = null;
-                }
               ] ++ modules;
             };
             cfg = eval.config;
@@ -111,12 +97,6 @@
 
             # Record what system closure this was built from
             echo "${cfg.system.build.toplevel}" > "$out/toplevel-path"
-
-            # Runner script (for microvm.nix runner backend)
-            runner="${cfg.microvm.declaredRunner or ""}"
-            if [ -n "$runner" ] && [ -d "$runner/bin" ]; then
-              cp -r "$runner/bin" "$out/bin"
-            fi
           '';
 
         # ── NixOS modules (for advanced users) ──────────────────────

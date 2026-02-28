@@ -1,0 +1,12 @@
+{{ marker_start }}
+# Load completions for the current shell (bash or zsh)
+if command -v mvmctl >/dev/null 2>&1; then
+    _mvm_shell="$(basename "${SHELL:-bash}")"
+    eval "$(mvmctl completions "$_mvm_shell" 2>/dev/null)"
+    unset _mvm_shell
+fi
+
+KV_ROOT="{{ kv_root }}"
+alias cr="cargo run --manifest-path $KV_ROOT/mvm/Cargo.toml --"
+alias crd="cargo run --features tui --manifest-path $KV_ROOT/mvmd/Cargo.toml --"
+{{ marker_end }}

@@ -70,7 +70,7 @@
       ProtectSystem = "strict";
       ProtectHome = "read-only";
       PrivateTmp = true;
-      ReadWritePaths = [ "/var/lib/openclaw" "/mnt/data" ];
+      ReadWritePaths = [ "/var/lib/openclaw" ];
       MemoryMax = "2G";
       TasksMax = 1024;
     };

@@ -126,7 +126,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Remove old Nix dev-build artifacts from ~/.mvm/dev/builds
+    /// Remove old dev-build artifacts and run Nix garbage collection
     Cleanup {
         /// Number of newest build revisions to keep
         #[arg(long)]
@@ -1262,6 +1262,18 @@ fn cmd_cleanup(keep: Option<usize>, all: bool, verbose: bool) -> Result<()> {
         anyhow::bail!("--keep must be greater than 0 (or use --all)");
     }
 
+    // Show disk usage before cleanup.
+    let disk_before = vm_disk_usage_pct();
+    if let Some(pct) = disk_before {
+        ui::info(&format!("Lima VM disk usage: {}%", pct));
+    }
+
+    // Step 1: Clear temp files first — when the disk is 100% full the nix
+    // daemon cannot start, so we need to free a little space before GC.
+    ui::info("Clearing temporary files...");
+    let _ = shell::run_in_vm("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
+
+    // Step 2: Remove old dev-build symlinks and artifacts.
     let env = mvm_runtime::build_env::RuntimeBuildEnv;
     let report = mvm_build::dev_build::cleanup_old_dev_builds(&env, keep_count)?;
 
@@ -1278,17 +1290,60 @@ fn cmd_cleanup(keep: Option<usize>, all: bool, verbose: bool) -> Result<()> {
 
     if all {
         ui::success(&format!(
-            "Cleanup complete — removed {} cached build(s).",
+            "Removed {} cached build(s).",
             report.removed_count
         ));
     } else {
         ui::success(&format!(
-            "Cleanup complete — removed {} cached build(s), kept newest {}.",
+            "Removed {} cached build(s), kept newest {}.",
             report.removed_count, keep_count
         ));
     }
 
+    // Step 3: Garbage-collect unreferenced Nix store paths inside the Lima VM.
+    ui::info("Running nix-collect-garbage...");
+    match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
+        Ok(output) => {
+            let trimmed = output.trim();
+            if !trimmed.is_empty() {
+                println!("{trimmed}");
+            }
+        }
+        Err(e) => {
+            // If GC fails (disk too full for daemon), try clearing the Nix
+            // user profile links and retrying once.
+            ui::warn(&format!("nix-collect-garbage failed: {e}"));
+            ui::info("Retrying after clearing Nix profile generations...");
+            let _ = shell::run_in_vm("rm -rf ~/.local/state/nix/profiles/* 2>/dev/null");
+            match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
+                Ok(output) => {
+                    let trimmed = output.trim();
+                    if !trimmed.is_empty() {
+                        println!("{trimmed}");
+                    }
+                }
+                Err(e2) => ui::warn(&format!("nix-collect-garbage retry failed: {e2}")),
+            }
+        }
+    }
+
+    // Show disk usage after cleanup.
+    let disk_after = vm_disk_usage_pct();
+    if let Some(pct) = disk_after {
+        let freed_msg = match disk_before {
+            Some(before) if before > pct => format!(" (freed {}%)", before - pct),
+            _ => String::new(),
+        };
+        ui::success(&format!("Lima VM disk usage: {}%{}", pct, freed_msg));
+    }
+
     Ok(())
+}
+
+/// Read the Lima VM root filesystem usage percentage.
+fn vm_disk_usage_pct() -> Option<u8> {
+    let output = shell::run_in_vm_stdout("df --output=pcent / 2>/dev/null | tail -1").ok()?;
+    output.trim().trim_end_matches('%').trim().parse().ok()
 }
 
 /// Run a sync phase, emitting JSON events or human-readable output.
@@ -2657,6 +2712,38 @@ fn cmd_vm_ping_all() -> Result<()> {
     Ok(())
 }
 
+/// How long (seconds) to treat a VM as "still booting" before reporting errors.
+const BOOT_TIMEOUT_SECS: u64 = 90;
+
+/// Check whether a VM is likely still booting.
+///
+/// Returns `true` if the error looks like an agent-unreachable issue AND the
+/// Firecracker process was started less than [`BOOT_TIMEOUT_SECS`] ago.
+fn is_vm_booting(abs_vms: &str, name: &str, err_msg: &str) -> bool {
+    let is_agent_unreachable = err_msg.contains("did not respond within")
+        || err_msg.contains("Failed to connect to guest agent");
+    if !is_agent_unreachable {
+        return false;
+    }
+    let pid_file = format!("{}/{}/fc.pid", abs_vms, name);
+    let Ok(output) =
+        shell::run_in_vm_stdout(&format!("stat -c %Y {} 2>/dev/null && date +%s", pid_file,))
+    else {
+        return false;
+    };
+    let mut lines = output.trim().lines();
+    let (Some(mtime_str), Some(now_str)) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    let (Ok(mtime), Ok(now)) = (
+        mtime_str.trim().parse::<u64>(),
+        now_str.trim().parse::<u64>(),
+    ) else {
+        return false;
+    };
+    now.saturating_sub(mtime) < BOOT_TIMEOUT_SECS
+}
+
 fn cmd_vm_status_all(json: bool) -> Result<()> {
     // Delegate to Lima on macOS
     if bootstrap::is_lima_required() {
@@ -2676,15 +2763,28 @@ fn cmd_vm_status_all(json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Resolve VMS_DIR once for boot-age checks in error paths.
+    let abs_vms = shell::run_in_vm_stdout(&format!("echo {}", config::VMS_DIR)).unwrap_or_default();
+    let abs_vms = abs_vms.trim();
+
     if json {
         let mut results = Vec::new();
         for name in &names {
             match cmd_vm_status_json(name) {
                 Ok(obj) => results.push(obj),
-                Err(e) => results.push(serde_json::json!({
-                    "name": name,
-                    "error": e.to_string(),
-                })),
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    let status = if is_vm_booting(abs_vms, name, &err_msg) {
+                        "starting"
+                    } else {
+                        "error"
+                    };
+                    results.push(serde_json::json!({
+                        "name": name,
+                        "status": status,
+                        "error": err_msg,
+                    }));
+                }
             }
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
@@ -2706,18 +2806,22 @@ fn cmd_vm_status_all(json: bool) -> Result<()> {
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
-                    let health = if err_msg.contains("did not respond within")
-                        || err_msg.contains("Failed to connect to guest agent")
-                    {
-                        "agent unreachable"
-                    } else if err_msg.contains("not found at") {
-                        "vsock missing"
-                    } else if err_msg.contains("not a socket") {
-                        "vsock invalid"
+                    if is_vm_booting(abs_vms, name, &err_msg) {
+                        println!("  {:<16} {:<10} {:<24} booting", name, "starting", "-");
                     } else {
-                        "unknown error"
-                    };
-                    println!("  {:<16} {:<10} {:<24} {}", name, "error", "-", health);
+                        let health = if err_msg.contains("did not respond within")
+                            || err_msg.contains("Failed to connect to guest agent")
+                        {
+                            "agent unreachable"
+                        } else if err_msg.contains("not found at") {
+                            "vsock missing"
+                        } else if err_msg.contains("not a socket") {
+                            "vsock invalid"
+                        } else {
+                            "unknown error"
+                        };
+                        println!("  {:<16} {:<10} {:<24} {}", name, "error", "-", health);
+                    }
                 }
             }
         }

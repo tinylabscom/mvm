@@ -24,9 +24,9 @@
 #   systemd service reads /proc/cmdline and writes a networkd config
 #   before systemd-networkd starts.  No DHCP needed.
 
-{ lib, pkgs, ... }:
+{ pkgs, ... }:
 {
-  system.stateVersion = "24.11";
+  system.stateVersion = "25.11";
 
   # --- Boot ---
   boot.loader.grub.enable = false;
@@ -71,10 +71,16 @@
     device = "/dev/vda";
     fsType = "ext4";
     options = [ "noatime" ];
+    neededForBoot = true;
   };
 
   # --- Console ---
   systemd.services."serial-getty@ttyS0".enable = true;
+  # Forward journal to serial console so `mvmctl logs` shows service errors.
+  services.journald.extraConfig = ''
+    ForwardToConsole=yes
+    MaxLevelConsole=info
+  '';
 
   # --- Networking (systemd-networkd + kernel cmdline IP) ---
   # The host passes mvm.ip=<cidr> and mvm.gw=<ip> in Firecracker boot args.
@@ -145,13 +151,20 @@
   };
 
   # Data drive is optional — only present when pool spec has data_disk_mib > 0.
-  # Use a short timeout so boot isn't blocked when the drive doesn't exist.
+  # `noauto` prevents systemd from waiting for /dev/vdd at boot (which produces
+  # noisy timeout errors when the drive isn't attached).  Services that need
+  # persistent storage should `mount /mnt/data` explicitly or check with
+  # `mountpoint -q /mnt/data`.
   fileSystems."/mnt/data" = {
     device = "/dev/vdd";
     fsType = "ext4";
-    options = [ "noexec" "nosuid" "nodev" "nofail" "x-systemd.device-timeout=1s" ];
+    options = [ "noexec" "nosuid" "nodev" "nofail" "noauto" ];
     neededForBoot = false;
   };
+
+  # Ensure the mount point exists even when the data drive is not attached,
+  # so services with ReadWritePaths = [ "/mnt/data" ] don't fail namespace setup.
+  systemd.tmpfiles.rules = [ "d /mnt/data 0755 root root -" ];
 
   # --- Minimal packages ---
   environment.systemPackages = with pkgs; [
