@@ -62,7 +62,7 @@
         export OPENCLAW_CONFIG_PATH="''${OPENCLAW_CONFIG_PATH:-/var/lib/openclaw/config/openclaw.json}"
         export OPENCLAW_HOME="''${OPENCLAW_HOME:-/var/lib/openclaw}"
         export OPENCLAW_STATE_DIR="''${OPENCLAW_STATE_DIR:-/var/lib/openclaw/.state}"
-        exec ${openclaw}/bin/openclaw gateway
+        exec ${openclaw}/bin/openclaw gateway --allow-unconfigured
       '';
 
       # Hardening

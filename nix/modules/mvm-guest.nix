@@ -60,6 +60,17 @@
   security.audit.enable = false;
   systemd.tpm2.enable = false;
   system.switch.enable = false;
+  services.nscd.enable = false;
+  services.logrotate.enable = false;
+  programs.command-not-found.enable = false;
+  nix.enable = false;  # no nix-daemon inside the microVM
+
+  # Short timeouts — don't wait 90s for anything in an ephemeral VM.
+  systemd.extraConfig = ''
+    DefaultTimeoutStartSec=10s
+    DefaultTimeoutStopSec=10s
+    DefaultDeviceTimeoutSec=5s
+  '';
 
   # Skip fsck — these are ephemeral VMs, rootfs is rebuilt on every deploy
   boot.initrd.checkJournalingFS = false;

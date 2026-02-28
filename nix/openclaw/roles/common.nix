@@ -66,6 +66,13 @@
       if [ -f /mnt/config/openclaw.json ]; then
         install -o openclaw -g openclaw -m 0644 \
           /mnt/config/openclaw.json /var/lib/openclaw/config/openclaw.json
+      else
+        # No config provided — write a minimal default so the gateway
+        # can start in local mode without requiring `openclaw setup`.
+        cat > /var/lib/openclaw/config/openclaw.json << 'DEFAULTCFG'
+      {"gateway":{"mode":"local","port":3000},"version":"1"}
+      DEFAULTCFG
+        chown openclaw:openclaw /var/lib/openclaw/config/openclaw.json
       fi
 
       # Persistent storage on the data drive (survives reboots).
