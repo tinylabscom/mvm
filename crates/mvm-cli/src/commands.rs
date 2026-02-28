@@ -152,6 +152,13 @@ enum Commands {
         #[arg(long)]
         hypervisor: bool,
     },
+    /// Forward a port from a running microVM to localhost
+    Forward {
+        /// Name of the VM
+        name: String,
+        /// Port mapping: GUEST_PORT or LOCAL_PORT:GUEST_PORT
+        port: String,
+    },
     /// Show status of Lima VM and microVM
     Status,
     /// Tear down Lima VM and all resources
@@ -591,6 +598,7 @@ pub fn run() -> Result<()> {
             lines,
             hypervisor,
         } => cmd_logs(&name, follow, lines, hypervisor),
+        Commands::Forward { name, port } => cmd_forward(&name, &port),
         Commands::Status => cmd_status(),
         Commands::Destroy { yes } => cmd_destroy(yes),
         Commands::Upgrade { check, force } => cmd_upgrade(check, force),
@@ -1380,6 +1388,91 @@ fn sync_phase(
 
 fn cmd_logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()> {
     microvm::logs(name, follow, lines, hypervisor)
+}
+
+/// Forward a port from a running microVM to localhost.
+///
+/// On macOS this tunnels through Lima's SSH connection; on native Linux
+/// it spawns a local socat proxy.
+///
+/// `port_spec` is either `GUEST_PORT` (binds to same local port) or
+/// `LOCAL_PORT:GUEST_PORT`.
+fn cmd_forward(name: &str, port_spec: &str) -> Result<()> {
+    // Verify the VM is actually running.
+    let _abs_dir = resolve_running_vm(name)?;
+
+    let (local_port, guest_port) = parse_port_spec(port_spec)?;
+
+    // Read the VM's guest IP from run-info.json.
+    let info = microvm::read_vm_run_info(name)?;
+    let guest_ip = info
+        .guest_ip
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "VM '{}' has no guest_ip in run-info. Was it started with 'mvmctl run'?",
+                name,
+            )
+        })?;
+
+    ui::info(&format!(
+        "Forwarding localhost:{} -> {}:{} (VM '{}')",
+        local_port, guest_ip, guest_port, name,
+    ));
+    ui::info("Press Ctrl-C to stop forwarding.");
+
+    if bootstrap::is_lima_required() {
+        // macOS: SSH port-forward through Lima's SSH connection.
+        lima::require_running()?;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+        let ssh_config = format!("{}/.lima/{}/ssh.config", home, config::VM_NAME);
+
+        let status = std::process::Command::new("ssh")
+            .arg("-F")
+            .arg(&ssh_config)
+            .arg("-N") // no remote command
+            .arg("-L")
+            .arg(format!("{}:{}:{}", local_port, guest_ip, guest_port))
+            .arg(format!("lima-{}", config::VM_NAME))
+            .status()
+            .context("Failed to start SSH port forward. Is Lima running?")?;
+
+        if !status.success() {
+            anyhow::bail!("SSH port forward exited with status {}", status);
+        }
+    } else {
+        // Native Linux: socat proxy (microVM is directly reachable).
+        let status = std::process::Command::new("socat")
+            .arg(format!("TCP-LISTEN:{},fork,reuseaddr", local_port))
+            .arg(format!("TCP:{}:{}", guest_ip, guest_port))
+            .status()
+            .context("Failed to start socat. Install it with: sudo apt install socat")?;
+
+        if !status.success() {
+            anyhow::bail!("socat exited with status {}", status);
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse a port spec like `3000` or `8080:3000` into `(local, guest)`.
+fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
+    if let Some((local, guest)) = spec.split_once(':') {
+        let local: u16 = local
+            .parse()
+            .with_context(|| format!("invalid local port '{}'", local))?;
+        let guest: u16 = guest
+            .parse()
+            .with_context(|| format!("invalid guest port '{}'", guest))?;
+        Ok((local, guest))
+    } else {
+        let port: u16 = spec
+            .parse()
+            .with_context(|| format!("invalid port '{}'", spec))?;
+        Ok((port, port))
+    }
 }
 
 fn cmd_status() -> Result<()> {
@@ -2583,6 +2676,11 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
                 mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
             let probes = mvm_guest::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
 
+            // Read guest IP from run-info (best-effort).
+            let guest_ip = microvm::read_vm_run_info(name)
+                .ok()
+                .and_then(|info| info.guest_ip);
+
             if json {
                 let integration_json: Vec<serde_json::Value> = integrations
                     .iter()
@@ -2610,6 +2708,7 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
                     .collect();
                 let obj = serde_json::json!({
                     "name": name,
+                    "guest_ip": guest_ip,
                     "worker_status": status,
                     "last_busy_at": last_busy_at,
                     "integrations": integration_json,
@@ -2618,6 +2717,9 @@ fn cmd_vm_status(name: &str, json: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&obj)?);
             } else {
                 ui::status_line("VM:", name);
+                if let Some(ip) = &guest_ip {
+                    ui::status_line("Guest IP:", ip);
+                }
                 ui::status_line("Worker status:", &status);
                 let busy = last_busy_at.as_deref().unwrap_or("never");
                 ui::status_line("Last busy:", busy);
@@ -2789,25 +2891,31 @@ fn cmd_vm_status_all(json: bool) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        let integ_header = "HEALTH";
         println!(
-            "  {:<16} {:<10} {:<24} {}",
-            "NAME", "STATUS", "LAST BUSY", integ_header
+            "  {:<16} {:<16} {:<10} {:<24} HEALTH",
+            "NAME", "IP", "STATUS", "LAST BUSY"
         );
-        println!("  {}", "-".repeat(66));
+        println!("  {}", "-".repeat(82));
         for name in &names {
+            let ip = microvm::read_vm_run_info(name)
+                .ok()
+                .and_then(|info| info.guest_ip)
+                .unwrap_or_default();
             match cmd_vm_status_row(name) {
                 Ok((status, last_busy, integrations)) => {
                     let busy = last_busy.as_deref().unwrap_or("never");
                     println!(
-                        "  {:<16} {:<10} {:<24} {}",
-                        name, status, busy, integrations
+                        "  {:<16} {:<16} {:<10} {:<24} {}",
+                        name, ip, status, busy, integrations
                     );
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
                     if is_vm_booting(abs_vms, name, &err_msg) {
-                        println!("  {:<16} {:<10} {:<24} booting", name, "starting", "-");
+                        println!(
+                            "  {:<16} {:<16} {:<10} {:<24} booting",
+                            name, ip, "starting", "-"
+                        );
                     } else {
                         let health = if err_msg.contains("did not respond within")
                             || err_msg.contains("Failed to connect to guest agent")
@@ -2820,7 +2928,10 @@ fn cmd_vm_status_all(json: bool) -> Result<()> {
                         } else {
                             "unknown error"
                         };
-                        println!("  {:<16} {:<10} {:<24} {}", name, "error", "-", health);
+                        println!(
+                            "  {:<16} {:<16} {:<10} {:<24} {}",
+                            name, ip, "error", "-", health
+                        );
                     }
                 }
             }
@@ -2866,8 +2977,12 @@ fn cmd_vm_status_json(name: &str) -> Result<serde_json::Value> {
                     })
                 })
                 .collect();
+            let guest_ip = microvm::read_vm_run_info(name)
+                .ok()
+                .and_then(|info| info.guest_ip);
             Ok(serde_json::json!({
                 "name": name,
+                "guest_ip": guest_ip,
                 "worker_status": status,
                 "last_busy_at": last_busy_at,
                 "integrations": integration_json,
@@ -4141,5 +4256,53 @@ edition = "2024"
     fn test_read_dir_to_drive_files_nonexistent_dir() {
         let result = read_dir_to_drive_files("/nonexistent/path/abc123", 0o444);
         assert!(result.is_err());
+    }
+
+    // ---- Forward command tests ----
+
+    #[test]
+    fn test_forward_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000"]).unwrap();
+        match cli.command {
+            Commands::Forward { name, port } => {
+                assert_eq!(name, "swift");
+                assert_eq!(port, "3000");
+            }
+            _ => panic!("Expected Forward command"),
+        }
+    }
+
+    #[test]
+    fn test_forward_with_port_mapping() {
+        let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "8080:3000"]).unwrap();
+        match cli.command {
+            Commands::Forward { name, port } => {
+                assert_eq!(name, "swift");
+                assert_eq!(port, "8080:3000");
+            }
+            _ => panic!("Expected Forward command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_port_spec_single() {
+        let (local, guest) = parse_port_spec("3000").unwrap();
+        assert_eq!(local, 3000);
+        assert_eq!(guest, 3000);
+    }
+
+    #[test]
+    fn test_parse_port_spec_mapping() {
+        let (local, guest) = parse_port_spec("8080:3000").unwrap();
+        assert_eq!(local, 8080);
+        assert_eq!(guest, 3000);
+    }
+
+    #[test]
+    fn test_parse_port_spec_invalid() {
+        assert!(parse_port_spec("abc").is_err());
+        assert!(parse_port_spec("abc:3000").is_err());
+        assert!(parse_port_spec("3000:abc").is_err());
+        assert!(parse_port_spec("99999").is_err());
     }
 }

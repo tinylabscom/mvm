@@ -1112,6 +1112,14 @@ fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read run info for a named VM.
+pub fn read_vm_run_info(name: &str) -> Result<RunInfo> {
+    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_dir = format!("{}/{}", abs_vms.trim(), name);
+    read_vm_run_info_from(&abs_dir)
+        .ok_or_else(|| anyhow::anyhow!("No run-info found for VM '{}'. Is it running?", name))
+}
+
 /// Read run info from a specific VM directory.
 fn read_vm_run_info_from(abs_dir: &str) -> Option<RunInfo> {
     let json = run_in_vm_stdout(&format!(

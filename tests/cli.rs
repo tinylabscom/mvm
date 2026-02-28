@@ -56,6 +56,7 @@ fn test_help_lists_all_subcommands() {
         "destroy",
         "upgrade",
         "run",
+        "forward",
         "shell-init",
     ] {
         assert!(
@@ -182,6 +183,17 @@ fn test_cleanup_help() {
         .stdout(predicate::str::contains("--all"))
         .stdout(predicate::str::contains("--verbose"))
         .stdout(predicate::str::contains("dev-build"));
+}
+
+#[test]
+fn test_forward_help() {
+    mvm()
+        .args(["forward", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Forward"))
+        .stdout(predicate::str::contains("<NAME>"))
+        .stdout(predicate::str::contains("<PORT>"));
 }
 
 #[test]
