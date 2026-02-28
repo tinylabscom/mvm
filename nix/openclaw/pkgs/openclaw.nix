@@ -49,6 +49,10 @@ stdenv.mkDerivation (finalAttrs: {
     vips          # sharp (image processing) links against libvips
   ];
 
+  # Fail the build if python3 or perl leak into the runtime closure.
+  # These are only needed at build time (node-gyp, native module compilation).
+  disallowedReferences = [ python3 perl ];
+
   env = {
     SHARP_IGNORE_GLOBAL_LIBVIPS = "1";
     npm_config_nodedir = nodejs_22;
@@ -115,6 +119,48 @@ stdenv.mkDerivation (finalAttrs: {
 
     # Remove dangling symlinks left by node-llama-cpp removal.
     find $out/lib/openclaw/node_modules -xtype l -delete 2>/dev/null || true
+
+    # ── Closure size reduction ─────────────────────────────────────
+    # The full node_modules is ~1.3 GB. Strip everything that isn't
+    # needed at runtime to shrink the NixOS rootfs closure.
+
+    # 1. Strip build-time references to python3/perl from node_modules.
+    #    node-gyp/koffi leave .py scripts with Nix store shebangs that
+    #    pull python3 (110 MB) into the runtime closure.
+    find $out/lib/openclaw/node_modules -name '*.py' -exec sed -i '1s|^#!.*/nix/store/[^ ]*/bin/python[0-9.]*|#!/usr/bin/env python3|' {} + 2>/dev/null || true
+    find $out/lib/openclaw/node_modules -name '*.pl' -exec sed -i '1s|^#!.*/nix/store/[^ ]*/bin/perl|#!/usr/bin/env perl|' {} + 2>/dev/null || true
+
+    # 2. Remove build artifacts (gyp, cmake, makefiles).
+    find $out/lib/openclaw/node_modules \( \
+      -name '*.gyp' -o -name '*.gypi' -o -name 'binding.gyp' -o \
+      -name 'Makefile' -o -name 'CMakeLists.txt' \
+    \) -delete 2>/dev/null || true
+
+    # 3. Remove TypeScript source and declaration files — only .js is needed.
+    find $out/lib/openclaw/node_modules -name '*.ts' ! -name '*.d.ts' -delete 2>/dev/null || true
+    find $out/lib/openclaw/node_modules -name '*.d.ts' -delete 2>/dev/null || true
+    find $out/lib/openclaw/node_modules -name '*.ts.map' -delete 2>/dev/null || true
+    find $out/lib/openclaw/node_modules -name '*.js.map' -delete 2>/dev/null || true
+
+    # 4. Remove documentation, examples, tests — not needed at runtime.
+    find $out/lib/openclaw/node_modules -type d \( \
+      -name 'test' -o -name 'tests' -o -name '__tests__' -o \
+      -name 'example' -o -name 'examples' -o -name 'demo' -o \
+      -name 'docs' -o -name 'doc' -o -name '.github' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+
+    # 5. Remove documentation files from package roots.
+    find $out/lib/openclaw/node_modules \( \
+      -name 'README*' -o -name 'CHANGELOG*' -o -name 'HISTORY*' -o \
+      -name 'CHANGES*' -o -name 'AUTHORS*' -o -name 'CONTRIBUTORS*' -o \
+      -name '*.md' -o -name 'LICENSE*' -o -name 'LICENCE*' \
+    \) ! -path '*/node_modules/.pnpm/*/.modules.yaml' -delete 2>/dev/null || true
+
+    # 6. Remove Python/C source files left by native module builds.
+    find $out/lib/openclaw/node_modules \( -name '*.py' -o -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' \) -delete 2>/dev/null || true
+
+    # 7. Remove empty directories left by pruning.
+    find $out/lib/openclaw/node_modules -type d -empty -delete 2>/dev/null || true
 
     patchShebangs $out/lib/openclaw/node_modules/.bin/
 

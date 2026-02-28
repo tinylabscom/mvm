@@ -36,3 +36,7 @@ That way we can have a simplest version working in a single repo and then have t
 ```bash
 cr stop swift; cr template build openclaw --force; cr run --template openclaw --name swift; cr logs -f swift;
 ```
+
+---
+
+We want these boots to be as FAST as possible. I need these microvms to be as small as possible. That's part of the point of this library

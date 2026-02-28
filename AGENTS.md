@@ -1,5 +1,16 @@
 # Agent Working Agreement
 
+## Lima VM Requirement
+
+All Nix builds, Firecracker operations, and Linux-specific commands MUST be run inside the Lima VM. Use `limactl shell mvm -- <command>` to execute commands inside the VM. The Lima VM name is `mvm`.
+
+Examples:
+- `limactl shell mvm -- nix build .#packages.aarch64-linux.default`
+- `limactl shell mvm -- nix path-info -rsh /nix/store/<hash>`
+- `limactl shell mvm -- ls -lh /Users/auser/.mvm/templates/`
+
+The `cargo run` commands (e.g. `cargo run -- template build`) automatically delegate to the Lima VM via `mvm_runtime::shell::run_in_vm()`, but direct Nix commands must be run via `limactl shell mvm`.
+
 ## Definition of Done
 
 No task is complete without tests. Every feature, bug fix, or refactor must include:

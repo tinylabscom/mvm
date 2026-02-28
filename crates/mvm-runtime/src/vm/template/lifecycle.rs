@@ -118,7 +118,15 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
         let _ = shell::run_in_vm(&format!("rm -rf {builds_dir}"));
     }
     let result = mvm_build::dev_build::dev_build(&env, &spec.flake_ref, Some(&spec.profile))?;
-    mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
+    // Best-effort: inject guest agent if not already present.
+    // Non-fatal because flakes built with mvm's mkGuest already include
+    // guest-agent.nix, and the loop-mount check can fail on virtiofs.
+    if let Err(e) = mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result) {
+        ui::warn(&format!(
+            "Could not verify guest agent ({}). If built with mvm's mkGuest, the agent is already included.",
+            e
+        ));
+    }
 
     // Store artifacts in template revision directory
     ui::info("Storing artifacts in template revision directory...");
@@ -134,10 +142,18 @@ pub fn template_build(id: &str, force: bool) -> Result<()> {
         result.rootfs_path
     ))?;
 
-    // Generate a minimal fc-base.json config for reference
+    // Generate a minimal fc-base.json config for reference.
+    // Minimal guests (no initrd) need root= and init= on the kernel cmdline
+    // so the kernel can mount the rootfs and exec /init directly.
+    let boot_args = if result.initrd_path.is_some() {
+        "console=ttyS0 reboot=k panic=1 net.ifnames=0".to_string()
+    } else {
+        "root=/dev/vda rw rootwait init=/init console=ttyS0 reboot=k panic=1 net.ifnames=0"
+            .to_string()
+    };
     let mut boot_source = serde_json::json!({
         "kernel_image_path": "vmlinux",
-        "boot_args": "console=ttyS0 reboot=k panic=1 net.ifnames=0"
+        "boot_args": boot_args
     });
     if result.initrd_path.is_some() {
         boot_source["initrd_path"] = serde_json::json!("initrd");

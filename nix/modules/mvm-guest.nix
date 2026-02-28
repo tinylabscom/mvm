@@ -60,14 +60,11 @@
     "systemd.mask=systemd-random-seed.service"
     # utmp: no login accounting in headless VMs
     "systemd.mask=systemd-update-utmp.service"
-    # Skip keyboard controller probes (no keyboard in Firecracker)
+    # Skip keyboard controller probes (x86 only, harmless on aarch64)
     "i8042.noaux"
     "i8042.nomux"
     "i8042.nopnp"
     "i8042.nokbd"
-    # Firecracker-specific: no APIC, trust host TSC
-    "noapic"
-    "tsc=reliable"
   ];
 
   # Only include the virtio drivers we actually need.
@@ -77,75 +74,16 @@
   boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" ];
   boot.initrd.kernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" ];
 
-  # Use systemd-based initrd instead of the scripted shell stage-1.
-  # The systemd initrd parallelizes device discovery and mounting instead
-  # of running them sequentially.  microvm.nix uses this by default.
-  boot.initrd.systemd.enable = true;
-  boot.initrd.systemd.tpm2.enable = false;
+  # NOTE: boot.initrd.systemd.enable is NOT used here.  The systemd initrd
+  # requires initrd-find-nixos-closure.service and initrd-nixos-activation,
+  # which fail because our make-ext4-fs.nix rootfs lacks the NixOS profile
+  # symlinks the systemd initrd expects.  The scripted stage-1 works fine —
+  # it simply mounts /dev/vda and pivots root.
 
-  # --- Custom kernel for Firecracker ---
-  # The stock NixOS kernel probes hundreds of hardware subsystems (ACPI, USB,
-  # SCSI, NUMA, sound, GPU) that don't exist in Firecracker.  Disabling them
-  # eliminates device-probing latency during boot.
-  boot.kernelPatches = [{
-    name = "firecracker-minimal";
-    patch = null;
-    structuredExtraConfig = with lib.kernel; {
-      # Disable nonexistent hardware
-      ACPI = no;
-      NUMA = no;
-      HIBERNATION = no;
-      PM = no;
-      CPU_FREQ = no;
-      CPU_IDLE = no;
-      USB_SUPPORT = no;
-      SOUND = no;
-      DRM = no;
-      WIRELESS = no;
-      WLAN = no;
-      BLUETOOTH = no;
-      NFC = no;
-      INPUT_MOUSE = no;
-      INPUT_TOUCHSCREEN = no;
-      INPUT_TABLET = no;
-      INPUT_JOYSTICK = no;
-      HID = no;
-      MEDIA_SUPPORT = no;
-      HWMON = no;
-      THERMAL = no;
-      WATCHDOG = no;
-      IOMMU_SUPPORT = no;
-      PCCARD = no;
-      HOTPLUG_PCI = no;
-
-      # Disable unused filesystems
-      XFS_FS = no;
-      BTRFS_FS = no;
-      NFS_FS = no;
-      CIFS = no;
-
-      # Disable unused network features
-      BRIDGE = no;
-
-      # Firecracker guest essentials
-      KVM_GUEST = yes;
-      PARAVIRT = yes;
-      HYPERVISOR_GUEST = yes;
-      VIRTIO = yes;
-      VIRTIO_PCI = yes;
-      VIRTIO_BLK = yes;
-      VIRTIO_NET = yes;
-      VIRTIO_MMIO = yes;
-      VIRTIO_CONSOLE = yes;
-      VIRTIO_BALLOON = no;
-      SERIAL_8250 = yes;
-      SERIAL_8250_CONSOLE = yes;
-
-      # Reduce kernel size and boot time
-      DEBUG_INFO_NONE = yes;
-      KALLSYMS = no;
-    };
-  }];
+  # --- Custom kernel ---
+  # Firecracker-optimized kernel is in firecracker-kernel.nix (included by
+  # mkGuest in flake.nix). Uses Firecracker's upstream aarch64 guest config
+  # with linuxManualConfig for a monolithic ~8 MB kernel.
 
   # --- Minimize boot time ---
   documentation.enable = false;
