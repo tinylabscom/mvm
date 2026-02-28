@@ -48,26 +48,33 @@
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      User = "openclaw";
-      Group = "openclaw";
+      # Runs as root so it can set ownership of the tmpfs mount.
+      # All created files are chowned to openclaw at the end.
     };
 
     script = ''
       set -eu
 
+      # The tmpfs at /var/lib/openclaw mounts as root — fix ownership.
+      chown openclaw:openclaw /var/lib/openclaw
+
       # Runtime directories on tmpfs.
-      mkdir -p /var/lib/openclaw/{config,.state,logs}
+      install -d -o openclaw -g openclaw /var/lib/openclaw/{config,.state,logs}
 
       # Copy read-only config to a writable location so OpenClaw can
       # update settings at runtime (enable skills, change models, etc.).
       if [ -f /mnt/config/openclaw.json ]; then
-        cp /mnt/config/openclaw.json /var/lib/openclaw/config/openclaw.json
+        install -o openclaw -g openclaw -m 0644 \
+          /mnt/config/openclaw.json /var/lib/openclaw/config/openclaw.json
       fi
 
       # Persistent storage on the data drive (survives reboots).
-      # If /mnt/data is mounted, create and symlink persistent dirs.
+      # The data drive is noauto in fstab — try to mount it if the device exists.
+      if [ -b /dev/vdd ] && ! mountpoint -q /mnt/data 2>/dev/null; then
+        mount /mnt/data || true
+      fi
       if mountpoint -q /mnt/data 2>/dev/null; then
-        mkdir -p /mnt/data/openclaw/{skills,workspace,sessions}
+        install -d -o openclaw -g openclaw /mnt/data/openclaw/{skills,workspace,sessions}
 
         # Skills persist across reboots so they don't need re-installing.
         ln -sfn /mnt/data/openclaw/skills /var/lib/openclaw/skills
@@ -79,7 +86,7 @@
         ln -sfn /mnt/data/openclaw/sessions /var/lib/openclaw/sessions
       else
         # No data drive — use tmpfs (ephemeral, lost on reboot).
-        mkdir -p /var/lib/openclaw/{skills,workspace,sessions}
+        install -d -o openclaw -g openclaw /var/lib/openclaw/{skills,workspace,sessions}
       fi
     '';
   };

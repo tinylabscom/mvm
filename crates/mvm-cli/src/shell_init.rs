@@ -9,23 +9,23 @@ const MARKER_END: &str = "# <<< mvmctl <<<";
 
 /// Generate the shell init block with completions and dev aliases.
 ///
-/// Produces POSIX-compatible output that works in both bash and zsh.
-/// Completions use the shell name from `$0` or fall back to bash.
+/// The block template lives in `resources/shell_init.sh.tera` and is
+/// embedded at compile time, then rendered via Tera at runtime.
 pub fn generate_block(kv_root: &str) -> String {
-    format!(
-        r#"{MARKER_START}
-# Load completions for the current shell (bash or zsh)
-if command -v mvmctl >/dev/null 2>&1; then
-    _mvm_shell="$(basename "${{SHELL:-bash}}")"
-    eval "$(mvmctl completions "$_mvm_shell" 2>/dev/null)"
-    unset _mvm_shell
-fi
-
-KV_ROOT="{kv_root}"
-alias cr="cargo run --manifest-path $KV_ROOT/mvm/Cargo.toml --"
-alias crd="cargo run --manifest-path $KV_ROOT/mvmd/Cargo.toml --"
-{MARKER_END}"#
+    let mut tera = tera::Tera::default();
+    tera.add_raw_template(
+        "shell_init",
+        include_str!("../resources/shell_init.sh.tera"),
     )
+    .expect("embedded shell_init template should parse");
+    let mut ctx = tera::Context::new();
+    ctx.insert("kv_root", kv_root);
+    ctx.insert("marker_start", MARKER_START);
+    ctx.insert("marker_end", MARKER_END);
+    tera.render("shell_init", &ctx)
+        .expect("shell_init template should render")
+        .trim()
+        .to_string()
 }
 
 /// Detect the KV workspace root by walking up from cwd to find the mvm repo,
