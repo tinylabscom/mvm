@@ -70,6 +70,23 @@ Layer 3: Firecracker microVM
 
 **Important**: Firecracker microVMs (Layer 3) are headless workloads with no SSH access. They communicate via vsock only. To work with your project files in a Linux environment, use `mvmctl shell` or `mvmctl dev` (Layer 2), where your home directory is mounted. Use `--volume` flags to pass data directories to microVMs. For debugging, dev-mode guest agents support `mvmctl vm exec <name> -- <command>` to run commands inside the microVM via vsock.
 
+### Guest Agent
+
+Every microVM built with `mkGuest` includes **mvm-guest-agent**, a lightweight Rust daemon that runs inside the guest on vsock port 52. It provides the host with visibility and control over the guest without SSH:
+
+| Capability | Description |
+|------------|-------------|
+| **Health checks** | Runs per-service health commands on a schedule, reports results to the host via vsock |
+| **Worker status** | Tracks idle/busy state by sampling `/proc/loadavg` -- used by fleet autoscaling |
+| **Snapshot lifecycle** | Coordinates sleep/wake: flushes data, drops page cache before snapshot, signals restore |
+| **Integration management** | Loads service definitions from `/etc/mvm/integrations.d/*.json` (checkpoint, restore, health) |
+| **Probes** | Loads read-only system checks from `/etc/mvm/probes.d/*.json` (disk usage, custom metrics) |
+| **Remote exec** | Dev-only: `mvmctl vm exec <name> -- <cmd>` runs commands inside the guest (requires `dev-shell` build feature) |
+
+The agent communicates using length-prefixed JSON frames over Firecracker's vsock UDS socket. The host connects by writing `CONNECT 52\n` to the socket and reading `OK 52\n`. All requests are request/response pairs (ping, status, sleep-prep, wake, exec, etc.).
+
+Health checks defined in `mkGuest`'s `healthChecks` parameter are automatically written to `/etc/mvm/integrations.d/` at build time. The agent picks them up on boot and begins periodic checks immediately.
+
 ## Setup Flow
 
 mvm has three setup commands with increasing levels of automation:

@@ -94,7 +94,7 @@
             export OPENCLAW_CONFIG_PATH OPENCLAW_HOME OPENCLAW_STATE_DIR
 
             cd /var/lib/openclaw
-            exec ${openclaw}/bin/openclaw ${role} --allow-unconfigured
+            exec ${openclaw}/bin/openclaw ${role} --port 3000 --allow-unconfigured
           '';
         in
         mvm.lib.${system}.mkGuest {
@@ -113,7 +113,7 @@
           };
 
           healthChecks.${serviceName} = {
-            healthCmd = "pgrep -f 'openclaw ${role}' >/dev/null";
+            healthCmd = "wget -q -O /dev/null http://localhost:3000/ 2>/dev/null";
             healthIntervalSecs = 10;
             healthTimeoutSecs = 5;
           };

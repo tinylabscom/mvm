@@ -381,6 +381,32 @@ Items deferred until the core mkGuest workflow is validated end-to-end:
   map to flake package attributes instead of module files. Update the manifest
   format and Rust parser accordingly.
 
+- **OpenClaw rootfs optimization**: The current OpenClaw rootfs is ~1.8 GB
+  (mostly node_modules). Node.js module loading on virtio-block ext4 is too
+  slow for Firecracker — the process hangs during startup because loading
+  hundreds of JS files via random I/O on a virtual disk is orders of magnitude
+  slower than on virtiofs/9p. The binary starts in ~1s in the Lima VM but
+  hangs indefinitely in Firecracker. Options to fix:
+  1. **esbuild single-file bundle**: Bundle the entire OpenClaw dist + deps
+     into a single JS file. Eliminates random I/O for module resolution.
+     Reduces rootfs from ~1.8 GB to ~50-100 MB. Highest impact, moderate risk
+     (some dynamic imports may break).
+  2. **initrd/ramfs boot**: Load the rootfs into RAM at boot instead of
+     reading from virtio-block. Eliminates disk I/O entirely but requires
+     enough RAM to hold the entire rootfs. Works well if combined with (1).
+  3. **squashfs/erofs rootfs**: Replace ext4 with a compressed read-only
+     filesystem. Better random read performance due to block-level compression
+     and potentially better caching. Medium impact, low risk.
+  4. **Further node_modules pruning**: The current openclaw.nix already strips
+     ~40% (tests, docs, .ts, .map). Could go further: remove unused workspace
+     packages, tree-shake with `pnpm deploy --prod`, or use `node-prune`.
+
+- **Firecracker entropy device**: The Firecracker API supports `/entropy`
+  (virtio-rng) to provide guest entropy. Without it, the kernel's initial
+  entropy pool relies on jitter timing which is slow in a VM. Consider adding
+  this for crypto-heavy workloads. (Tested: adds ~40s to boot — needs
+  investigation, may require a newer Firecracker version or kernel config.)
+
 ## References
 
 - [microvm.nix optimization.nix](https://github.com/microvm-nix/microvm.nix/blob/main/nixos-modules/microvm/optimization.nix)
