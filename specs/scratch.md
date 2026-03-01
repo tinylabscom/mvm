@@ -34,7 +34,11 @@ That way we can have a simplest version working in a single repo and then have t
 ---
 
 ```bash
-cr stop swift; cr template build openclaw --force; cr run --template openclaw --name swift; cr logs -f swift;
+(TEMPLATE=hello; NAME=demo; cr stop $NAME; echo "Runing $TEMPLATE"; cr template build $TEMPLATE --force; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
+```
+
+```bash
+(TEMPLATE=openclaw; NAME=oc; cr stop $NAME; echo "Runing $TEMPLATE"; cr template build $TEMPLATE --force; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
 ```
 
 ---

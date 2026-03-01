@@ -99,6 +99,54 @@ impl Default for RuntimePolicy {
 }
 
 // ============================================================================
+// Sleep policy configuration (optional per-pool override)
+// ============================================================================
+
+/// Configurable thresholds for per-pool sleep policy.
+///
+/// When set on a `DesiredPool`, overrides the system-wide default thresholds
+/// for idle detection and sleep transitions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SleepPolicyConfig {
+    /// Idle seconds before Running → Warm transition (default: 300).
+    #[serde(default = "default_warm_threshold")]
+    pub warm_threshold_secs: u64,
+    /// Idle seconds before Warm → Sleeping transition (default: 900).
+    #[serde(default = "default_sleep_threshold")]
+    pub sleep_threshold_secs: u64,
+    /// CPU % below which an instance is considered idle (default: 5.0).
+    #[serde(default = "default_cpu_threshold")]
+    pub cpu_threshold: f32,
+    /// Net bytes below which an instance is considered idle (default: 1024).
+    #[serde(default = "default_net_threshold")]
+    pub net_bytes_threshold: u64,
+}
+
+fn default_warm_threshold() -> u64 {
+    300
+}
+fn default_sleep_threshold() -> u64 {
+    900
+}
+fn default_cpu_threshold() -> f32 {
+    5.0
+}
+fn default_net_threshold() -> u64 {
+    1024
+}
+
+impl Default for SleepPolicyConfig {
+    fn default() -> Self {
+        Self {
+            warm_threshold_secs: default_warm_threshold(),
+            sleep_threshold_secs: default_sleep_threshold(),
+            cpu_threshold: default_cpu_threshold(),
+            net_bytes_threshold: default_net_threshold(),
+        }
+    }
+}
+
+// ============================================================================
 // Pool spec
 // ============================================================================
 

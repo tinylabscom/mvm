@@ -57,7 +57,8 @@ Layer 2: Lima VM (Ubuntu)
   - Skipped entirely on native Linux with KVM
 
 Layer 3: Firecracker microVM
-  - Minimal guest OS (NixOS-based, built from Nix flakes)
+  - Minimal guest OS (busybox init, built from Nix flakes)
+  - Sub-5s boot time -- no systemd, no NixOS overhead
   - Isolated filesystem -- NO host mounts by default
   - Headless -- no SSH, no interactive access
   - Communicates via vsock only
@@ -256,51 +257,73 @@ mvmctl run --flake .
 ```
 my-service/
 ├── flake.nix       # Nix flake that builds kernel + rootfs via mkGuest
-├── baseline.nix    # NixOS guest config (console, drives, networking)
 ├── .gitignore      # Ignores result symlinks and build artifacts
 └── README.md       # Quick-reference for the template workflow
 ```
 
-**`flake.nix`** pulls in the mvm source as a flake input, which provides:
-- The **guest agent** binary (auto-included in every image for health checks and vsock communication)
-- The **guest-agent.nix** NixOS module (systemd service for the agent)
-- The **guest-integrations.nix** module (register workload health checks)
+**`flake.nix`** pulls in the mvm flake as an input. `mkGuest` handles everything internally -- the Firecracker kernel, busybox init, guest agent, networking, drive mounting, and service supervision are all built into the image automatically. You just define your services and health checks.
 
-**`baseline.nix`** configures the guest OS for Firecracker: minimal kernel, serial console, virtio drivers, static networking via kernel cmdline, and mount points for config/secrets/data drives.
+### Writing a Flake
 
-### Adding a Workload
-
-To add your own service to the template, create a role module (e.g. `roles/worker.nix`):
+A complete microVM flake:
 
 ```nix
-{ pkgs, ... }:
 {
-  # Import the integration health module so the guest agent
-  # monitors your service and reports status via `mvmctl vm status`.
-  imports = [ ../../../nix/modules/guest-integrations.nix ];
+  inputs = {
+    mvm.url = "github:auser/mvm?dir=nix";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+  };
 
-  services.mvm-integrations = {
-    enable = true;
-    integrations.my-worker = {
-      healthCmd = "${pkgs.systemd}/bin/systemctl is-active my-worker.service";
-      healthIntervalSecs = 10;
-      healthTimeoutSecs = 5;
+  outputs = { mvm, nixpkgs, ... }:
+    let
+      system = "aarch64-linux";
+      pkgs = import nixpkgs { inherit system; };
+    in {
+      packages.${system}.default = mvm.lib.${system}.mkGuest {
+        name = "my-app";
+        packages = [ pkgs.curl ];
+
+        # Services are supervised with automatic restart on failure.
+        services.my-app = {
+          # preStart runs once as root before the service starts.
+          preStart = "mkdir -p /tmp/data";
+
+          # The long-running service command.
+          command = "${pkgs.python3}/bin/python3 -m http.server 8080";
+
+          # Optional environment variables.
+          # env = { MY_VAR = "value"; };
+        };
+
+        # Health checks are reported to the host via the guest agent.
+        healthChecks.my-app = {
+          healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/ >/dev/null";
+          healthIntervalSecs = 5;
+          healthTimeoutSecs = 3;
+        };
+      };
     };
-  };
-
-  systemd.services.my-worker = {
-    # ... your systemd service definition
-  };
 }
 ```
 
-Then add it to `flake.nix` in the `mkGuest` call:
+The `mkGuest` API:
 
-```nix
-packages.${system} = {
-  default = mkGuest "default" [ ./roles/worker.nix ];
-};
-```
+| Parameter | Description |
+|-----------|-------------|
+| `name` | VM name (used in image filename) |
+| `packages` | Nix packages to include in the rootfs |
+| `hostname` | Guest hostname (default: same as `name`) |
+| `users.<name>.uid` | User ID (optional, auto-assigned from 1000) |
+| `users.<name>.group` | Group name (optional, defaults to user name) |
+| `users.<name>.home` | Home directory (optional, defaults to `/home/<name>`) |
+| `services.<name>.command` | Long-running service command (supervised with respawn) |
+| `services.<name>.preStart` | Optional setup script (runs as root before the service) |
+| `services.<name>.env` | Optional environment variables (`{ KEY = "value"; }`) |
+| `services.<name>.user` | Optional user to run as (must exist in `users`) |
+| `services.<name>.logFile` | Optional log file path (default: `/dev/console`) |
+| `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy) |
+| `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
+| `healthChecks.<name>.healthTimeoutSecs` | Timeout for each check (default: 10) |
 
 ### Create (Without Scaffold)
 
@@ -321,7 +344,7 @@ mvmctl template build base-worker
 mvmctl template build base-worker --force    # Rebuild even if cached
 ```
 
-Builds run `nix build` inside the Lima VM (Layer 2) to produce kernel + rootfs artifacts. The **mvm guest agent** is automatically injected into the rootfs after every build, so you don't need to include it manually.
+Builds run `nix build` inside the Lima VM (Layer 2) to produce kernel + rootfs artifacts. The guest agent, init system, networking, and drive mounting are all built into the image by `mkGuest` -- you don't need to configure any of this manually.
 
 For repeatable multi-role builds, use a TOML config:
 
@@ -517,7 +540,7 @@ Host (macOS/Linux)
 - Use `--volume` flags to pass data directories to the microVM
 - Use `--config-dir` / `--secrets-dir` to inject files onto the config and secrets drives at boot
 
-**Build pipeline**: `mvmctl build` and `mvmctl template build` run `nix build` inside the Linux environment, producing kernel (`vmlinux`) and rootfs (`rootfs.ext4`) artifacts.
+**Build pipeline**: `mvmctl build` and `mvmctl template build` run `nix build` inside the Linux environment, producing kernel (`vmlinux`) and rootfs (`rootfs.ext4`) artifacts. No initrd is needed -- the kernel boots directly into a busybox init script on the rootfs.
 
 ### Trait Architecture
 

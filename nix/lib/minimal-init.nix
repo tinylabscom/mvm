@@ -8,10 +8,13 @@
 #   initScript = import ./minimal-init.nix {
 #     inherit pkgs;
 #     hostname = "my-vm";
+#     users.myuser = { uid = 1000; };          # optional
 #     services.my-app = {
 #       command = "${pkgs.python3}/bin/python3 -m http.server 8080";
-#       preStart = "mkdir -p /tmp/www";  # optional
-#       env = { FOO = "bar"; };          # optional
+#       preStart = "mkdir -p /tmp/www";         # optional, runs as root
+#       env = { FOO = "bar"; };                 # optional
+#       user = "myuser";                        # optional, run as this user
+#       logFile = "/var/log/my-app.log";        # optional, default: /dev/console
 #     };
 #     healthChecks.my-app = {
 #       healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
@@ -25,6 +28,7 @@
 , lib ? pkgs.lib
 , busybox ? pkgs.pkgsStatic.busybox
 , hostname ? "mvm"
+, users ? {}
 , services ? {}
 , healthChecks ? {}
 , guestAgentPkg ? null
@@ -32,6 +36,36 @@
 
 let
   bb = busybox;
+
+  # Auto-assign UIDs starting from 1000 for users that don't specify one.
+  userList = lib.mapAttrsToList (name: cfg: { inherit name; config = cfg; }) users;
+  assignUids = idx: remaining:
+    if remaining == [] then []
+    else
+      let
+        head = builtins.head remaining;
+        tail = builtins.tail remaining;
+        uid = head.config.uid or (1000 + idx);
+      in
+        [{ name = head.name; uid = uid; config = head.config; }]
+        ++ assignUids (idx + 1) tail;
+  usersWithUids = assignUids 0 userList;
+
+  # Generate /etc/passwd and /etc/group entries + home directory creation.
+  mkUserBlock = entry:
+    let
+      name = entry.name;
+      uid = toString entry.uid;
+      group = entry.config.group or name;
+      home = entry.config.home or "/home/${name}";
+    in ''
+      grep -q "^${group}:" /etc/group || echo '${group}:x:${uid}:' >> /etc/group
+      grep -q "^${name}:" /etc/passwd || echo '${name}:x:${uid}:${uid}:${name}:${home}:${bb}/bin/sh' >> /etc/passwd
+      mkdir -p ${home}
+      chown ${name}:${group} ${home}
+    '';
+
+  userBlocks = lib.concatStringsSep "\n" (map mkUserBlock usersWithUids);
 
   # Generate a respawn loop for one service.
   mkServiceBlock = name: svc:
@@ -44,19 +78,39 @@ let
       envLines = lib.concatStringsSep "\n" (
         lib.mapAttrsToList (k: v: "export ${k}='${v}'") (svc.env or {})
       );
+      # Log redirection: logFile or /dev/console.
+      redirect = if (svc ? logFile) then
+        ">> ${svc.logFile} 2>&1"
+      else
+        "> /dev/console 2>&1";
+      logSetup = lib.optionalString (svc ? logFile) ''
+        mkdir -p "$(dirname '${svc.logFile}')"
+      '';
+      # Command: optionally run as non-root user via su.
+      cmdLine = if (svc ? user) then
+        "su ${svc.user} -s ${bb}/bin/sh -c '${svc.command}'"
+      else
+        svc.command;
     in ''
       # --- Service: ${name} ---
       (
         ${envLines}
+        ${logSetup}
         ${preBlock}
-        while true; do
+        RUNNING=1
+        trap 'RUNNING=0; kill "$CMD_PID" 2>/dev/null' TERM
+        while [ "$RUNNING" = "1" ]; do
           echo "[init] starting ${name}..." > /dev/console
-          ${svc.command} > /dev/console 2>&1
+          ${cmdLine} ${redirect} &
+          CMD_PID=$!
+          wait "$CMD_PID"
           RC=$?
+          [ "$RUNNING" = "0" ] && break
           echo "[init] ${name} exited ($RC), restarting in 2s..." > /dev/console
           sleep 2
         done
       ) &
+      SERVICE_PIDS="$SERVICE_PIDS $!"
     '';
 
   # Generate health check JSON for the guest agent.
@@ -92,14 +146,20 @@ let
   guestAgentBlock = lib.optionalString (guestAgentPkg != null) ''
     # --- mvm-guest-agent ---
     (
-      while true; do
+      RUNNING=1
+      trap 'RUNNING=0; kill "$CMD_PID" 2>/dev/null' TERM
+      while [ "$RUNNING" = "1" ]; do
         echo "[init] starting mvm-guest-agent..." > /dev/console
-        ${guestAgentPkg}/bin/mvm-guest-agent > /dev/console 2>&1
+        ${guestAgentPkg}/bin/mvm-guest-agent > /dev/console 2>&1 &
+        CMD_PID=$!
+        wait "$CMD_PID"
         RC=$?
+        [ "$RUNNING" = "0" ] && break
         echo "[init] mvm-guest-agent exited ($RC), restarting in 2s..." > /dev/console
         sleep 2
       done
     ) &
+    AGENT_PID=$!
   '';
 
 in
@@ -110,13 +170,15 @@ pkgs.writeScript "mvm-minimal-init" ''
 
   export PATH="${bb}/bin"
 
-  echo "[init] mvm minimal init starting..." > /dev/console
-
   # ── 1. Mount virtual filesystems ─────────────────────────────────
-  # /dev is auto-mounted by the kernel (CONFIG_DEVTMPFS_MOUNT=y).
+  # Mount devtmpfs first so /dev/console is available for logging.
+  mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
   mount -t proc proc /proc
   mount -t sysfs sys /sys
-  mkdir -p /dev/pts /tmp /run /var/run /var/log /root
+
+  echo "[init] mvm minimal init starting..." > /dev/console
+
+  mkdir -p /dev/pts
   mount -t devpts devpts /dev/pts 2>/dev/null || true
   mount -t tmpfs tmpfs /tmp
   mount -t tmpfs tmpfs /run
@@ -127,6 +189,14 @@ pkgs.writeScript "mvm-minimal-init" ''
   echo 'root:x:0:' > /etc/group
   echo '${hostname}' > /etc/hostname
   hostname '${hostname}'
+  cat > /etc/hosts <<'HOSTS'
+  127.0.0.1 localhost
+  ::1       localhost
+  HOSTS
+  echo 'hosts: files dns' > /etc/nsswitch.conf
+
+  # ── 2b. Create users and groups ────────────────────────────────
+  ${userBlocks}
 
   # ── 3. Parse kernel cmdline for network config ───────────────────
   MVM_IP="" MVM_GW=""
@@ -138,9 +208,9 @@ pkgs.writeScript "mvm-minimal-init" ''
   done
 
   # ── 4. Configure networking ─────────────────────────────────────
+  ip link set lo up
   if [ -n "$MVM_IP" ] && [ -n "$MVM_GW" ]; then
     echo "[init] network: eth0 $MVM_IP gw $MVM_GW" > /dev/console
-    ip link set lo up
     ip link set eth0 up
     ip addr add "$MVM_IP" dev eth0
     ip route add default via "$MVM_GW"
@@ -165,14 +235,36 @@ pkgs.writeScript "mvm-minimal-init" ''
   ${healthCheckBlocks}
 
   # ── 7. Start services (respawn loops) ───────────────────────────
+  SERVICE_PIDS=""
   ${serviceBlocks}
 
   # ── 8. Start guest agent ────────────────────────────────────────
+  AGENT_PID=""
   ${guestAgentBlock}
 
   echo "[init] all services started" > /dev/console
 
-  # ── 9. PID 1 reaper: wait for children, loop forever ────────────
+  # ── 9. Graceful shutdown handler ────────────────────────────────
+  shutdown() {
+    echo "[init] shutting down..." > /dev/console
+    # Signal all service subshells to stop respawning.
+    for pid in $SERVICE_PIDS; do
+      kill -TERM "$pid" 2>/dev/null
+    done
+    [ -n "$AGENT_PID" ] && kill -TERM "$AGENT_PID" 2>/dev/null
+    # Grace period for services to clean up.
+    sleep 2
+    # Force-kill any stragglers.
+    for pid in $SERVICE_PIDS $AGENT_PID; do
+      kill -KILL "$pid" 2>/dev/null
+    done
+    sync
+    echo "[init] goodbye" > /dev/console
+  }
+
+  trap shutdown TERM INT
+
+  # ── 10. PID 1 reaper: wait for children, re-enter on signal ────
   while true; do
     wait
   done

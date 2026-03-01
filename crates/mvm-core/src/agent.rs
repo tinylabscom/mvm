@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::instance::InstanceState;
 use crate::node::{NodeInfo, NodeStats};
-use crate::pool::{DesiredCounts, InstanceResources, Role, RuntimePolicy, SecretScope};
+use crate::pool::{
+    DesiredCounts, InstanceResources, Role, RuntimePolicy, SecretScope, SleepPolicyConfig,
+};
 use crate::routing::RoutingTable;
 use crate::signing::SignedPayload;
 use crate::tenant::TenantQuota;
@@ -64,6 +66,8 @@ pub struct DesiredPool {
     pub routing_table: Option<RoutingTable>,
     #[serde(default)]
     pub secret_scopes: Vec<SecretScope>,
+    #[serde(default)]
+    pub sleep_policy: Option<SleepPolicyConfig>,
 }
 
 fn default_seccomp() -> String {
