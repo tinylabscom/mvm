@@ -74,11 +74,13 @@
   boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" ];
   boot.initrd.kernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" ];
 
-  # NOTE: boot.initrd.systemd.enable is NOT used here.  The systemd initrd
-  # requires initrd-find-nixos-closure.service and initrd-nixos-activation,
-  # which fail because our make-ext4-fs.nix rootfs lacks the NixOS profile
-  # symlinks the systemd initrd expects.  The scripted stage-1 works fine —
-  # it simply mounts /dev/vda and pivots root.
+  # Explicitly disable the systemd initrd.  NixOS 25.11 defaults to
+  # boot.initrd.systemd.enable = true, but the systemd initrd requires
+  # initrd-find-nixos-closure.service and initrd-nixos-activation, which
+  # fail because our make-ext4-fs.nix rootfs lacks the NixOS profile
+  # symlinks the systemd initrd expects.  The scripted stage-1 works
+  # fine — it simply mounts /dev/vda and pivots root.
+  boot.initrd.systemd.enable = false;
 
   # --- Custom kernel ---
   # Firecracker-optimized kernel is in firecracker-kernel.nix (included by

@@ -364,6 +364,23 @@ After each phase:
 5. `mvmctl vm exec boot-test -- systemd-analyze critical-chain` — critical path
 6. Verify functionality: networking, mounts, openclaw service, guest agent
 
+## Backlog
+
+Items deferred until the core mkGuest workflow is validated end-to-end:
+
+- **Config-driven multi-variant builds**: Bring back `template.toml` support so
+  `mvmctl template build --config template.toml` can build multiple variants
+  (gateway, worker) in one command with per-variant resource defaults (vcpus,
+  memory, data disk size). The old `mvm-profiles.toml` pointed at deleted NixOS
+  modules -- the new version should map variant names to Nix flake package names
+  (e.g., `gateway -> #tenant-gateway`, `worker -> #tenant-worker`).
+
+- **`mvm-profiles.toml` redesign**: Currently the Rust build code
+  (`mvm-build/src/build.rs`, `backend/host.rs`) reads `mvm-profiles.toml` to
+  resolve `--profile`/`--role` flags to Nix module paths. With mkGuest, profiles
+  map to flake package attributes instead of module files. Update the manifest
+  format and Rust parser accordingly.
+
 ## References
 
 - [microvm.nix optimization.nix](https://github.com/microvm-nix/microvm.nix/blob/main/nixos-modules/microvm/optimization.nix)

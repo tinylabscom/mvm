@@ -156,8 +156,12 @@ enum Commands {
     Forward {
         /// Name of the VM
         name: String,
-        /// Port mapping: GUEST_PORT or LOCAL_PORT:GUEST_PORT
-        port: String,
+        /// Port mapping(s): GUEST_PORT or LOCAL_PORT:GUEST_PORT
+        #[arg(short, long, value_name = "PORT")]
+        port: Vec<String>,
+        /// Port mapping(s) (positional, same as --port)
+        #[arg(trailing_var_arg = true, hide = true)]
+        ports: Vec<String>,
     },
     /// Show status of Lima VM and microVM
     Status,
@@ -598,7 +602,17 @@ pub fn run() -> Result<()> {
             lines,
             hypervisor,
         } => cmd_logs(&name, follow, lines, hypervisor),
-        Commands::Forward { name, port } => cmd_forward(&name, &port),
+        Commands::Forward { name, port, ports } => {
+            let mut all_ports = port;
+            all_ports.extend(ports);
+            if all_ports.is_empty() {
+                anyhow::bail!(
+                    "At least one port mapping is required.\nUsage: mvmctl forward <NAME> <PORT>... or mvmctl forward <NAME> -p <PORT>..."
+                );
+            }
+            cmd_forward(&name, &all_ports)
+        }
+
         Commands::Status => cmd_status(),
         Commands::Destroy { yes } => cmd_destroy(yes),
         Commands::Upgrade { check, force } => cmd_upgrade(check, force),
@@ -1395,13 +1409,17 @@ fn cmd_logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()
 /// On macOS this tunnels through Lima's SSH connection; on native Linux
 /// it spawns a local socat proxy.
 ///
-/// `port_spec` is either `GUEST_PORT` (binds to same local port) or
-/// `LOCAL_PORT:GUEST_PORT`.
-fn cmd_forward(name: &str, port_spec: &str) -> Result<()> {
+/// Each `port_spec` is either `GUEST_PORT` (binds to same local port) or
+/// `LOCAL_PORT:GUEST_PORT`.  Multiple ports are forwarded concurrently —
+/// background children handle all but the last, and Ctrl-C kills the group.
+fn cmd_forward(name: &str, port_specs: &[String]) -> Result<()> {
     // Verify the VM is actually running.
     let _abs_dir = resolve_running_vm(name)?;
 
-    let (local_port, guest_port) = parse_port_spec(port_spec)?;
+    let parsed: Vec<(u16, u16)> = port_specs
+        .iter()
+        .map(|s| parse_port_spec(s))
+        .collect::<Result<_>>()?;
 
     // Read the VM's guest IP from run-info.json.
     let info = microvm::read_vm_run_info(name)?;
@@ -1416,25 +1434,30 @@ fn cmd_forward(name: &str, port_spec: &str) -> Result<()> {
             )
         })?;
 
-    ui::info(&format!(
-        "Forwarding localhost:{} -> {}:{} (VM '{}')",
-        local_port, guest_ip, guest_port, name,
-    ));
+    for &(local_port, guest_port) in &parsed {
+        ui::info(&format!(
+            "Forwarding localhost:{} -> {}:{} (VM '{}')",
+            local_port, guest_ip, guest_port, name,
+        ));
+    }
     ui::info("Press Ctrl-C to stop forwarding.");
 
     if bootstrap::is_lima_required() {
         // macOS: SSH port-forward through Lima's SSH connection.
+        // SSH -L supports multiple -L flags in a single session.
         lima::require_running()?;
         let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
         let ssh_config = format!("{}/.lima/{}/ssh.config", home, config::VM_NAME);
 
-        let status = std::process::Command::new("ssh")
-            .arg("-F")
-            .arg(&ssh_config)
-            .arg("-N") // no remote command
-            .arg("-L")
-            .arg(format!("{}:{}:{}", local_port, guest_ip, guest_port))
-            .arg(format!("lima-{}", config::VM_NAME))
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.arg("-F").arg(&ssh_config).arg("-N"); // no remote command
+        for &(local_port, guest_port) in &parsed {
+            cmd.arg("-L")
+                .arg(format!("{}:{}:{}", local_port, guest_ip, guest_port));
+        }
+        cmd.arg(format!("lima-{}", config::VM_NAME));
+
+        let status = cmd
             .status()
             .context("Failed to start SSH port forward. Is Lima running?")?;
 
@@ -1443,14 +1466,19 @@ fn cmd_forward(name: &str, port_spec: &str) -> Result<()> {
         }
     } else {
         // Native Linux: socat proxy (microVM is directly reachable).
-        let status = std::process::Command::new("socat")
-            .arg(format!("TCP-LISTEN:{},fork,reuseaddr", local_port))
-            .arg(format!("TCP:{}:{}", guest_ip, guest_port))
-            .status()
-            .context("Failed to start socat. Install it with: sudo apt install socat")?;
-
-        if !status.success() {
-            anyhow::bail!("socat exited with status {}", status);
+        // Spawn a child for each port; wait on all.
+        let mut children: Vec<std::process::Child> = Vec::new();
+        for &(local_port, guest_port) in &parsed {
+            let child = std::process::Command::new("socat")
+                .arg(format!("TCP-LISTEN:{},fork,reuseaddr", local_port))
+                .arg(format!("TCP:{}:{}", guest_ip, guest_port))
+                .spawn()
+                .context("Failed to start socat. Install it with: sudo apt install socat")?;
+            children.push(child);
+        }
+        // Wait for any child to exit (Ctrl-C sends SIGINT to the process group).
+        for mut child in children {
+            let _ = child.wait();
         }
     }
 
@@ -4030,10 +4058,11 @@ mod tests {
 
     #[test]
     fn test_up_parses_with_flake() {
-        let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "./nix/openclaw/"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["mvmctl", "up", "--flake", "./nix/examples/openclaw/"]).unwrap();
         match cli.command {
             Commands::Up { flake, name, .. } => {
-                assert_eq!(flake.as_deref(), Some("./nix/openclaw/"));
+                assert_eq!(flake.as_deref(), Some("./nix/examples/openclaw/"));
                 assert!(name.is_none());
             }
             _ => panic!("Expected Up command"),
@@ -4264,9 +4293,11 @@ edition = "2024"
     fn test_forward_parses() {
         let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000"]).unwrap();
         match cli.command {
-            Commands::Forward { name, port } => {
+            Commands::Forward { name, port, ports } => {
                 assert_eq!(name, "swift");
-                assert_eq!(port, "3000");
+                // Positional ports land in `ports`, flag ports in `port`.
+                assert!(port.is_empty());
+                assert_eq!(ports, vec!["3000"]);
             }
             _ => panic!("Expected Forward command"),
         }
@@ -4276,9 +4307,51 @@ edition = "2024"
     fn test_forward_with_port_mapping() {
         let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "8080:3000"]).unwrap();
         match cli.command {
-            Commands::Forward { name, port } => {
+            Commands::Forward { name, port, ports } => {
                 assert_eq!(name, "swift");
-                assert_eq!(port, "8080:3000");
+                assert!(port.is_empty());
+                assert_eq!(ports, vec!["8080:3000"]);
+            }
+            _ => panic!("Expected Forward command"),
+        }
+    }
+
+    #[test]
+    fn test_forward_with_flag() {
+        let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "-p", "3000"]).unwrap();
+        match cli.command {
+            Commands::Forward { name, port, ports } => {
+                assert_eq!(name, "swift");
+                assert_eq!(port, vec!["3000"]);
+                assert!(ports.is_empty());
+            }
+            _ => panic!("Expected Forward command"),
+        }
+    }
+
+    #[test]
+    fn test_forward_multiple_ports() {
+        let cli =
+            Cli::try_parse_from(["mvmctl", "forward", "swift", "-p", "3000", "-p", "8080:443"])
+                .unwrap();
+        match cli.command {
+            Commands::Forward { name, port, ports } => {
+                assert_eq!(name, "swift");
+                assert_eq!(port, vec!["3000", "8080:443"]);
+                assert!(ports.is_empty());
+            }
+            _ => panic!("Expected Forward command"),
+        }
+    }
+
+    #[test]
+    fn test_forward_multiple_positional() {
+        let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000", "8080:443"]).unwrap();
+        match cli.command {
+            Commands::Forward { name, port, ports } => {
+                assert_eq!(name, "swift");
+                assert!(port.is_empty());
+                assert_eq!(ports, vec!["3000", "8080:443"]);
             }
             _ => panic!("Expected Forward command"),
         }
