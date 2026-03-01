@@ -143,10 +143,12 @@ stdenv.mkDerivation (finalAttrs: {
     find $out/lib/openclaw/node_modules -name '*.js.map' -delete 2>/dev/null || true
 
     # 4. Remove documentation, examples, tests — not needed at runtime.
+    # NOTE: Do NOT remove 'doc' directories — some packages (e.g. yaml)
+    # use dist/doc/ for runtime code, not documentation.
     find $out/lib/openclaw/node_modules -type d \( \
       -name 'test' -o -name 'tests' -o -name '__tests__' -o \
       -name 'example' -o -name 'examples' -o -name 'demo' -o \
-      -name 'docs' -o -name 'doc' -o -name '.github' \
+      -name 'docs' -o -name '.github' \
     \) -exec rm -rf {} + 2>/dev/null || true
 
     # 5. Remove documentation files from package roots.

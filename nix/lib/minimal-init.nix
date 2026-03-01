@@ -88,7 +88,7 @@ let
       '';
       # Command: optionally run as non-root user via su.
       cmdLine = if (svc ? user) then
-        "su ${svc.user} -s ${bb}/bin/sh -c '${svc.command}'"
+        "su -s ${bb}/bin/sh -c '${svc.command}' ${svc.user}"
       else
         svc.command;
     in ''
@@ -177,6 +177,9 @@ pkgs.writeScript "mvm-minimal-init" ''
   mount -t sysfs sys /sys
 
   echo "[init] mvm minimal init starting..." > /dev/console
+
+  # Allow non-root services to write to /dev/console for logging.
+  chmod 666 /dev/console 2>/dev/null || true
 
   mkdir -p /dev/pts
   mount -t devpts devpts /dev/pts 2>/dev/null || true

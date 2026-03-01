@@ -2,14 +2,27 @@
 
 ## Lima VM Requirement
 
-All Nix builds, Firecracker operations, and Linux-specific commands MUST be run inside the Lima VM. Use `limactl shell mvm -- <command>` to execute commands inside the VM. The Lima VM name is `mvm`.
+All Nix builds, Firecracker operations, `mvmctl` commands, and Linux-specific commands MUST be run inside the Lima VM. Use `limactl shell mvm -- <command>` to execute commands inside the VM. The Lima VM name is `mvm`.
+
+If the Lima VM is not running, boot it with:
+```bash
+cargo run -- dev
+```
+
+Once running, access it with:
+```bash
+limactl shell mvm
+```
 
 Examples:
+- `limactl shell mvm -- cargo run --quiet -- template build openclaw --force`
+- `limactl shell mvm -- cargo run --quiet -- run --template openclaw --name oc`
+- `limactl shell mvm -- cargo run --quiet -- logs oc`
+- `limactl shell mvm -- cargo run --quiet -- stop oc`
 - `limactl shell mvm -- nix build .#packages.aarch64-linux.default`
 - `limactl shell mvm -- nix path-info -rsh /nix/store/<hash>`
-- `limactl shell mvm -- ls -lh /Users/auser/.mvm/templates/`
 
-The `cargo run` commands (e.g. `cargo run -- template build`) automatically delegate to the Lima VM via `mvm_runtime::shell::run_in_vm()`, but direct Nix commands must be run via `limactl shell mvm`.
+**Important:** `mvmctl` (via `cargo run`) commands like `template build`, `run`, `stop`, `logs`, and `status` must be run inside the Lima VM — they talk to Firecracker which only runs inside Linux. The `cargo run -- dev` bootstrap command is the only one that runs on the macOS host directly.
 
 ## Definition of Done
 
