@@ -184,6 +184,7 @@ fn write_run_info(config: &MicrovmNixConfig, abs_dir: &str) -> Result<()> {
         guest_user: String::new(),
         cpus: config.cpus,
         memory: config.memory,
+        ports: vec![],
     };
 
     let mut json_value = serde_json::to_value(&info)?;

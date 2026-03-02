@@ -262,6 +262,12 @@ enum Commands {
         /// Directory of files to add to the secrets drive
         #[arg(long)]
         secrets_dir: Option<String>,
+        /// Port mapping (format: HOST:GUEST or PORT). Repeatable.
+        #[arg(long, short = 'p')]
+        port: Vec<String>,
+        /// Environment variable to inject (format: KEY=VALUE). Repeatable.
+        #[arg(long, short = 'e')]
+        env: Vec<String>,
     },
     /// Launch microVMs (from mvm.toml or CLI flags)
     Up {
@@ -605,11 +611,6 @@ pub fn run() -> Result<()> {
         Commands::Forward { name, port, ports } => {
             let mut all_ports = port;
             all_ports.extend(ports);
-            if all_ports.is_empty() {
-                anyhow::bail!(
-                    "At least one port mapping is required.\nUsage: mvmctl forward <NAME> <PORT>... or mvmctl forward <NAME> -p <PORT>..."
-                );
-            }
             cmd_forward(&name, &all_ports)
         }
 
@@ -648,6 +649,8 @@ pub fn run() -> Result<()> {
             hypervisor,
             config_dir,
             secrets_dir,
+            port,
+            env,
         } => cmd_run(RunParams {
             flake_ref: flake.as_deref(),
             template_name: template.as_deref(),
@@ -660,6 +663,8 @@ pub fn run() -> Result<()> {
             hypervisor: &hypervisor,
             config_dir: config_dir.as_deref(),
             secrets_dir: secrets_dir.as_deref(),
+            ports: &port,
+            env_vars: &env,
         }),
         Commands::Up {
             name,
@@ -1416,13 +1421,28 @@ fn cmd_forward(name: &str, port_specs: &[String]) -> Result<()> {
     // Verify the VM is actually running.
     let _abs_dir = resolve_running_vm(name)?;
 
-    let parsed: Vec<(u16, u16)> = port_specs
-        .iter()
-        .map(|s| parse_port_spec(s))
-        .collect::<Result<_>>()?;
-
     // Read the VM's guest IP from run-info.json.
     let info = microvm::read_vm_run_info(name)?;
+
+    // Use CLI port specs if provided, otherwise fall back to persisted ports.
+    let parsed: Vec<(u16, u16)> = if port_specs.is_empty() {
+        if info.ports.is_empty() {
+            anyhow::bail!(
+                "VM '{}' has no port mappings configured.\n\
+                 Specify ports: mvmctl forward {} <PORT>...\n\
+                 Or declare ports in mvm.toml.",
+                name,
+                name,
+            );
+        }
+        ui::info("Using port mappings from VM config.");
+        info.ports.iter().map(|p| (p.host, p.guest)).collect()
+    } else {
+        port_specs
+            .iter()
+            .map(|s| parse_port_spec(s))
+            .collect::<Result<_>>()?
+    };
     let guest_ip = info
         .guest_ip
         .as_deref()
@@ -1501,6 +1521,52 @@ fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
             .with_context(|| format!("invalid port '{}'", spec))?;
         Ok((port, port))
     }
+}
+
+/// Parse multiple port specs into `PortMapping` values.
+fn parse_port_specs(specs: &[String]) -> Result<Vec<mvm_runtime::config::PortMapping>> {
+    specs
+        .iter()
+        .map(|s| {
+            let (host, guest) = parse_port_spec(s)?;
+            Ok(mvm_runtime::config::PortMapping { host, guest })
+        })
+        .collect()
+}
+
+/// Convert port mappings into a `DriveFile` for the config drive.
+/// Writes `export MVM_PORT_MAP="3333:3000,3334:3002"`.
+fn ports_to_drive_file(ports: &[mvm_runtime::config::PortMapping]) -> Option<microvm::DriveFile> {
+    if ports.is_empty() {
+        return None;
+    }
+    let map_str = ports
+        .iter()
+        .map(|p| format!("{}:{}", p.host, p.guest))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(microvm::DriveFile {
+        name: "mvm-ports.env".to_string(),
+        content: format!("export MVM_PORT_MAP=\"{}\"\n", map_str),
+        mode: 0o444,
+    })
+}
+
+/// Convert env var specs ("KEY=VALUE") into a `DriveFile` for the config drive.
+fn env_vars_to_drive_file(env_vars: &[String]) -> Option<microvm::DriveFile> {
+    if env_vars.is_empty() {
+        return None;
+    }
+    let content = env_vars
+        .iter()
+        .map(|kv| format!("export {}", kv))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(microvm::DriveFile {
+        name: "mvm-env.env".to_string(),
+        content: format!("{}\n", content),
+        mode: 0o444,
+    })
 }
 
 fn cmd_status() -> Result<()> {
@@ -2051,6 +2117,8 @@ struct RunParams<'a> {
     hypervisor: &'a str,
     config_dir: Option<&'a str>,
     secrets_dir: Option<&'a str>,
+    ports: &'a [String],
+    env_vars: &'a [String],
 }
 
 fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -2066,6 +2134,8 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         hypervisor,
         config_dir,
         secrets_dir,
+        ports,
+        env_vars,
     } = params;
     if bootstrap::is_lima_required() {
         lima::require_running()?;
@@ -2175,7 +2245,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // Allocate a network slot for this VM
     let slot = microvm::allocate_slot(&vm_name)?;
 
-    let config_files = match config_dir {
+    let mut config_files = match config_dir {
         Some(dir) => read_dir_to_drive_files(dir, 0o444)
             .with_context(|| format!("reading config-dir '{}'", dir))?,
         None => Vec::new(),
@@ -2185,6 +2255,17 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             .with_context(|| format!("reading secrets-dir '{}'", dir))?,
         None => Vec::new(),
     };
+
+    // Parse port mappings and inject as config drive file
+    let port_mappings = parse_port_specs(ports)?;
+    if let Some(f) = ports_to_drive_file(&port_mappings) {
+        config_files.push(f);
+    }
+
+    // Inject env vars as config drive file
+    if let Some(f) = env_vars_to_drive_file(env_vars) {
+        config_files.push(f);
+    }
 
     let run_config = microvm::FlakeRunConfig {
         name: vm_name,
@@ -2200,6 +2281,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volumes: volume_cfg,
         config_files,
         secret_files,
+        ports: port_mappings,
     };
 
     let backend = AnyBackend::from_hypervisor(hypervisor);
@@ -2341,6 +2423,16 @@ fn cmd_up(
 
                 let slot = microvm::allocate_slot(vm_name)?;
 
+                // Parse fleet config ports/env and inject as config drive files
+                let port_mappings = parse_port_specs(&resolved.ports)?;
+                let mut config_files = Vec::new();
+                if let Some(f) = ports_to_drive_file(&port_mappings) {
+                    config_files.push(f);
+                }
+                if let Some(f) = env_vars_to_drive_file(&resolved.env) {
+                    config_files.push(f);
+                }
+
                 let run_config = microvm::FlakeRunConfig {
                     name: vm_name.clone(),
                     slot,
@@ -2353,8 +2445,9 @@ fn cmd_up(
                     cpus: resolved.cpus,
                     memory: resolved.memory,
                     volumes,
-                    config_files: vec![],
+                    config_files,
                     secret_files: vec![],
+                    ports: port_mappings,
                 };
 
                 let backend = AnyBackend::from_hypervisor(hypervisor);
@@ -2400,6 +2493,7 @@ fn cmd_up(
                 volumes: vec![],
                 config_files: vec![],
                 secret_files: vec![],
+                ports: vec![],
             };
 
             let backend = AnyBackend::from_hypervisor(hypervisor);
@@ -3833,6 +3927,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_run_port_and_env_flags() {
+        let cli = Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--flake",
+            ".",
+            "-p",
+            "3333:3000",
+            "-p",
+            "3334:3002",
+            "-e",
+            "NODE_ENV=production",
+            "-e",
+            "DEBUG=true",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run { port, env, .. } => {
+                assert_eq!(port, vec!["3333:3000", "3334:3002"]);
+                assert_eq!(env, vec!["NODE_ENV=production", "DEBUG=true"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_port_and_env_default_empty() {
+        let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
+        match cli.command {
+            Commands::Run { port, env, .. } => {
+                assert!(port.is_empty());
+                assert!(env.is_empty());
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_port_specs_multiple() {
+        let specs = vec!["3333:3000".to_string(), "8080".to_string()];
+        let result = parse_port_specs(&specs).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].host, 3333);
+        assert_eq!(result[0].guest, 3000);
+        assert_eq!(result[1].host, 8080);
+        assert_eq!(result[1].guest, 8080);
+    }
+
+    #[test]
+    fn test_parse_port_specs_empty() {
+        let specs: Vec<String> = vec![];
+        let result = parse_port_specs(&specs).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_ports_to_drive_file() {
+        use mvm_runtime::config::PortMapping;
+        let ports = vec![
+            PortMapping {
+                host: 3333,
+                guest: 3000,
+            },
+            PortMapping {
+                host: 3334,
+                guest: 3002,
+            },
+        ];
+        let f = ports_to_drive_file(&ports).unwrap();
+        assert_eq!(f.name, "mvm-ports.env");
+        assert!(f.content.contains("MVM_PORT_MAP=\"3333:3000,3334:3002\""));
+        assert_eq!(f.mode, 0o444);
+    }
+
+    #[test]
+    fn test_ports_to_drive_file_empty() {
+        assert!(ports_to_drive_file(&[]).is_none());
+    }
+
+    #[test]
+    fn test_env_vars_to_drive_file() {
+        let vars = vec!["NODE_ENV=production".to_string(), "DEBUG=true".to_string()];
+        let f = env_vars_to_drive_file(&vars).unwrap();
+        assert_eq!(f.name, "mvm-env.env");
+        assert!(f.content.contains("export NODE_ENV=production"));
+        assert!(f.content.contains("export DEBUG=true"));
+        assert_eq!(f.mode, 0o444);
+    }
+
+    #[test]
+    fn test_env_vars_to_drive_file_empty() {
+        let vars: Vec<String> = vec![];
+        assert!(env_vars_to_drive_file(&vars).is_none());
+    }
+
     // ---- VM subcommand tests ----
 
     #[test]
@@ -4352,6 +4542,21 @@ edition = "2024"
                 assert_eq!(name, "swift");
                 assert!(port.is_empty());
                 assert_eq!(ports, vec!["3000", "8080:443"]);
+            }
+            _ => panic!("Expected Forward command"),
+        }
+    }
+
+    #[test]
+    fn test_forward_no_ports_parses() {
+        // forward with no ports should parse successfully — cmd_forward
+        // falls back to persisted ports from run-info.json
+        let cli = Cli::try_parse_from(["mvmctl", "forward", "swift"]).unwrap();
+        match cli.command {
+            Commands::Forward { name, port, ports } => {
+                assert_eq!(name, "swift");
+                assert!(port.is_empty());
+                assert!(ports.is_empty());
             }
             _ => panic!("Expected Forward command"),
         }

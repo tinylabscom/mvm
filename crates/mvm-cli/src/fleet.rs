@@ -32,6 +32,14 @@ pub struct FleetDefaults {
 
     #[serde(default)]
     pub profile: Option<String>,
+
+    /// Default port mappings applied to all VMs (format: "HOST:GUEST" or "PORT").
+    #[serde(default)]
+    pub ports: Vec<String>,
+
+    /// Default environment variables injected into all VMs (format: "KEY=VALUE").
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -47,6 +55,14 @@ pub struct VmConfig {
 
     #[serde(default)]
     pub volumes: Vec<String>,
+
+    /// Port mappings (format: "HOST:GUEST" or "PORT"). Replaces defaults if non-empty.
+    #[serde(default)]
+    pub ports: Vec<String>,
+
+    /// Environment variables (format: "KEY=VALUE"). Replaces defaults if non-empty.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 const DEFAULT_CPUS: u32 = 2;
@@ -59,6 +75,10 @@ pub struct ResolvedVm {
     pub cpus: u32,
     pub memory: u32,
     pub volumes: Vec<String>,
+    /// Merged port mappings (VM-specific replaces defaults).
+    pub ports: Vec<String>,
+    /// Merged environment variables (VM-specific replaces defaults).
+    pub env: Vec<String>,
 }
 
 /// Search for `mvm.toml` starting from cwd, walking up the directory tree.
@@ -104,12 +124,28 @@ pub fn resolve_vm(fleet: &FleetConfig, name: &str) -> Result<ResolvedVm> {
 
     let memory = vm.memory.or(fleet.defaults.memory).unwrap_or(DEFAULT_MEM);
 
+    // Ports: VM-specific replaces defaults entirely (fall through if empty)
+    let ports = if vm.ports.is_empty() {
+        fleet.defaults.ports.clone()
+    } else {
+        vm.ports.clone()
+    };
+
+    // Env: VM-specific replaces defaults entirely (fall through if empty)
+    let env = if vm.env.is_empty() {
+        fleet.defaults.env.clone()
+    } else {
+        vm.env.clone()
+    };
+
     Ok(ResolvedVm {
         name: name.to_string(),
         profile,
         cpus,
         memory,
         volumes: vm.volumes.clone(),
+        ports,
+        env,
     })
 }
 
@@ -160,6 +196,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_config_with_ports_and_env() {
+        let toml = r#"
+            flake = "."
+
+            [defaults]
+            ports = ["3333:3000", "3334:3002"]
+            env = ["NODE_ENV=production"]
+
+            [vms.oc]
+            profile = "gateway"
+            ports = ["8080:3000"]
+            env = ["OPENCLAW_EXTERNAL_PORT=8080"]
+
+            [vms.worker]
+            profile = "worker"
+        "#;
+
+        let config = parse_fleet_config(toml).unwrap();
+        assert_eq!(config.defaults.ports, vec!["3333:3000", "3334:3002"]);
+        assert_eq!(config.defaults.env, vec!["NODE_ENV=production"]);
+
+        let oc = &config.vms["oc"];
+        assert_eq!(oc.ports, vec!["8080:3000"]);
+        assert_eq!(oc.env, vec!["OPENCLAW_EXTERNAL_PORT=8080"]);
+
+        let worker = &config.vms["worker"];
+        assert!(worker.ports.is_empty());
+        assert!(worker.env.is_empty());
+    }
+
+    #[test]
     fn test_parse_minimal_config() {
         let toml = r#"
             flake = "."
@@ -172,6 +239,8 @@ mod tests {
         assert_eq!(config.flake, ".");
         assert_eq!(config.defaults.cpus, None);
         assert_eq!(config.defaults.memory, None);
+        assert!(config.defaults.ports.is_empty());
+        assert!(config.defaults.env.is_empty());
         assert_eq!(config.vms.len(), 1);
     }
 
@@ -252,6 +321,8 @@ mod tests {
         assert_eq!(resolved.cpus, DEFAULT_CPUS);
         assert_eq!(resolved.memory, DEFAULT_MEM);
         assert!(resolved.profile.is_none());
+        assert!(resolved.ports.is_empty());
+        assert!(resolved.env.is_empty());
     }
 
     #[test]
@@ -299,5 +370,53 @@ mod tests {
 
         let w1 = resolve_vm(&config, "w1").unwrap();
         assert_eq!(w1.profile.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn test_resolve_ports_vm_overrides_defaults() {
+        let config = parse_fleet_config(
+            r#"
+            flake = "."
+            [defaults]
+            ports = ["3333:3000", "3334:3002"]
+
+            [vms.oc]
+            ports = ["8080:3000"]
+
+            [vms.worker]
+        "#,
+        )
+        .unwrap();
+
+        // VM-level ports replace defaults entirely
+        let oc = resolve_vm(&config, "oc").unwrap();
+        assert_eq!(oc.ports, vec!["8080:3000"]);
+
+        // No VM-level ports → fall through to defaults
+        let worker = resolve_vm(&config, "worker").unwrap();
+        assert_eq!(worker.ports, vec!["3333:3000", "3334:3002"]);
+    }
+
+    #[test]
+    fn test_resolve_env_vm_overrides_defaults() {
+        let config = parse_fleet_config(
+            r#"
+            flake = "."
+            [defaults]
+            env = ["NODE_ENV=production"]
+
+            [vms.oc]
+            env = ["NODE_ENV=development", "DEBUG=true"]
+
+            [vms.worker]
+        "#,
+        )
+        .unwrap();
+
+        let oc = resolve_vm(&config, "oc").unwrap();
+        assert_eq!(oc.env, vec!["NODE_ENV=development", "DEBUG=true"]);
+
+        let worker = resolve_vm(&config, "worker").unwrap();
+        assert_eq!(worker.env, vec!["NODE_ENV=production"]);
     }
 }

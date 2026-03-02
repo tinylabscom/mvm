@@ -95,6 +95,10 @@
           commandScript = pkgs.writeShellScript "${serviceName}-start" ''
             set -eu
 
+            # Source mvm-injected port mappings and environment variables.
+            [ -f /mnt/config/mvm-ports.env ] && . /mnt/config/mvm-ports.env
+            [ -f /mnt/config/mvm-env.env ] && . /mnt/config/mvm-env.env
+
             # Source optional environment overrides.
             [ -f /mnt/config/openclaw.env ] && . /mnt/config/openclaw.env
             [ -f /mnt/secrets/openclaw-secrets.env ] && . /mnt/secrets/openclaw-secrets.env

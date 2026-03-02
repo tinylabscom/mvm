@@ -368,6 +368,8 @@ pub struct FlakeRunConfig {
     pub config_files: Vec<DriveFile>,
     /// Extra files to write onto the secrets drive.
     pub secret_files: Vec<DriveFile>,
+    /// Declared port mappings (host:guest) for forwarding and guest config.
+    pub ports: Vec<crate::config::PortMapping>,
 }
 
 /// Boot a Firecracker VM from flake-built artifacts (headless).
@@ -1097,6 +1099,7 @@ fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
         guest_user: String::new(),
         cpus: config.cpus,
         memory: config.memory,
+        ports: config.ports.clone(),
     };
 
     // Also store slot_index for allocation tracking

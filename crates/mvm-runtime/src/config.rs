@@ -58,6 +58,15 @@ pub struct MvmState {
     pub fc_pid: Option<u32>,
 }
 
+/// A host:guest port mapping for port forwarding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortMapping {
+    /// Port on the host that the user connects to.
+    pub host: u16,
+    /// Port inside the guest microVM.
+    pub guest: u16,
+}
+
 /// Run mode info persisted at `~/microvm/.mvm-run-info` so `status` can
 /// distinguish dev-mode VMs from flake-built VMs.
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -77,6 +86,10 @@ pub struct RunInfo {
     pub guest_user: String,
     pub cpus: u32,
     pub memory: u32,
+    /// Declared port mappings (host:guest). Used by `mvmctl forward` when
+    /// no explicit port specs are given on the command line.
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
 }
 
 /// Find the lima.yaml.tera template file.
@@ -302,6 +315,17 @@ mod tests {
     }
 
     #[test]
+    fn test_port_mapping_serde_roundtrip() {
+        let pm = PortMapping {
+            host: 3333,
+            guest: 3000,
+        };
+        let json = serde_json::to_string(&pm).unwrap();
+        let parsed: PortMapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, pm);
+    }
+
+    #[test]
     fn test_run_info_json_roundtrip() {
         let info = RunInfo {
             mode: "flake".to_string(),
@@ -313,6 +337,16 @@ mod tests {
             guest_user: "root".to_string(),
             cpus: 4,
             memory: 2048,
+            ports: vec![
+                PortMapping {
+                    host: 3333,
+                    guest: 3000,
+                },
+                PortMapping {
+                    host: 3334,
+                    guest: 3002,
+                },
+            ],
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: RunInfo = serde_json::from_str(&json).unwrap();
@@ -325,6 +359,9 @@ mod tests {
         assert_eq!(parsed.guest_user, "root");
         assert_eq!(parsed.cpus, 4);
         assert_eq!(parsed.memory, 2048);
+        assert_eq!(parsed.ports.len(), 2);
+        assert_eq!(parsed.ports[0].host, 3333);
+        assert_eq!(parsed.ports[0].guest, 3000);
     }
 
     #[test]
@@ -339,6 +376,7 @@ mod tests {
         assert!(info.guest_user.is_empty());
         assert_eq!(info.cpus, 0);
         assert_eq!(info.memory, 0);
+        assert!(info.ports.is_empty());
     }
 
     #[test]
@@ -348,6 +386,10 @@ mod tests {
         assert_eq!(info.mode, "dev");
         assert!(info.revision.is_none());
         assert!(info.flake_ref.is_none());
+        assert!(
+            info.ports.is_empty(),
+            "missing ports field should default to empty vec"
+        );
     }
 
     #[test]

@@ -31,12 +31,12 @@ export function Hero() {
       </div>
 
       <h1 className="max-w-3xl text-4xl font-bold leading-tight tracking-tight text-heading sm:text-5xl lg:text-6xl">
-        Firecracker MicroVMs,{" "}
+        MicroVMs,{" "}
         <span className="text-accent">Made Simple</span>
       </h1>
 
       <p className="max-w-2xl text-lg leading-relaxed text-muted sm:text-xl">
-        Build and run Firecracker microVMs on macOS and Linux with reproducible
+        Build and run microVMs on macOS and Linux with reproducible
         Nix flakes. Sub-5s boot. No SSH. No containers.
       </p>
 
