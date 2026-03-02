@@ -7,7 +7,7 @@ export function Card({
   return (
     <div
       className={cn(
-        "rounded-xl border border-border bg-surface text-heading transition-all duration-200 hover:border-accent/30 hover:shadow-md hover:shadow-accent/5",
+        "rounded-xl border border-edge bg-raised text-title transition-all duration-200 hover:border-action/30 hover:shadow-md hover:shadow-action/5",
         className,
       )}
       {...props}
@@ -41,7 +41,7 @@ export function CardDescription({
   ...props
 }: React.HTMLAttributes<HTMLParagraphElement>) {
   return (
-    <p className={cn("text-sm leading-relaxed text-muted", className)} {...props} />
+    <p className={cn("text-sm leading-relaxed text-body", className)} {...props} />
   );
 }
 

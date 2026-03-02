@@ -3,25 +3,25 @@
 
 /* Force dark mode globally — override Starlight's default palette */
 :root {
-  --sl-color-accent-low: #0c2d6b;
-  --sl-color-accent: #58a6ff;
-  --sl-color-accent-high: #c8e1ff;
-  --sl-color-bg-nav: #0d1117;
-  --sl-color-bg-sidebar: #0d1117;
-  --sl-color-bg: #0d1117;
-  --sl-color-bg-inline-code: #161b22;
-  --sl-color-hairline-light: #30363d;
-  --sl-color-hairline: #30363d;
-  --sl-color-text: #e6edf3;
-  --sl-color-text-accent: #58a6ff;
-  --sl-color-white: #e6edf3;
-  --sl-color-gray-1: #c9d1d9;
-  --sl-color-gray-2: #b1bac4;
-  --sl-color-gray-3: #8b949e;
-  --sl-color-gray-4: #6e7681;
-  --sl-color-gray-5: #484f58;
-  --sl-color-gray-6: #30363d;
-  --sl-color-black: #0d1117;
+  --sl-color-accent-low: var(--color-accent-low);
+  --sl-color-accent: var(--color-accent);
+  --sl-color-accent-high: var(--color-accent-high);
+  --sl-color-bg-nav: var(--color-page);
+  --sl-color-bg-sidebar: var(--color-page);
+  --sl-color-bg: var(--color-page);
+  --sl-color-bg-inline-code: var(--color-surface);
+  --sl-color-hairline-light: var(--color-border);
+  --sl-color-hairline: var(--color-border);
+  --sl-color-text: var(--color-heading);
+  --sl-color-text-accent: var(--color-accent);
+  --sl-color-white: var(--color-heading);
+  --sl-color-gray-1: var(--color-gray-1);
+  --sl-color-gray-2: var(--color-gray-2);
+  --sl-color-gray-3: var(--color-muted);
+  --sl-color-gray-4: var(--color-gray-4);
+  --sl-color-gray-5: var(--color-dim);
+  --sl-color-gray-6: var(--color-border);
+  --sl-color-black: var(--color-page);
   --sl-font-system-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code",
     Consolas, monospace;
   color-scheme: dark;
@@ -100,19 +100,19 @@ html {
 
 .expressive-code,
 .expressive-code .frame {
-  --ec-codeBg: #161b22 !important;
-  --ec-frm-edBg: #161b22 !important;
-  --ec-frm-termBg: #161b22 !important;
-  --ec-frm-tooltipBg: #1c2128 !important;
-  --ec-codeFg: #e6edf3 !important;
-  --ec-frm-edTabBg: #161b22 !important;
-  --ec-frm-edActTabBg: #0d1117 !important;
-  --ec-frm-edTabBarBg: #161b22 !important;
-  --ec-frm-edTabBarBrdBtm: #30363d !important;
-  --ec-frm-termTitlebarBg: #161b22 !important;
-  --ec-frm-termTitlebarBrdBtm: #30363d !important;
-  --ec-frm-termTitlebarDotsFg: #484f58 !important;
-  --ec-brdCol: #30363d !important;
+  --ec-codeBg: var(--color-surface) !important;
+  --ec-frm-edBg: var(--color-surface) !important;
+  --ec-frm-termBg: var(--color-surface) !important;
+  --ec-frm-tooltipBg: var(--color-tooltip) !important;
+  --ec-codeFg: var(--color-heading) !important;
+  --ec-frm-edTabBg: var(--color-surface) !important;
+  --ec-frm-edActTabBg: var(--color-page) !important;
+  --ec-frm-edTabBarBg: var(--color-surface) !important;
+  --ec-frm-edTabBarBrdBtm: var(--color-border) !important;
+  --ec-frm-termTitlebarBg: var(--color-surface) !important;
+  --ec-frm-termTitlebarBrdBtm: var(--color-border) !important;
+  --ec-frm-termTitlebarDotsFg: var(--color-dim) !important;
+  --ec-brdCol: var(--color-border) !important;
 }
 
 /* Sidebar — increased spacing between items */
@@ -170,3 +170,7 @@ nav[aria-label="Main"] [role="group"] > :first-child {
   margin-inline: auto;
 }
 
+
+h2.text-title {
+  margin-bottom: 1.5rem;
+}

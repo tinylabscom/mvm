@@ -85,20 +85,20 @@ export function CodeBlock({ code, language }: { code: string; language: string }
   return (
     <Highlight theme={theme} code={code} language={language}>
       {({ tokens, getLineProps, getTokenProps }) => (
-        <div className="overflow-hidden rounded-xl border border-border bg-surface shadow-lg shadow-black/20">
+        <div className="overflow-hidden rounded-xl border border-edge bg-raised shadow-lg shadow-black/20">
           {/* Terminal header bar */}
-          <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-            <span className="h-3 w-3 rounded-full bg-[#ff5f57] opacity-80" />
-            <span className="h-3 w-3 rounded-full bg-[#febc2e] opacity-80" />
-            <span className="h-3 w-3 rounded-full bg-[#28c840] opacity-80" />
-            <span className="ml-3 text-xs font-medium text-muted">{language}</span>
+          <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
+            <span className="h-3 w-3 rounded-full bg-dot-close opacity-80" />
+            <span className="h-3 w-3 rounded-full bg-dot-minimize opacity-80" />
+            <span className="h-3 w-3 rounded-full bg-dot-expand opacity-80" />
+            <span className="ml-3 text-xs font-medium text-label">{language}</span>
           </div>
           {/* Code area */}
-          <pre className="overflow-x-auto bg-page p-6 font-mono text-sm leading-relaxed sm:p-8">
+          <pre className="overflow-x-auto bg-canvas p-6 font-mono text-sm leading-relaxed sm:p-8">
             <code>
               {tokens.map((line, i) => (
                 <div key={i} {...getLineProps({ line })} className="flex">
-                  <span className="mr-6 inline-block w-8 select-none text-right text-muted/40">
+                  <span className="mr-6 inline-block w-8 select-none text-right text-label/40">
                     {i + 1}
                   </span>
                   <span>

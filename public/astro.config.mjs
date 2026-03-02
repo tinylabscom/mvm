@@ -23,7 +23,7 @@ export default defineConfig({
       expressiveCode: {
         themes: ["github-dark"],
         styleOverrides: {
-          borderColor: "#30363d",
+          borderColor: "#30363d", // overridden by custom.css var(--color-border)
           borderRadius: "0.75rem",
         },
       },

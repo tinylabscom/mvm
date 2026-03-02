@@ -6,10 +6,10 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-accent text-page hover:bg-accent-hover",
+        default: "bg-action text-canvas hover:bg-action-hover",
         outline:
-          "border border-border bg-transparent text-heading hover:bg-surface hover:border-accent",
-        ghost: "text-muted hover:text-heading hover:bg-surface",
+          "border border-edge bg-transparent text-emphasis hover:bg-raised hover:border-action",
+        ghost: "text-label hover:text-emphasis hover:bg-raised",
       },
       size: {
         default: "h-10 px-5 py-2",

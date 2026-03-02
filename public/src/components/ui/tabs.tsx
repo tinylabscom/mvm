@@ -33,7 +33,7 @@ export function TabsList({
   return (
     <div
       className={cn(
-        "inline-flex items-center gap-1 rounded-lg border border-border bg-page p-1",
+        "inline-flex items-center gap-1 rounded-lg border border-edge bg-canvas p-1",
         className,
       )}
       {...props}
@@ -53,8 +53,8 @@ export function TabsTrigger({
       className={cn(
         "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
         isActive
-          ? "bg-surface text-heading"
-          : "text-muted hover:text-heading",
+          ? "bg-raised text-emphasis"
+          : "text-label hover:text-emphasis",
         className,
       )}
       onClick={() => ctx.setValue(value)}

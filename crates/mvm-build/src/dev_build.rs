@@ -90,15 +90,23 @@ pub fn dev_build(
 ) -> Result<DevBuildResult> {
     let attr = resolve_dev_build_attribute(env, flake_ref, profile);
 
+    // Run optional pre-build hook if the flake provides one.
+    // This supports templates that install external software (e.g. via an
+    // upstream installer script) before the Nix build runs.
+    let impure_flag = run_pre_build_hook(env, flake_ref)?;
+
     // Step 1: Run nix build with visible output so the user sees progress
     env.log_info(&format!("Building: nix build {}", attr));
-    let build_cmd = format!("nix build {} --no-link", attr);
+    let build_cmd = format!("nix build {} --no-link{}", attr, impure_flag);
     env.shell_exec_visible(&build_cmd)
         .with_context(|| format!("nix build failed for {}", attr))?;
 
     // Step 2: Capture the output path (instant, uses Nix cache)
     let output = env
-        .shell_exec_stdout(&format!("nix build {} --no-link --print-out-paths", attr,))
+        .shell_exec_stdout(&format!(
+            "nix build {} --no-link --print-out-paths{}",
+            attr, impure_flag,
+        ))
         .with_context(|| "Failed to get nix build output path")?;
 
     let nix_output_path = output
@@ -152,6 +160,36 @@ pub fn dev_build(
         cached: false,
         runner_dir,
     })
+}
+
+/// Run the flake's `pre-build.sh` hook if it exists.
+///
+/// Some templates install external software (e.g. via an upstream installer
+/// script) before the Nix build. If `<flake_ref>/pre-build.sh` exists and
+/// is executable, it is run with visible output. Returns `" --impure"` when
+/// the hook ran (so `nix build` can reference host paths), or `""` otherwise.
+fn run_pre_build_hook(env: &dyn ShellEnvironment, flake_ref: &str) -> Result<&'static str> {
+    let pre_build = format!("{}/pre-build.sh", flake_ref);
+    let check = env
+        .shell_exec_stdout(&format!(
+            "test -f {} && test -x {} && echo yes || echo no",
+            shell_quote(&pre_build),
+            shell_quote(&pre_build),
+        ))
+        .unwrap_or_default();
+
+    if check.trim() != "yes" {
+        return Ok("");
+    }
+
+    env.log_info("Running pre-build hook (pre-build.sh)...");
+    env.shell_exec_visible(&format!("bash {}", shell_quote(&pre_build)))
+        .with_context(|| "pre-build.sh hook failed")?;
+
+    // The hook may install files outside the Nix store (e.g. /opt/openclaw)
+    // that the flake references via builtins.path. --impure is required for
+    // nix build to access these host paths.
+    Ok(" --impure")
 }
 
 /// Resolve the Nix attribute for a dev build.
@@ -753,5 +791,56 @@ mod tests {
 
         assert!(result.runner_dir.is_some());
         assert_eq!(result.runner_dir.as_ref().unwrap(), &dir);
+    }
+
+    #[test]
+    fn test_pre_build_hook_skipped_when_absent() {
+        let env = TestEnv::new();
+        // Default: shell_exec_stdout returns "" for unknown commands,
+        // so the hook check returns "no" equivalent → skip.
+        let flag = run_pre_build_hook(&env, "/tmp/flake").unwrap();
+        assert_eq!(flag, "");
+    }
+
+    #[test]
+    fn test_pre_build_hook_runs_when_present() {
+        let env = TestEnv::new();
+        env.stub_stdout("test -f", "yes");
+
+        let flag = run_pre_build_hook(&env, "/tmp/flake").unwrap();
+        assert_eq!(flag, " --impure");
+
+        // Verify the hook script was executed.
+        let exec_log = env.exec_log.lock().unwrap();
+        assert!(
+            exec_log.iter().any(|s| s.contains("pre-build.sh")),
+            "Expected pre-build.sh in exec log"
+        );
+    }
+
+    #[test]
+    fn test_dev_build_with_pre_build_hook() {
+        let env = TestEnv::new();
+
+        // Pre-build hook exists.
+        env.stub_stdout("test -f", "yes");
+        // nix build output.
+        env.stub_stdout("--print-out-paths", "/nix/store/abc123-tenant-minimal\n");
+
+        let result = dev_build(&env, "/tmp/flake", Some("minimal")).unwrap();
+
+        // Verify --impure was added to nix build commands.
+        let exec_log = env.exec_log.lock().unwrap();
+        let nix_build_cmds: Vec<_> = exec_log
+            .iter()
+            .filter(|s| s.contains("nix build"))
+            .collect();
+        assert!(
+            nix_build_cmds.iter().all(|s| s.contains("--impure")),
+            "Expected --impure in nix build commands: {:?}",
+            nix_build_cmds
+        );
+
+        assert_eq!(result.revision_hash, "abc123");
     }
 }

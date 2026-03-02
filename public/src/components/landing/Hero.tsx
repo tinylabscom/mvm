@@ -30,25 +30,25 @@ export function Hero() {
         </Badge>
       </div>
 
-      <h1 className="max-w-3xl text-4xl font-bold leading-tight tracking-tight text-heading sm:text-5xl lg:text-6xl">
+      <h1 className="max-w-3xl text-4xl font-bold leading-tight tracking-tight text-title sm:text-5xl lg:text-6xl">
         MicroVMs,{" "}
-        <span className="text-accent">Made Simple</span>
+        <span className="text-link">Made Simple</span>
       </h1>
 
-      <p className="max-w-2xl text-lg leading-relaxed text-muted sm:text-xl">
+      <p className="max-w-2xl text-lg leading-relaxed text-body sm:text-xl">
         Build and run microVMs on macOS and Linux with reproducible
         Nix flakes. Sub-5s boot. No SSH. No containers.
       </p>
 
       <div
-        className="flex w-full max-w-xl cursor-pointer items-center gap-3 rounded-lg border border-border/60 bg-surface px-6 py-4 ring-1 ring-accent/10 transition-all hover:border-accent/30 hover:ring-accent/20"
+        className="flex w-full max-w-xl cursor-pointer items-center gap-3 rounded-lg border border-edge/60 bg-raised px-6 py-4 ring-1 ring-action/10 transition-all hover:border-action/30 hover:ring-action/20"
         onClick={copyInstall}
         title="Click to copy"
       >
-        <code className="flex-1 text-left font-mono text-sm text-green overflow-x-auto">
+        <code className="flex-1 text-left font-mono text-sm text-code-inline overflow-x-auto">
           {installCmd}
         </code>
-        <span className="shrink-0 text-xs text-muted">
+        <span className="shrink-0 text-xs text-label">
           {copied ? "Copied!" : "Copy"}
         </span>
       </div>

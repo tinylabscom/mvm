@@ -132,6 +132,13 @@ pub enum AgentRequest {
         instance_id: String,
         action: InstanceAction,
     },
+    /// Forward a sandbox operation (filesystem, exec, logs) to the guest agent.
+    SandboxAction {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        request: serde_json::Value,
+    },
 }
 
 /// Imperative lifecycle action for a single instance.
@@ -164,6 +171,13 @@ pub enum AgentResponse {
     InstanceActionResult {
         success: bool,
         new_status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Result of a sandbox operation (filesystem, exec, logs).
+    SandboxResult {
+        success: bool,
+        response: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -287,6 +301,74 @@ mod tests {
                 assert!(error.is_none());
             }
             _ => panic!("Expected InstanceActionResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_sandbox_action_serde_roundtrip() {
+        let req = AgentRequest::SandboxAction {
+            tenant_id: "t1".to_string(),
+            pool_id: "p1".to_string(),
+            instance_id: "i1".to_string(),
+            request: serde_json::json!({"type": "Ping"}),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::SandboxAction {
+                tenant_id,
+                pool_id,
+                instance_id,
+                request,
+            } => {
+                assert_eq!(tenant_id, "t1");
+                assert_eq!(pool_id, "p1");
+                assert_eq!(instance_id, "i1");
+                assert_eq!(request.get("type").and_then(|t| t.as_str()), Some("Ping"));
+            }
+            _ => panic!("Expected SandboxAction variant"),
+        }
+    }
+
+    #[test]
+    fn test_sandbox_result_success_roundtrip() {
+        let resp = AgentResponse::SandboxResult {
+            success: true,
+            response: serde_json::json!({"type": "Pong"}),
+            error: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("error"));
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::SandboxResult {
+                success,
+                response,
+                error,
+            } => {
+                assert!(success);
+                assert_eq!(response.get("type").and_then(|t| t.as_str()), Some("Pong"));
+                assert!(error.is_none());
+            }
+            _ => panic!("Expected SandboxResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_sandbox_result_failure_roundtrip() {
+        let resp = AgentResponse::SandboxResult {
+            success: false,
+            response: serde_json::Value::Null,
+            error: Some("proxy_error: socket not found".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::SandboxResult { success, error, .. } => {
+                assert!(!success);
+                assert_eq!(error.as_deref(), Some("proxy_error: socket not found"));
+            }
+            _ => panic!("Expected SandboxResult variant"),
         }
     }
 

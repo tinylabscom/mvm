@@ -268,6 +268,9 @@ enum Commands {
         /// Environment variable to inject (format: KEY=VALUE). Repeatable.
         #[arg(long, short = 'e')]
         env: Vec<String>,
+        /// Auto-forward declared ports after boot (blocks until Ctrl-C)
+        #[arg(long)]
+        forward: bool,
     },
     /// Launch microVMs (from mvm.toml or CLI flags)
     Up {
@@ -651,6 +654,7 @@ pub fn run() -> Result<()> {
             secrets_dir,
             port,
             env,
+            forward,
         } => cmd_run(RunParams {
             flake_ref: flake.as_deref(),
             template_name: template.as_deref(),
@@ -665,6 +669,7 @@ pub fn run() -> Result<()> {
             secrets_dir: secrets_dir.as_deref(),
             ports: &port,
             env_vars: &env,
+            forward,
         }),
         Commands::Up {
             name,
@@ -2119,6 +2124,7 @@ struct RunParams<'a> {
     secrets_dir: Option<&'a str>,
     ports: &'a [String],
     env_vars: &'a [String],
+    forward: bool,
 }
 
 fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -2136,6 +2142,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         secrets_dir,
         ports,
         env_vars,
+        forward,
     } = params;
     if bootstrap::is_lima_required() {
         lima::require_running()?;
@@ -2284,8 +2291,20 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         ports: port_mappings,
     };
 
+    let vm_name_owned = run_config.name.clone();
+    let has_ports = !run_config.ports.is_empty();
+
     let backend = AnyBackend::from_hypervisor(hypervisor);
     backend.start_firecracker(&FirecrackerConfig { run_config })?;
+
+    if forward {
+        if has_ports {
+            cmd_forward(&vm_name_owned, &[])?;
+        } else {
+            ui::warn("--forward was set but no ports were declared. Use -p to specify ports.");
+        }
+    }
+
     Ok(())
 }
 
@@ -3960,6 +3979,38 @@ mod tests {
             Commands::Run { port, env, .. } => {
                 assert!(port.is_empty());
                 assert!(env.is_empty());
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_forward_flag() {
+        let cli = Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--flake",
+            ".",
+            "-p",
+            "3333:3000",
+            "--forward",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run { forward, port, .. } => {
+                assert!(forward);
+                assert_eq!(port, vec!["3333:3000"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_forward_default_false() {
+        let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
+        match cli.command {
+            Commands::Run { forward, .. } => {
+                assert!(!forward);
             }
             _ => panic!("Expected Run command"),
         }

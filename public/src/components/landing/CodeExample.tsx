@@ -56,9 +56,9 @@ mvmctl template warm my-service
 
 export function CodeExample() {
   return (
-    <section className="w-full border-y border-border/50 bg-surface px-6 py-28 sm:px-8 lg:py-36">
+    <section className="w-full border-y border-edge/50 bg-raised px-6 py-28 sm:px-8 lg:py-36">
       <div className="mx-auto max-w-5xl">
-        <h2 className="mb-14 text-center text-2xl font-semibold text-heading sm:text-3xl lg:mb-16">
+        <h2 className="mb-16 text-center text-2xl font-semibold text-title sm:text-3xl lg:mb-20">
           Get Running in Minutes
         </h2>
         <Tabs defaultValue="quickstart">

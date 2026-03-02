@@ -2,6 +2,7 @@
 @source "./src/**/*.{astro,tsx,ts,jsx,js}";
 
 @theme {
+  /* Base palette */
   --color-page: #0d1117;
   --color-surface: #161b22;
   --color-border: #30363d;
@@ -13,4 +14,35 @@
   --color-amber: #d29922;
   --color-rust: #dea584;
   --color-nix: #7ebae4;
+  --color-tooltip: #1c2128;
+  --color-dim: #484f58;
+  --color-accent-low: #0c2d6b;
+  --color-accent-high: #c8e1ff;
+  --color-gray-1: #c9d1d9;
+  --color-gray-2: #b1bac4;
+  --color-gray-4: #6e7681;
+}
+
+@theme inline {
+  /* Text roles */
+  --color-title: var(--color-heading);
+  --color-body: var(--color-muted);
+  --color-label: var(--color-muted);
+  --color-emphasis: var(--color-heading);
+  --color-code-inline: var(--color-green);
+  --color-link: var(--color-accent);
+
+  /* Interactive */
+  --color-action: var(--color-accent);
+  --color-action-hover: var(--color-accent-hover);
+
+  /* Surfaces & borders */
+  --color-canvas: var(--color-page);
+  --color-raised: var(--color-surface);
+  --color-edge: var(--color-border);
+
+  /* Terminal window dots */
+  --color-dot-close: #ff5f57;
+  --color-dot-minimize: #febc2e;
+  --color-dot-expand: #28c840;
 }
