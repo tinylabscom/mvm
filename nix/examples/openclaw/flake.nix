@@ -55,8 +55,10 @@
             else
               # No config provided — write a minimal default so the service
               # can start in local mode without requiring setup.
+              # IMPORTANT: OpenClaw validates config strictly — do NOT add
+              # extra keys (e.g. "version") or the service will fail to start.
               cat > /var/lib/openclaw/config/openclaw.json << 'DEFAULTCFG'
-            {"gateway":{"mode":"local","port":3000},"version":"1"}
+            {"gateway":{"mode":"local","port":3000}}
             DEFAULTCFG
               chown openclaw:openclaw /var/lib/openclaw/config/openclaw.json
             fi
@@ -75,6 +77,16 @@
               install -d -o openclaw -g openclaw /var/lib/openclaw/skills
               install -d -o openclaw -g openclaw /var/lib/openclaw/workspace
               install -d -o openclaw -g openclaw /var/lib/openclaw/sessions
+            fi
+
+            # OpenClaw binds to 127.0.0.1 only — use socat to forward incoming
+            # TAP traffic to loopback so port forwarding from the host works.
+            # (iptables DNAT won't work: the Firecracker guest kernel has no
+            # netfilter support.)
+            GUEST_IP=$(sed -n 's/.*mvm\.ip=\([0-9.]*\).*/\1/p' /proc/cmdline)
+            if [ -n "$GUEST_IP" ]; then
+              ${pkgs.socat}/bin/socat TCP-LISTEN:3000,bind="$GUEST_IP",fork,reuseaddr TCP:127.0.0.1:3000 &
+              ${pkgs.socat}/bin/socat TCP-LISTEN:3002,bind="$GUEST_IP",fork,reuseaddr TCP:127.0.0.1:3002 &
             fi
           '';
 
@@ -113,7 +125,7 @@
           };
 
           healthChecks.${serviceName} = {
-            healthCmd = "wget -q -O /dev/null http://localhost:3000/ 2>/dev/null";
+            healthCmd = "nc -z 127.0.0.1 3000";
             healthIntervalSecs = 10;
             healthTimeoutSecs = 5;
           };

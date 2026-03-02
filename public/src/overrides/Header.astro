@@ -1,0 +1,120 @@
+---
+// Override Starlight's Header component.
+// On the splash page, render a clean landing-page header.
+// On all other pages, render the default Starlight Header.
+import Default from "@astrojs/starlight/components/Header.astro";
+import logoDark from "../assets/logo-dark.svg";
+import logoLight from "../assets/logo-light.svg";
+
+const route = Astro.locals.starlightRoute;
+const isSplash = route?.entry?.data?.template === "splash";
+
+const navLinks = [
+  { label: "Docs", href: "/getting-started/installation/" },
+  { label: "Quick Start", href: "/getting-started/quickstart/" },
+  { label: "Guides", href: "/guides/nix-flakes/" },
+  { label: "Reference", href: "/reference/cli-commands/" },
+];
+---
+
+{isSplash ? (
+  <header class="landing-header">
+    <div class="landing-header-inner">
+      <a href="/" class="landing-logo">
+        <img class="light:sl-hidden" src={logoDark.src} alt="mvm" width="88" height="24" />
+        <img class="dark:sl-hidden" src={logoLight.src} alt="mvm" width="88" height="24" />
+      </a>
+      <nav class="landing-nav">
+        {navLinks.map(link => (
+          <a href={link.href} class="landing-nav-link">{link.label}</a>
+        ))}
+      </nav>
+      <div class="landing-nav-right">
+        <a href="https://github.com/auser/mvm" target="_blank" rel="noopener" class="landing-github-link" aria-label="GitHub">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/>
+          </svg>
+        </a>
+      </div>
+    </div>
+  </header>
+) : (
+  <Default />
+)}
+
+<style>
+  .landing-header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    width: 100%;
+    border-bottom: 1px solid var(--sl-color-hairline);
+    background: var(--sl-color-bg);
+    backdrop-filter: blur(12px);
+  }
+
+  .landing-header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 0.75rem 1.5rem;
+  }
+
+  .landing-logo {
+    display: flex;
+    align-items: center;
+    text-decoration: none;
+    flex-shrink: 0;
+  }
+
+  .landing-logo img {
+    height: 24px;
+    width: auto;
+  }
+
+  .landing-nav {
+    display: none;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  @media (min-width: 50em) {
+    .landing-nav {
+      display: flex;
+    }
+  }
+
+  .landing-nav-link {
+    padding: 0.4rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--sl-color-gray-2);
+    text-decoration: none;
+    transition: color 0.15s, background 0.15s;
+  }
+
+  .landing-nav-link:hover {
+    color: var(--sl-color-text);
+    background: var(--sl-color-bg-inline-code);
+  }
+
+  .landing-nav-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .landing-github-link {
+    display: flex;
+    align-items: center;
+    color: var(--sl-color-gray-2);
+    transition: color 0.15s;
+  }
+
+  .landing-github-link:hover {
+    color: var(--sl-color-text);
+  }
+</style>

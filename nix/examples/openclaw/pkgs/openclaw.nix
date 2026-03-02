@@ -16,6 +16,7 @@
 , vips
 , perl
 , makeWrapper
+, esbuild
 }:
 
 stdenv.mkDerivation (finalAttrs: {
@@ -43,6 +44,7 @@ stdenv.mkDerivation (finalAttrs: {
     pkg-config
     perl          # some native deps (e.g. openssl bindings) need perl
     makeWrapper
+    esbuild
   ];
 
   buildInputs = [
@@ -101,6 +103,36 @@ stdenv.mkDerivation (finalAttrs: {
     # Build TypeScript source + bundle UI assets.
     pnpm run build
 
+    # Build the Control UI static assets (web dashboard).
+    # This is separate from A2UI (canvas) and provides the browser
+    # interface at the gateway port.
+    pnpm ui:build 2>/dev/null || echo "WARNING: pnpm ui:build failed, Control UI will be unavailable"
+
+    # Bundle into a single JS file for Firecracker virtio-block perf.
+    # Without this, Node.js does thousands of random reads from node_modules
+    # over virtio-block, adding minutes to startup time.
+    if [ -f dist/entry.js ]; then
+      echo "Bundling dist/entry.js with esbuild..."
+      if esbuild dist/entry.js \
+        --bundle --platform=node --target=node22 --format=esm \
+        --outfile=dist/openclaw-bundle.mjs \
+        --banner:js='import{createRequire as __cr}from"module";const require=__cr(import.meta.url);' \
+        --external:sharp --external:koffi --external:protobufjs \
+        --external:@img/* --external:chromium-bidi \
+        --external:node-llama-cpp --external:ffmpeg-static \
+        --external:@snazzah/* --external:@napi-rs/* \
+        --external:@discordjs/opus --external:authenticate-pam \
+        --external:@lydell/node-pty --external:playwright-core \
+        --external:@anthropic-ai/bedrock-sdk --external:@google-cloud/* \
+        --loader:.node=empty --minify-whitespace \
+        --log-limit=0 --log-level=info 2>&1; then
+        echo "esbuild bundle created: $(wc -c < dist/openclaw-bundle.mjs) bytes"
+      else
+        echo "WARNING: esbuild bundling failed, falling back to unbundled"
+        rm -f dist/openclaw-bundle.mjs
+      fi
+    fi
+
     runHook postBuild
   '';
 
@@ -112,8 +144,8 @@ stdenv.mkDerivation (finalAttrs: {
     # Copy runtime artifacts.
     cp -r dist node_modules package.json openclaw.mjs $out/lib/openclaw/
 
-    # Copy workspace sub-packages if they produced runtime output.
-    for dir in ui extensions packages; do
+    # Copy workspace sub-packages and runtime data directories.
+    for dir in ui extensions packages docs scripts; do
       [ -d "$dir" ] && cp -r "$dir" $out/lib/openclaw/
     done
 
@@ -164,11 +196,69 @@ stdenv.mkDerivation (finalAttrs: {
     # 7. Remove empty directories left by pruning.
     find $out/lib/openclaw/node_modules -type d -empty -delete 2>/dev/null || true
 
+    # ── Prune build-time packages when bundle exists ────────────
+    # The esbuild bundle contains all pure-JS code. Only native addon
+    # packages (sharp, koffi, protobufjs, @img/*) are needed at runtime.
+    local NM=$out/lib/openclaw/node_modules
+    if [ -f $out/lib/openclaw/dist/openclaw-bundle.mjs ]; then
+      echo "Pruning build-time packages from node_modules..."
+      local before_size=$(du -sm $NM/.pnpm 2>/dev/null | cut -f1)
+
+      for pattern in \
+        "typescript@*" \
+        "rolldown@*" "@rolldown+*" \
+        "@oxlint+*" "@oxc-resolver+*" "@oxc-parser+*" \
+        "lancedb@*" "@lancedb+*" \
+        "eslint@*" "eslint-*@*" "@eslint+*" \
+        "prettier@*" \
+        "@types+*" \
+        "@anthropic-ai+bedrock-sdk@*" \
+        "@google-cloud+*" \
+        "pdfjs-dist@*" \
+        "ffmpeg-static@*" \
+        "vitest@*" "@vitest+*" \
+        "esbuild@*" "@esbuild+*" \
+        "tsx@*" "ts-node@*" \
+        "@swc+*" "swc-*@*" \
+      ; do
+        find $NM/.pnpm -maxdepth 1 -name "$pattern" -type d \
+          -exec rm -rf {} + 2>/dev/null || true
+      done
+
+      # Clean ALL broken symlinks left by pruning.
+      find $out/lib/openclaw -xtype l -delete 2>/dev/null || true
+      find $NM/.pnpm -type d -empty -delete 2>/dev/null || true
+
+      local after_size=$(du -sm $NM/.pnpm 2>/dev/null | cut -f1)
+      echo "node_modules pruned: ''${before_size}M -> ''${after_size}M"
+    fi
+
+    # Ensure external packages used by the bundle are resolvable.
+    # pnpm hoists some to .pnpm/node_modules/ which Node.js ESM can't find.
+    for pkg in protobufjs sharp koffi; do
+      if [ ! -e "$NM/$pkg" ] && [ -e "$NM/.pnpm/node_modules/$pkg" ]; then
+        ln -s ".pnpm/node_modules/$pkg" "$NM/$pkg"
+      fi
+    done
+
     patchShebangs $out/lib/openclaw/node_modules/.bin/
 
-    # The CLI entry point is openclaw.mjs (ES module wrapper).
+    # NOTE: Do NOT copy jiti's babel.cjs into dist/. The esbuild bundle
+    # inlines jiti, which tries to find babel.cjs relative to the bundle.
+    # If found, jiti transpiles extension .ts files at runtime — triggering
+    # massive I/O on virtio-block that adds 10+ minutes to startup.
+    # Without babel.cjs, plugins fail fast and the gateway starts in ~4 min.
+    # Extensions that need runtime TS support should be pre-compiled to JS.
+
+    # Choose entry point: bundle if available, else unbundled.
+    if [ -f $out/lib/openclaw/dist/openclaw-bundle.mjs ]; then
+      ENTRY="$out/lib/openclaw/dist/openclaw-bundle.mjs"
+    else
+      ENTRY="$out/lib/openclaw/openclaw.mjs"
+    fi
+
     makeWrapper ${nodejs_22}/bin/node $out/bin/openclaw \
-      --add-flags "$out/lib/openclaw/openclaw.mjs" \
+      --add-flags "$ENTRY" \
       --set NODE_PATH "$out/lib/openclaw/node_modules"
 
     runHook postInstall

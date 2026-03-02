@@ -1,0 +1,16 @@
+@import "tailwindcss";
+@source "./src/**/*.{astro,tsx,ts,jsx,js}";
+
+@theme {
+  --color-page: #0d1117;
+  --color-surface: #161b22;
+  --color-border: #30363d;
+  --color-heading: #e6edf3;
+  --color-muted: #8b949e;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79c0ff;
+  --color-green: #3fb950;
+  --color-amber: #d29922;
+  --color-rust: #dea584;
+  --color-nix: #7ebae4;
+}

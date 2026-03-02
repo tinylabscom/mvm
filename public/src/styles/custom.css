@@ -1,0 +1,162 @@
+/* Force dark mode globally — override Starlight's default palette */
+:root {
+  --sl-color-accent-low: #0c2d6b;
+  --sl-color-accent: #58a6ff;
+  --sl-color-accent-high: #c8e1ff;
+  --sl-color-bg-nav: #0d1117;
+  --sl-color-bg-sidebar: #0d1117;
+  --sl-color-bg: #0d1117;
+  --sl-color-bg-inline-code: #161b22;
+  --sl-color-hairline-light: #30363d;
+  --sl-color-hairline: #30363d;
+  --sl-color-text: #e6edf3;
+  --sl-color-text-accent: #58a6ff;
+  --sl-color-white: #e6edf3;
+  --sl-color-gray-1: #c9d1d9;
+  --sl-color-gray-2: #b1bac4;
+  --sl-color-gray-3: #8b949e;
+  --sl-color-gray-4: #6e7681;
+  --sl-color-gray-5: #484f58;
+  --sl-color-gray-6: #30363d;
+  --sl-color-black: #0d1117;
+  --sl-font-system-mono: "SF Mono", "Cascadia Code", "Fira Code",
+    "JetBrains Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+
+/* Ensure page always has an opaque background */
+html,
+body {
+  background-color: var(--sl-color-bg) !important;
+}
+
+/* ── Typography — slightly larger base ── */
+html {
+  font-size: 17px;
+}
+
+/* Docs content headings */
+[data-has-sidebar] main h1 {
+  font-size: 2.25rem;
+  margin-block-end: 1.5rem;
+}
+
+[data-has-sidebar] main h2 {
+  font-size: 1.6rem;
+  margin-block-start: 2.5rem;
+  margin-block-end: 1rem;
+}
+
+[data-has-sidebar] main h3 {
+  font-size: 1.25rem;
+  margin-block-start: 2rem;
+  margin-block-end: 0.75rem;
+}
+
+/* Docs content — improved padding and spacing */
+[data-has-sidebar] main {
+  padding-block: 2.5rem;
+  padding-inline: 2rem;
+}
+
+@media (min-width: 50em) {
+  [data-has-sidebar] main {
+    padding-block: 3rem;
+    padding-inline: 2.5rem;
+  }
+}
+
+@media (min-width: 72em) {
+  [data-has-sidebar] main {
+    padding-block: 3.5rem;
+    padding-inline: 3rem;
+  }
+}
+
+/* Docs paragraphs — more breathing room */
+[data-has-sidebar] main p {
+  line-height: 1.8;
+  margin-block-end: 1.25rem;
+}
+
+/* Docs lists */
+[data-has-sidebar] main ul,
+[data-has-sidebar] main ol {
+  margin-block-end: 1.25rem;
+}
+
+[data-has-sidebar] main li {
+  margin-block-end: 0.5rem;
+  line-height: 1.7;
+}
+
+/* Code blocks — more padding + force dark theme */
+[data-has-sidebar] main .expressive-code {
+  margin-block: 1.5rem;
+}
+
+.expressive-code,
+.expressive-code .frame {
+  --ec-codeBg: #161b22 !important;
+  --ec-frm-edBg: #161b22 !important;
+  --ec-frm-termBg: #161b22 !important;
+  --ec-frm-tooltipBg: #1c2128 !important;
+  --ec-codeFg: #e6edf3 !important;
+  --ec-frm-edTabBg: #161b22 !important;
+  --ec-frm-edActTabBg: #0d1117 !important;
+  --ec-frm-edTabBarBg: #161b22 !important;
+  --ec-frm-edTabBarBrdBtm: #30363d !important;
+  --ec-frm-termTitlebarBg: #161b22 !important;
+  --ec-frm-termTitlebarBrdBtm: #30363d !important;
+  --ec-frm-termTitlebarDotsFg: #484f58 !important;
+  --ec-brdCol: #30363d !important;
+}
+
+/* Sidebar — increased spacing between items */
+nav[aria-label="Main"] a {
+  padding-block: 0.4rem;
+}
+
+nav[aria-label="Main"] summary,
+nav[aria-label="Main"] [role="group"] > :first-child {
+  padding-block: 0.5rem;
+}
+
+/* ── Splash / Landing page — full-width, no Starlight chrome ── */
+[data-has-hero] .main-frame {
+  padding: 0;
+}
+
+[data-has-hero] .content-panel {
+  max-width: none;
+  padding: 0;
+}
+
+[data-has-hero] .sl-container {
+  max-width: none;
+  padding: 0;
+}
+
+[data-has-hero] .main-pane {
+  padding: 0;
+}
+
+/* Hide Starlight's default splash-page padding/wrapper */
+[data-has-hero] main {
+  padding: 0;
+}
+
+/* Remove the pagination footer on the splash page */
+[data-has-hero] .pagination-links {
+  display: none;
+}
+
+/* Remove empty footer space on splash */
+[data-has-hero] footer {
+  display: none;
+}
+
+/* Center the landing page content sections (Tailwind mx-auto fallback) */
+[data-has-hero] main section {
+  margin-inline: auto;
+}

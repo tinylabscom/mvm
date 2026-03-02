@@ -125,6 +125,24 @@ pub enum AgentRequest {
         pool_id: String,
         instance_id: String,
     },
+    /// Perform an imperative lifecycle action on a specific instance.
+    InstanceAction {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        action: InstanceAction,
+    },
+}
+
+/// Imperative lifecycle action for a single instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InstanceAction {
+    Start,
+    Stop,
+    Sleep,
+    Wake,
+    Warm,
+    Destroy,
 }
 
 /// Strongly typed response returned over QUIC streams.
@@ -142,6 +160,13 @@ pub enum AgentResponse {
     InstanceList(Vec<InstanceState>),
     /// Result of a wake operation.
     WakeResult { success: bool },
+    /// Result of an imperative instance action.
+    InstanceActionResult {
+        success: bool,
+        new_status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Error response.
     Error { code: u16, message: String },
 }
@@ -196,5 +221,95 @@ mod tests {
         assert!(report.tenants_created.is_empty());
         assert!(report.errors.is_empty());
         assert_eq!(report.instances_created, 0);
+    }
+
+    #[test]
+    fn test_instance_action_serde_all_variants() {
+        let actions = vec![
+            InstanceAction::Start,
+            InstanceAction::Stop,
+            InstanceAction::Sleep,
+            InstanceAction::Wake,
+            InstanceAction::Warm,
+            InstanceAction::Destroy,
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            let parsed: InstanceAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, action);
+        }
+    }
+
+    #[test]
+    fn test_instance_action_request_serde() {
+        let req = AgentRequest::InstanceAction {
+            tenant_id: "t1".to_string(),
+            pool_id: "p1".to_string(),
+            instance_id: "i1".to_string(),
+            action: InstanceAction::Wake,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::InstanceAction {
+                tenant_id,
+                pool_id,
+                instance_id,
+                action,
+            } => {
+                assert_eq!(tenant_id, "t1");
+                assert_eq!(pool_id, "p1");
+                assert_eq!(instance_id, "i1");
+                assert_eq!(action, InstanceAction::Wake);
+            }
+            _ => panic!("Expected InstanceAction variant"),
+        }
+    }
+
+    #[test]
+    fn test_instance_action_result_success() {
+        let resp = AgentResponse::InstanceActionResult {
+            success: true,
+            new_status: "running".to_string(),
+            error: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("error"));
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::InstanceActionResult {
+                success,
+                new_status,
+                error,
+            } => {
+                assert!(success);
+                assert_eq!(new_status, "running");
+                assert!(error.is_none());
+            }
+            _ => panic!("Expected InstanceActionResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_instance_action_result_failure() {
+        let resp = AgentResponse::InstanceActionResult {
+            success: false,
+            new_status: "stopped".to_string(),
+            error: Some("Instance not found".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::InstanceActionResult {
+                success,
+                new_status,
+                error,
+            } => {
+                assert!(!success);
+                assert_eq!(new_status, "stopped");
+                assert_eq!(error.as_deref(), Some("Instance not found"));
+            }
+            _ => panic!("Expected InstanceActionResult variant"),
+        }
     }
 }

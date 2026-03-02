@@ -3,7 +3,7 @@ name: Deploy GitHub Pages
 on:
   push:
     branches: [main]
-    paths: [docs/**]
+    paths: [public/**]
 
   workflow_dispatch:
 
@@ -25,13 +25,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: public
+        run: npm ci
+
+      - name: Build Astro site
+        working-directory: public
+        run: npm run build
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: public/dist
 
       - name: Deploy to GitHub Pages
         id: deployment

@@ -7,6 +7,6 @@ if command -v mvmctl >/dev/null 2>&1; then
 fi
 
 KV_ROOT="{{ kv_root }}"
-alias cr="cargo run --manifest-path $KV_ROOT/mvm/Cargo.toml --"
-alias crd="cargo run --features tui --manifest-path $KV_ROOT/mvmd/Cargo.toml --"
+alias mvmctl="cargo run --manifest-path $KV_ROOT/mvm/Cargo.toml --"
+alias mvmd="cargo run --features tui --manifest-path $KV_ROOT/mvmd/Cargo.toml --"
 {{ marker_end }}

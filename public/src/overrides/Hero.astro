@@ -1,0 +1,18 @@
+---
+// Override Starlight's Hero component.
+// On the splash page (index), render our React landing page.
+// On all other pages, render the default Starlight Hero.
+import Default from "@astrojs/starlight/components/Hero.astro";
+import { Landing } from "../components/landing/Landing";
+
+const route = Astro.locals.starlightRoute;
+const isSplash = route?.entry?.data?.template === "splash";
+---
+
+{
+  isSplash ? (
+    <Landing client:load />
+  ) : (
+    <Default />
+  )
+}

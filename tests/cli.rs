@@ -585,11 +585,11 @@ fn test_shell_init_prints_block() {
         "shell-init should include completions"
     );
     assert!(
-        stdout.contains("alias cr="),
-        "shell-init should include cr alias"
+        stdout.contains("alias mvmctl="),
+        "shell-init should include mvmctl alias"
     );
     assert!(
-        stdout.contains("alias crd="),
-        "shell-init should include crd alias"
+        stdout.contains("alias mvmd="),
+        "shell-init should include mvmd alias"
     );
 }

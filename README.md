@@ -403,6 +403,14 @@ mvmctl shell --project ~/myproject    # Open shell and cd into project dir
 
 Inside the Lima shell, your host home directory (`~`) is mounted read/write. This is where Nix builds run and where Firecracker binaries live. Use this for debugging build issues or inspecting VM state.
 
+### Quick Rebuild Loop
+
+Stop, rebuild, and relaunch a microVM from a template in one shot:
+
+```bash
+(TEMPLATE=openclaw; NAME=oc; cr cleanup --all; cr stop $NAME; cr template build $TEMPLATE --force; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
+```
+
 ### Sync (Build mvmctl Inside Lima)
 
 Build and install the mvmctl binary inside the Lima VM from your host source tree:
