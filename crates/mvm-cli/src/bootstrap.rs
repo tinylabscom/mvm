@@ -76,29 +76,40 @@ pub fn ensure_lima() -> Result<()> {
     Ok(())
 }
 
-/// Install Lima on Linux via package manager or direct binary download.
+/// Install Lima on Linux via binary download from GitHub releases.
 fn install_lima_linux() -> Result<()> {
-    if which::which("apt-get").is_ok() {
-        ui::info("Installing Lima via apt...");
-        shell::run_host_visible(
-            "bash",
-            &["-c", "curl -fsSL https://lima-vm.io/install.sh | sudo sh"],
-        )?;
-    } else if which::which("dnf").is_ok() {
-        ui::info("Installing Lima via dnf...");
-        shell::run_host_visible(
-            "bash",
-            &["-c", "curl -fsSL https://lima-vm.io/install.sh | sudo sh"],
-        )?;
-    } else if which::which("pacman").is_ok() {
-        ui::info("Installing Lima via pacman...");
-        shell::run_host_visible("sudo", &["pacman", "-S", "--noconfirm", "lima"])?;
-    } else {
-        anyhow::bail!(
-            "No supported package manager found. Install Lima manually:\n\
-             https://lima-vm.io/docs/installation/"
-        );
+    // Check for Homebrew first (works on Linux)
+    if which::which("brew").is_ok() {
+        ui::info("Installing Lima via Homebrew...");
+        shell::run_host_visible("brew", &["install", "lima"])?;
+        return Ok(());
     }
+
+    // Check for Nix (cross-platform)
+    if which::which("nix-env").is_ok() {
+        ui::info("Installing Lima via Nix...");
+        shell::run_host_visible("nix-env", &["-i", "lima"])?;
+        return Ok(());
+    }
+
+    // Fallback: Download binary from GitHub releases
+    ui::info("Installing Lima from GitHub releases...");
+    let install_script = r#"
+set -euo pipefail
+LIMA_VERSION=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64) ARCH="x86_64" ;;
+    aarch64|arm64) ARCH="aarch64" ;;
+    *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+esac
+URL="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-${ARCH}.tar.gz"
+echo "Downloading Lima ${LIMA_VERSION} for ${ARCH}..."
+curl -fsSL "$URL" | sudo tar -xz -C /usr/local
+sudo chmod +x /usr/local/bin/limactl
+echo "Lima ${LIMA_VERSION} installed successfully"
+"#;
+    shell::run_host_visible("bash", &["-c", install_script])?;
     Ok(())
 }
 

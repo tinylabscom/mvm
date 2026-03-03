@@ -35,14 +35,13 @@ stdenv.mkDerivation {
     ENTRY="$out/lib/openclaw/dist/index.js"
     BUNDLE="$out/lib/openclaw/dist/openclaw-bundle.mjs"
 
-    # Bundle only OpenClaw's own code-split chunks into a single file.
-    # --packages=external keeps all node_modules imports as-is, avoiding
-    # pnpm resolution issues while still consolidating the 800+ chunks
-    # into one file for fast virtio-block loading.
+    # Create a full ESM bundle that inlines all dependencies for fast loading
+    # on Firecracker's slow virtio-block storage. Native .node modules are
+    # automatically kept external by esbuild. This eliminates the 800+ code-split
+    # chunks and thousands of module resolution calls that cause slow startup.
     echo "Bundling $ENTRY with esbuild..."
     esbuild "$ENTRY" \
       --bundle \
-      --packages=external \
       --platform=node \
       --target=node22 \
       --format=esm \
