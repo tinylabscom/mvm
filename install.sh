@@ -248,7 +248,6 @@ install_binary() {
 
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
 
     info "Downloading ${download_url}..."
     download "$download_url" "${tmpdir}/${archive_name}" \
@@ -285,6 +284,9 @@ install_binary() {
             sudo cp -r "${extracted_dir}/resources" "${INSTALL_DIR}/resources"
         fi
     fi
+
+    # Cleanup
+    rm -rf "$tmpdir"
 
     info "Installed ${BINARY} ${version} to ${INSTALL_DIR}/${BINARY}"
     MVM_BIN="${INSTALL_DIR}/${BINARY}"
