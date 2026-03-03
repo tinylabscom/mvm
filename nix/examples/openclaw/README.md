@@ -1,147 +1,223 @@
-# OpenClaw -- mvm microVM Template
+# OpenClaw MicroVM Template
 
-A multi-variant microVM template for the OpenClaw platform. Builds minimal
-Firecracker guests (busybox init, no systemd) that receive per-tenant
-configuration at runtime via mvm's config and secrets drives.
+Nix-based Firecracker microVM running the [OpenClaw](https://openclaw.ai) MCP gateway.
+
+## ⚠️ Important: First Boot Performance
+
+**First boot takes 10-15 minutes** on macOS due to nested virtualization (macOS hypervisor → Lima → Firecracker). V8 compiles the 9.5MB bundled application during this time.
+
+**Solution**: After the first successful boot, use the snapshot feature for instant subsequent boots (<5 seconds).
+
+## Quick Start
+
+### Option A: Patient First Boot
+
+```bash
+# Build and start (wait 10-15 minutes for first boot)
+mvmctl template build openclaw --force
+mvmctl run --template openclaw --name oc --cpus 4 --memory 4096
+
+# Check logs to see progress
+mvmctl logs -f oc
+# Wait for: "listening on ws://127.0.0.1:3000"
+
+# Verify it's running
+curl http://172.16.0.3:3000/
+```
+
+### Option B: Build with Snapshot (Recommended)
+
+```bash
+# Build template WITH snapshot capture (waits for first boot, then saves state)
+mvmctl template build openclaw --force --snapshot
+
+# Now start with instant snapshot restore (<5 seconds)
+mvmctl run --template openclaw --name oc --snapshot
+```
+
+The `--snapshot` flag on `template build` boots the VM once, waits for it to become healthy, captures the running state, then shuts down. Subsequent `run --snapshot` commands restore from this saved state instantly.
 
 ## Architecture
 
 ```
-+---------------------------------------------------+
-|  Firecracker microVM (same image per role)        |
-|                                                   |
-|  /mnt/config/   <- mvm config drive (read-only)  |
-|    config.json       instance metadata            |
-|    openclaw.json     app config (gateway/worker)  |
-|    openclaw.env      environment overrides        |
-|                                                   |
-|  /mnt/secrets/  <- mvm secrets drive (read-only)  |
-|    secrets.json      tenant secrets               |
-|    openclaw-secrets.env  API keys                 |
-|                                                   |
-|  /mnt/data/     <- mvm data drive (read-write)    |
-|    (persistent storage, optional)                 |
-|                                                   |
-|  busybox init -> openclaw-gateway (or worker)     |
-|    reads config from /mnt/config                  |
-|    reads secrets from /mnt/secrets                |
-+---------------------------------------------------+
+Host (macOS/Linux)
+  └─> Lima VM (Ubuntu + KVM)
+      └─> Firecracker microVM
+          ├─> /mnt/config/   (config drive, read-only)
+          ├─> /mnt/secrets/  (secrets drive, read-only)
+          ├─> /mnt/data/     (data drive, optional, persistent)
+          └─> OpenClaw gateway (Node.js, busybox init)
 ```
 
-Drives are mounted by device path (`/dev/vdb`, `/dev/vdc`, `/dev/vdd`).
-Firecracker drive ordering is deterministic, so device paths are stable.
+### Packaging
 
-The `openclaw` user and privilege drop are handled by mkGuest's `users`
-and `user` fields -- no manual user creation needed in the template.
+- **Source**: Official [nix-openclaw](https://github.com/openclaw/nix-openclaw) flake
+- **Build**: Pure Nix derivation with pnpm frozen lockfile
+- **Optimization**: 800+ Vite code-split chunks bundled into 9.5MB ESM file (esbuild `--packages=external`)
+- **Updates**: `cd nix/examples/openclaw && nix flake update nix-openclaw`
+
+### Why Is First Boot Slow?
+
+Nested virtualization overhead:
+- **Lima VM** (direct KVM): OpenClaw starts in ~6 seconds ✅
+- **Firecracker** (nested via Lima): V8 compilation takes 10-15 minutes ⏱️
+
+On native Linux with direct Firecracker access (no Lima), boot times match the Lima performance (~6 seconds).
 
 ## Variants
 
-| Name               | Role    | vCPUs | Memory | Data Disk |
-| ------------------ | ------- | ----- | ------ | --------- |
-| `tenant-gateway`   | gateway | 2     | 1 GiB  | none      |
-| `tenant-worker`    | worker  | 2     | 2 GiB  | 2 GiB     |
+### Gateway (Default)
 
-## Build
-
-Build with mvmctl (from repo root):
+Lightweight MCP proxy, no persistent storage:
 
 ```bash
-mvmctl template build openclaw
+mvmctl run --template openclaw --name oc-gw
 ```
 
-Or directly with Nix:
+### Worker
+
+Agent execution with persistent data disk:
+
+```bash
+mvmctl template build openclaw --profile tenant-worker
+mvmctl run --template openclaw --name oc-worker --profile tenant-worker --data-disk 10G
+```
+
+## Configuration
+
+### Via Environment Variables
+
+```bash
+# Create environment file
+cat > /tmp/openclaw.env <<EOF
+OPENCLAW_LOG_LEVEL=debug
+ANTHROPIC_API_KEY=sk-ant-...
+EOF
+
+# Run with config
+mvmctl run --template openclaw --name oc --config /tmp/openclaw.env
+```
+
+Inside the VM, files from `--config` appear at `/mnt/config/` and are sourced by the start script.
+
+### Via OpenClaw Config File
+
+```json
+{
+  "gateway": {
+    "mode": "local",
+    "port": 3000,
+    "auth": {
+      "enabled": true,
+      "token": "..."
+    }
+  }
+}
+```
+
+Place as `openclaw.json` in the config directory passed via `--config-dir`:
+
+```bash
+mkdir my-config
+cat > my-config/openclaw.json <<EOF
+{"gateway":{"mode":"local","port":3000}}
+EOF
+
+mvmctl run --template openclaw --name oc --config-dir ./my-config
+```
+
+If no `openclaw.json` is provided, a minimal default is generated automatically.
+
+## Networking
+
+- **Internal**: OpenClaw binds to `127.0.0.1:3000` (gateway) and `127.0.0.1:3002` (browser control)
+- **External**: socat forwards from TAP interface (e.g., `172.16.0.3:3000`) to loopback
+- **Host Access**: Use port forwarding:
+
+```bash
+mvmctl forward oc 3000
+# Now access at http://localhost:3000
+```
+
+## Troubleshooting
+
+### Health Checks Keep Failing
+
+**During first boot**: This is normal for 10-15 minutes while V8 compiles. Wait for the log message:
+
+```
+listening on ws://127.0.0.1:3000
+```
+
+Check logs with:
+
+```bash
+mvmctl logs -f oc
+```
+
+### VM Never Starts (20+ Minutes)
+
+Check for zombie Firecracker processes hogging CPU:
+
+```bash
+limactl shell mvm -- ps aux | grep firecracker
+```
+
+Kill any old processes:
+
+```bash
+limactl shell mvm -- sudo pkill -f firecracker
+```
+
+Then restart the VM.
+
+### Testing Without Nested Virtualization
+
+Verify the package works in Lima directly (bypasses nested virt):
+
+```bash
+limactl shell mvm
+/nix/store/*-openclaw-bundled-*/bin/openclaw gateway --port 3000 --allow-unconfigured
+# Should start in ~6 seconds
+```
+
+## Development
+
+### Rebuild Template
+
+```bash
+mvmctl template build openclaw --force
+```
+
+### Update OpenClaw Version
 
 ```bash
 cd nix/examples/openclaw
-nix build .#tenant-gateway
-nix build .#tenant-worker
+nix flake update nix-openclaw
+cd ../../..
+mvmctl template build openclaw --force --snapshot
 ```
 
-Each output contains `vmlinux` (kernel) and `rootfs.ext4` (root filesystem)
-ready for Firecracker.
+### Modify Bundling
 
-## Dev Usage
+Edit `pkgs/openclaw-bundled.nix`. Current approach:
+- Uses `--packages=external` to bundle only OpenClaw's 800 Vite chunks
+- Keeps all node_modules imports external (avoids pnpm resolution issues)
+- Result: 9.5MB single ESM file vs 800+ individual chunks
 
-Run an openclaw gateway locally with `mvmctl`:
+## Performance Summary
 
-```bash
-# 1. Build the template (runs nix build inside the Lima VM)
-mvmctl template build openclaw
+| Environment | Cold Boot | With Snapshot |
+|-------------|-----------|---------------|
+| Lima VM (KVM) | ~6 seconds | N/A (direct) |
+| Firecracker (nested) | 10-15 minutes | <5 seconds ✅ |
+| Firecracker (native Linux) | ~6 seconds | <5 seconds ✅ |
 
-# 2. Run a gateway instance
-mvmctl run --template openclaw --name my-gateway
+**Recommendation**: Always use `--snapshot` for development on macOS.
 
-# 3. Check status (shows IP address)
-mvmctl vm status my-gateway
+## See Also
 
-# 4. Forward the gateway port to localhost
-mvmctl forward my-gateway 3000
-# -> localhost:3000 now proxies to the gateway inside the microVM
-# Press Ctrl-C to stop forwarding
-
-# 5. View serial console logs
-mvmctl logs my-gateway
-
-# 6. Stop the instance
-mvmctl stop my-gateway
-```
-
-### Injecting configuration
-
-Use `--config-dir` and `--secrets-dir` to inject files into the VM's
-config and secrets drives. Every file in the directory is copied onto
-the corresponding drive image before the VM boots.
-
-```bash
-# Prepare config and secrets directories
-mkdir -p my-config my-secrets
-
-# Gateway config (JSON)
-cat > my-config/openclaw.json << 'EOF'
-{
-  "gateway": { "mode": "local", "port": 3000 },
-  "models": ["claude-sonnet-4-5-20250929"],
-  "version": "1"
-}
-EOF
-
-# Environment overrides
-echo 'OPENCLAW_LOG_LEVEL=debug' > my-config/openclaw.env
-
-# API keys (secrets drive is also read-only inside the VM)
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > my-secrets/openclaw-secrets.env
-
-# Run with injected config
-mvmctl run --template openclaw --name my-gateway \
-  --config-dir ./my-config \
-  --secrets-dir ./my-secrets
-```
-
-Inside the VM, these files appear at:
-- `/mnt/config/openclaw.json` -- copied to `/var/lib/openclaw/config/openclaw.json` by the preStart script
-- `/mnt/config/openclaw.env` -- sourced by the service command script
-- `/mnt/secrets/openclaw-secrets.env` -- sourced by the service command script
-
-If no `openclaw.json` is provided, a minimal default is generated
-(`gateway.mode=local`, `port=3000`), so the gateway starts without
-requiring `openclaw setup`.
-
-### Running the worker variant
-
-```bash
-mvmctl run --template openclaw --name my-worker --profile worker \
-  --config-dir ./my-config \
-  --secrets-dir ./my-secrets
-
-# Workers use the data drive for persistent state (skills, sessions)
-mvmctl forward my-worker 3000
-```
-
-## File Structure
-
-```
-nix/examples/openclaw/
-├── flake.nix          Nix flake: mkGuest call per role (gateway, worker)
-└── pkgs/
-    └── openclaw.nix   OpenClaw Node.js gateway package derivation
-```
+- [OpenClaw Documentation](https://docs.openclaw.ai)
+- [nix-openclaw Repository](https://github.com/openclaw/nix-openclaw)
+- [mvm User Guide](../../docs/user-guide.md)
+- [Firecracker Snapshots](../../docs/snapshots.md)

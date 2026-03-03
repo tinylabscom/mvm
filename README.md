@@ -408,7 +408,7 @@ Inside the Lima shell, your host home directory (`~`) is mounted read/write. Thi
 Stop, rebuild, and relaunch a microVM from a template in one shot:
 
 ```bash
-(TEMPLATE=openclaw; NAME=oc; cr cleanup --all; cr stop $NAME; cr template build $TEMPLATE --force; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
+(TEMPLATE=openclaw; NAME=oc; cr cleanup --all; cr stop $NAME; cr template build $TEMPLATE --force --snapshot; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
 ```
 
 ### Sync (Build mvmctl Inside Lima)
