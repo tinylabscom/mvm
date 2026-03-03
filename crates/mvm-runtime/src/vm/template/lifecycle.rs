@@ -385,9 +385,14 @@ pub fn template_build_with_snapshot(id: &str, force: bool) -> Result<()> {
     let _ = shell::run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir));
 
     // Wait for guest agent to become healthy
+    // Note: First boot can take 10-15 minutes on nested virtualization (macOS)
+    // due to V8 compilation overhead. 900s (15 min) timeout ensures snapshot
+    // creation succeeds even on slow systems.
     let vsock_path = format!("{}/v.sock", abs_dir);
-    ui::info("Waiting for guest agent to become healthy...");
-    let health_result = wait_for_healthy(&vsock_path, 120, 2000);
+    ui::info(
+        "Waiting for guest agent to become healthy (may take up to 15 minutes on first boot)...",
+    );
+    let health_result = wait_for_healthy(&vsock_path, 900, 2000);
 
     if let Err(e) = health_result {
         cleanup_snapshot_vm(&abs_dir, &abs_socket, &slot);
