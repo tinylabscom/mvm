@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Usage:
 #   # Binary-only install (default)
-#   curl -fsSL https://raw.githubusercontent.com/auser/mvm/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/auser/mvm/main/install.sh | bash
 #
 #   # Dev (macOS + Lima, or Linux dev)
 #   curl -fsSL https://raw.githubusercontent.com/auser/mvm/main/install.sh | bash -s -- dev
