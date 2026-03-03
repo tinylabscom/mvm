@@ -217,7 +217,7 @@ pkgs.writeScript "mvm-minimal-init" ''
     ip link set eth0 up
     ip addr add "$MVM_IP" dev eth0
     ip route add default via "$MVM_GW"
-    echo "nameserver $MVM_GW" > /etc/resolv.conf
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
   else
     echo "[init] WARNING: no mvm.ip/mvm.gw on cmdline, skipping network" > /dev/console
   fi
