@@ -8,7 +8,7 @@ use crate::logging::{self, LogFormat};
 use crate::shell_init;
 use crate::template_cmd;
 use crate::ui;
-use crate::upgrade;
+use crate::update;
 
 use mvm_core::util::parse_human_size;
 use mvm_core::vm_backend::VmId;
@@ -173,7 +173,7 @@ enum Commands {
         yes: bool,
     },
     /// Check for and install the latest version of mvmctl
-    Upgrade {
+    Update {
         /// Only check for updates, don't install
         #[arg(long)]
         check: bool,
@@ -653,7 +653,7 @@ pub fn run() -> Result<()> {
 
         Commands::Status => cmd_status(),
         Commands::Destroy { yes } => cmd_destroy(yes),
-        Commands::Upgrade { check, force } => cmd_upgrade(check, force),
+        Commands::Update { check, force } => cmd_update(check, force),
         Commands::Doctor { json } => cmd_doctor(json),
         Commands::Security { action } => cmd_security(action),
         Commands::Release {
@@ -1744,8 +1744,8 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn cmd_upgrade(check: bool, force: bool) -> Result<()> {
-    upgrade::upgrade(check, force)
+fn cmd_update(check: bool, force: bool) -> Result<()> {
+    update::update(check, force)
 }
 
 fn cmd_doctor(json: bool) -> Result<()> {

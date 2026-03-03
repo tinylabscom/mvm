@@ -447,8 +447,8 @@ Then connect with `ssh mvm` from any terminal.
 | `mvmctl status` | Show platform, Lima VM, Firecracker, and microVM status |
 | `mvmctl destroy` | Tear down Lima VM and all resources (confirmation required) |
 | `mvmctl doctor` | Run system diagnostics and dependency checks |
-| `mvmctl upgrade` | Check for and install mvmctl updates |
-| `mvmctl upgrade --check` | Only check for updates, don't install |
+| `mvmctl update` | Check for and install mvmctl updates |
+| `mvmctl update --check` | Only check for updates, don't install |
 
 ### MicroVM Lifecycle
 
@@ -545,7 +545,7 @@ mvm is a Cargo workspace with 6 crates:
 | **mvm-build** | Nix builder pipeline (dev_build for local, pool_build for fleet) |
 | **mvm-runtime** | Shell execution, Lima/Firecracker VM lifecycle, UI, template management |
 | **mvm-security** | Security posture evaluation, jailer operations, seccomp profiles |
-| **mvm-cli** | Clap CLI, bootstrap, upgrade, doctor, security, template commands |
+| **mvm-cli** | Clap CLI, bootstrap, update, doctor, security, template commands |
 
 The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`. The binary entry point (`src/main.rs`) delegates to `mvm_cli::run()`.
 

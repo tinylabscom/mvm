@@ -54,7 +54,7 @@ fn test_help_lists_all_subcommands() {
         "cleanup",
         "status",
         "destroy",
-        "upgrade",
+        "update",
         "run",
         "forward",
         "shell-init",
@@ -95,9 +95,9 @@ fn test_dev_help() {
 }
 
 #[test]
-fn test_upgrade_help() {
+fn test_update_help() {
     mvm()
-        .args(["upgrade", "--help"])
+        .args(["update", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("latest version"));

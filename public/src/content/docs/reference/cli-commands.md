@@ -14,8 +14,8 @@ description: Complete command reference for mvmctl.
 | `mvmctl status` | Show platform, Lima VM, Firecracker, and microVM status |
 | `mvmctl destroy` | Tear down Lima VM and all resources (confirmation required) |
 | `mvmctl doctor` | Run system diagnostics and dependency checks |
-| `mvmctl upgrade` | Check for and install mvmctl updates |
-| `mvmctl upgrade --check` | Only check for updates, don't install |
+| `mvmctl update` | Check for and install mvmctl updates |
+| `mvmctl update --check` | Only check for updates, don't install |
 
 ## MicroVM Lifecycle
 

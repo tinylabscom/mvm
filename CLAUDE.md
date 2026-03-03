@@ -20,7 +20,7 @@ macOS / Linux Host (this CLI) -> Lima VM (Ubuntu) -> Firecracker microVM (/dev/k
 - `mvm-guest` -- vsock protocol, integration manifest/state (OpenClaw)
 - `mvm-build` -- Nix builder pipeline (dev_build uses `ShellEnvironment` trait, pool_build uses `BuildEnvironment`)
 - `mvm-runtime` -- shell execution, Lima/Firecracker VM lifecycle, UI, template management
-- `mvm-cli` -- Clap CLI, bootstrap, upgrade, doctor, template commands
+- `mvm-cli` -- Clap CLI, bootstrap, update, doctor, template commands
 
 Root package: `src/lib.rs` (facade re-exports `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
 
@@ -45,7 +45,7 @@ mvm-build: `dev_build.rs` (local Nix builds via ShellEnvironment), `build.rs` (o
 
 mvm-guest: `vsock.rs`, `integrations.rs`, `builder_agent.rs`
 
-mvm-cli: `commands.rs`, `bootstrap.rs`, `template_cmd.rs`, `doctor.rs`, `upgrade.rs`, `http.rs`, `logging.rs`, `ui.rs`
+mvm-cli: `commands.rs`, `bootstrap.rs`, `template_cmd.rs`, `doctor.rs`, `update.rs`, `http.rs`, `logging.rs`, `ui.rs`
 
 ### Trait Architecture
 

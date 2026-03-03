@@ -11,6 +11,6 @@ pub mod security_cmd;
 pub mod shell_init;
 pub mod template_cmd;
 pub mod ui;
-pub mod upgrade;
+pub mod update;
 
 pub use commands::run;

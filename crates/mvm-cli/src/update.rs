@@ -236,7 +236,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Main entry point: check for updates and optionally install.
-pub fn upgrade(check_only: bool, force: bool) -> Result<()> {
+pub fn update(check_only: bool, force: bool) -> Result<()> {
     let current = current_version();
     ui::info(&format!("Current version: {}", current));
 
@@ -278,7 +278,7 @@ pub fn upgrade(check_only: bool, force: bool) -> Result<()> {
     download_release(&latest_tag, target, tmp_dir.path())?;
     extract_and_install(target, tmp_dir.path(), &current_exe)?;
 
-    ui::success(&format!("\nSuccessfully upgraded to {}!", latest_tag));
+    ui::success(&format!("\nSuccessfully updated to {}!", latest_tag));
     ui::info("The binary has been replaced on disk.");
     ui::info("To verify: Open a new shell and run 'mvmctl --version'");
     ui::info("Or run: hash -r  (to clear your shell's command cache)");

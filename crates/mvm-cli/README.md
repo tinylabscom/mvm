@@ -1,6 +1,6 @@
 # mvm-cli
 
-Clap-based CLI commands, bootstrap workflow, diagnostics, upgrade mechanism, and template management. This is a **pure library crate** — the `mvm` binary lives in the root package and calls `mvm_cli::run()`.
+Clap-based CLI commands, bootstrap workflow, diagnostics, update mechanism, and template management. This is a **pure library crate** — the `mvm` binary lives in the root package and calls `mvm_cli::run()`.
 
 ## Modules
 
@@ -9,12 +9,12 @@ Clap-based CLI commands, bootstrap workflow, diagnostics, upgrade mechanism, and
 | `commands` | Main CLI entry point (`run()`), all command definitions and handlers |
 | `bootstrap` | Full environment setup (Homebrew/apt, Lima, Nix, Firecracker) |
 | `doctor` | System diagnostics and dependency checks (`mvm doctor`) |
-| `upgrade` | Self-upgrade from GitHub releases |
+| `update` | Self-update from GitHub releases |
 | `template_cmd` | Template CRUD commands (create, list, build, delete, push, pull) |
 | `logging` | Log format configuration (`LogFormat::Human` / `LogFormat::Json`) |
 | `ui` | Terminal UI helpers (colored messages, spinners, prompts, status tables) |
 | `fleet` | Fleet management commands |
-| `http` | HTTP client utilities (for upgrade checks) |
+| `http` | HTTP client utilities (for update checks) |
 
 ## Commands
 
@@ -32,7 +32,7 @@ Clap-based CLI commands, bootstrap workflow, diagnostics, upgrade mechanism, and
 | `mvm status` | Show Lima and microVM status |
 | `mvm logs <name>` | Show microVM console or hypervisor logs |
 | `mvm doctor [--json]` | System diagnostics |
-| `mvm upgrade` | Check for and install latest version |
+| `mvm update` | Check for and install latest version |
 | `mvm template <action>` | Manage global templates |
 
 ## Global Flags

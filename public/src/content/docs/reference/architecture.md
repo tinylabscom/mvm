@@ -14,7 +14,7 @@ mvm is a Cargo workspace with 6 crates plus a root facade:
 | **mvm-build** | Nix builder pipeline (dev_build for local, pool_build for fleet) |
 | **mvm-runtime** | Shell execution, Lima/Firecracker VM lifecycle, UI, template management |
 | **mvm-security** | Security posture evaluation, jailer operations, seccomp profiles |
-| **mvm-cli** | Clap CLI, bootstrap, upgrade, doctor, security, template commands |
+| **mvm-cli** | Clap CLI, bootstrap, update, doctor, security, template commands |
 
 The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`. The binary entry point (`src/main.rs`) delegates to `mvm_cli::run()`.
 

@@ -33,7 +33,7 @@ cargo install mvmctl
 ## Self-Update
 
 ```bash
-mvmctl upgrade
+mvmctl update
 ```
 
 ## Prerequisites
