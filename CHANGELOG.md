@@ -1,5 +1,26 @@
 # Changelog
 
+
+## [0.3.5] — 2026-03-03
+
+### Added
+- `mvmctl template edit` command for modifying template configurations (flake, profile, role, cpus, mem, data-disk)
+- Automated changelog generation via `scripts/update-changelog.sh` integrated into `just release` workflow
+- Template snapshot health check timeout increased to 15 minutes for nested virtualization compatibility
+- Improved install script error handling for GitHub API rate limits and tmpdir cleanup
+
+### Changed
+- **Template snapshot redesign**: Fixed Firecracker snapshot API ordering (load before config)
+- Template snapshots now use template-relative paths for drives and vsock with per-instance symlinks
+- Implemented flock-based serialization for concurrent instance startup from same template
+- Multiple VMs can now run from the same template snapshot without path conflicts
+
+### Fixed
+- Fixed Firecracker "Loading a microVM snapshot not allowed after configuring boot-specific resources" error
+- Fixed template snapshot vsock socket path issues
+- Fixed release verification script to accept both hyphen and em dash date separators in CHANGELOG.md
+- Bootstrap improvements: install jq and better doctor messaging
+
 All notable changes to mvm are documented in this file.
 
 ## [0.3.2] — 2026-02-25

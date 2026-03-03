@@ -52,8 +52,9 @@ if [[ ! -f "$changelog" ]]; then
   exit 1
 fi
 
-if ! grep -Eq "^## \\[$version\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" "$changelog"; then
+if ! grep -Eq "^## \\[$version\\] [—-] [0-9]{4}-[0-9]{2}-[0-9]{2}$" "$changelog"; then
   echo "Missing changelog release section for version $version in $changelog" >&2
+  echo "Expected format: ## [$version] — YYYY-MM-DD" >&2
   exit 1
 fi
 

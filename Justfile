@@ -82,18 +82,20 @@ release VERSION:
     sed -i '' 's/^version = ".*"/version = "{{VERSION}}"/' Cargo.toml
     cargo check --workspace --quiet
     echo "    Cargo.toml [workspace.package] version set to {{VERSION}}"
-    # 2. Commit the version bump (if anything changed)
-    if ! git diff --quiet Cargo.toml Cargo.lock; then
-        git add Cargo.toml Cargo.lock
-        git commit -m "chore: bump workspace version to {{VERSION}}"
+    # 2. Auto-generate changelog entry if missing
+    scripts/update-changelog.sh --version "{{VERSION}}"
+    # 3. Commit the version bump and changelog (if anything changed)
+    if ! git diff --quiet Cargo.toml Cargo.lock CHANGELOG.md; then
+        git add Cargo.toml Cargo.lock CHANGELOG.md
+        git commit -m "chore: bump version to {{VERSION}} and update changelog"
     fi
-    # 3. Quality gates
+    # 4. Quality gates
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
-    # 4. Verify changelog & crate versions match
+    # 5. Verify changelog & crate versions match
     scripts/verify-release-version.sh --version "{{VERSION}}"
-    # 5. Tag and push (triggers .github/workflows/release.yml)
+    # 6. Tag and push (triggers .github/workflows/release.yml)
     git tag "v{{VERSION}}"
     git push origin "v{{VERSION}}"
     echo "==> Tag v{{VERSION}} pushed. Release workflow will build and publish."
