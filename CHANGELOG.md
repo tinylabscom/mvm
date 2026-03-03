@@ -1,6 +1,21 @@
 # Changelog
 
 
+## [0.3.6] — 2026-03-03
+
+### Added
+- rename(cli): rename `upgrade` command to `update`
+- fix(init): use Google DNS (8.8.8.8) instead of gateway for microVM DNS resolution
+- fix(examples): fix dynamic mounts permissions and simplify OpenClaw example
+- feat(openclaw): add simple native install approach
+- fix(openclaw): attempt to fix esbuild bundling with external flags
+- fix(bootstrap): update Lima installation to use GitHub releases
+
+### Changed
+
+### Fixed
+
+
 ## [0.3.5] — 2026-03-03
 
 ### Added
