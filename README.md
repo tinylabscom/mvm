@@ -433,7 +433,7 @@ mvmctl template pull base-worker
 mvmctl template verify base-worker     # Verify checksums
 ```
 
-Requires `MVM_TEMPLATE_REGISTRY` environment variable to be set.
+Requires `MVM_TEMPLATE_REGISTRY_ENDPOINT` and related environment variables to be set (see [Environment Variables](#environment-variables)).
 
 ### Manage
 
@@ -588,7 +588,12 @@ Then connect with `ssh mvm` from any terminal.
 | `MVM_FC_ASSET_ROOTFS` | Override rootfs filename | Auto-detected |
 | `MVM_FC_ASSET_KERNEL` | Override kernel filename | Auto-detected |
 | `MVM_BUILDER_MODE` | Builder transport: `auto`, `vsock`, or `ssh` | `auto` |
-| `MVM_TEMPLATE_REGISTRY` | S3 endpoint for template push/pull | None |
+| `MVM_TEMPLATE_REGISTRY_ENDPOINT` | S3-compatible endpoint URL for template push/pull | None |
+| `MVM_TEMPLATE_REGISTRY_BUCKET` | S3 bucket name for templates | None |
+| `MVM_TEMPLATE_REGISTRY_ACCESS_KEY_ID` | S3 access key ID | None |
+| `MVM_TEMPLATE_REGISTRY_SECRET_ACCESS_KEY` | S3 secret access key | None |
+| `MVM_TEMPLATE_REGISTRY_PREFIX` | Key prefix inside the bucket | `mvm` |
+| `MVM_TEMPLATE_REGISTRY_REGION` | S3 region | `us-east-1` |
 | `MVM_SSH_PORT` | Lima SSH local port | `60022` |
 | `MVM_PRODUCTION` | Enable production mode checks | `false` |
 
@@ -678,10 +683,11 @@ cargo clippy --workspace -- -D warnings  # Lint (0 warnings required)
 ## Documentation
 
 - [Quick Start](QUICKSTART.md) -- step-by-step guide
-- [Development](docs/development.md) -- contributor guide
-- [User Guide](docs/user-guide.md) -- writing Nix flakes for microVM images
-- [Smoke Tests](docs/SMOKE_TEST.md) -- testing the dev workflow
-- [Troubleshooting](docs/troubleshooting.md) -- common issues and fixes
+- [Documentation Site](https://gomicrovm.com) -- full docs (architecture, guides, CLI reference)
+- [Writing Nix Flakes](public/src/content/docs/guides/nix-flakes.md) -- mkGuest API reference
+- [Templates](public/src/content/docs/guides/templates.md) -- reusable base images
+- [Troubleshooting](public/src/content/docs/guides/troubleshooting.md) -- common issues and fixes
+- [Development](public/src/content/docs/contributing/development.md) -- contributor guide
 
 ## Related Projects
 

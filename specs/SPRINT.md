@@ -25,7 +25,7 @@ Active development has moved to [mvmd](https://github.com/auser/mvmd) (fleet orc
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade          |
-| Total tests      | 611                      |
+| Total tests      | 630                      |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | Examples         | hello, openclaw, paperclip |
@@ -42,8 +42,9 @@ These items may be addressed as needed, driven by mvmd requirements:
 - **mvm-profiles.toml redesign**: Map profiles to flake package attributes instead of
   NixOS module paths. Update Rust parser in mvm-build accordingly.
 
-- **Upstream mvm-core changes**: Add fields to `DesiredPool`/`DesiredTenant` as needed
-  by mvmd Sprint 13 (end-to-end integration).
+- **Upstream mvm-core changes**: `UpdateStrategy` types, `DesiredPool.registry_artifact`,
+  and `registry_download_revision()` extraction are complete (Phases 71-72a). Further
+  fields may be added as needed by mvmd Sprint 13.
 
 ## Maintenance Policy
 

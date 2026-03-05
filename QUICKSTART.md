@@ -178,7 +178,7 @@ Volume format: `host_path:guest_mount:size_mb`
 |----------|-------------|
 | `MVM_FC_VERSION` | Override Firecracker version (auto-normalized) |
 | `MVM_BUILDER_MODE` | Builder transport: `auto` (default), `vsock`, or `ssh` |
-| `MVM_TEMPLATE_REGISTRY` | S3 endpoint for template push/pull |
+| `MVM_TEMPLATE_REGISTRY_ENDPOINT` | S3-compatible endpoint URL for template push/pull |
 | `MVM_SSH_PORT` | Lima SSH local port (default: 60022) |
 
 ## Diagnostics
@@ -204,7 +204,7 @@ mvmctl doctor    # Check system dependencies and configuration
 ## Next Steps
 
 - [README.md](README.md) -- full command reference and architecture
-- [User Guide](docs/user-guide.md) -- writing Nix flakes for microVM images
-- [Development](docs/development.md) -- contributing to mvm
-- [Troubleshooting](docs/troubleshooting.md) -- common issues
+- [Writing Nix Flakes](public/src/content/docs/guides/nix-flakes.md) -- mkGuest API reference
+- [Development](public/src/content/docs/contributing/development.md) -- contributing to mvm
+- [Troubleshooting](public/src/content/docs/guides/troubleshooting.md) -- common issues
 - For multi-tenant fleet management, see [mvmd](https://github.com/auser/mvmd)

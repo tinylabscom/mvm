@@ -124,24 +124,42 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
         flake = flake_ref
     ))?;
 
-    // Run nix build — it will fail with hash mismatch, printing the correct hash.
-    // Phase 2/3 never execute; only the FOD download runs.
-    let output = shell::run_in_vm_stdout(&format!(
-        r#"cd {flake} && nix build .# --no-link 2>&1 | grep -oE 'got:[[:space:]]+sha256-[A-Za-z0-9+/]+={{0,2}}' | sed 's/got:[[:space:]]*//' || true"#,
+    // Run nix build and capture all output. It will fail with hash mismatch,
+    // printing the correct hash. Phase 2/3 never execute; only the FOD runs.
+    ui::info("Running nix build to compute hash (this downloads the package)...");
+    let build_output = shell::run_in_vm_stdout(&format!(
+        r#"cd {flake} && nix build '.#' --no-link 2>&1 || true"#,
         flake = flake_ref
     ))?;
-    let new_hash = output.trim();
+
+    // Extract the "got: sha256-..." hash from the build output.
+    let new_hash = build_output
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("got:") {
+                Some(trimmed.trim_start_matches("got:").trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
     if new_hash.is_empty() {
-        // Restore original hash on failure.
+        // Show the nix output so the user can diagnose the failure.
+        for line in build_output.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                ui::info(&format!("  nix: {trimmed}"));
+            }
+        }
+        // Restore original hash.
         let _ = shell::run_in_vm(&format!(
             r#"sed -i.bak 's|outputHash = "[^"]*"|outputHash = "{orig}"|' {flake}/flake.nix && rm -f {flake}/flake.nix.bak"#,
             orig = orig_hash,
             flake = flake_ref
         ));
-        return Err(anyhow!(
-            "Could not compute FOD hash. Check network connectivity and nix build output."
-        ));
+        return Err(anyhow!("Could not extract FOD hash from nix build output."));
     }
 
     // Write the correct hash.

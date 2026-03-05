@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/auser/mvm/main/install.sh | sh
 ## Pin a Version
 
 ```bash
-MVM_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/auser/mvm/main/install.sh | sh
+MVM_VERSION=v0.3.6 curl -fsSL https://raw.githubusercontent.com/auser/mvm/main/install.sh | sh
 ```
 
 ## From Source
