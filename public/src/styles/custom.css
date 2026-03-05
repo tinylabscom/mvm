@@ -1,7 +1,9 @@
 /* Load JetBrains Mono for crisp monospace rendering */
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
 
-/* Force dark mode globally — override Starlight's default palette */
+/* Force dark mode globally — override Starlight's default palette.
+   Unlayered :root beats Starlight's @layer starlight.base, so these
+   values apply regardless of the theme-picker state (Auto/Light/Dark). */
 :root {
   --sl-color-accent-low: var(--color-accent-low);
   --sl-color-accent: var(--color-accent);
@@ -22,6 +24,26 @@
   --sl-color-gray-5: var(--color-dim);
   --sl-color-gray-6: var(--color-border);
   --sl-color-black: var(--color-page);
+
+  /* Aside/admonition colors — must be pinned to dark values.
+     Without these, Starlight's theme-picker "Auto" mode can flip
+     aside backgrounds to light-mode pastels while text stays light. */
+  --sl-color-blue-low: #0d1f3c;
+  --sl-color-blue: #58a6ff;
+  --sl-color-blue-high: #c8e1ff;
+  --sl-color-purple-low: #1c1330;
+  --sl-color-purple: #a371f7;
+  --sl-color-purple-high: #d2b8ff;
+  --sl-color-orange-low: #2a1e03;
+  --sl-color-orange: #d29922;
+  --sl-color-orange-high: #f0dfa0;
+  --sl-color-red-low: #2c0e12;
+  --sl-color-red: #f85149;
+  --sl-color-red-high: #ffb4a9;
+  --sl-color-green-low: #0d2818;
+  --sl-color-green: #3fb950;
+  --sl-color-green-high: #aff5b4;
+
   --sl-font-system-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code",
     Consolas, monospace;
   color-scheme: dark;
