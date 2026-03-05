@@ -45,6 +45,12 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 - Security code: positive path (valid data accepted), negative path (tampered/invalid data rejected), and edge cases (replay, wrong key, expired session).
 - If a function can fail, test that it fails correctly (returns `Err`, not panic).
 
-## Screenshots
+## Screenshots & Temporary Files
 
-**NEVER** save screenshots to the project root or any directory within the repository. Always save screenshots to `/tmp/` (e.g. `/tmp/screenshot.png`). This prevents binary files from polluting the git history.
+**NEVER** save screenshots, images, or any binary artifacts to the project root or any directory within the repository. Always save screenshots and temporary files to `/tmp/` (e.g. `/tmp/screenshot.png`, `/tmp/page-snapshot.png`). This prevents binary files from polluting the git history.
+
+When using Playwright or other browser tools, explicitly set the output path to `/tmp/`:
+- Screenshots: `filename: "/tmp/screenshot.png"`
+- Snapshots: `filename: "/tmp/snapshot.md"`
+
+If you accidentally save files to the repo, delete them immediately before committing.
