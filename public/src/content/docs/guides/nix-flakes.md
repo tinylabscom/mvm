@@ -43,13 +43,14 @@ mvm uses Nix flakes to produce reproducible microVM images. Each build runs `nix
 | `name` | VM name (used in image filename) |
 | `packages` | Nix packages to include in the rootfs |
 | `hostname` | Guest hostname (default: same as `name`) |
+| `serviceGroup` | Default service user/group name (default: `"mvm"`). Services run as this user; secrets are readable by this group. |
 | `users.<name>.uid` | User ID (optional, auto-assigned from 1000) |
 | `users.<name>.group` | Group name (optional, defaults to user name) |
 | `users.<name>.home` | Home directory (optional, defaults to `/home/<name>`) |
 | `services.<name>.command` | Long-running service command (supervised with respawn) |
 | `services.<name>.preStart` | Optional setup script (runs as root before the service) |
 | `services.<name>.env` | Optional environment variables (`{ KEY = "value"; }`) |
-| `services.<name>.user` | Optional user to run as (must exist in `users`) |
+| `services.<name>.user` | User to run as (default: `serviceGroup`) |
 | `services.<name>.logFile` | Optional log file path (default: `/dev/console`) |
 | `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy) |
 | `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
@@ -84,7 +85,7 @@ services.my-app = {
     NODE_ENV = "production";
   };
 
-  # Run as a specific user (must be defined in users)
+  # Run as a specific user (default: serviceGroup, which defaults to "mvm")
   user = "app";
 
   # Log to a file instead of console
@@ -111,7 +112,21 @@ mvmctl vm status
 mvmctl vm inspect <name>
 ```
 
-## Custom Users
+## Users
+
+All services run as a built-in non-root user (default: `mvm`, uid 900) — never as root. Secrets at `/mnt/secrets` are owned by `root:<serviceGroup>` with mode `0440`, so only members of the service group can read them. Custom users are automatically added to this group.
+
+To change the default service user/group name, set `serviceGroup`:
+
+```nix
+mvm.lib.${system}.mkGuest {
+  name = "my-app";
+  serviceGroup = "app";  # default: "mvm"
+  # ...
+};
+```
+
+To run a service as a custom user, define it in `users` and reference it in the service. The custom user is automatically added to the service group for secrets access:
 
 ```nix
 users.app = {
@@ -122,9 +137,11 @@ users.app = {
 
 services.my-app = {
   command = "${pkgs.nodejs}/bin/node /app/server.js";
-  user = "app";
+  user = "app";  # overrides the default serviceGroup user
 };
 ```
+
+The `preStart` script always runs as root regardless of the `user` setting, so it can perform privileged setup like mounting filesystems or creating directories.
 
 ## Rootfs Types
 

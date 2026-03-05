@@ -391,6 +391,7 @@ fn run_health_check(entry: &IntegrationEntry) -> IntegrationHealthResult {
 fn integration_health_loop(state: Arc<Mutex<IntegrationState>>) {
     let count = state.lock().map(|s| s.integrations.len()).unwrap_or(0);
     let mut last_checked: Vec<Option<std::time::Instant>> = vec![None; count];
+    let boot_time = std::time::Instant::now();
 
     loop {
         let entries: Vec<(usize, IntegrationEntry)> = {
@@ -419,7 +420,11 @@ fn integration_health_loop(state: Arc<Mutex<IntegrationState>>) {
             }
 
             let result = run_health_check(entry);
-            if !result.healthy {
+            // During the startup grace period, still store results (so the host
+            // can poll via vsock) but don't log failures to console.
+            let in_grace = entry.startup_grace_secs > 0
+                && boot_time.elapsed() < Duration::from_secs(entry.startup_grace_secs);
+            if !result.healthy && !in_grace {
                 eprintln!(
                     "mvm-guest-agent: health check failed for '{}': {}",
                     entry.name, result.detail
@@ -758,6 +763,30 @@ fn handle_client(
         GuestRequest::ProbeStatus => GuestResponse::ProbeStatusReport {
             probes: build_probe_reports(probe_state),
         },
+
+        GuestRequest::PostRestore => {
+            // Send SIGUSR1 to PID 1 to trigger drive remount + service restart.
+            let result = std::process::Command::new("kill")
+                .args(["-USR1", "1"])
+                .output();
+            match result {
+                Ok(out) if out.status.success() => GuestResponse::PostRestoreAck {
+                    success: true,
+                    detail: Some("post-restore signal sent to init".to_string()),
+                },
+                Ok(out) => GuestResponse::PostRestoreAck {
+                    success: false,
+                    detail: Some(format!(
+                        "kill failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    )),
+                },
+                Err(e) => GuestResponse::PostRestoreAck {
+                    success: false,
+                    detail: Some(format!("failed to send signal: {}", e)),
+                },
+            }
+        }
 
         #[cfg(feature = "dev-shell")]
         GuestRequest::Exec {

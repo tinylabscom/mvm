@@ -188,7 +188,7 @@ mvmctl run --template my-app \
 
 Inside the guest:
 - Config files appear at `/mnt/config/` (read-only, mode 0444)
-- Secret files appear at `/mnt/secrets/` (read-only, mode 0400)
+- Secret files appear at `/mnt/secrets/` (read-only, mode 0440 `root:<serviceGroup>`)
 
 The same API is available programmatically via `FlakeRunConfig.config_files` and `FlakeRunConfig.secret_files` for library consumers like [mvmd](https://github.com/auser/mvmd).
 
@@ -330,13 +330,14 @@ The `mkGuest` API:
 | `name` | VM name (used in image filename) |
 | `packages` | Nix packages to include in the rootfs |
 | `hostname` | Guest hostname (default: same as `name`) |
+| `serviceGroup` | Default service user/group name (default: `"mvm"`). Services run as this user; secrets are readable by this group. |
 | `users.<name>.uid` | User ID (optional, auto-assigned from 1000) |
 | `users.<name>.group` | Group name (optional, defaults to user name) |
 | `users.<name>.home` | Home directory (optional, defaults to `/home/<name>`) |
 | `services.<name>.command` | Long-running service command (supervised with respawn) |
 | `services.<name>.preStart` | Optional setup script (runs as root before the service) |
 | `services.<name>.env` | Optional environment variables (`{ KEY = "value"; }`) |
-| `services.<name>.user` | Optional user to run as (must exist in `users`) |
+| `services.<name>.user` | User to run as (default: `serviceGroup`) |
 | `services.<name>.logFile` | Optional log file path (default: `/dev/console`) |
 | `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy) |
 | `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
@@ -368,6 +369,20 @@ For repeatable multi-role builds, use a TOML config:
 ```bash
 mvmctl template build base-worker --config templates.toml
 ```
+
+### Snapshots
+
+Add `--snapshot` to capture a fully booted, healthy VM state at build time. Subsequent `run` commands restore from this snapshot instead of cold-booting -- sub-second startup instead of minutes:
+
+```bash
+# Build + snapshot (one-time)
+mvmctl template build openclaw --snapshot
+
+# Runs auto-detect the snapshot -- no extra flags needed:
+mvmctl run --template openclaw --name oc
+```
+
+The snapshot process builds the image, boots a temporary VM, waits for all services to be healthy, then captures a full Firecracker snapshot (`vmstate.bin` + `mem.bin`). Use `--force --snapshot` to rebuild and re-snapshot.
 
 ### Share via Registry
 
@@ -408,8 +423,21 @@ Inside the Lima shell, your host home directory (`~`) is mounted read/write. Thi
 Stop, rebuild, and relaunch a microVM from a template in one shot:
 
 ```bash
-(TEMPLATE=openclaw; NAME=oc; cr cleanup --all; cr stop $NAME; cr template build $TEMPLATE --force --snapshot; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
+# Generic (no volumes)
+(TEMPLATE=hello; NAME=demo; cr cleanup --all; cr stop $NAME; cr template build $TEMPLATE --force --snapshot; cr run --template $TEMPLATE --name $NAME; cr logs -f $NAME;)
+
+# With config/secrets volumes and port forwarding (e.g., OpenClaw)
+(TEMPLATE=openclaw; NAME=oc; cr cleanup --all; \
+    cr stop $NAME; \
+    cr template build $TEMPLATE --force --snapshot; \
+    cr run  --template $TEMPLATE \
+            --name $NAME \
+            -v nix/examples/openclaw/config:/mnt/config \
+            -v nix/examples/openclaw/secrets:/mnt/secrets \
+            -p 3000:3000; cr forward $NAME & cr logs -f $NAME;)
 ```
+
+Drop `--snapshot` if you don't need instant restore on subsequent runs.
 
 ### Sync (Build mvmctl Inside Lima)
 
@@ -480,6 +508,7 @@ Then connect with `ssh mvm` from any terminal.
 | `mvmctl template create <name>` | Create a single template definition |
 | `mvmctl template create-multi <base>` | Create templates for multiple roles |
 | `mvmctl template build <name>` | Build a template (runs nix build in Lima) |
+| `mvmctl template build <name> --snapshot` | Build and capture a Firecracker snapshot for instant restore |
 | `mvmctl template build <name> --config <toml>` | Build from a TOML config file |
 | `mvmctl template push <name>` | Push to S3-compatible registry |
 | `mvmctl template pull <name>` | Pull from registry |

@@ -25,13 +25,13 @@
           rustc = rustToolchain;
         };
 
-        # Shared kernel — built once, used by both mkGuest and mkNixosGuest.
-        firecrackerKernel = import ./lib/firecracker-kernel-pkg.nix { inherit pkgs; };
+        # Shared kernel — built once, used by mkGuest.
+        firecrackerKernel = import ./firecracker-kernel-pkg.nix { inherit pkgs; };
 
         # mvm guest agent — vsock management agent for all mvm microVMs.
-        mvm-guest-agent = import ./modules/guest-agent-pkg.nix {
+        mvm-guest-agent = import ./guest-agent-pkg.nix {
           inherit pkgs rustPlatform;
-          mvmSrc = ./..;
+          mvmSrc = ./../..;
         };
 
         busybox = pkgs.pkgsStatic.busybox;
@@ -65,28 +65,32 @@
         #   command   — long-running process (supervised with respawn)
         #   preStart  — optional setup script (runs as root)
         #   env       — optional environment variables { KEY = "val"; }
-        #   user      — optional user to run as (must exist in `users`)
+        #   user      — user to run as (default: serviceGroup)
         #   logFile   — optional log file path (default: /dev/console)
         #
         # Users:
         #   users.<name> = { uid?, group?, home? }
         #   Auto-assigns UIDs from 1000 if not specified.
+        #   Custom users are automatically added to serviceGroup for secrets access.
         #
         # Produces:
         #   $out/vmlinux       — uncompressed kernel for Firecracker
         #   $out/rootfs.ext4   — ext4 root filesystem (no initrd)
         #
         lib.mkGuest = { name, packages ? [], services ? {}, healthChecks ? {},
-                        users ? {}, hostname ? name }:
+                        users ? {}, hostname ? name, serviceGroup ? "mvm",
+                        cacert ? pkgs.cacert }:
           let
-            initScript = import ./lib/minimal-init.nix {
-              inherit pkgs hostname users services healthChecks busybox;
+            initScript = import ./minimal-init.nix {
+              inherit pkgs hostname serviceGroup users services healthChecks busybox;
               guestAgentPkg = mvm-guest-agent;
             };
 
+            cacertPaths = pkgs.lib.optionals (cacert != null) [ cacert ];
+
             rootfs = pkgs.callPackage
               (nixpkgs + "/nixos/lib/make-ext4-fs.nix") {
-              storePaths = [ initScript mvm-guest-agent ] ++ packages;
+              storePaths = [ initScript mvm-guest-agent ] ++ cacertPaths ++ packages;
               volumeLabel = "mvm";
               populateImageCommands = ''
                 mkdir -p ./files/dev ./files/proc ./files/sys
@@ -97,6 +101,12 @@
                 mkdir -p ./files/mnt/config ./files/mnt/secrets ./files/mnt/data
                 ln -s ${initScript} ./files/init
                 ln -s ${busybox}/bin/sh ./files/bin/sh
+              '' + pkgs.lib.optionalString (cacert != null) ''
+                mkdir -p ./files/etc/ssl/certs
+                mkdir -p ./files/etc/pki/tls/certs
+                ln -s ${cacert}/etc/ssl/certs/ca-bundle.crt ./files/etc/ssl/certs/ca-bundle.crt
+                ln -s ${cacert}/etc/ssl/certs/ca-bundle.crt ./files/etc/ssl/certs/ca-certificates.crt
+                ln -s ${cacert}/etc/ssl/certs/ca-bundle.crt ./files/etc/pki/tls/certs/ca-bundle.crt
               '';
             };
           in
@@ -105,65 +115,6 @@
             ${copyKernel firecrackerKernel}
             cp "${rootfs}" "$out/rootfs.ext4"
           '';
-
-        # ── mkNixosGuest — Full NixOS guest (legacy) ─────────────
-        #
-        # mvm.lib.<system>.mkNixosGuest { name, modules? }
-        #
-        # Builds a full NixOS guest image with systemd.  Use this for
-        # complex workloads that need NixOS modules (systemd services,
-        # users, tmpfiles, etc.).  Prefer mkGuest for new templates.
-        #
-        # Produces:
-        #   $out/vmlinux       — uncompressed kernel
-        #   $out/initrd        — NixOS stage-1 ramdisk
-        #   $out/rootfs.ext4   — ext4 root filesystem
-        #   $out/toplevel-path — NixOS closure reference
-        #
-        lib.mkNixosGuest = { name, modules ? [] }:
-          let
-            eval = nixpkgs.lib.nixosSystem {
-              inherit system;
-              specialArgs = { inherit mvm-guest-agent; };
-              modules = [
-                ./modules/mvm-guest.nix
-                ./modules/guest-agent.nix
-                ./modules/firecracker-kernel.nix
-              ] ++ modules;
-            };
-            cfg = eval.config;
-            kernel = cfg.boot.kernelPackages.kernel;
-
-            rootfs = pkgs.callPackage
-              (nixpkgs + "/nixos/lib/make-ext4-fs.nix") {
-              storePaths = [ cfg.system.build.toplevel ];
-              volumeLabel = "nixos";
-              populateImageCommands = ''
-                mkdir -p ./files/etc ./files/sbin
-                ln -s ${cfg.system.build.toplevel} ./files/etc/system-toplevel
-                ln -s ${cfg.system.build.toplevel}/init ./files/sbin/init
-                ln -s .${cfg.system.build.toplevel}/init ./files/init
-                echo "${cfg.system.build.toplevel}" > ./files/etc/NIXOS_CLOSURE
-                touch ./files/etc/NIXOS
-              '';
-            };
-          in
-          pkgs.runCommand "mvm-nixos-${name}" {
-            passthru = { inherit eval; config = cfg; };
-          } ''
-            mkdir -p $out
-            ${copyKernel kernel}
-            cp "${cfg.system.build.initialRamdisk}/initrd" "$out/initrd"
-            cp "${rootfs}" "$out/rootfs.ext4"
-            echo "${cfg.system.build.toplevel}" > "$out/toplevel-path"
-          '';
-
-        # ── NixOS modules (for mkNixosGuest users) ────────────────
-        nixosModules = {
-          mvm-guest = ./modules/mvm-guest.nix;
-          guest-agent = ./modules/guest-agent.nix;
-          guest-integrations = ./modules/guest-integrations.nix;
-        };
 
         packages.mvm-guest-agent = mvm-guest-agent;
       }

@@ -51,7 +51,7 @@ The secrets drive (`/dev/vdc`, mounted at `/mnt/secrets/`) contains sensitive da
 
 Security hardening:
 - Uses tmpfs-backed file (never hits persistent storage)
-- File permissions 0400 (root-only read)
+- Drive image files are 0400 (root-only); at boot, secrets are copied to a tmpfs with 0440 `root:<serviceGroup>` so only service group members can read them
 - Mount with `ro,noexec,nodev,nosuid`
 - Recreated on every start (never reused)
 

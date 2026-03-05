@@ -1,52 +1,132 @@
 # OpenClaw MicroVM Example
 
-This example demonstrates running [OpenClaw](https://github.com/OpenClaw/openclaw) in a Firecracker microVM using the native npx installer approach.
+Run [OpenClaw](https://openclaw.com) in a Firecracker microVM, pre-built at Nix build time.
 
-## Approach
+## How It Works
 
-This example uses a **runtime installer** approach rather than packaging OpenClaw with Nix:
+OpenClaw is pre-installed into the rootfs image at Nix build time using a three-phase process:
 
-- **Base OS**: Built with Nix, includes only Node.js 22
-- **OpenClaw**: Downloaded and installed at runtime via `npx openclaw@latest`
-- **Dynamic Mounts**: Configuration, secrets, and data mounted from host directories
+1. **FOD download** — `npm install openclaw@2026.3.2` in a fixed-output derivation (content-addressed by hash)
+2. **autoPatchelf** — patches native `.node` addons to find nix store glibc/libstdc++
+3. **esbuild bundle** — bundles 932 JS files into a single ~21MB file for fast startup on virtio-blk
 
-This approach is simpler than the bundled approach (`openclaw-bundled`) and better demonstrates the mvm pattern of dynamic mounts for configuration and secrets.
+The gateway starts in ~5 minutes on emulated ARM (QEMU), near-instant on subsequent starts within the same boot (V8 compile cache).
 
 ## Quick Start
+
+```bash
+# Build the template (first time takes a few minutes)
+mvmctl template build openclaw
+
+# Run with defaults (no API keys, localhost-only)
+mvmctl run --template openclaw --name oc
+
+# Run with config and API keys from host directories
+mvmctl run --template openclaw --name oc \
+    --volume ./config:/mnt/config \
+    --volume ./secrets:/mnt/secrets
+
+# Forward the gateway port to the host
+mvmctl forward oc 3000:3000
+
+# Check status and logs
+mvmctl status
+mvmctl logs oc
+```
+
+Or use the convenience script:
 
 ```bash
 ./start.sh [vm-name] [port]
 ```
 
-Default: `vm-name=openclaw`, `port=3000`
+## Configuration
 
-## Dynamic Mounts
+### Default Config
 
-The VM demonstrates mvm's dynamic mount capabilities:
+Without any mounts, the VM generates a default config at `/var/lib/openclaw/config.json`:
 
-### Configuration (`/mnt/config`)
+```json
+{
+  "gateway": {
+    "mode": "local",
+    "port": 3000,
+    "bind": "lan",
+    "channelHealthCheckMinutes": 0,
+    "auth": { "mode": "token" },
+    "reload": { "mode": "off" },
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+}
+```
 
-Mounted from `./config/`:
-- `openclaw.json` - OpenClaw configuration (supports environment variable substitution)
-- `env.sh` - Optional environment variables
+The default gateway token is `mvm` (set via `OPENCLAW_GATEWAY_TOKEN`).
 
-The setup script copies `openclaw.json` to `/var/lib/openclaw/config.json` and applies `envsubst` for variable expansion.
+### Overriding via Host Directories
 
-### Secrets (`/mnt/secrets`)
+Use `-v` to mount host directories into the VM:
 
-Mounted from `./secrets/`:
-- `api-keys.env` - API keys and secrets (sourced at runtime)
+```bash
+mvmctl run --template openclaw --name oc \
+    --volume ./config:/mnt/config \
+    --volume ./secrets:/mnt/secrets
+```
 
-### Data (optional, `/mnt/data`)
+| Volume flag | Guest mount | Permissions | Purpose |
+|---|---|---|---|
+| `-v ./config:/mnt/config` | `/mnt/config` | Read-only (0444) | Config files |
+| `-v ./secrets:/mnt/secrets` | `/mnt/secrets` | Read-only (0400) | API keys, tokens |
 
-If you pass `--data-dir` to `mvmctl run`, persistent data will be stored here:
-- `skills/` - Custom skills
-- `workspace/` - User workspace files
-- `sessions/` - Session history
+#### Config Drive (`/mnt/config`)
 
-## First Run
+If `/mnt/config/openclaw.json` exists, it replaces the default config entirely. Environment variables are expanded via `envsubst`:
 
-The first run takes 5-10 minutes as OpenClaw downloads and caches dependencies via npx. Subsequent starts are much faster.
+```json
+{
+  "gateway": {
+    "mode": "local",
+    "port": 3000,
+    "bind": "lan",
+    "auth": { "mode": "token" },
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+}
+```
+
+If `/mnt/config/env.sh` exists, it's sourced before starting the gateway:
+
+```bash
+export OPENCLAW_INSTANCE_NAME=my-instance
+export NODE_OPTIONS="--max-old-space-size=2048"
+```
+
+#### Secrets Drive (`/mnt/secrets`)
+
+If `/mnt/secrets/api-keys.env` exists, it's sourced at startup. Put API keys here:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+OPENCLAW_GATEWAY_TOKEN=my-custom-token
+```
+
+The `OPENCLAW_GATEWAY_TOKEN` defaults to `mvm` if not set via secrets or config env.
+
+### Drive Model
+
+The microVM has four block devices:
+
+| Device | Mount | Type | Description |
+|---|---|---|---|
+| `/dev/vda` | `/` | ext4 (rw) | Root filesystem (Nix-built image) |
+| `/dev/vdb` | `/mnt/config` | ext4 (ro) | Config drive from `-v dir:/mnt/config` |
+| `/dev/vdc` | `/mnt/secrets` | ext4 (ro) | Secrets drive from `-v dir:/mnt/secrets` |
+| `/dev/vdd` | `/mnt/data` | ext4 (rw) | Data volume from `-v host:guest:size` |
+
+All drives except root are optional — the init script mounts them best-effort.
 
 ## Architecture
 
@@ -55,41 +135,26 @@ Host (macOS/Linux)
   └─ Lima VM (Ubuntu)
       └─ Firecracker microVM
           ├─ Node.js 22 (Nix-built)
-          ├─ /mnt/config → ./config/
-          ├─ /mnt/secrets → ./secrets/
-          ├─ /var/lib/openclaw (tmpfs workspace)
-          └─ npx openclaw@latest gateway
+          ├─ OpenClaw bundle (esbuild, pre-built)
+          ├─ Control UI (pre-built static assets)
+          ├─ /mnt/config → -v dir:/mnt/config (read-only)
+          ├─ /mnt/secrets → -v dir:/mnt/secrets (read-only)
+          └─ /var/lib/openclaw (tmpfs workspace)
 ```
 
 ## Files
 
-- `flake.nix` - Nix configuration for the base OS and OpenClaw service
-- `start.sh` - Convenience script to build and run
-- `config/openclaw.json` - Sample OpenClaw configuration
-- `secrets/api-keys.env` - Example API key template
+- `flake.nix` — Nix build: FOD download, autoPatchelf, esbuild bundle, mkGuest image
+- `start.sh` — Convenience script to build template and run
+- `config/openclaw.json` — Sample OpenClaw config (mounted to `/mnt/config`)
+- `secrets/api-keys.env` — API key template (mounted to `/mnt/secrets`)
 
-## Customization
+## Updating OpenClaw
 
-Edit `config/openclaw.json` to configure:
-- Gateway mode (local, remote, etc.)
-- Port binding
-- Instance settings
+To update the OpenClaw version:
 
-Add API keys to `secrets/api-keys.env`:
-```bash
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-## Why Not Use the Bundled Approach?
-
-The `openclaw-bundled` example packages OpenClaw with Nix and uses esbuild to bundle the application. While this works, it:
-- Requires complex bundling configuration to work around OpenClaw's native modules
-- Needs to be rebuilt for every OpenClaw update
-- Obscures the dynamic mounts pattern
-
-The runtime installer approach:
-- ✅ Always uses the latest OpenClaw version
-- ✅ Simpler flake configuration
-- ✅ Better demonstrates mvm's dynamic mount capabilities
-- ✅ Matches how users would actually deploy applications
+1. Edit `version` in `openclaw-src` derivation in `flake.nix`
+2. Set `outputHash = "";` (empty string)
+3. Build — Nix will fail and print the correct hash
+4. Set `outputHash` to the printed hash
+5. Rebuild

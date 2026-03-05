@@ -1,7 +1,7 @@
 # Build the mvm-guest-agent binary from the workspace.
 #
 # Usage from a flake:
-#   mvm-guest-agent = import ../../nix/modules/guest-agent-pkg.nix {
+#   mvm-guest-agent = import ../../nix/guest-lib/guest-agent-pkg.nix {
 #     inherit pkgs;
 #     mvmSrc = ../../.;
 #   };
@@ -25,6 +25,8 @@ rustPlatform.buildRustPackage {
   };
 
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
-  cargoBuildFlags = [ "-p" "mvm-guest" "--bin" "mvm-guest-agent" ];
+  # dev-shell enables the Exec handler; access is controlled at runtime
+  # by the security policy on the config drive (access.debug_exec).
+  cargoBuildFlags = [ "-p" "mvm-guest" "--bin" "mvm-guest-agent" "--features" "dev-shell" ];
   doCheck = false;
 }

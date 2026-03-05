@@ -420,7 +420,7 @@ fn ensure_guest_agent(
 
     // Step 2: Build the guest-agent from the mvm workspace
     let build_cmd = format!(
-        "nix-build --no-out-link {}/nix/modules/guest-agent-pkg.nix \
+        "nix-build --no-out-link {}/nix/guest-lib/guest-agent-pkg.nix \
          --arg pkgs 'import <nixpkgs> {{}}' \
          --arg mvmSrc {} \
          --arg rustPlatform '(import <nixpkgs> {{}}).rustPlatform'",

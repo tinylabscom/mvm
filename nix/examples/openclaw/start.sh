@@ -1,43 +1,42 @@
 #!/usr/bin/env bash
-# OpenClaw MicroVM - Native npx installer
-# First run downloads OpenClaw via npx (5-10 min)
-
+# OpenClaw MicroVM - pre-built at Nix build time
 set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
-VM_NAME="${1:-openclaw}"
+VM_NAME="${1:-oc}"
 PORT="${2:-3000}"
+SCRIPT_DIR="$(dirname "$0")"
 
 echo "Starting OpenClaw MicroVM: $VM_NAME"
 echo "  Port: $PORT"
 echo ""
-echo "Note: First run downloads OpenClaw via npx (~5-10 min)"
-echo ""
 
 # Stop existing VM if running
-if cargo run --quiet -- status 2>/dev/null | grep -q "^  $VM_NAME"; then
+if cargo run --quiet -- status 2>/dev/null | grep -q "  $VM_NAME "; then
     echo "Stopping existing VM '$VM_NAME'..."
     cargo run --quiet -- stop "$VM_NAME"
     sleep 2
 fi
 
-# Run with native npx installer (no complex bundling)
-# Pass config and secrets from host directories
+# Build template if not already built
+if ! cargo run --quiet -- template list 2>/dev/null | grep -q "openclaw"; then
+    echo "Building openclaw template..."
+    cargo run --quiet -- template build openclaw
+fi
+
+# Run from template with config and secrets from host
 cargo run -- run \
-    --flake ./nix/examples/openclaw \
+    --template openclaw \
     --name "$VM_NAME" \
-    --cpus 4 \
-    --memory 4096 \
-    -p "$PORT:3000" \
-    --config-dir ./nix/examples/openclaw/config \
-    --secrets-dir ./nix/examples/openclaw/secrets \
-    --forward
+    -v "$SCRIPT_DIR/config:/mnt/config" \
+    -v "$SCRIPT_DIR/secrets:/mnt/secrets" \
+    -p "$PORT:3000"
 
 echo ""
-echo "✓ OpenClaw is starting!"
+echo "OpenClaw is starting (gateway takes ~5 min on first boot)."
 echo ""
-echo "Access at: http://localhost:$PORT"
-echo ""
-echo "To check status: cargo run -- status"
-echo "To stop: cargo run -- stop $VM_NAME"
+echo "  Forward port:  cargo run -- forward $VM_NAME $PORT:3000"
+echo "  View logs:     cargo run -- logs $VM_NAME"
+echo "  Check status:  cargo run -- status"
+echo "  Stop:          cargo run -- stop $VM_NAME"

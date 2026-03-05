@@ -40,18 +40,27 @@ mvmctl template build my-service --force    # Rebuild even if cached
 
 Builds run `nix build` inside the Lima VM to produce kernel + rootfs artifacts.
 
-## Warm Snapshots
+## Snapshots
 
-Warm snapshots automate cold boot → health wait → snapshot → store. Users never experience cold boot:
+Build with `--snapshot` to capture a fully booted, healthy VM state. Subsequent runs restore from this snapshot instead of cold-booting — sub-second startup instead of minutes.
 
 ```bash
-# One-time: build and warm
-mvmctl template build my-service
-mvmctl template warm my-service          # boots, waits for healthy, snapshots
+# Build + snapshot (one-time, waits for all services to be healthy)
+mvmctl template build my-service --snapshot
 
-# Every subsequent run is instant (<1s):
+# Every subsequent run auto-detects the snapshot and restores instantly:
 mvmctl run --template my-service --name svc
 ```
+
+The snapshot process:
+1. Builds the template normally (`nix build`)
+2. Boots a temporary VM from the built artifacts
+3. Waits for the guest agent to respond (health check)
+4. Waits for all integrations to report healthy (e.g., gateway listening)
+5. Pauses vCPUs and captures a full Firecracker snapshot (`vmstate.bin` + `mem.bin`)
+6. Stores the snapshot alongside the template revision
+
+No flags are needed on `run` — snapshot detection is automatic. If a template has a snapshot, it's used; otherwise the VM cold-boots.
 
 ## Share via Registry
 

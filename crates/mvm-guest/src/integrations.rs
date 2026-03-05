@@ -51,6 +51,11 @@ pub struct IntegrationEntry {
     /// Timeout in seconds for each health check execution (default: 10).
     #[serde(default = "default_health_timeout")]
     pub health_timeout_secs: u64,
+    /// Grace period in seconds after boot before logging health failures (default: 0).
+    /// During the grace period, health checks still run and results are stored
+    /// (so the host can poll), but failures are not logged to console.
+    #[serde(default)]
+    pub startup_grace_secs: u64,
 }
 
 fn default_health_interval() -> u64 {
@@ -174,6 +179,7 @@ mod tests {
                     health_cmd: Some("/opt/openclaw/bin/whatsapp-health".to_string()),
                     health_interval_secs: 15,
                     health_timeout_secs: 5,
+                    startup_grace_secs: 0,
                 },
                 IntegrationEntry {
                     name: "slack".to_string(),
@@ -183,6 +189,7 @@ mod tests {
                     health_cmd: None,
                     health_interval_secs: default_health_interval(),
                     health_timeout_secs: default_health_timeout(),
+                    startup_grace_secs: 0,
                 },
             ],
         };
@@ -291,6 +298,7 @@ mod tests {
             health_cmd: Some("systemctl is-active myapp".to_string()),
             health_interval_secs: 15,
             health_timeout_secs: 5,
+            startup_grace_secs: 30,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: IntegrationEntry = serde_json::from_str(&json).unwrap();

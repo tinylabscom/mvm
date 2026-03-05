@@ -2,7 +2,7 @@
   description = "Minimal hello-world microVM for boot time testing";
 
   inputs = {
-    mvm.url = "path:../../";
+    mvm.url = "path:../../guest-lib";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
   };
 

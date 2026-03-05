@@ -34,6 +34,7 @@ fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
         r#"
         mkdir -p {dir}
         sudo rm -f {socket}
+        rm -f {dir}/v.sock
         touch {dir}/console.log {dir}/firecracker.log
         sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
             </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
@@ -63,6 +64,7 @@ pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
         r#"
         mkdir -p {dir}
         sudo rm -f {socket}
+        rm -f {dir}/v.sock
         touch {dir}/console.log {dir}/firecracker.log
         sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
             </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
@@ -569,6 +571,36 @@ pub fn restore_from_template_snapshot(
 
     // Make vsock socket accessible
     let _ = run_in_vm(&format!("sudo chmod 0666 {}/v.sock 2>/dev/null", abs_dir));
+
+    // Post-restore: remount drives and restart services with fresh config/secrets.
+    if !config.config_files.is_empty() || !config.secret_files.is_empty() {
+        let vsock_path = format!("{}/v.sock", abs_dir);
+        ui::info("Sending post-restore signal (remounting drives, restarting services)...");
+        // Wait for guest agent to be reachable after resume (may take a moment).
+        let mut agent_ready = false;
+        for attempt in 0..30 {
+            if mvm_guest::vsock::ping_at(&vsock_path).unwrap_or(false) {
+                agent_ready = true;
+                break;
+            }
+            if attempt == 29 {
+                ui::warn(
+                    "Guest agent not reachable after resume. Config/secrets may not be loaded.",
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if agent_ready {
+            match mvm_guest::vsock::post_restore_at(&vsock_path) {
+                Ok(true) => ui::info("Post-restore complete."),
+                Ok(false) => ui::warn("Post-restore signal returned failure."),
+                Err(e) => ui::warn(&format!(
+                    "Post-restore failed: {}. Services may need manual restart.",
+                    e
+                )),
+            }
+        }
+    }
 
     // Persist run info
     write_vm_run_info(config, &abs_dir)?;

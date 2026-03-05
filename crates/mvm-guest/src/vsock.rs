@@ -61,6 +61,8 @@ pub enum GuestRequest {
         stdin: Option<String>,
         timeout_secs: Option<u64>,
     },
+    /// Signal post-restore: remount drives and restart services.
+    PostRestore,
 }
 
 /// Response from guest vsock agent to host.
@@ -102,6 +104,11 @@ pub enum GuestResponse {
         exit_code: i32,
         stdout: String,
         stderr: String,
+    },
+    /// Post-restore acknowledgement.
+    PostRestoreAck {
+        success: bool,
+        detail: Option<String>,
     },
 }
 
@@ -722,6 +729,23 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
     }
 }
 
+/// Signal post-restore to the guest agent at a specific UDS path.
+///
+/// After snapshot restore, tells the guest to remount config/secrets drives
+/// and restart services. Returns Ok(true) if the guest acknowledged success.
+pub fn post_restore_at(vsock_uds_path: &str) -> Result<bool> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::PostRestore)?;
+
+    match resp {
+        GuestResponse::PostRestoreAck { success, .. } => Ok(success),
+        GuestResponse::Error { message } => {
+            bail!("Guest post-restore error: {}", message);
+        }
+        _ => bail!("Unexpected response to PostRestore"),
+    }
+}
+
 /// Execute a command inside the guest via vsock at a specific UDS path (dev-only).
 pub fn exec_at(
     vsock_uds_path: &str,
@@ -767,6 +791,7 @@ mod tests {
                 stdin: Some("hello".to_string()),
                 timeout_secs: Some(10),
             },
+            GuestRequest::PostRestore,
         ];
 
         for req in &variants {
@@ -823,6 +848,10 @@ mod tests {
                 exit_code: 0,
                 stdout: "Linux\n".to_string(),
                 stderr: String::new(),
+            },
+            GuestResponse::PostRestoreAck {
+                success: true,
+                detail: Some("post-restore signal sent to init".to_string()),
             },
         ];
 

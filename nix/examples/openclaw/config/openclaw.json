@@ -1,13 +1,30 @@
 {
   "gateway": {
     "mode": "local",
-    "port": 3000,
-    "host": "127.0.0.1"
+    "channelHealthCheckMinutes": 0,
+    "auth": { "mode": "none" },
+    "reload": { "mode": "off" },
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
   },
-  "logging": {
-    "level": "info"
-  },
-  "instance": {
-    "name": "${OPENCLAW_INSTANCE_NAME:-openclaw}"
+  "channels": {
+    "whatsapp": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "allowFrom": ["*"],
+      "groupPolicy": "open",
+      "groups": {
+        "*": { "requireMention": true }
+      },
+      "sendReadReceipts": true,
+      "ackReaction": {
+        "emoji": "👀",
+        "direct": true,
+        "group": "mentions"
+      },
+      "textChunkLimit": 4000,
+      "mediaMaxMb": 50
+    }
   }
 }

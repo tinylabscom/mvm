@@ -251,18 +251,12 @@ enum Commands {
         /// Runtime config (TOML) for persistent resources/volumes
         #[arg(long)]
         config: Option<String>,
-        /// Volume override (format: host_path:guest_mount:size). Repeatable.
+        /// Volume (host_dir:/guest/path or host:/guest/path:size). Repeatable.
         #[arg(long, short = 'v')]
         volume: Vec<String>,
         /// Hypervisor backend (firecracker, qemu). Default: firecracker.
         #[arg(long, default_value = "firecracker")]
         hypervisor: String,
-        /// Directory of files to add to the config drive
-        #[arg(long)]
-        config_dir: Option<String>,
-        /// Directory of files to add to the secrets drive
-        #[arg(long)]
-        secrets_dir: Option<String>,
         /// Port mapping (format: HOST:GUEST or PORT). Repeatable.
         #[arg(long, short = 'p')]
         port: Vec<String>,
@@ -684,8 +678,6 @@ pub fn run() -> Result<()> {
             config,
             volume,
             hypervisor,
-            config_dir,
-            secrets_dir,
             port,
             env,
             forward,
@@ -705,8 +697,6 @@ pub fn run() -> Result<()> {
                 config_path: config.as_deref(),
                 volumes: &volume,
                 hypervisor: &hypervisor,
-                config_dir: config_dir.as_deref(),
-                secrets_dir: secrets_dir.as_deref(),
                 ports: &port,
                 env_vars: &env,
                 forward,
@@ -2168,8 +2158,6 @@ struct RunParams<'a> {
     config_path: Option<&'a str>,
     volumes: &'a [String],
     hypervisor: &'a str,
-    config_dir: Option<&'a str>,
-    secrets_dir: Option<&'a str>,
     ports: &'a [String],
     env_vars: &'a [String],
     forward: bool,
@@ -2186,8 +2174,6 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         config_path,
         volumes,
         hypervisor,
-        config_dir,
-        secrets_dir,
         ports,
         env_vars,
         forward,
@@ -2286,13 +2272,40 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         None => image::RuntimeConfig::default(),
     };
 
-    let volume_cfg: Vec<image::RuntimeVolume> = if !volumes.is_empty() {
-        volumes
-            .iter()
-            .map(|v| parse_runtime_volume(v))
-            .collect::<Result<_>>()?
+    // Partition --volume specs into dir-inject (config/secrets) and persistent volumes
+    let mut volume_cfg: Vec<image::RuntimeVolume> = Vec::new();
+    let mut config_files: Vec<microvm::DriveFile> = Vec::new();
+    let mut secret_files: Vec<microvm::DriveFile> = Vec::new();
+
+    if !volumes.is_empty() {
+        for v in volumes {
+            match parse_volume_spec(v)? {
+                VolumeSpec::DirInject {
+                    host_dir,
+                    guest_mount,
+                } => match guest_mount.as_str() {
+                    "/mnt/config" => {
+                        config_files.extend(
+                            read_dir_to_drive_files(&host_dir, 0o444)
+                                .with_context(|| format!("reading volume '{}'", v))?,
+                        );
+                    }
+                    "/mnt/secrets" => {
+                        secret_files.extend(
+                            read_dir_to_drive_files(&host_dir, 0o400)
+                                .with_context(|| format!("reading volume '{}'", v))?,
+                        );
+                    }
+                    other => anyhow::bail!(
+                        "Unsupported guest mount '{}'. Supported: /mnt/config, /mnt/secrets",
+                        other
+                    ),
+                },
+                VolumeSpec::Persistent(vol) => volume_cfg.push(vol),
+            }
+        }
     } else {
-        rt_config.volumes.clone()
+        volume_cfg = rt_config.volumes.clone();
     };
 
     const DEFAULT_CPUS: u32 = 2;
@@ -2309,17 +2322,6 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     // Allocate a network slot for this VM
     let slot = microvm::allocate_slot(&vm_name)?;
-
-    let mut config_files = match config_dir {
-        Some(dir) => read_dir_to_drive_files(dir, 0o444)
-            .with_context(|| format!("reading config-dir '{}'", dir))?,
-        None => Vec::new(),
-    };
-    let secret_files = match secrets_dir {
-        Some(dir) => read_dir_to_drive_files(dir, 0o444)
-            .with_context(|| format!("reading secrets-dir '{}'", dir))?,
-        None => Vec::new(),
-    };
 
     // Parse port mappings and inject as config drive file
     let port_mappings = parse_port_specs(ports)?;
@@ -2396,19 +2398,46 @@ fn read_dir_to_drive_files(dir: &str, default_mode: u32) -> Result<Vec<microvm::
     Ok(files)
 }
 
-fn parse_runtime_volume(spec: &str) -> Result<image::RuntimeVolume> {
+/// Parsed volume specification from the `--volume/-v` CLI flag.
+enum VolumeSpec {
+    /// Inject host directory contents onto a drive (2-part: `host_dir:/guest/path`).
+    DirInject {
+        host_dir: String,
+        guest_mount: String,
+    },
+    /// Persistent ext4 volume with explicit size (3-part: `host:/guest/path:size`).
+    Persistent(image::RuntimeVolume),
+}
+
+fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     let parts: Vec<&str> = spec.splitn(3, ':').collect();
-    if parts.len() != 3 {
-        anyhow::bail!(
+    match parts.len() {
+        2 => Ok(VolumeSpec::DirInject {
+            host_dir: parts[0].to_string(),
+            guest_mount: parts[1].to_string(),
+        }),
+        3 => Ok(VolumeSpec::Persistent(image::RuntimeVolume {
+            host: parts[0].to_string(),
+            guest: parts[1].to_string(),
+            size: parts[2].to_string(),
+        })),
+        _ => anyhow::bail!(
+            "Invalid volume '{}'. Expected host_dir:/guest/path or host:/guest/path:size",
+            spec
+        ),
+    }
+}
+
+/// Parse a volume spec that must be a persistent volume (3-part: `host:guest:size`).
+/// Used by fleet commands where dir-inject is not supported.
+fn parse_volume_spec_persistent(spec: &str) -> Result<image::RuntimeVolume> {
+    match parse_volume_spec(spec)? {
+        VolumeSpec::Persistent(vol) => Ok(vol),
+        VolumeSpec::DirInject { .. } => anyhow::bail!(
             "Invalid volume '{}'. Expected format host_path:guest_mount:size",
             spec
-        );
+        ),
     }
-    Ok(image::RuntimeVolume {
-        host: parts[0].to_string(),
-        guest: parts[1].to_string(),
-        size: parts[2].to_string(),
-    })
 }
 
 // ============================================================================
@@ -2503,7 +2532,7 @@ fn cmd_up(
                 let volumes: Vec<image::RuntimeVolume> = resolved
                     .volumes
                     .iter()
-                    .map(|v| parse_runtime_volume(v))
+                    .map(|v| parse_volume_spec_persistent(v))
                     .collect::<Result<_>>()?;
 
                 ui::step(
@@ -4021,44 +4050,85 @@ mod tests {
     }
 
     #[test]
-    fn test_run_config_dir_and_secrets_dir() {
+    fn test_run_volume_dir_inject() {
         let cli = Cli::try_parse_from([
             "mvmctl",
             "run",
             "--flake",
             ".",
-            "--config-dir",
-            "/tmp/config",
-            "--secrets-dir",
-            "/tmp/secrets",
+            "-v",
+            "/tmp/config:/mnt/config",
+            "-v",
+            "/tmp/secrets:/mnt/secrets",
         ])
         .unwrap();
         match cli.command {
-            Commands::Run {
-                config_dir,
-                secrets_dir,
-                ..
-            } => {
-                assert_eq!(config_dir.as_deref(), Some("/tmp/config"));
-                assert_eq!(secrets_dir.as_deref(), Some("/tmp/secrets"));
+            Commands::Run { volume, .. } => {
+                assert_eq!(volume.len(), 2);
+                assert_eq!(volume[0], "/tmp/config:/mnt/config");
+                assert_eq!(volume[1], "/tmp/secrets:/mnt/secrets");
             }
             _ => panic!("Expected Run command"),
         }
     }
 
     #[test]
-    fn test_run_config_dir_defaults_none() {
-        let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
+    fn test_run_volume_persistent() {
+        let cli =
+            Cli::try_parse_from(["mvmctl", "run", "--flake", ".", "-v", "/data:/mnt/data:4G"])
+                .unwrap();
         match cli.command {
-            Commands::Run {
-                config_dir,
-                secrets_dir,
-                ..
-            } => {
-                assert!(config_dir.is_none());
-                assert!(secrets_dir.is_none());
+            Commands::Run { volume, .. } => {
+                assert_eq!(volume.len(), 1);
+                assert_eq!(volume[0], "/data:/mnt/data:4G");
             }
             _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_volume_spec_dir_inject() {
+        let spec = parse_volume_spec("/tmp/config:/mnt/config").unwrap();
+        match spec {
+            VolumeSpec::DirInject {
+                host_dir,
+                guest_mount,
+            } => {
+                assert_eq!(host_dir, "/tmp/config");
+                assert_eq!(guest_mount, "/mnt/config");
+            }
+            _ => panic!("Expected DirInject"),
+        }
+    }
+
+    #[test]
+    fn test_parse_volume_spec_persistent() {
+        let spec = parse_volume_spec("/data:/mnt/data:4G").unwrap();
+        match spec {
+            VolumeSpec::Persistent(vol) => {
+                assert_eq!(vol.host, "/data");
+                assert_eq!(vol.guest, "/mnt/data");
+                assert_eq!(vol.size, "4G");
+            }
+            _ => panic!("Expected Persistent"),
+        }
+    }
+
+    #[test]
+    fn test_parse_volume_spec_invalid() {
+        let result = parse_volume_spec("just-a-path");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_volume_spec_unsupported_mount() {
+        let spec = parse_volume_spec("/tmp/foo:/mnt/custom").unwrap();
+        // The spec itself parses fine — the error happens at routing time in cmd_run
+        match spec {
+            VolumeSpec::DirInject { guest_mount, .. } => {
+                assert_eq!(guest_mount, "/mnt/custom");
+            }
+            _ => panic!("Expected DirInject"),
         }
     }
 
