@@ -558,8 +558,6 @@ mod tests {
 
     #[test]
     fn test_desired_pool_with_registry_artifact() {
-        use crate::pool::RegistryArtifact;
-
         let json = r#"{
             "pool_id": "gateways",
             "flake_ref": ".",
