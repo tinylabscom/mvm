@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Global metrics registry (singleton).
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -241,7 +241,7 @@ fn write_metric(out: &mut String, name: &str, value: u64, help: &str) {
 }
 
 /// Serializable snapshot of all metrics.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub requests_total: u64,
     pub requests_reconcile: u64,

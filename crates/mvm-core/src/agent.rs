@@ -93,6 +93,138 @@ fn default_compression() -> String {
 }
 
 // ============================================================================
+// Deployment control types
+// ============================================================================
+
+/// Deployment phase for rollout state tracking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentPhase {
+    NotStarted,
+    CanaryEvaluation,
+    RollingUpdate,
+    Paused,
+    Complete,
+    RolledBack,
+    Failed,
+}
+
+// ============================================================================
+// Batch operation types
+// ============================================================================
+
+/// Single item in a batch operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchActionItem {
+    pub tenant_id: String,
+    pub pool_id: String,
+    pub instance_id: String,
+    pub action: InstanceAction,
+}
+
+/// Pool-level action types.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolActionType {
+    StartAll,
+    StopAll,
+    WarmAll,
+    DestroyAll {
+        wipe_volumes: bool,
+    },
+    ScaleTo {
+        running: u32,
+        warm: u32,
+        sleeping: u32,
+    },
+}
+
+/// Result for a single item in a batch operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchActionItemResult {
+    pub tenant_id: String,
+    pub pool_id: String,
+    pub instance_id: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ============================================================================
+// Monitoring and observability types
+// ============================================================================
+
+/// Health status for a single instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceHealthReport {
+    pub tenant_id: String,
+    pub pool_id: String,
+    pub instance_id: String,
+    pub status: InstanceState,
+    pub healthy: bool,
+    pub integration_health: Vec<IntegrationHealthSummary>,
+    pub probe_results: Vec<ProbeResultSummary>,
+    pub idle_metrics: crate::idle_metrics::IdleMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_health_check_at: Option<String>,
+}
+
+/// Integration health summary (from guest integrations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntegrationHealthSummary {
+    pub name: String,
+    pub healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Probe result summary (from guest probes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeResultSummary {
+    pub name: String,
+    pub healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Single reconciliation history entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileHistoryEntry {
+    pub timestamp: String,
+    pub duration_ms: u64,
+    pub report: ReconcileReport,
+}
+
+/// Tenant state in state dump.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantStateDump {
+    pub tenant_id: String,
+    pub pools: Vec<PoolStateDump>,
+}
+
+/// Pool state in state dump.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolStateDump {
+    pub pool_id: String,
+    pub instances: Vec<InstanceState>,
+    pub desired_counts: DesiredCounts,
+}
+
+/// Content for StateDump response (boxed to reduce enum size).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateDumpContent {
+    pub node_info: NodeInfo,
+    pub node_stats: NodeStats,
+    #[serde(default)]
+    pub metrics: Option<crate::observability::metrics::MetricsSnapshot>,
+    #[serde(default)]
+    pub audit_log: Option<Vec<crate::audit::AuditEntry>>,
+    pub tenants: Vec<TenantStateDump>,
+}
+
+// ============================================================================
 // Reconcile report
 // ============================================================================
 
@@ -153,6 +285,68 @@ pub enum AgentRequest {
         instance_id: String,
         request: serde_json::Value,
     },
+    /// Query the status of an ongoing deployment/rollout for a pool.
+    DeploymentStatus { tenant_id: String, pool_id: String },
+    /// Pause an ongoing deployment/rollout.
+    PauseDeployment { tenant_id: String, pool_id: String },
+    /// Resume a paused deployment/rollout.
+    ResumeDeployment { tenant_id: String, pool_id: String },
+    /// Rollback a deployment to the previous revision.
+    RollbackDeployment {
+        tenant_id: String,
+        pool_id: String,
+        #[serde(default)]
+        target_revision: Option<String>,
+    },
+    /// Perform the same action on multiple instances at once.
+    BatchInstanceAction { actions: Vec<BatchActionItem> },
+    /// Perform pool-level operations (affect all instances in pool).
+    PoolAction {
+        tenant_id: String,
+        pool_id: String,
+        action: PoolActionType,
+    },
+    /// Query current metrics snapshot.
+    GetMetrics,
+    /// Retrieve recent audit log entries for a tenant.
+    GetAuditLog {
+        tenant_id: String,
+        #[serde(default)]
+        last_n: Option<u32>,
+        #[serde(default)]
+        since: Option<String>,
+    },
+    /// Get detailed health status for instances.
+    GetHealthStatus {
+        #[serde(default)]
+        tenant_id: Option<String>,
+        #[serde(default)]
+        pool_id: Option<String>,
+    },
+    /// Retrieve reconciliation history.
+    GetReconcileHistory {
+        #[serde(default)]
+        last_n: Option<u32>,
+    },
+    /// Force an immediate reconciliation pass (debug/troubleshooting).
+    ForceReconcile { dry_run: bool },
+    /// Export complete node state for debugging.
+    DumpState {
+        include_metrics: bool,
+        include_audit_log: bool,
+    },
+    /// Hot reload secrets without restarting instances.
+    UpdateSecrets {
+        tenant_id: String,
+        secrets_hash: String,
+        force_reload: bool,
+    },
+    /// Update config drive for instances in a pool.
+    UpdateConfig {
+        tenant_id: String,
+        pool_id: String,
+        config_version: u64,
+    },
 }
 
 /// Imperative lifecycle action for a single instance.
@@ -197,6 +391,73 @@ pub enum AgentResponse {
     },
     /// Error response.
     Error { code: u16, message: String },
+    /// Deployment status with rollout progress.
+    DeploymentStatus {
+        pool_id: String,
+        current_revision: String,
+        #[serde(default)]
+        target_revision: Option<String>,
+        strategy: UpdateStrategy,
+        phase: DeploymentPhase,
+        instances_updated: u32,
+        instances_pending: u32,
+        #[serde(default)]
+        canary_health: Option<f64>,
+        paused: bool,
+        errors: Vec<String>,
+    },
+    /// Result of pause/resume/rollback operations.
+    DeploymentControlResult {
+        success: bool,
+        pool_id: String,
+        new_phase: String,
+        message: String,
+    },
+    /// Result of batch instance operations.
+    BatchActionResult {
+        results: Vec<BatchActionItemResult>,
+        total: u32,
+        succeeded: u32,
+        failed: u32,
+    },
+    /// Result of pool-level action.
+    PoolActionResult {
+        success: bool,
+        pool_id: String,
+        instances_affected: u32,
+        errors: Vec<String>,
+    },
+    /// Metrics snapshot.
+    Metrics(crate::observability::metrics::MetricsSnapshot),
+    /// Audit log entries.
+    AuditLog {
+        entries: Vec<crate::audit::AuditEntry>,
+        total_count: u32,
+    },
+    /// Health status report for instances.
+    HealthStatus {
+        instances: Vec<InstanceHealthReport>,
+        unhealthy_count: u32,
+        degraded_count: u32,
+    },
+    /// Reconciliation history.
+    ReconcileHistory { runs: Vec<ReconcileHistoryEntry> },
+    /// Complete node state dump (boxed due to size).
+    StateDump(Box<StateDumpContent>),
+    /// Result of secrets update.
+    SecretsUpdateResult {
+        success: bool,
+        tenant_id: String,
+        instances_reloaded: u32,
+        errors: Vec<String>,
+    },
+    /// Result of config update.
+    ConfigUpdateResult {
+        success: bool,
+        pool_id: String,
+        instances_updated: u32,
+        errors: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -626,5 +887,555 @@ mod tests {
         let ra = parsed.registry_artifact.unwrap();
         assert_eq!(ra.template_id, "hello");
         assert_eq!(ra.revision.as_deref(), Some("rev-abc123"));
+    }
+
+    // ========================================================================
+    // Tests for new protocol extensions
+    // ========================================================================
+
+    #[test]
+    fn test_deployment_phase_serde_all_variants() {
+        let phases = vec![
+            DeploymentPhase::NotStarted,
+            DeploymentPhase::CanaryEvaluation,
+            DeploymentPhase::RollingUpdate,
+            DeploymentPhase::Paused,
+            DeploymentPhase::Complete,
+            DeploymentPhase::RolledBack,
+            DeploymentPhase::Failed,
+        ];
+        for phase in phases {
+            let json = serde_json::to_string(&phase).unwrap();
+            let parsed: DeploymentPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, phase);
+        }
+    }
+
+    #[test]
+    fn test_batch_action_item_serde() {
+        let item = BatchActionItem {
+            tenant_id: "t1".to_string(),
+            pool_id: "p1".to_string(),
+            instance_id: "i1".to_string(),
+            action: InstanceAction::Start,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let parsed: BatchActionItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tenant_id, "t1");
+        assert_eq!(parsed.pool_id, "p1");
+        assert_eq!(parsed.instance_id, "i1");
+        assert_eq!(parsed.action, InstanceAction::Start);
+    }
+
+    #[test]
+    fn test_pool_action_type_serde_all_variants() {
+        let actions = vec![
+            PoolActionType::StartAll,
+            PoolActionType::StopAll,
+            PoolActionType::WarmAll,
+            PoolActionType::DestroyAll { wipe_volumes: true },
+            PoolActionType::ScaleTo {
+                running: 3,
+                warm: 1,
+                sleeping: 0,
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            let parsed: PoolActionType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, action);
+        }
+    }
+
+    #[test]
+    fn test_agent_request_deployment_status() {
+        let req = AgentRequest::DeploymentStatus {
+            tenant_id: "acme".to_string(),
+            pool_id: "gateways".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::DeploymentStatus { tenant_id, pool_id } => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(pool_id, "gateways");
+            }
+            _ => panic!("Expected DeploymentStatus variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_pause_deployment() {
+        let req = AgentRequest::PauseDeployment {
+            tenant_id: "acme".to_string(),
+            pool_id: "workers".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, AgentRequest::PauseDeployment { .. }));
+    }
+
+    #[test]
+    fn test_agent_request_resume_deployment() {
+        let req = AgentRequest::ResumeDeployment {
+            tenant_id: "acme".to_string(),
+            pool_id: "workers".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, AgentRequest::ResumeDeployment { .. }));
+    }
+
+    #[test]
+    fn test_agent_request_rollback_deployment() {
+        let req = AgentRequest::RollbackDeployment {
+            tenant_id: "acme".to_string(),
+            pool_id: "workers".to_string(),
+            target_revision: Some("rev-abc123".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::RollbackDeployment {
+                target_revision, ..
+            } => {
+                assert_eq!(target_revision.as_deref(), Some("rev-abc123"));
+            }
+            _ => panic!("Expected RollbackDeployment variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_batch_instance_action() {
+        let req = AgentRequest::BatchInstanceAction {
+            actions: vec![
+                BatchActionItem {
+                    tenant_id: "t1".to_string(),
+                    pool_id: "p1".to_string(),
+                    instance_id: "i1".to_string(),
+                    action: InstanceAction::Start,
+                },
+                BatchActionItem {
+                    tenant_id: "t1".to_string(),
+                    pool_id: "p1".to_string(),
+                    instance_id: "i2".to_string(),
+                    action: InstanceAction::Stop,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::BatchInstanceAction { actions } => {
+                assert_eq!(actions.len(), 2);
+                assert_eq!(actions[0].instance_id, "i1");
+                assert_eq!(actions[1].instance_id, "i2");
+            }
+            _ => panic!("Expected BatchInstanceAction variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_pool_action() {
+        let req = AgentRequest::PoolAction {
+            tenant_id: "acme".to_string(),
+            pool_id: "workers".to_string(),
+            action: PoolActionType::StartAll,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::PoolAction { action, .. } => {
+                assert_eq!(action, PoolActionType::StartAll);
+            }
+            _ => panic!("Expected PoolAction variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_get_metrics() {
+        let req = AgentRequest::GetMetrics;
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, AgentRequest::GetMetrics));
+    }
+
+    #[test]
+    fn test_agent_request_get_audit_log() {
+        let req = AgentRequest::GetAuditLog {
+            tenant_id: "acme".to_string(),
+            last_n: Some(10),
+            since: Some("2025-01-01T00:00:00Z".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::GetAuditLog {
+                tenant_id,
+                last_n,
+                since,
+            } => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(last_n, Some(10));
+                assert_eq!(since.as_deref(), Some("2025-01-01T00:00:00Z"));
+            }
+            _ => panic!("Expected GetAuditLog variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_get_health_status() {
+        let req = AgentRequest::GetHealthStatus {
+            tenant_id: Some("acme".to_string()),
+            pool_id: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::GetHealthStatus { tenant_id, pool_id } => {
+                assert_eq!(tenant_id.as_deref(), Some("acme"));
+                assert!(pool_id.is_none());
+            }
+            _ => panic!("Expected GetHealthStatus variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_get_reconcile_history() {
+        let req = AgentRequest::GetReconcileHistory { last_n: Some(5) };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::GetReconcileHistory { last_n } => {
+                assert_eq!(last_n, Some(5));
+            }
+            _ => panic!("Expected GetReconcileHistory variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_force_reconcile() {
+        let req = AgentRequest::ForceReconcile { dry_run: true };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::ForceReconcile { dry_run } => {
+                assert!(dry_run);
+            }
+            _ => panic!("Expected ForceReconcile variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_dump_state() {
+        let req = AgentRequest::DumpState {
+            include_metrics: true,
+            include_audit_log: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::DumpState {
+                include_metrics,
+                include_audit_log,
+            } => {
+                assert!(include_metrics);
+                assert!(!include_audit_log);
+            }
+            _ => panic!("Expected DumpState variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_update_secrets() {
+        let req = AgentRequest::UpdateSecrets {
+            tenant_id: "acme".to_string(),
+            secrets_hash: "sha256:abc123".to_string(),
+            force_reload: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::UpdateSecrets {
+                tenant_id,
+                secrets_hash,
+                force_reload,
+            } => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(secrets_hash, "sha256:abc123");
+                assert!(!force_reload);
+            }
+            _ => panic!("Expected UpdateSecrets variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_update_config() {
+        let req = AgentRequest::UpdateConfig {
+            tenant_id: "acme".to_string(),
+            pool_id: "workers".to_string(),
+            config_version: 42,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentRequest::UpdateConfig {
+                tenant_id,
+                pool_id,
+                config_version,
+            } => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(pool_id, "workers");
+                assert_eq!(config_version, 42);
+            }
+            _ => panic!("Expected UpdateConfig variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_deployment_status() {
+        use crate::pool::{RollingUpdateStrategy, UpdateStrategy};
+
+        let resp = AgentResponse::DeploymentStatus {
+            pool_id: "workers".to_string(),
+            current_revision: "rev-old".to_string(),
+            target_revision: Some("rev-new".to_string()),
+            strategy: UpdateStrategy::Rolling(RollingUpdateStrategy::default()),
+            phase: DeploymentPhase::RollingUpdate,
+            instances_updated: 5,
+            instances_pending: 3,
+            canary_health: None,
+            paused: false,
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::DeploymentStatus {
+                pool_id,
+                current_revision,
+                phase,
+                ..
+            } => {
+                assert_eq!(pool_id, "workers");
+                assert_eq!(current_revision, "rev-old");
+                assert_eq!(phase, DeploymentPhase::RollingUpdate);
+            }
+            _ => panic!("Expected DeploymentStatus variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_deployment_control_result() {
+        let resp = AgentResponse::DeploymentControlResult {
+            success: true,
+            pool_id: "workers".to_string(),
+            new_phase: "paused".to_string(),
+            message: "Deployment paused successfully".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::DeploymentControlResult {
+                success, pool_id, ..
+            } => {
+                assert!(success);
+                assert_eq!(pool_id, "workers");
+            }
+            _ => panic!("Expected DeploymentControlResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_batch_action_result() {
+        let resp = AgentResponse::BatchActionResult {
+            results: vec![
+                BatchActionItemResult {
+                    tenant_id: "t1".to_string(),
+                    pool_id: "p1".to_string(),
+                    instance_id: "i1".to_string(),
+                    success: true,
+                    new_status: Some("running".to_string()),
+                    error: None,
+                },
+                BatchActionItemResult {
+                    tenant_id: "t1".to_string(),
+                    pool_id: "p1".to_string(),
+                    instance_id: "i2".to_string(),
+                    success: false,
+                    new_status: None,
+                    error: Some("Instance not found".to_string()),
+                },
+            ],
+            total: 2,
+            succeeded: 1,
+            failed: 1,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::BatchActionResult {
+                results,
+                total,
+                succeeded,
+                failed,
+            } => {
+                assert_eq!(total, 2);
+                assert_eq!(succeeded, 1);
+                assert_eq!(failed, 1);
+                assert_eq!(results.len(), 2);
+                assert!(results[0].success);
+                assert!(!results[1].success);
+            }
+            _ => panic!("Expected BatchActionResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_pool_action_result() {
+        let resp = AgentResponse::PoolActionResult {
+            success: true,
+            pool_id: "workers".to_string(),
+            instances_affected: 5,
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::PoolActionResult {
+                success,
+                pool_id,
+                instances_affected,
+                ..
+            } => {
+                assert!(success);
+                assert_eq!(pool_id, "workers");
+                assert_eq!(instances_affected, 5);
+            }
+            _ => panic!("Expected PoolActionResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_metrics() {
+        use crate::observability::metrics::MetricsSnapshot;
+
+        let snapshot = MetricsSnapshot {
+            requests_total: 100,
+            requests_reconcile: 10,
+            requests_node_info: 5,
+            requests_node_stats: 3,
+            requests_tenant_list: 2,
+            requests_instance_list: 15,
+            requests_wake: 8,
+            requests_rate_limited: 1,
+            requests_failed: 2,
+            reconcile_runs: 10,
+            reconcile_errors: 0,
+            reconcile_duration_ms: 500,
+            instances_created: 20,
+            instances_started: 18,
+            instances_stopped: 10,
+            instances_slept: 5,
+            instances_woken: 8,
+            instances_destroyed: 2,
+            instances_deferred: 3,
+            connections_accepted: 50,
+            connections_rejected: 1,
+        };
+        let resp = AgentResponse::Metrics(snapshot);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::Metrics(s) => {
+                assert_eq!(s.requests_total, 100);
+                assert_eq!(s.reconcile_runs, 10);
+                assert_eq!(s.instances_created, 20);
+            }
+            _ => panic!("Expected Metrics variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_audit_log() {
+        use crate::audit::{AuditAction, AuditEntry};
+
+        let resp = AgentResponse::AuditLog {
+            entries: vec![AuditEntry {
+                timestamp: "2025-01-01T00:00:00Z".to_string(),
+                tenant_id: "acme".to_string(),
+                pool_id: Some("workers".to_string()),
+                instance_id: Some("i-001".to_string()),
+                action: AuditAction::InstanceStarted,
+                detail: Some("pid=12345".to_string()),
+                threats: vec![],
+                gate_decision: None,
+                frame_sequence: None,
+            }],
+            total_count: 1,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::AuditLog {
+                entries,
+                total_count,
+            } => {
+                assert_eq!(total_count, 1);
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].tenant_id, "acme");
+            }
+            _ => panic!("Expected AuditLog variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_secrets_update_result() {
+        let resp = AgentResponse::SecretsUpdateResult {
+            success: true,
+            tenant_id: "acme".to_string(),
+            instances_reloaded: 10,
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::SecretsUpdateResult {
+                success,
+                tenant_id,
+                instances_reloaded,
+                ..
+            } => {
+                assert!(success);
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(instances_reloaded, 10);
+            }
+            _ => panic!("Expected SecretsUpdateResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_response_config_update_result() {
+        let resp = AgentResponse::ConfigUpdateResult {
+            success: true,
+            pool_id: "workers".to_string(),
+            instances_updated: 5,
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AgentResponse::ConfigUpdateResult {
+                success,
+                pool_id,
+                instances_updated,
+                ..
+            } => {
+                assert!(success);
+                assert_eq!(pool_id, "workers");
+                assert_eq!(instances_updated, 5);
+            }
+            _ => panic!("Expected ConfigUpdateResult variant"),
+        }
     }
 }
