@@ -1,6 +1,17 @@
 # Changelog
 
 
+## [0.3.9] — 2026-03-06
+
+### Added
+- feat(agent): add protocol extensions for deployment control, batch ops, and monitoring
+- fix(docs): fix double-slash in landing page navigation links
+
+### Changed
+
+### Fixed
+
+
 ## [0.3.8] — 2026-03-05
 
 ### Added
