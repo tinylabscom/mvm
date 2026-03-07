@@ -73,32 +73,60 @@ preflight: ci
 
 # ── Release ──────────────────────────────────────────────────────────────
 
-# Cut a release: just release 0.3.0
+# Cut a release with automatic version bump (based on conventional commits)
+release-auto:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> Preparing automatic release"
+    # 1. Quality gates — auto-fix fmt and clippy, then test
+    cargo fmt --all
+    cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo nextest run --workspace
+    # 2. Determine next version from conventional commits
+    NEXT_VERSION=$(git cliff --bumped-version)
+    echo "==> Auto-detected next version: $NEXT_VERSION"
+    # 3. Update version in Cargo.toml (workspace.package.version and internal crate versions)
+    sed -i.bak -e "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" \
+               -e "s/\(mvm-[a-z]* = .*version = \)\"[^\"]*\"/\1\"$NEXT_VERSION\"/" Cargo.toml
+    rm Cargo.toml.bak
+    cargo update -w
+    git add Cargo.toml Cargo.lock
+    # 4. Generate changelog and create tag
+    git-cliff --tag "v$NEXT_VERSION" --unreleased --prepend CHANGELOG.md
+    git add CHANGELOG.md
+    git commit -m "chore(release): prepare v$NEXT_VERSION"
+    git tag "v$NEXT_VERSION"
+    # 5. Push commits and tags
+    git push --follow-tags
+    echo "==> Release v$NEXT_VERSION complete. CI workflow will build and publish."
+
+# Cut a release with specific version: just release 0.4.1
 release VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "==> Releasing v{{VERSION}}"
-    # 1. Bump workspace version in root Cargo.toml
-    sed -i '' 's/^version = ".*"/version = "{{VERSION}}"/' Cargo.toml
-    cargo check --workspace --quiet
-    echo "    Cargo.toml [workspace.package] version set to {{VERSION}}"
-    # 2. Auto-generate changelog entry if missing
-    scripts/update-changelog.sh --version "{{VERSION}}"
-    # 3. Commit the version bump and changelog (if anything changed)
-    if ! git diff --quiet Cargo.toml Cargo.lock CHANGELOG.md; then
-        git add Cargo.toml Cargo.lock CHANGELOG.md
-        git commit -m "chore: bump version to {{VERSION}} and update changelog"
-    fi
-    # 4. Quality gates
-    cargo fmt --all --check
+    echo "==> Preparing release v{{VERSION}}"
+    # 1. Quality gates — auto-fix fmt and clippy, then test
+    cargo fmt --all
+    cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
     cargo clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
-    # 5. Verify changelog & crate versions match
-    scripts/verify-release-version.sh --version "{{VERSION}}"
-    # 6. Tag and push (triggers .github/workflows/release.yml)
+    # 2. Update version in Cargo.toml (workspace.package.version and internal crate versions)
+    sed -i.bak -e 's/^version = ".*"/version = "{{VERSION}}"/' \
+               -e 's/\(mvm-[a-z]* = .*version = \)"[^"]*"/\1"{{VERSION}}"/' Cargo.toml
+    rm Cargo.toml.bak
+    cargo update -w
+    git add Cargo.toml Cargo.lock
+    # 3. Use git-cliff to generate changelog and create tag
+    # --tag: use specified version instead of auto-bump
+    # --prepend: add new changelog entry to CHANGELOG.md
+    git-cliff --tag "v{{VERSION}}" --unreleased --prepend CHANGELOG.md
+    git add CHANGELOG.md
+    git commit -m "chore(release): prepare v{{VERSION}}"
     git tag "v{{VERSION}}"
-    git push origin "v{{VERSION}}"
-    echo "==> Tag v{{VERSION}} pushed. Release workflow will build and publish."
+    # 4. Push commits and tags
+    git push --follow-tags
+    echo "==> Release v{{VERSION}} complete. CI workflow will build and publish."
 
 # Build optimized release binary
 release-build:
