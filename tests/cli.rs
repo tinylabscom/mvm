@@ -667,3 +667,13 @@ fn test_metrics_json_output() {
         "JSON must have instances_created"
     );
 }
+
+#[test]
+fn test_cleanup_orphans_help() {
+    mvm()
+        .args(["cleanup-orphans", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"))
+        .stdout(predicate::str::contains("orphan"));
+}

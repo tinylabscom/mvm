@@ -1,5 +1,55 @@
 use anyhow::{Result, bail};
 
+/// Validate a VM name: lowercase alphanumeric + hyphens, 1-63 chars (RFC 1123).
+///
+/// VM names flow into filesystem paths and shell commands, so only
+/// a safe subset of characters is accepted.
+pub fn validate_vm_name(name: &str) -> Result<()> {
+    validate_id(name, "VM name")
+}
+
+/// Validate a template name: lowercase alphanumeric + hyphens + underscores, 1-63 chars.
+pub fn validate_template_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 63 {
+        bail!("template name must be 1-63 characters, got {}", name.len());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        bail!(
+            "template name must be lowercase alphanumeric + hyphens/underscores: {:?}",
+            name
+        );
+    }
+    if name.starts_with('-') || name.starts_with('_') {
+        bail!(
+            "template name must not start with a hyphen or underscore: {:?}",
+            name
+        );
+    }
+    Ok(())
+}
+
+/// Validate a Nix flake reference for safe shell interpolation.
+///
+/// Rejects empty strings and any character that would be interpreted by the
+/// shell as a metacharacter (`;`, `|`, `&`, `$`, `(`, `)`, `` ` ``, `!`,
+/// `<`, `>`, newline).
+pub fn validate_flake_ref(s: &str) -> Result<()> {
+    if s.is_empty() {
+        bail!("flake reference must not be empty");
+    }
+    const SHELL_META: &[char] = &[';', '|', '&', '$', '(', ')', '`', '!', '<', '>', '\n', '\r'];
+    if let Some(bad) = s.chars().find(|c| SHELL_META.contains(c)) {
+        bail!(
+            "flake reference contains unsafe character {:?} — shell metacharacters not allowed",
+            bad
+        );
+    }
+    Ok(())
+}
+
 /// Validate a tenant or pool ID: lowercase alphanumeric + hyphens, 1-63 chars.
 pub fn validate_id(id: &str, kind: &str) -> Result<()> {
     if id.is_empty() || id.len() > 63 {
@@ -135,5 +185,106 @@ mod tests {
         assert_eq!(t, "acme");
         assert_eq!(p, "workers");
         assert_eq!(i, "i-a3f7b2c1");
+    }
+
+    // validate_vm_name
+    #[test]
+    fn test_validate_vm_name_valid() {
+        assert!(validate_vm_name("myvm").is_ok());
+        assert!(validate_vm_name("my-vm-1").is_ok());
+        assert!(validate_vm_name("a").is_ok());
+        assert!(validate_vm_name(&"a".repeat(63)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vm_name_empty() {
+        assert!(validate_vm_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_vm_name_too_long() {
+        assert!(validate_vm_name(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn test_validate_vm_name_uppercase() {
+        assert!(validate_vm_name("MyVM").is_err());
+    }
+
+    #[test]
+    fn test_validate_vm_name_leading_hyphen() {
+        assert!(validate_vm_name("-bad").is_err());
+    }
+
+    #[test]
+    fn test_validate_vm_name_special_chars() {
+        assert!(validate_vm_name("vm;evil").is_err());
+        assert!(validate_vm_name("vm name").is_err());
+        assert!(validate_vm_name("vm/path").is_err());
+    }
+
+    // validate_template_name
+    #[test]
+    fn test_validate_template_name_valid() {
+        assert!(validate_template_name("base").is_ok());
+        assert!(validate_template_name("my-template").is_ok());
+        assert!(validate_template_name("my_template").is_ok());
+        assert!(validate_template_name("worker1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_template_name_empty() {
+        assert!(validate_template_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_template_name_leading_hyphen() {
+        assert!(validate_template_name("-bad").is_err());
+    }
+
+    #[test]
+    fn test_validate_template_name_special_chars() {
+        assert!(validate_template_name("bad;name").is_err());
+        assert!(validate_template_name("bad name").is_err());
+    }
+
+    #[test]
+    fn test_validate_template_name_too_long() {
+        assert!(validate_template_name(&"a".repeat(64)).is_err());
+    }
+
+    // validate_flake_ref
+    #[test]
+    fn test_validate_flake_ref_valid() {
+        assert!(validate_flake_ref(".").is_ok());
+        assert!(validate_flake_ref("./my-flake").is_ok());
+        assert!(validate_flake_ref("github:org/repo").is_ok());
+        assert!(validate_flake_ref("git+https://github.com/org/repo").is_ok());
+        assert!(validate_flake_ref("/absolute/path").is_ok());
+    }
+
+    #[test]
+    fn test_validate_flake_ref_empty() {
+        assert!(validate_flake_ref("").is_err());
+    }
+
+    #[test]
+    fn test_validate_flake_ref_semicolon() {
+        assert!(validate_flake_ref(". ; rm -rf /").is_err());
+    }
+
+    #[test]
+    fn test_validate_flake_ref_pipe() {
+        assert!(validate_flake_ref(".|evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_flake_ref_dollar() {
+        assert!(validate_flake_ref("$(evil)").is_err());
+    }
+
+    #[test]
+    fn test_validate_flake_ref_newline() {
+        assert!(validate_flake_ref("flake\nmalicious").is_err());
     }
 }

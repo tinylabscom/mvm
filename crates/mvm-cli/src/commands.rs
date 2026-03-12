@@ -11,6 +11,7 @@ use crate::template_cmd;
 use crate::ui;
 use crate::update;
 
+use mvm_core::naming::{validate_flake_ref, validate_template_name, validate_vm_name};
 use mvm_core::util::parse_human_size;
 use mvm_core::vm_backend::VmId;
 use mvm_runtime::config;
@@ -311,6 +312,12 @@ enum Commands {
         /// Output as JSON instead of Prometheus exposition format
         #[arg(long)]
         json: bool,
+    },
+    /// Remove orphaned VM state files (run-info.json entries with dead PIDs)
+    CleanupOrphans {
+        /// List orphans without deleting
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -735,6 +742,7 @@ pub fn run() -> Result<()> {
         Commands::Completions { shell } => cmd_completions(shell),
         Commands::ShellInit => shell_init::print_shell_init(),
         Commands::Metrics { json } => cmd_metrics(json),
+        Commands::CleanupOrphans { dry_run } => cmd_cleanup_orphans(dry_run),
         Commands::Template { action } => cmd_template(action),
         Commands::Vm { action } => cmd_vm(action),
     };
@@ -960,6 +968,9 @@ fn shell_escape(s: &str) -> String {
 }
 
 fn cmd_stop(name: Option<&str>, all: bool) -> Result<()> {
+    if let Some(n) = name {
+        validate_vm_name(n).with_context(|| format!("Invalid VM name: {:?}", n))?;
+    }
     let backend = AnyBackend::default_backend();
     match (name, all) {
         (Some(n), _) => backend.stop(&VmId::from(n)),
@@ -1388,6 +1399,7 @@ fn sync_phase(
 }
 
 fn cmd_logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()> {
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     microvm::logs(name, follow, lines, hypervisor)
 }
 
@@ -1400,6 +1412,7 @@ fn cmd_logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()
 /// `LOCAL_PORT:GUEST_PORT`.  Multiple ports are forwarded concurrently —
 /// background children handle all but the last, and Ctrl-C kills the group.
 fn cmd_forward(name: &str, port_specs: &[String]) -> Result<()> {
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     // Verify the VM is actually running.
     let _abs_dir = resolve_running_vm(name)?;
 
@@ -1986,6 +1999,8 @@ fn cmd_build(path: &str, output: Option<&str>) -> Result<()> {
 }
 
 fn cmd_build_flake(flake_ref: &str, profile: Option<&str>, watch: bool, json: bool) -> Result<()> {
+    validate_flake_ref(flake_ref)
+        .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
     if bootstrap::is_lima_required() {
         lima::require_running()?;
     }
@@ -2141,6 +2156,15 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         env_vars,
         forward,
     } = params;
+    if let Some(n) = name {
+        validate_vm_name(n).with_context(|| format!("Invalid VM name: {:?}", n))?;
+    }
+    if let Some(f) = flake_ref {
+        validate_flake_ref(f).with_context(|| format!("Invalid flake reference: {:?}", f))?;
+    }
+    if let Some(t) = template_name {
+        validate_template_name(t).with_context(|| format!("Invalid template name: {:?}", t))?;
+    }
     if bootstrap::is_lima_required() {
         lima::require_running()?;
     }
@@ -2676,6 +2700,13 @@ fn cmd_down(name: Option<&str>, config_path: Option<&str>) -> Result<()> {
     }
 }
 
+fn cmd_cleanup_orphans(dry_run: bool) -> Result<()> {
+    if bootstrap::is_lima_required() {
+        lima::require_running()?;
+    }
+    microvm::cleanup_orphaned_vms(dry_run)
+}
+
 fn cmd_metrics(json: bool) -> Result<()> {
     let metrics = mvm_core::observability::metrics::global();
     if json {
@@ -2731,6 +2762,10 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
             mem,
             data_disk,
         } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            validate_flake_ref(&flake)
+                .with_context(|| format!("Invalid flake reference: {:?}", flake))?;
             let mem_mb = parse_human_size(&mem).context("Invalid memory size")?;
             let data_disk_mb = parse_human_size(&data_disk).context("Invalid data disk size")?;
             template_cmd::create_single(&name, &flake, &profile, &role, cpus, mem_mb, data_disk_mb)
@@ -2744,6 +2779,10 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
             mem,
             data_disk,
         } => {
+            validate_template_name(&base)
+                .with_context(|| format!("Invalid template base name: {:?}", base))?;
+            validate_flake_ref(&flake)
+                .with_context(|| format!("Invalid flake reference: {:?}", flake))?;
             let mem_mb = parse_human_size(&mem).context("Invalid memory size")?;
             let data_disk_mb = parse_human_size(&data_disk).context("Invalid data disk size")?;
             let role_list: Vec<String> = roles.split(',').map(|s| s.trim().to_string()).collect();
@@ -2763,12 +2802,32 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
             snapshot,
             config,
             update_hash,
-        } => template_cmd::build(&name, force, snapshot, config.as_deref(), update_hash),
-        TemplateCmd::Push { name, revision } => template_cmd::push(&name, revision.as_deref()),
-        TemplateCmd::Pull { name, revision } => template_cmd::pull(&name, revision.as_deref()),
-        TemplateCmd::Verify { name, revision } => template_cmd::verify(&name, revision.as_deref()),
+        } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            template_cmd::build(&name, force, snapshot, config.as_deref(), update_hash)
+        }
+        TemplateCmd::Push { name, revision } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            template_cmd::push(&name, revision.as_deref())
+        }
+        TemplateCmd::Pull { name, revision } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            template_cmd::pull(&name, revision.as_deref())
+        }
+        TemplateCmd::Verify { name, revision } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            template_cmd::verify(&name, revision.as_deref())
+        }
         TemplateCmd::List { json } => template_cmd::list(json),
-        TemplateCmd::Info { name, json } => template_cmd::info(&name, json),
+        TemplateCmd::Info { name, json } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            template_cmd::info(&name, json)
+        }
         TemplateCmd::Edit {
             name,
             flake,
@@ -2778,6 +2837,12 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
             mem,
             data_disk,
         } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            if let Some(ref f) = flake {
+                validate_flake_ref(f)
+                    .with_context(|| format!("Invalid flake reference: {:?}", f))?;
+            }
             let mem_mb = mem
                 .as_ref()
                 .map(|s| parse_human_size(s))
@@ -2798,13 +2863,19 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
                 data_disk_mb,
             )
         }
-        TemplateCmd::Delete { name, force } => template_cmd::delete(&name, force),
+        TemplateCmd::Delete { name, force } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
+            template_cmd::delete(&name, force)
+        }
         TemplateCmd::Init {
             name,
             local,
             vm,
             dir,
         } => {
+            validate_template_name(&name)
+                .with_context(|| format!("Invalid template name: {:?}", name))?;
             let use_local = local && !vm;
             template_cmd::init(&name, use_local, &dir)
         }

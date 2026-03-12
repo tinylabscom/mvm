@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use crate::http;
@@ -60,6 +61,79 @@ fn fetch_latest_version() -> Result<String> {
 /// Strip the "v" prefix from a version tag.
 fn strip_v_prefix(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
+}
+
+/// Parse a hex-encoded SHA256 digest from a `checksums-sha256.txt` entry.
+///
+/// Each line is: `<64 hex chars>  <filename>`  (two spaces, shasum format).
+/// Returns the raw 32-byte digest.
+fn parse_checksum_line(line: &str) -> Result<[u8; 32]> {
+    let hex = line
+        .split_whitespace()
+        .next()
+        .context("Empty checksum line")?;
+    if hex.len() != 64 {
+        anyhow::bail!("Expected 64 hex chars in checksum, got {}", hex.len());
+    }
+    let mut digest = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).context("Non-UTF8 in checksum hex")?;
+        digest[i] =
+            u8::from_str_radix(s, 16).with_context(|| format!("Invalid hex byte: {}", s))?;
+    }
+    Ok(digest)
+}
+
+/// Verify the SHA256 digest of a downloaded archive against `checksums-sha256.txt`.
+///
+/// Downloads the combined checksum file, finds the line for `archive_name`,
+/// and confirms it matches the digest of the file at `archive_path`.
+fn verify_checksum(version: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+    let checksum_url = format!(
+        "https://github.com/{}/releases/download/{}/checksums-sha256.txt",
+        GITHUB_REPO, version
+    );
+
+    let checksum_text = http::fetch_text(&checksum_url)
+        .context("Failed to download checksum file — cannot verify integrity")?;
+
+    // Find the line that corresponds to this archive.
+    let expected_digest = checksum_text
+        .lines()
+        .find(|line| line.contains(archive_name))
+        .with_context(|| {
+            format!(
+                "Checksum for '{}' not found in checksums-sha256.txt",
+                archive_name
+            )
+        })
+        .and_then(parse_checksum_line)?;
+
+    // Compute the SHA256 of the downloaded file.
+    let bytes = std::fs::read(archive_path).with_context(|| {
+        format!(
+            "Failed to read archive for checksum: {}",
+            archive_path.display()
+        )
+    })?;
+    let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+
+    if actual_digest != expected_digest {
+        anyhow::bail!(
+            "Checksum mismatch for {}!\n  expected: {}\n  actual:   {}\nThe download may be corrupted or tampered with.",
+            archive_name,
+            hex_encode(&expected_digest),
+            hex_encode(&actual_digest),
+        );
+    }
+
+    ui::success("Checksum verified.");
+    Ok(())
+}
+
+/// Hex-encode a byte slice for display.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Download the release archive into the given temp directory.
@@ -329,6 +403,12 @@ pub fn update(check_only: bool, force: bool) -> Result<()> {
     let tmp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
 
     download_release(&latest_tag, target, tmp_dir.path())?;
+    let archive_name = format!("mvmctl-{}.tar.gz", target);
+    verify_checksum(
+        &latest_tag,
+        &archive_name,
+        &tmp_dir.path().join(&archive_name),
+    )?;
     extract_and_install(target, tmp_dir.path(), &current_exe)?;
 
     ui::success(&format!("\nSuccessfully updated to {}!", latest_tag));
@@ -342,6 +422,65 @@ pub fn update(check_only: bool, force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    // --- Phase 2: checksum verification ---
+
+    fn sha256_of(data: &[u8]) -> String {
+        let digest: [u8; 32] = Sha256::digest(data).into();
+        hex_encode(&digest)
+    }
+
+    #[test]
+    fn test_parse_checksum_line_valid() {
+        let hex = "a".repeat(64);
+        let line = format!("{}  mvmctl-aarch64-apple-darwin.tar.gz", hex);
+        let digest = parse_checksum_line(&line).unwrap();
+        assert_eq!(digest, [0xaa; 32]);
+    }
+
+    #[test]
+    fn test_parse_checksum_line_wrong_length() {
+        let err = parse_checksum_line("abc  file.tar.gz").unwrap_err();
+        assert!(err.to_string().contains("64 hex chars"));
+    }
+
+    #[test]
+    fn test_checksum_correct_digest_passes() {
+        let data = b"hello binary";
+        let hash = sha256_of(data);
+
+        // Write the "archive" to a temp file
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(data).unwrap();
+        tmp.flush().unwrap();
+
+        // Build a checksums-sha256.txt line that matches
+        let checksum_line = format!("{}  mvmctl-test.tar.gz\n", hash);
+
+        // parse_checksum_line + manual comparison (verify_checksum needs HTTP)
+        let expected = parse_checksum_line(checksum_line.trim()).unwrap();
+        let actual: [u8; 32] = Sha256::digest(data).into();
+        assert_eq!(expected, actual, "Correct digest should match");
+    }
+
+    #[test]
+    fn test_checksum_tampered_bytes_fail() {
+        let data = b"hello binary";
+        let tampered = b"TAMPERED!!!!";
+        let hash_of_original = sha256_of(data);
+        let checksum_line = format!("{}  mvmctl-test.tar.gz", hash_of_original);
+
+        let expected = parse_checksum_line(&checksum_line).unwrap();
+        let actual: [u8; 32] = Sha256::digest(tampered).into();
+        assert_ne!(
+            expected, actual,
+            "Tampered bytes should produce different digest"
+        );
+    }
+
+    // --- Existing tests ---
 
     #[test]
     fn test_current_version_non_empty() {

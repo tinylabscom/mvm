@@ -1528,6 +1528,95 @@ fn read_slot_index(abs_dir: &str) -> Option<u8> {
     value.get("slot_index")?.as_u64().map(|v| v as u8)
 }
 
+/// Check whether a PID is alive on the current OS.
+///
+/// On Linux: checks for `/proc/<pid>` existence (no signal needed).
+/// On macOS: runs `kill -0 <pid>` via the shell.
+pub fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Scan `VMS_DIR` inside the Lima VM for orphaned entries — run-info.json files
+/// whose stored Firecracker PID is no longer alive.
+///
+/// Returns a list of VM names with orphaned state files.
+pub fn find_orphaned_vms() -> Result<Vec<String>> {
+    // List all run-info.json files and check each PID in a single shell script.
+    let output = run_in_vm_stdout(&format!(
+        r#"for dir in {vms_dir}/*/; do
+            name=$(basename "$dir")
+            rif="${{dir}}run-info.json"
+            if [ ! -f "$rif" ]; then continue; fi
+            pid=$(cat "$rif" 2>/dev/null | grep -o '"fc_pid":[0-9]*' | grep -o '[0-9]*$' | head -1)
+            if [ -z "$pid" ]; then continue; fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo "$name"
+            fi
+        done 2>/dev/null || true"#,
+        vms_dir = VMS_DIR,
+    ))?;
+
+    Ok(output
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// Remove orphaned `run-info.json` entries from `VMS_DIR`.
+///
+/// In dry-run mode: lists orphaned entries without deleting.
+/// In normal mode: removes the orphaned files and logs each removal.
+pub fn cleanup_orphaned_vms(dry_run: bool) -> Result<()> {
+    let orphans = find_orphaned_vms()?;
+
+    if orphans.is_empty() {
+        ui::success("No orphaned VM state files found.");
+        return Ok(());
+    }
+
+    if dry_run {
+        ui::info(&format!(
+            "Would remove {} orphaned VM state file(s):",
+            orphans.len()
+        ));
+        for name in &orphans {
+            println!("  {}", name);
+        }
+        return Ok(());
+    }
+
+    for name in &orphans {
+        let result = run_in_vm(&format!(
+            "rm -f {vms_dir}/{name}/run-info.json",
+            vms_dir = VMS_DIR,
+            name = name,
+        ));
+        match result {
+            Ok(_) => {
+                ui::success(&format!("Removed orphaned state for VM '{}'", name));
+                tracing::info!(vm = %name, "removed orphaned run-info.json");
+            }
+            Err(e) => {
+                tracing::warn!(vm = %name, "failed to remove orphaned run-info.json: {e}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Read persisted run info (returns None if file doesn't exist), with migration.
 pub fn read_run_info() -> Option<RunInfo> {
     let json = run_in_vm_stdout(&format!(
@@ -1860,5 +1949,22 @@ mod tests {
         {
             let _guard = FirecrackerGuard::new("/tmp/nonexistent-vm");
         }
+    }
+
+    // is_pid_alive
+    #[test]
+    fn test_is_pid_alive_current_process() {
+        // The current process is definitely alive.
+        let my_pid = std::process::id();
+        assert!(is_pid_alive(my_pid), "current process must be alive");
+    }
+
+    #[test]
+    fn test_is_pid_alive_impossible_pid() {
+        // PID 999999999 exceeds the maximum Linux PID (4194304) and will never exist.
+        assert!(
+            !is_pid_alive(999_999_999),
+            "impossible PID must not be alive"
+        );
     }
 }

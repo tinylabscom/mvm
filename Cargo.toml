@@ -10,7 +10,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -78,12 +78,12 @@ uuid = { version = "1", features = ["v4"] }
 which = "7"
 
 # Internal crates
-mvm-core = { path = "crates/mvm-core", version = "0.5.0" }
-mvm-guest = { path = "crates/mvm-guest", version = "0.5.0" }
-mvm-build = { path = "crates/mvm-build", version = "0.5.0" }
-mvm-runtime = { path = "crates/mvm-runtime", version = "0.5.0" }
-mvm-security = { path = "crates/mvm-security", version = "0.5.0" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.5.0" }
+mvm-core = { path = "crates/mvm-core", version = "0.6.0" }
+mvm-guest = { path = "crates/mvm-guest", version = "0.6.0" }
+mvm-build = { path = "crates/mvm-build", version = "0.6.0" }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.6.0" }
+mvm-security = { path = "crates/mvm-security", version = "0.6.0" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.6.0" }
 
 # Dev dependencies
 assert_cmd = "2"

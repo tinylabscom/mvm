@@ -58,14 +58,32 @@ jobs:
           OPENSSL_VENDORED: 1
         run: cargo build --release --target "${TARGET}"
 
+      - name: Smoke test binary (native targets only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          BIN="target/${TARGET}/release/mvmctl"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+          "$BIN" metrics --json | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert 'requests_total' in d, 'metrics JSON missing requests_total'
+          print('smoke test passed')
+          "
+
       - name: Package binary and generate checksums
+        env:
+          TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           BIN_NAME="mvmctl"
-          ARCHIVE_NAME="mvmctl-${{ matrix.target }}"
+          ARCHIVE_NAME="mvmctl-${TARGET}"
 
           mkdir -p "staging/${ARCHIVE_NAME}"
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
+          cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           cp -r resources "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
 
@@ -88,6 +106,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: cargo cyclonedx --format json --all --output-cdx sbom.cdx.json
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -113,4 +140,5 @@ jobs:
             --title "${TAG_NAME}" \
             --generate-notes \
             artifacts/*.tar.gz \
-            artifacts/checksums-sha256.txt
+            artifacts/checksums-sha256.txt \
+            sbom.cdx.json
