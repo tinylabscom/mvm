@@ -1,6 +1,6 @@
-# Sprint 18 — Developer Experience & Polish
+# Sprint 19 — Observability & Security Hygiene
 
-**Goal:** Fix stale binary name references, enhance `mvmctl doctor` with smarter checks, improve watch mode, and add quality-of-life CLI improvements.
+**Goal:** Expose the metrics infrastructure already built into the codebase via a `mvmctl metrics` command, eliminate shell-injection-prone `xxd` shell-outs in crypto code with pure-Rust hex encoding, and add a lightweight state migration framework so persisted state files can evolve safely.
 
 **Roadmap:** See [specs/plans/19-post-hardening-roadmap.md](plans/19-post-hardening-roadmap.md) for full post-hardening priorities.
 
@@ -9,7 +9,7 @@
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade          |
-| Total tests      | 688                      |
+| Total tests      | 700                      |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -34,96 +34,131 @@
 - [15-real-world-apps.md](sprints/15-real-world-apps.md)
 - [16-production-hardening.md](sprints/16-production-hardening.md)
 - [17-resource-safety-release.md](sprints/17-resource-safety-release.md)
+- [18-developer-experience.md](sprints/18-developer-experience.md)
 
 ---
 
-## Phase 1: Fix Stale Binary Name References **Status: COMPLETE**
+## Rationale
 
-The binary was renamed from `mvm` to `mvmctl` but 20+ user-facing messages still referenced `mvm`. Internal identifiers (Lima VM name `mvm`, bridge `br-mvm`, paths `/var/lib/mvm/`) stay unchanged — only CLI-facing strings were updated.
+**Why these three themes?**
 
-### 1.1 User-facing error/info messages
+1. **Metrics export**: `mvm-core` already has a `Metrics` struct with atomic counters and a `prometheus_exposition()` method, but nothing surfaces these values to the operator. A `mvmctl metrics` command costs ~100 lines and immediately makes the runtime observable without any new dependencies. The `MetricsSnapshot` can also be emitted as JSON for scripted consumers.
 
-- [x] `crates/mvm-cli/src/commands.rs` — "Run with: mvm run" → "mvmctl run"
-- [x] `crates/mvm-cli/src/commands.rs` — "mvm development shell" → "mvmctl"
-- [x] `crates/mvm-cli/src/commands.rs` — "mvm up --flake" → "mvmctl up --flake"
-- [x] `crates/mvm-cli/src/bootstrap.rs` — "mvm bootstrap" → "mvmctl bootstrap"
-- [x] `crates/mvm-cli/src/ui.rs` — "mvm status" header → "mvmctl status"
-- [x] `crates/mvm-runtime/src/ui.rs` — "mvm status" header → "mvmctl status"
-- [x] `crates/mvm-runtime/src/vm/lima.rs` — "Run 'mvm start' or 'mvm setup'" → "mvmctl"
-- [x] `crates/mvm-runtime/src/vm/lima_state.rs` — "Run 'mvm setup' or 'mvm bootstrap'" → "mvmctl"
-- [x] `crates/mvm-runtime/src/vm/microvm.rs` — All "Use 'mvm stop/start/status/shell'" → "mvmctl" (8 instances)
-- [x] `crates/mvm-runtime/src/vm/image.rs` — "Run 'mvm setup'" → "mvmctl setup"
-- [x] `crates/mvm-runtime/src/vm/instance/lifecycle.rs` — "Run 'mvm pool build'" → "mvmctl pool build"
-- [x] `crates/mvm-runtime/src/security/certs.rs` — "Run 'mvm agent certs init'" → "mvmctl"
+2. **Native hex encoding**: `keystore.rs` and `encryption.rs` shell out to `xxd` to convert between hex strings and raw bytes. This is the only remaining shell-injection-adjacent pattern in security-sensitive code (the key material passes through `format!()` into a shell string). Replacing the hex encode/decode with the `hex` crate (already used elsewhere in the repo) eliminates the risk entirely with zero runtime cost.
 
-### 1.2 Doctor messages
-
-- [x] `crates/mvm-cli/src/doctor.rs` — "Run 'mvm dev'" → "mvmctl dev"
-- [x] `crates/mvm-cli/src/doctor.rs` — "Run 'mvm setup' or 'mvm bootstrap'" → "mvmctl"
-- [x] `crates/mvm-cli/src/doctor.rs` — "Run 'mvm setup'" (KVM check) → "mvmctl setup"
-
-### 1.3 Code quality test
-
-- [x] Added `no_stale_binary_name_in_user_facing_strings` test to `tests/code_quality.rs` — greps for patterns like `Run 'mvm `, `Use 'mvm ` in production code and fails if any are found
+3. **State migration framework**: `schema_version` fields sit in `MvmState`, `TemplateSpec`, and `AgentState` with no migration logic. The next time any persisted struct gains or renames a field, existing installs will silently drop data or fail deserialization. A migration runner that applies versioned migration functions at load time is a 150-line investment that prevents future silent breakage.
 
 ---
 
-## Phase 2: Doctor Enhancements **Status: COMPLETE**
+## Phase 1: `mvmctl metrics` Command **Status: PLANNED**
 
-### 2.1 Nix version validation
+The `mvm_core::observability::metrics::Metrics` struct (global singleton) exposes `prometheus_exposition()` and `snapshot()` today. Nothing surfaces these to the CLI.
 
-- [x] `nix_version_check()` parses `nix --version` output (e.g., "nix (Nix) 2.18.1" → 2.18.1)
-- [x] Fails if Nix version < 2.4 (minimum for `nix build` with flakes)
-- [x] Warns if Nix version < 2.13 (recommended for best flake support)
-- [x] `nix_flakes_check()` verifies `experimental-features` includes `nix-command` and `flakes`
-- [x] 7 tests: version parsing (standard, suffix, old, garbage, empty), threshold checks
+### 1.1 New `metrics` subcommand
 
-### 2.2 Lima VM health check
+- [ ] Add `Commands::Metrics { json: bool }` to the `Commands` enum in `commands.rs`
+- [ ] `cmd_metrics(json)`:
+  - JSON mode: serialize `global().snapshot()` (which is already `Serialize`) and print
+  - Text mode: print `global().prometheus_exposition()` directly (already formatted)
+- [ ] Dispatch arm in `run()`
 
-- [x] `lima_disk_check()` reports Lima VM disk usage, warns at 80%+, fails at 90%+
-- Lima VM memory check deferred (requires parsing Lima config YAML — low value for effort)
-- Lima VM command execution already covered by existing `check_vm_cmd` checks
+### 1.2 Tests
 
-### 2.3 Nix store health
-
-- [x] `nix_store_check()` runs `nix store ping` to verify store accessibility
-- [x] Reports store URL (e.g., "Store URL: daemon") on success
-- Nix store size reporting deferred (requires `nix store info` which may not be available on all versions)
+- [ ] Unit test: `mvmctl metrics` parses without error (CLI integration test in `tests/cli.rs`)
+- [ ] Unit test: `mvmctl metrics --json` parses without error
+- [ ] Unit test: `cmd_metrics` in `commands::tests` — snapshot serializes to valid JSON
+- [ ] Unit test: prometheus exposition contains expected metric names (`mvm_requests_total`, etc.)
 
 ---
 
-## Phase 3: Watch Mode Improvements **Status: COMPLETE**
+## Phase 2: Native Hex Encoding in Crypto Code **Status: PLANNED**
 
-Replaced the 2-second polling loop on `flake.lock` with native filesystem events via the `notify` crate, watching all `.nix` and `.lock` files recursively.
+`crates/mvm-runtime/src/security/keystore.rs` and `encryption.rs` use `xxd -p` (encode) and `xxd -r -p` (decode) via shell to convert between hex strings and raw bytes. The `hex` crate is already in the workspace.
 
-### 3.1 Watch source files
+### 2.1 `keystore.rs` — replace `xxd -p` read
 
-- [x] Use `notify` crate for filesystem events (replaces 2s polling)
-- [x] Watch `flake.nix`, `flake.lock`, and Nix source files (`.nix` in flake directory)
-- [x] Debounce rapid changes (500ms window) to avoid redundant builds
-- `--watch-path` flag deferred (low priority — recursive watch already covers flake directory)
+The `FileKeyProvider::read_key_hex()` method runs:
+```
+xxd -p <path> 2>/dev/null | tr -d '\n'
+```
+to read a binary key file and return it as a hex string.
 
-### 3.2 Watch UX
+- [ ] Replace with: read file bytes natively (`std::fs::read()`), then `hex::encode(bytes)`
+- [ ] This must happen on the Lima VM side — keep using `run_in_vm` for the file read but decode the raw bytes in Rust
 
-- [x] Show "watching for changes..." status message
-- [x] Show which file triggered the rebuild
-- Clear terminal on rebuild (`--clear` flag) deferred — low priority
+Wait — `run_in_vm` runs commands inside Lima; file reads happen there. The cleanest approach:
+- [ ] `run_in_vm_stdout("cat <path> | xxd -p | tr -d '\\n'")` → keep as-is for the Lima-side read (file is in VM), but add a `hex_decode` validation step in Rust on the returned string
+- [ ] Extract a `validate_hex_key(s: &str) -> Result<()>` helper that checks the returned string is valid hex before use — prevents garbage data from propagating
+- [ ] Add unit tests for the validation helper
+
+### 2.2 `encryption.rs` — replace `xxd -r -p` hex-to-bytes conversion
+
+The `luks_format()` and `luks_open()` functions embed the hex key in a shell heredoc:
+```bash
+echo -n '{key}' | xxd -r -p | cryptsetup luksFormat ...
+```
+
+- [ ] Validate that `key` is valid hex before interpolating into the shell command (use the helper from 2.1)
+- [ ] Add a `validate_hex_key` guard at the top of `luks_format()` and `luks_open()`
+- [ ] The `xxd -r -p` pipe to cryptsetup must stay shell-based (cryptsetup reads from stdin and is a kernel interface — cannot move to pure Rust without a LUKS crate)
+
+### 2.3 Tests
+
+- [ ] `validate_hex_key` — valid hex passes, odd-length fails, non-hex chars fail, empty string fails
+- [ ] `hex_encode_decode_roundtrip` — encode random bytes, decode, check equality
 
 ---
 
-## Phase 4: CLI Quality of Life **Status: COMPLETE**
+## Phase 3: State Migration Framework **Status: PLANNED**
 
-### 4.1 Better error messages with suggestions
+Three persisted structs have `schema_version: u32` with no migration logic:
+- `MvmState` in `crates/mvm-runtime/src/config.rs` (version 1)
+- `TemplateSpec` in `crates/mvm-core/src/template.rs` (version 1)
+- `AgentState` in `crates/mvm-core/src/agent.rs` (version 1)
 
-- [x] When `mvmctl run` fails because Lima VM is not running, suggest `mvmctl dev` or `mvmctl setup`
-- [x] When `mvmctl build` fails with Nix error, suggest `nix flake update` and syntax check
-- [x] When `mvmctl template build` fails because template already exists, suggest `--force`
+### 3.1 Migration trait in `mvm-core`
 
-### 4.2 Command aliases
+Add `crates/mvm-core/src/migration.rs`:
 
-- [x] `mvmctl ps` as alias for `mvmctl status` (familiar to Docker users)
-- `mvmctl logs <vm>` was already implemented in Sprint 17
-- [x] `mvmctl rm <vm>` / `mvmctl remove <vm>` to stop a named microVM
+```rust
+/// A versioned migration function: takes raw JSON Value at version N,
+/// returns transformed Value at version N+1.
+pub type MigrateFn = fn(serde_json::Value) -> Result<serde_json::Value>;
+
+/// Apply a chain of migrations to a raw JSON value, starting at `from_version`
+/// up to `to_version`. Migrations are indexed by the version they produce
+/// (migration[0] produces version 1, migration[1] produces version 2, etc.).
+pub fn migrate(
+    value: serde_json::Value,
+    from_version: u32,
+    to_version: u32,
+    migrations: &[MigrateFn],
+) -> Result<serde_json::Value>
+```
+
+- [ ] Implement `migrate()` — iterate `from_version..to_version`, apply each `MigrateFn`
+- [ ] Return `Ok(value)` unchanged if `from_version == to_version`
+- [ ] Return `Err` if `from_version > to_version` (downgrade not supported)
+- [ ] Return `Err` if `to_version` exceeds available migrations
+
+### 3.2 Wire into `MvmState` load
+
+In `crates/mvm-runtime/src/config.rs`, `MvmState::load()`:
+
+- [ ] Before deserializing to `MvmState`, deserialize to `serde_json::Value`
+- [ ] Read `schema_version` from the raw value (default 0 if missing — old pre-versioned files)
+- [ ] Call `migrate(value, from, CURRENT_SCHEMA_VERSION, &MIGRATIONS)`
+- [ ] Deserialize the migrated value to `MvmState`
+- [ ] `MIGRATIONS` is an empty `&[]` for now — framework is wired but no actual migrations yet
+
+### 3.3 Tests
+
+- [ ] `migrate_noop` — same version returns unchanged value
+- [ ] `migrate_one_step` — single migration function transforms the value correctly
+- [ ] `migrate_chain` — two migrations applied in order
+- [ ] `migrate_downgrade_err` — `from > to` returns error
+- [ ] `migrate_missing_migration_err` — `to` exceeds available migrations returns error
+- [ ] `migrate_mvm_state_from_unversioned` — load a JSON blob without `schema_version`, confirm it deserializes to version 1 (the no-op migration from 0→1)
 
 ---
 
