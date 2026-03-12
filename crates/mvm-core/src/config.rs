@@ -13,7 +13,12 @@ pub fn normalize_fc_version(raw: &str) -> String {
     let candidate = re
         .captures_iter(raw)
         .last()
-        .map(|c| c.get(0).unwrap().as_str().to_string())
+        .map(|c| {
+            c.get(0)
+                .expect("regex capture group 0 must exist")
+                .as_str()
+                .to_string()
+        })
         .unwrap_or_else(|| FC_VERSION_DEFAULT.to_string());
 
     if candidate.starts_with('v') {

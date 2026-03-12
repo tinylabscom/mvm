@@ -3,6 +3,8 @@ use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use tracing::warn;
+
 use crate::shell;
 
 /// Certificate directory inside the Lima VM.
@@ -269,6 +271,7 @@ pub fn cert_status() -> Result<CertStatus> {
             "openssl x509 -in {} -noout -subject 2>/dev/null || echo unknown",
             paths.node_cert
         ))
+        .map_err(|e| warn!("failed to read node cert subject: {e}"))
         .ok()
         .map(|s| s.trim().to_string())
     } else {
@@ -280,6 +283,7 @@ pub fn cert_status() -> Result<CertStatus> {
             "openssl x509 -in {} -noout -enddate 2>/dev/null || echo unknown",
             paths.node_cert
         ))
+        .map_err(|e| warn!("failed to read node cert expiry: {e}"))
         .ok()
         .map(|s| s.trim().to_string())
     } else {
@@ -291,6 +295,7 @@ pub fn cert_status() -> Result<CertStatus> {
             "stat -c '%y' {} 2>/dev/null || echo unknown",
             paths.node_cert
         ))
+        .map_err(|e| warn!("failed to read node cert last-rotated time: {e}"))
         .ok()
         .map(|s| s.trim().to_string())
     } else {

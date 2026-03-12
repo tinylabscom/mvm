@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use super::disk;
 use super::fc_config;
@@ -214,10 +214,12 @@ pub fn instance_start(tenant_id: &str, pool_id: &str, instance_id: &str) -> Resu
             let mapper_path = encryption::open_encrypted_volume(&raw_path, &mapper_name, &key)?;
 
             // Format the mapper device if new
-            let _ = shell::run_in_vm(&format!(
+            if let Err(e) = shell::run_in_vm(&format!(
                 "if ! blkid {} >/dev/null 2>&1; then mkfs.ext4 -q {}; fi",
                 mapper_path, mapper_path
-            ));
+            )) {
+                warn!("failed to format encrypted volume: {e}");
+            }
             Some(mapper_path)
         } else {
             Some(raw_path)
@@ -311,11 +313,13 @@ pub fn instance_start(tenant_id: &str, pool_id: &str, instance_id: &str) -> Resu
 
     // Set up metadata endpoint if configured
     if spec.metadata_enabled {
-        let _ = metadata::setup_metadata_endpoint(
+        if let Err(e) = metadata::setup_metadata_endpoint(
             tenant_id,
             &tenant.net.bridge_name,
             &tenant.net.gateway_ip,
-        );
+        ) {
+            warn!("failed to set up metadata endpoint: {e}");
+        }
     }
 
     // Update state
@@ -349,18 +353,24 @@ pub fn instance_stop(tenant_id: &str, pool_id: &str, instance_id: &str) -> Resul
 
     // Kill Firecracker if running
     if let Some(pid) = state.firecracker_pid {
-        let _ = shell::run_in_vm(&format!(
+        if let Err(e) = shell::run_in_vm(&format!(
             "kill {} 2>/dev/null || true; sleep 1; kill -9 {} 2>/dev/null || true",
             pid, pid
-        ));
+        )) {
+            warn!("failed to kill firecracker process: {e}");
+        }
     }
 
     // Close LUKS volume if open
     let mapper_name = encryption::luks_mapper_name(tenant_id, instance_id);
-    let _ = encryption::close_encrypted_volume(&mapper_name);
+    if let Err(e) = encryption::close_encrypted_volume(&mapper_name) {
+        warn!("failed to close LUKS volume: {e}");
+    }
 
     // Kill remaining cgroup processes and clean up cgroup
-    let _ = cgroups::kill_cgroup_processes(tenant_id, instance_id);
+    if let Err(e) = cgroups::kill_cgroup_processes(tenant_id, instance_id) {
+        warn!("failed to kill cgroup processes: {e}");
+    }
     cgroups::remove_instance_cgroup(tenant_id, instance_id)?;
 
     // Tear down TAP device
@@ -368,11 +378,13 @@ pub fn instance_stop(tenant_id: &str, pool_id: &str, instance_id: &str) -> Resul
 
     // Clean up runtime files (socket, pid, log) and ephemeral disks (secrets, config)
     let inst_dir = instance_dir(tenant_id, pool_id, instance_id);
-    let _ = shell::run_in_vm(&format!(
+    if let Err(e) = shell::run_in_vm(&format!(
         "rm -f {dir}/runtime/firecracker.socket {dir}/runtime/fc.pid \
          {dir}/runtime/v.sock {dir}/volumes/secrets.ext4 {dir}/volumes/config.ext4",
         dir = inst_dir
-    ));
+    )) {
+        warn!("failed to clean up runtime files: {e}");
+    }
 
     state.status = InstanceStatus::Stopped;
     state.firecracker_pid = None;
@@ -457,13 +469,15 @@ pub fn instance_sleep(
             }
             Ok(false) => {
                 // Drain timeout exceeded — log and force
-                let _ = audit::log_event(
+                if let Err(e) = audit::log_event(
                     tenant_id,
                     Some(pool_id),
                     Some(instance_id),
                     audit::AuditAction::MinRuntimeOverridden,
                     Some("drain_timeout exceeded, forcing sleep"),
-                );
+                ) {
+                    warn!("failed to log drain timeout audit event: {e}");
+                }
             }
             Err(_) => {
                 // Vsock not available (e.g. guest agent not running) — best-effort
@@ -480,21 +494,25 @@ pub fn instance_sleep(
     // Kill Firecracker process with graceful shutdown timeout
     let graceful = spec.runtime_policy.graceful_shutdown_seconds;
     if let Some(pid) = state.firecracker_pid {
-        let _ = shell::run_in_vm(&format!(
+        if let Err(e) = shell::run_in_vm(&format!(
             "kill {pid} 2>/dev/null || true; \
              for i in $(seq 1 {graceful}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done; \
              kill -9 {pid} 2>/dev/null || true",
-        ));
+        )) {
+            warn!("failed to kill firecracker process during sleep: {e}");
+        }
     }
 
     // Cleanup cgroup
     cgroups::remove_instance_cgroup(tenant_id, instance_id)?;
 
     // Clean up runtime files but keep socket path info
-    let _ = shell::run_in_vm(&format!(
+    if let Err(e) = shell::run_in_vm(&format!(
         "rm -f {dir}/runtime/firecracker.socket {dir}/runtime/fc.pid {dir}/runtime/v.sock",
         dir = inst_dir
-    ));
+    )) {
+        warn!("failed to clean up runtime files during sleep: {e}");
+    }
 
     // TAP device is intentionally kept for wake
 
@@ -590,7 +608,9 @@ pub fn instance_wake(tenant_id: &str, pool_id: &str, instance_id: &str) -> Resul
 
     if !restored {
         // No snapshot available, kill the empty FC and bail
-        let _ = shell::run_in_vm(&format!("kill -9 {} 2>/dev/null || true", pid));
+        if let Err(e) = shell::run_in_vm(&format!("kill -9 {} 2>/dev/null || true", pid)) {
+            warn!("failed to kill empty firecracker process: {e}");
+        }
         anyhow::bail!(
             "No snapshot available for {}/{}/{}. Use 'instance start' for a fresh boot.",
             tenant_id,
@@ -600,7 +620,9 @@ pub fn instance_wake(tenant_id: &str, pool_id: &str, instance_id: &str) -> Resul
     }
 
     // Signal guest wake via vsock (best-effort: guest reinitializes connections and refreshes secrets)
-    let _ = mvm_guest::vsock::signal_wake(&inst_dir);
+    if let Err(e) = mvm_guest::vsock::signal_wake(&inst_dir) {
+        warn!("failed to signal guest wake via vsock: {e}");
+    }
 
     // Update state
     let now = time::utc_now();
@@ -680,15 +702,21 @@ pub fn instance_destroy(
         instance_stop(tenant_id, pool_id, instance_id)?;
     } else if let Some(pid) = state.firecracker_pid {
         // Kill stale process
-        let _ = shell::run_in_vm(&format!("kill -9 {} 2>/dev/null || true", pid));
+        if let Err(e) = shell::run_in_vm(&format!("kill -9 {} 2>/dev/null || true", pid)) {
+            warn!("failed to kill stale firecracker process: {e}");
+        }
     }
 
     // Close LUKS volume and wipe header if destroying
     let mapper_name = encryption::luks_mapper_name(tenant_id, instance_id);
-    let _ = encryption::close_encrypted_volume(&mapper_name);
+    if let Err(e) = encryption::close_encrypted_volume(&mapper_name) {
+        warn!("failed to close LUKS volume during destroy: {e}");
+    }
 
     // Tear down TAP if still present
-    let _ = net::teardown_tap(&state.net.tap_dev);
+    if let Err(e) = net::teardown_tap(&state.net.tap_dev) {
+        warn!("failed to tear down TAP device during destroy: {e}");
+    }
 
     // Remove cgroup
     cgroups::remove_instance_cgroup(tenant_id, instance_id)?;
@@ -864,4 +892,5 @@ mod tests {
         unique_ids.dedup();
         assert_eq!(ids.len(), unique_ids.len());
     }
+
 }

@@ -38,7 +38,7 @@ where
         }
     }
 
-    Err(last_err.unwrap())
+    Err(last_err.expect("retry loop must have recorded at least one error"))
 }
 
 #[cfg(test)]

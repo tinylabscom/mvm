@@ -102,9 +102,11 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         "tar",
         &[
             "xzf",
-            archive_path.to_str().unwrap(),
+            archive_path
+                .to_str()
+                .expect("archive path must be valid UTF-8"),
             "-C",
-            tmp_dir.to_str().unwrap(),
+            tmp_dir.to_str().expect("tmp dir path must be valid UTF-8"),
         ],
     )?;
 
@@ -138,19 +140,45 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
     if needs_sudo {
         run_sudo_mv(current_exe, &backup_path)?;
         if let Err(e) = run_sudo_cp(&new_binary, current_exe) {
-            let _ = run_sudo_mv(&backup_path, current_exe);
+            if let Err(e) = run_sudo_mv(&backup_path, current_exe) {
+                tracing::warn!("failed to rollback binary during update: {e}");
+            }
             return Err(e);
         }
-        let _ = run_host("sudo", &["chmod", "+x", current_exe.to_str().unwrap()]);
-        let _ = run_host("sudo", &["rm", "-f", backup_path.to_str().unwrap()]);
+        if let Err(e) = run_host(
+            "sudo",
+            &[
+                "chmod",
+                "+x",
+                current_exe.to_str().expect("exe path must be valid UTF-8"),
+            ],
+        ) {
+            tracing::warn!("failed to chmod during update: {e}");
+        }
+        if let Err(e) = run_host(
+            "sudo",
+            &[
+                "rm",
+                "-f",
+                backup_path
+                    .to_str()
+                    .expect("backup path must be valid UTF-8"),
+            ],
+        ) {
+            tracing::warn!("failed to rm during update: {e}");
+        }
     } else {
         std::fs::rename(current_exe, &backup_path).context("Failed to back up current binary")?;
         if let Err(e) = std::fs::copy(&new_binary, current_exe) {
-            let _ = std::fs::rename(&backup_path, current_exe);
+            if let Err(e) = std::fs::rename(&backup_path, current_exe) {
+                tracing::warn!("failed to rollback binary during update: {e}");
+            }
             return Err(anyhow::anyhow!(e).context("Failed to install new binary"));
         }
         set_executable(current_exe)?;
-        let _ = std::fs::remove_file(&backup_path);
+        if let Err(e) = std::fs::remove_file(&backup_path) {
+            tracing::warn!("failed to remove backup file: {e}");
+        }
     }
 
     // --- Replace resources ---
@@ -160,21 +188,38 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
         ui::info("Updating resources...");
 
         if needs_sudo {
-            let _ = run_host("sudo", &["rm", "-rf", dest_resources.to_str().unwrap()]);
+            if let Err(e) = run_host(
+                "sudo",
+                &[
+                    "rm",
+                    "-rf",
+                    dest_resources
+                        .to_str()
+                        .expect("resources path must be valid UTF-8"),
+                ],
+            ) {
+                tracing::warn!("failed to remove old resources directory: {e}");
+            }
             let output = run_host(
                 "sudo",
                 &[
                     "cp",
                     "-r",
-                    new_resources.to_str().unwrap(),
-                    dest_resources.to_str().unwrap(),
+                    new_resources
+                        .to_str()
+                        .expect("new resources path must be valid UTF-8"),
+                    dest_resources
+                        .to_str()
+                        .expect("dest resources path must be valid UTF-8"),
                 ],
             )?;
             if !output.status.success() {
                 ui::warn("Failed to update resources directory");
             }
         } else {
-            let _ = std::fs::remove_dir_all(&dest_resources);
+            if let Err(e) = std::fs::remove_dir_all(&dest_resources) {
+                tracing::warn!("failed to remove old resources: {e}");
+            }
             copy_dir_recursive(&new_resources, &dest_resources)
                 .context("Failed to update resources directory")?;
         }
@@ -186,7 +231,11 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
 fn run_sudo_mv(from: &Path, to: &Path) -> Result<()> {
     let output = run_host(
         "sudo",
-        &["mv", from.to_str().unwrap(), to.to_str().unwrap()],
+        &[
+            "mv",
+            from.to_str().expect("source path must be valid UTF-8"),
+            to.to_str().expect("dest path must be valid UTF-8"),
+        ],
     )?;
     if !output.status.success() {
         anyhow::bail!("sudo mv failed");
@@ -197,7 +246,11 @@ fn run_sudo_mv(from: &Path, to: &Path) -> Result<()> {
 fn run_sudo_cp(from: &Path, to: &Path) -> Result<()> {
     let output = run_host(
         "sudo",
-        &["cp", from.to_str().unwrap(), to.to_str().unwrap()],
+        &[
+            "cp",
+            from.to_str().expect("source path must be valid UTF-8"),
+            to.to_str().expect("dest path must be valid UTF-8"),
+        ],
     )?;
     if !output.status.success() {
         anyhow::bail!("sudo cp failed");

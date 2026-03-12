@@ -58,6 +58,15 @@ pub(crate) fn intercept(script: &str) -> Option<Output> {
     HANDLER.with(|h| h.borrow().as_ref().map(|f| f(script).to_output()))
 }
 
+/// Install a custom handler function. Returns a guard that clears on drop.
+pub fn install_handler<F>(f: F) -> MockGuard
+where
+    F: Fn(&str) -> MockResponse + 'static,
+{
+    HANDLER.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    MockGuard
+}
+
 /// Shared reference to the in-memory filesystem backing the mock.
 pub type SharedFs = Arc<Mutex<HashMap<String, String>>>;
 
@@ -109,7 +118,7 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
                 if let Some(end) = after_marker.rfind("\nMVMEOF") {
                     let content = &after_marker[..end];
                     fs.lock()
-                        .unwrap()
+                        .expect("mock fs mutex must not be poisoned")
                         .insert(path.to_string(), content.to_string());
                 }
             }
@@ -119,8 +128,15 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
 
     // ── cat path (read file) ────────────────────────────────────────────
     if s.starts_with("cat ") && !s.contains(">") && !s.contains("|") && !s.contains("<<") {
-        let path = s.strip_prefix("cat ").unwrap().trim();
-        if let Some(content) = fs.lock().unwrap().get(path) {
+        let path = s
+            .strip_prefix("cat ")
+            .expect("cat prefix must be present")
+            .trim();
+        if let Some(content) = fs
+            .lock()
+            .expect("mock fs mutex must not be poisoned")
+            .get(path)
+        {
             return MockResponse::ok(content);
         }
         return MockResponse {
@@ -136,7 +152,10 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
     {
         let rest = &s[idx + 8..];
         let path = rest.split_whitespace().next().unwrap_or("");
-        let exists = fs.lock().unwrap().contains_key(path);
+        let exists = fs
+            .lock()
+            .expect("mock fs mutex must not be poisoned")
+            .contains_key(path);
         return MockResponse::ok(if exists { "yes" } else { "no" });
     }
 
@@ -155,7 +174,7 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
             .trim_end_matches('/');
         let prefix = format!("{}/", path);
 
-        let fs_lock = fs.lock().unwrap();
+        let fs_lock = fs.lock().expect("mock fs mutex must not be poisoned");
         let mut entries: Vec<String> = Vec::new();
         for key in fs_lock.keys() {
             if let Some(remainder) = key.strip_prefix(&prefix)
@@ -176,7 +195,7 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
         for segment in s.split("rm -rf ").skip(1) {
             let path = segment.split_whitespace().next().unwrap_or("").trim();
             if !path.is_empty() {
-                let mut fs_lock = fs.lock().unwrap();
+                let mut fs_lock = fs.lock().expect("mock fs mutex must not be poisoned");
                 let to_remove: Vec<String> = fs_lock
                     .keys()
                     .filter(|k| k.starts_with(path))
@@ -202,7 +221,7 @@ fn fs_handler(script: &str, fs: &SharedFs) -> MockResponse {
 
     // ── find ... instance.json ... grep guest_ip ────────────────────────
     if s.contains("find ") && s.contains("instance.json") {
-        let fs_lock = fs.lock().unwrap();
+        let fs_lock = fs.lock().expect("mock fs mutex must not be poisoned");
         let mut lines = Vec::new();
         for (path, content) in fs_lock.iter() {
             if path.ends_with("instance.json")

@@ -45,6 +45,21 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 - Security code: positive path (valid data accepted), negative path (tampered/invalid data rejected), and edge cases (replay, wrong key, expired session).
 - If a function can fail, test that it fails correctly (returns `Err`, not panic).
 
+## No `unwrap()` in Production Code
+
+**NEVER** use `.unwrap()` in production code. Always use `.expect("descriptive message")` instead, so that if a panic occurs, the error message explains what went wrong and where. `.unwrap()` is only acceptable in test code (`#[cfg(test)]` modules and `tests/` directories).
+
+## Documentation
+
+When adding, changing, or removing user-facing features (CLI commands, flags, config options, behavior), update the corresponding site documentation in `public/src/content/docs/`. Key files:
+
+- `reference/cli-commands.md` — complete CLI command reference
+- `guides/` — user guides (networking, templates, nix-flakes, config-secrets, troubleshooting)
+- `getting-started/` — quickstart, installation, first-microvm
+- `contributing/development.md` — contributor guide
+
+Documentation must stay in sync with the code. Do not mark a task as done if the docs are stale.
+
 ## Screenshots & Temporary Files
 
 **NEVER** save screenshots, images, or any binary artifacts to the project root or any directory within the repository. Always save screenshots and temporary files to `/tmp/` (e.g. `/tmp/screenshot.png`, `/tmp/page-snapshot.png`). This prevents binary files from polluting the git history.

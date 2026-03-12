@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 
 use crate::bootstrap;
 use crate::fleet;
@@ -16,6 +17,10 @@ use mvm_runtime::config;
 use mvm_runtime::shell;
 use mvm_runtime::vm::backend::{AnyBackend, FirecrackerConfig};
 use mvm_runtime::vm::{firecracker, image, lima, microvm};
+
+/// Global registry of spawned child PIDs so the signal handler can clean them up.
+static CHILD_PIDS: std::sync::LazyLock<Arc<Mutex<Vec<u32>>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
 #[derive(Parser)]
 #[command(
@@ -573,6 +578,23 @@ pub fn run() -> Result<()> {
         None => LogFormat::Human,
     };
     logging::init(log_format);
+
+    // Install Ctrl-C / SIGTERM handler for graceful shutdown.
+    let pids = Arc::clone(&CHILD_PIDS);
+    if let Err(e) = ctrlc::set_handler(move || {
+        eprintln!("\nInterrupted, cleaning up...");
+        // Kill any tracked child processes (e.g., socat port-forwarders).
+        if let Ok(pids) = pids.lock() {
+            for &pid in pids.iter() {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                }
+            }
+        }
+        std::process::exit(130);
+    }) {
+        tracing::warn!("failed to install signal handler: {e}");
+    }
 
     let result = match cli.command {
         Commands::Bootstrap { production } => cmd_bootstrap(production),
@@ -1439,11 +1461,22 @@ fn cmd_forward(name: &str, port_specs: &[String]) -> Result<()> {
                 .arg(format!("TCP:{}:{}", guest_ip, guest_port))
                 .spawn()
                 .context("Failed to start socat. Install it with: sudo apt install socat")?;
+            // Register PID so the signal handler can clean it up.
+            if let Ok(mut pids) = CHILD_PIDS.lock() {
+                pids.push(child.id());
+            }
             children.push(child);
         }
-        // Wait for any child to exit (Ctrl-C sends SIGINT to the process group).
+        // Wait for all children to exit (Ctrl-C triggers the signal handler
+        // which sends SIGTERM to each tracked child).
         for mut child in children {
-            let _ = child.wait();
+            if let Err(e) = child.wait() {
+                tracing::warn!("failed to wait on socat child: {e}");
+            }
+        }
+        // Clear tracked PIDs after children exit.
+        if let Ok(mut pids) = CHILD_PIDS.lock() {
+            pids.clear();
         }
     }
 

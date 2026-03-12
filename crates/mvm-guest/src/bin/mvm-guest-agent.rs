@@ -101,15 +101,27 @@ fn parse_config() -> AgentConfig {
             }
             "--port" => {
                 i += 1;
-                cli_port = args.get(i).and_then(|v| v.parse().ok());
+                cli_port = args.get(i).and_then(|v| {
+                    v.parse()
+                        .map_err(|e| eprintln!("invalid --port value '{}': {}", v, e))
+                        .ok()
+                });
             }
             "--busy-threshold" => {
                 i += 1;
-                cli_threshold = args.get(i).and_then(|v| v.parse().ok());
+                cli_threshold = args.get(i).and_then(|v| {
+                    v.parse()
+                        .map_err(|e| eprintln!("invalid --busy-threshold value '{}': {}", v, e))
+                        .ok()
+                });
             }
             "--sample-interval" => {
                 i += 1;
-                cli_interval = args.get(i).and_then(|v| v.parse().ok());
+                cli_interval = args.get(i).and_then(|v| {
+                    v.parse()
+                        .map_err(|e| eprintln!("invalid --sample-interval value '{}': {}", v, e))
+                        .ok()
+                });
             }
             other => {
                 eprintln!("unknown flag: {}", other);
@@ -135,10 +147,18 @@ fn parse_config() -> AgentConfig {
                 std::process::exit(1);
             }
         },
-        None => std::fs::read_to_string(DEFAULT_CONFIG_PATH)
-            .ok()
-            .and_then(|data| serde_json::from_str::<AgentConfig>(&data).ok())
-            .unwrap_or_default(),
+        None => match std::fs::read_to_string(DEFAULT_CONFIG_PATH) {
+            Ok(data) => serde_json::from_str::<AgentConfig>(&data)
+                .map_err(|e| {
+                    eprintln!(
+                        "failed to parse default config {}: {}",
+                        DEFAULT_CONFIG_PATH, e
+                    )
+                })
+                .ok()
+                .unwrap_or_default(),
+            Err(_) => AgentConfig::default(),
+        },
     };
 
     // CLI flags override config file values.
@@ -317,8 +337,12 @@ fn run_shell_with_timeout(cmd: &str, timeout: Duration) -> std::io::Result<std::
         match child.try_wait()? {
             Some(status) => break status,
             None if start.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                if let Err(e) = child.kill() {
+                    eprintln!("failed to kill child process: {e}");
+                }
+                if let Err(e) = child.wait() {
+                    eprintln!("failed to wait child process: {e}");
+                }
                 return Ok(std::process::Output {
                     status: std::process::ExitStatus::default(),
                     stdout: Vec::new(),
@@ -332,11 +356,15 @@ fn run_shell_with_timeout(cmd: &str, timeout: Duration) -> std::io::Result<std::
     // Child has exited — read remaining pipe output.
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    if let Some(mut r) = child.stdout.take() {
-        let _ = r.read_to_end(&mut stdout);
+    if let Some(mut r) = child.stdout.take()
+        && let Err(e) = r.read_to_end(&mut stdout)
+    {
+        eprintln!("failed to read child stdout: {e}");
     }
-    if let Some(mut r) = child.stderr.take() {
-        let _ = r.read_to_end(&mut stderr);
+    if let Some(mut r) = child.stderr.take()
+        && let Err(e) = r.read_to_end(&mut stderr)
+    {
+        eprintln!("failed to read child stderr: {e}");
     }
     Ok(std::process::Output {
         status,
@@ -606,9 +634,15 @@ fn write_response(file: &mut std::fs::File, resp: &GuestResponse) {
         }
     };
     let len = (data.len() as u32).to_be_bytes();
-    let _ = file.write_all(&len);
-    let _ = file.write_all(&data);
-    let _ = file.flush();
+    if let Err(e) = file.write_all(&len) {
+        eprintln!("failed to write vsock response: {e}");
+    }
+    if let Err(e) = file.write_all(&data) {
+        eprintln!("failed to write vsock response: {e}");
+    }
+    if let Err(e) = file.flush() {
+        eprintln!("failed to flush vsock response: {e}");
+    }
 }
 
 // ============================================================================
@@ -670,7 +704,9 @@ fn do_exec(command: &str, stdin_data: Option<&str>, _timeout_secs: u64) -> Guest
 
     if let Some(data) = stdin_data {
         if let Some(ref mut pipe) = child.stdin {
-            let _ = pipe.write_all(data.as_bytes());
+            if let Err(e) = pipe.write_all(data.as_bytes()) {
+                eprintln!("failed to write to pipe: {e}");
+            }
         }
     }
     drop(child.stdin.take());

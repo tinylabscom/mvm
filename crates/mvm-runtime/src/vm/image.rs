@@ -131,7 +131,10 @@ pub struct RuntimeVolume {
 /// Find the built-in images directory (e.g., images/openclaw/).
 /// Same lookup pattern as config::find_lima_template().
 fn find_images_dir() -> Result<PathBuf> {
-    let exe_dir = std::env::current_exe()?.parent().unwrap().to_path_buf();
+    let exe_dir = std::env::current_exe()?
+        .parent()
+        .expect("executable path must have a parent directory")
+        .to_path_buf();
 
     // Next to binary
     let candidate = exe_dir.join("images");
@@ -178,7 +181,13 @@ pub fn find_config(name_or_path: &str) -> Result<(PathBuf, MvmImageConfig)> {
     let toml_path = images_dir.join(name_or_path).join("Mvmfile.toml");
     if toml_path.exists() {
         let config = parse_config(&toml_path)?;
-        return Ok((toml_path.parent().unwrap().to_path_buf(), config));
+        return Ok((
+            toml_path
+                .parent()
+                .expect("toml path must have parent")
+                .to_path_buf(),
+            config,
+        ));
     }
 
     anyhow::bail!(

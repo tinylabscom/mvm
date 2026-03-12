@@ -120,13 +120,17 @@ fn handle_client(fd: RawFd) {
 
 fn write_resp(reader: &mut BufReader<std::fs::File>, resp: BuilderResponse) {
     let writer = reader.get_mut();
-    let _ = writeln!(
+    if let Err(e) = writeln!(
         writer,
         "{}",
         serde_json::to_string(&resp)
             .unwrap_or_else(|_| "{\"Err\":{\"message\":\"encode error\"}}".to_string())
-    );
-    let _ = writer.flush();
+    ) {
+        eprintln!("failed to write log: {e}");
+    }
+    if let Err(e) = writer.flush() {
+        eprintln!("failed to flush log: {e}");
+    }
 }
 
 fn ensure_mount(
@@ -269,10 +273,18 @@ fn ensure_nix(reader: &mut BufReader<std::fs::File>) -> anyhow::Result<()> {
 
 fn ensure_nix_conf() {
     let conf = "experimental-features = nix-command flakes\n";
-    let _ = std::fs::create_dir_all("/etc/nix");
-    let _ = std::fs::write("/etc/nix/nix.conf", conf);
-    let _ = std::fs::create_dir_all("/root/.config/nix");
-    let _ = std::fs::write("/root/.config/nix/nix.conf", conf);
+    if let Err(e) = std::fs::create_dir_all("/etc/nix") {
+        eprintln!("failed to write nix config: {e}");
+    }
+    if let Err(e) = std::fs::write("/etc/nix/nix.conf", conf) {
+        eprintln!("failed to write nix config: {e}");
+    }
+    if let Err(e) = std::fs::create_dir_all("/root/.config/nix") {
+        eprintln!("failed to write nix config: {e}");
+    }
+    if let Err(e) = std::fs::write("/root/.config/nix/nix.conf", conf) {
+        eprintln!("failed to write nix config: {e}");
+    }
 }
 
 fn run_build(
@@ -333,7 +345,7 @@ fn run_build(
         }
         let line = buf.trim_end().to_string();
         if let Some(p) = line.strip_prefix("/nix/store/") {
-            let _ = p; // marker only
+            let _ = p; // intentionally ignored: marker variable
             last_store_path = Some(line.clone());
         }
         log_lines.push(line.clone());
@@ -343,7 +355,9 @@ fn run_build(
     let status = child.wait()?;
     if !status.success() {
         // Best-effort persist log in /build-out for host-side inspection.
-        let _ = std::fs::write("/build-out/build.log", log_lines.join("\n"));
+        if let Err(e) = std::fs::write("/build-out/build.log", log_lines.join("\n")) {
+            eprintln!("failed to write build log: {e}");
+        }
         return Err(anyhow::anyhow!(
             "nix build failed (exit {}): {}",
             status,
@@ -372,7 +386,9 @@ fn run_build(
     }
 
     // Persist build log after success as well.
-    let _ = std::fs::write("/build-out/build.log", log_lines.join("\n"));
+    if let Err(e) = std::fs::write("/build-out/build.log", log_lines.join("\n")) {
+        eprintln!("failed to write build log: {e}");
+    }
     write_resp(reader, BuilderResponse::Ok { out_path });
     Ok(())
 }

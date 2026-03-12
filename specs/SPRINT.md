@@ -1,6 +1,18 @@
-# mvm — Maintenance Mode
+# Sprint 16 — Production Hardening
 
-Active development has moved to [mvmd](https://github.com/auser/mvmd) (fleet orchestrator).
+**Goal:** Close critical production readiness gaps in error handling and test coverage, and document remaining hardening work.
+
+**Error policy:** Cleanup failures use **log-and-continue** — `tracing::warn!` the error but don't propagate. Prevents cascade failures during teardown.
+
+## Current Status (v0.4.1)
+
+| Metric           | Value                    |
+| ---------------- | ------------------------ |
+| Workspace crates | 6 + root facade          |
+| Total tests      | 630                      |
+| Clippy warnings  | 0                        |
+| Edition          | 2024 (Rust 1.85+)        |
+| Binary           | `mvmctl`                 |
 
 ## Completed Sprints
 
@@ -20,105 +32,158 @@ Active development has moved to [mvmd](https://github.com/auser/mvmd) (fleet orc
 - [14-guest-library-and-examples.md](sprints/14-guest-library-and-examples.md)
 - [15-real-world-apps.md](sprints/15-real-world-apps.md)
 
-## Current Status (v0.4.1)
+---
 
-| Metric           | Value                    |
-| ---------------- | ------------------------ |
-| Workspace crates | 6 + root facade          |
-| Total tests      | 630                      |
-| Clippy warnings  | 0                        |
-| Edition          | 2024 (Rust 1.85+)        |
-| Examples         | hello, openclaw, paperclip |
-| Boot time        | < 10s (< 200ms from snapshot) |
-| Binary           | `mvmctl`                 |
+## Gap Analysis Summary
 
-## Deferred Backlog
+### Critical
+1. 83+ `let _ =` error swallows (silent failures in VM cleanup, LUKS, cgroups)
+2. 32 `.unwrap()` in production code (crash risk, violates AGENTS.md)
+3. mvm-runtime — zero organized tests (most complex crate)
+4. mvm-guest — zero tests (37 unsafe blocks untested)
+5. No signal handling (Ctrl-C doesn't cleanup)
 
-These items may be addressed as needed, driven by mvmd requirements:
+### High
+6. 33+ `.ok()` silent failures
+7. No concurrent access protection (file-based state, no locking)
+8. SecurityPolicy defaults to unauthenticated
+9. 135 `println!/eprintln!` bypassing tracing
+10. No config/input validation
 
-- **Config-driven multi-variant builds**: `template.toml` support for building multiple
-  variants (gateway, worker) in one command with per-variant resource defaults.
+### Medium
+11. Metrics collected but not exported
+12. No state versioning/migration
+13. Missing Drop impls for VM resources
+14. Snapshot encryption reads via shell
+15. No binary signing or SBOM
+16. No MSRV specified
 
-- **mvm-profiles.toml redesign**: Map profiles to flake package attributes instead of
-  NixOS module paths. Update Rust parser in mvm-build accordingly.
+---
 
-- **Upstream mvm-core changes**: `UpdateStrategy` types, `DesiredPool.registry_artifact`,
-  and `registry_download_revision()` extraction are complete (Phases 71-72a). Further
-  fields may be added as needed by mvmd Sprint 13.
+## Phase 1: Error Handling & Robustness **Status: COMPLETE**
 
-## mvmd Sprint 13 — Upstream Fields (Phase 71)
+### 1.1 Replace `.unwrap()` with `.expect()` in production code (~32 instances)
 
-All fields required by mvmd Sprint 13 Phase 71 are already on HEAD. No further
-mvm-core changes needed — mvmd just needs to bump its `mvmctl` git dependency.
+- [x] `crates/mvm-cli/src/update.rs` — 11 unwraps replaced with `.expect()`
+- [x] `crates/mvm-runtime/src/shell_mock.rs` — 6 unwraps replaced with `.expect()`
+- [x] `crates/mvm-runtime/src/config.rs` — 4 unwraps replaced with `.expect()`
+- [x] `crates/mvm-runtime/src/vm/image.rs` — 2 unwraps replaced with `.expect()`
+- [x] `crates/mvm-core/src/retry.rs` — 1 unwrap replaced with `.expect()`
+- [x] `crates/mvm-core/src/config.rs` — 1 unwrap replaced with `.expect()`
 
-### DesiredTenant (`mvm-core/src/agent.rs` line 29)
+### 1.2 Replace `let _ =` error swallowing with log-and-continue (~83 instances)
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DesiredTenant {
-    pub tenant_id: String,
-    pub network: DesiredTenantNetwork,
-    pub quotas: TenantQuota,
-    #[serde(default)]
-    pub secrets_hash: Option<String>,
-    pub pools: Vec<DesiredPool>,
-    #[serde(default)]
-    pub preferred_regions: Vec<String>,        // ← Phase 71
-}
+Pattern: `let _ = op();` → `if let Err(e) = op() { tracing::warn!("description: {e}"); }`
+
+- [x] `crates/mvm-runtime/src/vm/instance/lifecycle.rs` — 14 instances replaced with warn logging
+- [x] `crates/mvm-runtime/src/vm/template/lifecycle.rs` — 9 instances replaced with warn logging
+- [x] `crates/mvm-guest/src/bin/mvm-guest-agent.rs` — 7 instances replaced with eprintln logging
+- [x] `crates/mvm-guest/src/bin/mvm-builder-agent.rs` — 8 instances replaced with eprintln logging
+- [x] `crates/mvm-runtime/src/vm/microvm.rs` — 7 instances replaced with warn logging
+- [x] `crates/mvm-cli/src/update.rs` — 7 instances replaced with warn logging
+
+Note: Some `let _ =` may be intentionally ignored (e.g., removing a file that may not exist). Add `// intentionally ignored: <reason>` comment for those cases.
+
+### 1.3 Replace `.ok()` silent failures with logging (~33 instances)
+
+Pattern: `.parse().ok()` → `.parse().map_err(|e| tracing::warn!("parse failed: {e}")).ok()`
+
+- [x] `crates/mvm-guest/src/bin/mvm-guest-agent.rs` — 4 logged (CLI args + config parse), 6 skipped (idiomatic optional chains)
+- [x] `crates/mvm-runtime/src/vm/microvm.rs` — 3 logged (PID + config parse), 6 skipped (idiomatic `.ok()?` chains)
+- [x] `crates/mvm-cli/src/commands.rs` — 0 changed, all 8 reviewed as idiomatic best-effort patterns
+- [x] `crates/mvm-runtime/src/security/certs.rs` — 3 logged (cert queries), 4 skipped (`filter_map` patterns)
+
+### 1.4 Add signal handling for graceful shutdown
+
+- [x] Add `ctrlc` crate dependency
+- [x] Install SIGINT/SIGTERM handler in CLI entry point
+- [x] Log "interrupted, cleaning up..." and exit cleanly
+- [x] Cleanup spawned port-forwarding processes (socat PIDs tracked in global registry, killed by signal handler)
+
+---
+
+## Phase 2: Test Coverage **Status: COMPLETE**
+
+### 2.1 mvm-runtime unit tests
+
+- [x] `config.rs` — 25+ tests: config loading, defaults, serde roundtrip, Lima template rendering, VmSlot
+- [x] `shell.rs` — 6 tests: run_host success/failure/nonexistent, run_host_visible, inside_lima
+- [x] `vm/network.rs` — functions are shell scripts (not unit-testable); VmSlot tested in config.rs
+- [x] `vm/image.rs` — 12+ tests: config parsing, service generation, host_init generation, runtime config
+- [x] `vm/template/` — 11 tests: integration health checks (8), Checksums serde roundtrip (3)
+
+### 2.2 mvm-guest unit tests
+
+- [x] `vsock.rs` — 30+ tests: all enum variants serde, authenticated frames, handshake, replay detection, error paths
+- [x] `integrations.rs` — 12 tests: manifest serde, status enums, health results, backward compat, drop-in loading
+
+### 2.3 Verification tests
+
+- [x] Grep-based CI check: `tests/code_quality.rs` — no `.unwrap()` in production code
+- [x] Mock-based test: `test_log_and_continue_pattern_does_not_propagate_errors` in microvm.rs — verifies cleanup errors don't propagate
+
+---
+
+## Phase 3: Observability & Logging Hygiene **Status: PLANNED**
+
+### 3.1 Replace `println!/eprintln!` with tracing (~135 instances)
+
+- [ ] Guest agent binaries: `eprintln!` → `tracing::error!`
+- [ ] CLI output: keep `println!` only for user-facing output (help, status tables)
+- [ ] All diagnostic/debug output must use tracing
+
+### 3.2 Add tracing spans to critical paths
+
+- [ ] `shell::run_in_vm()` — instrument with command summary
+- [ ] VM lifecycle (boot, health check, snapshot, stop)
+- [ ] Template operations (build, push, pull)
+
+---
+
+## Phase 4: State Safety **Status: PLANNED**
+
+### 4.1 Atomic state writes
+
+- [ ] Write to temp file, then `rename()` for atomicity
+- [ ] Applies to: `instance.json`, `template.json`, `run-info`
+
+### 4.2 File-based locking
+
+- [ ] Use `flock()` or `fs2::FileExt` for exclusive access during state mutations
+- [ ] Document concurrent access limitations
+
+### 4.3 State version fields
+
+- [ ] Add `schema_version: u32` to persisted structs
+- [ ] Add migration path for future schema changes
+
+---
+
+## Phase 5: Security Hardening **Status: PLANNED**
+
+### 5.1 Invert SecurityPolicy default
+
+- [ ] `require_auth: true` by default in `mvm-core/src/security.rs`
+- [ ] Explicit opt-out for dev/testing mode
+
+### 5.2 File permission enforcement
+
+- [ ] Ensure key files at `/var/lib/mvm/keys/*.key` are chmod 0600
+- [ ] Validate permissions on load, warn if too permissive
+
+### 5.3 Config validation
+
+- [ ] Add bounds checking for CPU, memory, rate limits
+- [ ] Validate flake refs against safe pattern
+- [ ] Reject unknown config keys (`#[serde(deny_unknown_fields)]` where missing)
+
+---
+
+## Verification
+
+After each phase:
+```bash
+limactl shell mvm -- cargo test --workspace
+limactl shell mvm -- cargo clippy --workspace -- -D warnings
+limactl shell mvm -- cargo check --workspace
 ```
-
-### DesiredPool (`mvm-core/src/agent.rs` line 54)
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DesiredPool {
-    pub pool_id: String,
-    pub flake_ref: String,
-    pub profile: String,
-    #[serde(default)]
-    pub role: Role,
-    pub instance_resources: InstanceResources,
-    pub desired_counts: DesiredCounts,
-    #[serde(default)]
-    pub runtime_policy: RuntimePolicy,
-    #[serde(default = "default_seccomp")]
-    pub seccomp_policy: String,
-    #[serde(default = "default_compression")]
-    pub snapshot_compression: String,
-    #[serde(default)]
-    pub routing_table: Option<RoutingTable>,
-    #[serde(default)]
-    pub secret_scopes: Vec<SecretScope>,
-    #[serde(default)]
-    pub sleep_policy: Option<SleepPolicyConfig>,       // ← Phase 71
-    #[serde(default)]
-    pub default_update_strategy: Option<UpdateStrategy>, // ← Phase 71
-    #[serde(default)]
-    pub registry_artifact: Option<RegistryArtifact>,   // ← Phase 72
-}
-```
-
-### Related Types (`mvm-core/src/pool.rs`)
-
-- `UpdateStrategy` — tagged enum (`#[serde(tag = "type", rename_all = "snake_case")]`)
-  - `Rolling(RollingUpdateStrategy)` — `max_unavailable: 1, max_surge: 1, health_check_timeout_secs: 60`
-  - `Canary(CanaryStrategy)` — `canary_count: 1, canary_duration_secs: 300, success_threshold: 0.95`
-- `SleepPolicyConfig` — `warm_threshold_secs: 300, sleep_threshold_secs: 900, cpu_threshold: 5.0, net_bytes_threshold: 1024`
-- `RegistryArtifact` — `template_id: String, revision: Option<String>`
-
-All new fields use `#[serde(default)]` for backward compat. Serde roundtrip tests exist.
-
-### What mvmd needs to wire (in mvmd repo)
-
-1. Bump `mvmctl` git dep to latest main
-2. Wire `preferred_regions` into scheduler placement scoring
-3. Wire `default_update_strategy` into agent reconcile rollout decisions
-4. Wire `sleep_policy` overrides into per-pool sleep policy thresholds
-5. `registry_artifact` already wired via mvmd Phase 72
-
-## Maintenance Policy
-
-Bug fixes and mvm-core type changes (for mvmd compatibility) will continue to be
-committed here. New feature development happens in mvmd.

@@ -209,3 +209,56 @@ pub fn replace_process_in_vm(cmd: &str, args: &[&str]) -> Result<()> {
         replace_process(cmd, args)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inside_lima_false_on_host() {
+        // In CI/dev environments, we should NOT be inside Lima.
+        // If LIMA_INSTANCE is not set and the marker files don't exist,
+        // inside_lima() should return false.
+        unsafe { std::env::remove_var("LIMA_INSTANCE") };
+        // On a non-Lima machine, neither marker file exists.
+        if !Path::new("/etc/lima-boot.conf").exists()
+            && !Path::new("/run/lima-guestagent.sock").exists()
+        {
+            assert!(!inside_lima());
+        }
+    }
+
+    #[test]
+    fn test_run_host_echo() {
+        let output = run_host("echo", &["hello"]).unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "hello");
+    }
+
+    #[test]
+    fn test_run_host_failure() {
+        let output = run_host("false", &[]).unwrap();
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_run_host_nonexistent_command() {
+        let result = run_host("definitely-not-a-real-command-12345", &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_host_visible_success() {
+        let result = run_host_visible("true", &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_host_visible_failure() {
+        let result = run_host_visible("false", &[]);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Command failed"));
+    }
+}
