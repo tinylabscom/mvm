@@ -124,19 +124,44 @@ Pattern: `.parse().ok()` → `.parse().map_err(|e| tracing::warn!("parse failed:
 
 ---
 
-## Phase 3: Observability & Logging Hygiene **Status: PLANNED**
+## Phase 3: Observability & Logging Hygiene **Status: COMPLETE**
 
-### 3.1 Replace `println!/eprintln!` with tracing (~135 instances)
+### 3.1 Replace diagnostic `eprintln!` with tracing (3 instances)
 
-- [ ] Guest agent binaries: `eprintln!` → `tracing::error!`
-- [ ] CLI output: keep `println!` only for user-facing output (help, status tables)
-- [ ] All diagnostic/debug output must use tracing
+Audit found 110 total `println!/eprintln!` — 94 are correct user-facing CLI output, 24 are
+guest agent binaries (appropriate as-is). Only 3 diagnostic instances need replacing:
 
-### 3.2 Add tracing spans to critical paths
+- [x] `crates/mvm-build/src/vsock_builder.rs` — 3 instances (builder log, readiness, waiting) → `tracing::debug!`/`tracing::info!`
 
-- [ ] `shell::run_in_vm()` — instrument with command summary
-- [ ] VM lifecycle (boot, health check, snapshot, stop)
-- [ ] Template operations (build, push, pull)
+**Keep as-is:**
+- CLI output via `ui::` module (94 instances) — correct user-facing output
+- Guest agent binaries (`mvm-guest-agent`, `mvm-builder-agent`) — headless services, `eprintln!` appropriate
+- `crates/mvm-guest/src/integrations.rs` — 4 instances (drop-in config loading, runs inside microVM, no tracing dep)
+- `crates/mvm-guest/src/probes.rs` — 4 instances (drop-in config loading, runs inside microVM, no tracing dep)
+
+### 3.2 Add tracing spans to critical paths (~40 functions)
+
+Pattern: `#[instrument(skip_all, fields(key_field = value, ...))]`
+Reference: `crates/mvm-runtime/src/vm/instance/lifecycle.rs` (6 functions already instrumented)
+
+**Tier 1 — Shell execution (10 functions):**
+- [x] `shell.rs` — `run_in_vm`, `run_in_vm_stdout`, `run_in_vm_visible`, `run_in_vm_capture`, `run_on_vm`, `run_on_vm_visible`, `run_on_vm_stdout`, `run_on_vm_capture`, `run_host`, `run_host_visible`
+
+**Tier 2 — VM lifecycle (15 functions in microvm.rs):**
+- [x] Boot: `run_from_build`, `restore_from_template_snapshot`, `start_firecracker_daemon`, `start_vm_firecracker`
+- [x] Configure: `configure_microvm`, `configure_flake_microvm`, `configure_flake_microvm_with_drives_dir`, `api_put_socket`, `api_patch_socket`
+- [x] Stop: `stop`, `stop_vm`, `stop_all_vms`
+- [x] Health: `diagnose_vm`, `read_vm_run_info`, `write_vm_run_info`, `list_vms`
+
+**Tier 3 — Template operations (16 functions in template/lifecycle.rs):**
+- [x] CRUD: `template_create`, `template_load`, `template_list`, `template_delete`, `template_init`
+- [x] Build: `template_build`, `template_build_with_snapshot`, `update_fod_hash`
+- [x] Registry: `template_push`, `template_pull`, `template_verify`, `registry_download_revision`
+- [x] Health: `wait_for_healthy`, `wait_for_integrations_healthy`
+- [x] Utilities: `template_artifacts`, `current_revision_id`
+
+**Tier 4 — Build pipeline (3 functions in dev_build.rs):**
+- [x] `dev_build`, `cleanup_old_dev_builds`, `ensure_guest_agent_if_needed`
 
 ---
 

@@ -6,7 +6,7 @@ use mvm_core::template::{
     template_spec_path,
 };
 
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use crate::build_env::RuntimeBuildEnv;
 use crate::shell;
@@ -50,6 +50,7 @@ fn vm_exec_stdout(script: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+#[instrument(skip_all, fields(template_id = %spec.template_id))]
 pub fn template_create(spec: &TemplateSpec) -> Result<()> {
     let dir = template_dir(&spec.template_id);
     vm_exec(&format!("mkdir -p {dir}"))
@@ -61,6 +62,7 @@ pub fn template_create(spec: &TemplateSpec) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip_all, fields(template_id = id))]
 pub fn template_load(id: &str) -> Result<TemplateSpec> {
     let path = template_spec_path(id);
     let data = vm_exec_stdout(&format!("cat {path}")).with_context(|| {
@@ -74,6 +76,7 @@ pub fn template_load(id: &str) -> Result<TemplateSpec> {
     Ok(spec)
 }
 
+#[instrument(skip_all)]
 pub fn template_list() -> Result<Vec<String>> {
     let base = mvm_core::template::templates_base_dir();
     let out = shell::run_in_vm_stdout(&format!("ls -1 {base} 2>/dev/null || true"))?
@@ -86,6 +89,7 @@ pub fn template_list() -> Result<Vec<String>> {
         .collect())
 }
 
+#[instrument(skip_all, fields(template_id = id, force))]
 pub fn template_delete(id: &str, force: bool) -> Result<()> {
     let dir = template_dir(id);
     let flag = if force { "-rf" } else { "-r" };
@@ -96,6 +100,7 @@ pub fn template_delete(id: &str, force: bool) -> Result<()> {
 
 /// Initialize an on-disk template directory layout (empty artifacts, no spec).
 /// Safe to call multiple times; existing contents are preserved.
+#[instrument(skip_all, fields(template_id = id))]
 pub fn template_init(id: &str) -> Result<()> {
     let dir = template_dir(id);
     let artifacts = format!("{}/artifacts/revisions", dir);
@@ -109,6 +114,7 @@ pub fn template_init(id: &str) -> Result<()> {
 /// Blanks the `outputHash` field, runs `nix build` to trigger hash computation,
 /// extracts the correct hash from the error output, and writes it back.
 /// On failure, the original hash is restored.
+#[instrument(skip_all, fields(flake_ref))]
 fn update_fod_hash(flake_ref: &str) -> Result<()> {
     ui::info("Recomputing fixed-output derivation hash...");
 
@@ -179,6 +185,7 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
 
 /// Build a template using the dev build pipeline (local Nix in Lima).
 /// Artifacts are stored in ~/.mvm/templates/<id>/artifacts and the current symlink is updated.
+#[instrument(skip_all, fields(template_id = id, force, update_hash))]
 pub fn template_build(id: &str, force: bool, update_hash: bool) -> Result<()> {
     use crate::ui;
 
@@ -340,6 +347,7 @@ pub fn template_snapshot_info(id: &str) -> Result<Option<SnapshotInfo>> {
 }
 
 /// Poll the guest agent via vsock until it responds, or timeout.
+#[instrument(skip_all, fields(timeout_secs, interval_ms))]
 pub fn wait_for_healthy(vsock_uds_path: &str, timeout_secs: u64, interval_ms: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut attempts = 0u32;
@@ -398,6 +406,7 @@ fn check_integration_health(
 ///
 /// If there are no integrations or none have `health_cmd` configured, returns
 /// immediately (no-op).
+#[instrument(skip_all, fields(timeout_secs, interval_ms))]
 pub fn wait_for_integrations_healthy(
     vsock_uds_path: &str,
     timeout_secs: u64,
@@ -484,6 +493,7 @@ pub fn wait_for_integrations_healthy(
 /// 5. Pauses vCPUs and creates a full snapshot
 /// 6. Stores snapshot files in the template revision directory
 /// 7. Cleans up the temporary VM
+#[instrument(skip_all, fields(template_id = id, force, update_hash))]
 pub fn template_build_with_snapshot(id: &str, force: bool, update_hash: bool) -> Result<()> {
     use crate::config::BRIDGE_IP;
     use crate::vm::{microvm, network};
@@ -739,6 +749,7 @@ fn require_local_template_fs() -> Result<()> {
 ///
 /// Returns `(spec, vmlinux, initrd, rootfs, revision_hash)`.
 /// The artifact paths are absolute and valid inside the Lima VM.
+#[instrument(skip_all, fields(template_id = id))]
 pub fn template_artifacts(
     id: &str,
 ) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
@@ -778,6 +789,7 @@ pub fn template_artifacts(
     ))
 }
 
+#[instrument(skip_all, fields(template_id))]
 pub fn current_revision_id(template_id: &str) -> Result<String> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -816,6 +828,7 @@ pub fn sha256_hex(path: &std::path::Path) -> Result<String> {
 /// template dir) and fleet agents (write to pool artifacts dir).
 ///
 /// Returns the revision hash and the list of downloaded file names.
+#[instrument(skip_all, fields(template_id))]
 pub fn registry_download_revision(
     registry: &TemplateRegistry,
     template_id: &str,
@@ -873,6 +886,7 @@ pub fn registry_download_revision(
     Ok((rev, downloaded_files))
 }
 
+#[instrument(skip_all, fields(template_id = id))]
 pub fn template_push(id: &str, revision: Option<&str>) -> Result<()> {
     require_local_template_fs()?;
     let registry = TemplateRegistry::from_env()?.context("Template registry not configured")?;
@@ -934,6 +948,7 @@ pub fn template_push(id: &str, revision: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip_all, fields(template_id = id))]
 pub fn template_pull(id: &str, revision: Option<&str>) -> Result<()> {
     require_local_template_fs()?;
     let registry = TemplateRegistry::from_env()?.context("Template registry not configured")?;
@@ -983,6 +998,7 @@ pub fn template_pull(id: &str, revision: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip_all, fields(template_id = id))]
 pub fn template_verify(id: &str, revision: Option<&str>) -> Result<()> {
     require_local_template_fs()?;
 

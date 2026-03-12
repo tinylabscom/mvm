@@ -69,7 +69,7 @@ pub fn build_via_vsock(
         match resp {
             BuilderResponse::Log { line } => {
                 if !line.is_empty() {
-                    eprintln!("[mvm][builder-agent] {}", line);
+                    tracing::debug!(target: "mvm::build", "[builder-agent] {}", line);
                     if recent_logs.len() >= MAX_LOG_LINES {
                         recent_logs.remove(0);
                     }
@@ -103,19 +103,19 @@ fn wait_for_agent_ready(vsock_uds: &str, max_wait_secs: u64) -> Result<()> {
             Ok(()) => {
                 let elapsed =
                     Instant::now().duration_since(deadline - Duration::from_secs(max_wait_secs));
-                eprintln!(
-                    "[mvm] Builder agent ready after {:.1}s ({} attempts)",
-                    elapsed.as_secs_f64(),
-                    attempts
+                tracing::info!(
+                    elapsed_secs = elapsed.as_secs_f64(),
+                    attempts,
+                    "builder agent ready"
                 );
                 return Ok(());
             }
             Err(_) if Instant::now() < deadline => {
                 if attempts.is_multiple_of(5) {
                     let remaining = deadline.duration_since(Instant::now());
-                    eprintln!(
-                        "[mvm] Waiting for builder agent... ({:.0}s remaining)",
-                        remaining.as_secs_f64()
+                    tracing::info!(
+                        remaining_secs = remaining.as_secs_f64(),
+                        "waiting for builder agent"
                     );
                 }
                 std::thread::sleep(Duration::from_millis(400));

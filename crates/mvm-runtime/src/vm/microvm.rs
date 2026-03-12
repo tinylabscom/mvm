@@ -1,6 +1,6 @@
 use anyhow::Result;
 use mvm_core::platform;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use super::{firecracker, lima, network};
 use crate::config::*;
@@ -29,6 +29,7 @@ pub fn resolve_vm_dir(slot: &VmSlot) -> Result<String> {
 }
 
 /// Start the Firecracker daemon inside the Lima VM (background).
+#[instrument(skip_all)]
 fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
     ui::info("Starting Firecracker...");
     run_in_vm_visible(&format!(
@@ -59,6 +60,7 @@ fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
 }
 
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
+#[instrument(skip_all)]
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
     ui::info("Starting Firecracker...");
     run_in_vm_visible(&format!(
@@ -94,6 +96,7 @@ fn api_put(path: &str, data: &str) -> Result<()> {
 }
 
 /// Send API PUT request to a specific Firecracker socket.
+#[instrument(skip_all, fields(path))]
 pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
     let script = format!(
         r#"
@@ -114,6 +117,7 @@ pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
 }
 
 /// Send API PATCH request to a specific Firecracker socket.
+#[instrument(skip_all, fields(path))]
 pub fn api_patch_socket(socket: &str, path: &str, data: &str) -> Result<()> {
     let script = format!(
         r#"
@@ -135,6 +139,7 @@ pub fn api_patch_socket(socket: &str, path: &str, data: &str) -> Result<()> {
 }
 
 /// Configure the microVM via the Firecracker API (dev-mode, legacy).
+#[instrument(skip_all)]
 fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     ui::info("Configuring logger...");
     api_put(
@@ -202,6 +207,7 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
 ///
 /// MicroVMs never have SSH enabled. They run as headless workloads and
 /// communicate via vsock. Use `mvm shell` to access the Lima VM environment.
+#[instrument(skip_all)]
 pub fn start() -> Result<()> {
     require_linux_env()?;
 
@@ -251,6 +257,7 @@ pub fn start() -> Result<()> {
 }
 
 /// Stop the microVM: kill Firecracker, clean up networking (legacy dev-mode).
+#[instrument(skip_all)]
 pub fn stop() -> Result<()> {
     require_linux_env()?;
 
@@ -405,6 +412,7 @@ pub struct FlakeRunConfig {
 /// Each VM gets its own directory under ~/microvm/vms/<name>/ with a
 /// separate Firecracker socket, PID file, and log.  The bridge network
 /// is shared, but each VM has its own TAP device and guest IP.
+#[instrument(skip_all, fields(name = %config.name))]
 pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     require_linux_env()?;
 
@@ -472,6 +480,7 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
 ///
 /// The VM configuration (vCPUs, memory, drive IDs, network) must match
 /// what was used when the snapshot was created.
+#[instrument(skip_all, fields(template_id, name = %config.name))]
 pub fn restore_from_template_snapshot(
     template_id: &str,
     config: &FlakeRunConfig,
@@ -628,6 +637,7 @@ pub fn restore_from_template_snapshot(
 }
 
 /// Stop a specific named VM.
+#[instrument(skip_all, fields(name))]
 pub fn stop_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
@@ -690,6 +700,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
 }
 
 /// Stop all running VMs.
+#[instrument(skip_all)]
 pub fn stop_all_vms() -> Result<()> {
     require_linux_env()?;
 
@@ -800,6 +811,7 @@ const CONSOLE_WARNING_PATTERNS: &[&str] = &[
 ///
 /// Checks each layer independently so that useful information is returned
 /// even when vsock is broken (e.g. guest agent crashed, OOM, kernel panic).
+#[instrument(skip_all, fields(name))]
 pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     require_linux_env()?;
 
@@ -998,6 +1010,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 }
 
 /// List all running VMs by scanning ~/microvm/vms/*/run-info.json.
+#[instrument(skip_all)]
 pub fn list_vms() -> Result<Vec<RunInfo>> {
     let output = run_in_vm_stdout(&format!(
         "for f in {dir}/*/run-info.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null || true",
@@ -1154,6 +1167,7 @@ pub fn create_dev_secrets_drive(abs_dir: &str, secret_files: &[DriveFile]) -> Re
 }
 
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
+#[instrument(skip_all, fields(name = %config.name))]
 pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
     configure_flake_microvm_with_drives_dir(config, abs_dir, socket, abs_dir)
 }
@@ -1161,6 +1175,7 @@ pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &
 /// Configure a flake-built microVM with custom config/secrets drive location.
 /// This allows template snapshots to use template-relative drive paths.
 /// The vsock socket is also placed in drives_dir for snapshot portability.
+#[instrument(skip_all, fields(name = %config.name))]
 pub fn configure_flake_microvm_with_drives_dir(
     config: &FlakeRunConfig,
     abs_dir: &str,
@@ -1308,6 +1323,7 @@ pub fn configure_flake_microvm_with_drives_dir(
 }
 
 /// Persist run info for a named VM.
+#[instrument(skip_all, fields(name = %config.name))]
 pub fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
     let info = RunInfo {
         mode: "flake".to_string(),
@@ -1341,6 +1357,7 @@ pub fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
 }
 
 /// Read run info for a named VM.
+#[instrument(skip_all, fields(name))]
 pub fn read_vm_run_info(name: &str) -> Result<RunInfo> {
     let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);

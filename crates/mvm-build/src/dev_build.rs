@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use tracing::instrument;
 
 use mvm_core::build_env::ShellEnvironment;
 
@@ -41,6 +42,7 @@ pub struct DevBuildCleanupReport {
 /// Remove old cached dev builds, keeping the newest `keep` revisions.
 ///
 /// Returns a report with the number of removed revisions and removed paths.
+#[instrument(skip_all, fields(keep))]
 pub fn cleanup_old_dev_builds(
     env: &dyn ShellEnvironment,
     keep: usize,
@@ -83,6 +85,7 @@ pub fn cleanup_old_dev_builds(
 ///
 /// When `profile` is `None`, builds the flake's default package.
 /// When `Some("worker")`, builds `packages.<system>.tenant-worker`, etc.
+#[instrument(skip_all, fields(flake_ref))]
 pub fn dev_build(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
@@ -368,6 +371,7 @@ fn detect_mvm_src() -> Option<String> {
 /// Auto-detects the mvm workspace root and injects the guest agent into the
 /// rootfs if it's not already present. Never fails the overall build — logs
 /// a message and returns `Ok(())` if injection cannot be performed.
+#[instrument(skip_all)]
 pub fn ensure_guest_agent_if_needed(
     env: &dyn ShellEnvironment,
     build_result: &DevBuildResult,
