@@ -153,7 +153,14 @@ enum Commands {
         ports: Vec<String>,
     },
     /// Show status of Lima VM and microVM
+    #[command(alias = "ps")]
     Status,
+    /// Stop and remove a named microVM (alias for 'stop <name>')
+    #[command(alias = "rm")]
+    Remove {
+        /// Name of the VM to remove
+        name: String,
+    },
     /// Tear down Lima VM and all resources
     Destroy {
         /// Skip confirmation prompt
@@ -637,6 +644,7 @@ pub fn run() -> Result<()> {
         }
 
         Commands::Status => cmd_status(),
+        Commands::Remove { name } => cmd_stop(Some(&name), false),
         Commands::Destroy { yes } => cmd_destroy(yes),
         Commands::Update { check, force } => cmd_update(check, force),
         Commands::Doctor { json } => cmd_doctor(json),
@@ -1706,6 +1714,19 @@ fn with_hints(result: Result<()>) -> Result<()> {
             ui::warn("Hint: Check directory permissions on ~/.mvm (set MVM_DATA_DIR to override).");
         } else if msg.contains("nix: command not found") || msg.contains("nix: not found") {
             ui::warn("Hint: Nix is installed inside the Lima VM. Run 'mvmctl shell' first.");
+        } else if msg.contains("Lima VM is not running") || msg.contains("VM is not started") {
+            ui::warn(
+                "Hint: Start the dev environment with 'mvmctl dev' or run 'mvmctl setup' \
+                 to initialise it first.",
+            );
+        } else if msg.contains("already exists") && msg.contains("template") {
+            ui::warn("Hint: Use '--force' to overwrite the existing template.");
+        } else if msg.contains("error: builder for") && msg.contains("failed with exit code") {
+            ui::warn(
+                "Hint: Nix build failed. Check the log above for the failing derivation.\n      \
+                 Common fixes: ensure flake inputs are up to date ('nix flake update'), \
+                 or check your flake.nix for syntax errors.",
+            );
         }
     }
     result
@@ -4755,5 +4776,35 @@ edition = "2024"
         assert!(parse_port_spec("abc:3000").is_err());
         assert!(parse_port_spec("3000:abc").is_err());
         assert!(parse_port_spec("99999").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Alias tests (Phase 4)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_ps_alias_for_status() {
+        let cli = Cli::try_parse_from(["mvmctl", "ps"]).unwrap();
+        assert!(matches!(cli.command, Commands::Status));
+    }
+
+    #[test]
+    fn test_rm_alias_for_remove() {
+        let cli = Cli::try_parse_from(["mvmctl", "rm", "my-vm"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Remove { ref name } if name == "my-vm"
+        ));
+    }
+
+    #[test]
+    fn test_remove_command_requires_name() {
+        assert!(Cli::try_parse_from(["mvmctl", "remove"]).is_err());
+    }
+
+    #[test]
+    fn test_start_alias_for_run() {
+        // 'start' is already an alias on Run — verify it still works
+        assert!(Cli::try_parse_from(["mvmctl", "start", "--flake", "."]).is_ok());
     }
 }

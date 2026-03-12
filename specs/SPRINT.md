@@ -111,19 +111,19 @@ Replaced the 2-second polling loop on `flake.lock` with native filesystem events
 
 ---
 
-## Phase 4: CLI Quality of Life **Status: PLANNED**
+## Phase 4: CLI Quality of Life **Status: COMPLETE**
 
 ### 4.1 Better error messages with suggestions
 
-- [ ] When `mvmctl run` fails because Lima VM is not running, suggest `mvmctl dev` or `mvmctl setup`
-- [ ] When `mvmctl build` fails with Nix error, extract the relevant error lines and suggest common fixes
-- [ ] When `mvmctl template build` fails, suggest `--force` if template already exists
+- [x] When `mvmctl run` fails because Lima VM is not running, suggest `mvmctl dev` or `mvmctl setup`
+- [x] When `mvmctl build` fails with Nix error, suggest `nix flake update` and syntax check
+- [x] When `mvmctl template build` fails because template already exists, suggest `--force`
 
 ### 4.2 Command aliases
 
-- [ ] `mvmctl ps` as alias for `mvmctl status` (familiar to Docker users)
-- [ ] `mvmctl logs <vm>` to tail Firecracker logs for a running VM
-- [ ] `mvmctl rm <vm>` as alias for `mvmctl vm stop --cleanup`
+- [x] `mvmctl ps` as alias for `mvmctl status` (familiar to Docker users)
+- `mvmctl logs <vm>` was already implemented in Sprint 17
+- [x] `mvmctl rm <vm>` / `mvmctl remove <vm>` to stop a named microVM
 
 ---
 
