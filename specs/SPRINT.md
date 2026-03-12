@@ -1,17 +1,18 @@
-# Sprint 16 — Production Hardening
+# Sprint 17 — Resource Safety & Release v0.5.0
 
-**Goal:** Close critical production readiness gaps in error handling and test coverage, and document remaining hardening work.
+**Goal:** Add RAII cleanup for VM resources to prevent leaks, specify MSRV, and cut a v0.5.0 release packaging all hardening work from Sprint 16.
 
-**Error policy:** Cleanup failures use **log-and-continue** — `tracing::warn!` the error but don't propagate. Prevents cascade failures during teardown.
+**Roadmap:** See [specs/plans/19-post-hardening-roadmap.md](plans/19-post-hardening-roadmap.md) for full post-hardening priorities.
 
-## Current Status (v0.4.1)
+## Current Status (v0.5.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade          |
-| Total tests      | 673                      |
+| Total tests      | 679                      |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
+| MSRV             | 1.85                     |
 | Binary           | `mvmctl`                 |
 
 ## Completed Sprints
@@ -31,181 +32,72 @@
 - [13-boot-time-optimization.md](sprints/13-boot-time-optimization.md)
 - [14-guest-library-and-examples.md](sprints/14-guest-library-and-examples.md)
 - [15-real-world-apps.md](sprints/15-real-world-apps.md)
+- [16-production-hardening.md](sprints/16-production-hardening.md)
 
 ---
 
-## Gap Analysis Summary
+## Phase 1: Drop Impls for VM Resources **Status: COMPLETE**
 
-### Critical
-1. 83+ `let _ =` error swallows (silent failures in VM cleanup, LUKS, cgroups)
-2. 32 `.unwrap()` in production code (crash risk, violates AGENTS.md)
-3. mvm-runtime — zero organized tests (most complex crate)
-4. mvm-guest — zero tests (37 unsafe blocks untested)
-5. No signal handling (Ctrl-C doesn't cleanup)
+### 1.1 Audit resource ownership
 
-### High
-6. 33+ `.ok()` silent failures
-7. No concurrent access protection (file-based state, no locking)
-8. SecurityPolicy defaults to unauthenticated
-9. 135 `println!/eprintln!` bypassing tracing
-10. No config/input validation
+- [x] Full audit of all OS resource handles across workspace (Firecracker PIDs, TAP interfaces, vsock sockets, temp dirs, cgroups, socat children, file locks)
+- [x] Mapped each resource to existing cleanup function
+- [x] Identified medium-risk targets: Firecracker process (dev+flake), TAP interfaces
 
-### Medium
-11. Metrics collected but not exported
-12. No state versioning/migration
-13. Missing Drop impls for VM resources
-14. Snapshot encryption reads via shell
-15. No binary signing or SBOM
-16. No MSRV specified
+### 1.2 Firecracker process guard
 
----
+- [x] `FirecrackerGuard` struct in `microvm.rs`: wraps VM directory path, kills FC process on drop via PID file
+- [x] `defuse()` method prevents cleanup after successful launch (ownership transfers to `stop_vm()`)
+- [x] Handles both `fc.pid` (multi-VM) and `.fc-pid` (legacy) PID file locations
+- [x] Wired into `run_from_build()`, `restore_from_template_snapshot()`, and legacy `start()`
+- [x] 3 tests: defuse prevents cleanup, drop runs cleanup with correct script, tolerates cleanup failure
 
-## Phase 1: Error Handling & Robustness **Status: COMPLETE**
+### 1.3 TAP interface guard
 
-### 1.1 Replace `.unwrap()` with `.expect()` in production code (~32 instances)
+- [x] `TapGuard` struct in `microvm.rs`: wraps `VmSlot`, calls `network::tap_destroy()` on drop
+- [x] `defuse()` method prevents cleanup after successful launch
+- [x] Wired into `run_from_build()` and `restore_from_template_snapshot()`
+- [x] 2 tests: defuse prevents cleanup, drop runs cleanup with TAP destroy command
 
-- [x] `crates/mvm-cli/src/update.rs` — 11 unwraps replaced with `.expect()`
-- [x] `crates/mvm-runtime/src/shell_mock.rs` — 6 unwraps replaced with `.expect()`
-- [x] `crates/mvm-runtime/src/config.rs` — 4 unwraps replaced with `.expect()`
-- [x] `crates/mvm-runtime/src/vm/image.rs` — 2 unwraps replaced with `.expect()`
-- [x] `crates/mvm-core/src/retry.rs` — 1 unwrap replaced with `.expect()`
-- [x] `crates/mvm-core/src/config.rs` — 1 unwrap replaced with `.expect()`
+### 1.4 Shell mock fix for `run_visible`
 
-### 1.2 Replace `let _ =` error swallowing with log-and-continue (~83 instances)
+- [x] Added `shell_mock::intercept()` to `LimaEnv::run_visible()` and `NativeEnv::run_visible()` — previously mock was not checked for visible shell commands, making Drop impls untestable
 
-Pattern: `let _ = op();` → `if let Err(e) = op() { tracing::warn!("description: {e}"); }`
+### 1.5 Build temp directory cleanup (deferred)
 
-- [x] `crates/mvm-runtime/src/vm/instance/lifecycle.rs` — 14 instances replaced with warn logging
-- [x] `crates/mvm-runtime/src/vm/template/lifecycle.rs` — 9 instances replaced with warn logging
-- [x] `crates/mvm-guest/src/bin/mvm-guest-agent.rs` — 7 instances replaced with eprintln logging
-- [x] `crates/mvm-guest/src/bin/mvm-builder-agent.rs` — 8 instances replaced with eprintln logging
-- [x] `crates/mvm-runtime/src/vm/microvm.rs` — 7 instances replaced with warn logging
-- [x] `crates/mvm-cli/src/update.rs` — 7 instances replaced with warn logging
-
-Note: Some `let _ =` may be intentionally ignored (e.g., removing a file that may not exist). Add `// intentionally ignored: <reason>` comment for those cases.
-
-### 1.3 Replace `.ok()` silent failures with logging (~33 instances)
-
-Pattern: `.parse().ok()` → `.parse().map_err(|e| tracing::warn!("parse failed: {e}")).ok()`
-
-- [x] `crates/mvm-guest/src/bin/mvm-guest-agent.rs` — 4 logged (CLI args + config parse), 6 skipped (idiomatic optional chains)
-- [x] `crates/mvm-runtime/src/vm/microvm.rs` — 3 logged (PID + config parse), 6 skipped (idiomatic `.ok()?` chains)
-- [x] `crates/mvm-cli/src/commands.rs` — 0 changed, all 8 reviewed as idiomatic best-effort patterns
-- [x] `crates/mvm-runtime/src/security/certs.rs` — 3 logged (cert queries), 4 skipped (`filter_map` patterns)
-
-### 1.4 Add signal handling for graceful shutdown
-
-- [x] Add `ctrlc` crate dependency
-- [x] Install SIGINT/SIGTERM handler in CLI entry point
-- [x] Log "interrupted, cleaning up..." and exit cleanly
-- [x] Cleanup spawned port-forwarding processes (socat PIDs tracked in global registry, killed by signal handler)
+- Build temp dirs are created inside bash scripts (`mktemp -d`) with inline cleanup
+- Already low-risk: scripts use `set -e` and cleanup runs at script end
+- `tempfile::TempDir` not applicable (dirs created in Lima VM, not host)
 
 ---
 
-## Phase 2: Test Coverage **Status: COMPLETE**
+## Phase 2: MSRV Specification **Status: COMPLETE**
 
-### 2.1 mvm-runtime unit tests
-
-- [x] `config.rs` — 25+ tests: config loading, defaults, serde roundtrip, Lima template rendering, VmSlot
-- [x] `shell.rs` — 6 tests: run_host success/failure/nonexistent, run_host_visible, inside_lima
-- [x] `vm/network.rs` — functions are shell scripts (not unit-testable); VmSlot tested in config.rs
-- [x] `vm/image.rs` — 12+ tests: config parsing, service generation, host_init generation, runtime config
-- [x] `vm/template/` — 11 tests: integration health checks (8), Checksums serde roundtrip (3)
-
-### 2.2 mvm-guest unit tests
-
-- [x] `vsock.rs` — 30+ tests: all enum variants serde, authenticated frames, handshake, replay detection, error paths
-- [x] `integrations.rs` — 12 tests: manifest serde, status enums, health results, backward compat, drop-in loading
-
-### 2.3 Verification tests
-
-- [x] Grep-based CI check: `tests/code_quality.rs` — no `.unwrap()` in production code
-- [x] Mock-based test: `test_log_and_continue_pattern_does_not_propagate_errors` in microvm.rs — verifies cleanup errors don't propagate
+- [x] Add `rust-version = "1.85"` to workspace `Cargo.toml`
+- [x] Add `rust-version.workspace = true` to root package
+- [x] Verified via `cargo check --workspace` (Edition 2024 requires 1.85+)
 
 ---
 
-## Phase 3: Observability & Logging Hygiene **Status: COMPLETE**
+## Phase 3: Release v0.5.0 **Status: COMPLETE**
 
-### 3.1 Replace diagnostic `eprintln!` with tracing (3 instances)
+### 3.1 Version bump
 
-Audit found 110 total `println!/eprintln!` — 94 are correct user-facing CLI output, 24 are
-guest agent binaries (appropriate as-is). Only 3 diagnostic instances need replacing:
+- [x] Update version in all workspace `Cargo.toml` files (root + 6 crates via `workspace.package`)
+- [x] Update `Cargo.lock`
 
-- [x] `crates/mvm-build/src/vsock_builder.rs` — 3 instances (builder log, readiness, waiting) → `tracing::debug!`/`tracing::info!`
+### 3.2 Changelog
 
-**Keep as-is:**
-- CLI output via `ui::` module (94 instances) — correct user-facing output
-- Guest agent binaries (`mvm-guest-agent`, `mvm-builder-agent`) — headless services, `eprintln!` appropriate
-- `crates/mvm-guest/src/integrations.rs` — 4 instances (drop-in config loading, runs inside microVM, no tracing dep)
-- `crates/mvm-guest/src/probes.rs` — 4 instances (drop-in config loading, runs inside microVM, no tracing dep)
+- [x] Updated CHANGELOG.md with v0.5.0 section
+- [x] Highlighted Sprint 16 hardening: error handling, test coverage, observability, state safety, security defaults
+- [x] Highlighted Sprint 17: resource safety, MSRV
 
-### 3.2 Add tracing spans to critical paths (~40 functions)
+### 3.3 Release prep
 
-Pattern: `#[instrument(skip_all, fields(key_field = value, ...))]`
-Reference: `crates/mvm-runtime/src/vm/instance/lifecycle.rs` (6 functions already instrumented)
-
-**Tier 1 — Shell execution (10 functions):**
-- [x] `shell.rs` — `run_in_vm`, `run_in_vm_stdout`, `run_in_vm_visible`, `run_in_vm_capture`, `run_on_vm`, `run_on_vm_visible`, `run_on_vm_stdout`, `run_on_vm_capture`, `run_host`, `run_host_visible`
-
-**Tier 2 — VM lifecycle (15 functions in microvm.rs):**
-- [x] Boot: `run_from_build`, `restore_from_template_snapshot`, `start_firecracker_daemon`, `start_vm_firecracker`
-- [x] Configure: `configure_microvm`, `configure_flake_microvm`, `configure_flake_microvm_with_drives_dir`, `api_put_socket`, `api_patch_socket`
-- [x] Stop: `stop`, `stop_vm`, `stop_all_vms`
-- [x] Health: `diagnose_vm`, `read_vm_run_info`, `write_vm_run_info`, `list_vms`
-
-**Tier 3 — Template operations (16 functions in template/lifecycle.rs):**
-- [x] CRUD: `template_create`, `template_load`, `template_list`, `template_delete`, `template_init`
-- [x] Build: `template_build`, `template_build_with_snapshot`, `update_fod_hash`
-- [x] Registry: `template_push`, `template_pull`, `template_verify`, `registry_download_revision`
-- [x] Health: `wait_for_healthy`, `wait_for_integrations_healthy`
-- [x] Utilities: `template_artifacts`, `current_revision_id`
-
-**Tier 4 — Build pipeline (3 functions in dev_build.rs):**
-- [x] `dev_build`, `cleanup_old_dev_builds`, `ensure_guest_agent_if_needed`
-
----
-
-## Phase 4: State Safety **Status: COMPLETE**
-
-### 4.1 Atomic state writes
-
-- [x] New `mvm_core::atomic_io` module: `atomic_write()` (temp file + fsync + rename), `atomic_write_str()`, 7 tests
-- [x] Added `fs2` and `tempfile` dependencies to workspace
-- [x] Applied to `template/lifecycle.rs` — 3 `std::fs::write` → `atomic_write`
-- [x] Applied to `security/signing.rs` — session key + host pubkey writes use `atomic_write`
-
-### 4.2 File-based locking
-
-- [x] `FileLock` RAII guard in `atomic_io`: `acquire()` (blocking) and `try_acquire()` (non-blocking) via `fs2::FileExt`
-- [x] Lock auto-released on drop, creates parent directories as needed
-- [x] 3 tests: acquire+drop, try_acquire contention, nonexistent parent
-
-### 4.3 State version fields
-
-- [x] `schema_version: u32` with `#[serde(default)]` added to: `TemplateSpec`, `TemplateRevision`, `RunInfo`, `Checksums`, `SnapshotMeta`
-- [x] `CURRENT_SCHEMA_VERSION` constant (= 1) in `mvm_core::template`
-- [x] All construction sites updated (15+ locations across 8 files)
-- [x] Backward-compatible: old files without field deserialize as version 0
-
----
-
-## Phase 5: Security Hardening **Status: COMPLETE**
-
-### 5.1 Invert SecurityPolicy default
-
-- [x] `require_auth` defaults to `true` in `mvm-core/src/security.rs` (was `false`)
-- [x] Added `SecurityPolicy::dev_defaults()` with `require_auth: false` for dev/testing
-- [x] Updated 3 tests to match new default behavior
-
-### 5.2 File permission enforcement
-
-- [x] Session key files (`session_key.pem`) set to `chmod 0600` after writing in `signing.rs`
-- [x] `FileKeyProvider` warns via `tracing::warn!` if key files have permissions other than 600/400
-
-### 5.3 Config validation
-
-- [x] `FlakeRunConfig::validate()` — bounds checking: cpus 1-32, memory 128-65536 MiB, non-empty name/vmlinux/rootfs
-- [x] Called at entry points: `run_from_build()` and `restore_from_template_snapshot()`
+- [x] `cargo test --workspace` — 679 tests pass
+- [x] `cargo clippy --workspace -- -D warnings` — zero warnings
+- [ ] Tag `v0.5.0`
+- [ ] Archive Sprint 17 to `specs/sprints/17-resource-safety-release.md`
 
 ---
 
@@ -213,7 +105,7 @@ Reference: `crates/mvm-runtime/src/vm/instance/lifecycle.rs` (6 functions alread
 
 After each phase:
 ```bash
-limactl shell mvm -- cargo test --workspace
-limactl shell mvm -- cargo clippy --workspace -- -D warnings
-limactl shell mvm -- cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+cargo check --workspace
 ```

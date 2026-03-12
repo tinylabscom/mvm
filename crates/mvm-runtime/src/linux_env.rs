@@ -36,6 +36,17 @@ impl LinuxEnv for LimaEnv {
     }
 
     fn run_visible(&self, script: &str) -> Result<()> {
+        if let Some(output) = crate::shell_mock::intercept(script) {
+            if output.status.success() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Command failed in Lima VM '{}' (exit {})",
+                self.vm_name,
+                output.status.code().unwrap_or(-1)
+            );
+        }
+
         let status = Command::new("limactl")
             .args(["shell", &self.vm_name, "bash", "-c", script])
             .stdin(Stdio::inherit())
@@ -92,6 +103,16 @@ impl LinuxEnv for NativeEnv {
     }
 
     fn run_visible(&self, script: &str) -> Result<()> {
+        if let Some(output) = crate::shell_mock::intercept(script) {
+            if output.status.success() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Command failed (exit {})",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+
         let status = Command::new("bash")
             .args(["-c", script])
             .stdin(Stdio::inherit())
