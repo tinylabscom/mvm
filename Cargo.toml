@@ -63,6 +63,10 @@ names = { version = "0.14", default-features = false }
 ctrlc = "3.4"
 libc = "0.2"
 
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"
+
 # Utilities
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }

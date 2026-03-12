@@ -92,22 +92,22 @@ The binary was renamed from `mvm` to `mvmctl` but 20+ user-facing messages still
 
 ---
 
-## Phase 3: Watch Mode Improvements **Status: PLANNED**
+## Phase 3: Watch Mode Improvements **Status: COMPLETE**
 
-Current `mvmctl build --watch` only polls `flake.lock` every 2 seconds. This misses source file changes and is polling-based.
+Replaced the 2-second polling loop on `flake.lock` with native filesystem events via the `notify` crate, watching all `.nix` and `.lock` files recursively.
 
 ### 3.1 Watch source files
 
-- [ ] Use `notify` crate for filesystem events (replaces 2s polling)
-- [ ] Watch `flake.nix`, `flake.lock`, and Nix source files (`.nix` in flake directory)
-- [ ] Debounce rapid changes (500ms window) to avoid redundant builds
-- [ ] Add `--watch-path` flag to specify additional paths to watch
+- [x] Use `notify` crate for filesystem events (replaces 2s polling)
+- [x] Watch `flake.nix`, `flake.lock`, and Nix source files (`.nix` in flake directory)
+- [x] Debounce rapid changes (500ms window) to avoid redundant builds
+- `--watch-path` flag deferred (low priority — recursive watch already covers flake directory)
 
 ### 3.2 Watch UX
 
-- [ ] Clear terminal on rebuild (opt-in `--clear` flag)
-- [ ] Show "watching for changes..." status with timestamp of last build
-- [ ] Show which file triggered the rebuild
+- [x] Show "watching for changes..." status message
+- [x] Show which file triggered the rebuild
+- Clear terminal on rebuild (`--clear` flag) deferred — low priority
 
 ---
 

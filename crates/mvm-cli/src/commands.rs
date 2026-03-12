@@ -1971,10 +1971,6 @@ fn cmd_build_flake(flake_ref: &str, profile: Option<&str>, watch: bool, json: bo
         ui::warn("Watch mode requires a local flake; running a single build instead.");
     }
 
-    let mut last_mtime = std::fs::metadata(format!("{}/flake.lock", resolved))
-        .and_then(|m| m.modified())
-        .ok();
-
     loop {
         let profile_display = profile.unwrap_or("default");
 
@@ -2049,18 +2045,22 @@ fn cmd_build_flake(flake_ref: &str, profile: Option<&str>, watch: bool, json: bo
             return Ok(());
         }
 
-        // Watch mode: wait for flake.lock mtime change
+        // Watch mode: wait for filesystem changes using native events
         if !json {
-            ui::info("Watching flake.lock for changes (Ctrl+C to exit)...");
+            ui::info("Watching for .nix and .lock changes (Ctrl+C to exit)...");
         }
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let new_mtime = std::fs::metadata(format!("{}/flake.lock", resolved))
-                .and_then(|m| m.modified())
-                .ok();
-            if new_mtime.is_some() && new_mtime != last_mtime {
-                last_mtime = new_mtime;
-                break;
+        match crate::watch::wait_for_changes(&resolved) {
+            Ok(trigger) => {
+                if !json {
+                    let display = crate::watch::display_trigger(&trigger, &resolved);
+                    ui::info(&format!("\nChange detected: {display} — rebuilding..."));
+                }
+            }
+            Err(e) => {
+                if !json {
+                    ui::warn(&format!("Watch error: {e} — falling back to single build"));
+                }
+                return Ok(());
             }
         }
     }

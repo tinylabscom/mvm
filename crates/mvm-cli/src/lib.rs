@@ -12,5 +12,6 @@ pub mod shell_init;
 pub mod template_cmd;
 pub mod ui;
 pub mod update;
+pub mod watch;
 
 pub use commands::run;
