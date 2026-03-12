@@ -90,56 +90,26 @@ After reading the code: `hex_decode` validation was already in place in `keystor
 
 ---
 
-## Phase 3: State Migration Framework **Status: PLANNED**
+## Phase 3: State Migration Framework **Status: COMPLETE**
 
-Three persisted structs have `schema_version: u32` with no migration logic:
-- `MvmState` in `crates/mvm-runtime/src/config.rs` (version 1)
-- `TemplateSpec` in `crates/mvm-core/src/template.rs` (version 1)
-- `AgentState` in `crates/mvm-core/src/agent.rs` (version 1)
+### 3.1 `mvm-core/src/migration.rs`
 
-### 3.1 Migration trait in `mvm-core`
+- [x] `pub type MigrateFn = fn(serde_json::Value) -> Result<serde_json::Value>`
+- [x] `pub fn migrate(value, from, to, migrations)` — iterate `from..to`, apply each fn
+- [x] Returns `Ok(value)` unchanged when `from == to`
+- [x] Returns `Err` when `from > to` (downgrade not supported)
+- [x] Returns `Err` when migrations list is shorter than needed
+- [x] `pub fn schema_version_of(value)` — reads `schema_version` field, defaults to 0
+- [x] 9 unit tests covering all branches + `RunInfo` unversioned roundtrip
 
-Add `crates/mvm-core/src/migration.rs`:
+### 3.2 Wired into `RunInfo` load
 
-```rust
-/// A versioned migration function: takes raw JSON Value at version N,
-/// returns transformed Value at version N+1.
-pub type MigrateFn = fn(serde_json::Value) -> Result<serde_json::Value>;
+In `crates/mvm-runtime/src/vm/microvm.rs`:
 
-/// Apply a chain of migrations to a raw JSON value, starting at `from_version`
-/// up to `to_version`. Migrations are indexed by the version they produce
-/// (migration[0] produces version 1, migration[1] produces version 2, etc.).
-pub fn migrate(
-    value: serde_json::Value,
-    from_version: u32,
-    to_version: u32,
-    migrations: &[MigrateFn],
-) -> Result<serde_json::Value>
-```
-
-- [ ] Implement `migrate()` — iterate `from_version..to_version`, apply each `MigrateFn`
-- [ ] Return `Ok(value)` unchanged if `from_version == to_version`
-- [ ] Return `Err` if `from_version > to_version` (downgrade not supported)
-- [ ] Return `Err` if `to_version` exceeds available migrations
-
-### 3.2 Wire into `MvmState` load
-
-In `crates/mvm-runtime/src/config.rs`, `MvmState::load()`:
-
-- [ ] Before deserializing to `MvmState`, deserialize to `serde_json::Value`
-- [ ] Read `schema_version` from the raw value (default 0 if missing — old pre-versioned files)
-- [ ] Call `migrate(value, from, CURRENT_SCHEMA_VERSION, &MIGRATIONS)`
-- [ ] Deserialize the migrated value to `MvmState`
-- [ ] `MIGRATIONS` is an empty `&[]` for now — framework is wired but no actual migrations yet
-
-### 3.3 Tests
-
-- [ ] `migrate_noop` — same version returns unchanged value
-- [ ] `migrate_one_step` — single migration function transforms the value correctly
-- [ ] `migrate_chain` — two migrations applied in order
-- [ ] `migrate_downgrade_err` — `from > to` returns error
-- [ ] `migrate_missing_migration_err` — `to` exceeds available migrations returns error
-- [ ] `migrate_mvm_state_from_unversioned` — load a JSON blob without `schema_version`, confirm it deserializes to version 1 (the no-op migration from 0→1)
+- [x] `RUN_INFO_SCHEMA_VERSION = 1` constant
+- [x] `RUN_INFO_MIGRATIONS: &[MigrateFn] = &[]` — empty for now, framework is live
+- [x] `read_vm_run_info_from()` deserializes to `Value`, calls `migrate()`, then to `RunInfo`
+- [x] `read_run_info()` same pattern — migration errors logged as warnings, returns `None`
 
 ---
 

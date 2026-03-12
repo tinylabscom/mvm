@@ -1494,14 +1494,27 @@ pub fn read_vm_run_info(name: &str) -> Result<RunInfo> {
         .ok_or_else(|| anyhow::anyhow!("No run-info found for VM '{}'. Is it running?", name))
 }
 
-/// Read run info from a specific VM directory.
+/// Current schema version for `RunInfo` files.
+const RUN_INFO_SCHEMA_VERSION: u32 = 1;
+
+/// Registered migrations for `RunInfo` (indexed by the version they produce).
+/// Currently empty — framework is wired but no field changes have occurred yet.
+const RUN_INFO_MIGRATIONS: &[mvm_core::migration::MigrateFn] = &[];
+
+/// Read run info from a specific VM directory, applying schema migrations if needed.
 fn read_vm_run_info_from(abs_dir: &str) -> Option<RunInfo> {
     let json = run_in_vm_stdout(&format!(
         "cat {dir}/run-info.json 2>/dev/null || echo 'null'",
         dir = abs_dir,
     ))
     .ok()?;
-    serde_json::from_str(&json).ok()
+    let raw: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let from = mvm_core::migration::schema_version_of(&raw);
+    let migrated =
+        mvm_core::migration::migrate(raw, from, RUN_INFO_SCHEMA_VERSION, RUN_INFO_MIGRATIONS)
+            .map_err(|e| tracing::warn!("run-info migration failed: {e}"))
+            .ok()?;
+    serde_json::from_value(migrated).ok()
 }
 
 /// Read the slot_index from a VM's run-info.json.
@@ -1515,14 +1528,20 @@ fn read_slot_index(abs_dir: &str) -> Option<u8> {
     value.get("slot_index")?.as_u64().map(|v| v as u8)
 }
 
-/// Read persisted run info (returns None if file doesn't exist).
+/// Read persisted run info (returns None if file doesn't exist), with migration.
 pub fn read_run_info() -> Option<RunInfo> {
     let json = run_in_vm_stdout(&format!(
         "cat {dir}/.mvm-run-info 2>/dev/null || echo 'null'",
         dir = MICROVM_DIR,
     ))
     .ok()?;
-    serde_json::from_str(&json).ok()
+    let raw: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let from = mvm_core::migration::schema_version_of(&raw);
+    let migrated =
+        mvm_core::migration::migrate(raw, from, RUN_INFO_SCHEMA_VERSION, RUN_INFO_MIGRATIONS)
+            .map_err(|e| tracing::warn!("run-info migration failed: {e}"))
+            .ok()?;
+    serde_json::from_value(migrated).ok()
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ pub mod config;
 pub mod idle_metrics;
 pub mod instance;
 pub mod linux_env;
+pub mod migration;
 pub mod naming;
 pub mod node;
 pub mod observability;
