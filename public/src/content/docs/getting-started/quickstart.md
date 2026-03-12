@@ -9,19 +9,25 @@ description: Get a Firecracker microVM running in under 5 minutes.
 mvmctl dev
 ```
 
-This single command handles everything:
+This single command detects your platform and handles everything:
 
-1. Installs Lima (macOS) if not present
-2. Creates and starts a Lima VM with nested virtualization
-3. Installs Firecracker inside the Lima VM
+**On macOS or Linux without KVM:**
+1. Installs Lima if not present
+2. Creates and starts a Lima VM with `/dev/kvm`
+3. Installs Nix and Firecracker inside the Lima VM
 4. Drops you into the Lima VM shell
 
-Inside the Lima shell, your home directory (`~`) is mounted read/write — your project files are right there. Nix, Firecracker, and `/dev/kvm` are all available.
+**On Linux with `/dev/kvm`:**
+1. Skips Lima entirely
+2. Installs Nix and Firecracker natively on the host
+3. Drops you into a dev shell
 
-Exit the shell with `exit` or `Ctrl+D` — the Lima VM keeps running in the background.
+Inside the dev shell, your home directory (`~`) is mounted read/write (Lima) or directly available (native Linux) — your project files are right there. Nix, Firecracker, and `/dev/kvm` are all available.
+
+Exit the shell with `exit` or `Ctrl+D` — the Lima VM (if used) keeps running in the background.
 
 :::note
-On the first run, `mvmctl dev` downloads ~500MB of assets (Lima VM image). Subsequent runs start in seconds.
+On macOS / Linux without KVM, the first run downloads ~500MB of assets (Lima VM image). On native Linux, setup is much faster. Subsequent runs start in seconds on all platforms.
 :::
 
 ## 2. Day-to-Day Commands

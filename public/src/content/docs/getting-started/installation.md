@@ -38,7 +38,17 @@ mvmctl update
 
 ## Prerequisites
 
-- **macOS** (Apple Silicon or Intel) or **Linux** with KVM
+- **macOS** (Apple Silicon or Intel) or **Linux** (x86_64 or aarch64)
 - [Homebrew](https://brew.sh/) (macOS only — mvm will install it if missing)
 
-Running `mvmctl bootstrap` or `mvmctl dev` handles everything else automatically — Lima, Nix, and Firecracker are installed inside the VM.
+### Platform Detection
+
+mvm automatically detects your platform at startup and adapts its setup:
+
+| Platform | What happens |
+|----------|-------------|
+| **macOS** | Lima VM is installed to provide `/dev/kvm`. All builds and Firecracker run inside Lima. |
+| **Linux with `/dev/kvm`** | Lima is skipped entirely. Builds and Firecracker run natively on the host. |
+| **Linux without `/dev/kvm`** | Lima VM is installed as a fallback (same as macOS). Useful for WSL2 or cloud VMs without nested virtualization. |
+
+Running `mvmctl bootstrap` or `mvmctl dev` handles everything automatically — it detects your platform, installs Lima only if needed, and sets up Nix and Firecracker in the right environment.

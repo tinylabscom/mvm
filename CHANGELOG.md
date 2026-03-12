@@ -2,6 +2,25 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.5.0] — 2026-03-12
+
+### Added
+- **Resource safety**: RAII guards (`FirecrackerGuard`, `TapGuard`) that automatically clean up orphaned Firecracker processes and TAP interfaces on drop
+- **MSRV specification**: `rust-version = "1.85"` in workspace Cargo.toml — `cargo install` now gives a clear error on old toolchains
+- **Observability**: Structured tracing instrumentation across all VM lifecycle operations (start, stop, build, snapshot, restore, template)
+- **State safety**: Schema versioning on all persisted structs, atomic writes via `mvm_core::atomic_io`, file locking with `fs2`
+- **Security defaults**: `SecurityPolicy::require_auth` defaults to `true` (secure by default), `dev_defaults()` for permissive dev mode
+- **Signal handling**: Graceful Ctrl-C cleanup via `ctrlc` crate
+
+### Changed
+- **Error handling**: Replaced 83+ `let _ =` silent error swallows with `tracing::warn!` log-and-continue pattern
+- **Robustness**: Replaced 32 `.unwrap()` in production code with `.expect()` or proper error propagation
+- **Test coverage**: 679 tests (up from 630), including new coverage for mvm-runtime and mvm-guest
+
+### Fixed
+- Shell mock infrastructure now intercepts `run_visible()` calls, enabling proper unit testing of Drop impls
+- `.ok()` silent failures replaced with logged warnings across CLI, runtime, and guest agent
+
 ## [0.4.1] — 2026-03-07
 
 ### Fixed

@@ -4,7 +4,7 @@ const features = [
   {
     title: "Three-Layer Stack",
     description:
-      "CLI on your host, Lima provides /dev/kvm on macOS, Firecracker runs microVMs inside it.",
+      "CLI on your host. On macOS or Linux without KVM, Lima provides /dev/kvm automatically. Native Linux skips Lima entirely. Firecracker runs your workloads.",
   },
   {
     title: "Nix-Based Builds",

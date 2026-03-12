@@ -43,8 +43,10 @@ Where Linux commands run. Defined in `mvm-core`:
 - `run_capture()` — run and capture both stdout and stderr
 
 Implementations:
-- **`LimaEnv`** — delegates commands via `limactl shell mvm bash -c "..."` (macOS)
-- **`NativeEnv`** — runs commands directly via `bash -c` (Linux with KVM)
+- **`LimaEnv`** — delegates commands via `limactl shell mvm bash -c "..."` (macOS, or Linux without KVM)
+- **`NativeEnv`** — runs commands directly via `bash -c` (Linux with `/dev/kvm`)
+
+The choice is driven by `Platform::needs_lima()`, which returns `true` for macOS and Linux without `/dev/kvm`, and `false` for native Linux with KVM.
 
 ### ShellEnvironment
 
@@ -76,11 +78,15 @@ Current implementations: `FirecrackerBackend`, `MicrovmNixBackend`.
 
 ## How It Works
 
-All Linux operations are routed through the `LinuxEnv` abstraction. On macOS, `LimaEnv` delegates commands via `limactl shell mvm bash -c "..."`. On Linux with KVM, `NativeEnv` runs commands directly.
+All Linux operations are routed through the `LinuxEnv` abstraction. At startup, mvm detects the platform as one of three variants:
+
+- **MacOS** — always uses Lima VM (`LimaEnv`)
+- **LinuxNative** — `/dev/kvm` exists, runs commands directly (`NativeEnv`), Lima is never installed
+- **LinuxNoKvm** — no `/dev/kvm`, falls back to Lima VM (`LimaEnv`), same as macOS
 
 ```
 Host (macOS/Linux)
-  └── Linux environment (Lima VM on macOS, native on Linux)
+  └── Linux environment (Lima VM when no KVM, native otherwise)
         └── Firecracker microVM (your workload)
 ```
 
@@ -99,4 +105,5 @@ No initrd is needed — the kernel boots directly into a busybox init script on 
 |----------|-------------|--------|
 | macOS | Apple Silicon (aarch64) | Via Lima VM |
 | macOS | Intel (x86_64) | Via Lima VM |
-| Linux | x86_64, aarch64 | Native (`/dev/kvm`) — Lima skipped |
+| Linux with `/dev/kvm` | x86_64, aarch64 | Native — Lima skipped |
+| Linux without `/dev/kvm` | x86_64, aarch64 | Via Lima VM (fallback) |

@@ -7,11 +7,11 @@ This guide walks through writing a Nix flake that builds a microVM image, then b
 
 ## Understanding the Layers
 
-mvm runs a three-layer stack:
+mvm runs a three-layer stack (Lima is only used when KVM isn't available natively):
 
 ```
 Your macOS/Linux Host
-  └── Lima VM (Ubuntu, has /dev/kvm)
+  └── Lima VM (only on macOS or Linux without /dev/kvm)
         └── Firecracker microVM (your workload)
 ```
 
@@ -22,6 +22,10 @@ Your macOS/Linux Host
 | Firecracker microVM | (headless, no SSH) | No (isolated filesystem) |
 
 Firecracker microVMs are **headless workloads** with no SSH access — they communicate via vsock only.
+
+:::note
+On Linux with `/dev/kvm`, the Lima layer is skipped entirely — the host IS the Linux environment. `mvmctl dev` drops you into a native dev shell instead.
+:::
 
 ## Write a Flake
 

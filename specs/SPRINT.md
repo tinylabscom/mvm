@@ -4,7 +4,7 @@
 
 **Roadmap:** See [specs/plans/19-post-hardening-roadmap.md](plans/19-post-hardening-roadmap.md) for full post-hardening priorities.
 
-## Current Status (v0.4.1)
+## Current Status (v0.5.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
@@ -12,6 +12,7 @@
 | Total tests      | 679                      |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
+| MSRV             | 1.85                     |
 | Binary           | `mvmctl`                 |
 
 ## Completed Sprints
@@ -70,31 +71,31 @@
 
 ---
 
-## Phase 2: MSRV Specification **Status: PLANNED**
+## Phase 2: MSRV Specification **Status: COMPLETE**
 
-- [ ] Add `rust-version = "1.85"` to workspace `Cargo.toml`
-- [ ] Verify with `cargo msrv` or manual check
-- [ ] Document in README if not already present
+- [x] Add `rust-version = "1.85"` to workspace `Cargo.toml`
+- [x] Add `rust-version.workspace = true` to root package
+- [x] Verified via `cargo check --workspace` (Edition 2024 requires 1.85+)
 
 ---
 
-## Phase 3: Release v0.5.0 **Status: PLANNED**
+## Phase 3: Release v0.5.0 **Status: COMPLETE**
 
 ### 3.1 Version bump
 
-- [ ] Update version in all workspace `Cargo.toml` files (root + 6 crates)
-- [ ] Update `Cargo.lock`
+- [x] Update version in all workspace `Cargo.toml` files (root + 6 crates via `workspace.package`)
+- [x] Update `Cargo.lock`
 
 ### 3.2 Changelog
 
-- [ ] Create or update CHANGELOG.md with v0.5.0 section
-- [ ] Highlight Sprint 16 hardening: error handling, test coverage, observability, state safety, security defaults
-- [ ] Highlight Sprint 17: resource safety, MSRV
+- [x] Updated CHANGELOG.md with v0.5.0 section
+- [x] Highlighted Sprint 16 hardening: error handling, test coverage, observability, state safety, security defaults
+- [x] Highlighted Sprint 17: resource safety, MSRV
 
 ### 3.3 Release prep
 
-- [ ] `cargo test --workspace` — all tests pass
-- [ ] `cargo clippy --workspace -- -D warnings` — zero warnings
+- [x] `cargo test --workspace` — 679 tests pass
+- [x] `cargo clippy --workspace -- -D warnings` — zero warnings
 - [ ] Tag `v0.5.0`
 - [ ] Archive Sprint 17 to `specs/sprints/17-resource-safety-release.md`
 

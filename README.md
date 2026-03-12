@@ -48,13 +48,14 @@ Layer 1: macOS / Linux Host
   - All mvmctl commands are executed from here
   - Your project files live here
 
-Layer 2: Lima VM (Ubuntu)
-  - Provides /dev/kvm on macOS
+Layer 2: Lima VM (Ubuntu) — only when KVM is not available
+  - Used on macOS and Linux without /dev/kvm
+  - Provides /dev/kvm via nested virtualization
   - Home directory (~) is mounted read/write
   - Nix and Firecracker are installed here
   - `mvmctl shell` drops you into this layer
   - `mvmctl build` runs nix build here
-  - Skipped entirely on native Linux with KVM
+  - Skipped entirely on Linux with /dev/kvm (native mode)
 
 Layer 3: Firecracker microVM
   - Minimal guest OS (busybox init, built from Nix flakes)
@@ -93,7 +94,7 @@ mvm has three setup commands with increasing levels of automation:
 
 | Command | What it does |
 |---------|-------------|
-| `mvmctl bootstrap` | Installs Homebrew dependencies (macOS), Lima, then runs full setup |
+| `mvmctl bootstrap` | Detects platform; installs Homebrew (macOS) and Lima (when no KVM), then runs full setup |
 | `mvmctl setup` | Creates the Lima VM, installs Firecracker, downloads kernel + rootfs |
 | `mvmctl dev` | Auto-detects missing components, runs bootstrap/setup as needed, then drops into a Lima shell |
 
@@ -624,7 +625,7 @@ The root crate is a facade (`src/lib.rs`) that re-exports all sub-crates as `mvm
 
 ### How It Works
 
-All Linux operations are routed through a **`LinuxEnv`** abstraction defined in `mvm-core`. On macOS, the default implementation (`LimaEnv`) delegates commands via `limactl shell mvm bash -c "..."`. On Linux with KVM, `NativeEnv` runs commands directly via `bash -c`. The rest of the codebase is unaware of which backend is in use.
+All Linux operations are routed through a **`LinuxEnv`** abstraction defined in `mvm-core`. At startup, mvm detects the platform as one of three variants: **MacOS**, **LinuxNative** (has `/dev/kvm`), or **LinuxNoKvm**. On macOS and Linux without KVM, `LimaEnv` delegates commands via `limactl shell mvm bash -c "..."`. On native Linux with KVM, `NativeEnv` runs commands directly via `bash -c`. The rest of the codebase is unaware of which backend is in use.
 
 ```
 Host (macOS/Linux)
@@ -669,7 +670,8 @@ The microVM has internet access via NAT through the Lima VM. The TAP device conn
 |----------|-------------|--------|
 | macOS | Apple Silicon (aarch64) | Via Lima VM |
 | macOS | Intel (x86_64) | Via Lima VM |
-| Linux | x86_64, aarch64 | Native (`/dev/kvm`) -- Lima skipped |
+| Linux with `/dev/kvm` | x86_64, aarch64 | Native -- Lima skipped |
+| Linux without `/dev/kvm` | x86_64, aarch64 | Via Lima VM (fallback) |
 
 ## Build from Source
 

@@ -20,13 +20,20 @@ export function Architecture() {
                 macOS / Linux Host
               </div>
               <span className="text-label">&rarr;</span>
-              <div className="rounded-lg border border-edge px-5 py-3 text-emphasis">
-                Lima VM (Ubuntu + Nix)
+              <div className="rounded-lg border border-dashed border-edge px-5 py-3 text-emphasis">
+                Lima VM (when no /dev/kvm)
               </div>
               <span className="text-label">&rarr;</span>
               <div className="rounded-lg border border-edge px-5 py-3 text-emphasis">
                 Firecracker microVM
               </div>
+            </div>
+
+            {/* Platform detection note */}
+            <div className="mt-6 flex flex-wrap justify-center gap-x-6 gap-y-2 text-xs text-label">
+              <span><strong className="text-emphasis">macOS</strong> &rarr; Lima VM</span>
+              <span><strong className="text-emphasis">Linux + KVM</strong> &rarr; native (no Lima)</span>
+              <span><strong className="text-emphasis">Linux no KVM</strong> &rarr; Lima VM fallback</span>
             </div>
 
             {/* Drive model */}
