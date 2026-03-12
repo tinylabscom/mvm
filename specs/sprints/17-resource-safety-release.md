@@ -33,7 +33,6 @@
 - [14-guest-library-and-examples.md](sprints/14-guest-library-and-examples.md)
 - [15-real-world-apps.md](sprints/15-real-world-apps.md)
 - [16-production-hardening.md](sprints/16-production-hardening.md)
-- [17-resource-safety-release.md](sprints/17-resource-safety-release.md)
 
 ---
 
@@ -97,8 +96,8 @@
 
 - [x] `cargo test --workspace` — 679 tests pass
 - [x] `cargo clippy --workspace -- -D warnings` — zero warnings
-- [x] Tag `v0.5.0`
-- [x] Archive Sprint 17 to `specs/sprints/17-resource-safety-release.md`
+- [ ] Tag `v0.5.0`
+- [ ] Archive Sprint 17 to `specs/sprints/17-resource-safety-release.md`
 
 ---
 
