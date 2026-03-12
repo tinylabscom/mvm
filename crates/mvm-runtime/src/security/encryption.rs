@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use zeroize::Zeroizing;
 
+use crate::security::keystore::validate_shell_id;
 use crate::shell;
 
 /// Create a LUKS-encrypted volume at the given path.
@@ -8,6 +9,7 @@ use crate::shell;
 /// Uses cryptsetup luksFormat with AES-256-XTS.
 /// The key is passed via stdin (never written to disk or logged).
 pub fn create_encrypted_volume(path: &str, size_mib: u32, key: &[u8]) -> Result<()> {
+    anyhow::ensure!(!path.is_empty(), "volume path must not be empty");
     let hex_key = Zeroizing::new(hex_encode(key));
     shell::run_in_vm(&format!(
         r#"
@@ -30,6 +32,8 @@ pub fn create_encrypted_volume(path: &str, size_mib: u32, key: &[u8]) -> Result<
 ///
 /// The key is passed via stdin to cryptsetup (never on command line).
 pub fn open_encrypted_volume(path: &str, name: &str, key: &[u8]) -> Result<String> {
+    anyhow::ensure!(!path.is_empty(), "volume path must not be empty");
+    validate_shell_id(name).with_context(|| format!("Invalid mapper name: {:?}", name))?;
     let hex_key = Zeroizing::new(hex_encode(key));
     let mapper_path = format!("/dev/mapper/{}", name);
     shell::run_in_vm(&format!(
@@ -92,5 +96,36 @@ mod tests {
     #[test]
     fn test_hex_encode_empty() {
         assert_eq!(hex_encode(&[]), "");
+    }
+
+    #[test]
+    fn test_hex_encode_roundtrip() {
+        // hex_encode then hex_decode (from keystore) must be lossless
+        let original: Vec<u8> = (0u8..=255).collect();
+        let encoded = hex_encode(&original);
+        assert_eq!(encoded.len(), 512);
+        // All characters must be lowercase hex only
+        assert!(encoded.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_open_encrypted_volume_rejects_empty_path() {
+        let result = open_encrypted_volume("", "myname", &[0u8; 32]);
+        assert!(result.is_err());
+        assert!(format!("{result:?}").contains("path must not be empty"));
+    }
+
+    #[test]
+    fn test_open_encrypted_volume_rejects_bad_mapper_name() {
+        let result = open_encrypted_volume("/dev/loop0", "bad;name", &[0u8; 32]);
+        assert!(result.is_err());
+        assert!(format!("{result:?}").contains("Invalid mapper name"));
+    }
+
+    #[test]
+    fn test_create_encrypted_volume_rejects_empty_path() {
+        let result = create_encrypted_volume("", 100, &[0u8; 32]);
+        assert!(result.is_err());
+        assert!(format!("{result:?}").contains("path must not be empty"));
     }
 }

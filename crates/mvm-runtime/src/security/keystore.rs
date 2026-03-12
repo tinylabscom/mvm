@@ -26,12 +26,32 @@ impl KeyProvider for EnvKeyProvider {
     }
 }
 
+/// Validate that a string is safe to interpolate into a shell path component.
+///
+/// Accepts only alphanumeric characters, hyphens, and underscores.
+/// This prevents shell metacharacters from being injected when tenant IDs
+/// or other identifiers are embedded in shell commands.
+pub fn validate_shell_id(s: &str) -> Result<()> {
+    if s.is_empty() {
+        anyhow::bail!("identifier must not be empty");
+    }
+    if let Some(bad) = s.chars().find(|c| !c.is_alphanumeric() && *c != '-' && *c != '_') {
+        anyhow::bail!(
+            "identifier contains unsafe character {:?} — only alphanumeric, '-', '_' allowed",
+            bad
+        );
+    }
+    Ok(())
+}
+
 /// Reads keys from files at /var/lib/mvm/keys/<tenant_id>.key (raw binary).
 /// Suitable for node-local key provisioning.
 pub struct FileKeyProvider;
 
 impl KeyProvider for FileKeyProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<Zeroizing<Vec<u8>>> {
+        validate_shell_id(tenant_id)
+            .with_context(|| format!("Invalid tenant_id for key lookup: {:?}", tenant_id))?;
         let path = format!("/var/lib/mvm/keys/{}.key", tenant_id);
         // Warn if key file has overly permissive permissions
         if let Ok(perms) = crate::shell::run_in_vm_stdout(&format!(
@@ -136,5 +156,39 @@ mod tests {
         let key = provider.get_data_key("testx").unwrap();
         assert_eq!(key.len(), 32);
         unsafe { std::env::remove_var("MVM_TENANT_KEY_TESTX") };
+    }
+
+    // validate_shell_id tests
+    #[test]
+    fn test_validate_shell_id_valid() {
+        assert!(validate_shell_id("acme").is_ok());
+        assert!(validate_shell_id("tenant-1").is_ok());
+        assert!(validate_shell_id("my_tenant_99").is_ok());
+        assert!(validate_shell_id("ABC123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_id_empty() {
+        assert!(validate_shell_id("").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_id_semicolon() {
+        assert!(validate_shell_id("foo;rm -rf /").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_id_spaces() {
+        assert!(validate_shell_id("foo bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_id_dot() {
+        assert!(validate_shell_id("foo.bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_shell_id_slash() {
+        assert!(validate_shell_id("../../etc/passwd").is_err());
     }
 }

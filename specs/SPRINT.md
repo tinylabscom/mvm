@@ -71,41 +71,22 @@ The `mvm_core::observability::metrics::Metrics` struct (global singleton) expose
 
 ---
 
-## Phase 2: Native Hex Encoding in Crypto Code **Status: PLANNED**
+## Phase 2: Shell Injection Guards in Crypto Code **Status: COMPLETE**
 
-`crates/mvm-runtime/src/security/keystore.rs` and `encryption.rs` use `xxd -p` (encode) and `xxd -r -p` (decode) via shell to convert between hex strings and raw bytes. The `hex` crate is already in the workspace.
+After reading the code: `hex_decode` validation was already in place in `keystore.rs`, and `hex_encode` in `encryption.rs` produces only `[0-9a-f]` so the hex key itself is safe. The actual shell-injection surface was **`tenant_id`** and **mapper `name`** being interpolated into shell commands without validation.
 
-### 2.1 `keystore.rs` — replace `xxd -p` read
+### 2.1 `keystore.rs` — `validate_shell_id` guard
 
-The `FileKeyProvider::read_key_hex()` method runs:
-```
-xxd -p <path> 2>/dev/null | tr -d '\n'
-```
-to read a binary key file and return it as a hex string.
+- [x] Added `pub fn validate_shell_id(s: &str) -> Result<()>` — accepts only `[A-Za-z0-9_-]`, rejects empty and any shell metacharacter
+- [x] Called at the top of `FileKeyProvider::get_data_key()` before `tenant_id` is embedded in the shell path command
+- [x] 6 unit tests: valid IDs, empty, semicolon, spaces, dot, slash/path-traversal
 
-- [ ] Replace with: read file bytes natively (`std::fs::read()`), then `hex::encode(bytes)`
-- [ ] This must happen on the Lima VM side — keep using `run_in_vm` for the file read but decode the raw bytes in Rust
+### 2.2 `encryption.rs` — guards on `path` and `name`
 
-Wait — `run_in_vm` runs commands inside Lima; file reads happen there. The cleanest approach:
-- [ ] `run_in_vm_stdout("cat <path> | xxd -p | tr -d '\\n'")` → keep as-is for the Lima-side read (file is in VM), but add a `hex_decode` validation step in Rust on the returned string
-- [ ] Extract a `validate_hex_key(s: &str) -> Result<()>` helper that checks the returned string is valid hex before use — prevents garbage data from propagating
-- [ ] Add unit tests for the validation helper
-
-### 2.2 `encryption.rs` — replace `xxd -r -p` hex-to-bytes conversion
-
-The `luks_format()` and `luks_open()` functions embed the hex key in a shell heredoc:
-```bash
-echo -n '{key}' | xxd -r -p | cryptsetup luksFormat ...
-```
-
-- [ ] Validate that `key` is valid hex before interpolating into the shell command (use the helper from 2.1)
-- [ ] Add a `validate_hex_key` guard at the top of `luks_format()` and `luks_open()`
-- [ ] The `xxd -r -p` pipe to cryptsetup must stay shell-based (cryptsetup reads from stdin and is a kernel interface — cannot move to pure Rust without a LUKS crate)
-
-### 2.3 Tests
-
-- [ ] `validate_hex_key` — valid hex passes, odd-length fails, non-hex chars fail, empty string fails
-- [ ] `hex_encode_decode_roundtrip` — encode random bytes, decode, check equality
+- [x] `create_encrypted_volume`: `ensure!(!path.is_empty())`
+- [x] `open_encrypted_volume`: `ensure!(!path.is_empty())` + `validate_shell_id(name)` on the mapper name
+- [x] 3 unit tests: empty path rejected in both functions, bad mapper name rejected
+- [x] `hex_encode` roundtrip test: verify all 256 byte values encode to valid hex-only output
 
 ---
 
