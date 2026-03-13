@@ -1,15 +1,15 @@
-# Sprint 25 — E2E Test Framework & `mvmctl uninstall`
+# Sprint 26 — Audit Logging
 
-**Goal:** Catch regressions before they reach users with a real subprocess-based E2E test harness, and give users a clean uninstall path.
+**Goal:** Provide an immutable audit trail for security-sensitive local mvmctl operations.
 
-**Branch:** `feat/sprint-25`
+**Branch:** `feat/sprint-26`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 760+                     |
+| Total tests      | 780+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -41,75 +41,72 @@
 - [22-observability-deep-dive.md](sprints/22-observability-deep-dive.md)
 - [23-global-config-file.md](sprints/23-global-config-file.md)
 - [24-man-pages.md](sprints/24-man-pages.md)
+- [25-e2e-uninstall.md](sprints/25-e2e-uninstall.md)
 
 ---
 
 ## Rationale
 
-`mvmctl` has 760+ unit/integration tests but no test suite that runs the actual binary
-end-to-end. Regressions in argument parsing, exit codes, or output format slip through.
-A subprocess-based harness using `assert_cmd` (already in workspace deps) fills this gap
-with no new dependencies.
-
-`mvmctl uninstall` is the natural counterpart to `mvmctl bootstrap`. Users want a clean
-way to remove everything: Lima VM, Firecracker binary, `/var/lib/mvm/` state, and
-optionally `~/.mvm/` config. Today they must do this manually.
+`mvmctl` performs privileged local operations (boot VMs, install binaries, manage
+volumes) but currently leaves no record of what was done or when. An append-only
+audit log at `/var/log/mvm/audit.jsonl` gives operators an immutable trail for
+debugging and compliance.  The existing `mvm-core/src/audit.rs` covers fleet events
+(tenant/pool/instance lifecycle for mvmd); this sprint adds a simpler
+`LocalAuditEvent` model for single-host mvmctl operations.
 
 ---
 
-## Phase 1: `mvmctl uninstall` command **Status: COMPLETE**
+## Phase 1: Extend `audit.rs` with local event model and log writer **Status: COMPLETE**
 
-### 1.1 Add `Uninstall` variant to `Commands` enum
+### 1.1 Add `LocalAuditEvent` to `mvm-core/src/audit.rs`
 
-- [x] `Commands::Uninstall` with flags:
-  - `--yes` / `-y` — skip confirmation
-  - `--all` — also remove `~/.mvm/` (config, keys) and `/usr/local/bin/mvmctl`
-  - `--dry-run` — print what would be removed without doing it
+- [x] `LocalAuditKind` enum: `VmStart`, `VmStop`, `KeyLookup`, `VolumeCreate`,
+  `VolumeOpen`, `UpdateInstall`, `Uninstall`
+- [x] `LocalAuditEvent` struct: `timestamp: String`, `kind: LocalAuditKind`,
+  `vm_name: Option<String>`, `detail: Option<String>`
+- [x] `impl LocalAuditEvent { pub fn now(kind, vm_name, detail) -> Self }`
 
-### 1.2 Implement `cmd_uninstall`
+### 1.2 Add `LocalAuditLog` writer in `mvm-core/src/audit.rs`
 
-- [x] Stop any running microVMs first (best-effort, log-and-continue on error)
-- [x] Destroy Lima VM if it exists (`lima::destroy()`)
-- [x] Remove `/var/lib/mvm/` state directory (with `sudo` if needed)
-- [x] With `--all`: remove `~/.mvm/` config dir and `/usr/local/bin/mvmctl` binary
-- [x] `--dry-run` prints each action without executing it
-- [x] Confirmation prompt unless `--yes` (lists what will be removed)
+- [x] `pub struct LocalAuditLog { path: PathBuf }`
+- [x] `pub fn open(path: &Path) -> Result<Self>` — creates parent dirs
+- [x] `pub fn append(&self, event: &LocalAuditEvent) -> Result<()>` — appends
+  one JSONL line; rotates to `audit.jsonl.1` when file exceeds 10 MiB
+- [x] Default log path constant: `pub const DEFAULT_AUDIT_LOG: &str = "/var/log/mvm/audit.jsonl"`
 
-### 1.3 Tests
+### 1.3 Unit tests in `audit.rs`
 
-- [x] `test_uninstall_help` — flags present in help output
-- [x] `test_uninstall_listed_in_help` — top-level help includes "uninstall"
-- [x] `test_uninstall_dry_run_no_side_effects` — `--dry-run --yes` exits 0, prints plan
-
----
-
-## Phase 2: E2E test harness **Status: COMPLETE**
-
-### 2.1 Create `tests/e2e/` directory
-
-- [x] `tests/e2e/harness.rs` — shared helpers: `mvmctl()` → `Command`, `assert_parse_ok()`
-- [x] `tests/e2e/mod.rs` — declare submodules
-
-### 2.2 E2E test cases
-
-- [x] `tests/e2e/help.rs` — `bootstrap --help`, `status --help`, `cleanup-orphans --help`
-- [x] `tests/e2e/status.rs` — `status` on clean system: exits 0 or 1, no panic, meaningful output
-- [x] `tests/e2e/cleanup_orphans.rs` — `cleanup-orphans --dry-run` on empty dir: exits 0
-- [x] `tests/e2e/uninstall.rs` — `uninstall --dry-run --yes` exits 0, output contains expected paths
-
-### 2.3 Wire into test binary
-
-- [x] Add `tests/e2e.rs` as the integration test entry point that includes `mod e2e`
+- [x] `test_local_audit_event_serializes` — roundtrip JSON check
+- [x] `test_local_audit_log_append` — writes to tempdir, reads back line
+- [x] `test_local_audit_log_rotation` — exceeds 10 MiB, verifies rotation file created
+- [x] `test_local_audit_kind_all_variants_serialize` — all kinds produce valid JSON
 
 ---
 
-## Phase 3: CI integration **Status: COMPLETE**
+## Phase 2: `mvmctl audit tail` command **Status: COMPLETE**
 
-### 3.1 Add `e2e` job to `.github/workflows/ci.yml`
+### 2.1 Add `Audit` subcommand to `Commands` enum
 
-- [x] Runs after `build-linux` job (depends on it)
-- [x] Uses `ubuntu-latest`
-- [x] Step: `cargo test --test e2e`
+- [x] `Commands::Audit { action: AuditCmd }`
+- [x] `AuditCmd::Tail { lines: usize, follow: bool }` — default 20 lines
+
+### 2.2 Implement `cmd_audit_tail`
+
+- [x] Read last N lines from `/var/log/mvm/audit.jsonl`
+- [x] Pretty-print: `<timestamp>  <kind>  [<vm_name>]  <detail>`
+- [x] `--follow` / `-f`: poll for new lines every 500 ms (Ctrl-C to stop)
+- [x] Graceful message when log file does not exist
+
+---
+
+## Phase 3: Emit audit events **Status: COMPLETE**
+
+### 3.1 Emit from key commands (best-effort — log-and-continue on error)
+
+- [x] `cmd_run` / `cmd_up` — emit `VmStart` after VM boot
+- [x] `cmd_stop` / `cmd_down` — emit `VmStop`
+- [x] `cmd_update` — emit `UpdateInstall`
+- [x] `cmd_uninstall` — emit `Uninstall`
 
 ---
 
@@ -120,18 +117,20 @@ cargo test --workspace
 cargo test --test e2e
 cargo clippy --workspace -- -D warnings
 cargo check --workspace
+mvmctl audit tail          # shows recent events (or "no audit log" message)
+mvmctl audit tail --follow  # streams events
 ```
 
 ---
 
 ## Future Sprints (Planned, Not Yet Implemented)
 
-### Sprint 26: Audit Logging
+### Sprint 27: Config Validation & Input Sanitisation
 
-**Goal:** Provide an immutable audit trail for security-sensitive operations.
+**Goal:** Reject bad input at the boundary, not deep in the stack.
 
-- [ ] Define `AuditEvent` struct in `mvm-core/src/audit.rs` (already partially exists — extend it)
-- [ ] Emit audit events for: `vm_start`, `vm_stop`, `key_lookup`, `volume_create`, `volume_open`, `update_install`
-- [ ] Append-only audit log at `/var/log/mvm/audit.jsonl` (rotate at 10 MiB)
-- [ ] Add `mvmctl audit tail` — stream recent audit events
-- [ ] 4 unit tests: event serialization, append-only write, rotation trigger, `audit tail` output format
+- [ ] Validate all user-supplied VM names against `validate_vm_name()` at CLI parse time
+- [ ] Validate flake refs against `validate_flake_ref()` at CLI parse time
+- [ ] Validate port specs (HOST:GUEST or PORT) with helpful error messages
+- [ ] Validate volume specs (host_dir:/guest/path) with helpful error messages
+- [ ] Add 6 unit tests covering valid/invalid paths for each validator

@@ -54,6 +54,7 @@ fn test_help_lists_all_subcommands() {
         "status",
         "destroy",
         "uninstall",
+        "audit",
         "update",
         "run",
         "forward",
@@ -707,4 +708,29 @@ fn test_uninstall_dry_run_no_side_effects() {
         .assert()
         .success()
         .stdout(predicate::str::contains("/var/lib/mvm"));
+}
+
+#[test]
+fn test_audit_listed_in_help() {
+    mvm()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit"));
+}
+
+#[test]
+fn test_audit_tail_help() {
+    mvm()
+        .args(["audit", "tail", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--lines"))
+        .stdout(predicate::str::contains("--follow"));
+}
+
+#[test]
+fn test_audit_tail_no_log_exits_ok() {
+    // On a fresh system /var/log/mvm/audit.jsonl doesn't exist — should exit 0.
+    mvm().args(["audit", "tail"]).assert().success();
 }

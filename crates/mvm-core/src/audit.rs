@@ -1,6 +1,118 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::security::{GateDecision, ThreatFinding};
+
+// ============================================================================
+// Local mvmctl audit log (single-host operations)
+// ============================================================================
+
+/// Default path for the local audit log.
+pub const DEFAULT_AUDIT_LOG: &str = "/var/log/mvm/audit.jsonl";
+
+/// Rotate when the audit log exceeds this size.
+const ROTATE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// Categories of local mvmctl operations that are audit-logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalAuditKind {
+    VmStart,
+    VmStop,
+    KeyLookup,
+    VolumeCreate,
+    VolumeOpen,
+    UpdateInstall,
+    Uninstall,
+}
+
+/// A single local audit log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAuditEvent {
+    pub timestamp: String,
+    pub kind: LocalAuditKind,
+    pub vm_name: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl LocalAuditEvent {
+    /// Create an event stamped with the current UTC time.
+    pub fn now(kind: LocalAuditKind, vm_name: Option<String>, detail: Option<String>) -> Self {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        Self {
+            timestamp,
+            kind,
+            vm_name,
+            detail,
+        }
+    }
+}
+
+/// Append-only local audit log writer.
+pub struct LocalAuditLog {
+    path: PathBuf,
+}
+
+impl LocalAuditLog {
+    /// Open (or create) a local audit log at `path`.
+    ///
+    /// Creates parent directories if they don't exist.
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create audit log dir: {}", parent.display()))?;
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Append one JSONL line.  Rotates to `audit.jsonl.1` when the file
+    /// exceeds [`ROTATE_THRESHOLD_BYTES`].
+    pub fn append(&self, event: &LocalAuditEvent) -> Result<()> {
+        self.maybe_rotate()?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("Failed to open audit log: {}", self.path.display()))?;
+
+        let line = serde_json::to_string(event).context("Failed to serialize audit event")?;
+        writeln!(file, "{line}").context("Failed to write audit event")?;
+        Ok(())
+    }
+
+    fn maybe_rotate(&self) -> Result<()> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let meta = std::fs::metadata(&self.path)
+            .with_context(|| format!("Failed to stat {}", self.path.display()))?;
+        if meta.len() >= ROTATE_THRESHOLD_BYTES {
+            let rotated = self.path.with_extension("jsonl.1");
+            std::fs::rename(&self.path, &rotated)
+                .with_context(|| format!("Failed to rotate audit log to {}", rotated.display()))?;
+        }
+        Ok(())
+    }
+}
+
+/// Emit a local audit event to the default log path (best-effort).
+///
+/// Errors are logged via `tracing::warn!` and never propagated — audit
+/// failures must not block the operation being logged.
+pub fn emit(kind: LocalAuditKind, vm_name: Option<&str>, detail: Option<&str>) {
+    let event = LocalAuditEvent::now(kind, vm_name.map(str::to_owned), detail.map(str::to_owned));
+    let path = PathBuf::from(DEFAULT_AUDIT_LOG);
+    match LocalAuditLog::open(&path).and_then(|log| log.append(&event)) {
+        Ok(()) => {}
+        Err(e) => tracing::warn!("audit log write failed: {e}"),
+    }
+}
 
 /// Audit event types for per-tenant audit logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,5 +300,90 @@ mod tests {
         assert_eq!(parsed.threats[0].category, ThreatCategory::Destructive);
         assert!(parsed.gate_decision.is_some());
         assert_eq!(parsed.frame_sequence, Some(42));
+    }
+
+    // -------------------------------------------------------------------------
+    // LocalAuditEvent / LocalAuditLog tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_local_audit_event_serializes() {
+        let event = LocalAuditEvent::now(
+            LocalAuditKind::VmStart,
+            Some("my-vm".to_string()),
+            Some("flake=.".to_string()),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: LocalAuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kind, LocalAuditKind::VmStart);
+        assert_eq!(parsed.vm_name.as_deref(), Some("my-vm"));
+        assert_eq!(parsed.detail.as_deref(), Some("flake=."));
+        assert!(!parsed.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_local_audit_kind_all_variants_serialize() {
+        let kinds = [
+            LocalAuditKind::VmStart,
+            LocalAuditKind::VmStop,
+            LocalAuditKind::KeyLookup,
+            LocalAuditKind::VolumeCreate,
+            LocalAuditKind::VolumeOpen,
+            LocalAuditKind::UpdateInstall,
+            LocalAuditKind::Uninstall,
+        ];
+        for kind in kinds {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert!(!json.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_local_audit_log_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.jsonl");
+
+        let log = LocalAuditLog::open(&path).unwrap();
+        let event = LocalAuditEvent::now(LocalAuditKind::VmStop, Some("vm1".to_string()), None);
+        log.append(&event).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("vm_stop"));
+        assert!(contents.contains("vm1"));
+        // One line per event.
+        assert_eq!(contents.lines().count(), 1);
+
+        // Append a second event.
+        let event2 = LocalAuditEvent::now(
+            LocalAuditKind::UpdateInstall,
+            None,
+            Some("v1.2.3".to_string()),
+        );
+        log.append(&event2).unwrap();
+        let contents2 = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents2.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_local_audit_log_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.jsonl");
+
+        // Write a file that exceeds the rotation threshold.
+        let big_content = "x".repeat(ROTATE_THRESHOLD_BYTES as usize + 1);
+        std::fs::write(&path, big_content).unwrap();
+
+        let log = LocalAuditLog::open(&path).unwrap();
+        let event = LocalAuditEvent::now(LocalAuditKind::Uninstall, None, None);
+        log.append(&event).unwrap();
+
+        // The rotated file should exist.
+        let rotated = path.with_extension("jsonl.1");
+        assert!(rotated.exists(), "rotation file should be created");
+
+        // The new log file should contain only the new event.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains("uninstall"));
     }
 }

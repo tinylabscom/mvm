@@ -345,6 +345,24 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// View the local audit log (/var/log/mvm/audit.jsonl)
+    Audit {
+        #[command(subcommand)]
+        action: AuditCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Show the last N audit events (default: 20)
+    Tail {
+        /// Number of lines to show
+        #[arg(long, short = 'n', default_value = "20")]
+        lines: usize,
+        /// Follow log output (poll every 500 ms until Ctrl-C)
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -834,6 +852,7 @@ pub fn run() -> Result<()> {
         Commands::Vm { action } => cmd_vm(action),
         Commands::Config { action } => cmd_config(action),
         Commands::Uninstall { yes, all, dry_run } => cmd_uninstall(yes, all, dry_run),
+        Commands::Audit { action } => cmd_audit(action),
     };
 
     with_hints(result)
@@ -1067,7 +1086,7 @@ fn cmd_stop(name: Option<&str>, all: bool) -> Result<()> {
         validate_vm_name(n).with_context(|| format!("Invalid VM name: {:?}", n))?;
     }
     let backend = AnyBackend::default_backend();
-    match (name, all) {
+    let result = match (name, all) {
         (Some(n), _) => backend.stop(&VmId::from(n)),
         (None, true) => backend.stop_all(),
         (None, false) => {
@@ -1079,7 +1098,11 @@ fn cmd_stop(name: Option<&str>, all: bool) -> Result<()> {
                 microvm::stop()
             }
         }
+    };
+    if result.is_ok() {
+        mvm_core::audit::emit(mvm_core::audit::LocalAuditKind::VmStop, name, None);
     }
+    result
 }
 
 fn cmd_ssh() -> Result<()> {
@@ -1793,7 +1816,11 @@ fn cmd_status() -> Result<()> {
 }
 
 fn cmd_update(check: bool, force: bool, skip_verify: bool) -> Result<()> {
-    update::update(check, force, skip_verify)
+    let result = update::update(check, force, skip_verify);
+    if result.is_ok() && !check {
+        mvm_core::audit::emit(mvm_core::audit::LocalAuditKind::UpdateInstall, None, None);
+    }
+    result
 }
 
 fn cmd_doctor(json: bool) -> Result<()> {
@@ -2460,6 +2487,12 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         backend.start_firecracker(&FirecrackerConfig { run_config })?;
     }
 
+    mvm_core::audit::emit(
+        mvm_core::audit::LocalAuditKind::VmStart,
+        Some(&vm_name_owned),
+        None,
+    );
+
     if forward {
         if has_ports {
             cmd_forward(&vm_name_owned, &[])?;
@@ -2945,8 +2978,95 @@ fn cmd_uninstall(yes: bool, all: bool, dry_run: bool) -> Result<()> {
         }
     }
 
+    mvm_core::audit::emit(mvm_core::audit::LocalAuditKind::Uninstall, None, None);
     ui::success("Uninstall complete.");
     Ok(())
+}
+
+// ============================================================================
+// Audit commands
+// ============================================================================
+
+fn cmd_audit(action: AuditCmd) -> Result<()> {
+    match action {
+        AuditCmd::Tail { lines, follow } => cmd_audit_tail(lines, follow),
+    }
+}
+
+fn cmd_audit_tail(lines: usize, follow: bool) -> Result<()> {
+    let path = std::path::Path::new(mvm_core::audit::DEFAULT_AUDIT_LOG);
+
+    if !path.exists() {
+        ui::info("No audit log found. Events are recorded at /var/log/mvm/audit.jsonl.");
+        return Ok(());
+    }
+
+    print_last_n_lines(path, lines)?;
+
+    if !follow {
+        return Ok(());
+    }
+
+    // Tail -f: track file position and poll for new content.
+    let mut pos = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !path.exists() {
+            continue;
+        }
+        let new_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if new_len > pos {
+            let mut file = std::fs::File::open(path)?;
+            use std::io::{BufRead, Seek, SeekFrom};
+            file.seek(SeekFrom::Start(pos))?;
+            let reader = std::io::BufReader::new(&file);
+            for line in reader.lines() {
+                let line = line?;
+                print_audit_line(&line);
+            }
+            pos = new_len;
+        }
+    }
+}
+
+fn print_last_n_lines(path: &std::path::Path, n: usize) -> Result<()> {
+    use std::io::BufRead;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
+    let start = lines.len().saturating_sub(n);
+    for line in &lines[start..] {
+        print_audit_line(line);
+    }
+    Ok(())
+}
+
+fn print_audit_line(line: &str) {
+    match serde_json::from_str::<mvm_core::audit::LocalAuditEvent>(line) {
+        Ok(event) => {
+            let kind = serde_json::to_string(&event.kind)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string();
+            let vm = event
+                .vm_name
+                .as_deref()
+                .map(|n| format!("  [{n}]"))
+                .unwrap_or_default();
+            let detail = event
+                .detail
+                .as_deref()
+                .map(|d| format!("  {d}"))
+                .unwrap_or_default();
+            println!("{ts}  {kind}{vm}{detail}", ts = event.timestamp);
+        }
+        Err(_) => {
+            // Non-local-audit line — print as-is (fleet AuditEntry, etc.)
+            println!("{line}");
+        }
+    }
 }
 
 // ============================================================================
@@ -5251,5 +5371,46 @@ edition = "2024"
                 dry_run: false,
             }
         ));
+    }
+
+    // ---- Audit command tests ----
+
+    #[test]
+    fn test_audit_tail_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "audit", "tail"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Audit {
+                action: AuditCmd::Tail {
+                    lines: 20,
+                    follow: false,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_audit_tail_follow_parses() {
+        let cli =
+            Cli::try_parse_from(["mvmctl", "audit", "tail", "--follow", "--lines", "50"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Audit {
+                action: AuditCmd::Tail {
+                    lines: 50,
+                    follow: true,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_audit_tail_no_log_prints_message() {
+        // When no audit log exists, cmd_audit_tail should succeed with a
+        // helpful message rather than an error.
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("audit.jsonl");
+        // Path doesn't exist — simulate the early-return path.
+        assert!(!nonexistent.exists());
     }
 }

@@ -48,3 +48,22 @@ fn top_level_help_lists_uninstall() {
         .success()
         .stdout(predicate::str::contains("uninstall"));
 }
+
+#[test]
+fn audit_tail_help_exits_successfully() {
+    mvmctl()
+        .args(["audit", "tail", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--lines"))
+        .stdout(predicate::str::contains("--follow"));
+}
+
+#[test]
+fn top_level_help_lists_audit() {
+    mvmctl()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit"));
+}
