@@ -160,11 +160,61 @@
               }
               WS_TYPES
 
+              # Helper: rewrite a workspace package's exports from src/*.ts → dist/*.js.
+              # Preserves all existing export keys; only rewrites the file paths.
+              # Called after tsc so Node.js resolves compiled JS instead of src TS.
+              patch_exports() {
+                local pkg_dir="$1"
+                node -e "
+                  const fs = require('fs');
+                  const path = require('path');
+                  const f = path.join('$pkg_dir', 'package.json');
+                  const p = JSON.parse(fs.readFileSync(f, 'utf8'));
+
+                  // Rewrite a single path: ./src/foo.ts -> ./dist/foo.js
+                  function rewrite(v) {
+                    if (typeof v !== 'string') return v;
+                    return v.replace(/^\.\/src\//, './dist/').replace(/\.ts$/, '.js');
+                  }
+
+                  // Rewrite all values in an exports map (handles nested conditions)
+                  function rewriteExports(e) {
+                    if (typeof e === 'string') return rewrite(e);
+                    if (typeof e === 'object' && e !== null) {
+                      const out = {};
+                      for (const [k, v] of Object.entries(e)) out[k] = rewriteExports(v);
+                      return out;
+                    }
+                    return e;
+                  }
+
+                  if (p.main) p.main = rewrite(p.main);
+                  if (p.module) p.module = rewrite(p.module);
+                  if (p.types) p.types = rewrite(p.types);
+                  if (p.exports) p.exports = rewriteExports(p.exports);
+                  fs.writeFileSync(f, JSON.stringify(p, null, 2) + '\n');
+                "
+              }
+
               echo "Building @paperclipai/shared..."
               (cd packages/shared && node "$TSC")
+              patch_exports packages/shared
 
               echo "Building @paperclipai/db..."
               (cd packages/db && node "$TSC" && cp -r src/migrations dist/migrations)
+              patch_exports packages/db
+
+              echo "Building @paperclipai/adapter-utils..."
+              (cd packages/adapter-utils && node "$TSC")
+              patch_exports packages/adapter-utils
+
+              echo "Building @paperclipai/adapters (claude-local, codex-local, openclaw)..."
+              (cd packages/adapters/claude-local && node "$TSC")
+              patch_exports packages/adapters/claude-local
+              (cd packages/adapters/codex-local && node "$TSC")
+              patch_exports packages/adapters/codex-local
+              (cd packages/adapters/openclaw && node "$TSC")
+              patch_exports packages/adapters/openclaw
 
               echo "Building UI..."
               (cd ui && node "$VITE" build)
@@ -279,7 +329,6 @@
 
                 echo "[paperclip] starting server on port $PORT" >&2
                 exec ${pkgs.nodejs_22}/bin/node \
-                  --import ${paperclip-built}/node_modules/tsx/dist/loader.mjs \
                   ${paperclip-built}/server/dist/index.js
               '';
 
