@@ -83,6 +83,7 @@ enum Commands {
     /// Stop a running microVM (by name) or all VMs (--all)
     Stop {
         /// Name of the VM to stop
+        #[arg(value_parser = clap_vm_name)]
         name: Option<String>,
         /// Stop all running VMs
         #[arg(long)]
@@ -134,6 +135,7 @@ enum Commands {
     /// Show console logs from a running microVM
     Logs {
         /// Name of the VM
+        #[arg(value_parser = clap_vm_name)]
         name: String,
         /// Follow log output (like tail -f)
         #[arg(long, short = 'f')]
@@ -148,9 +150,10 @@ enum Commands {
     /// Forward a port from a running microVM to localhost
     Forward {
         /// Name of the VM
+        #[arg(value_parser = clap_vm_name)]
         name: String,
         /// Port mapping(s): GUEST_PORT or LOCAL_PORT:GUEST_PORT
-        #[arg(short, long, value_name = "PORT")]
+        #[arg(short, long, value_name = "PORT", value_parser = clap_port_spec)]
         port: Vec<String>,
         /// Port mapping(s) (positional, same as --port)
         #[arg(trailing_var_arg = true, hide = true)]
@@ -163,6 +166,7 @@ enum Commands {
     #[command(alias = "rm")]
     Remove {
         /// Name of the VM to remove
+        #[arg(value_parser = clap_vm_name)]
         name: String,
     },
     /// Tear down Lima VM and all resources
@@ -217,7 +221,7 @@ enum Commands {
         #[arg(long, short = 'o')]
         output: Option<String>,
         /// Nix flake reference (enables flake build mode)
-        #[arg(long)]
+        #[arg(long, value_parser = clap_flake_ref)]
         flake: Option<String>,
         /// Flake package variant (e.g. worker, gateway). Omit to use flake default.
         #[arg(long)]
@@ -233,13 +237,13 @@ enum Commands {
     #[command(alias = "start", group(clap::ArgGroup::new("source").required(true)))]
     Run {
         /// Nix flake reference (local path or remote URI)
-        #[arg(long, group = "source")]
+        #[arg(long, group = "source", value_parser = clap_flake_ref)]
         flake: Option<String>,
         /// Run from a pre-built template (skip build)
         #[arg(long, group = "source")]
         template: Option<String>,
         /// VM name (auto-generated if omitted)
-        #[arg(long)]
+        #[arg(long, value_parser = clap_vm_name)]
         name: Option<String>,
         /// Flake package variant (e.g. worker, gateway). Omit to use flake default.
         #[arg(long)]
@@ -254,13 +258,13 @@ enum Commands {
         #[arg(long)]
         config: Option<String>,
         /// Volume (host_dir:/guest/path or host:/guest/path:size). Repeatable.
-        #[arg(long, short = 'v')]
+        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
         /// Hypervisor backend (firecracker, qemu). Default: firecracker.
         #[arg(long, default_value = "firecracker")]
         hypervisor: String,
         /// Port mapping (format: HOST:GUEST or PORT). Repeatable.
-        #[arg(long, short = 'p')]
+        #[arg(long, short = 'p', value_parser = clap_port_spec)]
         port: Vec<String>,
         /// Environment variable to inject (format: KEY=VALUE). Repeatable.
         #[arg(long, short = 'e')]
@@ -280,7 +284,7 @@ enum Commands {
         #[arg(long, short = 'f')]
         config: Option<String>,
         /// Nix flake reference (launches a single VM without config file)
-        #[arg(long)]
+        #[arg(long, value_parser = clap_flake_ref)]
         flake: Option<String>,
         /// Flake package variant (e.g. worker, gateway)
         #[arg(long)]
@@ -372,7 +376,7 @@ enum TemplateCmd {
         /// Template name (e.g. "base", "openclaw")
         name: String,
         /// Nix flake reference for the template source
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = clap_flake_ref)]
         flake: String,
         /// Flake package variant
         #[arg(long, default_value = "default")]
@@ -395,7 +399,7 @@ enum TemplateCmd {
         /// Base template name (each role becomes <base>-<role>)
         base: String,
         /// Nix flake reference for the template source
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_parser = clap_flake_ref)]
         flake: String,
         /// Flake package variant
         #[arg(long, default_value = "default")]
@@ -520,11 +524,13 @@ enum VmCmd {
     /// Health-check running microVMs via vsock (all if no name given)
     Ping {
         /// Name of the VM (omit to ping all running VMs)
+        #[arg(value_parser = clap_vm_name)]
         name: Option<String>,
     },
     /// Query worker status from running microVMs (all if no name given)
     Status {
         /// Name of the VM (omit to query all running VMs)
+        #[arg(value_parser = clap_vm_name)]
         name: Option<String>,
         /// Output as JSON
         #[arg(long)]
@@ -533,6 +539,7 @@ enum VmCmd {
     /// Deep-dive inspection of a single VM (probes, integrations, worker status)
     Inspect {
         /// Name of the VM to inspect
+        #[arg(value_parser = clap_vm_name)]
         name: String,
         /// Output as JSON
         #[arg(long)]
@@ -541,6 +548,7 @@ enum VmCmd {
     /// Run a command inside a running microVM (dev-only, requires dev-shell guest agent)
     Exec {
         /// Name of the VM
+        #[arg(value_parser = clap_vm_name)]
         name: String,
         /// Command to run (pass after --)
         #[arg(last = true, required = true)]
@@ -552,6 +560,7 @@ enum VmCmd {
     /// Run layered diagnostics on a VM (works even when vsock is broken)
     Diagnose {
         /// Name of the VM to diagnose
+        #[arg(value_parser = clap_vm_name)]
         name: String,
         /// Output as JSON
         #[arg(long)]
@@ -856,6 +865,56 @@ pub fn run() -> Result<()> {
     };
 
     with_hints(result)
+}
+
+// ============================================================================
+// Clap value parsers — run at argument-parse time for early validation
+// ============================================================================
+
+/// Validate a VM name at Clap parse time.
+fn clap_vm_name(s: &str) -> Result<String, String> {
+    mvm_core::naming::validate_vm_name(s).map_err(|e| e.to_string())?;
+    Ok(s.to_owned())
+}
+
+/// Validate a Nix flake reference at Clap parse time.
+fn clap_flake_ref(s: &str) -> Result<String, String> {
+    mvm_core::naming::validate_flake_ref(s).map_err(|e| e.to_string())?;
+    Ok(s.to_owned())
+}
+
+/// Validate a port spec (`PORT` or `HOST:GUEST`) at Clap parse time.
+fn clap_port_spec(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("port spec must not be empty".to_owned());
+    }
+    if let Some((host_part, guest_part)) = s.split_once(':') {
+        host_part
+            .parse::<u16>()
+            .map_err(|_| format!("invalid host port {:?} in {:?}", host_part, s))?;
+        guest_part
+            .parse::<u16>()
+            .map_err(|_| format!("invalid guest port {:?} in {:?}", guest_part, s))?;
+    } else {
+        s.parse::<u16>()
+            .map_err(|_| format!("invalid port {:?} — expected PORT or HOST:GUEST", s))?;
+    }
+    Ok(s.to_owned())
+}
+
+/// Validate a volume spec (`host:/guest` or `host:/guest:size`) at Clap parse time.
+fn clap_volume_spec(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("volume spec must not be empty".to_owned());
+    }
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(format!(
+            "invalid volume {:?} — expected host:/guest or host:/guest:size",
+            s
+        ));
+    }
+    Ok(s.to_owned())
 }
 
 // ============================================================================
@@ -5412,5 +5471,94 @@ edition = "2024"
         let nonexistent = tmp.path().join("audit.jsonl");
         // Path doesn't exist — simulate the early-return path.
         assert!(!nonexistent.exists());
+    }
+
+    // ---- Clap value parser tests ----
+
+    #[test]
+    fn test_clap_port_spec_valid() {
+        assert!(clap_port_spec("8080").is_ok());
+        assert!(clap_port_spec("8080:80").is_ok());
+        assert!(clap_port_spec("443:443").is_ok());
+        assert!(clap_port_spec("0:0").is_ok());
+    }
+
+    #[test]
+    fn test_clap_port_spec_invalid() {
+        assert!(clap_port_spec("").is_err());
+        assert!(clap_port_spec("abc").is_err());
+        assert!(clap_port_spec("8080:abc").is_err());
+        assert!(clap_port_spec("abc:80").is_err());
+        assert!(clap_port_spec("99999").is_err()); // out of u16 range
+    }
+
+    #[test]
+    fn test_clap_volume_spec_valid() {
+        assert!(clap_volume_spec("/host:/guest").is_ok());
+        assert!(clap_volume_spec("/host/path:/guest/mount").is_ok());
+        assert!(clap_volume_spec("/host:/guest:1G").is_ok());
+        assert!(clap_volume_spec("./local:/app").is_ok());
+    }
+
+    #[test]
+    fn test_clap_volume_spec_invalid() {
+        assert!(clap_volume_spec("").is_err());
+        assert!(clap_volume_spec("nocolon").is_err());
+        assert!(clap_volume_spec(":/guest").is_err()); // empty host
+    }
+
+    #[test]
+    fn test_clap_vm_name_valid() {
+        assert!(clap_vm_name("my-vm").is_ok());
+        assert!(clap_vm_name("vm1").is_ok());
+        assert!(clap_vm_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_clap_vm_name_invalid() {
+        assert!(clap_vm_name("").is_err());
+        assert!(clap_vm_name("UPPER").is_err());
+        assert!(clap_vm_name("has space").is_err());
+        assert!(clap_vm_name("-leading").is_err());
+    }
+
+    #[test]
+    fn test_clap_flake_ref_valid() {
+        assert!(clap_flake_ref(".").is_ok());
+        assert!(clap_flake_ref("github:org/repo").is_ok());
+        assert!(clap_flake_ref("/absolute/path").is_ok());
+    }
+
+    #[test]
+    fn test_clap_flake_ref_invalid() {
+        assert!(clap_flake_ref("").is_err());
+        assert!(clap_flake_ref(". ; rm -rf /").is_err());
+        assert!(clap_flake_ref("$(evil)").is_err());
+    }
+
+    #[test]
+    fn test_run_rejects_invalid_vm_name_at_parse_time() {
+        // Clap should reject bad --name values before any command runs.
+        let result = Cli::try_parse_from(["mvmctl", "run", "--flake", ".", "--name", "INVALID"]);
+        assert!(
+            result.is_err(),
+            "uppercase VM name should fail at parse time"
+        );
+    }
+
+    #[test]
+    fn test_run_rejects_invalid_flake_at_parse_time() {
+        let result =
+            Cli::try_parse_from(["mvmctl", "run", "--flake", ". ; rm -rf /", "--name", "vm1"]);
+        assert!(
+            result.is_err(),
+            "shell-injection flake ref should fail at parse time"
+        );
+    }
+
+    #[test]
+    fn test_run_rejects_invalid_port_at_parse_time() {
+        let result = Cli::try_parse_from(["mvmctl", "run", "--flake", ".", "--port", "notaport"]);
+        assert!(result.is_err(), "invalid port should fail at parse time");
     }
 }

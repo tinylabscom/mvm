@@ -1,15 +1,15 @@
-# Sprint 26 — Audit Logging
+# Sprint 27 — Config Validation & Input Sanitisation
 
-**Goal:** Provide an immutable audit trail for security-sensitive local mvmctl operations.
+**Goal:** Reject bad input at the CLI boundary with helpful error messages, not deep in the stack.
 
-**Branch:** `feat/sprint-26`
+**Branch:** `feat/sprint-27`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 780+                     |
+| Total tests      | 800+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -42,71 +42,62 @@
 - [23-global-config-file.md](sprints/23-global-config-file.md)
 - [24-man-pages.md](sprints/24-man-pages.md)
 - [25-e2e-uninstall.md](sprints/25-e2e-uninstall.md)
+- [26-audit-logging.md](sprints/26-audit-logging.md)
 
 ---
 
 ## Rationale
 
-`mvmctl` performs privileged local operations (boot VMs, install binaries, manage
-volumes) but currently leaves no record of what was done or when. An append-only
-audit log at `/var/log/mvm/audit.jsonl` gives operators an immutable trail for
-debugging and compliance.  The existing `mvm-core/src/audit.rs` covers fleet events
-(tenant/pool/instance lifecycle for mvmd); this sprint adds a simpler
-`LocalAuditEvent` model for single-host mvmctl operations.
+Several CLI inputs are validated late (inside command handlers or even inside the Lima VM)
+producing cryptic errors.  Validating at parse time with `clap` value parsers gives the
+user a clear, actionable message before any work is done.
+
+Validators already exist in `mvm-core::naming` — they just need to be wired into Clap
+value parsers so they run at argument parse time.
 
 ---
 
-## Phase 1: Extend `audit.rs` with local event model and log writer **Status: COMPLETE**
+## Phase 1: Wire validators into Clap value parsers **Status: COMPLETE**
 
-### 1.1 Add `LocalAuditEvent` to `mvm-core/src/audit.rs`
+### 1.1 VM name validation
 
-- [x] `LocalAuditKind` enum: `VmStart`, `VmStop`, `KeyLookup`, `VolumeCreate`,
-  `VolumeOpen`, `UpdateInstall`, `Uninstall`
-- [x] `LocalAuditEvent` struct: `timestamp: String`, `kind: LocalAuditKind`,
-  `vm_name: Option<String>`, `detail: Option<String>`
-- [x] `impl LocalAuditEvent { pub fn now(kind, vm_name, detail) -> Self }`
+- [x] `--name` in `Run`, `Stop`, `Remove`, `Logs`, `Forward`, `vm ping/status/inspect/exec/diagnose`
+  — use `value_parser = clap::value_parser!(String)` + a `fn parse_vm_name(s: &str) -> Result<String>` that calls `validate_vm_name`
+- [x] Add `fn parse_vm_name` in `commands.rs` using `validate_vm_name` from `mvm_core::naming`
 
-### 1.2 Add `LocalAuditLog` writer in `mvm-core/src/audit.rs`
+### 1.2 Flake ref validation
 
-- [x] `pub struct LocalAuditLog { path: PathBuf }`
-- [x] `pub fn open(path: &Path) -> Result<Self>` — creates parent dirs
-- [x] `pub fn append(&self, event: &LocalAuditEvent) -> Result<()>` — appends
-  one JSONL line; rotates to `audit.jsonl.1` when file exceeds 10 MiB
-- [x] Default log path constant: `pub const DEFAULT_AUDIT_LOG: &str = "/var/log/mvm/audit.jsonl"`
+- [x] `--flake` in `Run`, `Up`, `Build`, `Template Create/CreateMulti`
+  — `fn parse_flake_ref(s: &str) -> Result<String>` calling `validate_flake_ref`
 
-### 1.3 Unit tests in `audit.rs`
+### 1.3 Port spec validation
 
-- [x] `test_local_audit_event_serializes` — roundtrip JSON check
-- [x] `test_local_audit_log_append` — writes to tempdir, reads back line
-- [x] `test_local_audit_log_rotation` — exceeds 10 MiB, verifies rotation file created
-- [x] `test_local_audit_kind_all_variants_serialize` — all kinds produce valid JSON
+- [x] `--port / -p` in `Run`, `Forward`
+  — `fn parse_port_spec(s: &str) -> Result<String>` validates format `HOST:GUEST` or `PORT`
+  — valid: `"8080"`, `"8080:80"`, `"127.0.0.1:8080:80"`; invalid: `"abc"`, `"8080:abc:80"`
 
----
+### 1.4 Volume spec validation
 
-## Phase 2: `mvmctl audit tail` command **Status: COMPLETE**
-
-### 2.1 Add `Audit` subcommand to `Commands` enum
-
-- [x] `Commands::Audit { action: AuditCmd }`
-- [x] `AuditCmd::Tail { lines: usize, follow: bool }` — default 20 lines
-
-### 2.2 Implement `cmd_audit_tail`
-
-- [x] Read last N lines from `/var/log/mvm/audit.jsonl`
-- [x] Pretty-print: `<timestamp>  <kind>  [<vm_name>]  <detail>`
-- [x] `--follow` / `-f`: poll for new lines every 500 ms (Ctrl-C to stop)
-- [x] Graceful message when log file does not exist
+- [x] `--volume / -v` in `Run`
+  — `fn parse_volume_spec_str(s: &str) -> Result<String>` validates `host:/guest` or `host:/guest:size`
 
 ---
 
-## Phase 3: Emit audit events **Status: COMPLETE**
+## Phase 2: Unit tests **Status: COMPLETE**
 
-### 3.1 Emit from key commands (best-effort — log-and-continue on error)
+### 2.1 Tests in `mvm-core/src/naming.rs` (extend existing)
 
-- [x] `cmd_run` / `cmd_up` — emit `VmStart` after VM boot
-- [x] `cmd_stop` / `cmd_down` — emit `VmStop`
-- [x] `cmd_update` — emit `UpdateInstall`
-- [x] `cmd_uninstall` — emit `Uninstall`
+- [x] `test_validate_vm_name_valid` — alphanumeric + hyphens accepted
+- [x] `test_validate_vm_name_invalid` — rejects empty, spaces, uppercase, leading hyphens
+- [x] `test_validate_flake_ref_valid` — `.`, `path:./foo`, `github:org/repo`, `http://...`
+- [x] `test_validate_flake_ref_invalid` — rejects empty string
+
+### 2.2 Tests for new parsers in `commands.rs`
+
+- [x] `test_parse_port_spec_valid` — `"8080"`, `"8080:80"` parse OK
+- [x] `test_parse_port_spec_invalid` — `"abc"`, `"8080:abc"` return Err
+- [x] `test_parse_volume_spec_valid` — `"/host:/guest"`, `"/host:/guest:1G"` parse OK
+- [x] `test_parse_volume_spec_invalid` — `"nocolon"` returns Err
 
 ---
 
@@ -117,20 +108,17 @@ cargo test --workspace
 cargo test --test e2e
 cargo clippy --workspace -- -D warnings
 cargo check --workspace
-mvmctl audit tail          # shows recent events (or "no audit log" message)
-mvmctl audit tail --follow  # streams events
 ```
 
 ---
 
 ## Future Sprints (Planned, Not Yet Implemented)
 
-### Sprint 27: Config Validation & Input Sanitisation
+### Sprint 28: Config File Hot-Reload & Watch Mode
 
-**Goal:** Reject bad input at the boundary, not deep in the stack.
+**Goal:** Let operators change `~/.mvm/config.toml` without restarting long-running commands.
 
-- [ ] Validate all user-supplied VM names against `validate_vm_name()` at CLI parse time
-- [ ] Validate flake refs against `validate_flake_ref()` at CLI parse time
-- [ ] Validate port specs (HOST:GUEST or PORT) with helpful error messages
-- [ ] Validate volume specs (host_dir:/guest/path) with helpful error messages
-- [ ] Add 6 unit tests covering valid/invalid paths for each validator
+- [ ] Add `--watch-config` flag to `mvmctl dev` / `mvmctl run`
+- [ ] Use the existing `notify` watcher infrastructure to detect config file changes
+- [ ] On change: reload `MvmConfig` and apply updates if the VM is not yet started
+- [ ] 3 unit tests: file-change detection, partial override, invalid TOML graceful error
