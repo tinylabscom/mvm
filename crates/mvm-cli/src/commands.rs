@@ -79,6 +79,9 @@ enum Commands {
         /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
         #[arg(long, default_value = "0")]
         metrics_port: u16,
+        /// Reload ~/.mvm/config.toml automatically when it changes
+        #[arg(long)]
+        watch_config: bool,
     },
     /// Stop a running microVM (by name) or all VMs (--all)
     Stop {
@@ -275,6 +278,9 @@ enum Commands {
         /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
         #[arg(long, default_value = "0")]
         metrics_port: u16,
+        /// Reload ~/.mvm/config.toml automatically when it changes
+        #[arg(long)]
+        watch_config: bool,
     },
     /// Launch microVMs (from mvm.toml or CLI flags)
     Up {
@@ -719,6 +725,7 @@ pub fn run() -> Result<()> {
             lima_mem,
             project,
             metrics_port,
+            watch_config,
         } => {
             let effective_cpus = if lima_cpus == 8 {
                 cfg.lima_cpus
@@ -735,6 +742,7 @@ pub fn run() -> Result<()> {
                 effective_mem,
                 project.as_deref(),
                 metrics_port,
+                watch_config,
             )
         }
         Commands::Stop { name, all } => cmd_stop(name.as_deref(), all),
@@ -806,6 +814,7 @@ pub fn run() -> Result<()> {
             env,
             forward,
             metrics_port,
+            watch_config,
         } => {
             let memory_mb = memory
                 .as_ref()
@@ -826,6 +835,7 @@ pub fn run() -> Result<()> {
                 env_vars: &env,
                 forward,
                 metrics_port,
+                watch_config,
             })
         }
         Commands::Up {
@@ -990,12 +1000,45 @@ fn recreate_rootfs() -> Result<()> {
     Ok(())
 }
 
-fn cmd_dev(lima_cpus: u32, lima_mem: u32, project: Option<&str>, metrics_port: u16) -> Result<()> {
+fn cmd_dev(
+    lima_cpus: u32,
+    lima_mem: u32,
+    project: Option<&str>,
+    metrics_port: u16,
+    watch_config: bool,
+) -> Result<()> {
     let _metrics_server = if metrics_port > 0 {
         Some(crate::metrics_server::MetricsServer::start(metrics_port)?)
     } else {
         None
     };
+
+    // Start config watcher before setup so any reload during bootstrap is captured.
+    let _config_watcher = if watch_config {
+        let config_path = {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home)
+                .join(".mvm")
+                .join("config.toml")
+        };
+        if config_path.exists() {
+            match crate::config_watcher::ConfigWatcher::start(&config_path) {
+                Ok(w) => {
+                    tracing::info!("Watching ~/.mvm/config.toml for changes");
+                    Some(w)
+                }
+                Err(e) => {
+                    tracing::warn!("Could not start config watcher: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     ui::info("Launching development environment...\n");
 
     if bootstrap::is_lima_required() {
@@ -2321,6 +2364,7 @@ struct RunParams<'a> {
     env_vars: &'a [String],
     forward: bool,
     metrics_port: u16,
+    watch_config: bool,
 }
 
 fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -2338,6 +2382,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         env_vars,
         forward,
         metrics_port,
+        watch_config,
     } = params;
     let _span =
         tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
@@ -2355,6 +2400,33 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
     }
     let _metrics_server = if metrics_port > 0 {
         Some(crate::metrics_server::MetricsServer::start(metrics_port)?)
+    } else {
+        None
+    };
+
+    // Start config watcher so the user is notified if the config file changes
+    // while the build or boot is in progress.
+    let _config_watcher = if watch_config {
+        let config_path = {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home)
+                .join(".mvm")
+                .join("config.toml")
+        };
+        if config_path.exists() {
+            match crate::config_watcher::ConfigWatcher::start(&config_path) {
+                Ok(w) => {
+                    tracing::info!("Watching ~/.mvm/config.toml for changes");
+                    Some(w)
+                }
+                Err(e) => {
+                    tracing::warn!("Could not start config watcher: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
     } else {
         None
     };

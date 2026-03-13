@@ -734,3 +734,21 @@ fn test_audit_tail_no_log_exits_ok() {
     // On a fresh system /var/log/mvm/audit.jsonl doesn't exist — should exit 0.
     mvm().args(["audit", "tail"]).assert().success();
 }
+
+#[test]
+fn test_dev_accepts_watch_config_flag() {
+    mvm()
+        .args(["dev", "--watch-config", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--watch-config"));
+}
+
+#[test]
+fn test_run_accepts_watch_config_flag() {
+    mvm()
+        .args(["run", "--watch-config", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--watch-config"));
+}

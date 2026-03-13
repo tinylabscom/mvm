@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn nix_version_too_old_is_not_ok() {
         // Version 2.3.x is below minimum 2.4
-        let (major, minor, patch) = (2, 3, 16);
+        let (major, minor, _patch) = (2, 3, 16);
         assert!((major, minor) < NIX_MIN_VERSION);
         // Verify the logic matches what nix_version_check would produce
         assert!(
