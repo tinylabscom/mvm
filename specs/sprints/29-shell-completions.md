@@ -1,16 +1,17 @@
-# Sprint 30 — `mvmctl config` Subcommand
+# Sprint 29 — Shell Completion Generation
 
-**Goal:** Give operators a first-class CLI surface for reading and editing
-`~/.mvm/config.toml` without opening the file in a text editor.
+**Goal:** Ship `mvmctl completions <shell>` that writes Clap-generated completions for
+bash, zsh, fish, and PowerShell to stdout so users can install them with a single
+redirect.
 
-**Branch:** `feat/sprint-30`
+**Branch:** `feat/sprint-29`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 830+                     |
+| Total tests      | 820+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -46,41 +47,31 @@
 - [26-audit-logging.md](sprints/26-audit-logging.md)
 - [27-config-validation.md](sprints/27-config-validation.md)
 - [28-config-hot-reload.md](sprints/28-config-hot-reload.md)
-- [29-shell-completions.md](sprints/29-shell-completions.md)
 
 ---
 
 ## Rationale
 
-`~/.mvm/config.toml` is currently opaque to users who do not know its path.
-The existing `mvmctl config set KEY VALUE` command (Sprint 23) lets users write
-individual keys but there is no way to see the current effective values or open
-the whole file for editing.  Two sub-commands close this gap:
-
-- `mvmctl config show` — pretty-prints the current config as TOML to stdout.
-- `mvmctl config edit` — opens the config file in `$EDITOR` (fallback: `nano`).
-
-Both commands already have a placeholder for the `Config` variant; they just
-need the `show` and `edit` actions wired in.
+Users currently have to tab-complete `mvmctl` commands manually or remember them from
+`--help`.  `clap_complete` can generate native shell completions from the existing Clap
+definition with minimal code.  A `completions` subcommand is the standard pattern
+(used by `rustup`, `gh`, `kubectl`, etc.) and plays well with package managers and
+dotfile setups.
 
 ---
 
-## Phase 1: Implement `show` and `edit` actions **Status: COMPLETE**
+## Phase 1: Add `completions` subcommand **Status: COMPLETE**
 
-### 1.1 `ConfigAction::Edit` added to enum
+### 1.1 `clap_complete` in workspace
 
-- [x] `Edit` variant added to `ConfigAction` in `commands.rs`
-- [x] Match arm `ConfigAction::Edit => cmd_config_edit()` added
+- [x] `clap_complete = "4"` in `[workspace.dependencies]`
+- [x] `clap_complete.workspace = true` in `mvm-cli/Cargo.toml`
 
-### 1.2 `cmd_config_show` (pre-existing)
+### 1.2 `Completions` command (already implemented in a prior sprint)
 
-- [x] Loads `MvmConfig` and prints as TOML via `toml::to_string_pretty`
-
-### 1.3 `cmd_config_edit` (new)
-
-- [x] Ensures `~/.mvm/config.toml` exists (calls `load(None)` which creates it)
-- [x] Launches `$EDITOR` (fallback: `nano`) with the config path as argument
-- [x] Returns `Err` if the editor exits non-zero
+- [x] `Completions { shell: clap_complete::Shell }` variant in `Commands`
+- [x] `Commands::Completions { shell }` arm calls `cmd_completions(shell)`
+- [x] `fn cmd_completions` calls `clap_complete::generate(...)` and returns `Ok(())`
 
 ---
 
@@ -88,10 +79,11 @@ need the `show` and `edit` actions wired in.
 
 ### 2.1 Tests in `tests/cli.rs`
 
-- [x] `test_config_show_exits_ok` — exits 0, stdout contains `lima_cpus`
-- [x] `test_config_edit_with_true_editor` — `EDITOR=true` exits 0
-- [x] `test_config_show_help` — exits 0
-- [x] `test_config_edit_help` — exits 0
+- [x] `test_completions_bash_exits_ok` — exits 0 and stdout contains `mvmctl`
+- [x] `test_completions_zsh_exits_ok` — same for zsh
+- [x] `test_completions_fish_exits_ok` — same for fish
+- [x] `test_completions_no_shell_shows_error` — exits 2 (missing required arg)
+- [x] `test_top_level_help_lists_completions` — `--help` mentions `completions`
 
 ---
 
@@ -108,11 +100,12 @@ cargo check --workspace
 
 ## Future Sprints (Planned, Not Yet Implemented)
 
-### Sprint 31: VM Resource Limits
+### Sprint 30: `mvmctl config` REPL / interactive editor
 
-**Goal:** Honour `default_cpus` and `default_memory_mib` from `~/.mvm/config.toml`
-when `--cpus` / `--memory` are not passed to `mvmctl run`.
+**Goal:** `mvmctl config edit` opens `~/.mvm/config.toml` in `$EDITOR`; `mvmctl config
+show` pretty-prints the current effective config (merged CLI overrides + file defaults).
 
-- [ ] Read defaults from `MvmConfig` in `cmd_run`
-- [ ] `--cpus` / `--memory` CLI flags take precedence over config defaults
-- [ ] Tests: run with no flags uses config value; run with explicit flag overrides it
+- [ ] `Config { action: ConfigCmd }` subcommand with `Show` and `Edit` variants
+- [ ] `mvmctl config show` prints the merged config as TOML to stdout
+- [ ] `mvmctl config edit` opens `$EDITOR` (or `nano` fallback) on the config file
+- [ ] Tests: show exits 0, edit with `EDITOR=true` exits 0

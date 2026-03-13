@@ -793,3 +793,33 @@ fn test_top_level_help_lists_completions() {
         .success()
         .stdout(predicate::str::contains("completions"));
 }
+
+#[test]
+fn test_config_show_exits_ok() {
+    mvm()
+        .args(["config", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("lima_cpus").or(predicate::str::contains("default_cpus")));
+}
+
+#[test]
+fn test_config_show_help() {
+    mvm().args(["config", "show", "--help"]).assert().success();
+}
+
+#[test]
+fn test_config_edit_help() {
+    mvm().args(["config", "edit", "--help"]).assert().success();
+}
+
+#[test]
+fn test_config_edit_with_true_editor() {
+    // `true` is a no-op binary that exits 0 — verifies the plumbing without
+    // opening a real editor.
+    mvm()
+        .args(["config", "edit"])
+        .env("EDITOR", "true")
+        .assert()
+        .success();
+}
