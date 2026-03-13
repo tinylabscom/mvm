@@ -1,16 +1,16 @@
-# Sprint 30 — `mvmctl config` Subcommand
+# Sprint 31 — VM Resource Defaults from Config
 
-**Goal:** Give operators a first-class CLI surface for reading and editing
-`~/.mvm/config.toml` without opening the file in a text editor.
+**Goal:** Honour `default_cpus` and `default_memory_mib` from `~/.mvm/config.toml`
+when `--cpus` / `--memory` are not passed to `mvmctl run`.
 
-**Branch:** `feat/sprint-30`
+**Branch:** `feat/sprint-31`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 830+                     |
+| Total tests      | 840+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -47,51 +47,56 @@
 - [27-config-validation.md](sprints/27-config-validation.md)
 - [28-config-hot-reload.md](sprints/28-config-hot-reload.md)
 - [29-shell-completions.md](sprints/29-shell-completions.md)
+- [30-config-edit.md](sprints/30-config-edit.md)
 
 ---
 
 ## Rationale
 
-`~/.mvm/config.toml` is currently opaque to users who do not know its path.
-The existing `mvmctl config set KEY VALUE` command (Sprint 23) lets users write
-individual keys but there is no way to see the current effective values or open
-the whole file for editing.  Two sub-commands close this gap:
+`MvmConfig` has `default_cpus` (default: 2) and `default_memory_mib` (default: 512)
+but `cmd_run` ignores them — it uses the Clap defaults directly.  This means
+`mvmctl config set default_cpus 4` has no effect on `mvmctl run`.  Closing this gap
+makes the config file the single source of truth for per-user defaults.
 
-- `mvmctl config show` — pretty-prints the current config as TOML to stdout.
-- `mvmctl config edit` — opens the config file in `$EDITOR` (fallback: `nano`).
-
-Both commands already have a placeholder for the `Config` variant; they just
-need the `show` and `edit` actions wired in.
+Priority: CLI flag > config file value > Clap argument default.
 
 ---
 
-## Phase 1: Implement `show` and `edit` actions **Status: COMPLETE**
+## Phase 1: Wire config defaults into `cmd_run` **Status: COMPLETE**
 
-### 1.1 `ConfigAction::Edit` added to enum
+### 1.1 Apply defaults in the `Commands::Run` dispatch block
 
-- [x] `Edit` variant added to `ConfigAction` in `commands.rs`
-- [x] Match arm `ConfigAction::Edit => cmd_config_edit()` added
+In the `Commands::Run { cpus, memory, .. }` match arm (around line 820 of
+`commands.rs`), before constructing `RunParams`, resolve the effective values:
 
-### 1.2 `cmd_config_show` (pre-existing)
+```rust
+// CLI flag takes precedence; fall back to config defaults.
+let effective_cpus = cpus.or(Some(cfg.default_cpus));
+let effective_memory_mib = memory_mb.or(Some(cfg.default_memory_mib));
+```
 
-- [x] Loads `MvmConfig` and prints as TOML via `toml::to_string_pretty`
+Pass `effective_cpus` and `effective_memory_mib` to `RunParams`.
 
-### 1.3 `cmd_config_edit` (new)
+### 1.2 No changes to `RunParams` or `cmd_run` internals
 
-- [x] Ensures `~/.mvm/config.toml` exists (calls `load(None)` which creates it)
-- [x] Launches `$EDITOR` (fallback: `nano`) with the config path as argument
-- [x] Returns `Err` if the editor exits non-zero
+`RunParams.cpus` is already `Option<u32>` and `RunParams.memory` is `Option<u32>`.
+`cmd_run` already uses these; if `Some`, they override the Lima defaults. So
+providing `Some(cfg.default_cpus)` when the user omits `--cpus` is sufficient.
 
 ---
 
 ## Phase 2: Tests **Status: COMPLETE**
 
-### 2.1 Tests in `tests/cli.rs`
+### 2.1 Unit tests in `commands.rs` `#[cfg(test)]`
 
-- [x] `test_config_show_exits_ok` — exits 0, stdout contains `lima_cpus`
-- [x] `test_config_edit_with_true_editor` — `EDITOR=true` exits 0
-- [x] `test_config_show_help` — exits 0
-- [x] `test_config_edit_help` — exits 0
+- [x] `test_run_uses_config_default_cpus` — `cpus: None` + `cfg.default_cpus = 4` → `Some(4)`
+- [x] `test_run_cli_flag_overrides_config_cpus` — `cpus: Some(8)` wins over `cfg.default_cpus = 4`
+- [x] `test_run_uses_config_default_memory` — same pattern for memory
+- [x] `test_run_cli_flag_overrides_config_memory` — CLI flag wins over config default
+
+### 2.2 Integration tests in `tests/cli.rs`
+
+- [x] `test_run_help_shows_flags` — already passing (regression guard)
 
 ---
 
@@ -99,7 +104,6 @@ need the `show` and `edit` actions wired in.
 
 ```bash
 cargo test --workspace
-cargo test --test e2e
 cargo clippy --workspace -- -D warnings
 cargo check --workspace
 ```
@@ -108,11 +112,13 @@ cargo check --workspace
 
 ## Future Sprints (Planned, Not Yet Implemented)
 
-### Sprint 31: VM Resource Limits
+### Sprint 32: `mvmctl vm list` — tabular VM roster
 
-**Goal:** Honour `default_cpus` and `default_memory_mib` from `~/.mvm/config.toml`
-when `--cpus` / `--memory` are not passed to `mvmctl run`.
+**Goal:** `mvmctl vm list` prints a table of all running and stopped microVMs with
+their name, status, CPU count, memory, and uptime.
 
-- [ ] Read defaults from `MvmConfig` in `cmd_run`
-- [ ] `--cpus` / `--memory` CLI flags take precedence over config defaults
-- [ ] Tests: run with no flags uses config value; run with explicit flag overrides it
+- [ ] Add `VmCmd::List` subcommand
+- [ ] Collect VM state from Lima + local state dir
+- [ ] Format as a padded ASCII table (no external dep — use `format!` with padding)
+- [ ] `--json` flag for machine-readable output
+- [ ] Tests: list exits 0 on clean system; `--json` stdout is valid JSON

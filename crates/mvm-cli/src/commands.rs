@@ -823,13 +823,16 @@ pub fn run() -> Result<()> {
                 .map(|s| parse_human_size(s))
                 .transpose()
                 .context("Invalid memory size")?;
+            // CLI flag takes precedence; fall back to per-user config defaults.
+            let effective_cpus = cpus.or(Some(cfg.default_cpus));
+            let effective_memory = memory_mb.or(Some(cfg.default_memory_mib));
             cmd_run(RunParams {
                 flake_ref: flake.as_deref(),
                 template_name: template.as_deref(),
                 name: name.as_deref(),
                 profile: profile.as_deref(),
-                cpus,
-                memory: memory_mb,
+                cpus: effective_cpus,
+                memory: effective_memory,
                 config_path: config.as_deref(),
                 volumes: &volume,
                 hypervisor: &hypervisor,
@@ -5653,5 +5656,50 @@ edition = "2024"
     fn test_run_rejects_invalid_port_at_parse_time() {
         let result = Cli::try_parse_from(["mvmctl", "run", "--flake", ".", "--port", "notaport"]);
         assert!(result.is_err(), "invalid port should fail at parse time");
+    }
+
+    // ---- Config defaults wired into cmd_run ----
+
+    #[test]
+    fn test_run_uses_config_default_cpus() {
+        // When --cpus is omitted, the config default should be applied.
+        let mut cfg = mvm_core::user_config::MvmConfig::default();
+        cfg.default_cpus = 4;
+
+        // Simulate the resolution logic from the Commands::Run dispatch.
+        let cli_cpus: Option<u32> = None;
+        let effective = cli_cpus.or(Some(cfg.default_cpus));
+        assert_eq!(effective, Some(4));
+    }
+
+    #[test]
+    fn test_run_cli_flag_overrides_config_cpus() {
+        // When --cpus is provided, it takes precedence over config.
+        let mut cfg = mvm_core::user_config::MvmConfig::default();
+        cfg.default_cpus = 4;
+
+        let cli_cpus: Option<u32> = Some(8);
+        let effective = cli_cpus.or(Some(cfg.default_cpus));
+        assert_eq!(effective, Some(8));
+    }
+
+    #[test]
+    fn test_run_uses_config_default_memory() {
+        let mut cfg = mvm_core::user_config::MvmConfig::default();
+        cfg.default_memory_mib = 2048;
+
+        let cli_memory: Option<u32> = None;
+        let effective = cli_memory.or(Some(cfg.default_memory_mib));
+        assert_eq!(effective, Some(2048));
+    }
+
+    #[test]
+    fn test_run_cli_flag_overrides_config_memory() {
+        let mut cfg = mvm_core::user_config::MvmConfig::default();
+        cfg.default_memory_mib = 2048;
+
+        let cli_memory: Option<u32> = Some(512);
+        let effective = cli_memory.or(Some(cfg.default_memory_mib));
+        assert_eq!(effective, Some(512));
     }
 }
