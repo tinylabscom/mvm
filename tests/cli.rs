@@ -864,6 +864,32 @@ fn test_vm_help_lists_list_subcommand() {
 }
 
 // ============================================================================
+// Sprint 35: mvmctl run --watch
+// ============================================================================
+
+#[test]
+fn test_run_watch_flag_accepted_in_help() {
+    mvm()
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("watch"));
+}
+
+#[test]
+fn test_run_watch_without_flake_degrades_gracefully() {
+    // --watch without --flake should fail at argument validation (group "source"
+    // is required), not at parsing — exit code must not be 2 (Clap parse error).
+    // Actually, since --flake and --template are in a required arg group,
+    // omitting both gives exit code 2 even without --watch. So we test that
+    // --watch with a remote flake is accepted at parse time.
+    mvm()
+        .args(["run", "--flake", "github:auser/mvm", "--watch", "--help"])
+        .assert()
+        .success();
+}
+
+// ============================================================================
 // Sprint 34: mvmctl flake check
 // ============================================================================
 

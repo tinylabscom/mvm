@@ -281,6 +281,9 @@ enum Commands {
         /// Reload ~/.mvm/config.toml automatically when it changes
         #[arg(long)]
         watch_config: bool,
+        /// Watch the flake for changes and auto-rebuild + reboot (requires local --flake)
+        #[arg(long)]
+        watch: bool,
     },
     /// Launch microVMs (from mvm.toml or CLI flags)
     Up {
@@ -844,6 +847,7 @@ pub fn run() -> Result<()> {
             forward,
             metrics_port,
             watch_config,
+            watch,
         } => {
             let memory_mb = memory
                 .as_ref()
@@ -868,6 +872,7 @@ pub fn run() -> Result<()> {
                 forward,
                 metrics_port,
                 watch_config,
+                watch,
             })
         }
         Commands::Up {
@@ -2398,6 +2403,7 @@ struct RunParams<'a> {
     forward: bool,
     metrics_port: u16,
     watch_config: bool,
+    watch: bool,
 }
 
 fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -2416,6 +2422,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         forward,
         metrics_port,
         watch_config,
+        watch,
     } = params;
     let _span =
         tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
@@ -2662,6 +2669,135 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             cmd_forward(&vm_name_owned, &[])?;
         } else {
             ui::warn("--forward was set but no ports were declared. Use -p to specify ports.");
+        }
+    }
+
+    // Watch mode: on each .nix / flake.lock change, stop the VM, rebuild, reboot.
+    if watch {
+        let Some(flake) = flake_ref else {
+            // Template mode — watch not supported.
+            return Ok(());
+        };
+        if flake.contains(':') {
+            ui::warn("--watch requires a local flake; running a single boot instead.");
+            return Ok(());
+        }
+        let flake_dir = resolve_flake_ref(flake)?;
+        loop {
+            ui::info("Watching for .nix and .lock changes (Ctrl+C to exit)...");
+            match crate::watch::wait_for_changes(&flake_dir) {
+                Ok(trigger) => {
+                    let display = crate::watch::display_trigger(&trigger, &flake_dir);
+                    ui::info(&format!("\nChange detected: {display} — rebuilding..."));
+                }
+                Err(e) => {
+                    tracing::warn!("Watch error: {e}");
+                    break;
+                }
+            }
+
+            // Stop the running VM.
+            let backend = AnyBackend::default_backend();
+            if let Err(e) = backend.stop(&VmId::from(vm_name_owned.as_str())) {
+                tracing::warn!("Could not stop '{}': {e}", vm_name_owned);
+            }
+
+            // Rebuild the flake.
+            let env = mvm_runtime::build_env::RuntimeBuildEnv;
+            let result = match mvm_build::dev_build::dev_build(&env, &flake_dir, profile) {
+                Ok(r) => r,
+                Err(e) => {
+                    ui::warn(&format!("Rebuild failed: {e}; waiting for next change..."));
+                    continue;
+                }
+            };
+            if let Err(e) = mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result) {
+                tracing::warn!("Guest agent check failed: {e}");
+            }
+            ui::success(&format!(
+                "Build complete — revision {}",
+                result.revision_hash
+            ));
+
+            // Re-parse volumes, ports and env vars for the fresh boot.
+            let rt_cfg_watch = match config_path {
+                Some(p) => image::parse_runtime_config(p).unwrap_or_default(),
+                None => image::RuntimeConfig::default(),
+            };
+            let mut w_volume_cfg: Vec<image::RuntimeVolume> = Vec::new();
+            let mut w_config_files: Vec<microvm::DriveFile> = Vec::new();
+            let mut w_secret_files: Vec<microvm::DriveFile> = Vec::new();
+            if !volumes.is_empty() {
+                for v in volumes {
+                    match parse_volume_spec(v) {
+                        Ok(VolumeSpec::DirInject {
+                            host_dir,
+                            guest_mount,
+                        }) => match guest_mount.as_str() {
+                            "/mnt/config" => {
+                                if let Ok(files) = read_dir_to_drive_files(&host_dir, 0o444) {
+                                    w_config_files.extend(files);
+                                }
+                            }
+                            "/mnt/secrets" => {
+                                if let Ok(files) = read_dir_to_drive_files(&host_dir, 0o400) {
+                                    w_secret_files.extend(files);
+                                }
+                            }
+                            _ => {}
+                        },
+                        Ok(VolumeSpec::Persistent(vol)) => w_volume_cfg.push(vol),
+                        Err(_) => {}
+                    }
+                }
+            } else {
+                w_volume_cfg = rt_cfg_watch.volumes.clone();
+            }
+            let w_port_mappings = parse_port_specs(ports).unwrap_or_default();
+            if let Some(f) = ports_to_drive_file(&w_port_mappings) {
+                w_config_files.push(f);
+            }
+            if let Some(f) = env_vars_to_drive_file(env_vars) {
+                w_config_files.push(f);
+            }
+            let w_slot = match microvm::allocate_slot(&vm_name_owned) {
+                Ok(s) => s,
+                Err(e) => {
+                    ui::warn(&format!("Could not allocate slot: {e}; skipping reboot"));
+                    continue;
+                }
+            };
+            let w_run_config = microvm::FlakeRunConfig {
+                name: vm_name_owned.clone(),
+                slot: w_slot,
+                vmlinux_path: result.vmlinux_path,
+                initrd_path: result.initrd_path,
+                rootfs_path: result.rootfs_path,
+                revision_hash: result.revision_hash,
+                flake_ref: flake.to_string(),
+                profile: profile.map(|s| s.to_string()),
+                cpus: final_cpus,
+                memory: final_memory,
+                volumes: w_volume_cfg,
+                config_files: w_config_files,
+                secret_files: w_secret_files,
+                ports: w_port_mappings,
+            };
+            let w_backend = AnyBackend::from_hypervisor(hypervisor);
+            if let Err(e) = w_backend.start_firecracker(&FirecrackerConfig {
+                run_config: w_run_config,
+            }) {
+                ui::warn(&format!(
+                    "Could not start VM: {e}; waiting for next change..."
+                ));
+            } else {
+                mvm_core::audit::emit(
+                    mvm_core::audit::LocalAuditKind::VmStart,
+                    Some(&vm_name_owned),
+                    None,
+                );
+                ui::success(&format!("VM '{}' rebooted.", vm_name_owned));
+            }
         }
     }
 

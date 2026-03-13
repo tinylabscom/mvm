@@ -1,17 +1,17 @@
-# Sprint 35 — `mvmctl run --watch`
+# Sprint 34 — `mvmctl flake check`
 
-**Goal:** Add `--watch` to `mvmctl run --flake <path>` so the VM is
-automatically rebuilt and rebooted whenever a `.nix` or `flake.lock` file
-changes — the full edit→rebuild→reboot loop in a single command.
+**Goal:** Add `mvmctl flake check [--flake <path>]` to validate a Nix flake
+before committing to a full `nix build`, giving users fast feedback on syntax
+and evaluation errors.
 
-**Branch:** `feat/sprint-35`
+**Branch:** `feat/sprint-34`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 873+                     |
+| Total tests      | 870+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -52,39 +52,37 @@ changes — the full edit→rebuild→reboot loop in a single command.
 - [31-vm-resource-defaults.md](sprints/31-vm-resource-defaults.md)
 - [32-vm-list.md](sprints/32-vm-list.md)
 - [33-template-init-preset.md](sprints/33-template-init-preset.md)
-- [34-flake-check.md](sprints/34-flake-check.md)
 
 ---
 
 ## Rationale
 
-The inner dev loop for microVM development is:
-1. Edit `flake.nix`
-2. `mvmctl build --flake .` — rebuilds the image
-3. `mvmctl stop my-vm && mvmctl run --flake . --name my-vm` — reboots
-
-`mvmctl run --flake . --watch` collapses all three steps: it starts the VM,
-watches the flake directory, and on any `.nix` / `flake.lock` change it stops
-the running VM, rebuilds, and starts a fresh one.  Ctrl-C exits cleanly.
+`nix build` on an invalid flake can take 30+ seconds before failing.
+`mvmctl flake check` runs `nix flake check` inside the Lima VM (where Nix
+lives) and streams its output immediately, giving fast syntax/evaluation
+feedback without kicking off the full build pipeline.
 
 ---
 
-## Phase 1: Add `--watch` to `Commands::Run` **Status: COMPLETE**
+## Phase 1: Add `Commands::Flake` **Status: COMPLETE**
 
-- [x] Add `watch: bool` flag to `Commands::Run`
-- [x] Pass `watch` through `RunParams`
-- [x] In `cmd_run`, after the VM starts, if `watch` is set:
-  - Guard: `--watch` requires a local `--flake`; if absent or remote, print
-    warning and return without entering the loop
-  - Enter loop: `wait_for_changes` → stop VM → rebuild → start VM → repeat
+- [x] Add `Commands::Flake { action: FlakeCmd }` top-level subcommand
+- [x] Add `enum FlakeCmd { Check { flake: Option<String>, json: bool } }`
+- [x] Add `cmd_flake_check(flake: Option<&str>, json: bool) -> Result<()>`
+  - Defaults flake path to `"."` when not given
+  - Resolves to absolute path via `resolve_flake_ref`
+  - Runs `nix flake check <path>` inside Lima via visible shell exec
+  - On success prints `Flake is valid.` (or `{"valid":true}` in JSON mode)
+  - On failure prints error output (or `{"valid":false,"error":"..."}`)
+- [x] `cmd_flake` dispatch function
 
 ---
 
 ## Phase 2: Tests **Status: COMPLETE**
 
-- [x] `test_run_watch_flag_accepted_in_help` — help text contains `watch`
-- [x] `test_run_watch_requires_flake` — `--watch` without `--flake` exits 0
-  (the guard degrades gracefully, same as `build --watch` with remote flake)
+- [x] `test_flake_check_help_exits_ok` — `mvmctl flake check --help` exits 0
+- [x] `test_flake_top_level_help_lists_check` — `mvmctl flake --help` mentions `check`
+- [x] `test_flake_help_lists_in_top_level` — `mvmctl --help` mentions `flake`
 
 ---
 
@@ -95,3 +93,9 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo check --workspace
 ```
+
+---
+
+## Future Sprints (Planned, Not Yet Implemented)
+
+### Sprint 35: `mvmctl run --watch` — edit→rebuild→reboot loop
