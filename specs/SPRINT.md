@@ -169,9 +169,9 @@ In `mvm-guest/src/integrations.rs`, honour `startup_grace_secs`:
 - Skip health check failures for the first N seconds after the VM boots
 - Report `starting` status instead of `unhealthy` during the grace period
 
-- [ ] Add `startup_grace_secs` field handling in the guest agent
-- [ ] Wire up in paperclip example (`startupGraceSecs = 180`)
-- [ ] Test that health checks don't spam the log during startup
+- [x] Add `Starting` status variant and grace-period logic in the guest agent
+- [x] Wire up in paperclip example (`startupGraceSecs = 180`)
+- [ ] Test that health checks don't spam the log during startup (manual verification needed)
 
 ## Verification
 

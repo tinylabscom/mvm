@@ -394,10 +394,14 @@
             };
 
             # Port 3100 = 0x0C1C
+            # startupGraceSecs: paperclip runs 24 Drizzle migrations on first boot
+            # which takes ~60-90 s.  Suppress health check failures for 3 minutes
+            # so the log isn't flooded before the server is ready.
             healthChecks.paperclip = {
               healthCmd = "grep -q ':0C1C ' /proc/net/tcp 2>/dev/null || grep -q ':0C1C ' /proc/net/tcp6 2>/dev/null";
               healthIntervalSecs = 10;
               healthTimeoutSecs = 5;
+              startupGraceSecs = 180;
             };
           };
         });
