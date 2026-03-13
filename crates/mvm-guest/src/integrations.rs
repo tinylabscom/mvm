@@ -79,6 +79,9 @@ pub enum IntegrationStatus {
     /// Integration is not yet initialized.
     #[default]
     Pending,
+    /// Integration is within its startup grace period — health checks are
+    /// running but failures are suppressed until the grace window expires.
+    Starting,
 }
 
 /// Result of a single health check execution.
@@ -220,6 +223,7 @@ mod tests {
             (IntegrationStatus::Active, "\"active\""),
             (IntegrationStatus::Paused, "\"paused\""),
             (IntegrationStatus::Pending, "\"pending\""),
+            (IntegrationStatus::Starting, "\"starting\""),
             (
                 IntegrationStatus::Error("conn lost".to_string()),
                 "{\"error\":\"conn lost\"}",

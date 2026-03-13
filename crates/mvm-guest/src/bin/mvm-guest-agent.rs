@@ -471,8 +471,15 @@ fn integration_health_loop(state: Arc<Mutex<IntegrationState>>) {
 }
 
 /// Build an IntegrationStateReport from cached health data.
+///
+/// `boot_at` is the time the agent started; used to determine whether a
+/// service is still within its `startup_grace_secs` window.  During that
+/// window, unhealthy or not-yet-checked integrations report `starting`
+/// instead of `error` / `pending` so the host knows the VM is still
+/// initialising rather than broken.
 fn build_integration_reports(
     integration_state: &Arc<Mutex<IntegrationState>>,
+    boot_at: std::time::Instant,
 ) -> Vec<IntegrationStateReport> {
     let Ok(s) = integration_state.lock() else {
         return vec![];
@@ -480,9 +487,13 @@ fn build_integration_reports(
     s.integrations
         .iter()
         .map(|ih| {
+            let in_grace = ih.entry.startup_grace_secs > 0
+                && boot_at.elapsed() < Duration::from_secs(ih.entry.startup_grace_secs);
             let status = match &ih.last_result {
                 Some(r) if r.healthy => IntegrationStatus::Active,
+                Some(_) if in_grace => IntegrationStatus::Starting,
                 Some(r) => IntegrationStatus::Error(r.detail.clone()),
+                None if in_grace => IntegrationStatus::Starting,
                 None => IntegrationStatus::Pending,
             };
             IntegrationStateReport {
@@ -743,6 +754,7 @@ fn handle_client(
     state: &Arc<Mutex<AgentState>>,
     integration_state: &Arc<Mutex<IntegrationState>>,
     probe_state: &Arc<Mutex<ProbeState>>,
+    boot_at: std::time::Instant,
 ) {
     // SAFETY: fd comes from accept and is a valid file descriptor owned by this function.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -785,7 +797,7 @@ fn handle_client(
         }
 
         GuestRequest::IntegrationStatus => GuestResponse::IntegrationStatusReport {
-            integrations: build_integration_reports(integration_state),
+            integrations: build_integration_reports(integration_state, boot_at),
         },
 
         GuestRequest::CheckpointIntegrations { integrations: _ } => {
@@ -906,6 +918,9 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Record boot time for startup grace period tracking.
+    let boot_at = std::time::Instant::now();
+
     // Start background monitoring thread.
     let state = Arc::new(Mutex::new(AgentState::new()));
     let monitor_state = Arc::clone(&state);
@@ -958,6 +973,6 @@ fn main() {
         if cfd < 0 {
             continue;
         }
-        handle_client(cfd, &state, &integration_state, &probe_state);
+        handle_client(cfd, &state, &integration_state, &probe_state, boot_at);
     }
 }

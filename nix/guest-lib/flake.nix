@@ -51,6 +51,161 @@
           fi
         '';
       in {
+        # ── mkNodeService — Node.js service helper ──────────────────────
+        #
+        # Builds a Node.js app from source (npm install → autoPatchelf → tsc),
+        # and returns { package, service, healthCheck } for use with mkGuest.
+        #
+        # Usage:
+        #   let p = mvm.lib.${system}.mkNodeService {
+        #     name       = "my-app";
+        #     src        = fetchGit { url = ...; rev = ...; };
+        #     npmHash    = "sha256-...";  # FOD hash — set to "" to get it
+        #     buildPhase = ''             # optional; default: run tsc
+        #       node "$TSC"
+        #     '';
+        #     entrypoint = "dist/index.js"; # relative to built output root
+        #     env        = { PORT = "3000"; };
+        #     user       = "myapp";
+        #     port       = 3000;
+        #   };
+        #   in mvm.lib.${system}.mkGuest {
+        #     packages          = [ pkgs.nodejs_22 p.package ];
+        #     services.myapp    = p.service;
+        #     healthChecks.myapp = p.healthCheck;
+        #     ...
+        #   }
+        #
+        # Arguments:
+        #   name         — derivation name and default user name
+        #   src          — source tree (fetchGit, path:..., etc.)
+        #   npmHash      — sha256 hash for the FOD npm-install derivation;
+        #                  set to "" to obtain the correct hash from the build
+        #   buildPhase   — shell to compile (default: run tsc on the root package)
+        #                  $TSC  = path to the typescript compiler
+        #                  $VITE = path to the vite bundler (if installed)
+        #                  cwd is the build root ($TMPDIR/build)
+        #   entrypoint   — JS entry point relative to the output root
+        #   env          — extra environment variables for the service
+        #   user         — OS user to run the service (default: name)
+        #   port         — TCP port; used for /proc/net/tcp health check
+        #   nodejs       — Node.js derivation (default: pkgs.nodejs_22)
+        #   pruneDevDeps — remove dev-only packages after build (default: true)
+        lib.mkNodeService = {
+          name,
+          src,
+          npmHash,
+          buildPhase ? "node \"$TSC\"",
+          entrypoint,
+          env ? {},
+          user ? name,
+          port,
+          nodejs ? pkgs.nodejs_22,
+          pruneDevDeps ? true,
+        }:
+          let
+            # Convert an integer port to 4-digit uppercase hex for matching
+            # against /proc/net/tcp, which stores ports in host-endian hex.
+            intToHex4 = n:
+              let
+                digits = [ "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"
+                           "A" "B" "C" "D" "E" "F" ];
+                d = i: builtins.elemAt digits i;
+              in "${d (n / 4096)}${d (builtins.mod (n / 256) 16)}${d (builtins.mod (n / 16) 16)}${d (builtins.mod n 16)}";
+
+            portHex = intToHex4 port;
+
+            # Phase 1: npm install — fixed-output derivation (network access).
+            # To find the correct npmHash: set it to "" and build; the error
+            # message will show "got: sha256-..." with the value to use.
+            node-src = pkgs.stdenv.mkDerivation {
+              pname = "${name}-src";
+              version = "0";
+              inherit src;
+
+              dontFixup = true;
+
+              outputHashMode = "recursive";
+              outputHashAlgo = "sha256";
+              outputHash = npmHash;
+
+              nativeBuildInputs = [ nodejs pkgs.cacert ];
+              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
+              buildPhase = ''
+                export HOME=$TMPDIR
+                export npm_config_cache=$TMPDIR/.npm
+                cp -r $src $out
+                chmod -R u+w $out
+                cd $out
+                npm install --ignore-scripts --no-bin-links --legacy-peer-deps
+              '';
+
+              installPhase = "true";
+            };
+
+            # Phase 2: patch ELF binaries in node_modules (embedded natives etc.).
+            # Separate from the FOD because autoPatchelf changes content hashes.
+            node-pkg = pkgs.stdenv.mkDerivation {
+              pname = "${name}";
+              version = "0";
+              src = node-src;
+              nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+              buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.glibc ];
+              autoPatchelfIgnoreMissingDeps = true;
+              dontBuild = true;
+              installPhase = "cp -r $src $out";
+            };
+
+            # Phase 3: TypeScript build + optional dev-dependency pruning.
+            node-built = pkgs.stdenv.mkDerivation {
+              pname = "${name}-built";
+              version = "0";
+              src = node-pkg;
+              nativeBuildInputs = [ nodejs ];
+              buildPhase = ''
+                export HOME=$TMPDIR
+                cp -r $src $TMPDIR/build
+                chmod -R u+w $TMPDIR/build
+                cd $TMPDIR/build
+                TSC="$TMPDIR/build/node_modules/typescript/bin/tsc"
+                VITE="$TMPDIR/build/node_modules/vite/bin/vite.js"
+                ${buildPhase}
+              '' + pkgs.lib.optionalString pruneDevDeps ''
+                for pkg in typescript vite "@vitejs" vitest "@vitest" eslint "@eslint" tsx esbuild drizzle-kit; do
+                  rm -rf "node_modules/$pkg"
+                done
+                rm -rf node_modules/@types
+                find node_modules -name '*.d.ts' -not -path '*/dist/*' -delete 2>/dev/null || true
+              '' + ''
+                mkdir -p $out
+                cp -r $TMPDIR/build/* $out/
+              '';
+              installPhase = "true";
+            };
+          in {
+            # Add to mkGuest packages = [ pkgs.nodejs_22 p.package ].
+            package = node-built;
+
+            # Pass as services.<name> = p.service to mkGuest.
+            service = {
+              command = pkgs.writeShellScript "${name}-start" ''
+                set -eu
+                exec ${nodejs}/bin/node ${node-built}/${entrypoint}
+              '';
+              env = { NODE_ENV = "production"; } // env;
+              user = user;
+            };
+
+            # Pass as healthChecks.<name> = p.healthCheck to mkGuest.
+            # Matches the bound port in /proc/net/tcp (works with busybox).
+            healthCheck = {
+              healthCmd = "grep -q ':${portHex} ' /proc/net/tcp 2>/dev/null || grep -q ':${portHex} ' /proc/net/tcp6 2>/dev/null";
+              healthIntervalSecs = 10;
+              healthTimeoutSecs = 5;
+            };
+          };
+
         # ── mkGuest — Minimal guest (default) ─────────────────────
         #
         # mvm.lib.<system>.mkGuest {
@@ -76,7 +231,6 @@
         # Produces:
         #   $out/vmlinux       — uncompressed kernel for Firecracker
         #   $out/rootfs.ext4   — ext4 root filesystem (no initrd)
-        #
         lib.mkGuest = { name, packages ? [], services ? {}, healthChecks ? {},
                         users ? {}, hostname ? name, serviceGroup ? "mvm",
                         cacert ? pkgs.cacert }:
