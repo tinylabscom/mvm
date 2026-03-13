@@ -151,10 +151,10 @@ mvm.lib.<system>.mkNodeService {
 `mkNodeService` returns `{ package, service, healthCheck }` — the caller
 assembles them into `mkGuest { packages = [...p.package]; services.app = p.service; healthChecks.app = p.healthCheck; }`.
 
-- [ ] Add `mkNodeService` to `nix/guest-lib/flake.nix`
-- [ ] Refactor paperclip example to use `mkNodeService`
-- [ ] Add a minimal `hello-node` example using `mkNodeService`
-- [ ] Document the helper in `nix/guest-lib/flake.nix` comments
+- [x] Add `mkNodeService` to `nix/guest-lib/flake.nix`
+- [ ] Refactor paperclip example to use `mkNodeService` (deferred — workspace:* patching and multi-package tsc too complex for generic helper)
+- [x] Add a minimal `hello-node` example using `mkNodeService`
+- [x] Document the helper in `nix/guest-lib/flake.nix` comments
 
 ## Phase 4: `startupGraceSecs` health check for slow-starting services
 
