@@ -328,6 +328,11 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Read or write global operator config (~/.mvm/config.toml)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -534,6 +539,19 @@ enum SecurityCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print current config as TOML
+    Show,
+    /// Set a single config key
+    Set {
+        /// Config key (e.g. lima_cpus)
+        key: String,
+        /// New value
+        value: String,
+    },
+}
+
 // ============================================================================
 // Structured JSON event output for --json mode
 // ============================================================================
@@ -625,6 +643,9 @@ pub fn run() -> Result<()> {
         tracing::warn!("failed to install signal handler: {e}");
     }
 
+    // Load operator config once; used as fallback for lima_cpus, lima_mem, cpus, memory.
+    let cfg = mvm_core::user_config::load(None);
+
     let result = match cli.command {
         Commands::Bootstrap { production } => cmd_bootstrap(production),
         Commands::Setup {
@@ -632,13 +653,42 @@ pub fn run() -> Result<()> {
             force,
             lima_cpus,
             lima_mem,
-        } => cmd_setup(recreate, force, lima_cpus, lima_mem),
+        } => {
+            let effective_cpus = if lima_cpus == 8 {
+                cfg.lima_cpus
+            } else {
+                lima_cpus
+            };
+            let effective_mem = if lima_mem == 16 {
+                cfg.lima_mem_gib
+            } else {
+                lima_mem
+            };
+            cmd_setup(recreate, force, effective_cpus, effective_mem)
+        }
         Commands::Dev {
             lima_cpus,
             lima_mem,
             project,
             metrics_port,
-        } => cmd_dev(lima_cpus, lima_mem, project.as_deref(), metrics_port),
+        } => {
+            let effective_cpus = if lima_cpus == 8 {
+                cfg.lima_cpus
+            } else {
+                lima_cpus
+            };
+            let effective_mem = if lima_mem == 16 {
+                cfg.lima_mem_gib
+            } else {
+                lima_mem
+            };
+            cmd_dev(
+                effective_cpus,
+                effective_mem,
+                project.as_deref(),
+                metrics_port,
+            )
+        }
         Commands::Stop { name, all } => cmd_stop(name.as_deref(), all),
         Commands::Ssh => cmd_ssh(),
         Commands::SshConfig => cmd_ssh_config(),
@@ -761,6 +811,7 @@ pub fn run() -> Result<()> {
         Commands::CleanupOrphans { dry_run } => cmd_cleanup_orphans(dry_run),
         Commands::Template { action } => cmd_template(action),
         Commands::Vm { action } => cmd_vm(action),
+        Commands::Config { action } => cmd_config(action),
     };
 
     with_hints(result)
@@ -2326,17 +2377,15 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volume_cfg = rt_config.volumes.clone();
     };
 
-    const DEFAULT_CPUS: u32 = 2;
-    const DEFAULT_MEM: u32 = 1024;
-
+    let user_cfg = mvm_core::user_config::load(None);
     let final_cpus = cpus
         .or(rt_config.cpus)
         .or(tmpl_cpus)
-        .unwrap_or(DEFAULT_CPUS);
+        .unwrap_or(user_cfg.default_cpus);
     let final_memory = memory
         .or(rt_config.memory)
         .or(tmpl_mem)
-        .unwrap_or(DEFAULT_MEM);
+        .unwrap_or(user_cfg.default_memory_mib);
 
     // Allocate a network slot for this VM
     let slot = microvm::allocate_slot(&vm_name)?;
@@ -2608,8 +2657,7 @@ fn cmd_up(
                 }
             };
 
-            const DEFAULT_CPUS: u32 = 2;
-            const DEFAULT_MEM: u32 = 1024;
+            let user_cfg = mvm_core::user_config::load(None);
 
             let env = mvm_runtime::build_env::RuntimeBuildEnv;
             let result = mvm_build::dev_build::dev_build(&env, &resolved_flake, profile)?;
@@ -2626,8 +2674,8 @@ fn cmd_up(
                 revision_hash: result.revision_hash,
                 flake_ref: flake_ref.to_string(),
                 profile: profile.map(|s| s.to_string()),
-                cpus: cpus.unwrap_or(DEFAULT_CPUS),
-                memory: memory.unwrap_or(DEFAULT_MEM),
+                cpus: cpus.unwrap_or(user_cfg.default_cpus),
+                memory: memory.unwrap_or(user_cfg.default_memory_mib),
                 volumes: vec![],
                 config_files: vec![],
                 secret_files: vec![],
@@ -3797,6 +3845,32 @@ fn render_inspect_human(
 }
 
 // ============================================================================
+// Config commands
+// ============================================================================
+
+fn cmd_config(action: ConfigAction) -> Result<()> {
+    match action {
+        ConfigAction::Show => cmd_config_show(),
+        ConfigAction::Set { key, value } => cmd_config_set(&key, &value),
+    }
+}
+
+fn cmd_config_show() -> Result<()> {
+    let cfg = mvm_core::user_config::load(None);
+    let text = toml::to_string_pretty(&cfg).context("Failed to serialize config")?;
+    print!("{}", text);
+    Ok(())
+}
+
+fn cmd_config_set(key: &str, value: &str) -> Result<()> {
+    let mut cfg = mvm_core::user_config::load(None);
+    mvm_core::user_config::set_key(&mut cfg, key, value)?;
+    mvm_core::user_config::save(&cfg, None)?;
+    println!("Set {} = {}", key, value);
+    Ok(())
+}
+
+// ============================================================================
 // Utilities
 // ============================================================================
 
@@ -4959,5 +5033,59 @@ edition = "2024"
         assert!(prom.contains("mvm_instances_created_total"));
         assert!(prom.contains("# HELP"));
         assert!(prom.contains("# TYPE"));
+    }
+
+    // ---- Config command tests ----
+
+    #[test]
+    fn test_config_show_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "config", "show"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Config {
+                action: ConfigAction::Show
+            }
+        ));
+    }
+
+    #[test]
+    fn test_config_set_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "config", "set", "lima_cpus", "4"]).unwrap();
+        match cli.command {
+            Commands::Config {
+                action: ConfigAction::Set { key, value },
+            } => {
+                assert_eq!(key, "lima_cpus");
+                assert_eq!(value, "4");
+            }
+            _ => panic!("Expected Config Set command"),
+        }
+    }
+
+    #[test]
+    fn test_config_show_output_contains_lima_cpus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = mvm_core::user_config::MvmConfig::default();
+        mvm_core::user_config::save(&cfg, Some(tmp.path())).unwrap();
+        let loaded = mvm_core::user_config::load(Some(tmp.path()));
+        let text = toml::to_string_pretty(&loaded).unwrap();
+        assert!(text.contains("lima_cpus"));
+    }
+
+    #[test]
+    fn test_config_set_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = mvm_core::user_config::load(Some(tmp.path()));
+        mvm_core::user_config::set_key(&mut cfg, "lima_cpus", "4").unwrap();
+        mvm_core::user_config::save(&cfg, Some(tmp.path())).unwrap();
+        let reloaded = mvm_core::user_config::load(Some(tmp.path()));
+        assert_eq!(reloaded.lima_cpus, 4);
+    }
+
+    #[test]
+    fn test_config_set_unknown_key_fails() {
+        let mut cfg = mvm_core::user_config::MvmConfig::default();
+        let err = mvm_core::user_config::set_key(&mut cfg, "nonexistent_key", "5").unwrap_err();
+        assert!(err.to_string().contains("Unknown config key"));
     }
 }

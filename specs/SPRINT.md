@@ -1,17 +1,15 @@
-# Sprint 22 — Observability Deep Dive
+# Sprint 23 — Global Config File
 
-**Goal:** Make the runtime inspectable without adding a monitoring sidecar. Add timing metrics for the critical paths (`build_image`, `vm_start`, `vsock_handshake`), instrument those paths with `tracing` spans, and expose an opt-in HTTP `/metrics` endpoint for long-running commands.
+**Goal:** Replace scattered hardcoded defaults with a persistent operator config at `~/.mvm/config.toml`. CLI flags override config values; `mvmctl config show` and `mvmctl config set` provide read/write access.
 
-**Branch:** `feat/sprint-22`
-
-**Roadmap:** See [specs/plans/19-post-hardening-roadmap.md](plans/19-post-hardening-roadmap.md) for full post-hardening priorities.
+**Branch:** `feat/sprint-23`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade          |
-| Total tests      | 744                      |
+| Total tests      | 757                      |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -40,108 +38,73 @@
 - [19-observability-security.md](sprints/19-observability-security.md)
 - [20-production-hardening-validation.md](sprints/20-production-hardening-validation.md)
 - [21-binary-signing-attestation.md](sprints/21-binary-signing-attestation.md)
+- [22-observability-deep-dive.md](sprints/22-observability-deep-dive.md)
 
 ---
 
 ## Rationale
 
-The existing `mvmctl metrics` command already exposes Prometheus-format counters for requests and instance lifecycle events. What's missing:
+Several flags repeat the same defaults on every invocation (`--lima-cpus 8`, `--lima-mem 16`, `--cpus`, `--memory`). Users who customise these must type them every time. A single config file lets operators set-and-forget their environment preferences while preserving full CLI override capability.
 
-1. **Timing data** — operators can't see how long builds or VM starts take. Adding `build_image_duration_ms`, `vm_start_duration_ms`, and `vsock_handshake_rtt_ms` gauges closes that gap.
-2. **Tracing spans** — `tracing::info_span!` on critical paths lets structured log consumers (e.g. `RUST_LOG=mvm=trace`) correlate timing with context without code changes.
-3. **HTTP scrape endpoint** — `mvmctl metrics` is point-in-time and requires shell access. An opt-in `--metrics-port` flag on long-running commands (`run`, `dev`) lets Prometheus scrape metrics without interrupting the workflow.
-
-The HTTP server uses only `std::net::TcpListener` (no new deps) to keep the dependency footprint minimal.
+The config also provides a natural home for future settings (`metrics_port`, `log_format`, `hypervisor`), avoiding further flag sprawl. `mvmd` uses a separate config; `MvmConfig` is `mvmctl`-specific and lives in `mvm-core` so any future shared tooling can also load it.
 
 ---
 
-## Phase 1: Timing Gauges in `mvm-core` **Status: COMPLETE**
+## Phase 1: `MvmConfig` struct and load/save in `mvm-core` **Status: COMPLETE**
 
-### 1.1 Add timing fields to `Metrics`
+### 1.1 Define `MvmConfig`
 
-- [x] Add to `crates/mvm-core/src/observability/metrics.rs`:
+- [x] Create `crates/mvm-core/src/user_config.rs` (separate from existing `config.rs` which holds runtime constants):
   ```rust
-  // ── Timing gauges (last observed, milliseconds) ─────────────────
-  pub build_image_duration_ms: AtomicU64,  // last build_image() duration
-  pub vm_start_duration_ms: AtomicU64,     // last vm_start / run_from_snapshot() duration
-  pub vsock_handshake_rtt_ms: AtomicU64,   // last vsock auth handshake RTT
+  #[derive(Debug, Clone, Serialize, Deserialize)]
+  pub struct MvmConfig {
+      pub lima_cpus: u32,          // default: 8
+      pub lima_mem_gib: u32,       // default: 16
+      pub default_cpus: u32,       // default: 2  (for mvmctl run)
+      pub default_memory_mib: u32, // default: 512
+      pub log_format: Option<String>,  // default: None (human)
+      pub metrics_port: Option<u16>,   // default: None (disabled)
+  }
   ```
-- [x] Initialize all three to `0` in `Metrics::new()`
-- [x] Add to `MetricsSnapshot` and `prometheus_exposition()`:
-  - `mvm_build_image_duration_milliseconds` (gauge)
-  - `mvm_vm_start_duration_milliseconds` (gauge)
-  - `mvm_vsock_handshake_rtt_milliseconds` (gauge)
-  - Use `# TYPE ... gauge` (not counter) in Prometheus output
-- [x] 3 unit tests: each new field stores correctly; prometheus output contains `gauge` type lines
+- [x] `impl Default for MvmConfig` with values matching existing CLI `default_value` annotations
+- [x] Expose from `mvm_core` root: `pub mod user_config;`
+- [x] 2 unit tests: `MvmConfig::default()` has expected values; TOML roundtrip preserves all fields
 
-### 1.2 Instrument `build_image` in `mvm-build`
+### 1.2 `load()` and `save()`
 
-- [x] In `crates/mvm-build/src/dev_build.rs`, wrap the nix build with `std::time::Instant` and record to `build_image_duration_ms`
-- [x] Add `tracing::info_span!("build_image", flake = %flake_ref)` around the build
+- [x] `pub fn load(override_dir: Option<&Path>) -> MvmConfig` — reads `~/.mvm/config.toml`; creates with defaults if absent; warns on parse error and returns defaults
+- [x] `pub fn save(cfg: &MvmConfig, override_dir: Option<&Path>) -> Result<()>` — writes `~/.mvm/config.toml`, creates `~/.mvm/` dir if needed
+- [x] Both functions accept an optional override dir (`Option<&Path>`) for testability — production code passes `None` to use `~/.mvm/`
+- [x] 2 unit tests: `load()` from empty temp dir returns defaults and creates the file; `save()` + `load()` roundtrip
 
-### 1.3 Instrument `vm_start` in `mvm-runtime`
+### 1.3 `set_key` helper
 
-- [x] In `crates/mvm-runtime/src/vm/microvm.rs`, time the `start()` call and record to `vm_start_duration_ms`
-- [x] Add `tracing::info_span!("vm_start")` around the start sequence
-
-### 1.4 Instrument vsock handshake in `mvm-guest`
-
-- [x] In `crates/mvm-guest/src/vsock.rs`, time the auth handshake and record to `vsock_handshake_rtt_ms`
-- [x] Add `tracing::info_span!("vsock_handshake")` around the handshake sequence
+- [x] `pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()>`
+- [x] Matches known field names; parses value to correct type; returns `Err` with message listing valid keys for unknown keys
+- [x] 3 unit tests: known key updates; unknown key error; invalid value (non-numeric for u32) error
 
 ---
 
-## Phase 2: HTTP Metrics Endpoint **Status: COMPLETE**
+## Phase 2: Wire config into CLI defaults **Status: COMPLETE**
 
-### 2.1 `MetricsServer` in `mvm-cli`
+### 2.1 Load config at dispatch time
 
-- [ ] Create `crates/mvm-cli/src/metrics_server.rs`:
-  ```rust
-  pub struct MetricsServer { port: u16, handle: Option<std::thread::JoinHandle<()>> }
+- [x] In `run()` in `commands.rs`, call `mvm_core::user_config::load(None)` once before dispatch
+- [x] Use config values as fallback when CLI flags are absent:
+  - `--lima-cpus` / `--lima-mem`: if the flag matches its Clap default exactly, substitute from config
+  - `--cpus` / `--memory` in `RunParams`: if `None`, substitute `cfg.default_cpus` / `cfg.default_memory_mib`
 
-  impl MetricsServer {
-      /// Bind to 127.0.0.1:<port> and serve GET /metrics in a background thread.
-      pub fn start(port: u16) -> Result<Self>
-      /// Stop the background thread gracefully.
-      pub fn stop(self)
-  }
-  ```
-- [ ] Implementation: `TcpListener::bind("127.0.0.1:<port>")`, accept loop in background thread
-- [ ] On each connection: read first line of request (ignore rest), respond with:
-  - Status `200 OK`, `Content-Type: text/plain; version=0.0.4`
-  - Body: `metrics::global().prometheus_exposition()`
-- [x] Set non-blocking accept so shutdown flag is checked promptly
-- [x] 2 unit tests: server binds successfully; `GET /metrics` response body contains `mvm_requests_total`
+### 2.2 `mvmctl config show`
 
-### 2.2 Wire `--metrics-port` into long-running commands
+- [x] Add `Commands::Config { action: ConfigAction }` with `ConfigAction::Show`
+- [x] `cmd_config_show()` — loads config, prints as TOML to stdout
+- [x] 1 unit test: `config show` output contains `lima_cpus`
 
-- [x] Add `--metrics-port <PORT>` flag to `Commands::Run` and `Commands::Dev`:
-  ```
-  /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
-  #[arg(long, default_value = "0")]
-  metrics_port: u16,
-  ```
-- [x] In `cmd_run` and `cmd_dev`: if `metrics_port > 0`, call `MetricsServer::start(metrics_port)?`; stop on exit
-- [x] Log: `tracing::info!("Metrics available at http://127.0.0.1:{port}/metrics")`
-- [x] 2 unit tests: `--metrics-port 0` parses as 0; `--metrics-port 9090` parses as 9090
+### 2.3 `mvmctl config set <key> <value>`
 
----
-
-## Phase 3: Tracing Span Instrumentation in `mvm-cli` **Status: COMPLETE**
-
-### 3.1 Add spans to `cmd_run` and `cmd_stop`
-
-- [x] In `crates/mvm-cli/src/commands.rs`:
-  ```rust
-  fn cmd_run(...) -> Result<()> {
-      let _span = tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
-      // ...
-  }
-  fn cmd_stop(name: ...) -> Result<()> {
-      let _span = tracing::info_span!("cmd_stop", name = ?name, all).entered();
-      // ...
-  }
-  ```
+- [x] Add `ConfigAction::Set { key: String, value: String }`
+- [x] `cmd_config_set(key, value)` — loads, calls `set_key`, saves, prints `"Set <key> = <value>"`
+- [x] 2 unit tests: `set lima_cpus 4` persists; unknown key exits non-zero with helpful error
 
 ---
 
@@ -157,20 +120,6 @@ cargo check --workspace
 ---
 
 ## Future Sprints (Planned, Not Yet Implemented)
-
-### Sprint 23: Global Config File
-
-**Goal:** Replace scattered flags with a persistent operator config.
-
-- [ ] Define `MvmConfig` struct in `mvm-core/src/config.rs`:
-  - `default_cpus: u32`, `default_memory_mib: u32`, `default_hypervisor: String`
-  - `lima_cpus: u32`, `lima_mem_gib: u32`
-  - `log_format: Option<String>`, `metrics_port: Option<u16>`
-- [ ] Load from `~/.mvm/config.toml` (create with defaults if absent)
-- [ ] CLI flags override config values (existing `default_value` annotations replaced by config lookup)
-- [ ] Add `mvmctl config show` — print active config as TOML
-- [ ] Add `mvmctl config set <key> <value>` — write single key to `~/.mvm/config.toml`
-- [ ] 4 unit tests: default config, override from file, CLI flag overrides file, unknown key error
 
 ### Sprint 24: Man Pages & Shell Completions
 
