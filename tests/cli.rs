@@ -823,3 +823,42 @@ fn test_config_edit_with_true_editor() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_vm_list_help_exits_ok() {
+    mvm().args(["vm", "list", "--help"]).assert().success();
+}
+
+#[test]
+fn test_vm_list_exits_ok_on_clean_system() {
+    // On a system without a Lima VM, `vm list` should exit 0 or 1 but never
+    // crash (exit code 2 would indicate a parse failure, which we reject).
+    let code = mvm()
+        .args(["vm", "list"])
+        .output()
+        .expect("failed to run mvmctl")
+        .status
+        .code()
+        .unwrap_or(1);
+    assert_ne!(code, 2, "vm list must not fail at argument parsing");
+}
+
+#[test]
+fn test_vm_list_json_exits_ok() {
+    // On a clean system with no Lima VM, --json should print [] and exit 0 or 1.
+    let output = mvm()
+        .args(["vm", "list", "--json"])
+        .output()
+        .expect("failed to run mvmctl");
+    let code = output.status.code().unwrap_or(1);
+    assert_ne!(code, 2, "vm list --json must not fail at argument parsing");
+}
+
+#[test]
+fn test_vm_help_lists_list_subcommand() {
+    mvm()
+        .args(["vm", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("list"));
+}

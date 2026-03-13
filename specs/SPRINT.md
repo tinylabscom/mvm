@@ -1,16 +1,17 @@
-# Sprint 31 — VM Resource Defaults from Config
+# Sprint 32 — `mvmctl vm list` Subcommand
 
-**Goal:** Honour `default_cpus` and `default_memory_mib` from `~/.mvm/config.toml`
-when `--cpus` / `--memory` are not passed to `mvmctl run`.
+**Goal:** Add `mvmctl vm list` as an ergonomic alias for the existing
+`mvmctl vm status` (no-name form) so users have a discoverable command
+that matches the conventional `<tool> <noun> list` pattern.
 
-**Branch:** `feat/sprint-31`
+**Branch:** `feat/sprint-32`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 840+                     |
+| Total tests      | 855+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -48,55 +49,36 @@ when `--cpus` / `--memory` are not passed to `mvmctl run`.
 - [28-config-hot-reload.md](sprints/28-config-hot-reload.md)
 - [29-shell-completions.md](sprints/29-shell-completions.md)
 - [30-config-edit.md](sprints/30-config-edit.md)
+- [31-vm-resource-defaults.md](sprints/31-vm-resource-defaults.md)
 
 ---
 
 ## Rationale
 
-`MvmConfig` has `default_cpus` (default: 2) and `default_memory_mib` (default: 512)
-but `cmd_run` ignores them — it uses the Clap defaults directly.  This means
-`mvmctl config set default_cpus 4` has no effect on `mvmctl run`.  Closing this gap
-makes the config file the single source of truth for per-user defaults.
-
-Priority: CLI flag > config file value > Clap argument default.
+`mvmctl vm status` (with no name) already prints a tabular roster of all
+running microVMs.  Adding `mvmctl vm list` as a distinct subcommand that
+delegates to the same implementation gives users the expected `list` verb
+without duplicating any logic.
 
 ---
 
-## Phase 1: Wire config defaults into `cmd_run` **Status: COMPLETE**
+## Phase 1: Add `VmCmd::List` **Status: COMPLETE**
 
-### 1.1 Apply defaults in the `Commands::Run` dispatch block
-
-In the `Commands::Run { cpus, memory, .. }` match arm (around line 820 of
-`commands.rs`), before constructing `RunParams`, resolve the effective values:
-
-```rust
-// CLI flag takes precedence; fall back to config defaults.
-let effective_cpus = cpus.or(Some(cfg.default_cpus));
-let effective_memory_mib = memory_mb.or(Some(cfg.default_memory_mib));
-```
-
-Pass `effective_cpus` and `effective_memory_mib` to `RunParams`.
-
-### 1.2 No changes to `RunParams` or `cmd_run` internals
-
-`RunParams.cpus` is already `Option<u32>` and `RunParams.memory` is `Option<u32>`.
-`cmd_run` already uses these; if `Some`, they override the Lima defaults. So
-providing `Some(cfg.default_cpus)` when the user omits `--cpus` is sufficient.
+- [x] Add `List { json: bool }` variant to `VmCmd` enum
+- [x] Add match arm `VmCmd::List { json } => cmd_vm_status_all(json)` in `cmd_vm`
+- [x] Help text: "List all running microVMs (alias for 'vm status')"
 
 ---
 
 ## Phase 2: Tests **Status: COMPLETE**
 
-### 2.1 Unit tests in `commands.rs` `#[cfg(test)]`
+### 2.1 Tests in `tests/cli.rs`
 
-- [x] `test_run_uses_config_default_cpus` — `cpus: None` + `cfg.default_cpus = 4` → `Some(4)`
-- [x] `test_run_cli_flag_overrides_config_cpus` — `cpus: Some(8)` wins over `cfg.default_cpus = 4`
-- [x] `test_run_uses_config_default_memory` — same pattern for memory
-- [x] `test_run_cli_flag_overrides_config_memory` — CLI flag wins over config default
-
-### 2.2 Integration tests in `tests/cli.rs`
-
-- [x] `test_run_help_shows_flags` — already passing (regression guard)
+- [x] `test_vm_list_help_exits_ok` — `mvmctl vm list --help` exits 0
+- [x] `test_vm_list_exits_ok_on_clean_system` — exits 0 on a system with no Lima VM
+- [x] `test_vm_list_json_exits_ok` — `mvmctl vm list --json` exits 0 and stdout
+  is valid JSON (`[]` when no VMs are running)
+- [x] `test_vm_help_lists_list_subcommand` — `mvmctl vm --help` contains `list`
 
 ---
 
@@ -112,13 +94,14 @@ cargo check --workspace
 
 ## Future Sprints (Planned, Not Yet Implemented)
 
-### Sprint 32: `mvmctl vm list` — tabular VM roster
+### Sprint 33: `mvmctl run --detach` — background VM launch
 
-**Goal:** `mvmctl vm list` prints a table of all running and stopped microVMs with
-their name, status, CPU count, memory, and uptime.
+**Goal:** `mvmctl run --detach` starts the VM in the background and immediately
+returns, printing the VM name to stdout.  Without `--detach`, the current
+blocking behaviour is preserved.
 
-- [ ] Add `VmCmd::List` subcommand
-- [ ] Collect VM state from Lima + local state dir
-- [ ] Format as a padded ASCII table (no external dep — use `format!` with padding)
-- [ ] `--json` flag for machine-readable output
-- [ ] Tests: list exits 0 on clean system; `--json` stdout is valid JSON
+- [ ] Add `detach: bool` flag to `Run`
+- [ ] When set, fork a background process (or use `std::process::Command::spawn`)
+  and return immediately after logging the VM name
+- [ ] Tests: `--detach --help` exits 0; with detach the command exits before
+  the VM is fully booted

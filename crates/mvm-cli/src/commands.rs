@@ -572,6 +572,12 @@ enum VmCmd {
         #[arg(long)]
         json: bool,
     },
+    /// List all running microVMs (alias for 'vm status')
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3360,6 +3366,7 @@ fn cmd_vm(action: VmCmd) -> Result<()> {
             timeout,
         } => cmd_vm_exec(&name, &command, timeout),
         VmCmd::Diagnose { name, json } => cmd_vm_diagnose(&name, json),
+        VmCmd::List { json } => cmd_vm_status_all(json),
     }
 }
 
