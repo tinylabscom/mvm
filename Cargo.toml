@@ -125,6 +125,7 @@ mimalloc.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [profile.release]
 opt-level = 3

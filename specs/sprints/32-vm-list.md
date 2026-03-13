@@ -1,10 +1,10 @@
-# Sprint 33 — `mvmctl template init --preset`
+# Sprint 32 — `mvmctl vm list` Subcommand
 
-**Goal:** Add a `--preset` flag to `mvmctl template init` so users can start
-from a meaningful scaffold instead of a blank/minimal template.  Four presets
-are supported: `minimal` (default), `http`, `postgres`, and `worker`.
+**Goal:** Add `mvmctl vm list` as an ergonomic alias for the existing
+`mvmctl vm status` (no-name form) so users have a discoverable command
+that matches the conventional `<tool> <noun> list` pattern.
 
-**Branch:** `feat/sprint-33`
+**Branch:** `feat/sprint-32`
 
 ## Current Status (v0.6.0)
 
@@ -50,49 +50,35 @@ are supported: `minimal` (default), `http`, `postgres`, and `worker`.
 - [29-shell-completions.md](sprints/29-shell-completions.md)
 - [30-config-edit.md](sprints/30-config-edit.md)
 - [31-vm-resource-defaults.md](sprints/31-vm-resource-defaults.md)
-- [32-vm-list.md](sprints/32-vm-list.md)
 
 ---
 
 ## Rationale
 
-`mvmctl template init` currently writes one minimal `flake.nix` that shows a
-Python HTTP server.  New users need to edit the whole file to get started with
-a real workload.  Adding named presets lets users pick a starting point that
-already has the right packages, services, and health checks wired up.
+`mvmctl vm status` (with no name) already prints a tabular roster of all
+running microVMs.  Adding `mvmctl vm list` as a distinct subcommand that
+delegates to the same implementation gives users the expected `list` verb
+without duplicating any logic.
 
 ---
 
-## Phase 1: Scaffold Preset Files **Status: COMPLETE**
+## Phase 1: Add `VmCmd::List` **Status: COMPLETE**
 
-- [x] Update `crates/mvm-cli/resources/template_scaffold/flake.nix` → truly
-  minimal preset (packages only, no services, comments guide the user)
-- [x] Add `crates/mvm-cli/resources/template_scaffold/flake-http.nix` — Python
-  HTTP server with curl health check
-- [x] Add `crates/mvm-cli/resources/template_scaffold/flake-postgres.nix` —
-  PostgreSQL service with `pg_isready` health check
-- [x] Add `crates/mvm-cli/resources/template_scaffold/flake-worker.nix` —
-  long-running background worker with no ports
+- [x] Add `List { json: bool }` variant to `VmCmd` enum
+- [x] Add match arm `VmCmd::List { json } => cmd_vm_status_all(json)` in `cmd_vm`
+- [x] Help text: "List all running microVMs (alias for 'vm status')"
 
 ---
 
-## Phase 2: CLI & Logic **Status: COMPLETE**
+## Phase 2: Tests **Status: COMPLETE**
 
-- [x] Add `--preset <minimal|http|postgres|worker>` arg to `TemplateCmd::Init`
-  (default: `minimal`)
-- [x] Update `template_cmd::init` signature to accept `preset: &str`
-- [x] Update `scaffold_template_files` to select flake content by preset;
-  return `Err` for unknown preset name
-- [x] Pass `preset` through in `cmd_template` dispatch
+### 2.1 Tests in `tests/cli.rs`
 
----
-
-## Phase 3: Tests **Status: COMPLETE**
-
-- [x] `test_template_init_help_shows_preset_flag`
-- [x] `test_template_init_preset_minimal_exits_ok`
-- [x] `test_template_init_preset_http_exits_ok`
-- [x] `test_template_init_preset_unknown_shows_error`
+- [x] `test_vm_list_help_exits_ok` — `mvmctl vm list --help` exits 0
+- [x] `test_vm_list_exits_ok_on_clean_system` — exits 0 on a system with no Lima VM
+- [x] `test_vm_list_json_exits_ok` — `mvmctl vm list --json` exits 0 and stdout
+  is valid JSON (`[]` when no VMs are running)
+- [x] `test_vm_help_lists_list_subcommand` — `mvmctl vm --help` contains `list`
 
 ---
 
@@ -108,6 +94,14 @@ cargo check --workspace
 
 ## Future Sprints (Planned, Not Yet Implemented)
 
-### Sprint 34: `mvmctl flake check` — validate a flake before building
+### Sprint 33: `mvmctl run --detach` — background VM launch
 
-### Sprint 35: `mvmctl run --watch` — edit→rebuild→reboot loop
+**Goal:** `mvmctl run --detach` starts the VM in the background and immediately
+returns, printing the VM name to stdout.  Without `--detach`, the current
+blocking behaviour is preserved.
+
+- [ ] Add `detach: bool` flag to `Run`
+- [ ] When set, fork a background process (or use `std::process::Command::spawn`)
+  and return immediately after logging the VM name
+- [ ] Tests: `--detach --help` exits 0; with detach the command exits before
+  the VM is fully booted

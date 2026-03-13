@@ -862,3 +862,82 @@ fn test_vm_help_lists_list_subcommand() {
         .success()
         .stdout(predicate::str::contains("list"));
 }
+
+// ============================================================================
+// Sprint 33: template init --preset
+// ============================================================================
+
+#[test]
+fn test_template_init_help_shows_preset_flag() {
+    mvm()
+        .args(["template", "init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("preset"));
+}
+
+#[test]
+fn test_template_init_preset_minimal_exits_ok() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    mvm()
+        .args([
+            "template",
+            "init",
+            "test-minimal",
+            "--local",
+            "--preset",
+            "minimal",
+            "--dir",
+            dir.path().to_str().expect("utf8"),
+        ])
+        .assert()
+        .success();
+    assert!(
+        dir.path().join("test-minimal").join("flake.nix").exists(),
+        "flake.nix not scaffolded"
+    );
+}
+
+#[test]
+fn test_template_init_preset_http_exits_ok() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    mvm()
+        .args([
+            "template",
+            "init",
+            "test-http",
+            "--local",
+            "--preset",
+            "http",
+            "--dir",
+            dir.path().to_str().expect("utf8"),
+        ])
+        .assert()
+        .success();
+    let flake = dir.path().join("test-http").join("flake.nix");
+    assert!(flake.exists(), "flake.nix not scaffolded");
+    let content = std::fs::read_to_string(&flake).unwrap();
+    assert!(
+        content.contains("http.server"),
+        "http preset should reference http.server"
+    );
+}
+
+#[test]
+fn test_template_init_preset_unknown_shows_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    mvm()
+        .args([
+            "template",
+            "init",
+            "test-bad",
+            "--local",
+            "--preset",
+            "nonexistent",
+            "--dir",
+            dir.path().to_str().expect("utf8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown preset"));
+}

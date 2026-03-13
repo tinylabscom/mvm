@@ -54,10 +54,10 @@ fn resolve_flake_ref(flake: &str) -> String {
 }
 
 /// Initialize an empty template directory layout (idempotent).
-pub fn init(name: &str, local: bool, base_dir: &str) -> Result<()> {
+pub fn init(name: &str, local: bool, base_dir: &str, preset: &str) -> Result<()> {
     if local {
         let dir = std::path::Path::new(base_dir).join(name);
-        scaffold_template_files(&dir, name)?;
+        scaffold_template_files(&dir, name, preset)?;
         return Ok(());
     }
     tmpl::template_init(name)
@@ -294,7 +294,26 @@ fn local_templates(base: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
+fn flake_content_for_preset(preset: &str) -> Result<&'static str> {
+    match preset {
+        "minimal" => Ok(include_str!("../resources/template_scaffold/flake.nix")),
+        "http" => Ok(include_str!(
+            "../resources/template_scaffold/flake-http.nix"
+        )),
+        "postgres" => Ok(include_str!(
+            "../resources/template_scaffold/flake-postgres.nix"
+        )),
+        "worker" => Ok(include_str!(
+            "../resources/template_scaffold/flake-worker.nix"
+        )),
+        other => anyhow::bail!(
+            "Unknown preset {:?}. Valid presets: minimal, http, postgres, worker",
+            other
+        ),
+    }
+}
+
+fn scaffold_template_files(dir: &Path, name: &str, preset: &str) -> Result<()> {
     fs::create_dir_all(dir)?;
 
     let gitignore = dir.join(".gitignore");
@@ -307,10 +326,7 @@ fn scaffold_template_files(dir: &Path, name: &str) -> Result<()> {
 
     let flake_path = dir.join("flake.nix");
     if !flake_path.exists() {
-        fs::write(
-            &flake_path,
-            include_str!("../resources/template_scaffold/flake.nix"),
-        )?;
+        fs::write(&flake_path, flake_content_for_preset(preset)?)?;
     }
 
     let readme_path = dir.join("README.md");

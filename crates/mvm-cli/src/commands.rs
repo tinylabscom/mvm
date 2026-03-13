@@ -522,6 +522,9 @@ enum TemplateCmd {
         /// Base directory for local init (default: current dir)
         #[arg(long, default_value = ".")]
         dir: String,
+        /// Scaffold preset: minimal, http, postgres, worker (default: minimal)
+        #[arg(long, default_value = "minimal")]
+        preset: String,
     },
 }
 
@@ -3337,11 +3340,12 @@ fn cmd_template(action: TemplateCmd) -> Result<()> {
             local,
             vm,
             dir,
+            preset,
         } => {
             validate_template_name(&name)
                 .with_context(|| format!("Invalid template name: {:?}", name))?;
             let use_local = local && !vm;
-            template_cmd::init(&name, use_local, &dir)
+            template_cmd::init(&name, use_local, &dir, &preset)
         }
     }
 }

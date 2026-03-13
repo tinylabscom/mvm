@@ -1593,6 +1593,7 @@ dependencies = [
  "mvm-security",
  "predicates",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

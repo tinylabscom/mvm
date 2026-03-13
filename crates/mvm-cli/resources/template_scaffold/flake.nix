@@ -15,23 +15,22 @@
     in {
       packages.${system}.default = mvm.lib.${system}.mkGuest {
         name = "my-vm";
-        packages = [ pkgs.curl ];
 
-        # Services are supervised with automatic restart on failure.
-        services.my-app = {
-          # preStart runs once as root before the service starts.
-          # preStart = "mkdir -p /tmp/data";
+        # Add packages available inside the microVM.
+        packages = [ pkgs.curl pkgs.bash ];
 
-          # The long-running service command.
-          command = "${pkgs.python3}/bin/python3 -m http.server 8080";
-        };
+        # Add supervised services:
+        # services.my-service = {
+        #   command = "${pkgs.somePackage}/bin/my-binary --flag";
+        #   preStart = "echo starting";
+        # };
 
-        # Health checks are reported to the host via the guest agent.
-        healthChecks.my-app = {
-          healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/ >/dev/null";
-          healthIntervalSecs = 5;
-          healthTimeoutSecs = 3;
-        };
+        # Add health checks reported back to the host:
+        # healthChecks.my-service = {
+        #   healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
+        #   healthIntervalSecs = 5;
+        #   healthTimeoutSecs = 3;
+        # };
       };
     };
 }
