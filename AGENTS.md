@@ -64,14 +64,35 @@ Privacy and security are **critical priorities** for this project and must be co
 
 ## Documentation
 
-When adding, changing, or removing user-facing features (CLI commands, flags, config options, behavior), update the corresponding site documentation in `public/src/content/docs/`. Key files:
+Documentation is a **first-class deliverable**. Every code change that touches user-facing behavior MUST include corresponding doc updates in the same commit or PR. Stale docs are bugs.
 
-- `reference/cli-commands.md` — complete CLI command reference
-- `guides/` — user guides (networking, templates, nix-flakes, config-secrets, troubleshooting)
-- `getting-started/` — quickstart, installation, first-microvm
-- `contributing/development.md` — contributor guide
+### When to update docs
 
-Documentation must stay in sync with the code. Do not mark a task as done if the docs are stale.
+- **Adding a CLI command, subcommand, or flag** → update `reference/cli-commands.md` with the new entry
+- **Changing command behavior or defaults** → update both `reference/cli-commands.md` and any affected guides
+- **Adding/removing environment variables** → update the Environment Variables table in `reference/cli-commands.md`
+- **Adding/changing config options** → update `guides/config-secrets.md`
+- **Changing network layout or vsock behavior** → update `guides/networking.md`
+- **Changing template workflow** → update `guides/templates.md`
+- **Changing Nix flake API (mkGuest)** → update `guides/nix-flakes.md`
+- **Changing build/install steps** → update `getting-started/installation.md` and `contributing/development.md`
+
+### Key doc files
+
+- `public/src/content/docs/reference/cli-commands.md` — complete CLI command reference (every command, flag, and env var)
+- `public/src/content/docs/reference/architecture.md` — workspace structure, dependency graph, key abstractions
+- `public/src/content/docs/reference/filesystem.md` — drive model, rootfs layout, host-side paths
+- `public/src/content/docs/reference/guest-agent.md` — guest agent, vsock protocol, probes
+- `public/src/content/docs/guides/` — user guides (networking, templates, nix-flakes, config-secrets, troubleshooting)
+- `public/src/content/docs/getting-started/` — quickstart, installation, first-microvm
+- `public/src/content/docs/contributing/development.md` — contributor guide
+
+### Rules
+
+1. **Do not mark a task as done if docs are stale.** This is part of the Definition of Done.
+2. **CLI reference must match the code.** If `commands.rs` has it, `cli-commands.md` must have it — same flags, same defaults, same descriptions.
+3. **Verify after adding commands.** After adding or modifying any Clap command/subcommand/flag, diff `crates/mvm-cli/src/commands.rs` against `public/src/content/docs/reference/cli-commands.md` to confirm they match.
+4. **Guides must reflect current behavior.** Don't document aspirational features — only what's implemented and working.
 
 ## Screenshots & Temporary Files
 
