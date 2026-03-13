@@ -752,3 +752,44 @@ fn test_run_accepts_watch_config_flag() {
         .success()
         .stdout(predicate::str::contains("--watch-config"));
 }
+
+#[test]
+fn test_completions_bash_exits_ok() {
+    mvm()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mvmctl"));
+}
+
+#[test]
+fn test_completions_zsh_exits_ok() {
+    mvm()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mvmctl"));
+}
+
+#[test]
+fn test_completions_fish_exits_ok() {
+    mvm()
+        .args(["completions", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mvmctl"));
+}
+
+#[test]
+fn test_completions_no_shell_shows_error() {
+    mvm().args(["completions"]).assert().failure().code(2);
+}
+
+#[test]
+fn test_top_level_help_lists_completions() {
+    mvm()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completions"));
+}
