@@ -2,6 +2,75 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.6.0] — 2026-03-14
+
+### Added
+- Enhance mvmctl doctor with Nix version validation, flake check, Lima disk, and store health
+- Replace polling watch mode with native filesystem events
+- Add CLI aliases (ps, rm) and richer error hints
+- Add mvmctl metrics command (Prometheus + JSON output)
+- Add shell injection guards in crypto code (keystore, encryption)
+- Add state migration framework and wire into RunInfo load
+- Sprint 20 — input validation, checksum verification, stale PID cleanup, release hardening (v0.6.0)
+- Merge Sprint 20 — input validation, checksum verification, stale PID cleanup, release hardening (v0.6.0)
+- Sprint 21 — binary signing, smoke test, and signature verification
+- Sprint 22 — timing gauges, tracing spans, HTTP metrics endpoint
+- Sprint 23 — global config file at ~/.mvm/config.toml
+- Sprint 24 — man pages via xtask + clap_mangen
+- Sprint 25 — mvmctl uninstall + E2E test harness
+- Sprint 26 — local audit logging and mvmctl audit tail
+- Sprint 27 — config validation & input sanitisation at parse time
+- Sprint 28 — config file hot-reload & watch mode
+- Sprint 29 — shell completion generation tests
+- Sprint 30 — mvmctl config edit subcommand
+- Sprint 31 — honour config defaults for cpus and memory in mvmctl run
+- Sprint 32 — mvmctl vm list subcommand
+- Sprint 33 — mvmctl template init --preset
+- Sprint 34 — mvmctl flake check
+- Sprint 35 — mvmctl run --watch (edit→rebuild→reboot loop)
+- Add mkNodeService helper to guest-lib + hello-node example
+- Add startupGraceSecs grace period for health checks
+- Sprint 36 — Fast Boot & Minimal Images
+- Sprint 37 — Image Insights, DX Polish & Guest-Lib Expansion
+
+### Changed
+- Tag v0.5.0 and archive Sprint 17
+- Merge feat/sprint-27 — config validation & input sanitisation
+- Merge feat/sprint-28 — config file hot-reload & watch mode
+- Merge feat/sprint-29 — shell completion generation tests
+- Merge feat/sprint-30 — mvmctl config edit subcommand
+- Merge feat/sprint-31 — VM resource defaults from config
+- Merge feat/sprint-32 — mvmctl vm list subcommand
+- Merge feat/sprint-33 — template init --preset
+- Merge feat/sprint-34 — mvmctl flake check
+- Merge feat/sprint-35 — mvmctl run --watch
+
+### Documentation
+- Sprint 18 plan — Developer Experience & Polish
+- Archive Sprint 18 and plan Sprint 19 — Observability & Security Hygiene
+- Archive Sprint 20 and plan Sprint 21 — Binary Signing & Upgrade Safety
+- Sync CLI reference with commands.rs, enforce docs-as-deliverable
+- Mark Sprint 36 Phase 1 complete — tsx eliminated, 80 sec boot measured
+- Add explicit Clippy zero-warnings rule to AGENTS.md
+- Remove all mvmd references from README and site docs
+
+### Fixed
+- Replace stale 'mvm' binary name with 'mvmctl' in user-facing strings
+- Paperclip example — correct tsx loader path, deployment mode, and init setup
+- Resolve clippy warnings in test code for --all-targets builds
+- Update quinn-proto to 0.11.14 for RUSTSEC-2026-0037
+
+### Performance
+- Eliminate tsx runtime transpilation in paperclip — 3 min → 80 sec boot
+- Prune dev-only npm packages from paperclip rootfs closure
+- Speed up config_watcher tests with configurable debounce
+
+### Testing
+- Fix test_e2e_cli_flow_flags_parse to use --help instead of real commands
+
+### Plan
+- Sprint 36 — Fast Boot & Minimal Images
+
 ## [0.5.0] — 2026-03-12
 
 ### Added
