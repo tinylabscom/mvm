@@ -131,19 +131,75 @@ pub fn list(json: bool) -> Result<()> {
 
 pub fn info(name: &str, json: bool) -> Result<()> {
     let spec = tmpl::template_load(name)?;
+    let revision = tmpl::template_load_current_revision(name)?;
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&spec)?);
+        #[derive(serde::Serialize)]
+        struct InfoOut {
+            spec: TemplateSpec,
+            revision: Option<mvm_core::template::TemplateRevision>,
+            path: String,
+        }
+        let out = InfoOut {
+            spec,
+            revision,
+            path: template_dir(name),
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!("Template: {}", spec.template_id);
-        println!(" Flake:   {}", spec.flake_ref);
-        println!(" Profile: {}", spec.profile);
-        println!(" Role:    {}", spec.role);
-        println!(" vCPUs:   {}", spec.vcpus);
-        println!(" MemMiB:  {}", spec.mem_mib);
-        println!(" DataMiB: {}", spec.data_disk_mib);
-        println!(" Created: {}", spec.created_at);
-        println!(" Updated: {}", spec.updated_at);
-        println!(" Path:    {}", template_dir(name));
+        println!("  Flake:   {}", spec.flake_ref);
+        println!("  Profile: {}", spec.profile);
+        println!("  Role:    {}", spec.role);
+        println!("  vCPUs:   {}", spec.vcpus);
+        println!("  MemMiB:  {}", spec.mem_mib);
+        println!("  DataMiB: {}", spec.data_disk_mib);
+        println!("  Created: {}", spec.created_at);
+        println!("  Updated: {}", spec.updated_at);
+        println!("  Path:    {}", template_dir(name));
+
+        if let Some(rev) = &revision {
+            use mvm_core::pool::format_bytes;
+            println!();
+            println!("Current revision:");
+            println!(
+                "  Hash:    {}",
+                &rev.revision_hash[..rev.revision_hash.len().min(12)]
+            );
+            println!("  Built:   {}", rev.built_at);
+            if let Some(sizes) = &rev.artifact_paths.sizes {
+                println!("  Kernel:  {}", format_bytes(sizes.vmlinux_bytes));
+                println!("  Rootfs:  {}", format_bytes(sizes.rootfs_bytes));
+                if let Some(initrd) = sizes.initrd_bytes {
+                    println!("  Initrd:  {}", format_bytes(initrd));
+                }
+                println!("  Total:   {}", format_bytes(sizes.total_bytes()));
+                if let Some(closure) = sizes.nix_closure_bytes {
+                    println!("  Closure: {}", format_bytes(closure));
+                }
+            }
+
+            match &rev.snapshot {
+                Some(snap) => {
+                    println!();
+                    println!("Snapshot:");
+                    println!("  Created: {}", snap.created_at);
+                    println!("  VM state: {}", format_bytes(snap.vmstate_size_bytes));
+                    println!("  Memory:   {}", format_bytes(snap.mem_size_bytes));
+                    println!(
+                        "  Total:    {}",
+                        format_bytes(snap.vmstate_size_bytes + snap.mem_size_bytes)
+                    );
+                }
+                None => {
+                    println!();
+                    println!("Snapshot: (none)");
+                }
+            }
+        } else {
+            println!();
+            println!("Revision: (not yet built)");
+        }
     }
     Ok(())
 }
@@ -306,8 +362,11 @@ fn flake_content_for_preset(preset: &str) -> Result<&'static str> {
         "worker" => Ok(include_str!(
             "../resources/template_scaffold/flake-worker.nix"
         )),
+        "python" => Ok(include_str!(
+            "../resources/template_scaffold/flake-python.nix"
+        )),
         other => anyhow::bail!(
-            "Unknown preset {:?}. Valid presets: minimal, http, postgres, worker",
+            "Unknown preset {:?}. Valid presets: minimal, http, postgres, worker, python",
             other
         ),
     }

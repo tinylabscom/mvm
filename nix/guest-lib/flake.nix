@@ -206,6 +206,150 @@
             };
           };
 
+        # ── mkPythonService — Python service helper ──────────────────
+        #
+        # Builds a Python app with nixpkgs packages and returns
+        # { package, service, healthCheck } for use with mkGuest.
+        #
+        # Usage:
+        #   let p = mvm.lib.${system}.mkPythonService {
+        #     name           = "my-api";
+        #     src            = ./app;           # directory with your Python code
+        #     pythonPackages = ps: [ ps.flask ]; # nixpkgs Python packages
+        #     entrypoint     = "main.py";       # relative to src root
+        #     env            = { PORT = "8080"; };
+        #     user           = "myapi";
+        #     port           = 8080;
+        #   };
+        #   in mvm.lib.${system}.mkGuest {
+        #     packages          = [ p.package ];
+        #     services.myapi    = p.service;
+        #     healthChecks.myapi = p.healthCheck;
+        #   }
+        #
+        # Note: pythonPackages must be available in nixpkgs. For pip-based
+        # dependencies, use mkGuest directly with a custom derivation.
+        lib.mkPythonService = {
+          name,
+          src,
+          pythonPackages ? (ps: []),
+          entrypoint,
+          env ? {},
+          user ? name,
+          port,
+          python ? pkgs.python3,
+        }:
+          let
+            intToHex4 = n:
+              let
+                digits = [ "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"
+                           "A" "B" "C" "D" "E" "F" ];
+                d = i: builtins.elemAt digits i;
+              in "${d (n / 4096)}${d (builtins.mod (n / 256) 16)}${d (builtins.mod (n / 16) 16)}${d (builtins.mod n 16)}";
+
+            portHex = intToHex4 port;
+
+            pythonEnv = python.withPackages pythonPackages;
+
+            appPkg = pkgs.stdenv.mkDerivation {
+              pname = "${name}-app";
+              version = "0";
+              inherit src;
+              installPhase = "cp -r . $out";
+            };
+          in {
+            package = appPkg;
+
+            service = {
+              command = pkgs.writeShellScript "${name}-start" ''
+                set -eu
+                exec ${pythonEnv}/bin/python3 ${appPkg}/${entrypoint}
+              '';
+              env = { PYTHONUNBUFFERED = "1"; } // env;
+              user = user;
+            };
+
+            healthCheck = {
+              healthCmd = "grep -q ':${portHex} ' /proc/net/tcp 2>/dev/null || grep -q ':${portHex} ' /proc/net/tcp6 2>/dev/null";
+              healthIntervalSecs = 10;
+              healthTimeoutSecs = 5;
+            };
+          };
+
+        # ── mkStaticSite — Static file server helper ──────────────────
+        #
+        # Serves static files via busybox httpd and returns
+        # { package, service, healthCheck } for use with mkGuest.
+        #
+        # Usage:
+        #   let s = mvm.lib.${system}.mkStaticSite {
+        #     name = "docs";
+        #     src  = ./public;  # directory of static files
+        #     port = 8080;
+        #   };
+        #   in mvm.lib.${system}.mkGuest {
+        #     packages           = [ s.package ];
+        #     services.docs      = s.service;
+        #     healthChecks.docs  = s.healthCheck;
+        #   }
+        #
+        # No extra packages needed — busybox httpd is already in mkGuest images.
+        lib.mkStaticSite = {
+          name,
+          src,
+          port ? 8080,
+          user ? name,
+        }:
+          let
+            intToHex4 = n:
+              let
+                digits = [ "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"
+                           "A" "B" "C" "D" "E" "F" ];
+                d = i: builtins.elemAt digits i;
+              in "${d (n / 4096)}${d (builtins.mod (n / 256) 16)}${d (builtins.mod (n / 16) 16)}${d (builtins.mod n 16)}";
+
+            portHex = intToHex4 port;
+
+            sitePkg = pkgs.stdenv.mkDerivation {
+              pname = "${name}-site";
+              version = "0";
+              inherit src;
+              installPhase = "cp -r . $out";
+            };
+          in {
+            package = sitePkg;
+
+            service = {
+              command = "${busybox}/bin/busybox httpd -f -p ${toString port} -h ${sitePkg}";
+              user = user;
+            };
+
+            healthCheck = {
+              healthCmd = "grep -q ':${portHex} ' /proc/net/tcp 2>/dev/null || grep -q ':${portHex} ' /proc/net/tcp6 2>/dev/null";
+              healthIntervalSecs = 10;
+              healthTimeoutSecs = 5;
+            };
+          };
+
+        # ── Service builder contract ──────────────────────────────────
+        #
+        # mkNodeService, mkPythonService, and mkStaticSite all return the
+        # same shape: { package, service, healthCheck }.
+        #
+        #   package     — Nix derivation to include in mkGuest { packages = [...] }
+        #   service     — attrset for mkGuest { services.<name> = ... }
+        #                 contains: command, optional env, optional user, optional preStart
+        #   healthCheck — attrset for mkGuest { healthChecks.<name> = ... }
+        #                 contains: healthCmd, healthIntervalSecs, healthTimeoutSecs
+        #
+        # Compose them like:
+        #   let p = mkNodeService { ... };
+        #   in mkGuest {
+        #     packages          = [ pkgs.nodejs_22 p.package ];
+        #     services.app      = p.service;
+        #     healthChecks.app  = p.healthCheck;
+        #   }
+
         # ── mkGuest — Minimal guest (default) ─────────────────────
         #
         # mvm.lib.<system>.mkGuest {

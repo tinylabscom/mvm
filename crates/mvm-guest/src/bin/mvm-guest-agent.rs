@@ -976,3 +976,127 @@ fn main() {
         handle_client(cfd, &state, &integration_state, &probe_state, boot_at);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_guest::integrations::{IntegrationEntry, IntegrationHealthResult, IntegrationStatus};
+
+    fn make_state(
+        entries: Vec<(IntegrationEntry, Option<IntegrationHealthResult>)>,
+    ) -> Arc<Mutex<IntegrationState>> {
+        let integrations = entries
+            .into_iter()
+            .map(|(entry, last_result)| IntegrationHealth { entry, last_result })
+            .collect();
+        Arc::new(Mutex::new(IntegrationState { integrations }))
+    }
+
+    fn entry_with_grace(name: &str, grace_secs: u64) -> IntegrationEntry {
+        IntegrationEntry {
+            name: name.to_string(),
+            checkpoint_cmd: None,
+            restore_cmd: None,
+            critical: false,
+            health_cmd: Some("true".to_string()),
+            health_interval_secs: 10,
+            health_timeout_secs: 5,
+            startup_grace_secs: grace_secs,
+        }
+    }
+
+    fn unhealthy_result() -> IntegrationHealthResult {
+        IntegrationHealthResult {
+            healthy: false,
+            detail: "connection refused".to_string(),
+            checked_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn healthy_result() -> IntegrationHealthResult {
+        IntegrationHealthResult {
+            healthy: true,
+            detail: "ok".to_string(),
+            checked_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_grace_period_unhealthy_returns_starting() {
+        // Boot happened 5 seconds ago, grace period is 60 seconds
+        let boot_at = std::time::Instant::now() - Duration::from_secs(5);
+        let state = make_state(vec![(
+            entry_with_grace("app", 60),
+            Some(unhealthy_result()),
+        )]);
+
+        let reports = build_integration_reports(&state, boot_at);
+        assert_eq!(reports.len(), 1);
+        assert!(
+            matches!(reports[0].status, IntegrationStatus::Starting),
+            "Expected Starting during grace period, got {:?}",
+            reports[0].status
+        );
+    }
+
+    #[test]
+    fn test_grace_period_expired_returns_error() {
+        // Boot happened 120 seconds ago, grace period is 60 seconds
+        let boot_at = std::time::Instant::now() - Duration::from_secs(120);
+        let state = make_state(vec![(
+            entry_with_grace("app", 60),
+            Some(unhealthy_result()),
+        )]);
+
+        let reports = build_integration_reports(&state, boot_at);
+        assert_eq!(reports.len(), 1);
+        assert!(
+            matches!(reports[0].status, IntegrationStatus::Error(_)),
+            "Expected Error after grace period, got {:?}",
+            reports[0].status
+        );
+    }
+
+    #[test]
+    fn test_grace_period_no_result_returns_starting() {
+        // Boot happened 5 seconds ago, no health check result yet
+        let boot_at = std::time::Instant::now() - Duration::from_secs(5);
+        let state = make_state(vec![(entry_with_grace("app", 60), None)]);
+
+        let reports = build_integration_reports(&state, boot_at);
+        assert_eq!(reports.len(), 1);
+        assert!(
+            matches!(reports[0].status, IntegrationStatus::Starting),
+            "Expected Starting for no-result during grace, got {:?}",
+            reports[0].status
+        );
+    }
+
+    #[test]
+    fn test_no_grace_period_no_result_returns_pending() {
+        let boot_at = std::time::Instant::now() - Duration::from_secs(5);
+        let state = make_state(vec![(entry_with_grace("app", 0), None)]);
+
+        let reports = build_integration_reports(&state, boot_at);
+        assert_eq!(reports.len(), 1);
+        assert!(
+            matches!(reports[0].status, IntegrationStatus::Pending),
+            "Expected Pending with no grace and no result, got {:?}",
+            reports[0].status
+        );
+    }
+
+    #[test]
+    fn test_healthy_returns_active_regardless_of_grace() {
+        let boot_at = std::time::Instant::now() - Duration::from_secs(5);
+        let state = make_state(vec![(entry_with_grace("app", 60), Some(healthy_result()))]);
+
+        let reports = build_integration_reports(&state, boot_at);
+        assert_eq!(reports.len(), 1);
+        assert!(
+            matches!(reports[0].status, IntegrationStatus::Active),
+            "Expected Active for healthy integration, got {:?}",
+            reports[0].status
+        );
+    }
+}

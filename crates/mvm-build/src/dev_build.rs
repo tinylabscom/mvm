@@ -28,6 +28,8 @@ pub struct DevBuildResult {
     /// the microvm.nix backend can be used instead of manual Firecracker
     /// API calls.
     pub runner_dir: Option<String>,
+    /// Artifact file sizes (kernel, rootfs, initrd).
+    pub artifact_sizes: mvm_core::pool::ArtifactSizes,
 }
 
 /// Result of dev-build cache cleanup.
@@ -144,6 +146,7 @@ pub fn dev_build(
         env.log_success(&format!("Cache hit: {}", build_dir));
         let initrd_path = detect_initrd(env, &build_dir);
         let runner_dir = detect_runner(env, &build_dir);
+        let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
         return Ok(DevBuildResult {
             vmlinux_path: format!("{}/vmlinux", build_dir),
             initrd_path,
@@ -152,6 +155,7 @@ pub fn dev_build(
             revision_hash,
             cached: true,
             runner_dir,
+            artifact_sizes,
         });
     }
 
@@ -162,6 +166,7 @@ pub fn dev_build(
 
     let initrd_path = detect_initrd(env, &build_dir);
     let runner_dir = detect_runner(env, &build_dir);
+    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
     Ok(DevBuildResult {
         vmlinux_path: format!("{}/vmlinux", build_dir),
         initrd_path,
@@ -170,6 +175,7 @@ pub fn dev_build(
         revision_hash,
         cached: false,
         runner_dir,
+        artifact_sizes,
     })
 }
 
@@ -307,6 +313,35 @@ fn copy_dev_artifacts(
         dir = build_dir,
     ))
     .with_context(|| format!("Failed to copy artifacts to {}", build_dir))
+}
+
+/// Measure artifact file sizes in the build directory using `stat -c%s`.
+fn measure_artifact_sizes(
+    env: &dyn ShellEnvironment,
+    build_dir: &str,
+    has_initrd: bool,
+) -> mvm_core::pool::ArtifactSizes {
+    let parse_size = |path: &str| -> u64 {
+        env.shell_exec_stdout(&format!("stat -c%s {} 2>/dev/null || echo 0", path))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    };
+
+    let vmlinux_bytes = parse_size(&format!("{}/vmlinux", build_dir));
+    let rootfs_bytes = parse_size(&format!("{}/rootfs.ext4", build_dir));
+    let initrd_bytes = if has_initrd {
+        Some(parse_size(&format!("{}/initrd", build_dir)))
+    } else {
+        None
+    };
+
+    mvm_core::pool::ArtifactSizes {
+        vmlinux_bytes,
+        rootfs_bytes,
+        initrd_bytes,
+        nix_closure_bytes: None,
+    }
 }
 
 /// Check whether an initrd exists in the build directory.
@@ -775,6 +810,7 @@ mod tests {
             revision_hash: "hash123".to_string(),
             cached: false,
             runner_dir: None,
+            artifact_sizes: Default::default(),
         };
 
         assert!(result.vmlinux_path.starts_with(&result.build_dir));
@@ -799,6 +835,7 @@ mod tests {
             revision_hash: "hash456".to_string(),
             cached: false,
             runner_dir: Some(dir.clone()),
+            artifact_sizes: Default::default(),
         };
 
         assert!(result.runner_dir.is_some());
@@ -854,5 +891,45 @@ mod tests {
         );
 
         assert_eq!(result.revision_hash, "abc123");
+    }
+
+    #[test]
+    fn test_measure_artifact_sizes() {
+        let env = TestEnv::new();
+        env.stub_stdout("vmlinux", "12345678");
+        env.stub_stdout("rootfs.ext4", "45678901");
+
+        let sizes = measure_artifact_sizes(&env, "/tmp/build", false);
+        assert_eq!(sizes.vmlinux_bytes, 12_345_678);
+        assert_eq!(sizes.rootfs_bytes, 45_678_901);
+        assert!(sizes.initrd_bytes.is_none());
+        assert!(sizes.nix_closure_bytes.is_none());
+    }
+
+    #[test]
+    fn test_measure_artifact_sizes_with_initrd() {
+        let env = TestEnv::new();
+        env.stub_stdout("vmlinux", "12345678");
+        env.stub_stdout("rootfs.ext4", "45678901");
+        env.stub_stdout("initrd", "2345678");
+
+        let sizes = measure_artifact_sizes(&env, "/tmp/build", true);
+        assert_eq!(sizes.vmlinux_bytes, 12_345_678);
+        assert_eq!(sizes.rootfs_bytes, 45_678_901);
+        assert_eq!(sizes.initrd_bytes, Some(2_345_678));
+    }
+
+    #[test]
+    fn test_dev_build_includes_artifact_sizes() {
+        let env = TestEnv::new();
+
+        env.stub_stdout("--print-out-paths", "/nix/store/xyz789-tenant-minimal\n");
+        env.stub_stdout("test -f", "no");
+        // stat calls return sizes
+        env.stub_stdout("stat -c%s", "99999");
+
+        let result = dev_build(&env, "/tmp/flake", Some("minimal")).unwrap();
+        // Sizes should be populated (exact value depends on stub matching)
+        assert!(result.artifact_sizes.vmlinux_bytes > 0 || result.artifact_sizes.rootfs_bytes > 0);
     }
 }

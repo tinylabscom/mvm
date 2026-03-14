@@ -231,6 +231,7 @@ pub fn pool_build_with_opts(
                 } else {
                     None
                 },
+                sizes: None,
             },
             built_at: utc_now(),
         };

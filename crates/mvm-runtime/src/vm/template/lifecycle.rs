@@ -291,7 +291,8 @@ pub fn template_build(id: &str, force: bool, update_hash: bool) -> Result<()> {
         flake_lock_hash
     };
 
-    // Record template revision metadata
+    // Record template revision metadata (with artifact sizes from dev_build)
+    let sizes = result.artifact_sizes.clone();
     let revision = TemplateRevision {
         schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
         revision_hash: rev.clone(),
@@ -301,7 +302,12 @@ pub fn template_build(id: &str, force: bool, update_hash: bool) -> Result<()> {
             vmlinux: "vmlinux".to_string(),
             rootfs: "rootfs.ext4".to_string(),
             fc_base_config: "fc-base.json".to_string(),
-            initrd: None,
+            initrd: if result.initrd_path.is_some() {
+                Some("initrd".to_string())
+            } else {
+                None
+            },
+            sizes: Some(sizes.clone()),
         },
         built_at: utc_now(),
         profile: spec.profile.clone(),
@@ -317,12 +323,35 @@ pub fn template_build(id: &str, force: bool, update_hash: bool) -> Result<()> {
         "cat > {rev_meta_path} << 'MVMEOF'\n{rev_json}\nMVMEOF"
     ))?;
 
+    use mvm_core::pool::format_bytes;
     ui::success(&format!(
-        "Template '{}' built successfully (revision: {})",
+        "Template '{}' built successfully (revision: {}, rootfs: {}, kernel: {})",
         id,
-        &rev[..rev.len().min(12)]
+        &rev[..rev.len().min(12)],
+        format_bytes(sizes.rootfs_bytes),
+        format_bytes(sizes.vmlinux_bytes),
     ));
     Ok(())
+}
+
+/// Load the current revision metadata for a template (if any).
+///
+/// Returns `None` if the template has no built revision or if `revision.json`
+/// cannot be read/parsed.
+pub fn template_load_current_revision(id: &str) -> Result<Option<TemplateRevision>> {
+    let rev = match current_revision_id(id) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    let rev_dir = template_revision_dir(id, &rev);
+    let meta_path = format!("{}/revision.json", rev_dir);
+    let data = match vm_exec_stdout(&format!("cat {} 2>/dev/null", meta_path)) {
+        Ok(d) if !d.trim().is_empty() => d,
+        _ => return Ok(None),
+    };
+    let revision: TemplateRevision = serde_json::from_str(&data)
+        .with_context(|| format!("Corrupt revision.json for template {}", id))?;
+    Ok(Some(revision))
 }
 
 /// Check if the current revision of a template has a snapshot.

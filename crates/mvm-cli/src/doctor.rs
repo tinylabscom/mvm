@@ -82,6 +82,7 @@ pub fn run(json: bool) -> Result<()> {
 
     // Nix store health
     checks.push(nix_store_check(in_vm));
+    checks.push(nix_store_size_check(in_vm));
 
     // ── Render ────────────────────────────────────────────────────
     let all_ok = checks.iter().all(|c| c.ok);
@@ -558,6 +559,49 @@ fn nix_store_check(in_vm: bool) -> Check {
         _ => Check {
             name: "nix store",
             category: "tools",
+            ok: true,
+            info: "unable to check (skipped)".to_string(),
+        },
+    }
+}
+
+/// Check Nix store size and warn if it exceeds 20 GiB.
+fn nix_store_size_check(in_vm: bool) -> Check {
+    let cmd = "du -sb /nix/store 2>/dev/null | awk '{print $1}'";
+    let output_result = if in_vm {
+        shell::run_host("bash", &["-lc", cmd])
+    } else {
+        shell::run_on_vm("mvm", cmd)
+    };
+
+    match output_result {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let bytes: u64 = stdout.trim().parse().unwrap_or(0);
+            let threshold: u64 = 20 * 1024 * 1024 * 1024; // 20 GiB
+            let human = mvm_core::pool::format_bytes(bytes);
+            if bytes > threshold {
+                Check {
+                    name: "nix store size",
+                    category: "disk",
+                    ok: false,
+                    info: format!(
+                        "{} — exceeds 20 GiB. Run 'nix-collect-garbage -d' to reclaim space.",
+                        human
+                    ),
+                }
+            } else {
+                Check {
+                    name: "nix store size",
+                    category: "disk",
+                    ok: true,
+                    info: human,
+                }
+            }
+        }
+        _ => Check {
+            name: "nix store size",
+            category: "disk",
             ok: true,
             info: "unable to check (skipped)".to_string(),
         },

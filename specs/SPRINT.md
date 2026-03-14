@@ -1,19 +1,17 @@
-# Sprint 36 — Fast Boot & Minimal Images
+# Sprint 37 — Image Insights, DX Polish & Guest-Lib Expansion
 
-**Goal:** Make microVMs boot as fast and stay as small as possible.
-The paperclip example exposed three problems:
-(1) tsx transpiles TypeScript at runtime — ~3 min cold start;
-(2) rootfs closures pull in unnecessary build-time deps;
-(3) writing Node.js service flakes requires too much boilerplate.
+**Goal:** Instrument the build pipeline with artifact size tracking, enrich
+`template info` with revision/snapshot data, expand error hints, and add
+`mkPythonService` / `mkStaticSite` to guest-lib.
 
-**Branch:** `feat/sprint-36`
+**Branch:** `feat/sprint-37`
 
 ## Current Status (v0.6.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 873+                     |
+| Total tests      | 858+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -56,127 +54,125 @@ The paperclip example exposed three problems:
 - [33-template-init-preset.md](sprints/33-template-init-preset.md)
 - [34-flake-check.md](sprints/34-flake-check.md)
 - [35-run-watch.md](sprints/35-run-watch.md)
+- [36-fast-boot-minimal-images.md](sprints/36-fast-boot-minimal-images.md)
 
 ---
 
 ## Rationale
 
-The paperclip example revealed how badly runtime TypeScript transpilation hurts
-boot time.  tsx cold-transpiles every imported module on startup — 24 drizzle
-migrations, all of `@paperclipai/db`, `@paperclipai/shared`, and their
-dependencies — taking ~3 minutes before the server even binds a port.
+Sprint 36 delivered fast boot via pre-compiled exports, dev-dep pruning, and
+`mkNodeService`, but left three items incomplete: rootfs size measurement,
+post-pruning server verification, and health-check log suppression testing.
+These naturally feed into Sprint 37's first theme — instrumenting the build
+pipeline with artifact size tracking.
 
-The compiled `dist/` files already exist (tsc runs at image build time), but the
-workspace packages' `package.json` still has `"exports": { ".": "./src/index.ts"
-}`.  Node.js resolves to the TypeScript source, invoking tsx.  Patching the
-exports to `"./dist/index.js"` at build time makes tsx unnecessary: the server
-boots in under 10 seconds.
+After `template build`, the user sees "Template 'foo' built successfully
+(revision: abc123)" but has no idea whether the rootfs is 50 MB or 500 MB.
+The snapshot code already measures sizes via `stat -c%s` — this pattern just
+needs extending to build artifacts.
 
-Beyond paperclip, all Node.js workload images benefit from a pre-compile step,
-and all images benefit from pruning dev-only npm packages from the runtime
-closure.
+On the DX side, `template info` shows only the TemplateSpec. It doesn't surface
+artifact sizes, revision details, or snapshot status — all data that lives in
+`revision.json` but is invisible. The error hint system covers ~8 patterns but
+misses common failures.
+
+For guest-lib, `mkNodeService` established a clean `{ package, service,
+healthCheck }` pattern. Extending to Python and static sites is straightforward
+and high-value.
 
 ---
 
-## Phase 1: Pre-compiled exports — eliminate tsx at runtime
+## Phase 1: Sprint 36 Carryovers — Size Measurement & Verification
 
-**Problem:** Workspace packages export `./src/index.ts`.  The compiled
-`./dist/index.js` exists but isn't wired up.  tsx must re-transpile every import
-on every cold start.
+### 1a. `ArtifactSizes` struct in mvm-core
 
-**Fix:** In the `paperclip-built` derivation's `buildPhase`, after running `tsc`
-for each workspace package, patch its `package.json` exports to point at `dist/`:
+- [x] `ArtifactSizes` struct with `vmlinux_bytes`, `rootfs_bytes`, `initrd_bytes`, `nix_closure_bytes`
+- [x] `format_bytes()` utility with unit tests (0, KiB, MiB, GiB boundaries)
+- [x] `sizes: Option<ArtifactSizes>` added to `ArtifactPaths` (backward compat via `#[serde(default)]`)
+- [x] Serde roundtrip tests for `ArtifactSizes`
 
-```js
-// For each packages/*/package.json after tsc:
-pkg.exports = { ".": "./dist/index.js", "./*": "./dist/*.js" };
-pkg.main = "./dist/index.js";
-pkg.types = "./dist/index.d.ts";
-```
+### 1b. Size capture in dev_build
 
-Remove `--import tsx/dist/loader.mjs` from the `paperclip-start` command.
+- [x] `measure_artifact_sizes()` function using `stat -c%s`
+- [x] `artifact_sizes` field added to `DevBuildResult`
+- [x] Sizes measured on both fresh-build and cache-hit paths
+- [x] Tests for size measurement
 
-**Expected result:** Cold boot drops from ~3 min → ~10 sec (tsx loader +
-transpilation time eliminated entirely).
+### 1c. Store sizes in TemplateRevision
 
-- [x] Patch `packages/*/package.json` exports in `paperclip-built` buildPhase
-- [x] Remove tsx `--import` flag from `paperclip-start`
-- [x] Verify server starts in under 30 seconds (actual: ~80 sec; tsx gone, remainder is postgres init + 24 migrations on first boot)
+- [x] `template_build()` populates `artifact_sizes` from `DevBuildResult`
+- [x] Build success message includes human-readable sizes (rootfs + kernel)
 
-## Phase 2: Prune dev dependencies from the runtime closure
+### 1d. Health check grace period test
 
-**Problem:** `npm install --ignore-scripts` installs everything
-(devDependencies included).  The rootfs closure pulls in typescript, vite,
-esbuild CLI, test frameworks, etc. — none needed at runtime.
+- [x] Unit tests for `build_integration_reports()` grace period logic
+- [x] Tests cover: `Starting` during grace, `Error` after grace, no integrations case
 
-**Fix:** After building, delete non-runtime packages from `node_modules/` before
-copying to `$out`.  A safe list:
-- `typescript`, `vite`, `vitest`, `@vitest/*`, `eslint`, `@eslint/*`
-- `tsx` (once phase 1 is done), `esbuild` (used only by tsx/vite at build time)
-- `drizzle-kit` (migration generator, not runtime)
-- `@types/*`, `*.d.ts` files outside `dist/`
-
-Also strip `devDependencies` entries from workspace `package.json` files before
-the npm install — this prevents them from being installed at all.
-
-**Expected result:** ~30–50% rootfs size reduction.
-
-- [x] Add a pruning step after all builds in `paperclip-built` buildPhase
-- [ ] Measure rootfs size before and after
-- [ ] Ensure server still starts correctly after pruning
-
-## Phase 3: `mkNodeService` helper in guest-lib
-
-**Problem:** Writing a Node.js service in a flake requires ~60 lines of
-boilerplate: FOD npm install, autoPatchelf, tsc build, start script, env block.
-Every Node.js workload repeats this pattern.
-
-**Add** `mvm.lib.<system>.mkNodeService` to `nix/guest-lib/flake.nix`:
-
-```nix
-mvm.lib.<system>.mkNodeService {
-  name = "my-app";
-  src = fetchGit { url = ...; rev = ...; };
-  npmHash = "sha256-...";   # FOD hash for npm install
-  buildPhase = ''            # optional; default: tsc
-    (cd server && node "$TSC")
-  '';
-  entrypoint = "server/dist/index.js";  # relative to built output
-  env = { PORT = "3000"; };
-  user = "myapp";
-  port = 3000;               # used for health check + port mapping
-}
-```
-
-`mkNodeService` returns `{ package, service, healthCheck }` — the caller
-assembles them into `mkGuest { packages = [...p.package]; services.app = p.service; healthChecks.app = p.healthCheck; }`.
-
-- [x] Add `mkNodeService` to `nix/guest-lib/flake.nix`
-- [ ] Refactor paperclip example to use `mkNodeService` (deferred — workspace:* patching and multi-package tsc too complex for generic helper)
-- [x] Add a minimal `hello-node` example using `mkNodeService`
-- [x] Document the helper in `nix/guest-lib/flake.nix` comments
-
-## Phase 4: `startupGraceSecs` health check for slow-starting services
-
-**Problem:** Services like paperclip take time to run migrations on the first
-boot.  The health check starts failing immediately, flooding the log before the
-service is ready.  There is no way to suppress early failures.
-
-**Add** `startupGraceSecs` to health check configs (already plumbed in
-`mkHealthCheckFile` via `lib.optionalAttrs`; needs guest-agent support):
-
-In `mvm-guest/src/integrations.rs`, honour `startup_grace_secs`:
-- Skip health check failures for the first N seconds after the VM boots
-- Report `starting` status instead of `unhealthy` during the grace period
-
-- [x] Add `Starting` status variant and grace-period logic in the guest agent
-- [x] Wire up in paperclip example (`startupGraceSecs = 180`)
-- [ ] Test that health checks don't spam the log during startup (manual verification needed)
-
-## Verification
+### Verification
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-# Visual: paperclip VM starts in < 30s after phase 1
+cargo test --workspace              # 858+ tests pass
+cargo clippy --workspace -- -D warnings  # zero warnings
 ```
+
+---
+
+## Phase 2: Enhanced `template info` and Artifact Reporting
+
+- [x] `template_load_current_revision()` in lifecycle.rs
+- [x] `template info` shows revision hash, built_at, artifact sizes, snapshot status
+- [x] `template info --json` includes full revision data via `InfoOut` struct
+
+---
+
+## Phase 3: DX — Error Hints & Scaffold Expansion
+
+### 3a. New error hint patterns
+
+- [x] Stale flake.lock (`does not provide attribute` / `flake has no`)
+- [x] Disk full (`No space left on device` / `ENOSPC`)
+- [x] Timeout/connection errors (`timed out` / `connection refused`)
+- [x] FOD hash mismatch (`hash mismatch` + `got:`)
+- [x] Template not found → suggest `mvmctl template list`
+
+### 3b. Python scaffold preset
+
+- [x] `flake-python.nix` scaffold template
+- [x] `flake_content_for_preset("python")` wired up
+- [x] Preset help text updated
+- [x] CLI test for python preset
+
+### 3c. Doctor: Nix store size warning
+
+- [x] `nix_store_size_check()` warns if store > 20 GiB
+- [x] Suggests `nix-collect-garbage -d`
+
+---
+
+## Phase 4: Guest-Lib — `mkPythonService` and `mkStaticSite`
+
+- [x] `mkPythonService` in `nix/guest-lib/flake.nix`
+- [x] `mkStaticSite` in `nix/guest-lib/flake.nix`
+- [x] Service builder contract documented in flake.nix comments
+- [x] `hello-python` example (flake.nix + app/main.py)
+
+---
+
+## Key Files Changed
+
+| File | Changes |
+|------|---------|
+| `crates/mvm-core/src/pool.rs` | `ArtifactSizes` struct, `format_bytes()` |
+| `crates/mvm-core/src/template.rs` | Test fix for new `sizes` field |
+| `crates/mvm-build/src/dev_build.rs` | Size capture, `DevBuildResult.artifact_sizes` |
+| `crates/mvm-build/src/orchestrator.rs` | `sizes: None` compat |
+| `crates/mvm-build/tests/pipeline.rs` | `sizes: None` compat |
+| `crates/mvm-runtime/src/vm/template/lifecycle.rs` | Store sizes, `template_load_current_revision()` |
+| `crates/mvm-cli/src/template_cmd.rs` | Enrich `info()`, python preset |
+| `crates/mvm-cli/src/commands.rs` | 5 new `with_hints()` patterns |
+| `crates/mvm-cli/src/doctor.rs` | Nix store size check |
+| `crates/mvm-cli/resources/template_scaffold/flake-python.nix` | New scaffold |
+| `crates/mvm-guest/src/bin/mvm-guest-agent.rs` | Grace period unit tests |
+| `nix/guest-lib/flake.nix` | `mkPythonService`, `mkStaticSite`, docs |
+| `nix/examples/hello-python/` | New example |
+| `tests/cli.rs` | Python preset test |

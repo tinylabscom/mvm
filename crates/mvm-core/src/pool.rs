@@ -343,6 +343,45 @@ pub struct BuildRevision {
     pub built_at: String,
 }
 
+/// Artifact file sizes in bytes for build reporting and size tracking.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactSizes {
+    #[serde(default)]
+    pub vmlinux_bytes: u64,
+    #[serde(default)]
+    pub rootfs_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initrd_bytes: Option<u64>,
+    /// Nix closure size (all transitive dependencies). Optional — only
+    /// populated when `nix path-info -S` succeeds after a build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nix_closure_bytes: Option<u64>,
+}
+
+impl ArtifactSizes {
+    /// Total size of all artifacts in bytes.
+    pub fn total_bytes(&self) -> u64 {
+        self.vmlinux_bytes + self.rootfs_bytes + self.initrd_bytes.unwrap_or(0)
+    }
+}
+
+/// Format a byte count as a human-readable string (e.g. "45.2 MiB").
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// Paths to build artifacts within the pool's artifact directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactPaths {
@@ -352,6 +391,9 @@ pub struct ArtifactPaths {
     /// NixOS initrd (optional — present when the flake produces one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initrd: Option<String>,
+    /// Artifact file sizes (optional — populated by builds after Sprint 37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<ArtifactSizes>,
 }
 
 // --- Filesystem paths ---
@@ -623,5 +665,107 @@ mod tests {
         // revision: None should be omitted or null
         let parsed: RegistryArtifact = serde_json::from_str(&json).unwrap();
         assert!(parsed.revision.is_none());
+    }
+
+    #[test]
+    fn test_artifact_sizes_serde_roundtrip() {
+        let sizes = ArtifactSizes {
+            vmlinux_bytes: 12_345_678,
+            rootfs_bytes: 45_678_901,
+            initrd_bytes: Some(2_345_678),
+            nix_closure_bytes: Some(100_000_000),
+        };
+        let json = serde_json::to_string(&sizes).unwrap();
+        let parsed: ArtifactSizes = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, sizes);
+    }
+
+    #[test]
+    fn test_artifact_sizes_default() {
+        let sizes = ArtifactSizes::default();
+        assert_eq!(sizes.vmlinux_bytes, 0);
+        assert_eq!(sizes.rootfs_bytes, 0);
+        assert!(sizes.initrd_bytes.is_none());
+        assert!(sizes.nix_closure_bytes.is_none());
+    }
+
+    #[test]
+    fn test_artifact_sizes_total_bytes() {
+        let sizes = ArtifactSizes {
+            vmlinux_bytes: 100,
+            rootfs_bytes: 200,
+            initrd_bytes: Some(50),
+            nix_closure_bytes: None,
+        };
+        assert_eq!(sizes.total_bytes(), 350);
+
+        let no_initrd = ArtifactSizes {
+            vmlinux_bytes: 100,
+            rootfs_bytes: 200,
+            initrd_bytes: None,
+            nix_closure_bytes: None,
+        };
+        assert_eq!(no_initrd.total_bytes(), 300);
+    }
+
+    #[test]
+    fn test_artifact_sizes_backward_compat() {
+        // JSON without sizes field should deserialize ArtifactPaths fine
+        let json = r#"{
+            "vmlinux": "vmlinux",
+            "rootfs": "rootfs.ext4",
+            "fc_base_config": "fc-base.json"
+        }"#;
+        let parsed: ArtifactPaths = serde_json::from_str(json).unwrap();
+        assert!(parsed.sizes.is_none());
+    }
+
+    #[test]
+    fn test_artifact_paths_with_sizes() {
+        let paths = ArtifactPaths {
+            vmlinux: "vmlinux".to_string(),
+            rootfs: "rootfs.ext4".to_string(),
+            fc_base_config: "fc-base.json".to_string(),
+            initrd: None,
+            sizes: Some(ArtifactSizes {
+                vmlinux_bytes: 10_000_000,
+                rootfs_bytes: 50_000_000,
+                initrd_bytes: None,
+                nix_closure_bytes: None,
+            }),
+        };
+        let json = serde_json::to_string(&paths).unwrap();
+        let parsed: ArtifactPaths = serde_json::from_str(&json).unwrap();
+        assert!(parsed.sizes.is_some());
+        assert_eq!(parsed.sizes.unwrap().rootfs_bytes, 50_000_000);
+    }
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_bytes_bytes() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_bytes_kib() {
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+    }
+
+    #[test]
+    fn test_format_bytes_mib() {
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_bytes(47_400_000), "45.2 MiB");
+    }
+
+    #[test]
+    fn test_format_bytes_gib() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_bytes(2_684_354_560), "2.5 GiB");
     }
 }

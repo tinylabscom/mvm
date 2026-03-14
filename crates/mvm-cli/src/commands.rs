@@ -543,7 +543,7 @@ enum TemplateCmd {
         /// Base directory for local init (default: current dir)
         #[arg(long, default_value = ".")]
         dir: String,
-        /// Scaffold preset: minimal, http, postgres, worker (default: minimal)
+        /// Scaffold preset: minimal, http, postgres, worker, python (default: minimal)
         #[arg(long, default_value = "minimal")]
         preset: String,
     },
@@ -2009,6 +2009,31 @@ fn with_hints(result: Result<()>) -> Result<()> {
                  Common fixes: ensure flake inputs are up to date ('nix flake update'), \
                  or check your flake.nix for syntax errors.",
             );
+        } else if msg.contains("does not provide attribute")
+            || msg.contains("flake has no")
+            || msg.contains("does not provide a package")
+        {
+            ui::warn(
+                "Hint: Flake attribute not found. Your flake.lock may be stale.\n      \
+                 Try: nix flake update (inside the Lima VM or flake directory).",
+            );
+        } else if msg.contains("No space left on device") || msg.contains("ENOSPC") {
+            ui::warn(
+                "Hint: Disk full. Run 'mvmctl doctor' to check space, \
+                 or run 'nix-collect-garbage -d' inside the Lima VM.",
+            );
+        } else if msg.contains("timed out") || msg.contains("connection refused") {
+            ui::warn(
+                "Hint: The Lima VM may be unresponsive. Try 'mvmctl status' or \
+                 restart with 'mvmctl stop && mvmctl dev'.",
+            );
+        } else if msg.contains("hash mismatch") && msg.contains("got:") {
+            ui::warn(
+                "Hint: Fixed-output derivation hash changed. Run \
+                 'mvmctl template build <name> --update-hash' to recompute.",
+            );
+        } else if msg.contains("does it exist?") && msg.contains("template") {
+            ui::warn("Hint: List available templates with 'mvmctl template list'.");
         }
     }
     result

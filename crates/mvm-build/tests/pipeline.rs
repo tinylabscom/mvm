@@ -177,6 +177,7 @@ fn template_revision_json(profile: &str, role: &str) -> String {
             rootfs: "rootfs.ext4".to_string(),
             fc_base_config: "fc-base.json".to_string(),
             initrd: None,
+            sizes: None,
         },
         built_at: "2025-01-01T00:00:00Z".to_string(),
         profile: profile.to_string(),

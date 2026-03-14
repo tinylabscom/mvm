@@ -982,6 +982,31 @@ fn test_template_init_preset_http_exits_ok() {
 }
 
 #[test]
+fn test_template_init_preset_python_exits_ok() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    mvm()
+        .args([
+            "template",
+            "init",
+            "test-python",
+            "--local",
+            "--preset",
+            "python",
+            "--dir",
+            dir.path().to_str().expect("utf8"),
+        ])
+        .assert()
+        .success();
+    let flake = dir.path().join("test-python").join("flake.nix");
+    assert!(flake.exists(), "flake.nix not scaffolded");
+    let content = std::fs::read_to_string(&flake).unwrap();
+    assert!(
+        content.contains("python"),
+        "python preset should reference python"
+    );
+}
+
+#[test]
 fn test_template_init_preset_unknown_shows_error() {
     let dir = tempfile::tempdir().expect("temp dir");
     mvm()
