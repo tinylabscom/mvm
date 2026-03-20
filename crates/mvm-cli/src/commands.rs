@@ -2674,7 +2674,12 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         )
     };
 
-    ui::step(2, 2, &format!("Booting Firecracker VM '{}'", vm_name));
+    let backend_label = match effective_hypervisor {
+        "apple-container" => "Apple Container",
+        "qemu" => "QEMU (microvm.nix)",
+        _ => "Firecracker VM",
+    };
+    ui::step(2, 2, &format!("Booting {} '{}'", backend_label, vm_name));
 
     let rt_config = match config_path {
         Some(p) => image::parse_runtime_config(p)?,
