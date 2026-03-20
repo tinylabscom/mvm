@@ -177,6 +177,16 @@ mod tests {
         eprintln!("  kernel: {}", kernel.display());
         eprintln!("  rootfs: {}", rootfs.display());
 
+        // The start() call invokes the Swift bridge which creates a
+        // ContainerManager and attempts to boot a VM. This may segfault
+        // if Virtualization.framework isn't properly initialized (requires
+        // a signed binary with com.apple.security.virtualization entitlement
+        // and proper Swift runtime setup).
+        //
+        // To run this test successfully:
+        //   1. Build: cargo test -p mvm-apple-container --no-run
+        //   2. Sign:  codesign --force --sign - --entitlements resources/mvmctl.entitlements <test-binary>
+        //   3. Run:   cargo test -p mvm-apple-container -- --ignored boot_test
         let result = start(
             "boot-test",
             kernel.to_str().expect("kernel path must be UTF-8"),
@@ -188,21 +198,16 @@ mod tests {
         match &result {
             Ok(()) => {
                 eprintln!("Container started successfully!");
-                // Verify it appears in list
                 let ids = list_ids();
                 assert!(
                     ids.contains(&"boot-test".to_string()),
                     "boot-test not in list: {ids:?}"
                 );
-                // Stop it
                 let stop_result = stop("boot-test");
                 assert!(stop_result.is_ok(), "stop failed: {stop_result:?}");
                 eprintln!("Container stopped successfully!");
             }
             Err(e) => {
-                // Log the error but don't fail — the rootfs may not be
-                // compatible with Apple Container's vminitd expectations.
-                // This is expected until we build a Container-specific rootfs.
                 eprintln!("Container start returned error (may be expected): {e}");
             }
         }

@@ -102,26 +102,42 @@ public func startContainer(
 
             let network = try ContainerManager.VmnetNetwork()
 
-            var manager = try await ContainerManager(
+            // Use the rootfs as the initfs — our Nix-built rootfs has /init.
+            // This avoids needing to pull the vminit OCI image.
+            let initfs = Mount.block(
+                format: "ext4",
+                source: rootfsPath,
+                destination: "/"
+            )
+
+            // Use a temporary root for the container manager state
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mvm-containers")
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: true
+            )
+
+            var manager = try ContainerManager(
                 kernel: kernel,
-                initfsReference: "vminit:latest",
+                initfs: initfs,
+                root: root,
                 network: network,
                 rosetta: false
             )
 
-            // Create rootfs mount from existing ext4 file
+            // Create the container using a minimal base image.
+            // Our Nix rootfs is mounted as an additional block device
+            // that overrides the root filesystem via /init.
             let rootfs = Mount.block(
                 format: "ext4",
                 source: rootfsPath,
                 destination: "/"
             )
 
-            // Use the first create() overload with a dummy reference.
-            // The rootfs Mount overrides the actual filesystem.
             let container = try await manager.create(
                 id,
-                reference: "scratch",
-                rootfsSizeInBytes: 0,
+                reference: "docker.io/library/alpine:3.16",
+                rootfsSizeInBytes: 512 * 1024 * 1024,
                 readOnly: false
             ) { config in
                 config.cpus = cpuCount
