@@ -16,8 +16,77 @@ use mvm_core::util::parse_human_size;
 use mvm_core::vm_backend::VmId;
 use mvm_runtime::config;
 use mvm_runtime::shell;
-use mvm_runtime::vm::backend::{AnyBackend, FirecrackerConfig};
+use mvm_runtime::vm::backend::AnyBackend;
 use mvm_runtime::vm::{firecracker, image, lima, microvm};
+
+/// Parameters for building a `VmStartConfig` from runtime-specific types.
+struct VmStartParams<'a> {
+    name: String,
+    rootfs_path: String,
+    vmlinux_path: String,
+    initrd_path: Option<String>,
+    revision_hash: String,
+    flake_ref: String,
+    profile: Option<String>,
+    cpus: u32,
+    memory_mib: u32,
+    volumes: &'a [image::RuntimeVolume],
+    config_files: &'a [microvm::DriveFile],
+    secret_files: &'a [microvm::DriveFile],
+    port_mappings: &'a [config::PortMapping],
+}
+
+impl VmStartParams<'_> {
+    fn into_start_config(self) -> mvm_core::vm_backend::VmStartConfig {
+        mvm_core::vm_backend::VmStartConfig {
+            name: self.name,
+            rootfs_path: self.rootfs_path,
+            kernel_path: Some(self.vmlinux_path),
+            initrd_path: self.initrd_path,
+            revision_hash: self.revision_hash,
+            flake_ref: self.flake_ref,
+            profile: self.profile,
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            ports: self
+                .port_mappings
+                .iter()
+                .map(|p| mvm_core::vm_backend::VmPortMapping {
+                    host: p.host,
+                    guest: p.guest,
+                })
+                .collect(),
+            volumes: self
+                .volumes
+                .iter()
+                .map(|v| mvm_core::vm_backend::VmVolume {
+                    host: v.host.clone(),
+                    guest: v.guest.clone(),
+                    size: v.size.clone(),
+                })
+                .collect(),
+            config_files: self
+                .config_files
+                .iter()
+                .map(|f| mvm_core::vm_backend::VmFile {
+                    name: f.name.clone(),
+                    content: f.content.clone(),
+                    mode: f.mode,
+                })
+                .collect(),
+            secret_files: self
+                .secret_files
+                .iter()
+                .map(|f| mvm_core::vm_backend::VmFile {
+                    name: f.name.clone(),
+                    content: f.content.clone(),
+                    mode: f.mode,
+                })
+                .collect(),
+            runner_dir: None,
+        }
+    }
+}
 
 /// Global registry of spawned child PIDs so the signal handler can clean them up.
 static CHILD_PIDS: std::sync::LazyLock<Arc<Mutex<Vec<u32>>>> =
@@ -2632,9 +2701,6 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         .or(tmpl_mem)
         .unwrap_or(user_cfg.default_memory_mib);
 
-    // Allocate a network slot for this VM
-    let slot = microvm::allocate_slot(&vm_name)?;
-
     // Parse port mappings and inject as config drive file
     let port_mappings = parse_port_specs(ports)?;
     if let Some(f) = ports_to_drive_file(&port_mappings) {
@@ -2646,30 +2712,31 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         config_files.push(f);
     }
 
-    let run_config = microvm::FlakeRunConfig {
-        name: vm_name,
-        slot,
-        vmlinux_path,
-        initrd_path,
-        rootfs_path,
-        revision_hash,
-        flake_ref: source_flake,
-        profile: source_profile,
-        cpus: final_cpus,
-        memory: final_memory,
-        volumes: volume_cfg,
-        config_files,
-        secret_files,
-        ports: port_mappings,
-    };
-
-    let vm_name_owned = run_config.name.clone();
-    let has_ports = !run_config.ports.is_empty();
+    let vm_name_owned = vm_name.clone();
+    let has_ports = !port_mappings.is_empty();
 
     // If a template snapshot exists, restore from it instead of cold-booting.
+    // Snapshot restore requires Firecracker-specific FlakeRunConfig directly.
     if let Some(ref snap_info) = snapshot_info
         && let Some(tmpl) = template_name
     {
+        let slot = microvm::allocate_slot(&vm_name)?;
+        let run_config = microvm::FlakeRunConfig {
+            name: vm_name,
+            slot,
+            vmlinux_path,
+            initrd_path,
+            rootfs_path,
+            revision_hash,
+            flake_ref: source_flake,
+            profile: source_profile,
+            cpus: final_cpus,
+            memory: final_memory,
+            volumes: volume_cfg,
+            config_files,
+            secret_files,
+            ports: port_mappings,
+        };
         let rev = mvm_runtime::vm::template::lifecycle::current_revision_id(tmpl)?;
         let snap_dir = mvm_core::template::template_snapshot_dir(tmpl, &rev);
         ui::step(
@@ -2679,8 +2746,24 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         );
         microvm::restore_from_template_snapshot(tmpl, &run_config, &snap_dir, snap_info)?;
     } else {
+        let start_config = VmStartParams {
+            name: vm_name,
+            rootfs_path,
+            vmlinux_path,
+            initrd_path,
+            revision_hash,
+            flake_ref: source_flake,
+            profile: source_profile,
+            cpus: final_cpus,
+            memory_mib: final_memory,
+            volumes: &volume_cfg,
+            config_files: &config_files,
+            secret_files: &secret_files,
+            port_mappings: &port_mappings,
+        }
+        .into_start_config();
         let backend = AnyBackend::from_hypervisor(hypervisor);
-        backend.start_firecracker(&FirecrackerConfig { run_config })?;
+        backend.start(&start_config)?;
     }
 
     mvm_core::audit::emit(
@@ -2785,33 +2868,24 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             if let Some(f) = env_vars_to_drive_file(env_vars) {
                 w_config_files.push(f);
             }
-            let w_slot = match microvm::allocate_slot(&vm_name_owned) {
-                Ok(s) => s,
-                Err(e) => {
-                    ui::warn(&format!("Could not allocate slot: {e}; skipping reboot"));
-                    continue;
-                }
-            };
-            let w_run_config = microvm::FlakeRunConfig {
+            let w_start_config = VmStartParams {
                 name: vm_name_owned.clone(),
-                slot: w_slot,
+                rootfs_path: result.rootfs_path,
                 vmlinux_path: result.vmlinux_path,
                 initrd_path: result.initrd_path,
-                rootfs_path: result.rootfs_path,
                 revision_hash: result.revision_hash,
                 flake_ref: flake.to_string(),
                 profile: profile.map(|s| s.to_string()),
                 cpus: final_cpus,
-                memory: final_memory,
-                volumes: w_volume_cfg,
-                config_files: w_config_files,
-                secret_files: w_secret_files,
-                ports: w_port_mappings,
-            };
+                memory_mib: final_memory,
+                volumes: &w_volume_cfg,
+                config_files: &w_config_files,
+                secret_files: &w_secret_files,
+                port_mappings: &w_port_mappings,
+            }
+            .into_start_config();
             let w_backend = AnyBackend::from_hypervisor(hypervisor);
-            if let Err(e) = w_backend.start_firecracker(&FirecrackerConfig {
-                run_config: w_run_config,
-            }) {
+            if let Err(e) = w_backend.start(&w_start_config) {
                 ui::warn(&format!(
                     "Could not start VM: {e}; waiting for next change..."
                 ));
@@ -2988,8 +3062,6 @@ fn cmd_up(
                     &format!("Launching VM '{}'", vm_name),
                 );
 
-                let slot = microvm::allocate_slot(vm_name)?;
-
                 // Parse fleet config ports/env and inject as config drive files
                 let port_mappings = parse_port_specs(&resolved.ports)?;
                 let mut config_files = Vec::new();
@@ -3000,25 +3072,25 @@ fn cmd_up(
                     config_files.push(f);
                 }
 
-                let run_config = microvm::FlakeRunConfig {
+                let start_config = VmStartParams {
                     name: vm_name.clone(),
-                    slot,
+                    rootfs_path: build_result.rootfs_path.clone(),
                     vmlinux_path: build_result.vmlinux_path.clone(),
                     initrd_path: build_result.initrd_path.clone(),
-                    rootfs_path: build_result.rootfs_path.clone(),
                     revision_hash: build_result.revision_hash.clone(),
                     flake_ref: flake_ref.clone(),
                     profile: resolved.profile,
                     cpus: resolved.cpus,
-                    memory: resolved.memory,
-                    volumes,
-                    config_files,
-                    secret_files: vec![],
-                    ports: port_mappings,
-                };
+                    memory_mib: resolved.memory,
+                    volumes: &volumes,
+                    config_files: &config_files,
+                    secret_files: &[],
+                    port_mappings: &port_mappings,
+                }
+                .into_start_config();
 
                 let backend = AnyBackend::from_hypervisor(hypervisor);
-                backend.start_firecracker(&FirecrackerConfig { run_config })?;
+                backend.start(&start_config)?;
             }
 
             ui::success(&format!("{} VMs running", vm_names.len()));
@@ -3043,27 +3115,25 @@ fn cmd_up(
             let result = mvm_build::dev_build::dev_build(&env, &resolved_flake, profile)?;
             mvm_build::dev_build::ensure_guest_agent_if_needed(&env, &result)?;
 
-            let slot = microvm::allocate_slot(&vm_name)?;
-
-            let run_config = microvm::FlakeRunConfig {
+            let start_config = VmStartParams {
                 name: vm_name,
-                slot,
+                rootfs_path: result.rootfs_path,
                 vmlinux_path: result.vmlinux_path,
                 initrd_path: result.initrd_path,
-                rootfs_path: result.rootfs_path,
                 revision_hash: result.revision_hash,
                 flake_ref: flake_ref.to_string(),
                 profile: profile.map(|s| s.to_string()),
                 cpus: cpus.unwrap_or(user_cfg.default_cpus),
-                memory: memory.unwrap_or(user_cfg.default_memory_mib),
-                volumes: vec![],
-                config_files: vec![],
-                secret_files: vec![],
-                ports: vec![],
-            };
+                memory_mib: memory.unwrap_or(user_cfg.default_memory_mib),
+                volumes: &[],
+                config_files: &[],
+                secret_files: &[],
+                port_mappings: &[],
+            }
+            .into_start_config();
 
             let backend = AnyBackend::from_hypervisor(hypervisor);
-            backend.start_firecracker(&FirecrackerConfig { run_config })?;
+            backend.start(&start_config)?;
             Ok(())
         }
 

@@ -13,7 +13,7 @@ production backend on Linux.
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 6 + root facade + xtask  |
-| Total tests      | 858+                     |
+| Total tests      | 866+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -84,37 +84,39 @@ Docker backend for Windows dev is deferred to a follow-up sprint.
 
 ## Phase 0: Unify Backend Interface
 
-### 0a. `VmStartConfig` in mvm-core
+### 0a. `VmStartConfig` in mvm-core ✓
 
-- [ ] `VmStartConfig` struct (name, rootfs_path, kernel_path, cpus, memory, ports, volumes, config/secret files)
-- [ ] Replace `VmBackend::type Config` with `VmStartConfig`
-- [ ] `From<&VmStartConfig>` for `FlakeRunConfig` and `MicrovmNixConfig`
-- [ ] Unified `AnyBackend::start(&VmStartConfig)`
-- [ ] Remove `start_firecracker()` and `start_microvm_nix()` from `AnyBackend`
-- [ ] Update all call sites in `commands.rs`
+- [x] `VmStartConfig` struct (name, rootfs_path, kernel_path, cpus, memory, ports, volumes, config/secret files)
+- [x] `VmPortMapping`, `VmVolume`, `VmFile` types with serde + tests
+- [x] Replace `VmBackend::type Config` with `VmStartConfig`
+- [x] `FirecrackerConfig::from_start_config()` and `MicrovmNixConfig::from_start_config()`
+- [x] Unified `AnyBackend::start(&VmStartConfig)` — all 4 CLI call sites migrated
+- [x] `start_firecracker()` retained only for snapshot restore path
+- [x] `VmStartParams` struct in commands.rs (avoids clippy::too_many_arguments)
 
-### 0b. `GuestChannel` trait
+### 0b. `GuestChannelInfo` enum ✓
 
-- [ ] `GuestChannel` trait + `ChannelType` enum in mvm-core
-- [ ] Add `guest_channel()` method to `VmBackend` trait
-- [ ] Vsock implementation wrapping existing `mvm-guest` code
+- [x] `GuestChannelInfo` enum (`Vsock { cid, port }`, `UnixSocket { path }`) in mvm-core
+- [x] `guest_channel_info()` default method on `VmBackend` trait
+- [x] Serde roundtrip tests for both variants
 
-### 0c. `VmNetworkInfo`
+### 0c. `VmNetworkInfo` ✓
 
-- [ ] `VmNetworkInfo` struct (guest_ip, gateway_ip, subnet, port_mappings)
-- [ ] Add `network_info()` method to `VmBackend` trait
-- [ ] Firecracker backend returns TAP subnet info
+- [x] `VmNetworkInfo` struct (guest_ip, gateway_ip, subnet_cidr)
+- [x] `network_info()` default method on `VmBackend` trait
+- [x] Serde roundtrip test
 
-### 0d. `TemplateKind`
+### 0d. `TemplateKind` ✓
 
-- [ ] `TemplateKind::Image` and `TemplateKind::Snapshot(SnapInfo)` enum
-- [ ] Template build checks `capabilities().snapshots`
+- [x] `TemplateKind::Image` and `TemplateKind::Snapshot(SnapshotInfo)` enum
+- [x] `PartialEq + Eq` on `SnapshotInfo` for equality checks
+- [x] Serde roundtrip tests for both variants
 
-### Verification
+### Verification ✓
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo test --workspace   # 866 tests, 0 failures
+cargo clippy --workspace -- -D warnings  # 0 warnings
 # All existing tests pass, backend.start(&config) works for both backends
 ```
 

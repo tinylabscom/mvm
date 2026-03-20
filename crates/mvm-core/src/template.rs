@@ -96,7 +96,7 @@ pub fn template_snapshot_dir(template_id: &str, revision: &str) -> String {
 /// Created by `template build --snapshot` after booting the VM and
 /// waiting for the service to become healthy. Used by `run --template`
 /// to restore the VM instantly instead of cold-booting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotInfo {
     pub created_at: String,
     pub vmstate_size_bytes: u64,
@@ -107,6 +107,21 @@ pub struct SnapshotInfo {
     pub vcpus: u8,
     /// Memory MiB at snapshot time (must match on restore).
     pub mem_mib: u32,
+}
+
+/// Describes what kind of pre-built artifact a template provides.
+///
+/// All backends support `Image` (cold-boot from rootfs). Only backends
+/// with `capabilities().snapshots == true` (e.g. Firecracker) support
+/// `Snapshot` (warm-start from memory image).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TemplateKind {
+    /// Pre-built rootfs image only — cold-boot on every start.
+    /// Supported by all backends.
+    Image,
+    /// Pre-built rootfs + Firecracker memory snapshot — warm-start.
+    /// Only supported by backends with snapshot capability.
+    Snapshot(SnapshotInfo),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,5 +283,29 @@ mod tests {
     fn template_snapshot_dir_format() {
         let dir = template_snapshot_dir("my-tmpl", "abc123");
         assert!(dir.ends_with("/templates/my-tmpl/artifacts/abc123/snapshot"));
+    }
+
+    #[test]
+    fn template_kind_image_serde_roundtrip() {
+        let kind = TemplateKind::Image;
+        let json = serde_json::to_string(&kind).unwrap();
+        let parsed: TemplateKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TemplateKind::Image);
+    }
+
+    #[test]
+    fn template_kind_snapshot_serde_roundtrip() {
+        let snap = SnapshotInfo {
+            created_at: "2025-03-01T00:00:00Z".to_string(),
+            vmstate_size_bytes: 1024,
+            mem_size_bytes: 2048,
+            boot_args: "console=ttyS0".to_string(),
+            vcpus: 2,
+            mem_mib: 512,
+        };
+        let kind = TemplateKind::Snapshot(snap.clone());
+        let json = serde_json::to_string(&kind).unwrap();
+        let parsed: TemplateKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TemplateKind::Snapshot(snap));
     }
 }

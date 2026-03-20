@@ -1,9 +1,11 @@
 use anyhow::Result;
-use mvm_core::vm_backend::{VmBackend, VmCapabilities, VmId, VmInfo, VmStatus};
+use mvm_core::vm_backend::{VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus};
 
 use super::{firecracker, microvm, microvm_nix};
-use crate::config::VMS_DIR;
+use crate::config::{PortMapping, VMS_DIR};
 use crate::shell::run_in_vm_stdout;
+use crate::vm::image::RuntimeVolume;
+use crate::vm::microvm::{DriveFile, FlakeRunConfig};
 
 pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 
@@ -15,6 +17,62 @@ pub struct FirecrackerConfig {
     pub run_config: microvm::FlakeRunConfig,
 }
 
+impl FirecrackerConfig {
+    /// Convert a backend-agnostic `VmStartConfig` into a Firecracker-specific
+    /// `FlakeRunConfig`, allocating a network slot automatically.
+    pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
+        let slot = microvm::allocate_slot(&config.name)?;
+        let run_config = FlakeRunConfig {
+            name: config.name.clone(),
+            slot,
+            vmlinux_path: config.kernel_path.clone().unwrap_or_default(),
+            initrd_path: config.initrd_path.clone(),
+            rootfs_path: config.rootfs_path.clone(),
+            revision_hash: config.revision_hash.clone(),
+            flake_ref: config.flake_ref.clone(),
+            profile: config.profile.clone(),
+            cpus: config.cpus,
+            memory: config.memory_mib,
+            volumes: config
+                .volumes
+                .iter()
+                .map(|v| RuntimeVolume {
+                    host: v.host.clone(),
+                    guest: v.guest.clone(),
+                    size: v.size.clone(),
+                })
+                .collect(),
+            config_files: config
+                .config_files
+                .iter()
+                .map(|f| DriveFile {
+                    name: f.name.clone(),
+                    content: f.content.clone(),
+                    mode: f.mode,
+                })
+                .collect(),
+            secret_files: config
+                .secret_files
+                .iter()
+                .map(|f| DriveFile {
+                    name: f.name.clone(),
+                    content: f.content.clone(),
+                    mode: f.mode,
+                })
+                .collect(),
+            ports: config
+                .ports
+                .iter()
+                .map(|p| PortMapping {
+                    host: p.host,
+                    guest: p.guest,
+                })
+                .collect(),
+        };
+        Ok(Self { run_config })
+    }
+}
+
 /// Firecracker backend implementation.
 ///
 /// Wraps the existing free functions in [`microvm`] and [`firecracker`]
@@ -23,8 +81,6 @@ pub struct FirecrackerConfig {
 pub struct FirecrackerBackend;
 
 impl VmBackend for FirecrackerBackend {
-    type Config = FirecrackerConfig;
-
     fn name(&self) -> &str {
         "firecracker"
     }
@@ -38,9 +94,10 @@ impl VmBackend for FirecrackerBackend {
         }
     }
 
-    fn start(&self, config: &Self::Config) -> Result<VmId> {
-        microvm::run_from_build(&config.run_config)?;
-        Ok(VmId(config.run_config.name.clone()))
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let fc_config = FirecrackerConfig::from_start_config(config)?;
+        microvm::run_from_build(&fc_config.run_config)?;
+        Ok(VmId(fc_config.run_config.name.clone()))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
@@ -154,22 +211,31 @@ impl AnyBackend {
         }
     }
 
-    /// Start a VM using the Firecracker backend (manual API calls).
-    pub fn start_firecracker(&self, config: &FirecrackerConfig) -> Result<VmId> {
+    /// Start a VM using the backend-agnostic config.
+    ///
+    /// Each backend converts `VmStartConfig` into its own internal
+    /// configuration (e.g., Firecracker allocates a VmSlot and builds
+    /// a `FlakeRunConfig`; microvm.nix locates runner scripts).
+    pub fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         match self {
             Self::Firecracker(b) => b.start(config),
-            Self::MicrovmNix(_) => {
-                anyhow::bail!("Cannot start Firecracker config with microvm.nix backend")
-            }
+            Self::MicrovmNix(b) => b.start(config),
         }
     }
 
-    /// Start a VM using the microvm.nix runner backend.
-    pub fn start_microvm_nix(&self, config: &MicrovmNixConfig) -> Result<VmId> {
+    /// Start a VM using a pre-built `FirecrackerConfig`.
+    ///
+    /// This is a convenience method for callers that already have a
+    /// `FlakeRunConfig` (e.g., template snapshot restore). Prefer
+    /// [`start`](Self::start) for new VMs.
+    pub fn start_firecracker(&self, config: &FirecrackerConfig) -> Result<VmId> {
         match self {
-            Self::MicrovmNix(b) => b.start(config),
             Self::Firecracker(_) => {
-                anyhow::bail!("Cannot start microvm.nix config with Firecracker backend")
+                microvm::run_from_build(&config.run_config)?;
+                Ok(VmId(config.run_config.name.clone()))
+            }
+            Self::MicrovmNix(_) => {
+                anyhow::bail!("Cannot start Firecracker config with microvm.nix backend")
             }
         }
     }

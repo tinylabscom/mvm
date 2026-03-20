@@ -1,5 +1,5 @@
 use anyhow::Result;
-use mvm_core::vm_backend::{VmBackend, VmCapabilities, VmId, VmInfo, VmStatus};
+use mvm_core::vm_backend::{VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus};
 
 use crate::config::VMS_DIR;
 use crate::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
@@ -30,6 +30,27 @@ pub struct MicrovmNixConfig {
     pub memory: u32,
 }
 
+impl MicrovmNixConfig {
+    /// Convert a backend-agnostic `VmStartConfig` into a microvm.nix config,
+    /// allocating a network slot automatically.
+    pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
+        let runner_dir = config.runner_dir.clone().ok_or_else(|| {
+            anyhow::anyhow!("microvm.nix backend requires runner_dir in VmStartConfig")
+        })?;
+        let slot = microvm::allocate_slot(&config.name)?;
+        Ok(Self {
+            name: config.name.clone(),
+            slot,
+            runner_dir,
+            revision_hash: config.revision_hash.clone(),
+            flake_ref: config.flake_ref.clone(),
+            profile: config.profile.clone(),
+            cpus: config.cpus,
+            memory: config.memory_mib,
+        })
+    }
+}
+
 /// Backend that uses microvm.nix runner scripts for VM lifecycle.
 ///
 /// Instead of manually calling the Firecracker API (boot-source, drives,
@@ -39,8 +60,6 @@ pub struct MicrovmNixConfig {
 pub struct MicrovmNixBackend;
 
 impl VmBackend for MicrovmNixBackend {
-    type Config = MicrovmNixConfig;
-
     fn name(&self) -> &str {
         "microvm-nix"
     }
@@ -54,57 +73,9 @@ impl VmBackend for MicrovmNixBackend {
         }
     }
 
-    fn start(&self, config: &Self::Config) -> Result<VmId> {
-        let slot = &config.slot;
-        let abs_dir = run_in_vm_stdout(&format!("echo {}/{}", VMS_DIR, config.name))?;
-        let pid_file = format!("{}/fc.pid", abs_dir);
-
-        if firecracker::is_vm_running(&pid_file)? {
-            ui::info(&format!("VM '{}' is already running.", config.name));
-            return Ok(VmId(config.name.clone()));
-        }
-
-        // Ensure bridge network
-        network::bridge_ensure()?;
-        network::tap_create(slot)?;
-
-        // Start the VM via microvm.nix runner script
-        ui::info(&format!(
-            "Starting VM '{}' via microvm.nix runner...",
-            config.name
-        ));
-        run_in_vm_visible(&format!(
-            r#"
-            mkdir -p {dir}
-            sudo {runner}/bin/microvm-run \
-                >{dir}/console.log 2>{dir}/firecracker.log &
-            echo $! > {dir}/fc.pid
-
-            echo "[mvm] Waiting for VM process..."
-            sleep 1
-            if [ -f {dir}/fc.pid ] && kill -0 $(cat {dir}/fc.pid) 2>/dev/null; then
-                echo "[mvm] VM started."
-            else
-                echo "[mvm] WARNING: VM process may not be running." >&2
-            fi
-            "#,
-            dir = abs_dir,
-            runner = config.runner_dir,
-        ))?;
-
-        // Persist run info
-        write_run_info(config, &abs_dir)?;
-
-        ui::banner(&[
-            &format!("MicroVM '{}' is running! (microvm.nix)", config.name),
-            "",
-            &format!("  Guest IP: {}", slot.guest_ip),
-            &format!("  Revision: {}", config.revision_hash),
-            "",
-            &format!("Use 'mvmctl stop {}' to shut down.", config.name),
-        ]);
-
-        Ok(VmId(config.name.clone()))
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let nix_config = MicrovmNixConfig::from_start_config(config)?;
+        self.start_nix(&nix_config)
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
@@ -169,6 +140,62 @@ impl VmBackend for MicrovmNixBackend {
         // Nix must already be installed; runner scripts are built via nix build
         ui::info("microvm.nix backends require Nix. Use 'mvmctl setup' to install.");
         Ok(())
+    }
+}
+
+impl MicrovmNixBackend {
+    /// Start a VM from a fully-populated `MicrovmNixConfig`.
+    fn start_nix(&self, config: &MicrovmNixConfig) -> Result<VmId> {
+        let slot = &config.slot;
+        let abs_dir = run_in_vm_stdout(&format!("echo {}/{}", VMS_DIR, config.name))?;
+        let pid_file = format!("{}/fc.pid", abs_dir);
+
+        if firecracker::is_vm_running(&pid_file)? {
+            ui::info(&format!("VM '{}' is already running.", config.name));
+            return Ok(VmId(config.name.clone()));
+        }
+
+        // Ensure bridge network
+        network::bridge_ensure()?;
+        network::tap_create(slot)?;
+
+        // Start the VM via microvm.nix runner script
+        ui::info(&format!(
+            "Starting VM '{}' via microvm.nix runner...",
+            config.name
+        ));
+        run_in_vm_visible(&format!(
+            r#"
+            mkdir -p {dir}
+            sudo {runner}/bin/microvm-run \
+                >{dir}/console.log 2>{dir}/firecracker.log &
+            echo $! > {dir}/fc.pid
+
+            echo "[mvm] Waiting for VM process..."
+            sleep 1
+            if [ -f {dir}/fc.pid ] && kill -0 $(cat {dir}/fc.pid) 2>/dev/null; then
+                echo "[mvm] VM started."
+            else
+                echo "[mvm] WARNING: VM process may not be running." >&2
+            fi
+            "#,
+            dir = abs_dir,
+            runner = config.runner_dir,
+        ))?;
+
+        // Persist run info
+        write_run_info(config, &abs_dir)?;
+
+        ui::banner(&[
+            &format!("MicroVM '{}' is running! (microvm.nix)", config.name),
+            "",
+            &format!("  Guest IP: {}", slot.guest_ip),
+            &format!("  Revision: {}", config.revision_hash),
+            "",
+            &format!("Use 'mvmctl stop {}' to shut down.", config.name),
+        ]);
+
+        Ok(VmId(config.name.clone()))
     }
 }
 
