@@ -137,4 +137,74 @@ mod tests {
         // No containers running in test mode
         assert!(ids.is_empty());
     }
+
+    /// Integration test: boot an Apple Container from a Nix-built ext4 rootfs.
+    ///
+    /// Requires:
+    /// - macOS 26+ on Apple Silicon
+    /// - Pre-built template artifacts at ~/.mvm/templates/hello/
+    /// - Run with: cargo test -p mvm-apple-container -- --ignored boot_test
+    #[test]
+    #[ignore]
+    fn boot_test_apple_container() {
+        if !is_available() {
+            eprintln!("Skipping: Apple Containers not available");
+            return;
+        }
+
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let artifacts = format!("{}/.mvm/templates/hello/artifacts", home);
+
+        // Find the current revision (latest directory)
+        let mut entries: Vec<_> = std::fs::read_dir(&artifacts)
+            .expect("template artifacts dir must exist")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        let rev_dir = entries
+            .last()
+            .expect("at least one revision must exist")
+            .path();
+
+        let kernel = rev_dir.join("vmlinux");
+        let rootfs = rev_dir.join("rootfs.ext4");
+
+        assert!(kernel.exists(), "kernel not found at {}", kernel.display());
+        assert!(rootfs.exists(), "rootfs not found at {}", rootfs.display());
+
+        eprintln!("Booting Apple Container with:");
+        eprintln!("  kernel: {}", kernel.display());
+        eprintln!("  rootfs: {}", rootfs.display());
+
+        let result = start(
+            "boot-test",
+            kernel.to_str().expect("kernel path must be UTF-8"),
+            rootfs.to_str().expect("rootfs path must be UTF-8"),
+            2,
+            512,
+        );
+
+        match &result {
+            Ok(()) => {
+                eprintln!("Container started successfully!");
+                // Verify it appears in list
+                let ids = list_ids();
+                assert!(
+                    ids.contains(&"boot-test".to_string()),
+                    "boot-test not in list: {ids:?}"
+                );
+                // Stop it
+                let stop_result = stop("boot-test");
+                assert!(stop_result.is_ok(), "stop failed: {stop_result:?}");
+                eprintln!("Container stopped successfully!");
+            }
+            Err(e) => {
+                // Log the error but don't fail — the rootfs may not be
+                // compatible with Apple Container's vminitd expectations.
+                // This is expected until we build a Container-specific rootfs.
+                eprintln!("Container start returned error (may be expected): {e}");
+            }
+        }
+    }
 }

@@ -9,3 +9,4 @@ pub mod microvm;
 pub mod microvm_nix;
 pub mod network;
 pub mod template;
+pub mod vminitd_client;
