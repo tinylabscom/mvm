@@ -1,13 +1,21 @@
 # mvm
 
-Rust CLI for building and running [Firecracker](https://firecracker-microvm.github.io/) microVMs with [Nix](https://nixos.org/) on macOS (via [Lima](https://lima-vm.io/)) and Linux.
+Rust CLI for building and running lightweight VMs with [Nix](https://nixos.org/). Supports multiple backends:
+
+| Backend | Platform | Use Case |
+|---------|----------|----------|
+| [Apple Containers](https://github.com/apple/containerization) | macOS 26+ (Apple Silicon) | Dev — sub-second startup, native vsock |
+| [Firecracker](https://firecracker-microvm.github.io/) | Linux (KVM) / macOS (via [Lima](https://lima-vm.io/)) | Production — hardware isolation |
 
 ```
-macOS / Linux Host  -->  Lima VM (Ubuntu)  -->  Firecracker microVM
-      mvmctl CLI              limactl                  /dev/kvm
+macOS 26+:  mvmctl CLI  -->  Apple Container (XPC)  -->  Linux VM
+macOS <26:  mvmctl CLI  -->  Lima VM (Ubuntu)  -->  Firecracker microVM
+Linux:      mvmctl CLI  -->  Firecracker microVM (direct KVM)
 ```
 
-mvm handles the full dev lifecycle: bootstrapping Lima, installing Firecracker, building reproducible VM images from Nix flakes, launching microVMs, and managing reusable templates.
+All backends consume the same Nix-built ext4 rootfs — only the runtime differs. Nix builds happen in Lima (macOS) or natively (Linux).
+
+mvm handles the full dev lifecycle: building reproducible VM images from Nix flakes, launching VMs via the best available backend, and managing reusable templates.
 ## Install
 
 ```bash
@@ -35,38 +43,45 @@ mvmctl stop       # Stop the microVM
 mvmctl destroy    # Tear down everything
 ```
 
-## Three-Layer Architecture
+## Choosing a Backend
 
-mvm runs a nested virtualization stack. Understanding the layers is key to working with it:
+mvm auto-selects the best backend for your platform:
+
+```bash
+mvmctl run --flake .                               # auto-select
+mvmctl run --flake . --hypervisor apple-container   # force Apple Container
+mvmctl run --flake . --hypervisor firecracker       # force Firecracker
+mvmctl doctor                                       # check what's available
+```
+
+### Apple Container (macOS 26+)
+
+Uses Apple's [Containerization framework](https://github.com/apple/containerization) via XPC. Each container runs in a lightweight VM with dedicated networking (vmnet) and vsock for guest communication. No Lima, no nested virtualization.
+
+### Firecracker (Linux / macOS via Lima)
+
+Uses [Firecracker](https://firecracker-microvm.github.io/) microVMs with KVM. On macOS, Lima provides a Linux VM with `/dev/kvm`. On Linux with KVM, Firecracker runs directly (no Lima needed).
+
+## Architecture
 
 ```
-Layer 1: macOS / Linux Host
+Layer 1: Host (macOS / Linux)
   - mvmctl CLI runs here natively
-  - All mvmctl commands are executed from here
-  - Your project files live here
+  - Nix builds run in Lima (macOS) or natively (Linux)
 
-Layer 2: Lima VM (Ubuntu) — only when KVM is not available
-  - Used on macOS and Linux without /dev/kvm
-  - Provides /dev/kvm via nested virtualization
-  - Home directory (~) is mounted read/write
-  - Nix and Firecracker are installed here
-  - `mvmctl shell` drops you into this layer
-  - `mvmctl build` runs nix build here
-  - Skipped entirely on Linux with /dev/kvm (native mode)
+Layer 2: VM Backend
+  - Apple Container: lightweight VM via Virtualization.framework (macOS 26+)
+  - Firecracker: microVM via KVM (Linux native or macOS via Lima)
 
-Layer 3: Firecracker microVM
-  - Minimal guest OS (busybox init, built from Nix flakes)
-  - Sub-5s boot time -- no systemd, no NixOS overhead
+Layer 3: Guest
+  - Minimal OS (busybox init, built from Nix flakes)
+  - Sub-second startup (Apple Container) or sub-5s (Firecracker)
+  - Headless -- no SSH, communicates via vsock only
   - Isolated filesystem -- NO host mounts by default
-  - Headless -- no SSH, no interactive access
-  - Communicates via vsock only
-  - Network: 172.16.0.2 (NAT via Lima)
-  - Runs as a background daemon process
-  - Drives: /dev/vda (rootfs), /dev/vdb (config, ro), /dev/vdc (secrets, ro), /dev/vdd (data, rw)
-  - Dev builds support `mvmctl vm exec` for debugging (see below)
+  - Drives: /dev/vda (rootfs), /dev/vdb (config), /dev/vdc (secrets), /dev/vdd (data)
 ```
 
-**Important**: Firecracker microVMs (Layer 3) are headless workloads with no SSH access. They communicate via vsock only. To work with your project files in a Linux environment, use `mvmctl shell` or `mvmctl dev` (Layer 2), where your home directory is mounted. Use `--volume` flags to pass data directories to microVMs. For debugging, dev-mode guest agents support `mvmctl vm exec <name> -- <command>` to run commands inside the microVM via vsock.
+**Important**: VMs are headless workloads with no SSH access. They communicate via vsock only. Use `mvmctl shell` or `mvmctl dev` for a Linux dev environment. Use `--volume` flags to pass data to VMs. For debugging, dev-mode guest agents support `mvmctl vm exec <name> -- <command>`.
 
 ### Guest Agent
 
