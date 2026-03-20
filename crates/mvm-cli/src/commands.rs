@@ -2543,7 +2543,21 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
     if let Some(t) = template_name {
         validate_template_name(t).with_context(|| format!("Invalid template name: {:?}", t))?;
     }
-    if bootstrap::is_lima_required() {
+    // Auto-select Apple Container on macOS 26+ when no explicit hypervisor
+    // is specified (default is "firecracker").
+    let effective_hypervisor =
+        if hypervisor == "firecracker" && mvm_core::platform::current().has_apple_containers() {
+            "apple-container"
+        } else {
+            hypervisor
+        };
+
+    // Lima is needed for Nix builds on macOS, but not for Apple Container
+    // runtime. Skip the Lima check when using apple-container with a
+    // pre-built template (no build step needed).
+    let needs_lima = bootstrap::is_lima_required()
+        && (effective_hypervisor != "apple-container" || template_name.is_none());
+    if needs_lima {
         lima::require_running()?;
     }
     let _metrics_server = if metrics_port > 0 {
@@ -2731,7 +2745,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     // If a template snapshot exists AND the backend supports snapshots,
     // restore from it instead of cold-booting.
-    let backend = AnyBackend::from_hypervisor(hypervisor);
+    let backend = AnyBackend::from_hypervisor(effective_hypervisor);
     if let Some(ref snap_info) = snapshot_info
         && let Some(tmpl) = template_name
         && backend.capabilities().snapshots
@@ -2899,7 +2913,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 port_mappings: &w_port_mappings,
             }
             .into_start_config();
-            let w_backend = AnyBackend::from_hypervisor(hypervisor);
+            let w_backend = AnyBackend::from_hypervisor(effective_hypervisor);
             if let Err(e) = w_backend.start(&w_start_config) {
                 ui::warn(&format!(
                     "Could not start VM: {e}; waiting for next change..."
