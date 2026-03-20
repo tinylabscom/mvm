@@ -2552,11 +2552,9 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             hypervisor
         };
 
-    // Lima is needed for Nix builds on macOS, but not for Apple Container
-    // runtime. Skip the Lima check when using apple-container with a
-    // pre-built template (no build step needed).
-    let needs_lima = bootstrap::is_lima_required()
-        && (effective_hypervisor != "apple-container" || template_name.is_none());
+    // Apple Container doesn't need Lima — skip the upfront check entirely.
+    // For Firecracker on macOS, Lima is required for both build and runtime.
+    let needs_lima = effective_hypervisor != "apple-container" && bootstrap::is_lima_required();
     if needs_lima {
         lima::require_running()?;
     }
