@@ -14,6 +14,7 @@ mvm-guest.workspace = true
 mvm-runtime.workspace = true
 mvm-build.workspace = true
 mvm-security.workspace = true
+mvm-apple-container.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 names.workspace = true

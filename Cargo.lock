@@ -1502,6 +1502,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "libc",
+ "mvm-apple-container",
  "mvm-build",
  "mvm-core",
  "mvm-guest",

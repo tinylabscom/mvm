@@ -2039,6 +2039,17 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             port_mappings: &port_mappings,
         }
         .into_start_config();
+
+        // Apple Container with -d: install a launchd agent instead of
+        // starting the VM in this process. The agent runs as a proper
+        // macOS service with its own RunLoop.
+        if detach && effective_hypervisor == "apple-container" {
+            mvm_apple_container::install_launchd(&start_config.name)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{vm_name_owned}");
+            return Ok(());
+        }
+
         backend.start(&start_config)?;
     }
 
@@ -2049,36 +2060,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
     );
 
     // Apple Virtualization VMs live in-process — the process must stay alive.
-    // With -d (detach), spawn a background process. Without -d, block until Ctrl+C.
-    if effective_hypervisor == "apple-container" {
-        if detach {
-            // Spawn ourselves as a background process without -d flag.
-            // The child will block (foreground mode) while we exit.
-            use std::os::unix::process::CommandExt;
-            let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
-            let mut args: Vec<String> = std::env::args().skip(1).collect();
-            // Remove -d/--detach from args
-            args.retain(|a| a != "-d" && a != "--detach");
-
-            let devnull = std::fs::File::open("/dev/null")?;
-            let child = std::process::Command::new(exe)
-                .args(&args)
-                .env("MVM_SIGNED", "1") // skip re-signing in child
-                .stdin(std::process::Stdio::null())
-                .stdout(devnull.try_clone()?)
-                .stderr(devnull)
-                .process_group(0)
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("spawn daemon: {e}"))?;
-
-            // Wait briefly for the child to start the VM
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            println!("{vm_name_owned}");
-            // Don't wait for child — it runs as a daemon
-            std::mem::forget(child);
-            return Ok(());
-        }
-
+    if effective_hypervisor == "apple-container" && !detach {
         ui::info(&format!(
             "VM '{}' running. Press Ctrl+C to stop.",
             vm_name_owned

@@ -39,10 +39,113 @@ fn persist_vm_state(id: &str) {
     let _ = std::fs::write(dir.join("backend"), "apple-virtualization");
 }
 
-/// Remove VM state from disk.
+/// Remove VM state from disk and unload launchd agent.
 fn remove_vm_state(id: &str) {
+    unload_launchd_agent(id);
     let dir = vm_state_dir().join(id);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+// launchd agent management
+// ---------------------------------------------------------------------------
+
+fn launchd_label(id: &str) -> String {
+    format!("com.mvm.vm.{id}")
+}
+
+fn launchd_plist_path(id: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!(
+        "{home}/Library/LaunchAgents/{}.plist",
+        launchd_label(id)
+    ))
+}
+
+/// Install and load a launchd user agent that runs the VM in the background.
+///
+/// Takes the original CLI args (minus -d) and replays them via launchd.
+/// The agent runs as a proper macOS user service with its own RunLoop.
+pub fn install_launchd_agent(id: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let label = launchd_label(id);
+    let plist_path = launchd_plist_path(id);
+    let log_dir = vm_state_dir().join(id);
+    std::fs::create_dir_all(&log_dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Replay the original args without -d/--detach
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "-d" && a != "--detach")
+        .collect();
+
+    let args_xml: String = args
+        .iter()
+        .map(|a| format!("        <string>{a}</string>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+{args_xml}
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MVM_SIGNED</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/stderr.log</string>
+</dict>
+</plist>"#,
+        exe = exe.display(),
+        log_dir = log_dir.display(),
+    );
+
+    // Write plist
+    let agents_dir = plist_path.parent().expect("plist path must have parent");
+    std::fs::create_dir_all(agents_dir).map_err(|e| format!("mkdir LaunchAgents: {e}"))?;
+    std::fs::write(&plist_path, &plist).map_err(|e| format!("write plist: {e}"))?;
+
+    // Load agent
+    let output = std::process::Command::new("launchctl")
+        .args(["load", plist_path.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| format!("launchctl load: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("launchctl load failed: {stderr}"));
+    }
+
+    tracing::info!("Installed launchd agent: {label}");
+    Ok(())
+}
+
+/// Unload and remove the launchd agent for a VM.
+fn unload_launchd_agent(id: &str) {
+    let plist_path = launchd_plist_path(id);
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", plist_path.to_str().unwrap_or("")])
+            .output();
+        let _ = std::fs::remove_file(&plist_path);
+        tracing::info!("Unloaded launchd agent: {}", launchd_label(id));
+    }
 }
 
 /// Read all VM IDs from disk, filtering out dead PIDs.
@@ -78,11 +181,6 @@ fn read_persisted_vm_ids() -> Vec<String> {
 /// Ensure the running binary has the virtualization entitlement.
 /// If not, sign it ad-hoc and re-exec the process.
 pub fn ensure_signed() {
-    // Skip if already verified (e.g., spawned daemon child)
-    if std::env::var("MVM_SIGNED").as_deref() == Ok("1") {
-        return;
-    }
-
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(_) => return,
@@ -158,7 +256,11 @@ pub fn start_vm(
     let vm_dir = vm_state_dir().join(id);
     std::fs::create_dir_all(&vm_dir).map_err(|e| format!("create vm dir: {e}"))?;
     let writable_rootfs = vm_dir.join("rootfs.ext4");
-    if !writable_rootfs.exists() {
+    // Always create a fresh copy — previous runs may have left a locked file
+    if writable_rootfs.exists() {
+        let _ = std::fs::remove_file(&writable_rootfs);
+    }
+    {
         std::fs::copy(rootfs_path, &writable_rootfs).map_err(|e| format!("copy rootfs: {e}"))?;
         // Ensure writable
         let mut perms = std::fs::metadata(&writable_rootfs)

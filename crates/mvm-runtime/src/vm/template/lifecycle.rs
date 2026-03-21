@@ -65,7 +65,9 @@ pub fn template_create(spec: &TemplateSpec) -> Result<()> {
 #[instrument(skip_all, fields(template_id = id))]
 pub fn template_load(id: &str) -> Result<TemplateSpec> {
     let path = template_spec_path(id);
-    let data = vm_exec_stdout(&format!("cat {path}")).with_context(|| {
+    // Read directly from host filesystem — ~/.mvm/ resolves to $HOME/.mvm
+    // which is the same path on both host and Lima (home dir is mounted).
+    let data = std::fs::read_to_string(&path).with_context(|| {
         format!(
             "Failed to load template {} (does it exist? try `mvm template list`)",
             id
@@ -345,7 +347,7 @@ pub fn template_load_current_revision(id: &str) -> Result<Option<TemplateRevisio
     };
     let rev_dir = template_revision_dir(id, &rev);
     let meta_path = format!("{}/revision.json", rev_dir);
-    let data = match vm_exec_stdout(&format!("cat {} 2>/dev/null", meta_path)) {
+    let data = match std::fs::read_to_string(&meta_path) {
         Ok(d) if !d.trim().is_empty() => d,
         _ => return Ok(None),
     };
@@ -358,11 +360,9 @@ pub fn template_load_current_revision(id: &str) -> Result<Option<TemplateRevisio
 pub fn template_has_snapshot(id: &str) -> Result<bool> {
     let rev = current_revision_id(id)?;
     let snap_dir = template_snapshot_dir(id, &rev);
-    let out = shell::run_in_vm_stdout(&format!(
-        "test -f {dir}/vmstate.bin && test -f {dir}/mem.bin && echo yes || echo no",
-        dir = snap_dir,
-    ))?;
-    Ok(out.trim() == "yes")
+    let vmstate = std::path::Path::new(&snap_dir).join("vmstate.bin");
+    let mem = std::path::Path::new(&snap_dir).join("mem.bin");
+    Ok(vmstate.exists() && mem.exists())
 }
 
 /// Load the snapshot metadata for a template revision.
@@ -370,7 +370,9 @@ pub fn template_snapshot_info(id: &str) -> Result<Option<SnapshotInfo>> {
     let rev = current_revision_id(id)?;
     let rev_dir = template_revision_dir(id, &rev);
     let meta_path = format!("{}/revision.json", rev_dir);
-    let data = vm_exec_stdout(&format!("cat {}", meta_path))?;
+    // Read directly from host filesystem
+    let data = std::fs::read_to_string(&meta_path)
+        .with_context(|| format!("Failed to read revision.json for template {}", id))?;
     let revision: TemplateRevision = serde_json::from_str(&data)
         .with_context(|| format!("Corrupt revision.json for template {}", id))?;
     Ok(revision.snapshot)
@@ -793,20 +795,22 @@ pub fn template_artifacts(
     let rootfs = format!("{rev_dir}/rootfs.ext4");
     let initrd_candidate = format!("{rev_dir}/initrd");
 
-    vm_exec(&format!("test -f {vmlinux}")).with_context(|| {
-        format!(
-            "Template '{}' has no vmlinux (run `mvm template build {}`)",
-            id, id
-        )
-    })?;
-    vm_exec(&format!("test -f {rootfs}")).with_context(|| {
-        format!(
-            "Template '{}' has no rootfs (run `mvm template build {}`)",
-            id, id
-        )
-    })?;
+    if !std::path::Path::new(&vmlinux).exists() {
+        anyhow::bail!(
+            "Template '{}' has no vmlinux (run `mvmctl template build {}`)",
+            id,
+            id
+        );
+    }
+    if !std::path::Path::new(&rootfs).exists() {
+        anyhow::bail!(
+            "Template '{}' has no rootfs (run `mvmctl template build {}`)",
+            id,
+            id
+        );
+    }
 
-    let has_initrd = vm_exec(&format!("test -f {initrd_candidate}")).is_ok();
+    let has_initrd = std::path::Path::new(&initrd_candidate).exists();
 
     Ok((
         spec,

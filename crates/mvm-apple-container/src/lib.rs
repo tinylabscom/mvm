@@ -54,6 +54,20 @@ pub fn stop(id: &str) -> Result<(), String> {
     }
 }
 
+/// Install a launchd agent to run the VM in the background.
+/// Replays the current CLI args (minus -d) via launchd.
+pub fn install_launchd(id: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::install_launchd_agent(id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = id;
+        Err("launchd not available on this platform".to_string())
+    }
+}
+
 /// List running VM IDs.
 pub fn list_ids() -> Vec<String> {
     #[cfg(target_os = "macos")]
