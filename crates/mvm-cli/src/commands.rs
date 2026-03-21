@@ -1850,6 +1850,48 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
     };
 
+    // Direct boot mode: launchd agent passes kernel/rootfs via env vars.
+    // Skip the build/template loading entirely.
+    if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
+        let kernel = std::env::var("MVM_KERNEL_PATH")
+            .map_err(|_| anyhow::anyhow!("MVM_KERNEL_PATH not set"))?;
+        let rootfs = std::env::var("MVM_ROOTFS_PATH")
+            .map_err(|_| anyhow::anyhow!("MVM_ROOTFS_PATH not set"))?;
+
+        let start_config = mvm_core::vm_backend::VmStartConfig {
+            name: vm_name.clone(),
+            rootfs_path: rootfs,
+            kernel_path: Some(kernel),
+            cpus: cpus.unwrap_or(2),
+            memory_mib: memory.unwrap_or(512),
+            ..Default::default()
+        };
+
+        let backend = AnyBackend::from_hypervisor(effective_hypervisor);
+        backend.start(&start_config)?;
+
+        ui::info(&format!("VM '{}' running. Press Ctrl+C to stop.", vm_name));
+
+        // Block until signaled
+        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let pair2 = pair.clone();
+        let _ = ctrlc::set_handler(move || {
+            let (lock, cvar) = &*pair2;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            cvar.notify_all();
+        });
+        let (lock, cvar) = &*pair;
+        let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !*stopped {
+            stopped = cvar
+                .wait_timeout(stopped, std::time::Duration::from_secs(1))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name));
+        return Ok(());
+    }
+
     // Resolve artifact paths from either a pre-built template or a flake build.
     let (
         vmlinux_path,
@@ -2050,8 +2092,16 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // starting the VM in this process. The agent runs as a proper
         // macOS service with its own RunLoop.
         if detach && effective_hypervisor == "apple-container" {
-            mvm_apple_container::install_launchd(&start_config.name)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Build is already done — install launchd agent with the
+            // resolved kernel/rootfs paths (no rebuild in the daemon).
+            mvm_apple_container::install_launchd_direct(
+                &start_config.name,
+                start_config.kernel_path.as_deref().unwrap_or(""),
+                &start_config.rootfs_path,
+                start_config.cpus,
+                start_config.memory_mib as u64,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{vm_name_owned}");
             return Ok(());
         }

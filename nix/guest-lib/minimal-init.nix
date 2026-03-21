@@ -230,13 +230,42 @@ pkgs.writeScript "mvm-minimal-init" ''
   # ── 4. Configure networking ─────────────────────────────────────
   ip link set lo up
   if [ -n "$MVM_IP" ] && [ -n "$MVM_GW" ]; then
+    # Static IP (Firecracker with TAP networking)
     echo "[init] network: eth0 $MVM_IP gw $MVM_GW" > /dev/console
     ip link set eth0 up
     ip addr add "$MVM_IP" dev eth0
     ip route add default via "$MVM_GW"
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
   else
-    echo "[init] WARNING: no mvm.ip/mvm.gw on cmdline, skipping network" > /dev/console
+    # DHCP fallback (Apple Container with VZ NAT, or any NAT environment)
+    echo "[init] no static IP — trying DHCP on eth0..." > /dev/console
+    ip link set eth0 up 2>/dev/null || true
+
+    # Create udhcpc script that configures the interface
+    mkdir -p /tmp
+    cat > /tmp/udhcpc.sh << 'DHCPEOF'
+#!/bin/sh
+case "$1" in
+  bound|renew)
+    ip addr add "$ip/$mask" dev "$interface" 2>/dev/null
+    [ -n "$router" ] && ip route add default via "$router" 2>/dev/null
+    [ -n "$dns" ] && echo "nameserver $dns" > /etc/resolv.conf
+    ;;
+esac
+DHCPEOF
+    chmod +x /tmp/udhcpc.sh
+
+    if command -v udhcpc >/dev/null 2>&1; then
+      udhcpc -i eth0 -s /tmp/udhcpc.sh -q -t 5 -n 2>/dev/null
+      DHCP_IP=$(ip -4 addr show eth0 2>/dev/null | grep -o 'inet [^ ]*' | head -1)
+      if [ -n "$DHCP_IP" ]; then
+        echo "[init] DHCP: $DHCP_IP" > /dev/console
+      else
+        echo "[init] DHCP failed on eth0" > /dev/console
+      fi
+    else
+      echo "[init] WARNING: no udhcpc, no network" > /dev/console
+    fi
   fi
 
   # ── 5. Mount optional drives (best-effort) ──────────────────────

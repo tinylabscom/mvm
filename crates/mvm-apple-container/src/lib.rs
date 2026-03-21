@@ -55,15 +55,21 @@ pub fn stop(id: &str) -> Result<(), String> {
 }
 
 /// Install a launchd agent to run the VM in the background.
-/// Replays the current CLI args (minus -d) via launchd.
-pub fn install_launchd(id: &str) -> Result<(), String> {
+/// Uses resolved kernel/rootfs paths directly (build already done).
+pub fn install_launchd_direct(
+    id: &str,
+    kernel_path: &str,
+    rootfs_path: &str,
+    cpus: u32,
+    memory_mib: u64,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        macos::install_launchd_agent(id)
+        macos::install_launchd_direct(id, kernel_path, rootfs_path, cpus, memory_mib)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = id;
+        let _ = (id, kernel_path, rootfs_path, cpus, memory_mib);
         Err("launchd not available on this platform".to_string())
     }
 }

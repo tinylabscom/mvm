@@ -64,27 +64,24 @@ fn launchd_plist_path(id: &str) -> std::path::PathBuf {
 
 /// Install and load a launchd user agent that runs the VM in the background.
 ///
-/// Takes the original CLI args (minus -d) and replays them via launchd.
-/// The agent runs as a proper macOS user service with its own RunLoop.
-pub fn install_launchd_agent(id: &str) -> Result<(), String> {
+/// Install a launchd agent using pre-built kernel/rootfs paths.
+/// The agent calls `start_vm()` directly via env vars (no rebuild).
+pub fn install_launchd_direct(
+    id: &str,
+    kernel_path: &str,
+    rootfs_path: &str,
+    cpus: u32,
+    memory_mib: u64,
+) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let label = launchd_label(id);
     let plist_path = launchd_plist_path(id);
     let log_dir = vm_state_dir().join(id);
     std::fs::create_dir_all(&log_dir).map_err(|e| format!("mkdir: {e}"))?;
 
-    // Replay the original args without -d/--detach
-    let args: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|a| a != "-d" && a != "--detach")
-        .collect();
-
-    let args_xml: String = args
-        .iter()
-        .map(|a| format!("        <string>{a}</string>"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
+    // The plist runs mvmctl with --hypervisor apple-container and
+    // MVM_DIRECT_BOOT env var that tells start_vm to use the paths
+    // from env vars instead of going through the build pipeline.
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -95,12 +92,28 @@ pub fn install_launchd_agent(id: &str) -> Result<(), String> {
     <key>ProgramArguments</key>
     <array>
         <string>{exe}</string>
-{args_xml}
+        <string>up</string>
+        <string>--flake</string>
+        <string>/dev/null</string>
+        <string>--name</string>
+        <string>{id}</string>
+        <string>--hypervisor</string>
+        <string>apple-container</string>
+        <string>--cpus</string>
+        <string>{cpus}</string>
+        <string>--memory</string>
+        <string>{memory_mib}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>MVM_SIGNED</key>
         <string>1</string>
+        <key>MVM_DIRECT_BOOT</key>
+        <string>1</string>
+        <key>MVM_KERNEL_PATH</key>
+        <string>{kernel_path}</string>
+        <key>MVM_ROOTFS_PATH</key>
+        <string>{rootfs_path}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -116,20 +129,18 @@ pub fn install_launchd_agent(id: &str) -> Result<(), String> {
         log_dir = log_dir.display(),
     );
 
-    // Write plist
     let agents_dir = plist_path.parent().expect("plist path must have parent");
-    std::fs::create_dir_all(agents_dir).map_err(|e| format!("mkdir LaunchAgents: {e}"))?;
-    std::fs::write(&plist_path, &plist).map_err(|e| format!("write plist: {e}"))?;
+    std::fs::create_dir_all(agents_dir).map_err(|e| format!("mkdir: {e}"))?;
+    std::fs::write(&plist_path, &plist).map_err(|e| format!("write: {e}"))?;
 
-    // Load agent
     let output = std::process::Command::new("launchctl")
         .args(["load", plist_path.to_str().unwrap_or("")])
         .output()
-        .map_err(|e| format!("launchctl load: {e}"))?;
+        .map_err(|e| format!("launchctl: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("launchctl load failed: {stderr}"));
+        return Err(format!("launchctl load: {stderr}"));
     }
 
     tracing::info!("Installed launchd agent: {label}");
