@@ -123,7 +123,7 @@ jobs:
         run: cargo install cargo-cyclonedx --locked
 
       - name: Generate SBOM
-        run: cargo cyclonedx --format json --all --output-cdx sbom.cdx.json
+        run: cargo cyclonedx --format json --all --override-filename sbom.cdx
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
