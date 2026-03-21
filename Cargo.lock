@@ -1465,6 +1465,7 @@ dependencies = [
  "anyhow",
  "block2",
  "dispatch2",
+ "libc",
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",

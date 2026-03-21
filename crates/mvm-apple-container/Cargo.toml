@@ -11,6 +11,9 @@ license = "Apache-2.0"
 anyhow = "1"
 tracing = "0.1"
 
+[dependencies.libc]
+version = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = "0.3"

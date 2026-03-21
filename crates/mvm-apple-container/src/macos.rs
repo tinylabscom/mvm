@@ -16,8 +16,64 @@ use objc2_virtualization::*;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// In-process VM handle tracking.
 static VM_IDS: std::sync::LazyLock<Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Directory for persisted VM state (PID files + metadata).
+fn vm_state_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!("{home}/.mvm/vms"))
+}
+
+/// Write VM state to disk so other processes can see it.
+fn persist_vm_state(id: &str) {
+    let dir = vm_state_dir().join(id);
+    tracing::info!("Persisting VM state to {}", dir.display());
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("Failed to create VM state dir {}: {e}", dir.display());
+        return;
+    }
+    let pid = std::process::id();
+    let _ = std::fs::write(dir.join("pid"), pid.to_string());
+    let _ = std::fs::write(dir.join("backend"), "apple-virtualization");
+}
+
+/// Remove VM state from disk.
+fn remove_vm_state(id: &str) {
+    let dir = vm_state_dir().join(id);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Read all VM IDs from disk, filtering out dead PIDs.
+fn read_persisted_vm_ids() -> Vec<String> {
+    let dir = vm_state_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let pid_file = entry.path().join("pid");
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = pid_str.trim().parse::<i32>()
+        {
+            // Check if process is still alive
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                ids.push(name);
+            } else {
+                // Dead process — clean up
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    ids
+}
 
 fn nsurl(path: &str) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(path))
@@ -140,6 +196,7 @@ pub fn start_vm(
                         .lock()
                         .map_err(|e| e.to_string())?
                         .insert(id.to_string());
+                    persist_vm_state(id);
                     return Ok(());
                 }
                 Ok(Err(e)) => return Err(format!("start failed: {e}")),
@@ -152,17 +209,11 @@ pub fn start_vm(
 }
 
 pub fn stop_vm(id: &str) -> Result<(), String> {
-    let removed = VM_IDS.lock().map_err(|e| e.to_string())?.remove(id);
-    if removed {
-        Ok(())
-    } else {
-        Err(format!("VM '{id}' not found"))
-    }
+    VM_IDS.lock().map_err(|e| e.to_string())?.remove(id);
+    remove_vm_state(id);
+    Ok(())
 }
 
 pub fn list_vm_ids() -> Vec<String> {
-    VM_IDS
-        .lock()
-        .map(|ids| ids.iter().cloned().collect())
-        .unwrap_or_default()
+    read_persisted_vm_ids()
 }

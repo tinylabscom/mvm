@@ -2041,6 +2041,37 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         None,
     );
 
+    // Apple Virtualization VMs live in-process — keep running until Ctrl+C
+    // or the process is killed. Firecracker VMs are daemonized.
+    if effective_hypervisor == "apple-container" {
+        ui::info(&format!(
+            "VM '{}' running. Press Ctrl+C to stop.",
+            vm_name_owned
+        ));
+
+        // Block until signaled. Use a condvar so both Ctrl+C and SIGTERM work.
+        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let pair2 = pair.clone();
+        let _ = ctrlc::set_handler(move || {
+            let (lock, cvar) = &*pair2;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            cvar.notify_all();
+        });
+
+        let (lock, cvar) = &*pair;
+        let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !*stopped {
+            stopped = cvar
+                .wait_timeout(stopped, std::time::Duration::from_secs(1))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+
+        ui::info(&format!("Stopping VM '{}'...", vm_name_owned));
+        let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name_owned.clone()));
+        return Ok(());
+    }
+
     if forward {
         if has_ports {
             cmd_forward(&vm_name_owned, &[])?;
