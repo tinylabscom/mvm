@@ -175,7 +175,8 @@ fn test_dev_up_help_shows_all_flags() {
 
 #[test]
 fn test_dev_status_runs_without_lima() {
-    // dev status should work even without Lima — reports status or "not required"
+    // dev status should work even without Lima — reports status, "not required",
+    // or fails gracefully when limactl isn't installed (CI runners).
     let assert = mvm().args(["dev", "status"]).assert();
     let output = assert.get_output();
     let combined = format!(
@@ -186,7 +187,8 @@ fn test_dev_status_runs_without_lima() {
     assert!(
         combined.contains("Lima VM")
             || combined.contains("not required")
-            || combined.contains("Not found"),
+            || combined.contains("Not found")
+            || combined.contains("not installed"),
         "dev status should produce meaningful output, got: {}",
         combined
     );

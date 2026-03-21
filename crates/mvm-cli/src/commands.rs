@@ -1039,6 +1039,10 @@ fn cmd_dev_down() -> Result<()> {
         return Ok(());
     }
 
+    if which::which("limactl").is_err() {
+        anyhow::bail!("Lima is not installed. Run 'mvmctl dev up' to bootstrap first.");
+    }
+
     let status = lima::get_status()?;
     match status {
         lima::LimaStatus::Running => {
@@ -1063,6 +1067,11 @@ fn cmd_dev_down() -> Result<()> {
 fn cmd_dev_status() -> Result<()> {
     if !bootstrap::is_lima_required() {
         ui::info("Lima is not required on this platform (native KVM available).");
+        return Ok(());
+    }
+
+    if which::which("limactl").is_err() {
+        ui::warn("Lima is not installed. Run 'mvmctl dev up' to bootstrap.");
         return Ok(());
     }
 
