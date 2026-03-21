@@ -137,6 +137,12 @@ Let's unpack what's new here:
 
 **`let ... in`** — defines local variables, like `const` in JavaScript. Everything between `let` and `in` is available in the expression after `in`.
 
+**`system`** — the CPU architecture to build for. Use `"aarch64-linux"` for Apple Silicon Macs or ARM Linux, `"x86_64-linux"` for Intel/AMD. See the callout below for details.
+
+**`pkgs`** — the full nixpkgs package set for your target system. After this line, `pkgs.python3`, `pkgs.curl`, `pkgs.nodejs`, etc. are all available.
+
+**`inherit`** — a shorthand. `{ inherit system; }` is the same as `{ system = system; }` (or `{ system }` in JavaScript).
+
 :::note[What is `system`?]
 `system` is the target platform string that tells Nix which CPU architecture and OS to build for. It's always `"<arch>-<os>"`:
 
@@ -150,10 +156,6 @@ The OS is always `linux` — even when building on macOS — because the VM imag
 
 When you see `${system}` later in the flake (e.g., `packages.${system}.default` or `mvm.lib.${system}.mkGuest`), Nix substitutes the string at evaluation time. It's just dynamic attribute access — `packages.${system}.default` becomes `packages.aarch64-linux.default`.
 :::
-
-**`pkgs`** — the full nixpkgs package set for your target system. After this line, `pkgs.python3`, `pkgs.curl`, `pkgs.nodejs`, etc. are all available.
-
-**`inherit`** — a shorthand. `{ inherit system; }` is the same as `{ system = system; }` (or `{ system }` in JavaScript).
 
 ## Step 4: Define your VM image
 
