@@ -2,17 +2,40 @@
 name = "mvm-apple-container"
 version = "0.6.0"
 edition = "2024"
-description = "Apple Containerization framework bridge for mvm"
+description = "Apple Virtualization.framework backend for mvm"
 license = "Apache-2.0"
 # Only builds on macOS with Apple Silicon
 # On other platforms, this crate compiles as a no-op stub
 
 [dependencies]
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tracing = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-container = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSString", "NSURL", "NSArray", "NSError"] }
+objc2-virtualization = { version = "0.3", features = [
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZGenericPlatformConfiguration",
+    "VZPlatformConfiguration",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZStorageDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZNATNetworkDeviceAttachment",
+    "VZNetworkDeviceAttachment",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZEntropyDeviceConfiguration",
+    "VZSerialPortConfiguration",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZMemoryBalloonDeviceConfiguration",
+    "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+] }
