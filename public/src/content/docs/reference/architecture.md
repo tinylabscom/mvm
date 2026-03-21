@@ -11,11 +11,14 @@ mvmctl supports multiple VM backends and auto-selects the best one for your plat
 |---------|----------|-------------------|
 | Firecracker | Linux with `/dev/kvm` | 1st (preferred) |
 | Apple Container | macOS 26+ (Apple Silicon) | 2nd |
-| Lima + Firecracker | macOS <26, Linux without KVM | 3rd (fallback) |
+| Docker | Any platform with Docker daemon | 3rd |
+| microvm.nix | Linux (NixOS-native QEMU) | Via `--hypervisor qemu` |
+| Lima + Firecracker | macOS <26, Linux without KVM | 4th (legacy fallback) |
 
 ```
 Linux (KVM):    mvmctl up  -->  Firecracker microVM (direct)
 macOS 26+:      mvmctl up  -->  Apple Container (Virtualization.framework)
+Docker:         mvmctl up  -->  Docker container (universal fallback)
 macOS <26:      mvmctl up  -->  Lima VM (Ubuntu)  -->  Firecracker microVM
 ```
 
@@ -24,18 +27,21 @@ All backends consume the same Nix-built ext4 rootfs. Override auto-detection wit
 ```bash
 mvmctl up --flake . --hypervisor apple-container
 mvmctl up --flake . --hypervisor firecracker
+mvmctl up --flake . --hypervisor docker
+mvmctl up --flake . --hypervisor qemu    # microvm.nix
 mvmctl doctor   # check available backends
 ```
 
 ### Backend Capabilities
 
-| Capability | Firecracker | Apple Container | Lima + FC |
-|------------|:-----------:|:---------------:|:---------:|
-| Snapshots | Yes | No | Yes |
-| vsock | Yes | Yes | Yes |
-| TAP networking | Yes | No (vmnet) | Yes |
-| Port forwarding (`-p`) | Yes | Yes | Yes |
-| Detach mode (`-d`) | Yes | Yes | Yes |
+| Capability | Firecracker | Apple Container | microvm.nix | Docker | Lima + FC |
+|------------|:-----------:|:---------------:|:-----------:|:------:|:---------:|
+| Snapshots | Yes | No | No | No | Yes |
+| Pause/resume | Yes | No | No | Yes | Yes |
+| vsock | Yes | Yes | Yes | No | Yes |
+| TAP networking | Yes | No (vmnet) | Yes | No | Yes |
+| Port forwarding (`-p`) | Yes | Yes | Yes | Yes | Yes |
+| Detach mode (`-d`) | Yes | Yes | Yes | Yes | Yes |
 
 Template snapshots (`--snapshot`) are only available on the Firecracker backend.
 
@@ -81,6 +87,8 @@ VM lifecycle abstraction defined in `mvm-core`:
 Implementations:
 - **`FirecrackerBackend`** -- KVM microVMs via Firecracker (Linux native or via Lima)
 - **`AppleContainerBackend`** -- Virtualization.framework (macOS 26+)
+- **`MicrovmNixBackend`** -- NixOS-native QEMU runner
+- **`DockerBackend`** -- Container-based fallback, universal platform support
 - **`AnyBackend`** -- enum dispatch, auto-selects at runtime
 
 ### LinuxEnv
@@ -119,7 +127,8 @@ At startup, mvmctl detects the platform and selects the appropriate backend:
 
 1. **Linux with `/dev/kvm`** -- uses `FirecrackerBackend` directly via `NativeEnv`
 2. **macOS 26+** -- uses `AppleContainerBackend` for VM lifecycle; Nix builds still run in Lima
-3. **macOS <26 / Linux without KVM** -- uses `FirecrackerBackend` via `LimaEnv`
+3. **Docker available** -- uses `DockerBackend` as a universal fallback
+4. **macOS <26 / Linux without KVM** -- uses `FirecrackerBackend` via `LimaEnv`
 
 ```
 Host (macOS/Linux)
@@ -144,4 +153,6 @@ No initrd is needed -- the kernel boots directly into a busybox init script on t
 | macOS <26 | Apple Silicon (aarch64) | Lima + Firecracker |
 | macOS <26 | Intel (x86_64) | Lima + Firecracker |
 | Linux with `/dev/kvm` | x86_64, aarch64 | Firecracker (native) |
-| Linux without `/dev/kvm` | x86_64, aarch64 | Lima + Firecracker (fallback) |
+| Linux without `/dev/kvm` | x86_64, aarch64 | Docker or Lima + Firecracker |
+| WSL2 | x86_64 | Docker (may have KVM) |
+| Any platform with Docker | x86_64, aarch64 | Docker (universal fallback) |

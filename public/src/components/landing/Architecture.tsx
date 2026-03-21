@@ -3,13 +3,13 @@ export function Architecture() {
     <section className="relative w-full border-y border-edge/30 bg-raised/50 px-6 py-28 sm:px-8 lg:py-36">
       <div className="mx-auto max-w-5xl">
         <div className="mb-16 text-center lg:mb-20">
-          <p className="mb-3 text-sm font-medium uppercase tracking-widest text-accent">
+          <p className="mb-4 text-sm font-medium uppercase tracking-widest text-accent">
             Architecture
           </p>
-          <h2 className="text-3xl font-bold text-title sm:text-4xl">
+          <h2 className="text-3xl font-bold text-title sm:text-4xl lg:text-5xl">
             One CLI, four backends
           </h2>
-          <p className="mx-auto mt-4 max-w-xl text-body">
+          <p className="mx-auto mt-6 max-w-xl text-lg leading-relaxed text-body">
             mvm auto-detects your platform and picks the fastest path to a
             running VM. You can also choose a backend explicitly.
           </p>

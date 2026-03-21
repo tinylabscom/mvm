@@ -26,6 +26,10 @@ This single command detects your platform and handles everything:
 2. Installs Nix and Firecracker natively on the host
 3. Drops you into a dev shell
 
+**Docker fallback (any platform):**
+1. If no hypervisor or KVM is available, falls back to Docker
+2. Runs your workload in a container with pause/resume support
+
 Inside the dev shell, your home directory (`~`) is mounted read/write (Lima) or directly available (native Linux) -- your project files are right there. Nix, Firecracker, and `/dev/kvm` are all available.
 
 Exit the shell with `exit` or `Ctrl+D` -- the Lima VM (if used) keeps running in the background.

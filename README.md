@@ -4,16 +4,19 @@ Lightweight VM development tool. Build reproducible VM images from Nix flakes, l
 
 | Backend | Platform | Use Case |
 |---------|----------|----------|
-| [Firecracker](https://firecracker-microvm.github.io/) | Linux (KVM) | Production -- hardware isolation, snapshots |
-| [Apple Virtualization](https://github.com/apple/containerization) | macOS 26+ (Apple Silicon) | Dev -- sub-second startup, native vsock |
-| [Lima](https://lima-vm.io/) + Firecracker | macOS <26, Linux without KVM | Fallback -- nested virtualization |
+| [Firecracker](https://firecracker-microvm.github.io/) | Linux (KVM), WSL2 | Production -- hardware isolation, snapshots |
+| [Apple Virtualization](https://developer.apple.com/documentation/virtualization) | macOS 26+ (Apple Silicon) | Dev -- sub-second startup |
+| [Docker](https://docs.docker.com/get-docker/) | Linux, macOS, Windows, WSL2 | Universal -- works everywhere Docker runs |
+| [Lima](https://lima-vm.io/) + Firecracker | macOS <26, Linux without KVM | Legacy fallback |
 
-Backend is auto-selected (KVM first, then Apple Container, then Lima) or forced with `--hypervisor`.
+Backend is auto-selected or forced with `--hypervisor`:
 
 ```
 Linux (KVM):    mvmctl up  -->  Firecracker microVM (direct)
-macOS 26+:      mvmctl up  -->  Apple Container (Virtualization.framework)
-macOS <26:      mvmctl up  -->  Lima VM (Ubuntu)  -->  Firecracker microVM
+WSL2 (KVM):     mvmctl up  -->  Firecracker microVM (direct)
+macOS 26+:      mvmctl up  -->  Apple Virtualization.framework
+Docker:         mvmctl up  -->  Docker container
+macOS <26:      mvmctl up  -->  Lima VM  -->  Firecracker microVM
 ```
 
 All backends consume the same Nix-built ext4 rootfs -- only the runtime differs.

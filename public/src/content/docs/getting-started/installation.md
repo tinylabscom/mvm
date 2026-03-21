@@ -49,6 +49,7 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. No Lima needed. |
 | **macOS 26+** (Apple Silicon) | Apple Container | Uses Virtualization.framework. No Lima needed. |
+| **Docker available** | Docker | Container-based fallback. Runs anywhere Docker does. |
 | **macOS <26** | Lima + Firecracker | Lima VM provides `/dev/kvm`. Builds and Firecracker run inside Lima. |
 | **Linux without `/dev/kvm`** | Lima + Firecracker | Lima VM as fallback (same as macOS <26). |
 
@@ -59,6 +60,8 @@ You can force a specific backend with `--hypervisor`:
 ```bash
 mvmctl up --flake . --hypervisor apple-container
 mvmctl up --flake . --hypervisor firecracker
+mvmctl up --flake . --hypervisor docker
+mvmctl up --flake . --hypervisor qemu    # microvm.nix
 ```
 
 Use `mvmctl doctor` to check which backends are available on your system.

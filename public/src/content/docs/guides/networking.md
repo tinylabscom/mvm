@@ -12,6 +12,8 @@ Networking differs by backend:
 | Firecracker (Linux) | TAP device | 172.16.0.2/30 | Direct via TAP |
 | Firecracker (Lima) | TAP in Lima VM | 172.16.0.2/30 | Via Lima NAT |
 | Apple Container | vmnet | DHCP-assigned | Via vmnet bridge |
+| microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
+| Docker | Docker bridge | Docker-assigned | Via Docker port mapping |
 
 ## Firecracker Network Layout
 
@@ -45,7 +47,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 |------|----------|---------|
 | 52 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
 
-The host connects by writing `CONNECT 52\n` to the vsock socket and reading `OK 52\n`. All requests are request/response pairs. vsock is supported on all backends (Firecracker and Apple Container).
+The host connects by writing `CONNECT 52\n` to the vsock socket and reading `OK 52\n`. All requests are request/response pairs. vsock is supported on Firecracker, Apple Container, and microvm.nix backends. Docker uses a unix socket instead.
 
 ## No SSH
 

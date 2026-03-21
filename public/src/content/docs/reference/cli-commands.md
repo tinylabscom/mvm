@@ -17,7 +17,7 @@ description: Complete command reference for mvmctl.
 | `mvmctl up -v host:guest:size` | Mount a volume into the VM (repeatable) |
 | `mvmctl up -d` | Run in background (detached mode, via launchd) |
 | `mvmctl up --forward` | Auto-forward declared ports after boot (blocks until Ctrl-C) |
-| `mvmctl up --hypervisor <backend>` | Force backend: `firecracker` or `apple-container` |
+| `mvmctl up --hypervisor <backend>` | Force backend: `firecracker`, `apple-container`, `docker`, or `qemu` |
 | `mvmctl up --config <path>` | Runtime config (TOML) for persistent resources/volumes |
 | `mvmctl up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
