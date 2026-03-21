@@ -42,7 +42,7 @@ On macOS / Linux without KVM, the first run downloads ~500MB of assets (Lima VM 
 
 ```bash
 mvmctl ls         # List running VMs (aliases: ps, status)
-mvmctl shell      # Open a shell in the Lima VM
+mvmctl dev shell  # Open a shell in the Lima VM
 mvmctl down       # Stop all running VMs
 mvmctl doctor     # Check system dependencies and configuration
 ```

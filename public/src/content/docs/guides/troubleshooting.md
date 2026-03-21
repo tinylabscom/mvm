@@ -74,7 +74,7 @@ mvmctl up --template <template> --name <name>
 
 ```bash
 # Test the flake locally first
-mvmctl shell
+mvmctl dev shell
 nix build .#default
 
 # Check for errors in the flake
@@ -166,7 +166,7 @@ limactl shell mvm bash -c "ip link show tap0"
 
 ### Can't access project files inside microVM
 
-The Firecracker microVM has an **isolated filesystem**. Use `mvmctl shell` to access the Lima VM where your home directory is mounted, or pass volumes with `--volume`.
+The Firecracker microVM has an **isolated filesystem**. Use `mvmctl dev shell` to access the Lima VM where your home directory is mounted, or pass volumes with `--volume`.
 
 ## Performance Issues
 
@@ -175,7 +175,7 @@ The Firecracker microVM has an **isolated filesystem**. Use `mvmctl shell` to ac
 Adjust resources:
 ```bash
 mvmctl uninstall
-mvmctl dev --lima-cpus 8 --lima-mem 16
+mvmctl dev up --lima-cpus 8 --lima-mem 16
 ```
 
 ### Wrong backend selected

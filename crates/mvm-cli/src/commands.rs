@@ -130,38 +130,10 @@ enum Commands {
         #[arg(long, default_value = "16")]
         lima_mem: u32,
     },
-    /// Launch the Lima development environment, auto-bootstrapping if needed
+    /// Manage the Lima development environment (up, down, shell, status)
     Dev {
-        /// Number of vCPUs for the Lima VM
-        #[arg(long, default_value = "8")]
-        lima_cpus: u32,
-        /// Memory (GiB) for the Lima VM
-        #[arg(long, default_value = "16")]
-        lima_mem: u32,
-        /// Project directory to cd into inside the VM
-        #[arg(long)]
-        project: Option<String>,
-        /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
-        #[arg(long, default_value = "0")]
-        metrics_port: u16,
-        /// Reload ~/.mvm/config.toml automatically when it changes
-        #[arg(long)]
-        watch_config: bool,
-        /// Force Lima backend even on macOS 26+ (where Apple Container is default)
-        #[arg(long)]
-        lima: bool,
-    },
-    /// Open a shell in the Lima VM (where Firecracker and Nix are installed)
-    Shell {
-        /// Project directory to cd into inside the VM (Lima maps ~ → ~)
-        #[arg(long)]
-        project: Option<String>,
-        /// Number of vCPUs for the Lima VM
-        #[arg(long, default_value = "8")]
-        lima_cpus: u32,
-        /// Memory (GiB) for the Lima VM
-        #[arg(long, default_value = "16")]
-        lima_mem: u32,
+        #[command(subcommand)]
+        action: Option<DevCmd>,
     },
     /// Remove old dev-build artifacts and run Nix garbage collection
     Cleanup {
@@ -370,6 +342,41 @@ enum AuditCmd {
         #[arg(long, short = 'f')]
         follow: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum DevCmd {
+    /// Bootstrap and start the dev environment, then drop into a shell
+    Up {
+        /// Number of vCPUs for the Lima VM
+        #[arg(long, default_value = "8")]
+        lima_cpus: u32,
+        /// Memory (GiB) for the Lima VM
+        #[arg(long, default_value = "16")]
+        lima_mem: u32,
+        /// Project directory to cd into inside the VM
+        #[arg(long)]
+        project: Option<String>,
+        /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
+        #[arg(long, default_value = "0")]
+        metrics_port: u16,
+        /// Reload ~/.mvm/config.toml automatically when it changes
+        #[arg(long)]
+        watch_config: bool,
+        /// Force Lima backend even on macOS 26+ (where Apple Container is default)
+        #[arg(long)]
+        lima: bool,
+    },
+    /// Stop the Lima development VM
+    Down,
+    /// Open a shell in the running Lima VM
+    Shell {
+        /// Project directory to cd into inside the VM (Lima maps ~ → ~)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Show dev environment status (Lima VM, Firecracker, Nix)
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -676,47 +683,57 @@ pub fn run() -> Result<()> {
             };
             cmd_setup(recreate, force, effective_cpus, effective_mem)
         }
-        Commands::Dev {
-            lima_cpus,
-            lima_mem,
-            project,
-            metrics_port,
-            watch_config,
-            lima,
-        } => {
-            let effective_cpus = if lima_cpus == 8 {
-                cfg.lima_cpus
-            } else {
-                lima_cpus
-            };
-            let effective_mem = if lima_mem == 16 {
-                cfg.lima_mem_gib
-            } else {
-                lima_mem
-            };
+        Commands::Dev { action } => {
+            let action = action.unwrap_or(DevCmd::Up {
+                lima_cpus: 8,
+                lima_mem: 16,
+                project: None,
+                metrics_port: 0,
+                watch_config: false,
+                lima: false,
+            });
+            match action {
+                DevCmd::Up {
+                    lima_cpus,
+                    lima_mem,
+                    project,
+                    metrics_port,
+                    watch_config,
+                    lima,
+                } => {
+                    let effective_cpus = if lima_cpus == 8 {
+                        cfg.lima_cpus
+                    } else {
+                        lima_cpus
+                    };
+                    let effective_mem = if lima_mem == 16 {
+                        cfg.lima_mem_gib
+                    } else {
+                        lima_mem
+                    };
 
-            // On macOS 26+ without --lima, inform about Apple Container dev mode
-            if !lima && mvm_core::platform::current().has_apple_containers() {
-                ui::info(
-                    "Apple Containers available. Dev shell via Apple Container \
-                     is not yet implemented.\n\
-                     Falling back to Lima. Use '--lima' to suppress this message.",
-                );
+                    // On macOS 26+ without --lima, inform about Apple Container dev mode
+                    if !lima && mvm_core::platform::current().has_apple_containers() {
+                        ui::info(
+                            "Apple Containers available. Dev shell via Apple Container \
+                             is not yet implemented.\n\
+                             Falling back to Lima. Use '--lima' to suppress this message.",
+                        );
+                    }
+
+                    cmd_dev(
+                        effective_cpus,
+                        effective_mem,
+                        project.as_deref(),
+                        metrics_port,
+                        watch_config,
+                    )
+                }
+                DevCmd::Down => cmd_dev_down(),
+                DevCmd::Shell { project } => cmd_shell(project.as_deref()),
+                DevCmd::Status => cmd_dev_status(),
             }
-
-            cmd_dev(
-                effective_cpus,
-                effective_mem,
-                project.as_deref(),
-                metrics_port,
-                watch_config,
-            )
         }
-        Commands::Shell {
-            project,
-            lima_cpus,
-            lima_mem,
-        } => cmd_shell(project.as_deref(), lima_cpus, lima_mem),
         Commands::Cleanup { keep, all, verbose } => cmd_cleanup(keep, all, verbose),
         Commands::Logs {
             name,
@@ -1013,7 +1030,93 @@ fn cmd_dev(
     shell_init::ensure_shell_init()?;
 
     // Drop into the Lima VM shell (the development environment)
-    cmd_shell(project, lima_cpus, lima_mem)
+    cmd_shell(project)
+}
+
+fn cmd_dev_down() -> Result<()> {
+    if !bootstrap::is_lima_required() {
+        ui::info("Lima is not required on this platform (native KVM available).");
+        return Ok(());
+    }
+
+    let status = lima::get_status()?;
+    match status {
+        lima::LimaStatus::Running => {
+            ui::info("Stopping Lima development VM...");
+            lima::stop()?;
+            ui::success("Development VM stopped.");
+            Ok(())
+        }
+        lima::LimaStatus::Stopped => {
+            ui::info("Development VM is already stopped.");
+            Ok(())
+        }
+        lima::LimaStatus::NotFound => {
+            anyhow::bail!(
+                "Lima VM '{}' does not exist. Run 'mvmctl dev up' first.",
+                config::VM_NAME
+            );
+        }
+    }
+}
+
+fn cmd_dev_status() -> Result<()> {
+    if !bootstrap::is_lima_required() {
+        ui::info("Lima is not required on this platform (native KVM available).");
+        return Ok(());
+    }
+
+    let status = lima::get_status()?;
+    let status_str = match status {
+        lima::LimaStatus::Running => "Running",
+        lima::LimaStatus::Stopped => "Stopped",
+        lima::LimaStatus::NotFound => "Not found",
+    };
+
+    ui::info(&format!("Lima VM '{}': {status_str}", config::VM_NAME));
+
+    if matches!(status, lima::LimaStatus::Running) {
+        let fc_ver = shell::run_in_vm_stdout("firecracker --version 2>/dev/null | head -1")
+            .unwrap_or_default();
+        let nix_ver = shell::run_in_vm_stdout("nix --version 2>/dev/null").unwrap_or_default();
+
+        ui::info(&format!(
+            "  Firecracker: {}",
+            if fc_ver.trim().is_empty() {
+                "not installed"
+            } else {
+                fc_ver.trim()
+            }
+        ));
+        ui::info(&format!(
+            "  Nix:         {}",
+            if nix_ver.trim().is_empty() {
+                "not installed"
+            } else {
+                nix_ver.trim()
+            }
+        ));
+
+        let mvm_in_vm =
+            shell::run_in_vm_stdout("test -f /usr/local/bin/mvmctl && echo yes || echo no")
+                .unwrap_or_default();
+        if mvm_in_vm.trim() == "yes" {
+            let mvm_ver = shell::run_in_vm_stdout("/usr/local/bin/mvmctl --version 2>/dev/null")
+                .unwrap_or_default();
+            ui::info(&format!(
+                "  mvmctl:      {}",
+                if mvm_ver.trim().is_empty() {
+                    "installed"
+                } else {
+                    mvm_ver.trim()
+                }
+            ));
+        } else {
+            ui::warn("  mvmctl not installed in VM. Run 'mvmctl sync' to build and install it.");
+        }
+    }
+
+    Ok(())
 }
 
 fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
@@ -1115,7 +1218,7 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
-fn cmd_shell(project: Option<&str>, _lima_cpus: u32, _lima_mem: u32) -> Result<()> {
+fn cmd_shell(project: Option<&str>) -> Result<()> {
     lima::require_running()?;
 
     // Print welcome banner with tool versions

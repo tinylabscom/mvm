@@ -211,6 +211,21 @@ mvmctl dev --lima          # explicit Lima fallback
 
 ---
 
+## Phase 3: Dev CLI Subcommands ✓
+
+**Plan:** [specs/plans/21-dev-subcommands.md](plans/21-dev-subcommands.md)
+
+- [x] `DevCmd` enum with `Up`, `Down`, `Shell`, `Status` subcommands
+- [x] Bare `mvmctl dev` defaults to `dev up` (backward compatible)
+- [x] `dev down` — graceful Lima VM stop via `lima::stop()`
+- [x] `dev status` — shows Lima status + Firecracker/Nix/mvmctl versions
+- [x] `dev shell` — replaces top-level `shell` command
+- [x] Removed top-level `Shell` command
+- [x] Updated CLI integration tests
+- [x] Updated README, CLAUDE.md, site docs
+
+---
+
 ## Key Files
 
 | File | Changes |

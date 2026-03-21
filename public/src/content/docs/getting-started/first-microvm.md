@@ -19,7 +19,7 @@ macOS <26:      mvmctl up  -->  Lima VM  -->  Firecracker microVM
 | Layer | Access command | Has your project files? |
 |-------|---------------|------------------------|
 | Host | Your normal terminal | Yes |
-| Lima VM (macOS <26) | `mvmctl dev` or `mvmctl shell` | Yes (~ mounted read/write) |
+| Lima VM (macOS <26) | `mvmctl dev` or `mvmctl dev shell` | Yes (~ mounted read/write) |
 | MicroVM | (headless, no SSH) | No (isolated filesystem) |
 
 MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only.

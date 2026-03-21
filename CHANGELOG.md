@@ -2,6 +2,15 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.7.1] — 2026-03-21
+
+### Changed
+- Restructure `dev` command into subcommands: `dev up`, `dev down`, `dev shell`, `dev status`
+- Bare `mvmctl dev` defaults to `dev up` for backward compatibility
+- Move top-level `shell` command under `dev shell`
+- Add `lima::stop()` for graceful Lima VM shutdown via `dev down`
+- Add `dev status` to show Lima VM, Firecracker, and Nix version info
+
 ## [0.6.0] — 2026-03-14
 
 ### Added

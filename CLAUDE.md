@@ -70,8 +70,8 @@ The `RuntimeBuildEnv` in mvm-runtime implements only `ShellEnvironment`. The ful
 ### Key Design Decisions
 
 - **Firecracker-only**: no Docker/containers. Builds run Nix inside the Lima VM.
-- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvmctl dev` / `mvmctl shell`), not the microVM.
-- **Dev mode = Lima shell**: `mvmctl dev` auto-bootstraps then drops into the Lima VM shell. It does NOT start or SSH into a Firecracker microVM.
+- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvmctl dev` / `mvmctl dev shell`), not the microVM.
+- **Dev mode = Lima shell**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into the Lima VM shell. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell without bootstrap. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. No interactive access to the microVM.
 - **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
 - **Shell scripts inside run_in_vm**: complex ops are bash scripts passed to `limactl shell`. Deliberate -- they run inside the Linux VM.
@@ -102,8 +102,11 @@ cargo build
 cargo run -- --help
 
 # Dev mode
-cargo run -- dev         # auto-bootstrap + drop into Lima shell
-cargo run -- status      # check what's running
+cargo run -- dev         # auto-bootstrap + drop into Lima shell (alias for dev up)
+cargo run -- dev up      # same as above, explicit
+cargo run -- dev down    # stop the Lima dev VM
+cargo run -- dev shell   # open shell in running Lima VM
+cargo run -- dev status  # show dev environment status
 
 # Build from Nix flake
 cargo run -- build --flake . --profile minimal --role worker

@@ -221,8 +221,10 @@ mvmctl template delete my-app
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl dev` | Auto-bootstrap and drop into Lima dev shell |
-| `mvmctl shell` | Open a shell in the Lima VM |
+| `mvmctl dev [up]` | Auto-bootstrap and drop into Lima dev shell |
+| `mvmctl dev down` | Stop the Lima development VM |
+| `mvmctl dev shell` | Open a shell in the running Lima VM |
+| `mvmctl dev status` | Show dev environment status |
 | `mvmctl doctor` | System diagnostics and dependency checks |
 | `mvmctl config show/edit/set` | Manage global config (~/.mvm/config.toml) |
 

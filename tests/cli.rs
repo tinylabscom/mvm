@@ -46,7 +46,6 @@ fn test_help_lists_all_subcommands() {
         "bootstrap",
         "setup",
         "dev",
-        "shell",
         "cleanup",
         "ls",
         "uninstall",
@@ -89,13 +88,16 @@ fn test_dev_help() {
         .args(["dev", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("auto-bootstrapping"));
+        .stdout(predicate::str::contains("up"))
+        .stdout(predicate::str::contains("down"))
+        .stdout(predicate::str::contains("shell"))
+        .stdout(predicate::str::contains("status"));
 }
 
 #[test]
-fn test_dev_help_shows_lima_flag() {
+fn test_dev_up_help_shows_lima_flag() {
     mvm()
-        .args(["dev", "--help"])
+        .args(["dev", "up", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--lima"));
@@ -130,9 +132,9 @@ fn test_ls_runs_without_lima() {
 }
 
 #[test]
-fn test_shell_help() {
+fn test_dev_shell_help() {
     mvm()
-        .args(["shell", "--help"])
+        .args(["dev", "shell", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Lima VM"))
@@ -140,12 +142,54 @@ fn test_shell_help() {
 }
 
 #[test]
-fn test_shell_listed_in_help() {
+fn test_dev_down_help() {
     mvm()
-        .arg("--help")
+        .args(["dev", "down", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("shell"));
+        .stdout(predicate::str::contains("Stop the Lima development VM"));
+}
+
+#[test]
+fn test_dev_status_help() {
+    mvm()
+        .args(["dev", "status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev environment status"));
+}
+
+#[test]
+fn test_dev_up_help_shows_all_flags() {
+    mvm()
+        .args(["dev", "up", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--lima-cpus"))
+        .stdout(predicate::str::contains("--lima-mem"))
+        .stdout(predicate::str::contains("--project"))
+        .stdout(predicate::str::contains("--metrics-port"))
+        .stdout(predicate::str::contains("--watch-config"))
+        .stdout(predicate::str::contains("--lima"));
+}
+
+#[test]
+fn test_dev_status_runs_without_lima() {
+    // dev status should work even without Lima — reports status or "not required"
+    let assert = mvm().args(["dev", "status"]).assert();
+    let output = assert.get_output();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Lima VM")
+            || combined.contains("not required")
+            || combined.contains("Not found"),
+        "dev status should produce meaningful output, got: {}",
+        combined
+    );
 }
 
 #[test]
@@ -514,9 +558,9 @@ fn test_audit_tail_no_log_exits_ok() {
 }
 
 #[test]
-fn test_dev_accepts_watch_config_flag() {
+fn test_dev_up_accepts_watch_config_flag() {
     mvm()
-        .args(["dev", "--watch-config", "--help"])
+        .args(["dev", "up", "--watch-config", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--watch-config"));

@@ -41,13 +41,15 @@ description: Complete command reference for mvmctl.
 | `mvmctl setup --recreate` | Stop microVM, rebuild rootfs from upstream squashfs |
 | `mvmctl setup --force` | Re-run all setup steps even if already complete |
 | `mvmctl setup --lima-cpus N --lima-mem N` | Configure Lima VM resources (defaults: 8 CPUs, 16 GiB) |
-| `mvmctl dev` | Auto-bootstrap if needed, drop into Lima dev shell |
-| `mvmctl dev --project ~/dir` | Auto-bootstrap then cd into a project directory |
-| `mvmctl dev --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
-| `mvmctl dev --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
-| `mvmctl dev --lima` | Force Lima backend even on macOS 26+ |
-| `mvmctl shell` | Open a shell in the Lima VM |
-| `mvmctl shell --project ~/dir` | Open shell and cd into a project directory |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start Lima VM, drop into dev shell |
+| `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
+| `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
+| `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
+| `mvmctl dev up --lima` | Force Lima backend even on macOS 26+ |
+| `mvmctl dev down` | Stop the Lima development VM |
+| `mvmctl dev shell` | Open a shell in the running Lima VM |
+| `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
+| `mvmctl dev status` | Show dev environment status (Lima VM, Firecracker, Nix versions) |
 | `mvmctl doctor` | Run system diagnostics and dependency checks |
 | `mvmctl doctor --json` | Output diagnostics as JSON |
 | `mvmctl update` | Check for and install mvmctl updates |

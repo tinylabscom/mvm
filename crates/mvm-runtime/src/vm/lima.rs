@@ -65,6 +65,11 @@ pub fn ensure_vm_running(vm_name: &str, lima_yaml: &std::path::Path) -> Result<(
     }
 }
 
+/// Stop a named Lima VM.
+pub fn stop_vm(vm_name: &str) -> Result<()> {
+    run_host_visible("limactl", &["stop", vm_name])
+}
+
 /// Delete a named Lima VM forcefully.
 pub fn destroy_vm(vm_name: &str) -> Result<()> {
     run_host_visible("limactl", &["delete", "--force", vm_name])
@@ -100,7 +105,7 @@ pub fn require_running() -> Result<()> {
         LimaStatus::Running => Ok(()),
         LimaStatus::Stopped => {
             anyhow::bail!(
-                "Lima VM '{}' is stopped. Run 'mvmctl dev' or 'mvmctl setup'.",
+                "Lima VM '{}' is stopped. Run 'mvmctl dev up' or 'mvmctl setup'.",
                 VM_NAME
             )
         }
@@ -111,6 +116,11 @@ pub fn require_running() -> Result<()> {
             )
         }
     }
+}
+
+/// Stop the default Lima VM.
+pub fn stop() -> Result<()> {
+    stop_vm(VM_NAME)
 }
 
 /// Delete the default Lima VM forcefully.
