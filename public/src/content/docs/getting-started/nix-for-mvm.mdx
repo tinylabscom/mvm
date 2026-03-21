@@ -1,0 +1,439 @@
+---
+title: "Nix for mvm: A Beginner's Guide"
+description: Learn just enough Nix to write your first mvm flake — no prior Nix experience required.
+---
+
+You don't need to be a Nix expert to use mvm. This guide teaches you exactly what you need to know to write a flake that builds a microVM image. If you've never seen a `.nix` file before, start here.
+
+## What you're building
+
+By the end of this guide, you'll have a `flake.nix` file that tells mvm how to build a VM image containing your app. Running `mvmctl build --flake .` will produce a bootable microVM from that file.
+
+Here's the end result — don't worry about understanding it yet:
+
+```nix
+{
+  inputs = {
+    mvm.url = "github:auser/mvm?dir=nix";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+  };
+
+  outputs = { mvm, nixpkgs, ... }:
+    let
+      system = "aarch64-linux";
+      pkgs = import nixpkgs { inherit system; };
+    in {
+      packages.${system}.default = mvm.lib.${system}.mkGuest {
+        name = "hello";
+        packages = [ pkgs.python3 pkgs.curl ];
+
+        services.hello = {
+          command = "${pkgs.python3}/bin/python3 -m http.server 8080";
+        };
+
+        healthChecks.hello = {
+          healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
+          healthIntervalSecs = 5;
+        };
+      };
+    };
+}
+```
+
+Let's build up to this step by step.
+
+## Step 1: Create the file
+
+Make a new directory for your project and create a `flake.nix`:
+
+```bash
+mkdir my-microvm && cd my-microvm
+touch flake.nix
+```
+
+Every flake starts with the same skeleton — an attribute set with two keys, `inputs` and `outputs`:
+
+```nix
+{
+  inputs = {
+    # where to get dependencies
+  };
+
+  outputs = { ... }:
+    {
+      # what to build
+    };
+}
+```
+
+That's really it. A flake is just a file that says "here's where to get things" and "here's what to make from them."
+
+## Step 2: Declare inputs
+
+Inputs are the dependencies your flake needs — other Nix projects, package repositories, or libraries fetched from Git, GitHub, or local paths. Think of them like `dependencies` in a `package.json` or `[dependencies]` in a `Cargo.toml`, except Nix pins them to an exact revision automatically.
+
+When you first build, Nix creates a `flake.lock` file that records the exact commit hash for each input. This means everyone who builds your flake — on any machine, at any time — gets the identical result. **No "works on my machine" surprises.**
+
+For an mvm flake, you need two inputs:
+
+```nix "inputs"
+inputs = {
+  mvm.url = "github:auser/mvm?dir=nix";
+  nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+};
+```
+
+Each input has a name (left of the `=`) and a URL (right side) that tells Nix where to fetch it:
+
+- **`mvm`** — the mvm guest library, fetched from GitHub. The `?dir=nix` part tells Nix the flake lives in the `nix/` subdirectory of the repo. This provides `mkGuest` — the function that builds VM images. We'll look at this in a minute.
+- **`nixpkgs`** — the official Nix package repository, with 80,000+ packages (Python, Node, curl, PostgreSQL, and more). The `nixos-25.11` branch gives you a stable, tested snapshot.
+
+:::tip
+You'll never need to download these manually. Nix fetches and caches them automatically on first build. Subsequent builds reuse the cache. To update your inputs to the latest versions, run `nix flake update`.
+:::
+
+## Step 3: Write the outputs function
+
+The `outputs` key is a function. Nix passes your resolved inputs as arguments:
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+<Tabs>
+  <TabItem label="Nix">
+    ```nix "outputs"
+    outputs = { mvm, nixpkgs, ... }:
+      let
+        system = "aarch64-linux";
+        pkgs = import nixpkgs { inherit system; };
+      in {
+        # your packages go here
+      };
+    ```
+  </TabItem>
+  <TabItem label="If this were JavaScript">
+    ```js
+    // Conceptual equivalent — not real code
+    function outputs({ mvm, nixpkgs }) {
+      const system = "aarch64-linux";
+      const pkgs = nixpkgs.import({ system });
+
+      return {
+        packages: {
+          [system]: {
+            default: mvm.lib[system].mkGuest({ /* ... */ })
+          }
+        }
+      };
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Let's unpack what's new here:
+
+**`let ... in`** — defines local variables, like `const` in JavaScript. Everything between `let` and `in` is available in the expression after `in`.
+
+**`system`** — the CPU architecture to build for. Use `"aarch64-linux"` for Apple Silicon Macs or ARM Linux, `"x86_64-linux"` for Intel/AMD.
+
+**`pkgs`** — the full nixpkgs package set for your target system. After this line, `pkgs.python3`, `pkgs.curl`, `pkgs.nodejs`, etc. are all available.
+
+**`inherit`** — a shorthand. `{ inherit system; }` is the same as `{ system = system; }` (or `{ system }` in JavaScript).
+
+## Step 4: Define your VM image
+
+Inside the `outputs`, you tell Nix what to build. For mvm, that means calling `mkGuest`:
+
+```nix "mkGuest"
+packages.${system}.default = mvm.lib.${system}.mkGuest {
+  name = "hello";
+};
+```
+
+`mkGuest` is the mvm function that builds a complete microVM image. It handles the kernel, init system, guest agent, networking, and drive mounting — you just describe what you want inside the VM.
+
+**`packages.${system}.default`** — this is the standard Nix way to declare a build output. `mvmctl build --flake .` looks for this by default.
+
+## Step 5: Add packages
+
+A bare VM isn't very useful. Use `packages` to install software into the image:
+
+```nix "packages"
+mvm.lib.${system}.mkGuest {
+  name = "hello";
+  packages = [ pkgs.python3 pkgs.curl ];
+};
+```
+
+`packages` is a list of Nix packages to include in the rootfs. Anything in [nixpkgs](https://search.nixos.org/packages) (80,000+ packages) is available via `pkgs.<name>`:
+
+| What you want | Nix package name |
+|---------------|-----------------|
+| Python 3 | `pkgs.python3` |
+| Node.js 22 | `pkgs.nodejs_22` |
+| curl | `pkgs.curl` |
+| PostgreSQL 16 | `pkgs.postgresql_16` |
+| Redis | `pkgs.redis` |
+| Go | `pkgs.go` |
+| nginx | `pkgs.nginx` |
+
+Search for packages at [search.nixos.org/packages](https://search.nixos.org/packages) or from the command line:
+
+```bash
+# Inside the dev shell (mvmctl dev)
+nix search nixpkgs python
+nix search nixpkgs "node.*22"
+```
+
+:::note[Why `pkgs.python3` instead of just `python3`?]
+Nix stores every package in `/nix/store/hash-name/`. There's no global `PATH`. Using `pkgs.python3` tells Nix exactly which package to include — this is what makes builds reproducible. The same flake always produces the same image, on any machine.
+:::
+
+## Step 6: Add a service
+
+A VM image with packages but no running process just boots and sits idle. Add a service:
+
+```nix "services.hello"
+mvm.lib.${system}.mkGuest {
+  name = "hello";
+  packages = [ pkgs.python3 pkgs.curl ];
+
+  services.hello = {
+    command = "${pkgs.python3}/bin/python3 -m http.server 8080";
+  };
+};
+```
+
+`services.hello` declares a long-running process. mvm's init system starts it at boot and restarts it if it crashes.
+
+**`"${pkgs.python3}/bin/python3"`** — this is how Nix references a binary. The `${pkgs.python3}` part resolves to the full `/nix/store/...` path at build time. You never hardcode paths — Nix handles it.
+
+## Step 7: Add a health check
+
+Health checks let mvm verify your service is actually working, not just running:
+
+```nix "healthChecks.hello"
+healthChecks.hello = {
+  healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
+  healthIntervalSecs = 5;
+};
+```
+
+The guest agent runs this command every 5 seconds. Exit code 0 means healthy. The name (`hello`) should match your service name.
+
+## Step 8: Build and run
+
+You now have a complete flake. Put it all together and build:
+
+```bash
+# Build the VM image
+mvmctl build --flake .
+
+# Boot it
+mvmctl up --flake . --cpus 2 --memory 1024
+
+# Check it's running
+mvmctl ls
+
+# View logs (including health check output)
+mvmctl logs hello -f
+
+# Stop it
+mvmctl down hello
+```
+
+The first build downloads dependencies and takes a few minutes. Subsequent builds with the same `flake.lock` are near-instant thanks to Nix caching.
+
+## Step 9: Add environment variables and setup scripts
+
+Real services often need configuration. Use `env` and `preStart`:
+
+```nix "env"
+services.my-api = {
+  preStart = ''
+    mkdir -p /tmp/data
+    echo "starting up..."
+  '';
+
+  command = "${pkgs.python3}/bin/python3 /app/server.py";
+
+  env = {
+    PORT = "8080";
+    LOG_LEVEL = "info";
+  };
+};
+```
+
+- **`env`** — key-value pairs injected as environment variables into the service process.
+- **`preStart`** — runs once as root before the service starts. Use it for directory setup, file permissions, etc.
+- **`''...''`** — multi-line strings in Nix use two single quotes, not backticks or double quotes.
+
+## Common recipes
+
+### Python web app
+
+```nix
+services.api = {
+  command = "${pkgs.python3}/bin/python3 -m gunicorn app:app -b 0.0.0.0:8080";
+};
+```
+
+### Node.js server
+
+```nix
+services.app = {
+  command = "${pkgs.nodejs}/bin/node /app/server.js";
+  env = { NODE_ENV = "production"; PORT = "3000"; };
+};
+```
+
+### Static file server
+
+```nix
+services.www = {
+  preStart = ''
+    mkdir -p /tmp/www
+    echo '<h1>Hello!</h1>' > /tmp/www/index.html
+  '';
+  command = "${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www";
+};
+```
+
+### Multiple services in one VM
+
+```nix "mkGuest"
+mvm.lib.${system}.mkGuest {
+  name = "my-stack";
+  packages = [ pkgs.python3 pkgs.redis pkgs.curl ];
+
+  services.redis = {
+    command = "${pkgs.redis}/bin/redis-server --port 6379";
+  };
+
+  services.api = {
+    command = "${pkgs.python3}/bin/python3 /app/server.py";
+    env = { REDIS_URL = "redis://localhost:6379"; };
+  };
+
+  healthChecks.api = {
+    healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/health";
+    healthIntervalSecs = 10;
+  };
+};
+```
+
+## What happens when you build
+
+When `mvmctl build --flake .` runs:
+
+1. Nix reads your `flake.nix` and resolves all inputs
+2. It builds your packages and services into a root filesystem (ext4 image)
+3. It bundles a pre-built Linux kernel tuned for Firecracker
+4. The result is cached — rebuilds skip unchanged steps
+
+The output is a kernel (`vmlinux`) and rootfs (`rootfs.ext4`) that any mvm backend can boot.
+
+## Troubleshooting
+
+### "error: getting status of '/nix/store/...': No such file or directory"
+
+Your flake references a path that doesn't exist. Check your `src` paths.
+
+### "error: attribute 'xyz' missing"
+
+A package name is wrong. Search for it at [search.nixos.org/packages](https://search.nixos.org/packages).
+
+### "infinite recursion encountered"
+
+Usually caused by circular references in `let` bindings. Check for variables that reference each other.
+
+### Slow first build
+
+Normal — Nix is downloading and caching all dependencies. Subsequent builds will be fast. Run `mvmctl cleanup` periodically to free old cached builds.
+
+## Next steps
+
+- [Writing Nix Flakes](/guides/nix-flakes/) — the full mkGuest API reference, service helpers, profiles
+- [Templates](/guides/templates/) — save your image as a reusable template
+- [Config & Secrets](/guides/config-secrets/) — inject config files and API keys at boot
+
+---
+
+## Appendix: Nix syntax cheat sheet
+
+If you're curious about the Nix language itself, here's a quick reference for everything used in mvm flakes.
+
+### Values
+
+```nix
+"hello"                    # string
+''
+  multi-line
+  string
+''                         # multi-line string (two single quotes)
+42                         # integer
+true                       # boolean
+null                       # null
+[ 1 2 3 ]                 # list (space-separated, no commas)
+{ a = 1; b = 2; }         # attribute set (like an object/dict)
+```
+
+### String interpolation
+
+```nix "${name}"
+"Hello ${name}"            # inserts the value of 'name'
+"${pkgs.curl}/bin/curl"    # resolves to the Nix store path of curl
+```
+
+### let bindings
+
+```nix
+let
+  port = 8080;
+  host = "0.0.0.0";
+in
+  "${host}:${toString port}"   # "0.0.0.0:8080"
+```
+
+Like `const` in JavaScript. Variables defined between `let` and `in` are available in the expression after `in`.
+
+### Functions
+
+```nix
+# Single argument
+greet = name: "Hello ${name}";
+greet "world"              # "Hello world"
+
+# Multiple arguments (curried)
+add = a: b: a + b;
+add 1 2                    # 3
+
+# Attribute set argument (destructuring)
+f = { name, port }: "${name}:${toString port}";
+f { name = "app"; port = 8080; }   # "app:8080"
+```
+
+### inherit
+
+```nix "inherit"
+let system = "aarch64-linux";
+in { inherit system; }
+# same as: { system = system; }
+```
+
+Shorthand for "copy this variable into the attribute set with the same name."
+
+### Attribute access
+
+```nix
+pkgs.python3               # dot notation
+pkgs.${system}             # dynamic key (interpolation)
+```
+
+### Key Nix concepts
+
+| Concept | What it means |
+|---------|--------------|
+| **Store path** | Every package lives in `/nix/store/hash-name/`. Paths are content-addressed — same input always produces the same path. |
+| **Derivation** | A build recipe. `mkGuest`, `mkDerivation`, etc. are all functions that return derivations. |
+| **Flake** | A `flake.nix` file with pinned dependencies (`flake.lock`). Guarantees reproducibility. |
+| **Closure** | A package plus all its dependencies. When Nix builds your rootfs, it includes the full closure of every package you listed. |

@@ -44,7 +44,7 @@ apt install cosign
 
 ```bash
 # Replace <version> and <target> as appropriate
-VERSION=v0.6.0
+VERSION=v0.7.0
 TARGET=aarch64-apple-darwin  # or x86_64-apple-darwin, x86_64-unknown-linux-gnu, etc.
 
 curl -LO "https://github.com/auser/mvm/releases/download/${VERSION}/mvmctl-${TARGET}.tar.gz"

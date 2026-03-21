@@ -95,13 +95,13 @@ export function CodeBlock({ code, language }: { code: string; language: string }
           </div>
           {/* Code area */}
           <pre className="overflow-x-auto bg-canvas p-6 font-mono text-sm leading-relaxed sm:p-8">
-            <code>
+            <code className="grid" style={{ gridTemplateColumns: "2.5rem 1fr" }}>
               {tokens.map((line, i) => (
-                <div key={i} {...getLineProps({ line })} className="flex">
-                  <span className="mr-6 inline-block w-8 select-none text-right text-label/40">
+                <div key={i} {...getLineProps({ line })} className="contents">
+                  <span className="select-none text-right text-label/40 pr-4">
                     {i + 1}
                   </span>
-                  <span>
+                  <span className="overflow-x-auto">
                     {line.map((token, key) => (
                       <span key={key} {...getTokenProps({ token })} />
                     ))}

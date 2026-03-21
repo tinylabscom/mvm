@@ -184,6 +184,8 @@ Force a specific backend:
 ```bash
 mvmctl up --flake . --hypervisor firecracker
 mvmctl up --flake . --hypervisor apple-container
+mvmctl up --flake . --hypervisor docker
+mvmctl up --flake . --hypervisor qemu    # microvm.nix
 mvmctl doctor   # check available backends
 ```
 

@@ -57,8 +57,8 @@ MicroVMs have **no SSH access** by design. Communication is exclusively via vsoc
 - SSH daemon attack surface
 - Network-based authentication bypasses
 
-For debugging dev builds, use `mvmctl vm exec <name> -- <command>` which routes through the vsock agent.
+For debugging dev builds, use `mvmctl logs <name>` to view guest console output, or `mvmctl logs <name> -f` to follow in real time.
 
 ## DNS
 
-The guest's `/etc/resolv.conf` is configured at build time to use the host's DNS resolver. Internet access works out of the box through the NAT chain (Firecracker) or vmnet (Apple Container).
+The guest's `/etc/resolv.conf` is configured at build time to use the host's DNS resolver. Internet access works out of the box through the NAT chain (Firecracker), vmnet (Apple Container), or Docker bridge networking (Docker).

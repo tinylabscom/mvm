@@ -44,6 +44,7 @@ export default defineConfig({
           items: [
             { label: "Installation", slug: "getting-started/installation" },
             { label: "Quick Start", slug: "getting-started/quickstart" },
+            { label: "Nix for mvm", slug: "getting-started/nix-for-mvm" },
             { label: "Your First MicroVM", slug: "getting-started/first-microvm" },
           ],
         },

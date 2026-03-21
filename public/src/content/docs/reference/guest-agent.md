@@ -14,11 +14,11 @@ Every microVM built with `mkGuest` includes **mvm-guest-agent**, a lightweight R
 | **Snapshot lifecycle** | Coordinates sleep/wake: flushes data, drops page cache before snapshot, signals restore |
 | **Integration management** | Loads service definitions from `/etc/mvm/integrations.d/*.json` |
 | **Probes** | Loads read-only system checks from `/etc/mvm/probes.d/*.json` (disk usage, custom metrics) |
-| **Remote command** | Dev-only: `mvmctl vm exec <name> -- <cmd>` runs commands inside the guest |
+| **Remote command** | Dev-only: execute commands inside the guest via vsock |
 
 ## Protocol
 
-The agent communicates using **length-prefixed JSON frames** over vsock (supported on all backends -- Firecracker and Apple Container):
+The agent communicates using **length-prefixed JSON frames** over vsock (Firecracker, Apple Container, microvm.nix) or a unix socket (Docker):
 
 1. Host writes `CONNECT 52\n` to the socket
 2. Agent responds with `OK 52\n`
@@ -70,17 +70,17 @@ After the grace period expires, normal health reporting resumes.
 ## Querying from the Host
 
 ```bash
-# Simple health ping
-mvmctl vm ping
-mvmctl vm ping my-vm
+# Check guest console output
+mvmctl logs my-vm
 
-# Detailed status (worker state, integrations, health)
-mvmctl vm status my-vm
-mvmctl vm status my-vm --json
+# Follow logs in real time
+mvmctl logs my-vm -f
 
-# Deep inspection (probes, integrations, worker status)
-mvmctl vm inspect my-vm
+# List VMs and their status
+mvmctl ls
 ```
+
+Health check results and probe output are included in the guest console logs.
 
 ## Probes
 
@@ -94,7 +94,7 @@ Probes are read-only system checks loaded from `/etc/mvm/probes.d/*.json`:
 }
 ```
 
-Probe results are included in `mvmctl vm inspect` output.
+Probe results are reported via the vsock protocol and included in guest console logs.
 
 ## Snapshot Coordination
 

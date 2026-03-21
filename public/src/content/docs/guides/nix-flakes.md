@@ -63,7 +63,7 @@ mvmctl uses Nix flakes to produce reproducible microVM images. Each build runs `
 - **Firecracker kernel** (vmlinux) — tuned for microVM workloads
 - **Busybox init** — sub-5s boot, no systemd overhead
 - **Guest agent** — vsock-based health checks, status reporting, snapshot coordination
-- **Networking** — eth0 configured via kernel boot args, NAT through Lima
+- **Networking** — eth0 configured via kernel boot args, NAT to host network
 - **Drive mounting** — `/mnt/config` (ro), `/mnt/secrets` (ro), `/mnt/data` (rw)
 - **Service supervision** — automatic restart on failure with backoff
 
@@ -108,8 +108,8 @@ healthChecks.my-app = {
 Query health status from the host:
 
 ```bash
-mvmctl vm status
-mvmctl vm inspect <name>
+mvmctl logs <name>       # view guest console (includes health check results)
+mvmctl logs <name> -f    # follow in real time
 ```
 
 ## Users
@@ -145,17 +145,7 @@ The `preStart` script always runs as root regardless of the `user` setting, so i
 
 ## Rootfs Types
 
-By default, `mkGuest` produces an ext4 rootfs. For smaller images, use squashfs:
-
-```nix
-mvm.lib.${system}.mkGuest {
-  name = "my-app";
-  rootfsType = "squashfs";  # LZ4-compressed, ~76% smaller
-  # ...
-};
-```
-
-Squashfs images are read-only — the init system mounts tmpfs overlays on `/etc` and `/var` automatically.
+By default, `mkGuest` produces an **ext4** rootfs. The build system also supports **squashfs** for smaller, read-only images (~76% smaller with LZ4 compression). When using squashfs, the init system mounts tmpfs overlays on `/etc` and `/var` automatically.
 
 ## Service Builder Helpers
 
@@ -232,11 +222,13 @@ All three helpers return the same shape: `{ package, service, healthCheck }`. Th
 
 When you run `mvmctl build --flake .`:
 
-1. The flake is copied into the Lima VM
-2. `nix build` runs inside the Lima VM
+1. The flake is copied into the Linux environment (Lima VM on macOS, native on Linux)
+2. `nix build` runs inside that environment
 3. The resulting closure is packed into the rootfs
 4. Kernel and rootfs artifacts are cached
 5. Subsequent builds with unchanged `flake.lock` reuse the cache
+
+The same rootfs works on all backends (Firecracker, Apple Container, microvm.nix, Docker).
 
 ## Profiles
 

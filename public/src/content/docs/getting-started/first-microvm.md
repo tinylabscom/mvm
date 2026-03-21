@@ -12,6 +12,7 @@ mvmctl auto-selects the best backend for your platform:
 ```
 Linux (KVM):    mvmctl up  -->  Firecracker microVM (direct)
 macOS 26+:      mvmctl up  -->  Apple Container (Virtualization.framework)
+Docker:         mvmctl up  -->  Docker container (universal fallback)
 macOS <26:      mvmctl up  -->  Lima VM  -->  Firecracker microVM
 ```
 
@@ -24,7 +25,7 @@ macOS <26:      mvmctl up  -->  Lima VM  -->  Firecracker microVM
 MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only.
 
 :::note
-On Linux with `/dev/kvm`, the Lima layer is skipped entirely -- Firecracker runs directly. On macOS 26+, Apple Virtualization.framework is used instead of Lima + Firecracker.
+On Linux with `/dev/kvm`, the Lima layer is skipped entirely -- Firecracker runs directly. On macOS 26+, Apple Virtualization.framework is used instead of Lima + Firecracker. If neither is available, Docker serves as a universal fallback.
 :::
 
 ## Write a Flake

@@ -152,14 +152,13 @@ mvmctl up --template openclaw --name oc-dev \
 
 All three VMs restore from the same snapshot (1-2 second boot) but get different configs and secrets at runtime.
 
-### Running commands inside the VM
+### Monitoring the VM
 
-The OpenClaw CLI is available inside the VM via `mvmctl vm exec`:
+Check the OpenClaw gateway logs via the guest console:
 
 ```bash
-mvmctl vm exec oc -- openclaw nodes pending
-mvmctl vm exec oc -- openclaw nodes approve <id>
-mvmctl vm exec oc -- openclaw nodes status
+mvmctl logs oc        # view console output
+mvmctl logs oc -f     # follow in real time
 ```
 
 See [nix/examples/openclaw/](https://github.com/auser/mvm/tree/main/nix/examples/openclaw) for the full example with sample config and secrets files.

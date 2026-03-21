@@ -80,7 +80,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl supports three backends (Firecracker, Apple Container, Lima + Firecracker). The `VmBackend` trait in `mvm-core` abstracts the lifecycle; `AnyBackend` in `mvm-runtime` dispatches at runtime. Backend auto-selection: KVM first, then Apple Container, then Lima.
+mvmctl supports four backends: Firecracker (native Linux), Apple Container (macOS 26+), Docker (universal fallback), and microvm.nix (NixOS QEMU). The `VmBackend` trait in `mvm-core` abstracts the lifecycle; `AnyBackend` in `mvm-runtime` dispatches at runtime. Auto-selection priority: KVM → Apple Container → Docker → Lima + Firecracker.
 
 ### Host vs. VM
 
