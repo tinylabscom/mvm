@@ -202,14 +202,25 @@ impl AnyBackend {
 
     /// Select the best backend for the current platform.
     ///
-    /// On macOS 26+ with Apple Silicon, prefers Apple Container.
-    /// Otherwise falls back to Firecracker (via Lima on macOS).
+    /// Priority:
+    /// 1. Firecracker (if /dev/kvm available — fastest, production-grade)
+    /// 2. Apple Container (macOS 26+ — sub-second dev startup)
+    /// 3. Firecracker via Lima (macOS fallback)
     pub fn auto_select() -> Self {
-        if AppleContainerBackend::is_platform_available() {
-            Self::AppleContainer(AppleContainerBackend)
-        } else {
-            Self::Firecracker(FirecrackerBackend)
+        let plat = mvm_core::platform::current();
+
+        // KVM available → Firecracker directly (fastest, works in dev and prod)
+        if plat.has_kvm() {
+            return Self::Firecracker(FirecrackerBackend);
         }
+
+        // macOS 26+ → Apple Container (no Lima needed)
+        if plat.has_apple_containers() {
+            return Self::AppleContainer(AppleContainerBackend);
+        }
+
+        // Fallback: Firecracker via Lima
+        Self::Firecracker(FirecrackerBackend)
     }
 
     /// Dispatch helper — returns a `&dyn VmBackend` for the inner backend.

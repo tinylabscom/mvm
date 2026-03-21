@@ -1787,14 +1787,20 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
     if let Some(t) = template_name {
         validate_template_name(t).with_context(|| format!("Invalid template name: {:?}", t))?;
     }
-    // Auto-select Apple Container on macOS 26+ when no explicit hypervisor
-    // is specified (default is "firecracker").
-    let effective_hypervisor =
-        if hypervisor == "firecracker" && mvm_core::platform::current().has_apple_containers() {
-            "apple-container"
+    // Auto-select backend when no explicit hypervisor is specified.
+    // Priority: KVM (Firecracker direct) → Apple Container → Lima + Firecracker
+    let effective_hypervisor = if hypervisor == "firecracker" {
+        let plat = mvm_core::platform::current();
+        if plat.has_kvm() {
+            "firecracker" // native KVM — best option
+        } else if plat.has_apple_containers() {
+            "apple-container" // macOS 26+ — no Lima
         } else {
-            hypervisor
-        };
+            "firecracker" // macOS <26 — via Lima
+        }
+    } else {
+        hypervisor
+    };
 
     // Apple Container doesn't need Lima — skip the upfront check entirely.
     // For Firecracker on macOS, Lima is required for both build and runtime.
