@@ -147,6 +147,23 @@ pub fn start_vm(
         return Err(format!("Rootfs not found: {rootfs_path}"));
     }
 
+    // Copy rootfs to a writable location — the Nix store copy is read-only
+    // but Virtualization.framework needs read-write access for the disk.
+    let vm_dir = vm_state_dir().join(id);
+    std::fs::create_dir_all(&vm_dir).map_err(|e| format!("create vm dir: {e}"))?;
+    let writable_rootfs = vm_dir.join("rootfs.ext4");
+    if !writable_rootfs.exists() {
+        std::fs::copy(rootfs_path, &writable_rootfs).map_err(|e| format!("copy rootfs: {e}"))?;
+        // Ensure writable
+        let mut perms = std::fs::metadata(&writable_rootfs)
+            .map_err(|e| format!("metadata: {e}"))?
+            .permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&writable_rootfs, perms).map_err(|e| format!("chmod: {e}"))?;
+    }
+    let rootfs_path = writable_rootfs.to_str().unwrap_or(rootfs_path);
+
     unsafe {
         let platform =
             VZGenericPlatformConfiguration::init(VZGenericPlatformConfiguration::alloc());
