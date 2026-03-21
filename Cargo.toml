@@ -123,6 +123,9 @@ mvm-cli.workspace = true
 anyhow.workspace = true
 mimalloc.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
+
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
