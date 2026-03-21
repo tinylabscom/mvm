@@ -137,7 +137,17 @@ Let's unpack what's new here:
 
 **`let ... in`** — defines local variables, like `const` in JavaScript. Everything between `let` and `in` is available in the expression after `in`.
 
-**`system`** — the CPU architecture to build for. Use `"aarch64-linux"` for Apple Silicon Macs or ARM Linux, `"x86_64-linux"` for Intel/AMD.
+**`system`** — the target platform string that tells Nix which CPU architecture and OS to build for. Nix uses this everywhere — to pick the right package binaries, to look up the correct `mkGuest` function, and to label your build output. It's always `"<arch>-<os>"`:
+
+| Your machine | `system` value |
+|---|---|
+| Apple Silicon Mac (M1/M2/M3/M4) | `"aarch64-linux"` |
+| ARM Linux (Raspberry Pi, Graviton) | `"aarch64-linux"` |
+| Intel/AMD Mac or Linux | `"x86_64-linux"` |
+
+Note that the OS is always `linux` — even when building on macOS — because the VM image runs Linux inside Firecracker. You're cross-compiling for the guest, not building for your host.
+
+When you see `${system}` later in the flake (e.g., `packages.${system}.default` or `mvm.lib.${system}.mkGuest`), Nix substitutes the string at evaluation time. It's just dynamic attribute access — `packages.${system}.default` becomes `packages.aarch64-linux.default`.
 
 **`pkgs`** — the full nixpkgs package set for your target system. After this line, `pkgs.python3`, `pkgs.curl`, `pkgs.nodejs`, etc. are all available.
 
