@@ -56,6 +56,15 @@ pub fn stop(id: &str) -> Result<(), String> {
 
 /// Install a launchd agent to run the VM in the background.
 /// Uses resolved kernel/rootfs paths directly (build already done).
+/// Ensure the binary has the virtualization entitlement, signing if needed.
+/// On non-macOS this is a no-op.
+pub fn ensure_signed() {
+    #[cfg(target_os = "macos")]
+    {
+        macos::ensure_signed();
+    }
+}
+
 pub fn install_launchd_direct(
     id: &str,
     kernel_path: &str,

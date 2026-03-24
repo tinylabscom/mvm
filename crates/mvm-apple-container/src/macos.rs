@@ -201,9 +201,11 @@ fn read_persisted_vm_ids() -> Vec<String> {
 /// Ensure the running binary has the virtualization entitlement.
 /// If not, sign it ad-hoc and re-exec the process.
 ///
-/// The re-exec'd process (and launchd agents) set `MVM_SIGNED=1`
-/// to skip the check entirely.
+/// When `MVM_SIGNED=1` is set (by re-exec or launchd agents), the
+/// re-exec is skipped — the parent already signed the binary on disk
+/// before launching the daemon.
 pub fn ensure_signed() {
+    // Already re-exec'd or launched by launchd with a signed binary.
     if std::env::var("MVM_SIGNED").as_deref() == Ok("1") {
         return;
     }
@@ -225,6 +227,22 @@ pub fn ensure_signed() {
     }
 
     tracing::info!("Signing binary with virtualization entitlement...");
+    sign_binary(exe_str);
+
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .env("MVM_SIGNED", "1")
+        .exec();
+    tracing::error!("Re-exec after signing failed: {err}");
+    std::process::exit(1);
+}
+
+/// Sign the binary with the virtualization entitlement (no re-exec).
+///
+/// Called by `ensure_signed()` and also by the `-d` detach path to
+/// pre-sign before installing the launchd agent.
+fn sign_binary(exe_str: &str) {
     let ent = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -237,25 +255,13 @@ pub fn ensure_signed() {
         return;
     }
 
-    let ok = std::process::Command::new("codesign")
+    let _ = std::process::Command::new("codesign")
         .args(["--sign", "-", "--force", "--entitlements"])
         .arg(&ent_path)
         .arg(exe_str)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .output();
 
     let _ = std::fs::remove_file(&ent_path);
-
-    if ok {
-        use std::os::unix::process::CommandExt;
-        let err = std::process::Command::new(&exe)
-            .args(std::env::args_os().skip(1))
-            .env("MVM_SIGNED", "1")
-            .exec();
-        tracing::error!("Re-exec after signing failed: {err}");
-        std::process::exit(1);
-    }
 }
 
 /// Discover the guest's IP by scanning ARP for recent entries on bridge interfaces.

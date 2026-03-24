@@ -2471,6 +2471,10 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // starting the VM in this process. The agent runs as a proper
         // macOS service with its own RunLoop.
         if detach && effective_hypervisor == "apple-container" {
+            // Sign the binary before installing the launchd agent so the
+            // daemon process launches with the entitlement already in place.
+            mvm_apple_container::ensure_signed();
+
             // Build is already done — install launchd agent with the
             // resolved kernel/rootfs paths (no rebuild in the daemon).
             // Serialize port mappings for the daemon
