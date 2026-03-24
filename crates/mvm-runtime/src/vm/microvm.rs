@@ -113,6 +113,12 @@ pub fn resolve_vm_dir(slot: &VmSlot) -> Result<String> {
     run_in_vm_stdout(&format!("echo {}", slot.vm_dir))
 }
 
+/// Resolve the absolute directory path for a running VM by name.
+pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
+    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    Ok(format!("{}/{}", abs_vms, name))
+}
+
 /// Start the Firecracker daemon inside the Lima VM (background).
 #[instrument(skip_all)]
 fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
@@ -504,6 +510,8 @@ pub struct FlakeRunConfig {
     pub secret_files: Vec<DriveFile>,
     /// Declared port mappings (host:guest) for forwarding and guest config.
     pub ports: Vec<crate::config::PortMapping>,
+    /// Network policy controlling outbound traffic from this VM.
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 impl FlakeRunConfig {
@@ -560,6 +568,9 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     // Create TAP device for this VM
     network::tap_create(slot)?;
     let mut tap_guard = TapGuard::new(slot);
+
+    // Apply network policy (iptables egress filtering) if not unrestricted
+    network::apply_network_policy(slot, &config.network_policy)?;
 
     // Start Firecracker daemon in per-VM directory
     start_vm_firecracker(&abs_dir, &abs_socket)?;
@@ -640,6 +651,9 @@ pub fn restore_from_template_snapshot(
     // Create TAP device for this VM
     network::tap_create(slot)?;
     let mut tap_guard = TapGuard::new(slot);
+
+    // Apply network policy (iptables egress filtering) if not unrestricted
+    network::apply_network_policy(slot, &config.network_policy)?;
 
     // Copy snapshot files to per-VM directory
     run_in_vm(&format!(
@@ -822,6 +836,10 @@ pub fn stop_vm(name: &str) -> Result<()> {
         // Reconstruct slot to find TAP name — scan for the index
         if let Some(idx) = read_slot_index(&abs_dir) {
             let slot = VmSlot::new(vm_name, idx);
+            // Clean up any network policy iptables rules before destroying TAP
+            if let Err(e) = network::cleanup_network_policy(&slot) {
+                warn!("failed to clean up network policy rules: {e}");
+            }
             if let Err(e) = network::tap_destroy(&slot) {
                 warn!("failed to destroy TAP device: {e}");
             }

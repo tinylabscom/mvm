@@ -576,6 +576,7 @@ pub fn template_build_with_snapshot(id: &str, force: bool, update_hash: bool) ->
         config_files: vec![],
         secret_files: vec![],
         ports: vec![],
+        network_policy: mvm_core::network_policy::NetworkPolicy::default(),
     };
 
     // Ensure bridge + TAP

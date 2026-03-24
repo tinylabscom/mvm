@@ -26,7 +26,7 @@ use mvm_guest::integrations::{
     self, IntegrationEntry, IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
 };
 use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
-use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse};
+use mvm_guest::vsock::{FsChange, FsChangeKind, GUEST_AGENT_PORT, GuestRequest, GuestResponse};
 use serde::Deserialize;
 
 // ============================================================================
@@ -749,6 +749,76 @@ fn do_exec(command: &str, stdin_data: Option<&str>, _timeout_secs: u64) -> Guest
     }
 }
 
+/// Collect filesystem changes by walking the overlay upper directory.
+///
+/// When the rootfs is mounted read-only with an overlay (squashfs + tmpfs),
+/// all writes go to the upper dir (typically /overlay/upper). Walking it
+/// reveals every file created or modified since boot.
+///
+/// Falls back to an empty list if the overlay dir doesn't exist (non-overlay
+/// rootfs or unrestricted mode).
+fn collect_fs_diff() -> Vec<FsChange> {
+    // Common overlay upper dir paths
+    let upper_dirs = ["/overlay/upper", "/run/overlay/upper", "/tmp/overlay/upper"];
+    let upper = upper_dirs.iter().find(|p| std::path::Path::new(p).is_dir());
+
+    let Some(upper_dir) = upper else {
+        return Vec::new();
+    };
+
+    let mut changes = Vec::new();
+    walk_dir(std::path::Path::new(upper_dir), upper_dir, &mut changes);
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes
+}
+
+fn walk_dir(dir: &std::path::Path, strip_prefix: &str, changes: &mut Vec<FsChange>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .to_str()
+            .unwrap_or("")
+            .strip_prefix(strip_prefix)
+            .unwrap_or("")
+            .to_string();
+
+        if rel.is_empty() {
+            continue;
+        }
+
+        if path.is_dir() {
+            walk_dir(&path, strip_prefix, changes);
+        } else {
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            // In overlay upper dir, whiteout files (.wh.*) indicate deletion
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if let Some(deleted_name) = filename.strip_prefix(".wh.") {
+                let parent = path.parent().unwrap_or(&path);
+                let del_rel = parent
+                    .to_str()
+                    .unwrap_or("")
+                    .strip_prefix(strip_prefix)
+                    .unwrap_or("");
+                changes.push(FsChange {
+                    path: format!("{}/{}", del_rel, deleted_name),
+                    kind: FsChangeKind::Deleted,
+                    size: 0,
+                });
+            } else {
+                // File exists in upper = created or modified
+                changes.push(FsChange {
+                    path: rel,
+                    kind: FsChangeKind::Created, // can't distinguish create vs modify from overlay alone
+                    size,
+                });
+            }
+        }
+    }
+}
+
 fn handle_client(
     fd: RawFd,
     state: &Arc<Mutex<AgentState>>,
@@ -861,6 +931,14 @@ fn handle_client(
         GuestRequest::Exec { .. } => GuestResponse::Error {
             message: "exec not available: guest agent built without dev-shell feature".to_string(),
         },
+
+        GuestRequest::FsDiff => {
+            // Walk the overlay upper dir to find changes since boot.
+            // The overlay upper dir is typically at /overlay/upper when
+            // the rootfs is mounted read-only with an overlay.
+            let changes = collect_fs_diff();
+            GuestResponse::FsDiffResult { changes }
+        }
     };
 
     write_response(&mut file, &resp);

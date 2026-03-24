@@ -279,6 +279,18 @@ enum Commands {
         /// Run in background (detached mode, like docker run -d)
         #[arg(long, short = 'd')]
         detach: bool,
+        /// Network preset (unrestricted, none, registries, dev)
+        #[arg(long)]
+        network_preset: Option<String>,
+        /// Network allowlist entry (format: HOST:PORT). Repeatable.
+        #[arg(long)]
+        network_allow: Vec<String>,
+        /// Seccomp profile tier (essential, minimal, standard, network, unrestricted)
+        #[arg(long, default_value = "unrestricted")]
+        seccomp: String,
+        /// Secret binding (format: KEY:host, KEY:host:header, or KEY=value:host). Repeatable.
+        #[arg(long, short = 's')]
+        secret: Vec<String>,
     },
     /// Stop microVMs (from mvm.toml, by name, or all)
     Down {
@@ -328,6 +340,14 @@ enum Commands {
     Flake {
         #[command(subcommand)]
         action: FlakeCmd,
+    },
+    /// Show filesystem changes in a running VM (files created/modified/deleted since boot)
+    Diff {
+        /// VM name
+        name: String,
+        /// Output as JSON instead of human-readable
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -785,6 +805,10 @@ pub fn run() -> Result<()> {
             watch_config,
             watch,
             detach,
+            network_preset,
+            network_allow,
+            seccomp,
+            secret,
         } => {
             let memory_mb = memory
                 .as_ref()
@@ -794,6 +818,16 @@ pub fn run() -> Result<()> {
             // CLI flag takes precedence; fall back to per-user config defaults.
             let effective_cpus = cpus.or(Some(cfg.default_cpus));
             let effective_memory = memory_mb.or(Some(cfg.default_memory_mib));
+
+            let network_policy = resolve_network_policy(network_preset.as_deref(), &network_allow)?;
+            let seccomp_tier: mvm_security::seccomp::SeccompTier =
+                seccomp.parse().context("Invalid --seccomp value")?;
+            let secret_bindings: Vec<mvm_core::secret_binding::SecretBinding> = secret
+                .iter()
+                .map(|s| s.parse())
+                .collect::<Result<Vec<_>>>()
+                .context("Invalid --secret value")?;
+
             cmd_run(RunParams {
                 flake_ref: flake.as_deref(),
                 template_name: template.as_deref(),
@@ -811,6 +845,9 @@ pub fn run() -> Result<()> {
                 watch_config,
                 watch,
                 detach,
+                network_policy,
+                seccomp_tier,
+                secret_bindings,
             })
         }
         Commands::Down { name, config } => cmd_down(name.as_deref(), config.as_deref()),
@@ -821,6 +858,7 @@ pub fn run() -> Result<()> {
         Commands::Config { action } => cmd_config(action),
         Commands::Uninstall { yes, all, dry_run } => cmd_uninstall(yes, all, dry_run),
         Commands::Audit { action } => cmd_audit(action),
+        Commands::Diff { name, json } => cmd_diff(&name, json),
         Commands::Flake { action } => cmd_flake(action),
     };
 
@@ -1382,6 +1420,52 @@ fn cmd_logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()
     microvm::logs(name, follow, lines, hypervisor)
 }
 
+fn cmd_diff(name: &str, json: bool) -> Result<()> {
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+
+    let instance_dir = microvm::resolve_running_vm_dir(name)?;
+    let changes = mvm_guest::vsock::query_fs_diff(&instance_dir)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&changes)?);
+    } else if changes.is_empty() {
+        ui::info("No filesystem changes detected.");
+    } else {
+        ui::info(&format!("{} change(s):", changes.len()));
+        for change in &changes {
+            let prefix = match change.kind {
+                mvm_guest::vsock::FsChangeKind::Created => "+",
+                mvm_guest::vsock::FsChangeKind::Modified => "~",
+                mvm_guest::vsock::FsChangeKind::Deleted => "-",
+            };
+            if change.size > 0 {
+                println!(
+                    "  {} {} ({})",
+                    prefix,
+                    change.path,
+                    human_bytes(change.size)
+                );
+            } else {
+                println!("  {} {}", prefix, change.path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
 /// Forward a port from a running microVM to localhost.
 ///
 /// On macOS this tunnels through Lima's SSH connection; on native Linux
@@ -1839,6 +1923,33 @@ fn cmd_build_flake(flake_ref: &str, profile: Option<&str>, watch: bool, json: bo
     }
 }
 
+/// Resolve CLI network flags into a `NetworkPolicy`.
+/// `--network-preset` and `--network-allow` are mutually exclusive.
+fn resolve_network_policy(
+    preset: Option<&str>,
+    allow: &[String],
+) -> Result<mvm_core::network_policy::NetworkPolicy> {
+    use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+
+    match (preset, allow.is_empty()) {
+        (Some(_), false) => {
+            anyhow::bail!("--network-preset and --network-allow are mutually exclusive")
+        }
+        (Some(name), true) => {
+            let p: NetworkPreset = name.parse()?;
+            Ok(NetworkPolicy::preset(p))
+        }
+        (None, false) => {
+            let rules: Vec<HostPort> = allow
+                .iter()
+                .map(|s| s.parse())
+                .collect::<Result<Vec<_>>>()?;
+            Ok(NetworkPolicy::allow_list(rules))
+        }
+        (None, true) => Ok(NetworkPolicy::default()),
+    }
+}
+
 /// Resolve a flake reference: relative/absolute paths are canonicalized,
 /// remote refs (containing `:`) pass through unchanged.
 fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
@@ -1873,6 +1984,9 @@ struct RunParams<'a> {
     watch_config: bool,
     watch: bool,
     detach: bool,
+    network_policy: mvm_core::network_policy::NetworkPolicy,
+    seccomp_tier: mvm_security::seccomp::SeccompTier,
+    secret_bindings: Vec<mvm_core::secret_binding::SecretBinding>,
 }
 
 fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -1893,6 +2007,9 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         watch_config,
         watch,
         detach,
+        network_policy,
+        seccomp_tier,
+        secret_bindings,
     } = params;
     let _span =
         tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
@@ -2175,6 +2292,61 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
         config_files.push(f);
     }
 
+    // Inject seccomp manifest into config drive if not unrestricted
+    if let Some(manifest) = seccomp_tier.to_manifest() {
+        let json = serde_json::to_string_pretty(&manifest)
+            .context("failed to serialize seccomp manifest")?;
+        config_files.push(microvm::DriveFile {
+            name: "seccomp.json".to_string(),
+            content: json,
+            mode: 0o644,
+        });
+    }
+
+    // Resolve and inject secret bindings
+    if !secret_bindings.is_empty() {
+        let resolved = mvm_core::secret_binding::ResolvedSecrets::resolve(&secret_bindings)
+            .context("failed to resolve secret bindings")?;
+
+        // Write actual secret values to the secrets drive
+        for (filename, content) in resolved.to_secret_files() {
+            secret_files.push(microvm::DriveFile {
+                name: filename,
+                content,
+                mode: 0o600,
+            });
+        }
+
+        // Write secret manifest to config drive (no secret values, just metadata)
+        config_files.push(microvm::DriveFile {
+            name: "secrets-manifest.json".to_string(),
+            content: resolved.manifest_json(),
+            mode: 0o644,
+        });
+
+        // Write placeholder env vars so tools pass existence checks
+        let placeholders: Vec<String> = resolved
+            .placeholder_env_vars()
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        if let Some(f) = env_vars_to_drive_file(&placeholders) {
+            config_files.push(microvm::DriveFile {
+                name: "secret-env.env".to_string(),
+                content: f.content,
+                mode: f.mode,
+            });
+        }
+
+        // Log which secrets are bound (without revealing values)
+        for b in &secret_bindings {
+            ui::info(&format!(
+                "Secret {} bound to {} (header: {})",
+                b.env_var, b.target_host, b.header
+            ));
+        }
+    }
+
     let vm_name_owned = vm_name.clone();
     let has_ports = !port_mappings.is_empty();
 
@@ -2201,6 +2373,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             config_files,
             secret_files,
             ports: port_mappings,
+            network_policy: network_policy.clone(),
         };
         let rev = mvm_runtime::vm::template::lifecycle::current_revision_id(tmpl)?;
         let snap_dir = mvm_core::template::template_snapshot_dir(tmpl, &rev);
@@ -3966,5 +4139,50 @@ mod tests {
         let cli_memory: Option<u32> = Some(512);
         let effective = cli_memory.or(Some(cfg.default_memory_mib));
         assert_eq!(effective, Some(512));
+    }
+
+    #[test]
+    fn test_resolve_network_policy_default() {
+        let policy = resolve_network_policy(None, &[]).unwrap();
+        assert!(policy.is_unrestricted());
+    }
+
+    #[test]
+    fn test_resolve_network_policy_preset() {
+        let policy = resolve_network_policy(Some("dev"), &[]).unwrap();
+        assert!(!policy.is_unrestricted());
+        let rules = policy.resolve_rules().unwrap();
+        assert!(rules.iter().any(|r| r.host == "github.com"));
+    }
+
+    #[test]
+    fn test_resolve_network_policy_allow_list() {
+        let allow = vec![
+            "github.com:443".to_string(),
+            "api.openai.com:443".to_string(),
+        ];
+        let policy = resolve_network_policy(None, &allow).unwrap();
+        let rules = policy.resolve_rules().unwrap();
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_network_policy_mutual_exclusion() {
+        let allow = vec!["github.com:443".to_string()];
+        let result = resolve_network_policy(Some("dev"), &allow);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_network_policy_invalid_preset() {
+        let result = resolve_network_policy(Some("bogus"), &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_network_policy_invalid_allow_entry() {
+        let allow = vec!["not-a-host-port".to_string()];
+        let result = resolve_network_policy(None, &allow);
+        assert!(result.is_err());
     }
 }

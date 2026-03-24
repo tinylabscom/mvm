@@ -13,7 +13,7 @@ production backend on Linux.
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 7 + root facade + xtask  |
-| Total tests      | 886+                     |
+| Total tests      | 882+                     |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -178,7 +178,7 @@ mvmctl doctor  # shows Apple Container availability status
 - [x] `VminitdClient::launch_guest_agent()`, `write_file()`, `kill()` stubs
 - [x] `SandboxContext.proto` copied to `proto/` for reference
 - [x] Constants: `VMINITD_VSOCK_PORT=1024`, `GUEST_AGENT_VSOCK_PORT=52`
-- [ ] gRPC-over-vsock transport (blocked on vmnet entitlement for running containers)
+- [ ] gRPC-over-vsock transport (blocked on vmnet entitlement for running containers — see [apple-container boot model blocker](../../../.claude/projects/-Users-auser-work-personal-microvm-kv-mvm/memory/project_apple_container_boot_model.md))
 
 ### 2b. Backend-aware dev mode ✓
 
@@ -241,3 +241,66 @@ mvmctl dev --lima          # explicit Lima fallback
 | `crates/mvm-cli/src/commands.rs` | Unified start, `--hypervisor`, dev mode |
 | `crates/mvm-cli/src/doctor.rs` | Apple Container availability check |
 | `crates/mvm-guest/src/vsock.rs` | `GuestChannel` trait impl |
+
+---
+
+## Next: Sprint 39 — Agent Sandbox Patterns
+
+**Plan:** [specs/plans/22-agent-sandbox-patterns.md](plans/22-agent-sandbox-patterns.md)
+
+**Goal:** Harden mvm as an AI agent execution platform with network isolation, seccomp
+defense-in-depth, filesystem audit trails, and secret management — informed by competitive
+research across 8 Rust crates (arcbox-vm, agentkernel, mino, ai-jail, sandbox-runtime,
+sandbox-rs, agent-sandbox, wasm-sandbox).
+
+### Phase 1: Domain-Based Network Allowlists ✓
+
+- [x] `NetworkPolicy` enum in mvm-core (Unrestricted | Preset | AllowList)
+- [x] `HostPort` type with serde + validation + FromStr
+- [x] Built-in presets: `dev`, `registries`, `none`, `unrestricted`
+- [x] `apply_network_policy(slot, policy)` in `network.rs` (iptables FORWARD rules)
+- [x] `cleanup_network_policy(slot)` on VM stop (flush guest IP rules)
+- [x] `--network-allow` and `--network-preset` CLI flags (mutually exclusive)
+- [x] `network_policy` field on `FlakeRunConfig` (threaded through all 3 construction sites)
+- [x] Applied in both `run_from_build` and `restore_from_template_snapshot`
+- [x] Tests: 25 unit tests (network_policy) + 6 CLI resolver tests + integration test
+- [x] 0 clippy warnings
+
+### Phase 2: Tiered Seccomp Profiles ✓
+
+- [x] `SeccompTier` enum (Essential, Minimal, Standard, Network, Unrestricted) in mvm-security
+- [x] Syscall lists for each tier (cumulative, each is superset of previous)
+- [x] `SeccompManifest` JSON generation (guest init applies via prctl, no host-side BPF needed)
+- [x] Named security bundles (`SecurityProfile`: Strict, Moderate, Permissive) + `ProfileLimits`
+- [x] `--seccomp` CLI flag (default: unrestricted for backward compat)
+- [x] Config drive delivery: `seccomp.json` manifest injected into config drive
+- [x] `SeccompAction` enum (KillProcess, Trap, Errno, Log) for configurable enforcement
+- [x] Tests: 19 unit tests (tier ordering, cumulative subset, serde roundtrip, manifest, profiles)
+- [x] 0 clippy warnings
+
+### Phase 3: Filesystem Diff Tracking ✓
+
+- [x] `FsDiff` request + `FsDiffResult` response in vsock protocol
+- [x] `FsChange` and `FsChangeKind` types (Created, Modified, Deleted) with serde
+- [x] Guest agent walks overlay upper dir (`/overlay/upper`) for changes since boot
+- [x] Overlay whiteout files (`.wh.*`) detected as deletions
+- [x] `query_fs_diff()` and `query_fs_diff_at()` host-side query functions
+- [x] `mvmctl diff <name>` CLI subcommand (human-readable + `--json`)
+- [x] `resolve_running_vm_dir()` helper in microvm.rs
+- [x] Protocol roundtrip tests updated (GuestRequest + GuestResponse)
+- [x] CLI integration test for `diff --help`
+- [x] 0 clippy warnings
+
+### Phase 4: Secret Binding & Injection ✓
+
+- [x] `SecretBinding` type in mvm-core (env_var, target_host, header, value)
+- [x] `ResolvedSecrets` with env resolution + secret file + manifest generation
+- [x] CLI `--secret KEY:host` / `--secret KEY:host:header` / `--secret KEY=val:host`
+- [x] Secrets written to secrets drive (mode 0600, JSON with full metadata)
+- [x] `secrets-manifest.json` on config drive (metadata only, no secret values)
+- [x] Placeholder env vars (`mvm-managed:KEY`) on config drive for tool preflight checks
+- [x] Audit log of bound secrets at VM start (env var + host, not values)
+- [x] Combined with Phase 1 network allowlists for domain-scoped exfiltration prevention
+- [x] Tests: 18 unit tests (parsing, serde, resolution, files, manifest, placeholders)
+- [x] 0 clippy warnings
+- [ ] Future: MITM HTTPS proxy for true network-layer injection (proxy never exposes secrets to guest disk)

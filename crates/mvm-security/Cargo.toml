@@ -11,5 +11,8 @@ authors.workspace = true
 [dependencies]
 mvm-core.workspace = true
 aho-corasick.workspace = true
+anyhow.workspace = true
 regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true

@@ -70,6 +70,7 @@ impl FirecrackerConfig {
                     guest: p.guest,
                 })
                 .collect(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::default(),
         };
         Ok(Self { run_config })
     }

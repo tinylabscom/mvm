@@ -1589,8 +1589,11 @@ name = "mvm-security"
 version = "0.7.1"
 dependencies = [
  "aho-corasick",
+ "anyhow",
  "mvm-core",
  "regex",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 

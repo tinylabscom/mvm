@@ -134,3 +134,40 @@ pub fn tap_destroy(slot: &VmSlot) -> Result<()> {
         tap = slot.tap_dev,
     ))
 }
+
+// ============================================================================
+// Network policy enforcement (domain-based egress filtering)
+// ============================================================================
+
+/// Apply iptables-based network policy for a VM slot.
+/// Must be called after `tap_create()`. No-op if the policy is unrestricted.
+pub fn apply_network_policy(
+    slot: &VmSlot,
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Result<()> {
+    if let Some(script) = policy.iptables_script(BRIDGE_DEV, &slot.guest_ip) {
+        ui::info(&format!(
+            "Applying network policy for VM '{}'...",
+            slot.name
+        ));
+        run_in_vm_visible(&format!("set -euo pipefail\n{}", script))
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove all network policy iptables rules for a VM slot.
+/// Flushes any FORWARD rules matching this guest IP, regardless of what
+/// policy was originally applied. Safe to call even if no policy was set.
+pub fn cleanup_network_policy(slot: &VmSlot) -> Result<()> {
+    run_in_vm_visible(&format!(
+        "# Clean up all FORWARD rules for {ip}\n\
+         while sudo iptables -D FORWARD -i {br} -s {ip} -j DROP 2>/dev/null; do :; done\n\
+         while sudo iptables -D FORWARD -i {br} -s {ip} -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; do :; done\n\
+         while sudo iptables -D FORWARD -i {br} -s {ip} -p udp --dport 53 -j ACCEPT 2>/dev/null; do :; done\n\
+         while sudo iptables -D FORWARD -i {br} -s {ip} -p tcp --dport 53 -j ACCEPT 2>/dev/null; do :; done\n\
+         while sudo iptables -D FORWARD -i {br} -s {ip} -p tcp -j ACCEPT 2>/dev/null; do :; done\n",
+        br = BRIDGE_DEV,
+        ip = slot.guest_ip,
+    ))
+}

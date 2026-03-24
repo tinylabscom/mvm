@@ -63,6 +63,8 @@ pub enum GuestRequest {
     },
     /// Signal post-restore: remount drives and restart services.
     PostRestore,
+    /// Request filesystem diff (changes since boot, from overlay or snapshot).
+    FsDiff,
 }
 
 /// Response from guest vsock agent to host.
@@ -110,6 +112,28 @@ pub enum GuestResponse {
         success: bool,
         detail: Option<String>,
     },
+    /// Filesystem diff result.
+    FsDiffResult { changes: Vec<FsChange> },
+}
+
+/// A single filesystem change detected since boot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FsChange {
+    /// Path relative to the filesystem root.
+    pub path: String,
+    /// Type of change.
+    pub kind: FsChangeKind,
+    /// File size in bytes (0 for deleted files).
+    pub size: u64,
+}
+
+/// Kind of filesystem change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FsChangeKind {
+    Created,
+    Modified,
+    Deleted,
 }
 
 // ============================================================================
@@ -773,6 +797,38 @@ pub fn exec_at(
     )
 }
 
+/// Query filesystem diff from the guest agent at a specific UDS path.
+///
+/// Returns the list of filesystem changes since boot (created, modified,
+/// deleted files). The guest agent walks the overlay filesystem to compute
+/// the diff.
+pub fn query_fs_diff(instance_dir: &str) -> Result<Vec<FsChange>> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::FsDiff)?;
+
+    match resp {
+        GuestResponse::FsDiffResult { changes } => Ok(changes),
+        GuestResponse::Error { message } => {
+            bail!("Guest fs-diff error: {}", message);
+        }
+        _ => bail!("Unexpected response to FsDiff"),
+    }
+}
+
+/// Query filesystem diff at a specific UDS path.
+pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::FsDiff)?;
+
+    match resp {
+        GuestResponse::FsDiffResult { changes } => Ok(changes),
+        GuestResponse::Error { message } => {
+            bail!("Guest fs-diff error: {}", message);
+        }
+        _ => bail!("Unexpected response to FsDiff"),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -801,6 +857,7 @@ mod tests {
                 timeout_secs: Some(10),
             },
             GuestRequest::PostRestore,
+            GuestRequest::FsDiff,
         ];
 
         for req in &variants {
@@ -861,6 +918,25 @@ mod tests {
             GuestResponse::PostRestoreAck {
                 success: true,
                 detail: Some("post-restore signal sent to init".to_string()),
+            },
+            GuestResponse::FsDiffResult {
+                changes: vec![
+                    FsChange {
+                        path: "/app/output.txt".to_string(),
+                        kind: FsChangeKind::Created,
+                        size: 1234,
+                    },
+                    FsChange {
+                        path: "/etc/hosts".to_string(),
+                        kind: FsChangeKind::Modified,
+                        size: 89,
+                    },
+                    FsChange {
+                        path: "/tmp/scratch".to_string(),
+                        kind: FsChangeKind::Deleted,
+                        size: 0,
+                    },
+                ],
             },
         ];
 

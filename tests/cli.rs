@@ -268,7 +268,20 @@ fn test_run_help_shows_flags() {
         .stdout(predicate::str::contains("--cpus"))
         .stdout(predicate::str::contains("--memory"))
         .stdout(predicate::str::contains("apple-container"))
-        .stdout(predicate::str::contains("docker"));
+        .stdout(predicate::str::contains("docker"))
+        .stdout(predicate::str::contains("--network-preset"))
+        .stdout(predicate::str::contains("--network-allow"))
+        .stdout(predicate::str::contains("--seccomp"));
+}
+
+#[test]
+fn test_diff_help() {
+    mvm()
+        .args(["diff", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("filesystem changes"))
+        .stdout(predicate::str::contains("--json"));
 }
 
 #[test]
