@@ -3,7 +3,8 @@
 //! VMs are created from the CLI thread with callbacks on the main dispatch
 //! queue. The main thread pumps NSRunLoop (see main.rs) to deliver callbacks.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -16,9 +17,13 @@ use objc2_virtualization::*;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// In-process VM handle tracking.
-static VM_IDS: std::sync::LazyLock<Mutex<HashSet<String>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+/// In-process VM handle tracking. Stores raw pointer to VZVirtualMachine
+/// (must be accessed only from the main dispatch queue).
+///
+/// We store raw pointers because VZVirtualMachine is `!Send` — the actual
+/// object lives on the main queue. All access goes through `dispatch_on_main`.
+static VMS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Directory for persisted VM state (PID files + metadata).
 fn vm_state_dir() -> std::path::PathBuf {
@@ -376,7 +381,7 @@ pub fn start_vm(
         let boot_loader =
             VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &nsurl(kernel_path));
         boot_loader.setCommandLine(&NSString::from_str(
-            "console=hvc0 root=/dev/vda rw init=/sbin/vminitd",
+            "console=hvc0 root=/dev/vda rw init=/init",
         ));
 
         let config = VZVirtualMachineConfiguration::new();
@@ -411,6 +416,13 @@ pub fn start_vm(
         )]));
         config.setMemoryBalloonDevices(&NSArray::from_retained_slice(&[Retained::into_super(
             VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new(),
+        )]));
+
+        // Vsock device — enables host↔guest communication on port 52
+        // (same protocol as Firecracker vsock, used by the guest agent)
+        let vsock = VZVirtioSocketDeviceConfiguration::new();
+        config.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(
+            vsock,
         )]));
 
         // Serial console — write kernel and init output to log file
@@ -477,8 +489,12 @@ pub fn start_vm(
             // SAFETY: safe ObjC message send
             unsafe { vm.startWithCompletionHandler(&handler) };
 
-            // Leak VM to keep it alive
-            std::mem::forget(vm);
+            // Store VM pointer so we can access socket devices later.
+            // The pointer stays valid as long as we don't drop it.
+            let vm_ptr = Retained::into_raw(vm) as usize;
+            if let Ok(mut map) = VMS.lock() {
+                map.insert(id_owned.clone(), vm_ptr);
+            }
 
             tracing::debug!("VM '{}' start dispatched to main queue", id_owned);
         });
@@ -491,10 +507,6 @@ pub fn start_vm(
             match rx.try_recv() {
                 Ok(Ok(())) => {
                     tracing::info!("VM '{id}' started via Virtualization.framework");
-                    VM_IDS
-                        .lock()
-                        .map_err(|e| e.to_string())?
-                        .insert(id.to_string());
                     persist_vm_state(id);
                     return Ok(());
                 }
@@ -508,11 +520,101 @@ pub fn start_vm(
 }
 
 pub fn stop_vm(id: &str) -> Result<(), String> {
-    VM_IDS.lock().map_err(|e| e.to_string())?.remove(id);
+    // Drop the VM reference (stops the VM)
+    if let Ok(mut map) = VMS.lock()
+        && let Some(ptr) = map.remove(id)
+    {
+        // SAFETY: ptr was created from Retained::into_raw in start_vm.
+        // Dropping the Retained will release the ObjC object.
+        unsafe {
+            let _ = Retained::from_raw(ptr as *mut VZVirtualMachine);
+        }
+    }
     remove_vm_state(id);
     Ok(())
 }
 
 pub fn list_vm_ids() -> Vec<String> {
     read_persisted_vm_ids()
+}
+
+/// Connect to the guest agent via vsock and return a Unix stream.
+///
+/// Uses the stored VZVirtualMachine reference to access the socket device,
+/// then calls `connectToPort:completionHandler:` to establish a vsock
+/// connection to the guest agent on port 52.
+///
+/// Returns an `std::os::unix::net::UnixStream` wrapping the connection's
+/// file descriptor.
+pub fn vsock_connect(id: &str, port: u32) -> Result<std::os::unix::net::UnixStream, String> {
+    let vm_ptr = VMS
+        .lock()
+        .map_err(|e| format!("lock: {e}"))?
+        .get(id)
+        .copied()
+        .ok_or_else(|| format!("VM '{id}' not found (not running in this process)"))?;
+
+    let (tx, rx) = mpsc::channel::<Result<i32, String>>();
+
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        // SAFETY: vm_ptr was created from Retained::into_raw and is valid
+        // while the VM is in the VMS map. We borrow without taking ownership.
+        let vm = unsafe { &*(vm_ptr as *const VZVirtualMachine) };
+
+        // Get the first socket device
+        let socket_devices = unsafe { vm.socketDevices() };
+        if socket_devices.is_empty() {
+            let _ = tx.send(Err("no vsock device on VM".to_string()));
+            return;
+        }
+        let device: Retained<VZVirtioSocketDevice> =
+            unsafe { Retained::cast_unchecked(socket_devices.objectAtIndex(0)) };
+
+        let handler = RcBlock::new(
+            move |connection: *mut VZVirtioSocketConnection, error: *mut NSError| {
+                if !error.is_null() {
+                    let e = unsafe { &*error };
+                    let _ = tx.send(Err(format!("vsock connect: {}", e.localizedDescription())));
+                    return;
+                }
+                if connection.is_null() {
+                    let _ = tx.send(Err("vsock connect returned null connection".to_string()));
+                    return;
+                }
+                // Extract the file descriptor from the connection.
+                // We dup() it because VZVirtioSocketConnection owns the fd
+                // and will close it when the connection object is dropped.
+                let conn = unsafe { &*connection };
+                let fd = unsafe { conn.fileDescriptor() };
+                let duped = unsafe { libc::dup(fd) };
+                if duped < 0 {
+                    let _ = tx.send(Err("failed to dup vsock fd".to_string()));
+                } else {
+                    let _ = tx.send(Ok(duped));
+                }
+            },
+        );
+
+        // SAFETY: safe ObjC message send. The handler is a DynBlock.
+        let dyn_handler: &block2::DynBlock<dyn Fn(*mut VZVirtioSocketConnection, *mut NSError)> =
+            &handler;
+        unsafe { device.connectToPort_completionHandler(port, dyn_handler) };
+    });
+
+    // Wait for the connection callback
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        match rx.try_recv() {
+            Ok(Ok(fd)) => {
+                // SAFETY: fd is a valid file descriptor from VZVirtioSocketConnection
+                let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                return Ok(stream);
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => continue,
+            Err(mpsc::TryRecvError::Empty) => return Err("vsock connect timed out".to_string()),
+            Err(e) => return Err(format!("channel: {e}")),
+        }
+    }
 }

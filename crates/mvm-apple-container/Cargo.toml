@@ -41,4 +41,10 @@ objc2-virtualization = { version = "0.3", features = [
     "VZFileHandleSerialPortAttachment",
     "VZMemoryBalloonDeviceConfiguration",
     "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketConnection",
+    "VZVirtioSocketListener",
 ] }

@@ -178,7 +178,12 @@ mvmctl doctor  # shows Apple Container availability status
 - [x] `VminitdClient::launch_guest_agent()`, `write_file()`, `kill()` stubs
 - [x] `SandboxContext.proto` copied to `proto/` for reference
 - [x] Constants: `VMINITD_VSOCK_PORT=1024`, `GUEST_AGENT_VSOCK_PORT=52`
-- [ ] gRPC-over-vsock transport (blocked on vmnet entitlement for running containers — see [apple-container boot model blocker](../../../.claude/projects/-Users-auser-work-personal-microvm-kv-mvm/memory/project_apple_container_boot_model.md))
+- [x] Fix init path: `init=/sbin/vminitd` → `init=/init` (our rootfs has `/init`, not vminitd)
+- [x] Add `VZVirtioSocketDeviceConfiguration` to VM config (vsock device)
+- [x] Store VM references in `VMS` map (was `mem::forget`) for socket device access
+- [x] `vsock_connect(id, port)` → connects to guest agent, returns `UnixStream`
+- [x] `guest_channel_info()` returns `GuestChannelInfo::Vsock { cid: 3, port: 52 }`
+- [ ] End-to-end test on macOS 26 + Apple Silicon (needs hardware)
 
 ### 2b. Backend-aware dev mode ✓
 

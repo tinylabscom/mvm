@@ -100,6 +100,25 @@ pub fn start_port_proxy(host_port: u16, guest_ip: &str, guest_port: u16) {
     }
 }
 
+/// Connect to the guest vsock on the given port, returning a Unix stream.
+///
+/// The VM must have been started in this process (in-process VM tracking).
+/// Returns a `UnixStream` wrapping the vsock connection's file descriptor.
+pub fn vsock_connect(id: &str, port: u32) -> Result<std::os::unix::net::UnixStream, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::vsock_connect(id, port)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (id, port);
+        Err("Apple Virtualization not available on this platform".to_string())
+    }
+}
+
+/// Guest agent vsock port.
+pub const GUEST_AGENT_PORT: u32 = 52;
+
 /// List running VM IDs.
 pub fn list_ids() -> Vec<String> {
     #[cfg(target_os = "macos")]
