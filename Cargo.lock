@@ -1462,7 +1462,6 @@ dependencies = [
 name = "mvm-apple-container"
 version = "0.7.1"
 dependencies = [
- "anyhow",
  "block2",
  "dispatch2",
  "libc",

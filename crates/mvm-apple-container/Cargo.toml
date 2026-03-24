@@ -8,7 +8,6 @@ license = "Apache-2.0"
 # On other platforms, this crate compiles as a no-op stub
 
 [dependencies]
-anyhow = "1"
 tracing = "0.1"
 
 [dependencies.libc]
@@ -18,7 +17,7 @@ version = "0.2"
 block2 = "0.6"
 dispatch2 = "0.3"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSString", "NSURL", "NSArray", "NSError"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSError"] }
 objc2-virtualization = { version = "0.3", features = [
     "VZBootLoader",
     "VZLinuxBootLoader",
@@ -46,5 +45,4 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtioSocketDevice",
     "VZVirtioSocketDeviceConfiguration",
     "VZVirtioSocketConnection",
-    "VZVirtioSocketListener",
 ] }
