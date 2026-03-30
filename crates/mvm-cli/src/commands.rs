@@ -1516,10 +1516,11 @@ fn ensure_dev_image() -> Result<(String, String)> {
             ui::warn(
                 "Nix cannot cross-compile Linux images on this Mac.\n\
                  No Linux builder detected. To fix this, either:\n\n\
-                 \x20 1. Run in another terminal (stays running):\n\
+                 \x20 1. Run in another terminal (keeps running):\n\
                  \x20    nix run 'nixpkgs#darwin.linux-builder'\n\n\
-                 \x20 2. Or add to your nix-darwin config (permanent):\n\
-                 \x20    nix.linux-builder.enable = true;\n\n\
+                 \x20 2. Or add to /etc/nix/nix.conf (permanent):\n\
+                 \x20    builders = ssh-ng://linux-builder aarch64-linux /etc/nix/builder_ed25519 4 1 kvm,big-parallel - -\n\
+                 \x20    builders-use-substitutes = true\n\n\
                  Falling back to downloading a pre-built dev image...",
             );
         } else {
@@ -1583,8 +1584,9 @@ fn download_file(url: &str, dest: &str) -> Result<()> {
              \x20 Option 1 — Temporary (run in another terminal):\n\
              \x20   nix run 'nixpkgs#darwin.linux-builder'\n\
              \n\
-             \x20 Option 2 — Permanent (nix-darwin):\n\
-             \x20   nix.linux-builder.enable = true;\n\
+             \x20 Option 2 — Permanent (add to /etc/nix/nix.conf):\n\
+             \x20   builders = ssh-ng://linux-builder aarch64-linux /etc/nix/builder_ed25519 4 1 kvm,big-parallel - -\n\
+             \x20   builders-use-substitutes = true\n\
              \n\
              Then re-run: mvmctl dev up",
             version = env!("CARGO_PKG_VERSION")

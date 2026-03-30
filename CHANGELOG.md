@@ -2,6 +2,11 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.9.2] — 2026-03-30
+
+### Fixed
+- Build dev images for both aarch64 and x86_64 in CI
+
 ## [0.9.1] — 2026-03-30
 
 ### Added
