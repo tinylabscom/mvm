@@ -109,6 +109,56 @@ When adding fields to structs in serialized state:
 3. Fix each one
 4. Add a unit test for the new behavior
 
+## Developer Workflow Commands
+
+Beyond the standard build/test/lint cycle, mvmctl provides commands for managing the dev environment:
+
+```bash
+# First-time setup (installs deps, creates Lima VM, default network)
+just run -- init
+
+# Image catalog — browse and build images from Nix templates
+just run -- image list              # browse bundled catalog
+just run -- image search http       # search by name/tag
+just run -- image fetch minimal     # build from catalog entry
+
+# Named dev networks
+just run -- network create isolated # create a named network
+just run -- network list            # list all networks
+just run -- up --flake . --network isolated  # attach VM to a network
+
+# Interactive console (PTY-over-vsock, no SSH)
+just run -- console myvm            # interactive shell
+just run -- console myvm --command "uname -a"  # one-shot exec
+
+# Cache and diagnostics
+just run -- cache info              # show cache dir and disk usage
+just run -- cache prune             # clean stale temp files
+just run -- security status         # security posture evaluation
+just run -- doctor                  # dependency checks
+```
+
+### Console Access
+
+microVMs have no SSH. Interactive access is via `mvmctl console` which uses PTY-over-vsock:
+- Authenticated via the existing Ed25519 vsock protocol
+- Dev-mode only (`access.console` must be `true` in the guest security policy)
+- Single session per VM, 15-minute idle timeout
+- Supports both Firecracker and Apple Container backends
+
+### XDG Directory Layout
+
+Dev tool state uses XDG-compliant paths (override with `MVM_CACHE_DIR`, `MVM_CONFIG_DIR`, etc.):
+
+| Path | Purpose |
+|------|---------|
+| `~/.cache/mvm/` | Build artifacts, images, VM runtime state |
+| `~/.config/mvm/` | User config (`config.toml`) |
+| `~/.local/state/mvm/` | Logs, audit trail |
+| `~/.local/share/mvm/` | Templates, network definitions, VM name registry |
+
+Legacy `~/.mvm/` paths are auto-detected as fallback.
+
 ## CI/CD
 
 | Workflow | Trigger | What it does |
