@@ -45,4 +45,9 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtioSocketDevice",
     "VZVirtioSocketDeviceConfiguration",
     "VZVirtioSocketConnection",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZDirectoryShare",
+    "VZSingleDirectoryShare",
+    "VZSharedDirectory",
 ] }

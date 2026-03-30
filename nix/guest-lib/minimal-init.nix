@@ -205,6 +205,15 @@ pkgs.writeScript "mvm-minimal-init" ''
   mount -t tmpfs tmpfs /tmp 2>/dev/null || true
   mount -t tmpfs tmpfs /run 2>/dev/null || true
 
+  # ── 1b. VirtioFS shared directories (Apple Container dev) ────────
+  # If a virtiofs "home" share is available, mount it at /host.
+  # This gives dev VMs access to the host's home directory.
+  if [ "$MVM_CONTAINER" = "0" ]; then
+    mkdir -p /host
+    mount -t virtiofs home /host 2>/dev/null && \
+      echo "[init] mounted virtiofs share at /host" > /dev/console || true
+  fi
+
   # ── 2. Minimal /etc ──────────────────────────────────────────────
   mkdir -p /etc/mvm/integrations.d
   echo 'root:x:0:0:root:/root:${bb}/bin/sh' > /etc/passwd

@@ -116,11 +116,13 @@ and doesn't compile on Linux. Production always uses Firecracker + KVM.
 - [x] Requires host Nix — clear error message with install link if missing
 - [x] `find_dev_image_flake()` locates flake in source tree or falls back to guest-lib
 
-### 2c. Shared directory support
+### 2c. Shared directory support ✓
 
-- [ ] Add `VZSharedDirectory` + `VZVirtioFileSystemDeviceConfiguration` to `macos.rs:start_vm()`
-- [ ] Mount user's home directory inside VM at same path (like Lima does)
-- [ ] Guest mounts via `mount -t virtiofs` in init script
+- [x] Added `VZSharedDirectory` + `VZVirtioFileSystemDeviceConfiguration` to `macos.rs:start_vm()`
+- [x] Host home directory shared as virtiofs tag "home" (read-write)
+- [x] Guest init mounts `virtiofs home /host` (silent no-op on Firecracker/Lima)
+- [x] Added objc2-virtualization features: VZDirectorySharingDeviceConfiguration, VZSharedDirectory, etc.
+- [x] Lima unaffected — uses its own 9p/sshfs sharing
 
 ---
 
