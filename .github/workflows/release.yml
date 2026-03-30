@@ -111,37 +111,44 @@ jobs:
             staging/*.sha256
 
   dev-image:
-    runs-on: ubuntu-latest
+    # Build on ARM runner for native aarch64-linux (Apple Container target).
+    # Also build x86_64 for Linux dev environments.
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Build dev image (aarch64-linux)
+      - name: Build dev image
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
-          sudo apt-get update && sudo apt-get install -y qemu-user-static binfmt-support
-          sudo update-binfmts --enable qemu-aarch64
-          echo "extra-platforms = aarch64-linux" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon
-          sleep 2
-          nix build './nix/dev-image#packages.aarch64-linux.default' \
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/dev-image#packages.${SYSTEM}.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
           mkdir -p staging
-          cp "$STORE_PATH/vmlinux" staging/dev-vmlinux-aarch64
-          cp "$STORE_PATH/rootfs.ext4" staging/dev-rootfs-aarch64.ext4
+          cp "$STORE_PATH/vmlinux" "staging/dev-vmlinux-${ARCH}"
+          cp "$STORE_PATH/rootfs.ext4" "staging/dev-rootfs-${ARCH}.ext4"
           cd staging
-          sha256sum dev-vmlinux-aarch64 dev-rootfs-aarch64.ext4 > dev-image-checksums-sha256.txt
+          sha256sum "dev-vmlinux-${ARCH}" "dev-rootfs-${ARCH}.ext4" > "dev-image-${ARCH}-checksums-sha256.txt"
 
       - name: Upload dev image artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: dev-image
+          name: dev-image-${{ matrix.arch }}
           path: |
-            staging/dev-vmlinux-aarch64
-            staging/dev-rootfs-aarch64.ext4
-            staging/dev-image-checksums-sha256.txt
+            staging/dev-vmlinux-${{ matrix.arch }}
+            staging/dev-rootfs-${{ matrix.arch }}.ext4
+            staging/dev-image-${{ matrix.arch }}-checksums-sha256.txt
 
   release:
     needs: [build, dev-image]
@@ -207,8 +214,8 @@ jobs:
             artifacts/*.tar.gz \
             artifacts/*.tar.gz.bundle \
             artifacts/checksums-sha256.txt \
-            artifacts/dev-vmlinux-aarch64 \
-            artifacts/dev-rootfs-aarch64.ext4 \
-            artifacts/dev-image-checksums-sha256.txt \
+            artifacts/dev-vmlinux-* \
+            artifacts/dev-rootfs-* \
+            artifacts/dev-image-*-checksums-sha256.txt \
             sbom.cdx.json \
             sbom.cdx.json.bundle

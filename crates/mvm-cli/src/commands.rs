@@ -1419,6 +1419,50 @@ fn cmd_dev_apple_container_status() -> Result<()> {
     Ok(())
 }
 
+/// Extra `nix build` arguments needed to cross-compile Linux on macOS.
+///
+/// Checks (in order):
+///   1. `/etc/nix/machines` — nix-daemon already knows about a linux builder
+///   2. Standard linux-builder SSH key exists — builder was set up but machines
+///      file may be missing (common with `nix run 'nixpkgs#darwin.linux-builder'`)
+///   3. Otherwise returns empty vec (native Linux or no builder found)
+fn nix_linux_builder_args() -> Vec<String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Vec::new();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // 1. If /etc/nix/machines lists a linux builder, nix-daemon handles it
+        if let Ok(contents) = std::fs::read_to_string("/etc/nix/machines")
+            && contents.lines().any(|l| {
+                let l = l.trim();
+                !l.is_empty() && !l.starts_with('#') && l.contains("aarch64-linux")
+            })
+        {
+            return Vec::new(); // daemon already configured
+        }
+
+        // 2. Check for the well-known linux-builder SSH key (created by
+        //    `nix run 'nixpkgs#darwin.linux-builder'` or the nix-darwin module)
+        let key_path = "/etc/nix/builder_ed25519";
+        if std::path::Path::new(key_path).exists() {
+            let builder_spec =
+                format!("ssh-ng://linux-builder aarch64-linux {key_path} 4 1 kvm,big-parallel - -");
+            return vec![
+                "--builders".to_string(),
+                builder_spec,
+                "--option".to_string(),
+                "builders-use-substitutes".to_string(),
+                "true".to_string(),
+            ];
+        }
+
+        Vec::new()
+    }
+}
+
 /// Ensure the dev image (kernel + rootfs) exists in the cache.
 ///
 /// Returns (kernel_path, rootfs_path). Builds from the dev-image Nix flake
@@ -1441,15 +1485,19 @@ fn ensure_dev_image() -> Result<(String, String)> {
     {
         ui::info("Building dev image via Nix (first time only)...");
         let nix_bin = find_nix_binary();
-        let output = std::process::Command::new(&nix_bin)
-            .args([
-                "build",
-                &format!("{flake_dir}#default"),
-                "--no-link",
-                "--print-out-paths",
-            ])
-            .output()
-            .context("Failed to run nix build")?;
+        let builder_args = nix_linux_builder_args();
+        if !builder_args.is_empty() {
+            ui::info("  Using detected Linux builder for cross-compilation...");
+        }
+        let mut cmd = std::process::Command::new(&nix_bin);
+        cmd.args([
+            "build",
+            &format!("{flake_dir}#default"),
+            "--no-link",
+            "--print-out-paths",
+        ]);
+        cmd.args(&builder_args);
+        let output = cmd.output().context("Failed to run nix build")?;
 
         if output.status.success() {
             let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1467,7 +1515,12 @@ fn ensure_dev_image() -> Result<(String, String)> {
         if stderr.contains("required system or feature not available") {
             ui::warn(
                 "Nix cannot cross-compile Linux images on this Mac.\n\
-                 Downloading pre-built dev image instead...",
+                 No Linux builder detected. To fix this, either:\n\n\
+                 \x20 1. Run in another terminal (stays running):\n\
+                 \x20    nix run 'nixpkgs#darwin.linux-builder'\n\n\
+                 \x20 2. Or add to your nix-darwin config (permanent):\n\
+                 \x20    nix.linux-builder.enable = true;\n\n\
+                 Falling back to downloading a pre-built dev image...",
             );
         } else {
             ui::warn(&format!("Nix build failed, trying download:\n{stderr}"));
@@ -1482,8 +1535,16 @@ fn ensure_dev_image() -> Result<(String, String)> {
 fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, String)> {
     let version = env!("CARGO_PKG_VERSION");
     let base_url = format!("https://github.com/auser/mvm/releases/download/v{version}");
-    let kernel_url = format!("{base_url}/dev-vmlinux-aarch64");
-    let rootfs_url = format!("{base_url}/dev-rootfs-aarch64.ext4");
+    // Detect host arch to download the right image.
+    // Apple Silicon (aarch64-darwin) needs aarch64-linux image.
+    // Intel Mac (x86_64-darwin) needs x86_64-linux image.
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let kernel_url = format!("{base_url}/dev-vmlinux-{arch}");
+    let rootfs_url = format!("{base_url}/dev-rootfs-{arch}.ext4");
 
     ui::info(&format!("Downloading dev image (v{version})..."));
 
@@ -1516,8 +1577,16 @@ fn download_file(url: &str, dest: &str) -> Result<()> {
         let _ = std::fs::remove_file(dest);
         anyhow::bail!(
             "Download failed. The dev image may not be available for v{version}.\n\
-             To build locally, configure a Nix Linux builder:\n\
-             https://nixos.org/manual/nix/stable/advanced-topics/distributed-builds",
+             \n\
+             To build locally instead, set up a Nix Linux builder:\n\
+             \n\
+             \x20 Option 1 — Temporary (run in another terminal):\n\
+             \x20   nix run 'nixpkgs#darwin.linux-builder'\n\
+             \n\
+             \x20 Option 2 — Permanent (nix-darwin):\n\
+             \x20   nix.linux-builder.enable = true;\n\
+             \n\
+             Then re-run: mvmctl dev up",
             version = env!("CARGO_PKG_VERSION")
         );
     }
