@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1489,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runtime"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-security"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "assert_cmd",

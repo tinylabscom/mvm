@@ -2,6 +2,21 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.9.0] — 2026-03-30
+
+### Added
+- Vsock-based port forwarding for Apple Container VMs
+- Rename `ls` command to `ps`, add PORTS column
+- Sprint 39 — developer experience & DX features
+
+### Documentation
+- Add developer workflow commands and XDG layout to dev guide
+- Add Sprint 39 features to quickstart and installation guides
+
+### Fixed
+- Respect MVM_SIGNED env var to skip codesign re-exec
+- Sign binary before installing launchd agent for detached mode
+
 ## [0.8.0] — 2026-03-24
 
 ### Added
