@@ -75,13 +75,28 @@ impl Platform {
     pub fn has_host_nix(self) -> bool {
         static HOST_NIX: OnceLock<bool> = OnceLock::new();
         *HOST_NIX.get_or_init(|| {
-            std::process::Command::new("nix")
+            // Try PATH first
+            if std::process::Command::new("nix")
                 .args(["--version"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
+            {
+                return true;
+            }
+            // Check common Nix install locations (freshly installed Nix may
+            // not be on PATH if the shell profile hasn't been sourced yet)
+            for path in &[
+                "/nix/var/nix/profiles/default/bin/nix",
+                "/run/current-system/sw/bin/nix",
+            ] {
+                if Path::new(path).exists() {
+                    return true;
+                }
+            }
+            false
         })
     }
 

@@ -1450,7 +1450,8 @@ fn ensure_dev_image() -> Result<(String, String)> {
     let flake_dir = find_dev_image_flake()?;
 
     // Build the combined image (produces vmlinux + rootfs.ext4 in one derivation)
-    let build_output = std::process::Command::new("nix")
+    let nix_bin = find_nix_binary();
+    let build_output = std::process::Command::new(&nix_bin)
         .args([
             "build",
             &format!("{flake_dir}#default"),
@@ -1485,6 +1486,22 @@ fn ensure_dev_image() -> Result<(String, String)> {
 
     ui::success("Dev image built and cached.");
     Ok((kernel_path, rootfs_path))
+}
+
+/// Find the `nix` binary, checking PATH and common install locations.
+fn find_nix_binary() -> String {
+    if which::which("nix").is_ok() {
+        return "nix".to_string();
+    }
+    for path in &[
+        "/nix/var/nix/profiles/default/bin/nix",
+        "/run/current-system/sw/bin/nix",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    "nix".to_string() // fall back to PATH, let the error happen naturally
 }
 
 /// Find the dev-image Nix flake directory.
