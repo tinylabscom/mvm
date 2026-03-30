@@ -1434,181 +1434,93 @@ fn ensure_dev_image() -> Result<(String, String)> {
         return Ok((kernel_path, rootfs_path));
     }
 
-    // Check if host Nix is available
+    // Try Nix build first (works if Linux builder is configured)
     let plat = mvm_core::platform::current();
-    if !plat.has_host_nix() {
-        anyhow::bail!(
-            "Dev image not cached and Nix is not installed on the host.\n\
-             Install Nix first: https://nixos.org/download.html\n\
-             Then run 'mvmctl dev' again to build the dev image."
-        );
-    }
+    if plat.has_host_nix()
+        && let Ok(flake_dir) = find_dev_image_flake()
+    {
+        ui::info("Building dev image via Nix (first time only)...");
+        let nix_bin = find_nix_binary();
+        let output = std::process::Command::new(&nix_bin)
+            .args([
+                "build",
+                &format!("{flake_dir}#default"),
+                "--no-link",
+                "--print-out-paths",
+            ])
+            .output()
+            .context("Failed to run nix build")?;
 
-    ui::info("Building dev image via Nix (first time only, this may take a few minutes)...");
-
-    // Look for the dev-image flake in the project
-    let flake_dir = find_dev_image_flake()?;
-
-    // Build the combined image (produces vmlinux + rootfs.ext4 in one derivation)
-    let nix_bin = find_nix_binary();
-    let build_args = [
-        "build",
-        &format!("{flake_dir}#default"),
-        "--no-link",
-        "--print-out-paths",
-    ];
-
-    let build_output = std::process::Command::new(&nix_bin)
-        .args(build_args)
-        .output()
-        .context("Failed to run nix build for dev image")?;
-
-    // If the build failed because of missing Linux builder on macOS,
-    // set one up automatically and retry.
-    if !build_output.status.success() {
-        let stderr = String::from_utf8_lossy(&build_output.stderr);
-        if stderr.contains("Required system: 'aarch64-linux'")
-            || stderr.contains("required system or feature not available")
-        {
-            ui::info(
-                "macOS cannot build Linux images natively. \
-                 Setting up Nix Linux builder (one-time)...",
-            );
-            ensure_nix_linux_builder(&nix_bin)?;
-
-            // Retry the build with fresh args (previous ones were consumed)
-            ui::info("Retrying dev image build with Linux builder...");
-            let retry = std::process::Command::new(&nix_bin)
-                .args([
-                    "build",
-                    &format!("{flake_dir}#default"),
-                    "--no-link",
-                    "--print-out-paths",
-                ])
-                .output()
-                .context("Failed to run nix build (retry)")?;
-            if !retry.status.success() {
-                let retry_err = String::from_utf8_lossy(&retry.stderr);
-                anyhow::bail!(
-                    "Dev image build failed after setting up Linux builder:\n{retry_err}"
-                );
+        if output.status.success() {
+            let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let ks = format!("{store_path}/vmlinux");
+            let rs = format!("{store_path}/rootfs.ext4");
+            if std::path::Path::new(&ks).exists() && std::path::Path::new(&rs).exists() {
+                std::fs::copy(&ks, &kernel_path)?;
+                std::fs::copy(&rs, &rootfs_path)?;
+                ui::success("Dev image built and cached.");
+                return Ok((kernel_path, rootfs_path));
             }
-            // Use the retry output
-            let store_path = String::from_utf8_lossy(&retry.stdout).trim().to_string();
-            return finish_dev_image_copy(&store_path, &kernel_path, &rootfs_path);
         }
-        anyhow::bail!("Dev image build failed:\n{stderr}");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("required system or feature not available") {
+            ui::warn(
+                "Nix cannot cross-compile Linux images on this Mac.\n\
+                 Downloading pre-built dev image instead...",
+            );
+        } else {
+            ui::warn(&format!("Nix build failed, trying download:\n{stderr}"));
+        }
     }
-    let store_path = String::from_utf8_lossy(&build_output.stdout)
-        .trim()
-        .to_string();
-    finish_dev_image_copy(&store_path, &kernel_path, &rootfs_path)
+
+    // Fallback: download pre-built dev image from GitHub release
+    download_dev_image(&kernel_path, &rootfs_path)
 }
 
-/// Copy kernel and rootfs from Nix store to the cache directory.
-fn finish_dev_image_copy(
-    store_path: &str,
-    kernel_path: &str,
-    rootfs_path: &str,
-) -> Result<(String, String)> {
-    let kernel_src = format!("{store_path}/vmlinux");
-    let rootfs_src = format!("{store_path}/rootfs.ext4");
+/// Download a pre-built dev image (kernel + rootfs) from GitHub releases.
+fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, String)> {
+    let version = env!("CARGO_PKG_VERSION");
+    let base_url = format!("https://github.com/auser/mvm/releases/download/v{version}");
+    let kernel_url = format!("{base_url}/dev-vmlinux-aarch64");
+    let rootfs_url = format!("{base_url}/dev-rootfs-aarch64.ext4");
 
-    if !std::path::Path::new(&kernel_src).exists() {
-        anyhow::bail!("Nix build succeeded but vmlinux not found at {kernel_src}");
-    }
-    if !std::path::Path::new(&rootfs_src).exists() {
-        anyhow::bail!("Nix build succeeded but rootfs.ext4 not found at {rootfs_src}");
-    }
+    ui::info(&format!("Downloading dev image (v{version})..."));
 
-    std::fs::copy(&kernel_src, kernel_path)
-        .with_context(|| format!("Failed to copy kernel from {kernel_src}"))?;
-    std::fs::copy(&rootfs_src, rootfs_path)
-        .with_context(|| format!("Failed to copy rootfs from {rootfs_src}"))?;
+    // Download kernel
+    ui::info("  Fetching kernel...");
+    download_file(&kernel_url, kernel_path)
+        .with_context(|| format!("Failed to download kernel from {kernel_url}"))?;
 
-    ui::success("Dev image built and cached.");
+    // Download rootfs
+    ui::info("  Fetching rootfs...");
+    download_file(&rootfs_url, rootfs_path)
+        .with_context(|| format!("Failed to download rootfs from {rootfs_url}"))?;
+
+    ui::success("Dev image downloaded and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
 }
 
-/// Ensure a Nix Linux builder is configured on macOS.
-///
-/// On macOS, Nix cannot build Linux derivations natively. This sets up
-/// the `linux-builder` which runs a lightweight Linux VM in the background
-/// that Nix delegates Linux builds to.
-fn ensure_nix_linux_builder(nix_bin: &str) -> Result<()> {
-    // Check if builders are already configured
-    let check = std::process::Command::new(nix_bin)
-        .args(["show-config", "--json"])
-        .output()
-        .context("Failed to query Nix config")?;
-
-    if check.status.success() {
-        let config_str = String::from_utf8_lossy(&check.stdout);
-        if config_str.contains("aarch64-linux") && config_str.contains("builders") {
-            ui::info("Linux builder already configured.");
-            return Ok(());
-        }
-    }
-
-    // Add linux-builder to nix.custom.conf
-    let custom_conf = "/etc/nix/nix.custom.conf";
-    let builder_line = "extra-platforms = aarch64-linux\nsystem-features = nixos-test benchmark big-parallel kvm\n";
-
-    // Check if already configured
-    if let Ok(content) = std::fs::read_to_string(custom_conf)
-        && content.contains("aarch64-linux")
-    {
-        ui::info("Linux builder already configured in nix.custom.conf.");
-        return Ok(());
-    }
-
-    ui::info("Adding aarch64-linux platform support to Nix config...");
-    ui::info("This requires sudo to write to /etc/nix/nix.custom.conf");
-
-    let status = std::process::Command::new("sudo")
-        .args([
-            "sh",
-            "-c",
-            &format!("echo '{}' >> {}", builder_line, custom_conf),
-        ])
+/// Download a file from a URL using curl.
+fn download_file(url: &str, dest: &str) -> Result<()> {
+    let status = std::process::Command::new("curl")
+        .args(["-fSL", "--progress-bar", "-o", dest, url])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .context("Failed to configure Nix Linux builder")?;
+        .context("Failed to run curl")?;
 
     if !status.success() {
+        // Clean up partial download
+        let _ = std::fs::remove_file(dest);
         anyhow::bail!(
-            "Failed to configure Nix Linux builder.\n\
-             You can configure it manually by adding to /etc/nix/nix.custom.conf:\n\
-             extra-platforms = aarch64-linux"
+            "Download failed. The dev image may not be available for v{version}.\n\
+             To build locally, configure a Nix Linux builder:\n\
+             https://nixos.org/manual/nix/stable/advanced-topics/distributed-builds",
+            version = env!("CARGO_PKG_VERSION")
         );
     }
-
-    // Restart nix-daemon to pick up the new config
-    ui::info("Restarting Nix daemon...");
-    let _ = std::process::Command::new("sudo")
-        .args([
-            "launchctl",
-            "kickstart",
-            "-k",
-            "system/org.nixos.nix-daemon",
-        ])
-        .status();
-    // Determinate Nix uses a different service name
-    let _ = std::process::Command::new("sudo")
-        .args([
-            "launchctl",
-            "kickstart",
-            "-k",
-            "system/systems.determinate.nix-daemon",
-        ])
-        .status();
-
-    // Give the daemon a moment to restart
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    ui::success("Nix Linux builder configured.");
     Ok(())
 }
 
