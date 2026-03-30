@@ -188,7 +188,9 @@ fn test_dev_status_runs_without_lima() {
         combined.contains("Lima VM")
             || combined.contains("not required")
             || combined.contains("Not found")
-            || combined.contains("not installed"),
+            || combined.contains("not installed")
+            || combined.contains("Apple Container")
+            || combined.contains("Dev VM"),
         "dev status should produce meaningful output, got: {}",
         combined
     );

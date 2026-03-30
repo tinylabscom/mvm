@@ -1,20 +1,20 @@
-# Sprint 39 — Developer Experience & DX Features
+# Sprint 40 — Apple Container Dev Environment
 
-**Goal:** Borrow the best DX patterns from AlanD20/mvmctl — XDG-compliant
-directories, named network management, Nix-based image catalog, enhanced audit
-logging, and PTY-over-vsock console — while keeping Nix, vsock-only security,
-and Rust.
+**Goal:** Make `mvmctl dev` work with Apple Containers on macOS 26+ where
+`/dev/kvm` is not available. Lima becomes an optional fallback via `--lima`.
+This is a dev DX improvement only — production (Firecracker + KVM on Linux)
+is unaffected.
 
 **Branch:** `main`
 
-**Plan:** [cuddly-enchanting-lollipop.md](~/.claude/plans/cuddly-enchanting-lollipop.md)
+**Plan:** [specs/plans/23-apple-container-dev.md](plans/23-apple-container-dev.md)
 
-## Current Status (v0.8.0)
+## Current Status (v0.9.0)
 
 | Metric           | Value                    |
 | ---------------- | ------------------------ |
 | Workspace crates | 7 + root facade + xtask  |
-| Total tests      | 956                      |
+| Total tests      | 970                      |
 | Clippy warnings  | 0                        |
 | Edition          | 2024 (Rust 1.85+)        |
 | MSRV             | 1.85                     |
@@ -60,214 +60,100 @@ and Rust.
 - [36-fast-boot-minimal-images.md](sprints/36-fast-boot-minimal-images.md)
 - [37-image-insights-dx-guest-lib.md](sprints/37-image-insights-dx-guest-lib.md)
 - [38-multi-backend-abstraction.md](sprints/38-multi-backend-abstraction.md)
+- [39-developer-experience-dx.md](sprints/39-developer-experience-dx.md)
 
 ---
 
 ## Rationale
 
-AlanD20/mvmctl (Python) proves a Firecracker CLI can feel as approachable as
-Docker. Our Rust project is more powerful (Nix images, vsock-only, fleet
-orchestration) but has a steeper onboarding curve. This sprint borrows the best
-DX ideas while keeping our architecture.
+On macOS 26+ Apple Silicon, `mvmctl dev` still requires Lima — a 2-5 second
+boot overhead plus 500MB+ download on first run. Apple's Virtualization.framework
+provides sub-second VM startup with native vsock support. Our `mvm-apple-container`
+crate already boots VMs with `VZLinuxBootLoader` using our custom kernel and init
+(NOT vminitd), so the guest agent and PTY console work identically to Firecracker.
+
+This sprint makes Apple Container the default dev backend on macOS 26+, with
+Lima as an explicit `--lima` fallback.
+
+**Production is unaffected**: All Apple Container code is `#[cfg(target_os = "macos")]`
+and doesn't compile on Linux. Production always uses Firecracker + KVM.
 
 ---
 
-## Phase 1: Foundation Types & XDG Directories ✓
+## Phase 1: Platform Routing
 
-### 1a. XDG-compliant directory functions ✓
+### 1a. Update `needs_lima()` for macOS 26+ ✓
 
-- [x] `mvm_cache_dir()` → `$XDG_CACHE_HOME/mvm` or `~/.cache/mvm`
-- [x] `mvm_config_dir()` → `$XDG_CONFIG_HOME/mvm` or `~/.config/mvm`
-- [x] `mvm_state_dir()` → `$XDG_STATE_HOME/mvm` or `~/.local/state/mvm`
-- [x] `mvm_share_dir()` → `$XDG_DATA_HOME/mvm` or `~/.local/share/mvm`
-- [x] Env overrides: `MVM_CACHE_DIR`, `MVM_CONFIG_DIR`, `MVM_STATE_DIR`, `MVM_SHARE_DIR`
-- [x] `user_config.rs` updated to prefer XDG with legacy `~/.mvm/` fallback
-- [x] `audit.rs` updated to prefer `mvm_state_dir()` with legacy fallback
-- [x] Tests for all XDG resolution paths (env override, XDG var, default)
+- [x] `crates/mvm-core/src/platform.rs` — `Platform::MacOS => !self.has_apple_containers()`
+- [x] `bootstrap.rs:is_lima_required()` — now skips Lima on macOS 26+
+- [x] `linux_env.rs:create_linux_env()` — routes to `AppleContainerEnv`
+- [x] Test updated: `needs_lima()` conditional on Apple Container availability
 
-### 1b. DevNetwork type ✓
+### 1b. Route dev commands ✓
 
-- [x] `DevNetwork` struct in `mvm-core/src/dev_network.rs` (name, bridge_name, subnet, gateway, created_at)
-- [x] `DevNetwork::default_network()` matches legacy hardcoded `br-mvm`
-- [x] `DevNetwork::new(name, slot)` with auto-assigned 172.16.X.0/24 subnets
-- [x] `gateway_cidr()` helper
-- [x] `validate_network_name()` reusing `validate_id()`
-- [x] `networks_dir()` and `network_path()` helpers using `mvm_share_dir()`
-- [x] Serde roundtrip tests
-
-### 1c. VM Name Registry ✓
-
-- [x] `VmNameRegistry` in `mvm-runtime/src/vm/name_registry.rs`
-- [x] `VmRegistration` struct (vm_dir, network, guest_ip, slot_index, registered_at)
-- [x] `register()`, `deregister()`, `lookup()`, `names()` operations
-- [x] Atomic save via `mvm_core::atomic_io::atomic_write()`
-- [x] `registry_path()` using `mvm_share_dir()`
-- [x] `generate_vm_name()` for auto-generated VM names
-- [x] Load/save roundtrip tests
+- [x] `cmd_dev(DevCmd::Up)` — `cmd_dev_apple_container()`: boot dev VM, wait for agent, open PTY console
+- [x] `cmd_dev(DevCmd::Down)` — `cmd_dev_apple_container_down()`: stop dev VM
+- [x] `cmd_dev(DevCmd::Shell)` — `console_interactive("mvm-dev")` when dev VM running
+- [x] `cmd_dev(DevCmd::Status)` — `cmd_dev_apple_container_status()`: show backend, VM status, kernel version
+- [x] Removed "Falling back to Lima" message
+- [x] `ensure_dev_image()` — checks cache, builds from Nix flake if missing
 
 ---
 
-## Phase 2: Image Catalog & Audit Extensions ✓
+## Phase 2: Dev Image ✓
 
-### 2a. Nix-based Image Catalog ✓
+### 2a. Nix flake for dev rootfs ✓
 
-- [x] `CatalogEntry` and `Catalog` types in `mvm-core/src/catalog.rs`
-- [x] `Catalog::search()` — case-insensitive search by name, description, tags
-- [x] `Catalog::find()` — exact name lookup
-- [x] Bundled catalog with 5 presets: minimal, http, postgres, worker, python
-- [x] CLI: `mvmctl image list`, `mvmctl image search <q>`, `mvmctl image fetch <name>`, `mvmctl image info <name>`
-- [x] `image fetch` designed as sugar for template create + build (not yet wired)
-- [x] Serde roundtrip, search, and schema version default tests
+- [x] Created `nix/dev-image/flake.nix` using `mkGuest` from guest-lib
+- [x] Packages: bash, coreutils, gcc, gnumake, nix, git, curl, wget, iproute2, openssh, nano, e2fsprogs, squashfsTools, strace, procps, htop
+- [x] ext4 rootfs + kernel in single `#default` output
+- [x] Same kernel as production images (shared Firecracker kernel)
 
-### 2b. Audit Logging Extensions ✓
+### 2b. Dev image caching ✓
 
-- [x] 9 new `LocalAuditKind` variants: NetworkCreate, NetworkRemove, ImageFetch, TemplateBuild, TemplatePush, TemplatePull, ConfigChange, ConsoleSessionStart, ConsoleSessionEnd
-- [x] `audit::emit()` calls in network create/remove and image fetch commands
-- [x] Updated test to cover all variants
+- [x] Cache at `~/.cache/mvm/dev/vmlinux` and `~/.cache/mvm/dev/rootfs.ext4`
+- [x] `ensure_dev_image()` checks cache, builds via `nix build` if missing
+- [x] Requires host Nix — clear error message with install link if missing
+- [x] `find_dev_image_flake()` locates flake in source tree or falls back to guest-lib
 
----
+### 2c. Shared directory support
 
-## Phase 3: PTY-over-Vsock Console Protocol ✓
-
-### 3a. Protocol extensions ✓
-
-- [x] `GuestRequest::ConsoleOpen { cols, rows }` — open interactive PTY session
-- [x] `GuestRequest::ConsoleClose { session_id }` — close PTY session
-- [x] `GuestRequest::ConsoleResize { session_id, cols, rows }` — resize PTY window
-- [x] `GuestResponse::ConsoleOpened { session_id, data_port }` — session opened, connect to data port
-- [x] `GuestResponse::ConsoleExited { session_id, exit_code }` — shell exited
-- [x] `GuestResponse::ConsoleResized { session_id }` — resize acknowledged
-- [x] `CONSOLE_PORT_BASE = 20000` constant for data channel vsock ports
-- [x] Guest agent stub handler (returns "not yet implemented" error)
-- [x] Serde roundtrip tests for all new variants
-
-### 3b. CLI command ✓
-
-- [x] `mvmctl console <name>` — interactive PTY session (stub, prints not-yet-implemented)
-- [x] `mvmctl console <name> --command <cmd>` — one-shot command execution (wired to existing Exec path)
-- [x] CLI integration tests
-
-### 3c. Guest agent PTY implementation ✓
-
-- [x] `console.rs` module in mvm-guest — PTY allocation, shell fork, vsock data relay
-- [x] `open_session(cols, rows)` — openpty + fork + exec /bin/sh
-- [x] `run_console_relay(session)` — bind vsock data port, accept connection, bidirectional relay
-- [x] `close_session(session)` — kill shell, wait, cleanup
-- [x] `resize_pty(master_fd, cols, rows)` — TIOCSWINSZ ioctl
-- [x] Single-session enforcement via atomic flag
-- [x] Guest agent wired: ConsoleOpen spawns relay thread, ConsoleClose/Resize handled
-- [x] Supports both Firecracker and Apple Container backends
-
-### 3d. Host CLI interactive console ✓
-
-- [x] `console_interactive(name)` — full interactive PTY flow
-- [x] Backend detection: Apple Container (direct vsock) or Firecracker (UDS)
-- [x] `enter_raw_mode()` / `restore_terminal()` — termios raw mode via libc
-- [x] `get_terminal_size()` — TIOCGWINSZ ioctl
-- [x] `run_console_relay()` — bidirectional stdin/stdout ↔ vsock relay
-- [x] Audit events: ConsoleSessionStart / ConsoleSessionEnd
-- [x] Made `connect_to()` and `send_request()` public in vsock.rs
-
-### 3e. Console polish ✓
-
-- [x] SIGWINCH handler on host — polls atomic flag, sends ConsoleResize via control channel
-- [x] Global `CONSOLE_MASTER_FD` atomic in guest for resize ioctl dispatch
-- [x] `resize_active_session(cols, rows)` in console.rs, wired into guest agent
-- [x] `AccessPolicy.console` field (default false, enabled in `dev_defaults()`)
-- [x] Guest agent checks `access.console` before opening PTY session
-- [x] 15-minute idle timeout via `set_read_timeout()` on vsock data channel
+- [ ] Add `VZSharedDirectory` + `VZVirtioFileSystemDeviceConfiguration` to `macos.rs:start_vm()`
+- [ ] Mount user's home directory inside VM at same path (like Lima does)
+- [ ] Guest mounts via `mount -t virtiofs` in init script
 
 ---
 
-## Phase 4: Init Wizard & Security DX ✓
+## Phase 3: AppleContainerEnv ✓
 
-### 4a. Init Wizard ✓
-
-- [x] `mvmctl init` — unified first-time setup wizard
-- [x] Platform detection with human-readable label
-- [x] Apple Container detection (macOS 26+)
-- [x] Dependency check (package manager, Lima)
-- [x] Lima VM creation via `run_setup_steps()`
-- [x] Auto-create default network if missing
-- [x] Create XDG data directories
-- [x] Show available catalog images
-- [x] Print next-steps guidance
-- [x] `--non-interactive` flag for scripted use
-- [x] `--lima-cpus` and `--lima-mem` flags
-
-### 4b. Security Status ✓
-
-- [x] `mvmctl security status` — security posture evaluation
-- [x] Checks: audit log, XDG dirs, default network, seccomp, vsock auth, no-SSH, Nix builds
-- [x] Human-readable summary with score (passed/total)
-- [x] `--json` flag for machine-readable output
-- [x] Shows uncovered security layers
+- [x] `AppleContainerEnv` struct in `crates/mvm-runtime/src/linux_env.rs`
+- [x] Implements `LinuxEnv` trait via vsock `GuestRequest::Exec`
+- [x] `run()`, `run_visible()`, `run_stdout()`, `run_capture()` — all routed through vsock
+- [x] `exec_via_vsock()` — connects to guest agent, sends Exec request, returns `Output`
+- [x] `create_linux_env()` factory prefers Apple Container → Lima → Native
+- [x] `shell::run_in_vm()` automatically routes through Apple Container
 
 ---
 
-## Phase 5: Gap Closing & Polish ✓
+## Phase 4: Build Pipeline Without Lima ✓
 
-### 5a. Image catalog wiring ✓
-
-- [x] `image fetch` calls `template_cmd::create_single()` + `template_cmd::build()`
-- [x] Full pipeline: catalog entry → template creation → Nix build
-
-### 5b. VM name registry wiring ✓
-
-- [x] `mvmctl up` registers VM name in `vm-names.json` via `VmNameRegistry`
-- [x] `mvmctl down <name>` deregisters VM name from registry
-- [x] Stale entries cleared on re-registration
-
-### 5c. Network flag ✓
-
-- [x] `--network <name>` flag on `Up` command (default: "default")
-- [x] Network name threaded through `RunParams` → `VmNameRegistry`
-
-### 5d. Console Apple Container support ✓
-
-- [x] `console --command` detects backend (Apple Container vs Firecracker)
-- [x] Apple Container uses `vsock_connect` + `send_request` directly
-- [x] Firecracker falls back to UDS-based `exec_at`
-
-### 5e. Config extensions ✓
-
-- [x] `catalog_url: Option<String>` in `MvmConfig`
-- [x] `mvmctl config set catalog_url <url>` support
-- [x] Backward-compatible serde (defaults to None)
-
-### 5f. Cache management ✓
-
-- [x] `mvmctl cache info` — show cache path and disk usage
-- [x] `mvmctl cache prune` — remove stale temp files
-- [x] `--dry-run` flag for safe preview
-
-### 5g. Documentation ✓
-
-- [x] CLI reference updated: network, image, console, cache, security, init commands
-- [x] `--network` flag documented on Up command
-- [x] CLAUDE.md updated: new module locations, new commands, console access note
+- [x] `RuntimeBuildEnv` uses `shell::run_in_vm()` which routes through `create_linux_env()`
+- [x] `create_linux_env()` now prefers `AppleContainerEnv` on macOS 26+
+- [x] Nix builds automatically execute inside Apple Container dev VM
+- [x] `run_setup_steps()` skips Lima VM creation when `is_lima_required()` returns false
 
 ---
 
-## CLI Command Summary (New)
+## Phase 5: Tests & Docs ✓
 
-```
-mvmctl init                                      # First-time setup wizard
-mvmctl network create <name>                      # Create named dev network
-mvmctl network list                               # List all networks
-mvmctl network inspect <name>                     # Show network details
-mvmctl network remove <name>                      # Remove a network
-mvmctl image list                                 # Browse catalog
-mvmctl image search <query>                       # Search by name/tag
-mvmctl image fetch <name>                         # Build image from catalog
-mvmctl image info <name>                          # Show image details
-mvmctl console <name>                             # Interactive PTY shell
-mvmctl console <name> --command <cmd>             # One-shot exec
-mvmctl cache info                                 # Cache disk usage
-mvmctl cache prune [--dry-run]                    # Clean stale files
-mvmctl security status [--json]                   # Security posture
-mvmctl up --network <name>                        # Attach VM to named network
-```
+- [x] `AppleContainerEnv` construction test
+- [x] CLI tests: `dev up --lima`, `dev down`, `dev shell`, `dev status`
+- [x] `is_apple_container_dev_running()` smoke test
+- [x] Platform test: `needs_lima()` conditional on Apple Container availability
+- [x] E2E test updated: `dev status` accepts Apple Container output
+- [x] `CLAUDE.md` updated with Apple Container dev mode description
+- [x] CLI reference updated: `dev` command notes Apple Container on macOS 26+
+- [x] Development guide already documents dev workflow commands
 
 ---
 
@@ -275,25 +161,25 @@ mvmctl up --network <name>                        # Attach VM to named network
 
 | File | Changes |
 |------|---------|
-| `crates/mvm-core/src/config.rs` | XDG directory functions (cache, config, state, share) |
-| `crates/mvm-core/src/dev_network.rs` | New: `DevNetwork` type for named networks |
-| `crates/mvm-core/src/catalog.rs` | New: `CatalogEntry` and `Catalog` types |
-| `crates/mvm-core/src/audit.rs` | Extended `LocalAuditKind` with 9 new variants |
-| `crates/mvm-core/src/user_config.rs` | XDG config dir with legacy fallback, `catalog_url` |
-| `crates/mvm-core/src/security.rs` | `AccessPolicy.console` field |
-| `crates/mvm-runtime/src/vm/name_registry.rs` | New: `VmNameRegistry` for name-based VM lookups |
-| `crates/mvm-guest/src/vsock.rs` | Console protocol variants, `connect_to()` + `send_request()` public |
-| `crates/mvm-guest/src/console.rs` | New: PTY allocation, shell fork, vsock data relay |
-| `crates/mvm-guest/src/bin/mvm-guest-agent.rs` | Console session handler with `access.console` policy check |
-| `crates/mvm-cli/src/commands.rs` | Network, Image, Console, Cache, Init, Security CLI subcommands |
-| `public/src/content/docs/reference/cli-commands.md` | All new commands documented |
-| `CLAUDE.md` | New module locations, command examples, console access note |
+| `crates/mvm-core/src/platform.rs` | `needs_lima()` conditional on `has_apple_containers()` |
+| `crates/mvm-cli/src/commands.rs` | Dev command routing for Apple Container |
+| `crates/mvm-runtime/src/linux_env.rs` | New `AppleContainerEnv` struct |
+| `crates/mvm-apple-container/src/macos.rs` | Shared directory support |
+| `crates/mvm-runtime/src/build_env.rs` | Build env selection |
+| `nix/dev-image/flake.nix` | New: dev environment rootfs flake |
 
 ---
 
-## Verification ✓
+## Verification
 
 ```bash
-cargo test --workspace   # 964 tests, 0 failures
-cargo clippy --workspace -- -D warnings  # 0 warnings
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+# On macOS 26+ Apple Silicon:
+mvmctl dev                    # Boots Apple Container, not Lima
+mvmctl dev shell              # PTY console into dev VM
+mvmctl dev status             # Apple Container dev VM status
+mvmctl dev down               # Stops Apple Container dev VM
+mvmctl dev --lima             # Falls back to Lima explicitly
+mvmctl build --flake .        # Nix build without Lima
 ```

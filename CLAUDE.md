@@ -71,7 +71,7 @@ The `RuntimeBuildEnv` in mvm-runtime implements only `ShellEnvironment`. The ful
 
 - **Firecracker-only**: no Docker/containers. Builds run Nix inside the Lima VM.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvmctl dev` / `mvmctl dev shell`), not the microVM.
-- **Dev mode = Lima shell**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into the Lima VM shell. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell without bootstrap. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
+- **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots an Apple Container with Nix + build tools via PTY-over-vsock console. On macOS <26 or Linux without KVM: uses Lima VM. Use `--lima` to force Lima fallback. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
 - **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
 - **Shell scripts inside run_in_vm**: complex ops are bash scripts passed to `limactl shell`. Deliberate -- they run inside the Linux VM.

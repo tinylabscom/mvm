@@ -18,10 +18,10 @@ pub enum Platform {
 
 impl Platform {
     /// Whether this platform needs Lima to run Firecracker.
-    /// Returns false for platforms that have better alternatives (Docker, Apple VZ).
+    /// Returns false for platforms that have better alternatives (Apple VZ, Docker, native KVM).
     pub fn needs_lima(self) -> bool {
         match self {
-            Platform::MacOS => true,
+            Platform::MacOS => !self.has_apple_containers(),
             Platform::LinuxNoKvm => true,
             Platform::LinuxNative => false,
             Platform::Wsl2 => !self.has_kvm() && !self.has_docker(),
@@ -207,7 +207,13 @@ mod tests {
 
     #[test]
     fn test_needs_lima() {
-        assert!(Platform::MacOS.needs_lima());
+        // macOS: needs Lima only if Apple Containers are NOT available
+        let macos_needs = Platform::MacOS.needs_lima();
+        if Platform::MacOS.has_apple_containers() {
+            assert!(!macos_needs, "macOS 26+ should not need Lima");
+        } else {
+            assert!(macos_needs, "macOS <26 should need Lima");
+        }
         assert!(!Platform::LinuxNative.needs_lima());
         assert!(Platform::LinuxNoKvm.needs_lima());
         assert!(!Platform::Windows.needs_lima());

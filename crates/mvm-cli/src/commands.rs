@@ -847,26 +847,44 @@ pub fn run() -> Result<()> {
                         lima_mem
                     };
 
-                    // On macOS 26+ without --lima, inform about Apple Container dev mode
-                    if !lima && mvm_core::platform::current().has_apple_containers() {
-                        ui::info(
-                            "Apple Containers available. Dev shell via Apple Container \
-                             is not yet implemented.\n\
-                             Falling back to Lima. Use '--lima' to suppress this message.",
-                        );
-                    }
+                    let use_apple_container =
+                        !lima && mvm_core::platform::current().has_apple_containers();
 
-                    cmd_dev(
-                        effective_cpus,
-                        effective_mem,
-                        project.as_deref(),
-                        metrics_port,
-                        watch_config,
-                    )
+                    if use_apple_container {
+                        cmd_dev_apple_container(effective_cpus, effective_mem)
+                    } else {
+                        cmd_dev(
+                            effective_cpus,
+                            effective_mem,
+                            project.as_deref(),
+                            metrics_port,
+                            watch_config,
+                        )
+                    }
                 }
-                DevCmd::Down => cmd_dev_down(),
-                DevCmd::Shell { project } => cmd_shell(project.as_deref()),
-                DevCmd::Status => cmd_dev_status(),
+                DevCmd::Down => {
+                    if mvm_core::platform::current().has_apple_containers() {
+                        cmd_dev_apple_container_down()
+                    } else {
+                        cmd_dev_down()
+                    }
+                }
+                DevCmd::Shell { project } => {
+                    if mvm_core::platform::current().has_apple_containers()
+                        && is_apple_container_dev_running()
+                    {
+                        console_interactive("mvm-dev")
+                    } else {
+                        cmd_shell(project.as_deref())
+                    }
+                }
+                DevCmd::Status => {
+                    if mvm_core::platform::current().has_apple_containers() {
+                        cmd_dev_apple_container_status()
+                    } else {
+                        cmd_dev_status()
+                    }
+                }
             }
         }
         Commands::Cleanup { keep, all, verbose } => cmd_cleanup(keep, all, verbose),
@@ -1291,6 +1309,208 @@ fn cmd_dev_status() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Apple Container dev environment
+// ============================================================================
+
+const DEV_VM_NAME: &str = "mvm-dev";
+
+/// Check if the Apple Container dev VM is running.
+fn is_apple_container_dev_running() -> bool {
+    mvm_apple_container::list_ids()
+        .iter()
+        .any(|id| id == DEV_VM_NAME)
+}
+
+/// Boot the Apple Container dev VM and open an interactive console.
+fn cmd_dev_apple_container(cpus: u32, memory_gib: u32) -> Result<()> {
+    ui::info("Starting dev environment via Apple Container...\n");
+
+    if is_apple_container_dev_running() {
+        ui::info("Dev VM already running. Opening console...");
+        return console_interactive(DEV_VM_NAME);
+    }
+
+    // Ensure dev image exists
+    let (kernel, rootfs) = ensure_dev_image()?;
+
+    ui::info(&format!(
+        "Booting dev VM ({} vCPUs, {} GiB memory)...",
+        cpus, memory_gib
+    ));
+
+    let memory_mib = (memory_gib as u64) * 1024;
+    mvm_apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
+        .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
+
+    ui::info("Waiting for guest agent...");
+    if !wait_for_guest_agent(DEV_VM_NAME, 30) {
+        anyhow::bail!(
+            "Guest agent did not respond within 30 seconds.\n\
+             Check: mvmctl logs {DEV_VM_NAME}"
+        );
+    }
+
+    ui::success("Dev VM ready. Opening console (Ctrl-D to exit)...\n");
+    console_interactive(DEV_VM_NAME)
+}
+
+/// Stop the Apple Container dev VM.
+fn cmd_dev_apple_container_down() -> Result<()> {
+    if !is_apple_container_dev_running() {
+        ui::info("Dev VM is not running.");
+        return Ok(());
+    }
+
+    ui::info("Stopping Apple Container dev VM...");
+    mvm_apple_container::stop(DEV_VM_NAME)
+        .map_err(|e| anyhow::anyhow!("Failed to stop dev VM: {e}"))?;
+    ui::success("Dev VM stopped.");
+    Ok(())
+}
+
+/// Show Apple Container dev VM status.
+fn cmd_dev_apple_container_status() -> Result<()> {
+    let running = is_apple_container_dev_running();
+    ui::info("Backend:  Apple Container (Virtualization.framework)");
+    ui::info(&format!("Dev VM:   {DEV_VM_NAME}"));
+    ui::info(&format!(
+        "Status:   {}",
+        if running { "running" } else { "stopped" }
+    ));
+
+    if running
+        && let Ok(mut stream) =
+            mvm_apple_container::vsock_connect(DEV_VM_NAME, mvm_guest::vsock::GUEST_AGENT_PORT)
+        && let Ok(mvm_guest::vsock::GuestResponse::ExecResult { stdout, .. }) =
+            mvm_guest::vsock::send_request(
+                &mut stream,
+                &mvm_guest::vsock::GuestRequest::Exec {
+                    command: "uname -r".to_string(),
+                    stdin: None,
+                    timeout_secs: Some(5),
+                },
+            )
+    {
+        ui::info(&format!("  Kernel:  {}", stdout.trim()));
+    }
+
+    // Show dev image info
+    let cache_dir = format!("{}/dev", mvm_core::config::mvm_cache_dir());
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+    ui::info(&format!(
+        "  Image:   {}",
+        if std::path::Path::new(&rootfs_path).exists() {
+            "cached"
+        } else {
+            "not built"
+        }
+    ));
+    if std::path::Path::new(&kernel_path).exists() {
+        ui::info(&format!("  Kernel:  {kernel_path}"));
+    }
+    if std::path::Path::new(&rootfs_path).exists() {
+        ui::info(&format!("  Rootfs:  {rootfs_path}"));
+    }
+
+    Ok(())
+}
+
+/// Ensure the dev image (kernel + rootfs) exists in the cache.
+///
+/// Returns (kernel_path, rootfs_path). Builds from the dev-image Nix flake
+/// if not cached.
+fn ensure_dev_image() -> Result<(String, String)> {
+    let cache_dir = format!("{}/dev", mvm_core::config::mvm_cache_dir());
+    std::fs::create_dir_all(&cache_dir)?;
+
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+
+    if std::path::Path::new(&kernel_path).exists() && std::path::Path::new(&rootfs_path).exists() {
+        return Ok((kernel_path, rootfs_path));
+    }
+
+    // Check if host Nix is available
+    let plat = mvm_core::platform::current();
+    if !plat.has_host_nix() {
+        anyhow::bail!(
+            "Dev image not cached and Nix is not installed on the host.\n\
+             Install Nix first: https://nixos.org/download.html\n\
+             Then run 'mvmctl dev' again to build the dev image."
+        );
+    }
+
+    ui::info("Building dev image via Nix (first time only, this may take a few minutes)...");
+
+    // Look for the dev-image flake in the project
+    let flake_dir = find_dev_image_flake()?;
+
+    // Build the combined image (produces vmlinux + rootfs.ext4 in one derivation)
+    let build_output = std::process::Command::new("nix")
+        .args([
+            "build",
+            &format!("{flake_dir}#default"),
+            "--no-link",
+            "--print-out-paths",
+        ])
+        .output()
+        .context("Failed to run nix build for dev image")?;
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
+        anyhow::bail!("Dev image build failed:\n{stderr}");
+    }
+    let store_path = String::from_utf8_lossy(&build_output.stdout)
+        .trim()
+        .to_string();
+
+    // Copy kernel and rootfs from the Nix store to the cache
+    let kernel_src = format!("{store_path}/vmlinux");
+    let rootfs_src = format!("{store_path}/rootfs.ext4");
+
+    if !std::path::Path::new(&kernel_src).exists() {
+        anyhow::bail!("Nix build succeeded but vmlinux not found at {kernel_src}");
+    }
+    if !std::path::Path::new(&rootfs_src).exists() {
+        anyhow::bail!("Nix build succeeded but rootfs.ext4 not found at {rootfs_src}");
+    }
+
+    std::fs::copy(&kernel_src, &kernel_path)
+        .with_context(|| format!("Failed to copy kernel from {kernel_src}"))?;
+    std::fs::copy(&rootfs_src, &rootfs_path)
+        .with_context(|| format!("Failed to copy rootfs from {rootfs_src}"))?;
+
+    ui::success("Dev image built and cached.");
+    Ok((kernel_path, rootfs_path))
+}
+
+/// Find the dev-image Nix flake directory.
+fn find_dev_image_flake() -> Result<String> {
+    // Check in the source tree
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("Cannot find workspace root"))?;
+
+    let candidate = workspace_root.join("nix").join("dev-image");
+    if candidate.join("flake.nix").exists() {
+        return Ok(candidate.to_str().unwrap_or(".").to_string());
+    }
+
+    // Fall back to the guest-lib minimal profile
+    let guest_lib = workspace_root.join("nix").join("guest-lib");
+    if guest_lib.join("flake.nix").exists() {
+        return Ok(guest_lib.to_str().unwrap_or(".").to_string());
+    }
+
+    anyhow::bail!(
+        "Dev image flake not found. Expected at nix/dev-image/flake.nix\n\
+         or nix/guest-lib/flake.nix"
+    )
 }
 
 fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
@@ -5545,5 +5765,44 @@ mod tests {
             }
             _ => panic!("Expected Up command"),
         }
+    }
+
+    // --- Apple Container dev tests ---
+
+    #[test]
+    fn test_dev_up_with_lima_flag() {
+        let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--lima"]).unwrap();
+        match cli.command {
+            Commands::Dev {
+                action: Some(DevCmd::Up { lima, .. }),
+            } => {
+                assert!(lima);
+            }
+            _ => panic!("Expected Dev Up command"),
+        }
+    }
+
+    #[test]
+    fn test_dev_down_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "dev", "down"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_dev_shell_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "dev", "shell"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_dev_status_parses() {
+        let cli = Cli::try_parse_from(["mvmctl", "dev", "status"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_is_apple_container_dev_running_returns_bool() {
+        // Just verify it doesn't panic — actual result depends on platform
+        let _ = is_apple_container_dev_running();
     }
 }

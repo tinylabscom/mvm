@@ -48,7 +48,7 @@ description: Complete command reference for mvmctl.
 | `mvmctl setup --recreate` | Stop microVM, rebuild rootfs from upstream squashfs |
 | `mvmctl setup --force` | Re-run all setup steps even if already complete |
 | `mvmctl setup --lima-cpus N --lima-mem N` | Configure Lima VM resources (defaults: 8 CPUs, 16 GiB) |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start Lima VM, drop into dev shell |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. Uses Apple Container on macOS 26+, Lima otherwise. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
