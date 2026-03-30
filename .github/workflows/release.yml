@@ -110,8 +110,41 @@ jobs:
             staging/*.tar.gz
             staging/*.sha256
 
+  dev-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build dev image (aarch64-linux)
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64
+          echo "extra-platforms = aarch64-linux" | sudo tee -a /etc/nix/nix.conf
+          sudo systemctl restart nix-daemon
+          sleep 2
+          nix build './nix/dev-image#packages.aarch64-linux.default' \
+            --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          cp "$STORE_PATH/vmlinux" staging/dev-vmlinux-aarch64
+          cp "$STORE_PATH/rootfs.ext4" staging/dev-rootfs-aarch64.ext4
+          cd staging
+          sha256sum dev-vmlinux-aarch64 dev-rootfs-aarch64.ext4 > dev-image-checksums-sha256.txt
+
+      - name: Upload dev image artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-image
+          path: |
+            staging/dev-vmlinux-aarch64
+            staging/dev-rootfs-aarch64.ext4
+            staging/dev-image-checksums-sha256.txt
+
   release:
-    needs: build
+    needs: [build, dev-image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -174,5 +207,8 @@ jobs:
             artifacts/*.tar.gz \
             artifacts/*.tar.gz.bundle \
             artifacts/checksums-sha256.txt \
+            artifacts/dev-vmlinux-aarch64 \
+            artifacts/dev-rootfs-aarch64.ext4 \
+            artifacts/dev-image-checksums-sha256.txt \
             sbom.cdx.json \
             sbom.cdx.json.bundle

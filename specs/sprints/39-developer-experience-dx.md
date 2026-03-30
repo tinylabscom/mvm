@@ -1,6 +1,6 @@
 # Sprint 39 — Developer Experience & DX Features
 
-**Goal:** Borrow the best DX patterns from AlanD20/mvmctl — XDG-compliant
+**Goal:** Borrow the best DX patterns from a community Firecracker CLI project — XDG-compliant
 directories, named network management, Nix-based image catalog, enhanced audit
 logging, and PTY-over-vsock console — while keeping Nix, vsock-only security,
 and Rust.
@@ -65,7 +65,7 @@ and Rust.
 
 ## Rationale
 
-AlanD20/mvmctl (Python) proves a Firecracker CLI can feel as approachable as
+a community Firecracker CLI project (Python) proves a Firecracker CLI can feel as approachable as
 Docker. Our Rust project is more powerful (Nix images, vsock-only, fleet
 orchestration) but has a steeper onboarding curve. This sprint borrows the best
 DX ideas while keeping our architecture.
