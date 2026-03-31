@@ -29,7 +29,6 @@
 
             # Build tools
             pkgs.gnumake
-            pkgs.cargo
 
             # Nix package manager
             pkgs.nix
