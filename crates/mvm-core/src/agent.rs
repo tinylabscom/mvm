@@ -24,6 +24,11 @@ pub struct DesiredState {
     pub prune_unknown_tenants: bool,
     #[serde(default)]
     pub prune_unknown_pools: bool,
+    /// Monotonic sequence number from the coordinator's event log.
+    /// Agents use this to track which state version they last applied,
+    /// enabling incremental sync via `SyncEvents { since }`.
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +352,12 @@ pub enum AgentRequest {
         pool_id: String,
         config_version: u64,
     },
+    /// Request incremental state events since a given sequence number.
+    ///
+    /// Returns events with sequence > `since`. If the event log has been
+    /// truncated past the requested sequence, the coordinator responds with
+    /// a full `DesiredState` instead.
+    SyncEvents { since: u64 },
 }
 
 /// Imperative lifecycle action for a single instance.
@@ -458,6 +469,13 @@ pub enum AgentResponse {
         instances_updated: u32,
         errors: Vec<String>,
     },
+    /// Incremental state events in response to `SyncEvents`.
+    SyncEventsResult {
+        /// Events with sequence > the requested `since` value.
+        events: Vec<serde_json::Value>,
+        /// Current sequence number at the coordinator.
+        current_sequence: u64,
+    },
 }
 
 #[cfg(test)]
@@ -497,6 +515,7 @@ mod tests {
             tenants: vec![],
             prune_unknown_tenants: false,
             prune_unknown_pools: false,
+            sequence: 0,
         };
         let json = serde_json::to_string(&ds).unwrap();
         let parsed: DesiredState = serde_json::from_str(&json).unwrap();
@@ -1439,6 +1458,272 @@ mod tests {
                 assert_eq!(instances_updated, 5);
             }
             _ => panic!("Expected ConfigUpdateResult variant"),
+        }
+    }
+
+    // ==========================================================================
+    // Comprehensive round-trip tests for all protocol variants
+    // ==========================================================================
+
+    /// Build one instance of every `AgentRequest` variant to ensure full coverage.
+    fn all_request_variants() -> Vec<AgentRequest> {
+        vec![
+            AgentRequest::Reconcile(DesiredState {
+                schema_version: 1,
+                node_id: "n1".to_string(),
+                tenants: vec![],
+                prune_unknown_tenants: false,
+                prune_unknown_pools: false,
+                sequence: 0,
+            }),
+            AgentRequest::ReconcileSigned(SignedPayload {
+                payload: b"{}".to_vec(),
+                signature: b"abcd".to_vec(),
+                signer_id: "1234".to_string(),
+            }),
+            AgentRequest::NodeInfo,
+            AgentRequest::NodeStats,
+            AgentRequest::TenantList,
+            AgentRequest::InstanceList {
+                tenant_id: "t1".to_string(),
+                pool_id: Some("p1".to_string()),
+            },
+            AgentRequest::InstanceList {
+                tenant_id: "t1".to_string(),
+                pool_id: None,
+            },
+            AgentRequest::WakeInstance {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+            },
+            AgentRequest::InstanceAction {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                action: InstanceAction::Start,
+            },
+            AgentRequest::SandboxAction {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                request: serde_json::json!({"type": "Ping"}),
+            },
+            AgentRequest::DeploymentStatus {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+            },
+            AgentRequest::PauseDeployment {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+            },
+            AgentRequest::ResumeDeployment {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+            },
+            AgentRequest::RollbackDeployment {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                target_revision: Some("rev-abc".to_string()),
+            },
+            AgentRequest::BatchInstanceAction {
+                actions: vec![BatchActionItem {
+                    tenant_id: "t1".to_string(),
+                    pool_id: "p1".to_string(),
+                    instance_id: "i1".to_string(),
+                    action: InstanceAction::Stop,
+                }],
+            },
+            AgentRequest::PoolAction {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                action: PoolActionType::StartAll,
+            },
+            AgentRequest::GetMetrics,
+            AgentRequest::GetAuditLog {
+                tenant_id: "t1".to_string(),
+                last_n: Some(10),
+                since: None,
+            },
+            AgentRequest::GetHealthStatus {
+                tenant_id: Some("t1".to_string()),
+                pool_id: None,
+            },
+            AgentRequest::GetReconcileHistory { last_n: Some(5) },
+            AgentRequest::ForceReconcile { dry_run: true },
+            AgentRequest::DumpState {
+                include_metrics: true,
+                include_audit_log: false,
+            },
+            AgentRequest::UpdateSecrets {
+                tenant_id: "t1".to_string(),
+                secrets_hash: "sha256:abc".to_string(),
+                force_reload: false,
+            },
+            AgentRequest::UpdateConfig {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                config_version: 42,
+            },
+            AgentRequest::SyncEvents { since: 42 },
+        ]
+    }
+
+    /// Every `AgentRequest` variant must survive a JSON round-trip.
+    #[test]
+    fn test_all_agent_request_variants_round_trip() {
+        for (i, req) in all_request_variants().into_iter().enumerate() {
+            let json = serde_json::to_value(&req).unwrap_or_else(|e| {
+                panic!("Failed to serialize AgentRequest variant #{}: {}", i, e)
+            });
+            let _back: AgentRequest = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to deserialize AgentRequest variant #{}: {} -- json: {}",
+                    i, e, json
+                )
+            });
+        }
+    }
+
+    fn test_node_info() -> NodeInfo {
+        NodeInfo {
+            node_id: "node-1".to_string(),
+            hostname: "host".to_string(),
+            arch: "aarch64".to_string(),
+            total_vcpus: 8,
+            total_mem_mib: 16384,
+            vm_status: Some("running".to_string()),
+            firecracker_version: Some("1.5.0".to_string()),
+            jailer_available: true,
+            cgroup_v2: true,
+            attestation_provider: "none".to_string(),
+        }
+    }
+
+    /// Build one instance of every `AgentResponse` variant to ensure full coverage.
+    fn all_response_variants() -> Vec<AgentResponse> {
+        vec![
+            AgentResponse::ReconcileResult(ReconcileReport::default()),
+            AgentResponse::NodeInfo(test_node_info()),
+            AgentResponse::NodeStats(NodeStats::default()),
+            AgentResponse::TenantList(vec!["t1".to_string()]),
+            AgentResponse::InstanceList(vec![]),
+            AgentResponse::WakeResult { success: true },
+            AgentResponse::InstanceActionResult {
+                success: true,
+                new_status: "running".to_string(),
+                error: None,
+            },
+            AgentResponse::SandboxResult {
+                success: true,
+                response: serde_json::json!({"type": "Pong"}),
+                error: None,
+            },
+            AgentResponse::Error {
+                code: 500,
+                message: "internal error".to_string(),
+            },
+            AgentResponse::DeploymentStatus {
+                pool_id: "p1".to_string(),
+                current_revision: "rev-1".to_string(),
+                target_revision: None,
+                strategy: Default::default(),
+                phase: DeploymentPhase::Complete,
+                instances_updated: 3,
+                instances_pending: 0,
+                canary_health: None,
+                paused: false,
+                errors: vec![],
+            },
+            AgentResponse::DeploymentControlResult {
+                success: true,
+                pool_id: "p1".to_string(),
+                new_phase: "paused".to_string(),
+                message: "ok".to_string(),
+            },
+            AgentResponse::BatchActionResult {
+                results: vec![],
+                total: 0,
+                succeeded: 0,
+                failed: 0,
+            },
+            AgentResponse::PoolActionResult {
+                success: true,
+                pool_id: "p1".to_string(),
+                instances_affected: 5,
+                errors: vec![],
+            },
+            AgentResponse::Metrics(crate::observability::metrics::global().snapshot()),
+            AgentResponse::AuditLog {
+                entries: vec![],
+                total_count: 0,
+            },
+            AgentResponse::HealthStatus {
+                instances: vec![],
+                unhealthy_count: 0,
+                degraded_count: 0,
+            },
+            AgentResponse::ReconcileHistory { runs: vec![] },
+            AgentResponse::StateDump(Box::new(StateDumpContent {
+                node_info: test_node_info(),
+                node_stats: NodeStats::default(),
+                metrics: None,
+                audit_log: None,
+                tenants: vec![],
+            })),
+            AgentResponse::SecretsUpdateResult {
+                success: true,
+                tenant_id: "t1".to_string(),
+                instances_reloaded: 0,
+                errors: vec![],
+            },
+            AgentResponse::ConfigUpdateResult {
+                success: true,
+                pool_id: "p1".to_string(),
+                instances_updated: 0,
+                errors: vec![],
+            },
+            AgentResponse::SyncEventsResult {
+                events: vec![serde_json::json!({"type": "TenantAdded", "tenant_id": "acme"})],
+                current_sequence: 5,
+            },
+        ]
+    }
+
+    /// Every `AgentResponse` variant must survive a JSON round-trip.
+    #[test]
+    fn test_all_agent_response_variants_round_trip() {
+        for (i, resp) in all_response_variants().into_iter().enumerate() {
+            let json = serde_json::to_value(&resp).unwrap_or_else(|e| {
+                panic!("Failed to serialize AgentResponse variant #{}: {}", i, e)
+            });
+            let _back: AgentResponse = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to deserialize AgentResponse variant #{}: {} -- json: {}",
+                    i, e, json
+                )
+            });
+        }
+    }
+
+    /// All `PoolActionType` variants must round-trip through JSON.
+    #[test]
+    fn test_pool_action_type_all_variants_round_trip() {
+        let variants = vec![
+            PoolActionType::StartAll,
+            PoolActionType::StopAll,
+            PoolActionType::WarmAll,
+            PoolActionType::DestroyAll { wipe_volumes: true },
+            PoolActionType::ScaleTo {
+                running: 3,
+                warm: 1,
+                sleeping: 2,
+            },
+        ];
+        for v in &variants {
+            let json = serde_json::to_value(v).unwrap();
+            let back: PoolActionType = serde_json::from_value(json).unwrap();
+            assert_eq!(*v, back);
         }
     }
 }

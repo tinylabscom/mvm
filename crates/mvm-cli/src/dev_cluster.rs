@@ -223,6 +223,7 @@ fn default_desired_state() -> DesiredState {
         node_id: "dev-node".to_string(),
         prune_unknown_tenants: false,
         prune_unknown_pools: false,
+        sequence: 0,
         tenants: vec![DesiredTenant {
             tenant_id: "dev".to_string(),
             network: DesiredTenantNetwork {

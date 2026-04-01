@@ -1395,10 +1395,27 @@ fn cmd_dev_status() -> Result<()> {
 const DEV_VM_NAME: &str = "mvm-dev";
 
 /// Check if the Apple Container dev VM is running.
+/// Checks both in-process VM tracking (PID file) and launchd agent.
 fn is_apple_container_dev_running() -> bool {
-    mvm_apple_container::list_ids()
+    // Check persisted PID file (also checks if process is alive)
+    let pid_running = mvm_apple_container::list_ids()
         .iter()
-        .any(|id| id == DEV_VM_NAME)
+        .any(|id| id == DEV_VM_NAME);
+    if pid_running {
+        return true;
+    }
+    // Check if launchd agent is installed and loaded
+    if dev_launchd_plist_path().exists() {
+        let output = std::process::Command::new("launchctl")
+            .args(["list", DEV_LAUNCHD_LABEL])
+            .output();
+        if let Ok(o) = output
+            && o.status.success()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Boot the Apple Container dev VM, optionally opening an interactive console.
@@ -1431,28 +1448,19 @@ fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bool) -> Resu
     let exe = std::env::current_exe().context("cannot find current executable")?;
     let log_dir = format!("{}/dev", mvm_core::config::mvm_cache_dir());
     std::fs::create_dir_all(&log_dir)?;
-    let stdout_log = std::fs::File::create(format!("{log_dir}/daemon-stdout.log"))
-        .context("create stdout log")?;
-    let stderr_log = std::fs::File::create(format!("{log_dir}/daemon-stderr.log"))
-        .context("create stderr log")?;
+
+    // Sign the binary BEFORE launching via launchd. The daemon runs with
+    // MVM_SIGNED=1 so it won't re-exec (which would lose launchd context).
+    mvm_apple_container::ensure_signed();
 
     ui::info(&format!(
         "Booting dev VM ({} vCPUs, {} GiB memory)...",
         cpus, memory_gib
     ));
 
-    let child = std::process::Command::new(&exe)
-        .args(["dev", "up"])
-        .env("MVM_DEV_DAEMON", "1")
-        .env("MVM_DEV_KERNEL", &kernel)
-        .env("MVM_DEV_ROOTFS", &rootfs)
-        .env("MVM_DEV_CPUS", cpus.to_string())
-        .env("MVM_DEV_MEM_GIB", memory_gib.to_string())
-        .stdout(stdout_log)
-        .stderr(stderr_log)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .context("Failed to spawn dev VM daemon")?;
+    // Install a launchd agent to run the daemon. This is a proper macOS
+    // service that is cleanly unloaded by `dev down`.
+    install_dev_launchd_agent(&exe, &kernel, &rootfs, cpus, memory_gib, &log_dir)?;
 
     // Wait for the VM to become ready (vsock proxy socket + guest agent reachable)
     let proxy_path = dev_vsock_proxy_path();
@@ -1464,7 +1472,6 @@ fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bool) -> Resu
                            Check logs: {log_dir}/daemon-stderr.log"
             );
         }
-        // Try connecting through the daemon's vsock proxy
         if std::path::Path::new(&proxy_path).exists()
             && vsock_proxy_connect(&proxy_path, mvm_guest::vsock::GUEST_AGENT_PORT).is_ok()
         {
@@ -1472,8 +1479,6 @@ fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bool) -> Resu
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-
-    drop(child); // detach — don't wait for the daemon
 
     ui::success("Dev VM ready.");
     ui::info("  Shell:      mvmctl dev shell");
@@ -1514,6 +1519,95 @@ fn cmd_dev_apple_container_daemon(cpus: u32, memory_gib: u32) -> Result<()> {
     // Block forever — the VM lives in this process.
     loop {
         std::thread::park();
+    }
+}
+
+const DEV_LAUNCHD_LABEL: &str = "com.mvm.dev";
+
+fn dev_launchd_plist_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!(
+        "{home}/Library/LaunchAgents/{DEV_LAUNCHD_LABEL}.plist"
+    ))
+}
+
+fn install_dev_launchd_agent(
+    exe: &std::path::Path,
+    kernel: &str,
+    rootfs: &str,
+    cpus: u32,
+    memory_gib: u32,
+    log_dir: &str,
+) -> Result<()> {
+    // Unload any previous agent first
+    unload_dev_launchd_agent();
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{DEV_LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>dev</string>
+        <string>up</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MVM_DEV_DAEMON</key>
+        <string>1</string>
+        <key>MVM_DEV_KERNEL</key>
+        <string>{kernel}</string>
+        <key>MVM_DEV_ROOTFS</key>
+        <string>{rootfs}</string>
+        <key>MVM_DEV_CPUS</key>
+        <string>{cpus}</string>
+        <key>MVM_DEV_MEM_GIB</key>
+        <string>{memory_gib}</string>
+        <key>MVM_SIGNED</key>
+        <string>0</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/daemon-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/daemon-stderr.log</string>
+</dict>
+</plist>"#,
+        exe = exe.display(),
+    );
+
+    let plist_path = dev_launchd_plist_path();
+    let agents_dir = plist_path.parent().expect("plist path must have parent");
+    std::fs::create_dir_all(agents_dir)?;
+    std::fs::write(&plist_path, &plist)?;
+
+    let output = std::process::Command::new("launchctl")
+        .args(["load", plist_path.to_str().unwrap_or("")])
+        .output()
+        .context("Failed to run launchctl")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("launchctl load failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+fn unload_dev_launchd_agent() {
+    let plist_path = dev_launchd_plist_path();
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", plist_path.to_str().unwrap_or("")])
+            .output();
+        let _ = std::fs::remove_file(&plist_path);
     }
 }
 
@@ -1626,18 +1720,21 @@ fn cleanup_stale_dev_vm() {
 
 /// Stop the Apple Container dev VM.
 fn cmd_dev_apple_container_down() -> Result<()> {
-    if is_apple_container_dev_running() {
-        ui::info("Stopping Apple Container dev VM...");
-        // Kill the daemon process (which owns the VM in-process)
-        stop_dev_vm_owner();
-        // Clean up the vsock proxy socket
-        let _ = std::fs::remove_file(dev_vsock_proxy_path());
-        ui::success("Dev VM stopped.");
-        return Ok(());
-    }
+    let was_running = is_apple_container_dev_running() || dev_launchd_plist_path().exists();
 
+    // Unload the launchd agent (stops the daemon process)
+    unload_dev_launchd_agent();
+    // Kill any lingering daemon process
+    stop_dev_vm_owner();
+    // Clean up state files
     cleanup_stale_dev_vm();
-    ui::info("Dev VM is not running.");
+    let _ = std::fs::remove_file(dev_vsock_proxy_path());
+
+    if was_running {
+        ui::success("Dev VM stopped.");
+    } else {
+        ui::info("Dev VM is not running.");
+    }
     Ok(())
 }
 
