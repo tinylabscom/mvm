@@ -2,6 +2,15 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.10.0] — 2026-04-01
+
+### Added
+- Auto-setup linux-builder, interactive dev console, and CLI improvements
+- Run dev VM as background daemon with vsock proxy
+
+### Fixed
+- Remove cargo from dev image (too large for ext4 rootfs)
+
 ## [0.9.2] — 2026-03-30
 
 ### Fixed
