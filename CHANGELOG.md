@@ -2,6 +2,11 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.10.1] — 2026-04-01
+
+### Fixed
+- Dev VM launchd lifecycle and detection improvements
+
 ## [0.10.0] — 2026-04-01
 
 ### Added
