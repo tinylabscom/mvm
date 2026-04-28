@@ -117,11 +117,15 @@ pub struct RuntimeConfig {
     pub volumes: Vec<RuntimeVolume>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct RuntimeVolume {
     pub host: String,
     pub guest: String,
     pub size: String,
+    /// Mark the underlying drive read-only at the Firecracker level.
+    /// Defaults to false for backwards compatibility with persistent volumes.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -709,12 +713,104 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
 }
 
 // ---------------------------------------------------------------------------
+// Read-only host-directory volume images (used by `mvmctl exec --add-dir`)
+// ---------------------------------------------------------------------------
+
+/// Build a read-only ext4 image populated with the contents of a host
+/// directory.
+///
+/// Used by `mvmctl exec --add-dir host:guest` to share a host directory
+/// into a transient microVM without virtio-fs. The image is created inside
+/// the Linux build environment (Lima VM on macOS, host on Linux) and sized
+/// from the directory's actual contents plus headroom.
+///
+/// `host_dir` must already be reachable inside the Linux build environment
+/// (Lima auto-mounts the host home; Linux passes paths through directly).
+/// `label` is used as the ext4 volume label (max 16 chars, ASCII).
+/// `dest_image_path` is where the resulting `.ext4` file is written.
+///
+/// Returns the absolute image path on success.
+pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) -> Result<String> {
+    if label.is_empty()
+        || label.len() > 16
+        || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        anyhow::bail!("ext4 label '{label}' must be 1-16 ASCII alphanumeric/dash chars",);
+    }
+    let parent = std::path::Path::new(dest_image_path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mkdir_parent = if parent.is_empty() {
+        String::new()
+    } else {
+        format!("mkdir -p {parent}")
+    };
+
+    // Compute size: directory content + 8 MiB headroom + 16 MiB minimum,
+    // rounded up to the next 4-MiB boundary so mkfs.ext4 is happy.
+    // We do this inside the Linux env so `du` sees the same view as `cp`.
+    let script = format!(
+        r#"
+        set -e
+        {mkdir_parent}
+        rm -f {dest}
+        SRC_KB=$(du -sk {src} 2>/dev/null | awk '{{print $1}}')
+        SIZE_MIB=$(( (SRC_KB / 1024) + 8 ))
+        if [ "$SIZE_MIB" -lt 16 ]; then SIZE_MIB=16; fi
+        SIZE_MIB=$(( ((SIZE_MIB + 3) / 4) * 4 ))
+        truncate -s "${{SIZE_MIB}}M" {dest}
+        mkfs.ext4 -q -L {label} {dest}
+
+        MOUNT_DIR=$(mktemp -d)
+        sudo mount {dest} "$MOUNT_DIR"
+        if [ -d {src} ]; then
+            sudo cp -aT {src} "$MOUNT_DIR" 2>/dev/null || true
+        else
+            sudo cp -a {src} "$MOUNT_DIR/" 2>/dev/null || true
+        fi
+        sudo umount "$MOUNT_DIR"
+        rmdir "$MOUNT_DIR"
+        chmod 0644 {dest}
+        "#,
+        mkdir_parent = mkdir_parent,
+        src = host_dir,
+        dest = dest_image_path,
+        label = label,
+    );
+
+    run_in_vm(&script).with_context(|| {
+        format!("building read-only ext4 image from '{host_dir}' at '{dest_image_path}'")
+    })?;
+    Ok(dest_image_path.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_dir_image_ro_rejects_oversized_label() {
+        let err = build_dir_image_ro("/tmp/x", "this-label-is-too-long-by-far", "/tmp/x.ext4")
+            .unwrap_err();
+        assert!(err.to_string().contains("ext4 label"));
+    }
+
+    #[test]
+    fn build_dir_image_ro_rejects_invalid_chars() {
+        let err = build_dir_image_ro("/tmp/x", "extra/0", "/tmp/x.ext4").unwrap_err();
+        assert!(err.to_string().contains("ext4 label"));
+    }
+
+    #[test]
+    fn build_dir_image_ro_rejects_empty_label() {
+        let err = build_dir_image_ro("/tmp/x", "", "/tmp/x.ext4").unwrap_err();
+        assert!(err.to_string().contains("ext4 label"));
+    }
 
     #[test]
     fn test_parse_minimal_config() {

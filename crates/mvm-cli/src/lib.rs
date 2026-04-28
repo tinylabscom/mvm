@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod commands;
 pub mod config_watcher;
 pub mod doctor;
+pub mod exec;
 pub mod fleet;
 pub mod http;
 pub mod logging;

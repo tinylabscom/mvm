@@ -1435,17 +1435,19 @@ pub fn configure_flake_microvm_with_drives_dir(
 
     for (idx, vol) in config.volumes.iter().enumerate() {
         let drive_id = format!("vol{}", idx);
+        let mode = if vol.read_only { "ro" } else { "rw" };
         ui::info(&format!(
-            "Attaching volume {} -> {} (size {})",
+            "Attaching volume {} -> {} (size {}, {mode})",
             vol.host, vol.guest, vol.size
         ));
         api_put_socket(
             socket,
             &format!("/drives/{}", drive_id),
             &format!(
-                r#"{{"drive_id": "{id}", "path_on_host": "{host}", "is_root_device": false, "is_read_only": false}}"#,
+                r#"{{"drive_id": "{id}", "path_on_host": "{host}", "is_root_device": false, "is_read_only": {ro}}}"#,
                 id = drive_id,
                 host = vol.host,
+                ro = vol.read_only,
             ),
         )?;
     }

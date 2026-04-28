@@ -42,6 +42,7 @@ impl FirecrackerConfig {
                     host: v.host.clone(),
                     guest: v.guest.clone(),
                     size: v.size.clone(),
+                    read_only: v.read_only,
                 })
                 .collect(),
             config_files: config

@@ -156,6 +156,44 @@ description: Complete command reference for mvmctl.
 | `mvmctl console <name>` | Interactive PTY shell into a running VM (vsock, no SSH) |
 | `mvmctl console <name> --command <cmd>` | Run a one-shot command in the VM |
 
+## One-shot Exec
+
+`mvmctl exec` boots a fresh transient microVM, runs a single command, and tears it
+down on exit — like `cco` or `docker run --rm`, but with a Firecracker microVM
+as the sandbox. **Dev-mode only**, gated by `policy.access.debug_exec`.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl exec -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
+| `mvmctl exec --template <name> -- <cmd>...` | Boot a registered template instead of the default |
+| `mvmctl exec --add-dir HOST:GUEST -- <cmd>` | Mount a host directory read-only inside the guest. Repeatable. Writes are discarded on teardown |
+| `mvmctl exec --env KEY=VAL -- <cmd>` | Inject an environment variable. Repeatable |
+| `mvmctl exec --cpus <n>` / `--memory <size>` | Resize the transient VM (defaults: 2 vCPUs, 512 MiB) |
+| `mvmctl exec --timeout <secs>` | Per-command timeout (default: 60s) |
+
+Examples:
+
+```bash
+mvmctl exec -- uname -a                                # default image
+mvmctl exec --template minimal -- /bin/true            # named template
+mvmctl exec --add-dir .:/work -- ls /work              # share current dir, RO
+mvmctl exec -e DEBUG=1 -- env | grep DEBUG             # env var injection
+```
+
+## Default microVM Image
+
+When an image-taking command is invoked without `--flake` or `--template`,
+`mvmctl` falls back to a bundled minimal image (busybox + the guest agent).
+This applies to:
+
+- `mvmctl exec -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
+- `mvmctl up` / `mvmctl run` / `mvmctl start` — boots a long-running microVM
+  with the same image
+
+The image is built from `nix/default-microvm/` on first use and cached at
+`~/.cache/mvm/default-microvm/` (kernel + rootfs). Nix is required to build
+it; pass `--template` or `--flake` if Nix isn't available on your host.
+
 ## Cache
 
 | Command | Description |

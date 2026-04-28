@@ -66,7 +66,7 @@ pub struct VmPortMapping {
 }
 
 /// A volume to mount in the guest, backend-agnostic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VmVolume {
     /// Host-side path or identifier.
     pub host: String,
@@ -74,6 +74,8 @@ pub struct VmVolume {
     pub guest: String,
     /// Size hint (e.g. "1G"). Backend may ignore.
     pub size: String,
+    /// Mark the underlying drive read-only at the hypervisor level.
+    pub read_only: bool,
 }
 
 /// A file to inject into the guest (config or secret).

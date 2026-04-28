@@ -63,6 +63,7 @@ impl VmStartParams<'_> {
                     host: v.host.clone(),
                     guest: v.guest.clone(),
                     size: v.size.clone(),
+                    read_only: v.read_only,
                 })
                 .collect(),
             config_files: self
@@ -233,8 +234,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Build and run a VM from a Nix flake or template
-    #[command(alias = "start", alias = "run", group(clap::ArgGroup::new("source").required(true)))]
+    /// Build and run a VM from a Nix flake, a template, or the bundled default image.
+    ///
+    /// If neither `--flake` nor `--template` is supplied, the bundled
+    /// `nix/default-microvm/` image is used (built via Nix on first use,
+    /// cached at `~/.cache/mvm/default-microvm/`).
+    #[command(alias = "start", alias = "run", group(clap::ArgGroup::new("source")))]
     Up {
         /// Nix flake reference (local path or remote URI)
         #[arg(long, group = "source", value_parser = clap_flake_ref)]
@@ -397,6 +402,39 @@ enum Commands {
     Security {
         #[command(subcommand)]
         action: SecurityCmd,
+    },
+    /// Boot a transient microVM, run a single command, and tear down (dev-mode only).
+    ///
+    /// Inspired by cco — same one-command UX, but with a Firecracker microVM
+    /// as the sandbox. Use `--add-dir host:guest` to share a host directory
+    /// (read-only). Use `--` to separate the argv from `mvmctl exec` flags.
+    Exec {
+        /// Pre-built template to boot. If omitted, the bundled
+        /// `nix/exec-default/` image is used (built via Nix on first use,
+        /// cached at `~/.cache/mvm/exec-default/`). Each invocation boots a
+        /// fresh transient microVM — never the long-running `mvmctl dev` VM.
+        #[arg(long)]
+        template: Option<String>,
+        /// vCPU cores (default: 2).
+        #[arg(long, default_value = "2")]
+        cpus: u32,
+        /// Memory (supports human-readable: 512M, 1G, …).
+        #[arg(long, default_value = "512M")]
+        memory: String,
+        /// Share a host directory into the guest (read-only). Format:
+        /// `HOST_PATH:/GUEST_PATH`. Repeatable. Writes inside the guest are
+        /// discarded on teardown.
+        #[arg(long = "add-dir", short = 'd')]
+        add_dir: Vec<String>,
+        /// Environment variable to inject (KEY=VALUE). Repeatable.
+        #[arg(long, short = 'e')]
+        env: Vec<String>,
+        /// Per-command timeout in seconds (default: 60).
+        #[arg(long, default_value = "60")]
+        timeout: u64,
+        /// Argv to run inside the guest (use `--` to separate).
+        #[arg(trailing_var_arg = true, required = true)]
+        argv: Vec<String>,
     },
 }
 
@@ -1085,6 +1123,15 @@ pub fn run() -> Result<()> {
             lima_mem,
         } => cmd_init(non_interactive, lima_cpus, lima_mem),
         Commands::Security { action } => cmd_security(action),
+        Commands::Exec {
+            template,
+            cpus,
+            memory,
+            add_dir,
+            env,
+            timeout,
+            argv,
+        } => run_oneshot(template, cpus, &memory, &add_dir, &env, timeout, argv),
     };
 
     with_hints(result)
@@ -2252,6 +2299,109 @@ fn find_dev_image_flake() -> Result<String> {
     )
 }
 
+/// Locate the bundled `nix/default-microvm/` flake.
+///
+/// This is the fallback used by image-taking commands (`mvmctl exec`,
+/// `mvmctl up`/`run`/`start`) when neither `--flake` nor `--template` is
+/// supplied.
+fn find_default_microvm_flake() -> Result<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("Cannot find workspace root"))?;
+
+    let candidate = workspace_root.join("nix").join("default-microvm");
+    if candidate.join("flake.nix").exists() {
+        return Ok(candidate.to_str().unwrap_or(".").to_string());
+    }
+    anyhow::bail!(
+        "Default microVM image flake not found. Expected at nix/default-microvm/flake.nix"
+    )
+}
+
+/// Ensure the bundled default microVM image (kernel + rootfs) is in the cache.
+///
+/// Used by any image-taking command when no `--flake` or `--template` was
+/// supplied. Builds via Nix on first use and caches under
+/// `~/.cache/mvm/default-microvm/`. Returns `(kernel_path, rootfs_path)`.
+///
+/// Unlike the dev image, there is no download fallback — if Nix isn't
+/// available (or can't cross-compile a Linux image on this host), the
+/// caller is asked to install Nix or pass an explicit `--template`/`--flake`.
+pub(crate) fn ensure_default_microvm_image() -> Result<(String, String)> {
+    let cache_dir = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
+    std::fs::create_dir_all(&cache_dir)?;
+
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+
+    if std::path::Path::new(&kernel_path).exists() && std::path::Path::new(&rootfs_path).exists() {
+        return Ok((kernel_path, rootfs_path));
+    }
+
+    let plat = mvm_core::platform::current();
+    if !plat.has_host_nix() {
+        anyhow::bail!(
+            "Nix is required to build the default exec image, but it isn't installed.\n\
+             Install Nix (https://nixos.org/download.html) or pass an explicit\n\
+             --template that you've already built with `mvmctl template create`."
+        );
+    }
+    let flake_dir = find_default_microvm_flake()?;
+    let nix_bin = find_nix_binary();
+
+    if cfg!(target_os = "macos") && ensure_linux_builder_ssh_config() {
+        ui::info("  Linux builder detected and SSH configured.");
+    }
+
+    ui::info("Building default microVM image via Nix (first time only)...");
+    let mut child = std::process::Command::new(&nix_bin)
+        .args([
+            "build",
+            &format!(
+                "{flake_dir}#packages.{}.default",
+                mvm_build::dev_build::linux_system()
+            ),
+            "--no-link",
+            "--print-out-paths",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("Failed to run nix build")?;
+
+    let stdout = {
+        let mut buf = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            use std::io::Read;
+            let _ = out.read_to_string(&mut buf);
+        }
+        buf
+    };
+    let status = child.wait().context("nix build process failed")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "nix build of the default microVM image failed.\n\
+             If you're on macOS without a Linux builder, either start one\n\
+             (`nix run 'nixpkgs#darwin.linux-builder'`) or pass an explicit\n\
+             --template/--flake that you've already built."
+        );
+    }
+
+    let store_path = stdout.trim().to_string();
+    let ks = format!("{store_path}/vmlinux");
+    let rs = format!("{store_path}/rootfs.ext4");
+    if !std::path::Path::new(&ks).exists() || !std::path::Path::new(&rs).exists() {
+        anyhow::bail!("nix build succeeded but expected outputs are missing under {store_path}");
+    }
+    std::fs::copy(&ks, &kernel_path)?;
+    std::fs::copy(&rs, &rootfs_path)?;
+    ui::success("Default microVM image built and cached.");
+    Ok((kernel_path, rootfs_path))
+}
+
 fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
     let total = 5;
 
@@ -3338,8 +3488,7 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             Some(spec.mem_mib),
             snap_info,
         )
-    } else {
-        let flake = flake_ref.expect("--flake or --template required");
+    } else if let Some(flake) = flake_ref {
         let resolved = resolve_flake_ref(flake)?;
         let profile_display = profile.unwrap_or("default");
         ui::step(
@@ -3377,6 +3526,27 @@ fn cmd_run(params: RunParams<'_>) -> Result<()> {
             None,
             None,
             None, // No snapshot for flake builds
+        )
+    } else {
+        ui::step(
+            1,
+            2,
+            &format!(
+                "No --flake or --template; using bundled default microVM image for '{}'",
+                vm_name
+            ),
+        );
+        let (kernel, rootfs) = ensure_default_microvm_image()?;
+        (
+            kernel,
+            None,
+            rootfs,
+            String::new(),
+            "default-microvm".to_string(),
+            None,
+            None,
+            None,
+            None,
         )
     };
 
@@ -3855,6 +4025,7 @@ fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
             host: parts[0].to_string(),
             guest: parts[1].to_string(),
             size: parts[2].to_string(),
+            read_only: false,
         })),
         _ => anyhow::bail!(
             "Invalid volume '{}'. Expected host_dir:/guest/path or host:/guest/path:size",
@@ -4967,6 +5138,71 @@ fn cmd_security_status(json: bool) -> Result<()> {
 }
 
 // ============================================================================
+// One-shot exec (boot transient microVM, run argv, tear down)
+// ============================================================================
+
+fn run_oneshot(
+    template: Option<String>,
+    cpus: u32,
+    memory: &str,
+    add_dir: &[String],
+    env: &[String],
+    timeout: u64,
+    argv: Vec<String>,
+) -> Result<()> {
+    if argv.is_empty() {
+        anyhow::bail!("`mvmctl exec` requires a command (after `--`)");
+    }
+    let memory_mib = parse_human_size(memory).context("Invalid --memory")?;
+    let mut add_dirs = Vec::with_capacity(add_dir.len());
+    for spec in add_dir {
+        add_dirs.push(crate::exec::AddDir::parse(spec)?);
+    }
+    let mut env_pairs = Vec::with_capacity(env.len());
+    for kv in env {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--env '{kv}': expected KEY=VALUE"))?;
+        if k.is_empty() {
+            anyhow::bail!("--env '{kv}': KEY must not be empty");
+        }
+        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || k.starts_with(|c: char| c.is_ascii_digit())
+        {
+            anyhow::bail!("--env '{kv}': KEY must match [A-Za-z_][A-Za-z0-9_]* (got '{k}')");
+        }
+        env_pairs.push((k.to_string(), v.to_string()));
+    }
+    let image = match template {
+        Some(name) => crate::exec::ImageSource::Template(name),
+        None => {
+            ui::info("No --template specified; using bundled default microVM image.");
+            let (kernel_path, rootfs_path) = ensure_default_microvm_image()?;
+            crate::exec::ImageSource::Prebuilt {
+                kernel_path,
+                rootfs_path,
+                initrd_path: None,
+                label: "default-microvm".to_string(),
+            }
+        }
+    };
+    let req = crate::exec::ExecRequest {
+        image,
+        cpus,
+        memory_mib,
+        add_dirs,
+        env: env_pairs,
+        target: crate::exec::ExecTarget::Inline { argv },
+        timeout_secs: timeout,
+    };
+    let exit_code = crate::exec::run(req)?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Console (PTY-over-vsock)
 // ============================================================================
 
@@ -5591,9 +5827,20 @@ mod tests {
     }
 
     #[test]
-    fn test_run_requires_source() {
-        let result = Cli::try_parse_from(["mvmctl", "run"]);
-        assert!(result.is_err(), "run should require --flake or --template");
+    fn test_run_without_source_uses_default_microvm() {
+        // No --flake / --template: the dispatcher falls back to the bundled
+        // default microVM image. Clap should accept the bare invocation; the
+        // dispatcher then resolves the image at runtime.
+        let cli = Cli::try_parse_from(["mvmctl", "run"]).expect("parse");
+        match cli.command {
+            Commands::Up {
+                flake, template, ..
+            } => {
+                assert!(flake.is_none(), "no --flake should be parsed");
+                assert!(template.is_none(), "no --template should be parsed");
+            }
+            _ => panic!("Expected Run command"),
+        }
     }
 
     #[test]
@@ -6472,6 +6719,105 @@ mod tests {
             }
             _ => panic!("Expected Console command"),
         }
+    }
+
+    // --- Exec CLI tests ---
+
+    #[test]
+    fn exec_default_template_argv_only() {
+        let cli = Cli::try_parse_from(["mvmctl", "exec", "--", "uname", "-a"]).expect("parse");
+        match cli.command {
+            Commands::Exec {
+                template,
+                cpus,
+                memory,
+                add_dir,
+                env,
+                timeout,
+                argv,
+            } => {
+                assert!(template.is_none(), "template should default to None");
+                assert_eq!(cpus, 2);
+                assert_eq!(memory, "512M");
+                assert!(add_dir.is_empty());
+                assert!(env.is_empty());
+                assert_eq!(timeout, 60);
+                assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+            }
+            _ => panic!("Expected Exec command"),
+        }
+    }
+
+    #[test]
+    fn exec_with_template_and_resources() {
+        let cli = Cli::try_parse_from([
+            "mvmctl",
+            "exec",
+            "--template",
+            "my-tpl",
+            "--cpus",
+            "4",
+            "--memory",
+            "1G",
+            "--",
+            "/bin/true",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::Exec {
+                template,
+                cpus,
+                memory,
+                argv,
+                ..
+            } => {
+                assert_eq!(template.as_deref(), Some("my-tpl"));
+                assert_eq!(cpus, 4);
+                assert_eq!(memory, "1G");
+                assert_eq!(argv, vec!["/bin/true".to_string()]);
+            }
+            _ => panic!("Expected Exec command"),
+        }
+    }
+
+    #[test]
+    fn exec_with_add_dir_and_env() {
+        let cli = Cli::try_parse_from([
+            "mvmctl",
+            "exec",
+            "--add-dir",
+            "/tmp:/work",
+            "--add-dir",
+            "/etc:/host-etc",
+            "--env",
+            "FOO=bar",
+            "--env",
+            "BAZ=qux",
+            "--",
+            "ls",
+            "/work",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::Exec {
+                add_dir, env, argv, ..
+            } => {
+                assert_eq!(
+                    add_dir,
+                    vec!["/tmp:/work".to_string(), "/etc:/host-etc".to_string()]
+                );
+                assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
+                assert_eq!(argv, vec!["ls".to_string(), "/work".to_string()]);
+            }
+            _ => panic!("Expected Exec command"),
+        }
+    }
+
+    #[test]
+    fn exec_requires_argv() {
+        // Without trailing argv, Clap should reject because `argv` is required.
+        let cli = Cli::try_parse_from(["mvmctl", "exec"]);
+        assert!(cli.is_err());
     }
 
     // --- Init CLI tests ---
