@@ -45,24 +45,47 @@ if [ ! -d "crates" ]; then
     exit 1
 fi
 
+# Crates excluded from the workspace-version requirement. These are versioned
+# independently (e.g. not yet published to crates.io, or on a separate cadence).
+EXCLUDED_CRATES=(
+    "mvm-apple-container"
+)
+
+is_excluded() {
+    local crate_name="$1"
+    for excluded in "${EXCLUDED_CRATES[@]}"; do
+        if [ "$crate_name" = "$excluded" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 echo "Checking for hardcoded versions in crates..."
 
 for cargo_toml in crates/*/Cargo.toml; do
-    if [ -f "$cargo_toml" ]; then
-        if grep -q "^version = " "$cargo_toml"; then
-            echo "Error: Hardcoded version found in $cargo_toml"
-            grep "^version = " "$cargo_toml"
-            FOUND_ERROR=1
-        fi
+    if [ ! -f "$cargo_toml" ]; then
+        continue
+    fi
+    crate_name=$(basename "$(dirname "$cargo_toml")")
+    if is_excluded "$crate_name"; then
+        echo "  - skipping $crate_name (independent versioning)"
+        continue
+    fi
+    # Match only the [package].version line, not dependency version entries.
+    if awk '/^\[package\]/{p=1; next} /^\[/{p=0} p && /^version *= */{found=1; exit} END{exit !found}' "$cargo_toml"; then
+        echo "Error: Hardcoded [package].version found in $cargo_toml"
+        awk '/^\[package\]/{p=1; next} /^\[/{p=0} p && /^version *= */{print}' "$cargo_toml"
+        FOUND_ERROR=1
     fi
 done
 
 if [ $FOUND_ERROR -ne 0 ]; then
-    echo "All crates must use 'version.workspace = true'"
+    echo "All published crates must use 'version.workspace = true'"
     exit 1
 fi
 
-echo "Verified: All crates use workspace version"
+echo "Verified: All published crates use workspace version"
 
 # 4. Check inter-crate dependency versions match workspace version
 echo "Checking inter-crate dependency versions..."
