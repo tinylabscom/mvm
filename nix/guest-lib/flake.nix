@@ -36,14 +36,16 @@
 
         busybox = pkgs.pkgsStatic.busybox;
 
-        # Shared kernel copy logic.
+        # Shared kernel copy logic. Always exposes the kernel as $out/vmlinux
+        # regardless of arch — Firecracker accepts the file by path, not name,
+        # and consumers (release.yml, runtime image fetch) expect that name.
         copyKernel = kernel: ''
           if [ -f "${kernel}/vmlinux" ]; then
             cp "${kernel}/vmlinux" "$out/vmlinux"
           elif [ -f "${kernel}/Image" ]; then
             cp "${kernel}/Image" "$out/vmlinux"
           elif [ -f "${kernel}/bzImage" ]; then
-            cp "${kernel}/bzImage" "$out/kernel"
+            cp "${kernel}/bzImage" "$out/vmlinux"
           else
             echo "ERROR: cannot find kernel image in ${kernel}:" >&2
             ls -la "${kernel}/" >&2
