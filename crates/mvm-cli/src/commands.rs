@@ -3946,24 +3946,15 @@ fn cmd_completions(shell: clap_complete::Shell) -> Result<()> {
 }
 
 fn cmd_uninstall(yes: bool, all: bool, dry_run: bool) -> Result<()> {
-    // Build list of what will be removed.
-    let mut actions: Vec<String> = Vec::new();
-
-    let lima_status = lima::get_status().unwrap_or(lima::LimaStatus::NotFound);
-    if !matches!(lima_status, lima::LimaStatus::NotFound) {
-        actions.push("Destroy Lima VM 'mvm'".to_string());
-    }
-
-    actions.push("Remove /var/lib/mvm/ (VM state, volumes, run-info)".to_string());
-
+    // Build the action plan. Dry-run avoids any external process calls so it
+    // stays fast even when Lima/limactl is unresponsive.
+    let mut actions: Vec<String> = vec![
+        "Destroy Lima VM 'mvm' (if present)".to_string(),
+        "Remove /var/lib/mvm/ (VM state, volumes, run-info)".to_string(),
+    ];
     if all {
         actions.push("Remove ~/.mvm/ (config, signing keys)".to_string());
         actions.push("Remove /usr/local/bin/mvmctl (binary)".to_string());
-    }
-
-    if actions.is_empty() {
-        ui::info("Nothing to uninstall.");
-        return Ok(());
     }
 
     if dry_run {
@@ -3974,7 +3965,7 @@ fn cmd_uninstall(yes: bool, all: bool, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Confirmation prompt.
+    // Confirmation prompt — also avoids any external calls.
     if !yes {
         ui::info("The following will be removed:");
         for a in &actions {
@@ -3985,6 +3976,9 @@ fn cmd_uninstall(yes: bool, all: bool, dry_run: bool) -> Result<()> {
             return Ok(());
         }
     }
+
+    // Now query Lima — only when actually performing the uninstall.
+    let lima_status = lima::get_status().unwrap_or(lima::LimaStatus::NotFound);
 
     // Stop running microVMs first (best-effort).
     if matches!(lima_status, lima::LimaStatus::Running)
