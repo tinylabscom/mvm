@@ -2,6 +2,30 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.12.0] — 2026-04-28
+
+### Added
+- **cli**: Add `mvmctl exec` + bundled default microVM image (Sprint 41)
+- **exec**: Consume mvmforge launch.json entrypoint via --launch-plan
+
+### Documentation
+- **sprint**: Link sprint 41 follow-ups to their GitHub issues
+
+### Fixed
+- **publish-crates**: Set explicit User-Agent for crates.io probe
+
+## [0.12.0] — 2026-04-28
+
+### Added
+- **cli**: Add `mvmctl exec` + bundled default microVM image (Sprint 41)
+- **exec**: Consume mvmforge launch.json entrypoint via --launch-plan
+
+### Documentation
+- **sprint**: Link sprint 41 follow-ups to their GitHub issues
+
+### Fixed
+- **publish-crates**: Set explicit User-Agent for crates.io probe
+
 ## [0.11.0] — 2026-04-28
 
 ### Added

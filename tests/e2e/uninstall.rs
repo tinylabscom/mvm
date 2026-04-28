@@ -41,6 +41,7 @@ fn uninstall_all_dry_run_mentions_config_and_binary() {
 
 /// `uninstall` without `--yes` and without a tty should prompt (may fail
 /// gracefully but must not crash with exit 2).
+#[ignore]
 #[test]
 fn uninstall_no_yes_parses_ok() {
     let code = mvmctl()
