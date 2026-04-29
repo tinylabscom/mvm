@@ -51,19 +51,70 @@ already built) to skip the Nix path.
 
 ## Sharing host directories: `--add-dir`
 
-`--add-dir HOST:GUEST` materializes the host directory into a small ext4
-image, attaches it as an extra Firecracker drive, and mounts it
-**read-only** at `GUEST` inside the microVM. Writes inside the guest are
-discarded on teardown.
+`--add-dir HOST:GUEST[:MODE]` materializes the host directory into a
+small ext4 image, attaches it as an extra Firecracker drive, and mounts
+it at `GUEST` inside the microVM. `MODE` is `ro` (default) or `rw`. The
+flag is repeatable.
+
+### Read-only (default)
 
 ```bash
 echo "hello" > /tmp/foo
 mvmctl exec --add-dir /tmp:/host -- cat /host/foo     # prints "hello"
 ```
 
-The flag is repeatable: pass multiple `--add-dir` to mount several host
-paths. v1 is read-only only -- writable mounts (virtio-fs / 9p) are
-tracked separately in [issue #6](https://github.com/auser/mvm/issues/6).
+The guest sees the contents at boot. Writes inside the guest are
+discarded when the microVM is torn down.
+
+### Writable: `:rw`
+
+```bash
+mvmctl exec --add-dir .:/work:rw -- sh -c 'echo result > /work/output.txt'
+cat ./output.txt       # "result" — written by the guest
+```
+
+The mount is read-write inside the guest. Once the command exits and
+the VM stops, the ext4 image is mounted host-side and `rsync -aH
+--delete`-ed back over the host directory. New files appear, modified
+files are updated, and files removed inside the guest are removed on
+the host.
+
+This is the equivalent of cco's writable project directory --
+exactly what you want for a coding agent that needs to edit your repo.
+
+#### Trade-offs
+
+See [ADR-002](/contributing/adr/002-writable-add-dir/) for the full
+design rationale. Highlights for v1:
+
+- **No in-flight host visibility.** Guest writes only land on the host
+  *after* the command exits. Host-side `tail -f`-style tooling won't see
+  partial output.
+- **Last-writer-wins on concurrent host writes.** If you modify a file
+  on the host while the guest is also modifying it, the guest's version
+  overwrites the host's at teardown. v1 is for agentic flows where the
+  host isn't editing the same directory in parallel.
+- **No incremental durability.** A 30-minute task that crashes at
+  minute 29 loses all guest writes -- the rsync only runs after a clean
+  exit. Keep `mvmctl exec` for short-lived invocations; long-lived
+  workloads belong in `mvmd`.
+- **Guest deletes propagate.** The rsync uses `--delete`, so files
+  removed inside the guest are removed on the host.
+
+For a live two-way mount (visible during the run, no clobber semantics),
+virtio-fs is on the v2 roadmap once Firecracker ships upstream
+`vhost-user-fs` support.
+
+### Multiple shares
+
+Modes are independent per directory:
+
+```bash
+mvmctl exec \
+  --add-dir ./src:/work:rw \
+  --add-dir ~/.cargo:/root/.cargo:ro \
+  -- cargo build --manifest-path /work/Cargo.toml
+```
 
 ## Injecting environment variables: `--env`
 
@@ -168,10 +219,9 @@ highest):
 - **Stdin** is currently *not* forwarded to the guest. Pipe data via a
   `--add-dir`-shared file instead. Streaming stdin is a future
   improvement.
-- **Persistent state** doesn't survive teardown. If you need to keep
-  results, write them to a host path via a future writable
-  `--add-dir` (tracked in [#6](https://github.com/auser/mvm/issues/6))
-  or use `mvmctl up` for a long-running VM with a persistent volume.
+- **Persistent state** doesn't survive teardown beyond what `:rw`
+  `--add-dir` rsyncs back. For larger or longer-lived state, use
+  `mvmctl up` with a persistent volume.
 
 ## See also
 

@@ -167,7 +167,7 @@ as the sandbox. **Dev-mode only**, gated by `policy.access.debug_exec`.
 | `mvmctl exec -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
 | `mvmctl exec --template <name> -- <cmd>...` | Boot a registered template instead of the default |
 | `mvmctl exec --launch-plan <path> ` | Run the entrypoint from an [mvmforge](https://github.com/tinylabscom/decorationer) `launch.json`. Mutually exclusive with trailing argv |
-| `mvmctl exec --add-dir HOST:GUEST -- <cmd>` | Mount a host directory read-only inside the guest. Repeatable. Writes are discarded on teardown |
+| `mvmctl exec --add-dir HOST:GUEST[:MODE] -- <cmd>` | Mount a host directory inside the guest. `MODE` is `ro` (default — writes discarded) or `rw` (writes rsynced back to the host after the command exits — see [ADR-002](/contributing/adr/002-writable-add-dir/)). Repeatable |
 | `mvmctl exec --env KEY=VAL -- <cmd>` | Inject an environment variable. Repeatable. Overrides any env vars carried by `--launch-plan` |
 | `mvmctl exec --cpus <n>` / `--memory <size>` | Resize the transient VM (defaults: 2 vCPUs, 512 MiB) |
 | `mvmctl exec --timeout <secs>` | Per-command timeout (default: 60s) |
@@ -178,6 +178,7 @@ Examples:
 mvmctl exec -- uname -a                                # default image
 mvmctl exec --template minimal -- /bin/true            # named template
 mvmctl exec --add-dir .:/work -- ls /work              # share current dir, RO
+mvmctl exec --add-dir .:/work:rw -- touch /work/x      # writable, rsynced back
 mvmctl exec -e DEBUG=1 -- env | grep DEBUG             # env var injection
 mvmctl exec --launch-plan ./launch.json                # mvmforge entrypoint
 ```

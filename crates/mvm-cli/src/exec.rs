@@ -52,30 +52,46 @@ pub struct LaunchEntrypoint {
     pub env: BTreeMap<String, String>,
 }
 
-/// One `--add-dir host:guest` mapping.
+/// One `--add-dir host:guest[:mode]` mapping.
 ///
-/// v1: read-only only. The host directory is materialized into a small
-/// ext4 image attached as an extra Firecracker drive, then mounted at
-/// `guest_path` by a wrapper script before the user's command runs.
+/// The host directory is materialized into a small ext4 image attached as
+/// an extra Firecracker drive, then mounted at `guest_path` by a wrapper
+/// script before the user's command runs. When `read_only` is false
+/// (mode `:rw`), guest writes land in the ext4 image and are rsynced
+/// back to the host directory after the command exits — see ADR-002.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddDir {
     pub host_path: String,
     pub guest_path: String,
+    pub read_only: bool,
 }
 
 impl AddDir {
-    /// Parse a `host:guest` spec.
+    /// Parse a `host:guest[:mode]` spec.
     ///
-    /// The first colon splits host from guest; subsequent colons are part
-    /// of the guest path (rare but legal). Both sides must be non-empty,
-    /// and the guest path must be absolute.
+    /// The first colon splits host from guest. An optional trailing
+    /// `:ro` or `:rw` selects the mount mode (default `:ro`). Other
+    /// trailing tokens that look like a mode (no slash, alphanumeric)
+    /// are rejected to catch typos. Guest paths that legitimately
+    /// contain colons remain supported as long as the trailing
+    /// component is unambiguously path-shaped (contains a slash).
     pub fn parse(spec: &str) -> Result<Self> {
-        let (host, guest) = spec.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("--add-dir '{spec}': expected 'host:guest', missing ':'")
+        let (host, rest) = spec.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("--add-dir '{spec}': expected 'host:guest[:mode]', missing ':'")
         })?;
         if host.is_empty() {
             anyhow::bail!("--add-dir '{spec}': host path must not be empty");
         }
+
+        let (guest, read_only) = match rest.rsplit_once(':') {
+            Some((path, "ro")) => (path, true),
+            Some((path, "rw")) => (path, false),
+            Some((_, tail)) if looks_like_mode_typo(tail) => {
+                anyhow::bail!("--add-dir '{spec}': unknown mode '{tail}' (expected 'ro' or 'rw')");
+            }
+            _ => (rest, true),
+        };
+
         if guest.is_empty() {
             anyhow::bail!("--add-dir '{spec}': guest path must not be empty");
         }
@@ -85,8 +101,16 @@ impl AddDir {
         Ok(Self {
             host_path: expand_tilde(host),
             guest_path: guest.to_string(),
+            read_only,
         })
     }
+}
+
+fn looks_like_mode_typo(tail: &str) -> bool {
+    !tail.is_empty()
+        && tail.len() <= 8
+        && !tail.contains('/')
+        && tail.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -266,8 +290,9 @@ pub fn build_guest_wrapper(req: &ExecRequest, add_dir_labels: &[String]) -> Stri
     for (dir, label) in req.add_dirs.iter().zip(add_dir_labels.iter()) {
         let mount_point = shell_quote(&dir.guest_path);
         let label_q = shell_quote(label);
+        let mount_opts = if dir.read_only { " -o ro" } else { "" };
         script.push_str(&format!(
-            "mkdir -p {mount_point}\nmount LABEL={label_q} {mount_point} -o ro\n",
+            "mkdir -p {mount_point}\nmount LABEL={label_q} {mount_point}{mount_opts}\n",
         ));
     }
     if let ExecTarget::LaunchPlan { entrypoint } = &req.target {
@@ -357,7 +382,7 @@ pub fn run(req: ExecRequest) -> Result<i32> {
             host: image_path,
             guest: dir.guest_path.clone(),
             size: String::new(),
-            read_only: true,
+            read_only: dir.read_only,
         });
         add_dir_labels.push(label);
     }
@@ -411,6 +436,24 @@ pub fn run(req: ExecRequest) -> Result<i32> {
     let result = run_in_guest(&vm_name, &req, &add_dir_labels);
 
     let _ = backend.stop(&VmId(vm_name.clone()));
+
+    // ADR-002: writable --add-dir uses rsync-back. With the VM stopped the
+    // ext4 image is no longer in use, so we mount it host-side and rsync
+    // its contents over the host directory before nuking the staging dir.
+    // Failures here are warned but do not override the guest exit code.
+    for (idx, dir) in req.add_dirs.iter().enumerate() {
+        if dir.read_only {
+            continue;
+        }
+        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
+        if let Err(e) = mvm_runtime::vm::image::rsync_image_to_host(&image_path, &dir.host_path) {
+            ui::warn(&format!(
+                "writable --add-dir sync-back failed for '{}' -> '{}': {e:#}",
+                dir.host_path, dir.guest_path,
+            ));
+        }
+    }
+
     let _ = mvm_runtime::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
 
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -537,10 +580,44 @@ mod tests {
     }
 
     #[test]
+    fn add_dir_parse_default_is_read_only() {
+        let d = AddDir::parse("/tmp/src:/work").unwrap();
+        assert!(d.read_only, "default mode should be read-only");
+    }
+
+    #[test]
+    fn add_dir_parse_explicit_ro() {
+        let d = AddDir::parse("/tmp/src:/work:ro").unwrap();
+        assert_eq!(d.host_path, "/tmp/src");
+        assert_eq!(d.guest_path, "/work");
+        assert!(d.read_only);
+    }
+
+    #[test]
+    fn add_dir_parse_explicit_rw() {
+        let d = AddDir::parse("/tmp/src:/work:rw").unwrap();
+        assert_eq!(d.host_path, "/tmp/src");
+        assert_eq!(d.guest_path, "/work");
+        assert!(!d.read_only);
+    }
+
+    #[test]
+    fn add_dir_parse_rejects_bogus_mode() {
+        let err = AddDir::parse("/tmp/src:/work:bogus").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown mode"), "got: {msg}");
+        assert!(msg.contains("'bogus'"), "got: {msg}");
+    }
+
+    #[test]
     fn add_dir_extra_colons_belong_to_guest_path() {
-        let d = AddDir::parse("/host:/weird:path").unwrap();
+        // A guest path that legitimately contains a colon: the trailing
+        // component must be path-shaped (contains a slash) so we can
+        // distinguish it from a mode token.
+        let d = AddDir::parse("/host:/weird:path/file").unwrap();
         assert_eq!(d.host_path, "/host");
-        assert_eq!(d.guest_path, "/weird:path");
+        assert_eq!(d.guest_path, "/weird:path/file");
+        assert!(d.read_only);
     }
 
     #[test]
@@ -599,6 +676,7 @@ mod tests {
             add_dirs: vec![AddDir {
                 host_path: "/h".into(),
                 guest_path: "/g".into(),
+                read_only: true,
             }],
             env: vec![("FOO".into(), "bar baz".into())],
             target: ExecTarget::Inline {
@@ -611,6 +689,32 @@ mod tests {
         assert!(script.contains("mount LABEL='mvm-extra-0' '/g' -o ro"));
         assert!(script.contains("export FOO='bar baz'"));
         assert!(script.contains("exec 'echo' '$FOO'"));
+    }
+
+    #[test]
+    fn build_guest_wrapper_writable_mount_drops_ro_flag() {
+        let req = ExecRequest {
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            add_dirs: vec![AddDir {
+                host_path: "/h".into(),
+                guest_path: "/g".into(),
+                read_only: false,
+            }],
+            env: Vec::new(),
+            target: ExecTarget::Inline {
+                argv: vec!["true".into()],
+            },
+            timeout_secs: 30,
+        };
+        let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
+        // RW mount is unqualified — no `-o ro`.
+        assert!(
+            script.contains("mount LABEL='mvm-extra-0' '/g'\n"),
+            "expected unqualified mount line, got: {script}"
+        );
+        assert!(!script.contains("-o ro"), "RW mount must not include -o ro");
     }
 
     #[test]
