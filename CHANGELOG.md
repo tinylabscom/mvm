@@ -4,6 +4,8 @@ All notable changes to mvm are documented in this file.
 
 ## [0.13.0] — 2026-04-29
 
+## [0.13.0] — 2026-04-29
+
 ### Added
 - **exec**: Writable --add-dir HOST:GUEST:rw
 - **release**: Publish prebuilt default-microvm kernel + rootfs
