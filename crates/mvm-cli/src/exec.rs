@@ -324,6 +324,26 @@ pub fn transient_vm_name() -> String {
     format!("exec-{pid:x}-{nanos:08x}")
 }
 
+/// Decide whether snapshot restore is safe for this request.
+///
+/// v2 (issue #7) only enables it for the trivial case: a registered template
+/// (so the image has a snapshot at all), no `--add-dir` extras (so the drive
+/// layout matches the snapshot's recorded layout), and a backend that
+/// advertises snapshot support. Adding `--add-dir` would change the drive
+/// count and break the snapshot — that case is tracked separately in #7's
+/// "harder" branch and stays cold-boot for now.
+pub fn snapshot_eligible(
+    image: &ImageSource,
+    add_dirs: &[AddDir],
+    snap_present: bool,
+    backend_supports_snapshots: bool,
+) -> bool {
+    if !backend_supports_snapshots || !snap_present || !add_dirs.is_empty() {
+        return false;
+    }
+    matches!(image, ImageSource::Template(_))
+}
+
 /// Run the request: boot, run, tear down.
 ///
 /// Returns the guest command's exit code. On orchestrator failure (boot,
@@ -333,34 +353,44 @@ pub fn run(req: ExecRequest) -> Result<i32> {
     let backend = AnyBackend::default_backend();
 
     // Resolve image artifacts: either a named template or a pre-built pair.
-    let (vmlinux, initrd, rootfs, revision, flake_ref, profile) = match &req.image {
-        ImageSource::Template(name) => {
-            let (spec, vmlinux, initrd, rootfs, rev) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts(name)
-                    .with_context(|| format!("Loading template '{name}'"))?;
-            (
-                vmlinux,
-                initrd,
-                rootfs,
-                rev,
-                spec.flake_ref.clone(),
-                Some(spec.profile.clone()),
-            )
-        }
-        ImageSource::Prebuilt {
-            kernel_path,
-            rootfs_path,
-            initrd_path,
-            label,
-        } => (
-            kernel_path.clone(),
-            initrd_path.clone(),
-            rootfs_path.clone(),
-            String::new(),
-            label.clone(),
-            None,
-        ),
-    };
+    // For templates, also probe for a pre-built snapshot so we can skip the
+    // cold-boot cost when the request is snapshot-eligible.
+    let (vmlinux, initrd, rootfs, revision, flake_ref, profile, snap_info, template_id) =
+        match &req.image {
+            ImageSource::Template(name) => {
+                let (spec, vmlinux, initrd, rootfs, rev) =
+                    mvm_runtime::vm::template::lifecycle::template_artifacts(name)
+                        .with_context(|| format!("Loading template '{name}'"))?;
+                let snap = mvm_runtime::vm::template::lifecycle::template_snapshot_info(name)
+                    .ok()
+                    .flatten();
+                (
+                    vmlinux,
+                    initrd,
+                    rootfs,
+                    rev,
+                    spec.flake_ref.clone(),
+                    Some(spec.profile.clone()),
+                    snap,
+                    Some(name.clone()),
+                )
+            }
+            ImageSource::Prebuilt {
+                kernel_path,
+                rootfs_path,
+                initrd_path,
+                label,
+            } => (
+                kernel_path.clone(),
+                initrd_path.clone(),
+                rootfs_path.clone(),
+                String::new(),
+                label.clone(),
+                None,
+                None,
+                None,
+            ),
+        };
 
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
@@ -387,16 +417,22 @@ pub fn run(req: ExecRequest) -> Result<i32> {
         add_dir_labels.push(label);
     }
 
-    // Boot the VM (cold boot — snapshot path is intentionally skipped in
-    // v1: extra drives don't match the snapshot's recorded drive layout).
+    // Snapshot path is taken when the request is eligible; otherwise cold boot.
+    let use_snapshot = snapshot_eligible(
+        &req.image,
+        &req.add_dirs,
+        snap_info.is_some(),
+        backend.capabilities().snapshots,
+    );
+
     let start_config = VmStartConfig {
         name: vm_name.clone(),
-        rootfs_path: rootfs,
-        kernel_path: Some(vmlinux),
-        initrd_path: initrd,
-        revision_hash: revision,
-        flake_ref,
-        profile,
+        rootfs_path: rootfs.clone(),
+        kernel_path: Some(vmlinux.clone()),
+        initrd_path: initrd.clone(),
+        revision_hash: revision.clone(),
+        flake_ref: flake_ref.clone(),
+        profile: profile.clone(),
         cpus: req.cpus,
         memory_mib: req.memory_mib,
         ports: Vec::new(),
@@ -414,10 +450,36 @@ pub fn run(req: ExecRequest) -> Result<i32> {
         runner_dir: None,
     };
 
-    ui::info(&format!("Booting transient VM '{vm_name}'..."));
-    if let Err(e) = backend.start(&start_config) {
-        let _ = mvm_runtime::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
-        return Err(e).context("starting transient microVM");
+    let booted = if use_snapshot {
+        let tmpl = template_id
+            .as_deref()
+            .expect("snapshot_eligible only true for ImageSource::Template");
+        let snap = snap_info
+            .as_ref()
+            .expect("snapshot_eligible requires snap_info.is_some()");
+        ui::info(&format!(
+            "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
+        ));
+        match restore_via_snapshot(&vm_name, tmpl, snap, &start_config) {
+            Ok(()) => true,
+            Err(e) => {
+                // macOS / Lima QEMU returns os error 95 (EOPNOTSUPP) on vsock
+                // snapshots; cold boot still works there. Fall back rather
+                // than failing the whole exec.
+                ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !booted {
+        ui::info(&format!("Booting transient VM '{vm_name}'..."));
+        if let Err(e) = backend.start(&start_config) {
+            let _ = mvm_runtime::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+            return Err(e).context("starting transient microVM");
+        }
     }
 
     // Install Ctrl-C handler that tears the VM down.
@@ -460,6 +522,50 @@ pub fn run(req: ExecRequest) -> Result<i32> {
         anyhow::bail!("interrupted");
     }
     result
+}
+
+/// Restore a transient microVM from a template snapshot instead of cold-booting.
+///
+/// Mirrors the snapshot path in `cmd_run`: allocate a slot, build a
+/// `FlakeRunConfig` matching the snapshot's recorded layout, then call
+/// `microvm::restore_from_template_snapshot`. The caller is responsible for
+/// ensuring the request is `snapshot_eligible` first (no `--add-dir`,
+/// template image source).
+fn restore_via_snapshot(
+    vm_name: &str,
+    template_id: &str,
+    snap_info: &mvm_core::template::SnapshotInfo,
+    start_config: &VmStartConfig,
+) -> Result<()> {
+    let slot = mvm_runtime::vm::microvm::allocate_slot(vm_name)?;
+    let run_config = mvm_runtime::vm::microvm::FlakeRunConfig {
+        name: vm_name.to_string(),
+        slot,
+        vmlinux_path: start_config.kernel_path.clone().unwrap_or_default(),
+        initrd_path: start_config.initrd_path.clone(),
+        rootfs_path: start_config.rootfs_path.clone(),
+        revision_hash: start_config.revision_hash.clone(),
+        flake_ref: start_config.flake_ref.clone(),
+        profile: start_config.profile.clone(),
+        cpus: start_config.cpus,
+        memory: start_config.memory_mib,
+        // Snapshot-eligible callers have no extra volumes; if that ever
+        // changes the snapshot layout will mismatch and Firecracker will
+        // refuse to load — `snapshot_eligible` enforces this.
+        volumes: Vec::new(),
+        config_files: Vec::new(),
+        secret_files: Vec::new(),
+        ports: Vec::new(),
+        network_policy: mvm_core::network_policy::NetworkPolicy::default(),
+    };
+    let rev = mvm_runtime::vm::template::lifecycle::current_revision_id(template_id)?;
+    let snap_dir = mvm_core::template::template_snapshot_dir(template_id, &rev);
+    mvm_runtime::vm::microvm::restore_from_template_snapshot(
+        template_id,
+        &run_config,
+        &snap_dir,
+        snap_info,
+    )
 }
 
 /// Send the wrapped command to the guest agent and stream stdout/stderr.
@@ -928,5 +1034,55 @@ mod tests {
         assert!(!script.contains("cd "));
         assert!(!script.contains("export "));
         assert!(script.contains("exec 'true'"));
+    }
+
+    // -- snapshot_eligible --
+
+    fn template(name: &str) -> ImageSource {
+        ImageSource::Template(name.into())
+    }
+
+    fn prebuilt() -> ImageSource {
+        ImageSource::Prebuilt {
+            kernel_path: "/k".into(),
+            rootfs_path: "/r".into(),
+            initrd_path: None,
+            label: "lbl".into(),
+        }
+    }
+
+    fn add_dir() -> AddDir {
+        AddDir {
+            host_path: "/h".into(),
+            guest_path: "/g".into(),
+            read_only: true,
+        }
+    }
+
+    #[test]
+    fn snapshot_eligible_true_for_template_no_extras_with_snapshot() {
+        assert!(snapshot_eligible(&template("t"), &[], true, true));
+    }
+
+    #[test]
+    fn snapshot_eligible_false_when_backend_lacks_support() {
+        assert!(!snapshot_eligible(&template("t"), &[], true, false));
+    }
+
+    #[test]
+    fn snapshot_eligible_false_when_no_snapshot_present() {
+        assert!(!snapshot_eligible(&template("t"), &[], false, true));
+    }
+
+    #[test]
+    fn snapshot_eligible_false_with_add_dirs() {
+        // Adding extra drives changes the recorded layout; snapshot would fail.
+        assert!(!snapshot_eligible(&template("t"), &[add_dir()], true, true));
+    }
+
+    #[test]
+    fn snapshot_eligible_false_for_prebuilt_image() {
+        // The bundled default image isn't a registered template — no snapshot exists.
+        assert!(!snapshot_eligible(&prebuilt(), &[], true, true));
     }
 }
