@@ -25,8 +25,14 @@
           rustc = rustToolchain;
         };
 
-        # Shared kernel — built once, used by mkGuest.
-        firecrackerKernel = import ./firecracker-kernel-pkg.nix { inherit pkgs; };
+        # Shared Firecracker kernel.
+        #
+        # Wrapped in a thunk (function) so the kernel derivation is only
+        # constructed when a consumer actually asks for it. Apple Container
+        # and Docker consumers don't need a Linux kernel at all — eagerly
+        # importing here would force evaluation for every output and pull
+        # the kernel-config file into pure-eval scope unnecessarily.
+        firecrackerKernel = _: import ./firecracker-kernel-pkg.nix { inherit pkgs; };
 
         # mvm guest agent — vsock management agent for all mvm microVMs.
         mvm-guest-agent = import ./guest-agent-pkg.nix {
@@ -355,12 +361,13 @@
         # ── mkGuest — Minimal guest (default) ─────────────────────
         #
         # mvm.lib.<system>.mkGuest {
-        #   name, packages?, services?, healthChecks?, users?, hostname?
+        #   name, packages?, services?, healthChecks?, users?, hostname?,
+        #   hypervisor?
         # }
         #
         # Builds a microVM image with busybox init as PID 1 — no NixOS,
         # no systemd.  Handles mounts, networking, and service supervision
-        # via respawn loops.  Uses the shared Firecracker kernel.
+        # via respawn loops.
         #
         # Services support:
         #   command   — long-running process (supervised with respawn)
@@ -374,12 +381,18 @@
         #   Auto-assigns UIDs from 1000 if not specified.
         #   Custom users are automatically added to serviceGroup for secrets access.
         #
+        # Hypervisor (default "firecracker"):
+        #   "firecracker" — produces vmlinux + rootfs.ext4 + image.tar.gz
+        #   "apple-container" / "docker" — produces image.tar.gz only,
+        #     skipping the Linux kernel build entirely.
+        #
         # Produces:
-        #   $out/vmlinux       — uncompressed kernel for Firecracker
-        #   $out/rootfs.ext4   — ext4 root filesystem (no initrd)
+        #   $out/vmlinux       — uncompressed kernel (firecracker only)
+        #   $out/rootfs.ext4   — ext4 root filesystem (firecracker only)
+        #   $out/image.tar.gz  — OCI image (always)
         lib.mkGuest = { name, packages ? [], services ? {}, healthChecks ? {},
                         users ? {}, hostname ? name, serviceGroup ? "mvm",
-                        cacert ? pkgs.cacert }:
+                        cacert ? pkgs.cacert, hypervisor ? "firecracker" }:
           let
             initScript = import ./minimal-init.nix {
               inherit pkgs hostname serviceGroup users services healthChecks busybox;
@@ -411,6 +424,11 @@
                 ln -s ${cacert}/etc/ssl/certs/ca-bundle.crt ./files/etc/ssl/certs/ca-certificates.crt
                 ln -s ${cacert}/etc/ssl/certs/ca-bundle.crt ./files/etc/pki/tls/certs/ca-bundle.crt
               '';
+
+            # Firecracker artifacts are only built when the consumer asks
+            # for the firecracker hypervisor — Apple Container and Docker
+            # don't need a Linux kernel or ext4 image.
+            wantsFirecracker = hypervisor == "firecracker";
 
             # ext4 rootfs for Firecracker (production).
             rootfs = pkgs.callPackage
@@ -448,12 +466,13 @@
               };
             };
           in
-          pkgs.runCommand "mvm-${name}" {} ''
+          pkgs.runCommand "mvm-${name}" {} (''
             mkdir -p $out
-            ${copyKernel firecrackerKernel}
-            cp "${rootfs}" "$out/rootfs.ext4"
             ${ociImage} > "$out/image.tar.gz"
-          '';
+          '' + pkgs.lib.optionalString wantsFirecracker ''
+            ${copyKernel (firecrackerKernel null)}
+            cp "${rootfs}" "$out/rootfs.ext4"
+          '');
 
         packages.mvm-guest-agent = mvm-guest-agent;
       }

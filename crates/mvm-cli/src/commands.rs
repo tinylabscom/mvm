@@ -1566,8 +1566,9 @@ fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bool) -> Resu
 
 /// Path for the vsock proxy Unix socket.
 fn dev_vsock_proxy_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{home}/.mvm/vms/{DEV_VM_NAME}/vsock.sock")
+    mvm_apple_container::vsock_proxy_path(DEV_VM_NAME)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Daemon mode: boot the VM, expose a vsock proxy socket, and block forever.
@@ -1822,7 +1823,7 @@ fn cmd_dev_apple_container_status() -> Result<()> {
 
     if running
         && let Ok(mut stream) =
-            mvm_apple_container::vsock_connect(DEV_VM_NAME, mvm_guest::vsock::GUEST_AGENT_PORT)
+            mvm_apple_container::vsock_connect_any(DEV_VM_NAME, mvm_guest::vsock::GUEST_AGENT_PORT)
         && let Ok(mvm_guest::vsock::GuestResponse::ExecResult { stdout, .. }) =
             mvm_guest::vsock::send_request(
                 &mut stream,

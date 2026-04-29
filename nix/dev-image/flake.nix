@@ -39,6 +39,11 @@
             # Networking
             pkgs.curl
             pkgs.iproute2
+            # iptables + jq are required by the bridge_ensure script in
+            # mvm-runtime/src/vm/network.rs when this dev VM hosts
+            # transient microVMs (e.g., `mvmctl exec`).
+            pkgs.iptables
+            pkgs.jq
 
             # Editors
             pkgs.less

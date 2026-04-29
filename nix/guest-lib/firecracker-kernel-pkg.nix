@@ -10,7 +10,7 @@
 { pkgs }:
 
 let
-  baseConfig = ../kernel-configs/firecracker-aarch64.config;
+  baseConfig = ./kernel-configs/firecracker-aarch64.config;
 
   # Patch the upstream config with options NixOS/systemd and mvm require.
   configFile = pkgs.runCommand "firecracker-nixos-config" {} ''

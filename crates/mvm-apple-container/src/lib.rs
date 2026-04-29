@@ -125,6 +125,47 @@ pub fn vsock_connect(id: &str, port: u32) -> Result<std::os::unix::net::UnixStre
     }
 }
 
+/// Path to the cross-process vsock proxy Unix socket for VM `id`.
+///
+/// The dev daemon (started by `mvmctl dev up`) listens on this path and
+/// forwards each connection to the in-process VZVirtualMachine vsock,
+/// allowing other `mvmctl` invocations to talk to the dev VM.
+pub fn vsock_proxy_path(id: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!("{home}/.mvm/vms/{id}/vsock.sock"))
+}
+
+/// Connect to VM `id`'s guest vsock, falling back to the cross-process
+/// proxy socket when the VM isn't running in this process.
+///
+/// Resolution order:
+///   1. In-process Virtualization.framework reference (works only in the
+///      daemon process that called [`start`]).
+///   2. The proxy Unix socket at [`vsock_proxy_path`] (the daemon listens
+///      there for cross-process clients).
+///
+/// Returns a clear error when neither is reachable so callers can decide
+/// whether to surface the message or auto-start the dev daemon.
+pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::UnixStream, String> {
+    if let Ok(stream) = vsock_connect(id, port) {
+        return Ok(stream);
+    }
+    let proxy = vsock_proxy_path(id);
+    if !proxy.exists() {
+        return Err(format!(
+            "dev VM '{id}' is not running (no in-process VM and no proxy socket at {})",
+            proxy.display(),
+        ));
+    }
+    use std::io::Write as _;
+    let mut stream = std::os::unix::net::UnixStream::connect(&proxy)
+        .map_err(|e| format!("connect proxy {}: {e}", proxy.display()))?;
+    stream
+        .write_all(&port.to_le_bytes())
+        .map_err(|e| format!("write proxy port: {e}"))?;
+    Ok(stream)
+}
+
 /// Guest agent vsock port.
 pub const GUEST_AGENT_PORT: u32 = 52;
 
@@ -153,5 +194,33 @@ mod tests {
     fn test_list_ids_empty() {
         // No VMs running in test
         let _ = list_ids();
+    }
+
+    #[test]
+    fn test_vsock_proxy_path_under_home() {
+        // Whatever HOME points at, the path must resolve below it and end
+        // with the conventional segment used by the dev daemon.
+        let path = vsock_proxy_path("some-vm");
+        let suffix = std::path::Path::new(".mvm/vms/some-vm/vsock.sock");
+        assert!(
+            path.ends_with(suffix),
+            "expected path to end with {} but got {}",
+            suffix.display(),
+            path.display(),
+        );
+    }
+
+    #[test]
+    fn test_vsock_connect_any_reports_missing_proxy() {
+        // No VM is running in this process and the synthesised proxy
+        // socket path does not exist — the helper must surface a clear
+        // message pointing at the missing socket so callers can decide
+        // whether to auto-start the dev daemon or surface the error.
+        let id = "never-existed-vm-id-for-tests";
+        let err = vsock_connect_any(id, GUEST_AGENT_PORT)
+            .expect_err("connect must fail when neither in-process nor proxy is available");
+        assert!(err.contains(id), "got: {err}");
+        assert!(err.contains("not running"), "got: {err}");
+        assert!(err.contains("vsock.sock"), "got: {err}");
     }
 }

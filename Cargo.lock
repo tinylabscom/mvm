@@ -1567,6 +1567,7 @@ dependencies = [
  "ed25519-dalek",
  "indicatif",
  "inquire",
+ "libc",
  "mvm-apple-container",
  "mvm-build",
  "mvm-core",
