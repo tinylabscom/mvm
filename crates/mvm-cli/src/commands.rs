@@ -2261,7 +2261,13 @@ fn download_file(url: &str, dest: &str) -> Result<()> {
         // Clean up partial download
         let _ = std::fs::remove_file(dest);
         anyhow::bail!(
-            "Download failed. The dev image may not be available for v{version}.\n\
+            "Download failed. Pre-built images for v{version} may not yet be\n\
+             published — release tags are pushed before the artifact-build\n\
+             matrix completes, so a 404 here often just means the build is\n\
+             still in flight. Check the release page or retry in a few\n\
+             minutes:\n\
+             \n\
+             \x20   https://github.com/auser/mvm/releases/tag/v{version}\n\
              \n\
              To build locally instead, set up a Nix Linux builder:\n\
              \n\
@@ -2270,9 +2276,7 @@ fn download_file(url: &str, dest: &str) -> Result<()> {
              \n\
              \x20 Option 2 — Permanent (add to /etc/nix/nix.conf):\n\
              \x20   builders = ssh-ng://builder@linux-builder aarch64-linux /etc/nix/builder_ed25519 4 1 kvm,big-parallel - -\n\
-             \x20   builders-use-substitutes = true\n\
-             \n\
-             Then re-run: mvmctl dev up",
+             \x20   builders-use-substitutes = true",
             version = env!("CARGO_PKG_VERSION")
         );
     }
@@ -2348,9 +2352,9 @@ fn find_default_microvm_flake() -> Result<String> {
 /// supplied. Builds via Nix on first use and caches under
 /// `~/.cache/mvm/default-microvm/`. Returns `(kernel_path, rootfs_path)`.
 ///
-/// Unlike the dev image, there is no download fallback — if Nix isn't
-/// available (or can't cross-compile a Linux image on this host), the
-/// caller is asked to install Nix or pass an explicit `--template`/`--flake`.
+/// On hosts without Nix (or where the local Nix build fails — e.g. macOS
+/// without a Linux builder configured), falls back to downloading a
+/// pre-built image from the matching GitHub release.
 pub(crate) fn ensure_default_microvm_image() -> Result<(String, String)> {
     let cache_dir = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
     std::fs::create_dir_all(&cache_dir)?;
@@ -2363,65 +2367,89 @@ pub(crate) fn ensure_default_microvm_image() -> Result<(String, String)> {
     }
 
     let plat = mvm_core::platform::current();
-    if !plat.has_host_nix() {
-        anyhow::bail!(
-            "Nix is required to build the default exec image, but it isn't installed.\n\
-             Install Nix (https://nixos.org/download.html) or pass an explicit\n\
-             --template that you've already built with `mvmctl template create`."
-        );
-    }
-    let flake_dir = find_default_microvm_flake()?;
-    let nix_bin = find_nix_binary();
+    if plat.has_host_nix()
+        && let Ok(flake_dir) = find_default_microvm_flake()
+    {
+        let nix_bin = find_nix_binary();
 
-    if cfg!(target_os = "macos") && ensure_linux_builder_ssh_config() {
-        ui::info("  Linux builder detected and SSH configured.");
-    }
-
-    ui::info("Building default microVM image via Nix (first time only)...");
-    let mut child = std::process::Command::new(&nix_bin)
-        .args([
-            "build",
-            &format!(
-                "{flake_dir}#packages.{}.default",
-                mvm_build::dev_build::linux_system()
-            ),
-            "--no-link",
-            "--print-out-paths",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Failed to run nix build")?;
-
-    let stdout = {
-        let mut buf = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            use std::io::Read;
-            let _ = out.read_to_string(&mut buf);
+        if cfg!(target_os = "macos") && ensure_linux_builder_ssh_config() {
+            ui::info("  Linux builder detected and SSH configured.");
         }
-        buf
+
+        ui::info("Building default microVM image via Nix (first time only)...");
+        let mut child = std::process::Command::new(&nix_bin)
+            .args([
+                "build",
+                &format!(
+                    "{flake_dir}#packages.{}.default",
+                    mvm_build::dev_build::linux_system()
+                ),
+                "--no-link",
+                "--print-out-paths",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .context("Failed to run nix build")?;
+
+        let stdout = {
+            let mut buf = String::new();
+            if let Some(mut out) = child.stdout.take() {
+                use std::io::Read;
+                let _ = out.read_to_string(&mut buf);
+            }
+            buf
+        };
+        let status = child.wait().context("nix build process failed")?;
+
+        if status.success() {
+            let store_path = stdout.trim().to_string();
+            let ks = format!("{store_path}/vmlinux");
+            let rs = format!("{store_path}/rootfs.ext4");
+            if std::path::Path::new(&ks).exists() && std::path::Path::new(&rs).exists() {
+                std::fs::copy(&ks, &kernel_path)?;
+                std::fs::copy(&rs, &rootfs_path)?;
+                ui::success("Default microVM image built and cached.");
+                return Ok((kernel_path, rootfs_path));
+            }
+        }
+
+        ui::warn("Local Nix build failed; falling back to pre-built download.");
+    }
+
+    download_default_microvm_image(&kernel_path, &rootfs_path)
+}
+
+/// Download a pre-built default microVM image (kernel + rootfs) from the
+/// matching GitHub release. Mirrors `download_dev_image`.
+fn download_default_microvm_image(
+    kernel_path: &str,
+    rootfs_path: &str,
+) -> Result<(String, String)> {
+    let version = env!("CARGO_PKG_VERSION");
+    let base_url = format!("https://github.com/auser/mvm/releases/download/v{version}");
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
     };
-    let status = child.wait().context("nix build process failed")?;
+    let kernel_url = format!("{base_url}/default-microvm-vmlinux-{arch}");
+    let rootfs_url = format!("{base_url}/default-microvm-rootfs-{arch}.ext4");
 
-    if !status.success() {
-        anyhow::bail!(
-            "nix build of the default microVM image failed.\n\
-             If you're on macOS without a Linux builder, either start one\n\
-             (`nix run 'nixpkgs#darwin.linux-builder'`) or pass an explicit\n\
-             --template/--flake that you've already built."
-        );
-    }
+    ui::info(&format!(
+        "Downloading default microVM image (v{version})..."
+    ));
 
-    let store_path = stdout.trim().to_string();
-    let ks = format!("{store_path}/vmlinux");
-    let rs = format!("{store_path}/rootfs.ext4");
-    if !std::path::Path::new(&ks).exists() || !std::path::Path::new(&rs).exists() {
-        anyhow::bail!("nix build succeeded but expected outputs are missing under {store_path}");
-    }
-    std::fs::copy(&ks, &kernel_path)?;
-    std::fs::copy(&rs, &rootfs_path)?;
-    ui::success("Default microVM image built and cached.");
-    Ok((kernel_path, rootfs_path))
+    ui::info("  Fetching kernel...");
+    download_file(&kernel_url, kernel_path)
+        .with_context(|| format!("Failed to download kernel from {kernel_url}"))?;
+
+    ui::info("  Fetching rootfs...");
+    download_file(&rootfs_url, rootfs_path)
+        .with_context(|| format!("Failed to download rootfs from {rootfs_url}"))?;
+
+    ui::success("Default microVM image downloaded and cached.");
+    Ok((kernel_path.to_string(), rootfs_path.to_string()))
 }
 
 fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {

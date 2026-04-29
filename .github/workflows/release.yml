@@ -151,8 +151,50 @@ jobs:
             staging/dev-rootfs-${{ matrix.arch }}.ext4
             staging/dev-image-${{ matrix.arch }}-checksums-sha256.txt
 
+  default-microvm:
+    # Build the bundled default microVM image used by `mvmctl exec` /
+    # `mvmctl up` when no --flake or --template was given. Mirrors the
+    # dev-image job: native per-arch builds, unsigned artifacts.
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build default microVM image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/default-microvm#packages.${SYSTEM}.default" \
+            --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          cp "$STORE_PATH/vmlinux" "staging/default-microvm-vmlinux-${ARCH}"
+          cp "$STORE_PATH/rootfs.ext4" "staging/default-microvm-rootfs-${ARCH}.ext4"
+          cd staging
+          sha256sum "default-microvm-vmlinux-${ARCH}" "default-microvm-rootfs-${ARCH}.ext4" \
+            > "default-microvm-${ARCH}-checksums-sha256.txt"
+
+      - name: Upload default microVM image artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: default-microvm-${{ matrix.arch }}
+          path: |
+            staging/default-microvm-vmlinux-${{ matrix.arch }}
+            staging/default-microvm-rootfs-${{ matrix.arch }}.ext4
+            staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
+
   release:
-    needs: [build, dev-image]
+    needs: [build, dev-image, default-microvm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -218,6 +260,9 @@ jobs:
             artifacts/dev-vmlinux-* \
             artifacts/dev-rootfs-* \
             artifacts/dev-image-*-checksums-sha256.txt \
+            artifacts/default-microvm-vmlinux-* \
+            artifacts/default-microvm-rootfs-* \
+            artifacts/default-microvm-*-checksums-sha256.txt \
             sbom.cdx.json \
             sbom.cdx.json.bundle
 
