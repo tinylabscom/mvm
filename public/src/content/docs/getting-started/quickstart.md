@@ -103,7 +103,25 @@ mvmctl console myvm                    # Interactive shell
 mvmctl console myvm --command "ls -la" # One-shot command
 ```
 
-## 7. Named Networks
+## 7. Sandboxed One-Shot Commands
+
+`mvmctl exec` boots a fresh transient microVM, runs a single command, and tears
+it down on exit -- like `docker run --rm`, but with a Firecracker microVM as
+the sandbox. No `--flake` or `--template` needed; the bundled default image
+boots automatically the first time.
+
+```bash
+mvmctl exec -- uname -a                            # bundled default image
+mvmctl exec --add-dir .:/work -- ls /work          # share host dir, read-only
+mvmctl exec --env DEBUG=1 -- env | grep DEBUG      # inject env vars
+mvmctl exec --template my-tpl -- /bin/true         # registered template
+```
+
+When you reuse a registered template that has a captured snapshot, exec
+restores from the snapshot instead of cold-booting -- typically sub-second.
+See the [Sandboxed Exec](/guides/exec/) guide for details.
+
+## 8. Named Networks
 
 Create isolated networks for different projects:
 
@@ -113,7 +131,7 @@ mvmctl up --flake . --network myproject
 mvmctl network list
 ```
 
-## 8. Diagnostics & Security
+## 9. Diagnostics & Security
 
 ```bash
 mvmctl doctor           # Check system dependencies, available backends
@@ -125,6 +143,7 @@ mvmctl cache info       # Cache directory disk usage
 ## Next Steps
 
 - [Your First MicroVM](/getting-started/first-microvm/) -- write a Nix flake and boot it
+- [Sandboxed Exec](/guides/exec/) -- run a single command in a fresh microVM
 - [CLI Commands](/reference/cli-commands/) -- full command reference
 - [Templates](/guides/templates/) -- reusable base images
 - [Troubleshooting](/guides/troubleshooting/) -- common issues

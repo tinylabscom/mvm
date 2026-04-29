@@ -208,6 +208,25 @@ Multi-app workloads are rejected — that's an orchestration concern that
 belongs in `mvmd`, not in `mvmctl exec`. Env precedence (lowest →
 highest): `apps[].env` → `apps[].entrypoint.env` → CLI `--env`.
 
+### Snapshot restore
+
+When the request boots a registered template (`--template <name>`) and
+that template has a captured snapshot, `mvmctl exec` restores from the
+snapshot instead of cold-booting — typically sub-second on Linux/KVM.
+
+The snapshot path activates only when *all* of the following hold:
+
+- the image source is a **registered template** (the bundled default
+  image has no template snapshot to restore from);
+- there are **no** `--add-dir` extras (extra drives would mismatch the
+  snapshot's recorded drive layout);
+- the active backend reports snapshot support.
+
+On macOS / Lima QEMU, vsock snapshots return `os error 95` (EOPNOTSUPP);
+restore failures fall back to cold boot with a warning rather than
+aborting the exec. See the [Sandboxed Exec](/guides/exec/) guide for
+the full background.
+
 ## Default microVM Image
 
 When an image-taking command is invoked without `--flake` or `--template`,

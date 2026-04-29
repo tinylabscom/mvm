@@ -53,6 +53,7 @@ export default defineConfig({
           items: [
             { label: "Writing Nix Flakes", slug: "guides/nix-flakes" },
             { label: "Templates", slug: "guides/templates" },
+            { label: "Sandboxed Exec", slug: "guides/exec" },
             { label: "Config & Secrets", slug: "guides/config-secrets" },
             { label: "Networking", slug: "guides/networking" },
             { label: "Troubleshooting", slug: "guides/troubleshooting" },
