@@ -198,6 +198,17 @@ fn start_dev_daemon(vm_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Shell prelude that defines a no-op `sudo` function when the script
+/// already runs as root and `sudo` isn't installed.
+///
+/// The Apple Container dev VM uses a minimal Nix-built rootfs that runs
+/// scripts as PID 1 (uid 0) with no sudo binary, while the shared
+/// network / firecracker scripts in this crate are written for Lima's
+/// non-root + passwordless-sudo model. Prepending this shim lets the
+/// same scripts run unmodified on both backends.
+const SUDO_SHIM: &str =
+    "if [ \"$(id -u)\" = 0 ] && ! command -v sudo >/dev/null 2>&1; then sudo() { \"$@\"; }; fi";
+
 /// Apple Container-backed Linux execution environment.
 ///
 /// Routes commands through the guest agent's vsock `Exec` protocol.
@@ -251,10 +262,11 @@ impl AppleContainerEnv {
     fn exec_via_vsock(&self, script: &str, timeout_secs: u64) -> Result<Output> {
         let mut stream = self.connect_with_auto_start()?;
 
+        let wrapped = format!("{SUDO_SHIM}\n{script}");
         let resp = mvm_guest::vsock::send_request(
             &mut stream,
             &mvm_guest::vsock::GuestRequest::Exec {
-                command: script.to_string(),
+                command: wrapped,
                 stdin: None,
                 timeout_secs: Some(timeout_secs),
             },
@@ -458,5 +470,18 @@ mod tests {
         );
 
         restore();
+    }
+
+    /// `SUDO_SHIM` must parse cleanly in POSIX `sh` (busybox ash on the
+    /// dev rootfs) and behave as a no-op when running as a non-root user
+    /// — which is the typical state for this test process.
+    #[test]
+    fn test_sudo_shim_is_valid_sh() {
+        let out = Command::new("sh")
+            .args(["-c", &format!("{SUDO_SHIM}\necho ok")])
+            .output()
+            .expect("sh");
+        assert!(out.status.success(), "stderr: {:?}", out.stderr);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
     }
 }
