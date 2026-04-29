@@ -350,7 +350,7 @@ pub fn snapshot_eligible(
 /// agent unreachable, vsock error), returns an error; the VM is torn down
 /// best-effort before returning.
 pub fn run(req: ExecRequest) -> Result<i32> {
-    let backend = AnyBackend::default_backend();
+    let backend = AnyBackend::auto_select();
 
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
@@ -489,7 +489,7 @@ pub fn run(req: ExecRequest) -> Result<i32> {
         let vm_name = vm_name.clone();
         let _ = ctrlc::set_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-            let backend = AnyBackend::default_backend();
+            let backend = AnyBackend::auto_select();
             let _ = backend.stop(&VmId(vm_name.clone()));
         });
     }

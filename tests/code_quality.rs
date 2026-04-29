@@ -199,7 +199,8 @@ fn no_stale_binary_name_in_user_facing_strings() {
 fn find_cfg_test_line(path: &str) -> Option<usize> {
     let content = std::fs::read_to_string(path).ok()?;
     for (i, line) in content.lines().enumerate() {
-        if line.trim() == "#[cfg(test)]" {
+        let trimmed = line.trim();
+        if trimmed == "#[cfg(test)]" || trimmed == "#![cfg(test)]" {
             return Some(i + 1); // 1-indexed
         }
     }
