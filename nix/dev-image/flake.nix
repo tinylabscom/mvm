@@ -2,7 +2,7 @@
   description = "mvm dev environment — Linux VM image with Nix + build tools";
 
   inputs = {
-    mvm.url = "path:../guest-lib";
+    mvm.url = "path:..";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
   };
 

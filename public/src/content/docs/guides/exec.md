@@ -17,9 +17,11 @@ mvmctl exec --template my-tpl -- /bin/true
 mvmctl exec --launch-plan ./launch.json
 ```
 
-> `mvmctl exec` is **dev-mode only** -- it inherits the existing
-> `policy.access.debug_exec` gate enforced by the guest agent. It is not
-> meant for production workloads; use `mvmctl up` (or `mvmd`) for those.
+> `mvmctl exec` is **dev-mode only** -- the guest agent's Exec handler is
+> compiled in only when the `dev-shell` Cargo feature is enabled. Production
+> guest builds omit the feature, so the handler is not present in the binary
+> at all and `exec` is physically unavailable. It is not meant for production
+> workloads; use `mvmctl up` (or `mvmd`) for those.
 
 ## When to use it
 
@@ -157,17 +159,39 @@ Defaults: 2 vCPUs, 512 MiB, 60-second timeout per command.
 ## Driving from an mvmforge launch plan
 
 If you're using [mvmforge](https://github.com/tinylabscom/decorationer)
-to declare workloads, you can hand `mvmctl exec` a `launch.json` and it
-will invoke the entrypoint directly:
+to declare workloads, you can hand `mvmctl exec` either the `launch.json`
+artifact from `mvmforge compile` or the Workload IR manifest from
+`mvmforge emit` — `--launch-plan` accepts both shapes and auto-detects:
 
 ```bash
-mvmforge compile app.py --out ./build
+mvmforge compile manifest.json --out ./build
 mvmctl exec --launch-plan ./build/launch.json
 ```
 
-`mvmctl exec` reads a single-app subset of mvmforge's v0 Workload IR.
+```bash
+mvmforge emit app.py > manifest.json
+mvmctl exec --launch-plan manifest.json
+```
+
 Only the entrypoint is consumed in v1; image selection still comes from
 `--template` or the bundled default.
+
+**LaunchPlan artifact** (`mvmforge compile`'s `launch.json` output):
+
+```json
+{
+  "artifact_format_version": "1.0",
+  "workload_id": "hello",
+  "entrypoint": {
+    "command": ["python", "main.py"],
+    "working_dir": "/app",
+    "env": { "PORT": "8080" }
+  },
+  "env": { "LOG_LEVEL": "info" }
+}
+```
+
+**Workload IR manifest** (`mvmforge emit` stdout):
 
 ```json
 {
@@ -184,6 +208,11 @@ Only the entrypoint is consumed in v1; image selection still comes from
   ]
 }
 ```
+
+For long-running workloads, prefer `mvmforge up` (or
+`mvmctl up --flake <artifact-dir>`): mvmforge bakes the entrypoint into
+the generated flake's `services.<id>.command`, and mvm's PID-1 init
+supervises it across reboots.
 
 Multi-app launch plans are rejected -- that's an orchestration concern
 that belongs in `mvmd`, not in `mvmctl exec`. Env precedence (lowest →
@@ -210,9 +239,10 @@ highest):
 
 ## Limits
 
-- **Dev-mode only.** `mvmctl exec` requires `policy.access.debug_exec`
-  to be on, which is the default in the dev mode the rest of `mvmctl`
-  ships with.
+- **Dev-mode only.** `mvmctl exec` requires a guest agent built with the
+  `dev-shell` Cargo feature, which is the default for the dev images
+  `mvmctl` ships with. Production guest images omit the feature and the
+  Exec handler is physically absent from the binary.
 - **Network access.** The guest gets the same network configuration
   any other transient VM gets -- if your `--template` exposes outbound
   internet, so does `mvmctl exec` from that template.

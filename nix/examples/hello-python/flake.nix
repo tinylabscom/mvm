@@ -2,7 +2,7 @@
   description = "hello-python microVM — minimal Python example using mkPythonService";
 
   inputs = {
-    mvm.url = "path:../../guest-lib";
+    mvm.url = "path:../..";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 

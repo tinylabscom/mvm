@@ -2,7 +2,7 @@
   description = "Paperclip microVM — AI agent orchestration platform";
 
   inputs = {
-    mvm.url = "path:../../guest-lib";
+    mvm.url = "path:../..";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 

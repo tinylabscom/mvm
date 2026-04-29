@@ -2,7 +2,7 @@
   description = "OpenClaw microVM - pre-installed at build time";
 
   inputs = {
-    mvm.url = "path:../../guest-lib";
+    mvm.url = "path:../..";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
@@ -119,13 +119,6 @@
                   echo "[setup] Copying custom templates from /mnt/config/templates" >&2
                   cp -r /mnt/config/templates/* /var/lib/openclaw/workspace/
                   chown -R openclaw:openclaw /var/lib/openclaw/workspace/
-                fi
-
-                # Enable exec access for mvmctl vm exec (if not already on config drive).
-                if [ ! -f /mnt/config/security-policy.json ]; then
-                  cat > /mnt/config/security-policy.json <<'SECPOL'
-{"access":{"debug_exec":true}}
-SECPOL
                 fi
 
                 if [ -f /mnt/config/openclaw.json ]; then

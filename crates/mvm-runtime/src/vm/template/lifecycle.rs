@@ -80,23 +80,31 @@ pub fn template_load(id: &str) -> Result<TemplateSpec> {
 #[instrument(skip_all)]
 pub fn template_list() -> Result<Vec<String>> {
     let base = mvm_core::template::templates_base_dir();
-    let out = shell::run_in_vm_stdout(&format!("ls -1 {base} 2>/dev/null || true"))?
-        .trim()
-        .to_string();
-    Ok(out
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|s| s.to_string())
-        .collect())
+    let entries = match std::fs::read_dir(&base) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to list templates dir {}", base));
+        }
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 #[instrument(skip_all, fields(template_id = id, force))]
 pub fn template_delete(id: &str, force: bool) -> Result<()> {
     let dir = template_dir(id);
-    let flag = if force { "-rf" } else { "-r" };
-    vm_exec(&format!("rm {flag} {dir}"))
-        .with_context(|| format!("Failed to delete template {}", id))?;
-    Ok(())
+    let path = std::path::Path::new(&dir);
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && force => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("Failed to delete template {}", id)),
+    }
 }
 
 /// Initialize an on-disk template directory layout (empty artifacts, no spec).

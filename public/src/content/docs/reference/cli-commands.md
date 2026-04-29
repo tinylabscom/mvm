@@ -160,13 +160,15 @@ description: Complete command reference for mvmctl.
 
 `mvmctl exec` boots a fresh transient microVM, runs a single command, and tears it
 down on exit — like `cco` or `docker run --rm`, but with a Firecracker microVM
-as the sandbox. **Dev-mode only**, gated by `policy.access.debug_exec`.
+as the sandbox. **Dev-mode only**: the guest agent's Exec handler is compiled in
+only when the `dev-shell` Cargo feature is enabled. Production guest builds omit
+the feature, so the handler is not present in the binary at all.
 
 | Command | Description |
 |---------|-------------|
 | `mvmctl exec -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
 | `mvmctl exec --template <name> -- <cmd>...` | Boot a registered template instead of the default |
-| `mvmctl exec --launch-plan <path> ` | Run the entrypoint from an [mvmforge](https://github.com/tinylabscom/decorationer) `launch.json`. Mutually exclusive with trailing argv |
+| `mvmctl exec --launch-plan <path> ` | Run the entrypoint from an [mvmforge](https://github.com/tinylabscom/decorationer) document — either the `launch.json` artifact (top-level `entrypoint`) or the Workload IR manifest (top-level `apps[]`). Mutually exclusive with trailing argv |
 | `mvmctl exec --add-dir HOST:GUEST[:MODE] -- <cmd>` | Mount a host directory inside the guest. `MODE` is `ro` (default — writes discarded) or `rw` (writes rsynced back to the host after the command exits — see [ADR-002](/contributing/adr/002-writable-add-dir/)). Repeatable |
 | `mvmctl exec --env KEY=VAL -- <cmd>` | Inject an environment variable. Repeatable. Overrides any env vars carried by `--launch-plan` |
 | `mvmctl exec --cpus <n>` / `--memory <size>` | Resize the transient VM (defaults: 2 vCPUs, 512 MiB) |
@@ -185,9 +187,27 @@ mvmctl exec --launch-plan ./launch.json                # mvmforge entrypoint
 
 ### Launch-plan shape
 
-When `--launch-plan` is given, `mvmctl exec` reads a single-app subset of
-mvmforge's v0 Workload IR. Only the entrypoint is consumed (image
-selection still comes from `--template` or the bundled default in v1):
+`--launch-plan` accepts either of mvmforge's two JSON documents — the
+shape is auto-detected. Only the entrypoint is consumed (image selection
+still comes from `--template` or the bundled default in v1).
+
+**LaunchPlan artifact** (`mvmforge compile`'s `launch.json`, top-level
+`entrypoint`):
+
+```json
+{
+  "artifact_format_version": "1.0",
+  "workload_id": "hello",
+  "entrypoint": {
+    "command": ["python", "main.py"],
+    "working_dir": "/app",
+    "env": { "PORT": "8080" }
+  },
+  "env": { "LOG_LEVEL": "info" }
+}
+```
+
+**Workload IR manifest** (`mvmforge emit` stdout, top-level `apps[]`):
 
 ```json
 {
@@ -205,9 +225,9 @@ selection still comes from `--template` or the bundled default in v1):
 }
 ```
 
-Multi-app workloads are rejected — that's an orchestration concern that
-belongs in `mvmd`, not in `mvmctl exec`. Env precedence (lowest →
-highest): `apps[].env` → `apps[].entrypoint.env` → CLI `--env`.
+Multi-app IR manifests are rejected — that's an orchestration concern
+that belongs in `mvmd`, not in `mvmctl exec`. Env precedence (lowest →
+highest): top-level/app `env` → `entrypoint.env` → CLI `--env`.
 
 ### Snapshot restore
 

@@ -2,7 +2,7 @@
   description = "hello-node microVM — minimal Node.js/TypeScript example using mkNodeService";
 
   inputs = {
-    mvm.url = "path:../../guest-lib";
+    mvm.url = "path:../..";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 

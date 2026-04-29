@@ -913,19 +913,7 @@ fn handle_client(
             timeout_secs,
         } => {
             eprintln!("[audit] exec request: {:?}", command);
-            let policy = mvm_guest::builder_agent::load_security_policy()
-                .ok()
-                .flatten()
-                .unwrap_or_else(mvm_core::security::SecurityPolicy::dev_defaults);
-            let allowed = policy.access.debug_exec;
-            if !allowed {
-                GuestResponse::Error {
-                    message: "exec rejected: access.debug_exec not enabled in security policy"
-                        .to_string(),
-                }
-            } else {
-                do_exec(&command, stdin.as_deref(), timeout_secs.unwrap_or(30))
-            }
+            do_exec(&command, stdin.as_deref(), timeout_secs.unwrap_or(30))
         }
 
         #[cfg(not(feature = "dev-shell"))]

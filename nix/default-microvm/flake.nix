@@ -2,7 +2,7 @@
   description = "Default minimal microVM image (busybox + guest agent) used by mvmctl when no --flake or --template is given.";
 
   inputs = {
-    mvm.url = "path:../guest-lib";
+    mvm.url = "path:..";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
   };
 

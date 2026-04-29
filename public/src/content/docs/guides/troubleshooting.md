@@ -91,7 +91,7 @@ If builds are slow despite no code changes, check that `flake.lock` hasn't chang
 error: flake does not provide attribute ...
 ```
 
-**Cause**: Your `flake.lock` references an old nixpkgs or guest-lib version that doesn't have the expected outputs.
+**Cause**: Your `flake.lock` references an old nixpkgs or `mvm` flake version that doesn't have the expected outputs.
 
 **Fix**:
 ```bash

@@ -41,7 +41,10 @@ fn no_unwrap_in_production_code() {
         .lines()
         .filter(|line| {
             // Skip test infrastructure files
-            if line.contains("shell_mock.rs") || line.contains("/tests/") {
+            if line.contains("shell_mock.rs")
+                || line.contains("shell/mock.rs")
+                || line.contains("/tests/")
+            {
                 return false;
             }
 
@@ -153,7 +156,10 @@ fn no_stale_binary_name_in_user_facing_strings() {
         .lines()
         .filter(|line| {
             // Skip test code and comments
-            if line.contains("/tests/") || line.contains("shell_mock.rs") {
+            if line.contains("/tests/")
+                || line.contains("shell_mock.rs")
+                || line.contains("shell/mock.rs")
+            {
                 return false;
             }
             let parts: Vec<&str> = line.splitn(3, ':').collect();

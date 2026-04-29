@@ -5,7 +5,21 @@
 use super::*;
 use clap::Parser;
 
-use super::run::RunParams;
+// Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
+// follow the dispatcher's naming, regardless of which group they live in.
+use super::build::{build, template};
+use super::env::{cleanup, dev, init, uninstall};
+use super::ops::{audit, cache, config, metrics, security};
+use super::vm::{console, down, exec, forward, up};
+
+use audit::AuditAction;
+use cache::CacheAction;
+use config::ConfigAction;
+use dev::DevAction;
+use security::SecurityAction;
+use template::TemplateAction;
+use up::RunParams;
+
 use super::shared::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
     env_vars_to_drive_file, parse_port_spec, parse_port_specs, parse_volume_spec,
@@ -16,7 +30,7 @@ use super::shared::{
 fn test_cleanup_defaults() {
     let cli = Cli::try_parse_from(["mvmctl", "cleanup"]).unwrap();
     match cli.command {
-        Commands::Cleanup { keep, all, verbose } => {
+        Commands::Cleanup(cleanup::Args { keep, all, verbose }) => {
             assert_eq!(keep, None);
             assert!(!all);
             assert!(!verbose);
@@ -29,7 +43,7 @@ fn test_cleanup_defaults() {
 fn test_cleanup_keep_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--keep", "9"]).unwrap();
     match cli.command {
-        Commands::Cleanup { keep, all, verbose } => {
+        Commands::Cleanup(cleanup::Args { keep, all, verbose }) => {
             assert_eq!(keep, Some(9));
             assert!(!all);
             assert!(!verbose);
@@ -42,7 +56,7 @@ fn test_cleanup_keep_flag() {
 fn test_cleanup_all_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--all"]).unwrap();
     match cli.command {
-        Commands::Cleanup { keep, all, verbose } => {
+        Commands::Cleanup(cleanup::Args { keep, all, verbose }) => {
             assert_eq!(keep, None);
             assert!(all);
             assert!(!verbose);
@@ -55,7 +69,7 @@ fn test_cleanup_all_flag() {
 fn test_cleanup_verbose_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--verbose"]).unwrap();
     match cli.command {
-        Commands::Cleanup { keep, all, verbose } => {
+        Commands::Cleanup(cleanup::Args { keep, all, verbose }) => {
             assert_eq!(keep, None);
             assert!(!all);
             assert!(verbose);
@@ -71,7 +85,7 @@ fn test_build_flake_with_profile() {
     let cli =
         Cli::try_parse_from(["mvmctl", "build", "--flake", ".", "--profile", "gateway"]).unwrap();
     match cli.command {
-        Commands::Build { flake, profile, .. } => {
+        Commands::Build(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert_eq!(profile.as_deref(), Some("gateway"));
         }
@@ -83,7 +97,7 @@ fn test_build_flake_with_profile() {
 fn test_build_flake_defaults_to_no_profile() {
     let cli = Cli::try_parse_from(["mvmctl", "build", "--flake", "."]).unwrap();
     match cli.command {
-        Commands::Build { flake, profile, .. } => {
+        Commands::Build(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert!(profile.is_none(), "profile should be None when omitted");
         }
@@ -95,7 +109,7 @@ fn test_build_flake_defaults_to_no_profile() {
 fn test_build_mvmfile_mode_still_works() {
     let cli = Cli::try_parse_from(["mvmctl", "build", "myimage"]).unwrap();
     match cli.command {
-        Commands::Build { path, flake, .. } => {
+        Commands::Build(build::Args { path, flake, .. }) => {
             assert_eq!(path, "myimage");
             assert!(flake.is_none(), "Mvmfile mode should have no --flake");
         }
@@ -150,13 +164,13 @@ fn test_run_parses_all_flags() {
     ])
     .unwrap();
     match cli.command {
-        Commands::Up {
+        Commands::Up(up::Args {
             flake,
             profile,
             cpus,
             memory,
             ..
-        } => {
+        }) => {
             assert_eq!(flake, Some(".".to_string()));
             assert_eq!(profile.as_deref(), Some("full"));
             assert_eq!(cpus, Some(4));
@@ -170,7 +184,7 @@ fn test_run_parses_all_flags() {
 fn test_run_defaults() {
     let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
     match cli.command {
-        Commands::Up {
+        Commands::Up(up::Args {
             flake,
             template,
             name,
@@ -180,7 +194,7 @@ fn test_run_defaults() {
             volume,
             hypervisor,
             ..
-        } => {
+        }) => {
             assert_eq!(flake, Some(".".to_string()));
             assert!(template.is_none(), "template should be None when omitted");
             assert!(name.is_none(), "name should be None when omitted");
@@ -201,9 +215,9 @@ fn test_run_without_source_uses_default_microvm() {
     // dispatcher then resolves the image at runtime.
     let cli = Cli::try_parse_from(["mvmctl", "run"]).expect("parse");
     match cli.command {
-        Commands::Up {
+        Commands::Up(up::Args {
             flake, template, ..
-        } => {
+        }) => {
             assert!(flake.is_none(), "no --flake should be parsed");
             assert!(template.is_none(), "no --template should be parsed");
         }
@@ -215,9 +229,9 @@ fn test_run_without_source_uses_default_microvm() {
 fn test_run_template_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "run", "--template", "openclaw"]).unwrap();
     match cli.command {
-        Commands::Up {
+        Commands::Up(up::Args {
             flake, template, ..
-        } => {
+        }) => {
             assert!(flake.is_none());
             assert_eq!(template, Some("openclaw".to_string()));
         }
@@ -248,7 +262,7 @@ fn test_run_volume_dir_inject() {
     ])
     .unwrap();
     match cli.command {
-        Commands::Up { volume, .. } => {
+        Commands::Up(up::Args { volume, .. }) => {
             assert_eq!(volume.len(), 2);
             assert_eq!(volume[0], "/tmp/config:/mnt/config");
             assert_eq!(volume[1], "/tmp/secrets:/mnt/secrets");
@@ -262,7 +276,7 @@ fn test_run_volume_persistent() {
     let cli =
         Cli::try_parse_from(["mvmctl", "run", "--flake", ".", "-v", "/data:/mnt/data:4G"]).unwrap();
     match cli.command {
-        Commands::Up { volume, .. } => {
+        Commands::Up(up::Args { volume, .. }) => {
             assert_eq!(volume.len(), 1);
             assert_eq!(volume[0], "/data:/mnt/data:4G");
         }
@@ -334,7 +348,7 @@ fn test_run_port_and_env_flags() {
     ])
     .unwrap();
     match cli.command {
-        Commands::Up { port, env, .. } => {
+        Commands::Up(up::Args { port, env, .. }) => {
             assert_eq!(port, vec!["3333:3000", "3334:3002"]);
             assert_eq!(env, vec!["NODE_ENV=production", "DEBUG=true"]);
         }
@@ -346,7 +360,7 @@ fn test_run_port_and_env_flags() {
 fn test_run_port_and_env_default_empty() {
     let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
     match cli.command {
-        Commands::Up { port, env, .. } => {
+        Commands::Up(up::Args { port, env, .. }) => {
             assert!(port.is_empty());
             assert!(env.is_empty());
         }
@@ -367,7 +381,7 @@ fn test_run_forward_flag() {
     ])
     .unwrap();
     match cli.command {
-        Commands::Up { forward, port, .. } => {
+        Commands::Up(up::Args { forward, port, .. }) => {
             assert!(forward);
             assert_eq!(port, vec!["3333:3000"]);
         }
@@ -379,7 +393,7 @@ fn test_run_forward_flag() {
 fn test_run_forward_default_false() {
     let cli = Cli::try_parse_from(["mvmctl", "run", "--flake", "."]).unwrap();
     match cli.command {
-        Commands::Up { forward, .. } => {
+        Commands::Up(up::Args { forward, .. }) => {
             assert!(!forward);
         }
         _ => panic!("Expected Run command"),
@@ -452,7 +466,7 @@ fn test_env_vars_to_drive_file_empty() {
 fn test_down_parses_no_args() {
     let cli = Cli::try_parse_from(["mvmctl", "down"]).unwrap();
     match cli.command {
-        Commands::Down { name, config } => {
+        Commands::Down(down::Args { name, config }) => {
             assert!(name.is_none());
             assert!(config.is_none());
         }
@@ -464,7 +478,7 @@ fn test_down_parses_no_args() {
 fn test_down_parses_with_name() {
     let cli = Cli::try_parse_from(["mvmctl", "down", "gw"]).unwrap();
     match cli.command {
-        Commands::Down { name, config } => {
+        Commands::Down(down::Args { name, config }) => {
             assert_eq!(name.as_deref(), Some("gw"));
             assert!(config.is_none());
         }
@@ -476,7 +490,7 @@ fn test_down_parses_with_name() {
 fn test_down_parses_with_config() {
     let cli = Cli::try_parse_from(["mvmctl", "down", "-f", "my-fleet.toml"]).unwrap();
     match cli.command {
-        Commands::Down { name, config } => {
+        Commands::Down(down::Args { name, config }) => {
             assert!(name.is_none());
             assert_eq!(config.as_deref(), Some("my-fleet.toml"));
         }
@@ -535,7 +549,7 @@ fn test_read_dir_to_drive_files_nonexistent_dir() {
 fn test_forward_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000"]).unwrap();
     match cli.command {
-        Commands::Forward { name, port, ports } => {
+        Commands::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             // Positional ports land in `ports`, flag ports in `port`.
             assert!(port.is_empty());
@@ -549,7 +563,7 @@ fn test_forward_parses() {
 fn test_forward_with_port_mapping() {
     let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "8080:3000"]).unwrap();
     match cli.command {
-        Commands::Forward { name, port, ports } => {
+        Commands::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert!(port.is_empty());
             assert_eq!(ports, vec!["8080:3000"]);
@@ -562,7 +576,7 @@ fn test_forward_with_port_mapping() {
 fn test_forward_with_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "-p", "3000"]).unwrap();
     match cli.command {
-        Commands::Forward { name, port, ports } => {
+        Commands::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert_eq!(port, vec!["3000"]);
             assert!(ports.is_empty());
@@ -576,7 +590,7 @@ fn test_forward_multiple_ports() {
     let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "-p", "3000", "-p", "8080:443"])
         .unwrap();
     match cli.command {
-        Commands::Forward { name, port, ports } => {
+        Commands::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert_eq!(port, vec!["3000", "8080:443"]);
             assert!(ports.is_empty());
@@ -589,7 +603,7 @@ fn test_forward_multiple_ports() {
 fn test_forward_multiple_positional() {
     let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000", "8080:443"]).unwrap();
     match cli.command {
-        Commands::Forward { name, port, ports } => {
+        Commands::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert!(port.is_empty());
             assert_eq!(ports, vec!["3000", "8080:443"]);
@@ -600,11 +614,11 @@ fn test_forward_multiple_positional() {
 
 #[test]
 fn test_forward_no_ports_parses() {
-    // forward with no ports should parse successfully — cmd_forward
+    // forward with no ports should parse successfully — the runtime path
     // falls back to persisted ports from run-info.json
     let cli = Cli::try_parse_from(["mvmctl", "forward", "swift"]).unwrap();
     match cli.command {
-        Commands::Forward { name, port, ports } => {
+        Commands::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert!(port.is_empty());
             assert!(ports.is_empty());
@@ -642,13 +656,13 @@ fn test_parse_port_spec_invalid() {
 #[test]
 fn test_ls_alias_for_ps() {
     let cli = Cli::try_parse_from(["mvmctl", "ls"]).unwrap();
-    assert!(matches!(cli.command, Commands::Ps { .. }));
+    assert!(matches!(cli.command, Commands::Ps(_)));
 }
 
 #[test]
 fn test_ps_command() {
     let cli = Cli::try_parse_from(["mvmctl", "ps"]).unwrap();
-    assert!(matches!(cli.command, Commands::Ps { .. }));
+    assert!(matches!(cli.command, Commands::Ps(_)));
 }
 
 #[test]
@@ -664,13 +678,19 @@ fn test_start_alias_for_run() {
 #[test]
 fn test_metrics_command_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "metrics"]).unwrap();
-    assert!(matches!(cli.command, Commands::Metrics { json: false }));
+    assert!(matches!(
+        cli.command,
+        Commands::Metrics(metrics::Args { json: false })
+    ));
 }
 
 #[test]
 fn test_metrics_json_flag_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "metrics", "--json"]).unwrap();
-    assert!(matches!(cli.command, Commands::Metrics { json: true }));
+    assert!(matches!(
+        cli.command,
+        Commands::Metrics(metrics::Args { json: true })
+    ));
 }
 
 #[test]
@@ -697,9 +717,9 @@ fn test_config_show_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "config", "show"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Config {
+        Commands::Config(config::Args {
             action: ConfigAction::Show
-        }
+        })
     ));
 }
 
@@ -707,9 +727,9 @@ fn test_config_show_parses() {
 fn test_config_set_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "config", "set", "lima_cpus", "4"]).unwrap();
     match cli.command {
-        Commands::Config {
+        Commands::Config(config::Args {
             action: ConfigAction::Set { key, value },
-        } => {
+        }) => {
             assert_eq!(key, "lima_cpus");
             assert_eq!(value, "4");
         }
@@ -751,11 +771,11 @@ fn test_uninstall_parses_defaults() {
     let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall {
+        Commands::Uninstall(uninstall::Args {
             yes: true,
             all: false,
             dry_run: false,
-        }
+        })
     ));
 }
 
@@ -764,11 +784,11 @@ fn test_uninstall_dry_run_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--dry-run", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall {
+        Commands::Uninstall(uninstall::Args {
             yes: true,
             all: false,
             dry_run: true,
-        }
+        })
     ));
 }
 
@@ -777,11 +797,11 @@ fn test_uninstall_all_flag_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--all", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall {
+        Commands::Uninstall(uninstall::Args {
             yes: true,
             all: true,
             dry_run: false,
-        }
+        })
     ));
 }
 
@@ -792,12 +812,12 @@ fn test_audit_tail_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "audit", "tail"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Audit {
-            action: AuditCmd::Tail {
+        Commands::Audit(audit::Args {
+            action: AuditAction::Tail {
                 lines: 20,
                 follow: false,
             }
-        }
+        })
     ));
 }
 
@@ -807,18 +827,18 @@ fn test_audit_tail_follow_parses() {
         Cli::try_parse_from(["mvmctl", "audit", "tail", "--follow", "--lines", "50"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Audit {
-            action: AuditCmd::Tail {
+        Commands::Audit(audit::Args {
+            action: AuditAction::Tail {
                 lines: 50,
                 follow: true,
             }
-        }
+        })
     ));
 }
 
 #[test]
 fn test_audit_tail_no_log_prints_message() {
-    // When no audit log exists, cmd_audit_tail should succeed with a
+    // When no audit log exists, the command should succeed with a
     // helpful message rather than an error.
     let tmp = tempfile::tempdir().unwrap();
     let nonexistent = tmp.path().join("audit.jsonl");
@@ -914,7 +934,7 @@ fn test_run_rejects_invalid_port_at_parse_time() {
     assert!(result.is_err(), "invalid port should fail at parse time");
 }
 
-// ---- Config defaults wired into cmd_run ----
+// ---- Config defaults wired into the Up command ----
 
 #[test]
 fn test_run_uses_config_default_cpus() {
@@ -1077,7 +1097,7 @@ fn test_console_with_command() {
     let cli = Cli::try_parse_from(["mvmctl", "console", "myvm", "--command", "ls"]);
     assert!(cli.is_ok());
     match cli.unwrap().command {
-        Commands::Console { name, command } => {
+        Commands::Console(console::Args { name, command }) => {
             assert_eq!(name, "myvm");
             assert_eq!(command.as_deref(), Some("ls"));
         }
@@ -1091,7 +1111,7 @@ fn test_console_with_command() {
 fn exec_default_template_argv_only() {
     let cli = Cli::try_parse_from(["mvmctl", "exec", "--", "uname", "-a"]).expect("parse");
     match cli.command {
-        Commands::Exec {
+        Commands::Exec(exec::Args {
             template,
             cpus,
             memory,
@@ -1100,7 +1120,7 @@ fn exec_default_template_argv_only() {
             timeout,
             launch_plan,
             argv,
-        } => {
+        }) => {
             assert!(template.is_none(), "template should default to None");
             assert_eq!(cpus, 2);
             assert_eq!(memory, "512M");
@@ -1119,9 +1139,9 @@ fn exec_with_launch_plan_no_argv() {
     let cli =
         Cli::try_parse_from(["mvmctl", "exec", "--launch-plan", "./plan.json"]).expect("parse");
     match cli.command {
-        Commands::Exec {
+        Commands::Exec(exec::Args {
             launch_plan, argv, ..
-        } => {
+        }) => {
             assert_eq!(launch_plan.as_deref(), Some("./plan.json"));
             assert!(argv.is_empty());
         }
@@ -1162,13 +1182,13 @@ fn exec_with_template_and_resources() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Exec {
+        Commands::Exec(exec::Args {
             template,
             cpus,
             memory,
             argv,
             ..
-        } => {
+        }) => {
             assert_eq!(template.as_deref(), Some("my-tpl"));
             assert_eq!(cpus, 4);
             assert_eq!(memory, "1G");
@@ -1197,9 +1217,9 @@ fn exec_with_add_dir_and_env() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Exec {
+        Commands::Exec(exec::Args {
             add_dir, env, argv, ..
-        } => {
+        }) => {
             assert_eq!(
                 add_dir,
                 vec!["/tmp:/work".to_string(), "/etc:/host-etc".to_string()]
@@ -1224,11 +1244,11 @@ fn exec_requires_argv() {
 fn test_init_defaults() {
     let cli = Cli::try_parse_from(["mvmctl", "init"]).unwrap();
     match cli.command {
-        Commands::Init {
+        Commands::Init(init::Args {
             non_interactive,
             lima_cpus,
             lima_mem,
-        } => {
+        }) => {
             assert!(!non_interactive);
             assert_eq!(lima_cpus, 8);
             assert_eq!(lima_mem, 16);
@@ -1242,11 +1262,11 @@ fn test_init_non_interactive() {
     let cli =
         Cli::try_parse_from(["mvmctl", "init", "--non-interactive", "--lima-cpus", "4"]).unwrap();
     match cli.command {
-        Commands::Init {
+        Commands::Init(init::Args {
             non_interactive,
             lima_cpus,
             ..
-        } => {
+        }) => {
             assert!(non_interactive);
             assert_eq!(lima_cpus, 4);
         }
@@ -1266,9 +1286,9 @@ fn test_security_status_help() {
 fn test_security_status_json() {
     let cli = Cli::try_parse_from(["mvmctl", "security", "status", "--json"]).unwrap();
     match cli.command {
-        Commands::Security {
-            action: SecurityCmd::Status { json },
-        } => {
+        Commands::Security(security::Args {
+            action: SecurityAction::Status { json },
+        }) => {
             assert!(json);
         }
         _ => panic!("Expected Security Status command"),
@@ -1293,9 +1313,9 @@ fn test_cache_prune() {
 fn test_cache_prune_dry_run() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--dry-run"]).unwrap();
     match cli.command {
-        Commands::Cache {
-            action: CacheCmd::Prune { dry_run },
-        } => {
+        Commands::Cache(cache::Args {
+            action: CacheAction::Prune { dry_run },
+        }) => {
             assert!(dry_run);
         }
         _ => panic!("Expected Cache Prune command"),
@@ -1308,7 +1328,7 @@ fn test_cache_prune_dry_run() {
 fn test_up_network_default() {
     let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
     match cli.command {
-        Commands::Up { network, .. } => {
+        Commands::Up(up::Args { network, .. }) => {
             assert_eq!(network, "default");
         }
         _ => panic!("Expected Up command"),
@@ -1320,7 +1340,7 @@ fn test_up_network_custom() {
     let cli =
         Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--network", "isolated"]).unwrap();
     match cli.command {
-        Commands::Up { network, .. } => {
+        Commands::Up(up::Args { network, .. }) => {
             assert_eq!(network, "isolated");
         }
         _ => panic!("Expected Up command"),
@@ -1331,9 +1351,9 @@ fn test_up_network_custom() {
 fn test_template_init_defaults_to_no_preset_or_prompt() {
     let cli = Cli::try_parse_from(["mvmctl", "template", "init", "demo", "--local"]).unwrap();
     match cli.command {
-        Commands::Template {
-            action: TemplateCmd::Init { preset, prompt, .. },
-        } => {
+        Commands::Template(template::Args {
+            action: TemplateAction::Init { preset, prompt, .. },
+        }) => {
             assert!(preset.is_none(), "preset should be None when omitted");
             assert!(prompt.is_none(), "prompt should be None when omitted");
         }
@@ -1354,9 +1374,9 @@ fn test_template_init_parses_prompt_flag() {
     ])
     .unwrap();
     match cli.command {
-        Commands::Template {
-            action: TemplateCmd::Init { prompt, preset, .. },
-        } => {
+        Commands::Template(template::Args {
+            action: TemplateAction::Init { prompt, preset, .. },
+        }) => {
             assert_eq!(prompt.as_deref(), Some("python worker that polls an API"));
             assert!(preset.is_none(), "preset should remain None when omitted");
         }
@@ -1370,9 +1390,9 @@ fn test_template_init_parses_prompt_flag() {
 fn test_dev_up_with_lima_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--lima"]).unwrap();
     match cli.command {
-        Commands::Dev {
-            action: Some(DevCmd::Up { lima, .. }),
-        } => {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Up { lima, .. }),
+        }) => {
             assert!(lima);
         }
         _ => panic!("Expected Dev Up command"),
@@ -1400,7 +1420,7 @@ fn test_dev_status_parses() {
 #[test]
 fn test_is_apple_container_dev_running_returns_bool() {
     // Just verify it doesn't panic — actual result depends on platform
-    let _ = super::apple_container::is_apple_container_dev_running();
+    let _ = super::env::apple_container::is_apple_container_dev_running();
 }
 
 // ---- RunParams compile-check (referenced for type-export verification) ----

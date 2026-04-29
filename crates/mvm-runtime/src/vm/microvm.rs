@@ -1262,9 +1262,6 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
     let toml_content = format!("# Dev-mode {} config stub\n", role);
     let escaped_toml = toml_content.replace('\'', "'\\''");
 
-    // Dev-mode security policy enables debug_exec for vsock exec support
-    let security_policy = r#"{"access":{"debug_exec":true}}"#;
-
     // Build injection commands for custom config files
     let extra_cmds = drive_file_inject_commands(&config.config_files);
 
@@ -1278,8 +1275,7 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
         sudo mount {path} "$MOUNT_DIR"
         echo '{json}' | sudo tee "$MOUNT_DIR/config.json" >/dev/null
         echo '{toml}' | sudo tee "$MOUNT_DIR/{toml_name}" >/dev/null
-        echo '{security_policy}' | sudo tee "$MOUNT_DIR/security-policy.json" >/dev/null
-        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}" "$MOUNT_DIR/security-policy.json"
+        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}"
         {extra}
         sudo umount "$MOUNT_DIR"
         rmdir "$MOUNT_DIR"
@@ -1289,7 +1285,6 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
         json = escaped_json,
         toml = escaped_toml,
         toml_name = toml_name,
-        security_policy = security_policy,
         extra = extra_cmds,
     ))?;
     Ok(path)
