@@ -785,6 +785,47 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
     Ok(dest_image_path.to_string())
 }
 
+/// Mount an ext4 image read-only inside the Linux build environment and
+/// rsync its contents over a host directory.
+///
+/// Used by `mvmctl exec --add-dir HOST:GUEST:rw` to deliver guest-side
+/// writes back to the host once the transient microVM has stopped (see
+/// ADR-002). Uses `--delete` so the guest's view of the directory is the
+/// source of truth at sync time — added/modified files are copied over,
+/// files removed inside the guest are removed from the host, and
+/// permissions are preserved with `-aH` (archive + hardlinks).
+///
+/// `image_path` is the ext4 image previously created by
+/// `build_dir_image_ro` (sized for the host directory's contents). The VM
+/// must be stopped before calling this — the kernel will refuse to mount
+/// an image still attached to a running Firecracker.
+pub fn rsync_image_to_host(image_path: &str, host_dir: &str) -> Result<()> {
+    let script = format!(
+        r#"
+        set -e
+        if [ ! -f {image} ]; then
+            echo "rsync_image_to_host: image '{image}' not found" >&2
+            exit 1
+        fi
+        if [ ! -d {host} ]; then
+            echo "rsync_image_to_host: host dir '{host}' not found" >&2
+            exit 1
+        fi
+        MOUNT_DIR=$(mktemp -d)
+        trap 'sudo umount "$MOUNT_DIR" 2>/dev/null || true; rmdir "$MOUNT_DIR" 2>/dev/null || true' EXIT
+        sudo mount -o ro {image} "$MOUNT_DIR"
+        sudo rsync -aH --delete "$MOUNT_DIR/" {host}/
+        "#,
+        image = image_path,
+        host = host_dir,
+    );
+
+    run_in_vm(&script).with_context(|| {
+        format!("rsyncing ext4 image '{image_path}' contents back to '{host_dir}'")
+    })?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

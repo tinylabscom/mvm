@@ -406,8 +406,9 @@ enum Commands {
     /// Boot a transient microVM, run a single command, and tear down (dev-mode only).
     ///
     /// Inspired by cco — same one-command UX, but with a Firecracker microVM
-    /// as the sandbox. Use `--add-dir host:guest` to share a host directory
-    /// (read-only). Use `--` to separate the argv from `mvmctl exec` flags.
+    /// as the sandbox. Use `--add-dir host:guest[:mode]` to share a host
+    /// directory (default `:ro`; pass `:rw` to rsync writes back to the
+    /// host on exit). Use `--` to separate the argv from `mvmctl exec` flags.
     /// Alternatively, pass `--launch-plan ./launch.json` to invoke an
     /// mvmforge-emitted entrypoint instead of an inline argv.
     Exec {
@@ -423,9 +424,11 @@ enum Commands {
         /// Memory (supports human-readable: 512M, 1G, …).
         #[arg(long, default_value = "512M")]
         memory: String,
-        /// Share a host directory into the guest (read-only). Format:
-        /// `HOST_PATH:/GUEST_PATH`. Repeatable. Writes inside the guest are
-        /// discarded on teardown.
+        /// Share a host directory into the guest. Format:
+        /// `HOST_PATH:/GUEST_PATH[:MODE]` where MODE is `ro` (default,
+        /// writes are discarded) or `rw` (writes are rsynced back to the
+        /// host directory after the command exits — see ADR-002).
+        /// Repeatable.
         #[arg(long = "add-dir", short = 'd')]
         add_dir: Vec<String>,
         /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides
