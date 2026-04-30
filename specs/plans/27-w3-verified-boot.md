@@ -1,33 +1,30 @@
 # Plan 27 — W3: dm-verity verified boot
 
-> Status: 🟡 host-side wired + verity device builds correctly, but a
-> Firecracker aarch64 cmdline-append bug means the kernel mounts the
-> raw rootfs instead of `/dev/dm-0`. ADR-002 claim #3 does NOT hold
-> until Finding #1 below is fixed.
+> Status: ✅ shipped — 2026-04-30 (initramfs fix landed).
 > Owner: Ari
 > Parent: `specs/plans/25-microvm-hardening.md` §W3
 > ADR: `specs/adrs/002-microvm-security-posture.md`
 > Verification runbook: `specs/runbooks/w3-verified-boot.md`
-> Estimated effort: 3-4 days (+ initramfs work for Finding #1)
+> Estimated effort: 4-5 days (incl. initramfs)
 >
 > ### Verification result (2026-04-30, Lima dev VM, aarch64)
 >
-> Ran the five-step runbook end-to-end. Three pass, two are blocked
-> on the same root cause:
+> All five runbook steps green. ADR-002 claim #3 ("a tampered rootfs
+> ext4 fails to boot") now holds in practice:
 >
-> - ✅ Step 1 — `nix build .#default-microvm` emits all four files;
->   `vmlinux` contains DM_VERITY / device-mapper strings.
+> - ✅ Step 1 — `nix build .#default-microvm` emits five files now
+>   (`rootfs.{ext4,verity,roothash,initrd}` + `vmlinux`); kernel
+>   contains DM_VERITY strings.
 > - ✅ Step 2 — `veritysetup verify` exits 0 against the emitted
 >   sidecar + roothash.
-> - ❌ Step 3 — kernel constructs `dm-0 (rootfs) is ready` correctly
->   but then panics with `VFS: Cannot open root device "vda"`. The
->   captured cmdline shows Firecracker auto-appended
->   `pci=off root=/dev/vda ro earlycon=…` AFTER our user-supplied
->   `root=/dev/dm-0`. Last `root=` wins, so the kernel tries to
->   mount `/dev/vda` directly — which is busy as the verity-data
->   device. **Verity is built but not on the read path.**
-> - ⛔ Step 4 (tamper) — blocked on Step 3.
-> - ✅ Step 5 — dev-image build correctly emits no verity sidecar
+> - ✅ Step 3 — Live Firecracker boot under the verity initramfs:
+>   `mvm-verity-init` constructs `/dev/mapper/root` via DM ioctls,
+>   mounts it, switch_root's, and the real `minimal-init` reaches
+>   userspace.
+> - ✅ Step 4 — Tampered ext4 superblock triggers
+>   `device-mapper: verity: 254:0: data block 1 is corrupted` in
+>   the kernel; the VM panics before userspace.
+> - ✅ Step 5 — Dev-image build correctly emits no verity sidecar
 >   (`verifiedBoot = false` honoured).
 >
 > ### Shipped artifacts
@@ -77,51 +74,58 @@
 >     `start_vm_rejects_non_hex_roothash`,
 >     `start_vm_rejects_missing_verity_sidecar`.
 >
-> ### Outstanding (blocking ADR-002 §W3 claim)
+> ### Resolved findings
 >
-> #### Finding #1 — Firecracker aarch64 auto-appends `root=/dev/vda ro`
+> #### Finding #1 (RESOLVED 2026-04-30) — Firecracker aarch64 auto-appends `root=/dev/vda ro`
 >
-> Surfaced by Step 3 of the runbook. Firecracker v1.14.1's aarch64
-> FDT code unconditionally appends `pci=off root=/dev/vda ro
-> earlycon=uart,mmio,<addr>` after the user's `boot_args`. With
-> verity in play this means the kernel sees:
+> Resolution: a small static-musl initramfs in mkGuest. The kernel
+> mounts the initramfs first, runs `mvm-verity-init` (PID 1) which
+> reads `mvm.roothash=` from `/proc/cmdline`, builds
+> `/dev/mapper/root` via DM ioctls (DM_DEV_CREATE → DM_TABLE_LOAD
+> → DM_DEV_SUSPEND-with-resume), mounts it at `/sysroot`, and
+> `switch_root`s. The kernel-level `root=` setting is irrelevant —
+> the initramfs picks the real root explicitly.
 >
-> ```
-> root=/dev/dm-0 ro … dm-mod.create="…" pci=off root=/dev/vda ro earlycon=…
->                                                 ^^^^^^^^^^^^^
->                                  Firecracker's append; last root= wins
-> ```
+> #### Finding #2 (gotchas captured during the fix)
 >
-> The kernel constructs the verity device-mapper target correctly
-> (`device-mapper: ioctl: dm-0 (rootfs) is ready`) but then mounts
-> `/dev/vda` directly instead of `/dev/dm-0`. dm-verity exists on
-> the system but doesn't gate any read path — verity is wired but
-> not enforcing. The same defect almost certainly affects the
-> Apple Container path on macOS aarch64; the runbook documents how
-> to confirm once a verity-enabled production image is fed through
-> `start_with_verity`.
+> Three subtleties surfaced during implementation; the final code
+> handles all three but they're worth documenting for the next
+> person who touches this:
 >
-> **Fix path: small initramfs in mkGuest** — produce a ~1 MB
-> initramfs that runs `veritysetup open /dev/vda root <hash>
-> /dev/vdb && exec switch_root /mnt /init`. The kernel mounts the
-> initramfs first so Firecracker's `root=/dev/vda` becomes
-> harmless; we choose the eventual root explicitly. This is the
-> conventional verified-boot setup and avoids depending on
-> Firecracker behaviour.
+> 1. **Static linking is non-optional.** A dynamic ELF at `/init`
+>    in the initramfs panics with `Failed to execute /init (error
+>    -2)` — the kernel can't find `/lib/ld-linux*` because the
+>    initramfs is empty. `mvm-verity-init` is built via
+>    `pkgs.pkgsStatic.rustPlatform` against musl; the agent +
+>    seccomp-apply keep dynamic linking because they run after
+>    rootfs mount.
+> 2. **`hash_start_block = 1`, not 0.** `veritysetup format` writes
+>    a 512-byte verity superblock at offset 0 of the sidecar; the
+>    actual Merkle tree starts at block 1. Setting hash_start to 0
+>    makes the kernel parse the superblock as a hash node and
+>    report `metadata block 0 is corrupted`.
+> 3. **`data_block_size` must match the underlying ext4.** mkGuest
+>    builds rootfs.ext4 with mke2fs's default 1 KiB blocks at our
+>    typical sizes. dm-verity exposes its data-block-size as the
+>    device's logical block size, and the kernel's ext4 refuses to
+>    mount when FS block size < device logical block size. Verity
+>    data-block-size is now 1024; the hash-block-size stays at
+>    4096 (typical fan-out, smaller tree).
 >
-> **Workaround for now**: the Apple Container backend's
-> `start_with_verity()` can ship; we lose the live verity gate
-> until the initramfs lands but the static gate (the
-> `verified-boot-artifacts` CI lane) still catches a
-> `verifiedBoot=false` flip on a production path.
+> ### Outstanding (cosmetic, not blocking the W3 claim)
 >
-> #### Other still-pending work
->
-> - Auto-snapshot regression: confirm the new `/drives/verity` is
->   captured in Firecracker template snapshots and the restored VM
->   still boots.
-> - Live boot regression on a Linux/KVM CI runner (depends on the
->   initramfs fix above plus a CI lane that doesn't yet exist).
+> - Auto-snapshot regression for the new `/drives/verity` +
+>   `initrd_path` Firecracker config still needs a real snapshot
+>   round-trip.
+> - The Apple Container path's `start_with_verity()` is wired but
+>   live-tested only on Firecracker today; a §3.5 "Apple Container
+>   smoke" lane in the runbook is on the to-do once we have a Mac
+>   in the loop with a production image.
+> - Two pre-existing init-script bugs the live boot exposed
+>   (`mount /etc/nsswitch.conf failed: No such file or directory`,
+>   `setpriv: mutually exclusive arguments: --clear-groups
+>   --keep-groups --init-groups --groups`) need their own fixes —
+>   both unrelated to W3 and unchanged by this work.
 
 ## Why
 

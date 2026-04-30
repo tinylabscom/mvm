@@ -107,13 +107,15 @@ landed with the dev VM rebuilt, booted, and verified end-to-end.
   `prctl(PR_SET_SECCOMP, …)`. The tier list lives in
   `mvm-security/src/seccomp.rs` (already exists, just wired through).
 
-### W3 — Verified boot (🟡 host-side shipped — 2026-04-30; boot regression pending)
+### W3 — Verified boot (✅ shipped — 2026-04-30)
 
-Detail plan: `specs/plans/27-w3-verified-boot.md`. Kernel config,
-mkGuest's verity sidecar, both backends' wiring, the dev-VM
-exemption, and the security.yml gate are live. The live-boot +
-tamper regressions need a Linux/KVM CI lane that doesn't exist
-yet — they remain the only outstanding W3 work.
+Detail plan: `specs/plans/27-w3-verified-boot.md`. Verification
+runbook: `specs/runbooks/w3-verified-boot.md` (all five steps
+green on Lima/aarch64). Kernel config + `mkGuest`'s verity sidecar
++ a static-musl `mvm-verity-init` initramfs + both backends' boot
+wiring + the security.yml gate are all live. Live boot + tamper
+regression confirmed: a tampered ext4 panics with
+`data block N is corrupted` in early boot.
 
 - **W3.1** mkGuest emits a dm-verity sidecar alongside `rootfs.ext4`:
   a `rootfs.verity` Merkle tree and a `rootfs.roothash` text file.

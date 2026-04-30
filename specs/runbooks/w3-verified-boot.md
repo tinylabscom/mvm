@@ -1,15 +1,17 @@
 # W3 verified-boot verification runbook
 
 > Created: 2026-04-30
+> Last updated: 2026-04-30 (full pass after initramfs fix)
 > Parent plan: `specs/plans/27-w3-verified-boot.md`
 > ADR: `specs/adrs/002-microvm-security-posture.md`
 >
-> **Status: 4 of 5 steps PASS. Step 3 surfaced a real bug —
-> Firecracker's aarch64 boot path auto-appends `root=/dev/vda ro`
-> to the kernel cmdline, which clobbers `root=/dev/dm-0` (last
-> `root=` wins). dm-verity is constructed correctly but the kernel
-> mounts `/dev/vda` directly instead of the verity-protected
-> `/dev/dm-0`. See "Findings" below for the fix path.**
+> **Status: ✅ all 5 steps PASS as of 2026-04-30.** The original
+> Step 3 failure (Firecracker's aarch64 boot path auto-appends
+> `root=/dev/vda ro` and last-wins clobbers `/dev/dm-0`) is fixed
+> by an early-userspace verity initramfs that owns the boot pivot
+> in userspace via `mvm-verity-init` + `switch_root`. The kernel-
+> level `root=` setting is now irrelevant. Tamper test confirms
+> the kernel panics with `data block N is corrupted`.
 
 This runbook is the manual end-to-end verification for ADR-002 §W3
 (verified boot via dm-verity). The `security.yml::verified-boot-artifacts`
@@ -72,7 +74,14 @@ echo "exit=$?"
 ext4 it was built against, and the roothash produced by mkGuest is the
 same one veritysetup recovers from the tree.
 
-## Step 3 — Live Firecracker boot, expecting `/dev/dm-0` root mount
+## Step 3 — Live Firecracker boot via the verity initramfs
+
+The verity boot path uses the `rootfs.initrd` baked by mkGuest. The
+kernel mounts the initramfs first, runs `mvm-verity-init` as PID 1,
+which constructs `/dev/mapper/root` via DM ioctls, mounts it at
+`/sysroot`, then `switch_root`s to the real init. The kernel-level
+`root=` setting is irrelevant because the initramfs picks the real
+root explicitly.
 
 ```bash
 work=/tmp/w3-smoke
@@ -80,25 +89,21 @@ rm -rf "$work" && mkdir -p "$work"
 cp "$out/vmlinux"        "$work/vmlinux"
 cp "$out/rootfs.ext4"    "$work/rootfs.ext4"
 cp "$out/rootfs.verity"  "$work/rootfs.verity"
-chmod u+w "$work/rootfs.ext4" "$work/rootfs.verity"
+cp "$out/rootfs.initrd"  "$work/rootfs.initrd"
+chmod u+w "$work"/*
 
 hash=$(cat "$out/rootfs.roothash")
-size=$(stat -c %s "$work/rootfs.ext4")
-data_blocks=$((size / 4096))
-sectors=$((data_blocks * 8))
-salt=$(printf '0%.0s' $(seq 1 64))
-table="0 ${sectors} verity 1 /dev/vda /dev/vdb 4096 4096 ${data_blocks} 0 sha256 ${hash} ${salt}"
-
 python3 - <<EOF > "$work/config.json"
 import json
 boot_args = (
-    "console=ttyS0 reboot=k panic=1 root=/dev/dm-0 ro init=/init "
-    "dm-mod.create=\"rootfs,,,ro,${table}\""
+    "console=ttyS0 reboot=k panic=1 init=/init "
+    f"mvm.roothash=${hash} mvm.data=/dev/vda mvm.hash=/dev/vdb"
 )
 print(json.dumps({
     "boot-source": {
         "kernel_image_path": "$work/vmlinux",
         "boot_args": boot_args,
+        "initrd_path": "$work/rootfs.initrd",
     },
     "drives": [
         {"drive_id": "rootfs", "path_on_host": "$work/rootfs.ext4",
@@ -113,58 +118,65 @@ EOF
 sudo timeout 30 firecracker --no-api --config-file "$work/config.json" \
     > "$work/fc.stdout" 2> "$work/fc.stderr"
 
-grep -E 'device-mapper|verity|panic|dm-0' "$work/fc.stdout"
+grep -E 'mvm-verity-init|device-mapper:|switching to|/sysroot' "$work/fc.stdout"
 ```
 
-**Expected on success** — kernel reaches userspace and you see
-something like `/dev/dm-0 on / type ext4 (ro,…)` from `mount`.
-
-**Observed 2026-04-30** (the bug, see Findings #1):
+**Expected** (verified 2026-04-30):
 
 ```
-[1.450509] device-mapper: ioctl: 4.47.0-ioctl … initialised: dm-devel@redhat.com
-[1.639826] device-mapper: verity: sha256 using implementation "sha256-generic"
-[1.659951] device-mapper: ioctl: dm-0 (rootfs) is ready
-[1.685428] VFS: Cannot open root device "vda" or unknown-block(254,0): error -16
-[1.708495] Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(254,0)
+mvm-verity-init: starting
+mvm-verity-init: data=/dev/vda hash=/dev/vdb roothash=…
+mvm-verity-init: verity table = 419840 sectors, 209920 data blocks
+mvm-verity-init: dm-ioctl kernel version 4.47.0
+mvm-verity-init: DM_DEV_CREATE ok
+[..] device-mapper: verity: sha256 using implementation "sha256-generic"
+mvm-verity-init: DM_TABLE_LOAD ok
+mvm-verity-init: dm-verity device active
+mvm-verity-init: /sysroot mounted (verity-protected)
+mvm-verity-init: switching to /init
+[init] /etc/{passwd,group,nsswitch.conf} are read-only bind-mounts
 ```
 
-Verity setup itself succeeds (`dm-0 (rootfs) is ready`), but the kernel
-then tries to mount `/dev/vda` instead of `/dev/dm-0`. The cause is in
-the captured boot cmdline:
-
-```
-… root=/dev/dm-0 ro init=/init dm-mod.create="…" pci=off root=/dev/vda ro earlycon=…
-                                                           ^^^^^^^^^^^^^
-                                              Firecracker auto-append, last root= wins
-```
-
-Firecracker's aarch64 boot path appends `pci=off root=/dev/vda ro
-earlycon=uart,mmio,…` after the user's `boot_args`. The kernel uses
-last-wins for `root=`, so the user's `root=/dev/dm-0` is overridden.
+The trailing `[init]` line confirms the real `minimal-init` script
+reached userspace from the verity-protected `/dev/dm-0`. (Subsequent
+warnings about missing config drives or `setpriv` flag conflicts are
+unrelated to W3 — they're side effects of using the production rootfs
+without the per-VM config/secrets drives.)
 
 ## Step 4 — Tamper-panic regression
 
-Until Step 3's bug is fixed this step can't run end-to-end (the kernel
-panics before reaching the verity-data read). The intent is preserved
-here for when the fix lands:
+Tampering inside the ext4 superblock guarantees verity sees the
+corruption at first read (the kernel reads the superblock during the
+initial mount). Picking a "deeper" offset gambles on that block
+actually being read — verity is lazy, so a tampered byte that the
+boot path never touches goes undetected. That's not a verity bug; it
+just means the regression test has to point at a block ext4 is sure
+to read.
 
 ```bash
-"$REPO/target/debug/mvmctl" stop verity-smoke 2>/dev/null || true
-printf '\xff' | dd of="$work/rootfs.ext4" bs=1 count=1 \
-    seek=$((4096 * 1000)) conv=notrunc
+# Restore from the unmodified store path before tampering.
+cp "$out/rootfs.ext4" "$work/rootfs.ext4"
+chmod u+w "$work/rootfs.ext4"
 
-sudo timeout 30 firecracker --no-api --config-file "$work/config.json" \
+# Clobber 128 bytes inside the ext4 superblock at offset 1024.
+dd if=/dev/urandom of="$work/rootfs.ext4" bs=1 count=128 \
+   seek=1024 conv=notrunc
+
+sudo timeout 15 firecracker --no-api --config-file "$work/config.json" \
     > "$work/fc-tamper.stdout" 2>&1
 grep -E 'data block .* is corrupted|Kernel panic' "$work/fc-tamper.stdout"
 ```
 
-Expected on success: a line like
-`dm-verity: data block <n> is corrupted` followed by a kernel panic.
-The VM must NOT reach userspace.
+**Verified 2026-04-30** — output:
 
-**Verified 2026-04-30: blocked by Findings #1.** Once the cmdline
-override is fixed, the tamper test will be re-run.
+```
+[..] device-mapper: verity: 254:0: data block 1 is corrupted
+mvm-verity-init: FATAL: mount(/dev/dm-0 → /sysroot, ext4): I/O error (os error 5)
+[..] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+```
+
+Verity returns `-EIO` for the corrupted read, the mount fails, PID 1
+exits, and the kernel panics. The VM does NOT reach userspace.
 
 ## Step 5 — Dev-image exemption
 
@@ -183,7 +195,15 @@ correctly suppressing the verity sidecar.
 
 ## Findings
 
-### Finding #1 — Firecracker auto-appends `root=/dev/vda ro` on aarch64
+### Finding #1 (RESOLVED 2026-04-30) — Firecracker auto-appends `root=/dev/vda ro` on aarch64
+
+**Resolution**: implemented option (2) below. mkGuest now bakes a
+~250 KB cpio.gz initramfs at `rootfs.initrd` whose `/init` is
+`mvm-verity-init` (a static-musl Rust binary). The initramfs runs
+*before* the kernel commits to a root device, so Firecracker's
+trailing `root=/dev/vda ro` becomes irrelevant — `mvm-verity-init`
+constructs `/dev/mapper/root` via DM ioctls, mounts it, and
+`switch_root`s explicitly. Live boot + tamper test both green.
 
 **What**
 
@@ -273,10 +293,11 @@ and check off:
 
 - [x] Step 1: artifacts present + kernel has DM_VERITY strings.
 - [x] Step 2: `veritysetup verify` exits 0.
-- [ ] Step 3: live boot mounts `/dev/dm-0` as root. *Blocked on Finding #1.*
-- [ ] Step 4: tampered ext4 panics in early boot. *Blocked on Finding #1.*
+- [x] Step 3: live boot mounts `/dev/dm-0` as root via verity initramfs.
+- [x] Step 4: tampered ext4 panics in early boot (`data block N is corrupted`).
 - [x] Step 5: dev-image build emits no verity sidecar.
 
-When Steps 3 and 4 are checked, the runbook + the
+All five green as of 2026-04-30. The runbook + the
 `security.yml::verified-boot-artifacts` CI gate together provide the
-technical receipt for ADR-002 claim #3.
+technical receipt for ADR-002 claim #3 ("a tampered rootfs ext4
+fails to boot").

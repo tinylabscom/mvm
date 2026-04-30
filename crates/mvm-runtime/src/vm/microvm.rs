@@ -1355,53 +1355,6 @@ pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String
     (Some(verity), Some(hash))
 }
 
-/// Build the `dm-mod.create=` kernel cmdline argument that creates a
-/// verity-protected root device pointing at `/dev/vda` (data) and
-/// `/dev/vdb` (hash tree).
-///
-/// Format reference: kernel doc Documentation/admin-guide/device-mapper/dm-init.rst:
-///
-///   dm-mod.create="<name>,<uuid>,<minor>,<flags>,<table-line>"
-///
-/// Verity table line:
-///
-///   0 <num-sectors> verity 1 /dev/vda /dev/vdb 4096 4096
-///                           <data-blocks> 0 sha256 <root-hash> <salt-hex>
-///
-/// `data-blocks = rootfs_size / 4096`. Salt is zero (matches the
-/// deterministic salt pinned by mkGuest's verityArtifacts derivation
-/// in `nix/flake.nix`). ADR-002 §W3.2.
-fn build_verity_dm_create_arg(rootfs_path: &str, roothash: &str) -> Result<String> {
-    if roothash.len() != 64 || !roothash.chars().all(|c| c.is_ascii_hexdigit()) {
-        anyhow::bail!(
-            "invalid root hash {:?} (expected 64 lowercase hex chars)",
-            roothash
-        );
-    }
-    // Querying file size on the host (we're in mvmctl, not in the
-    // Lima VM that holds the rootfs) is unreliable when the path is
-    // inside a Linux-only filesystem mount — drop back to running
-    // `stat -c %s` inside the VM.
-    use crate::shell::run_in_vm_stdout;
-    let size_str = run_in_vm_stdout(&format!("stat -c %s {rootfs_path}"))?;
-    let size: u64 = size_str
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("parse rootfs size {:?}: {e}", size_str.trim()))?;
-    if !size.is_multiple_of(4096) {
-        anyhow::bail!(
-            "rootfs size {size} is not a multiple of 4096 — verity setup must have rejected \
-             this image, but we got here anyway"
-        );
-    }
-    let data_blocks = size / 4096;
-    let num_sectors = data_blocks * 8; // 4096 bytes per block / 512 sectors
-    let salt = "0".repeat(64);
-    Ok(format!(
-        "dm-mod.create=\"rootfs,,,ro,0 {num_sectors} verity 1 /dev/vda /dev/vdb 4096 4096 {data_blocks} 0 sha256 {roothash} {salt}\""
-    ))
-}
-
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
 #[instrument(skip_all, fields(name = %config.name))]
 pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
@@ -1431,40 +1384,68 @@ pub fn configure_flake_microvm_with_drives_dir(
     )?;
 
     // Boot args: pass guest IP and gateway via kernel cmdline.
-    // When initrd is present (NixOS guest), the initrd handles root mounting.
-    // When initrd is absent (minimal guest), the kernel mounts root directly.
+    // When initrd is present (NixOS guest or verity initrd), the initrd
+    // handles root mounting. When absent (minimal guest, no verity),
+    // the kernel mounts /dev/vda directly.
     let base_args = format!(
         "console=ttyS0 reboot=k panic=1 net.ifnames=0 mvm.ip={ip}/24 mvm.gw={gw}",
         ip = slot.guest_ip,
         gw = BRIDGE_IP,
     );
-    // dm-verity boot path: root maps to /dev/dm-0, mounted ro. The
-    // kernel constructs the verity target from the cmdline before init
-    // runs (CONFIG_DM_INIT in firecracker-aarch64.config). A tampered
-    // ext4 fails the hash check at first read and the kernel panics
-    // before init starts. ADR-002 §W3.2.
-    let dm_create = config
+
+    // dm-verity boot path (ADR-002 §W3): when verity is on, the kernel
+    // mounts the verity initramfs first, which is `mvm-verity-init`
+    // (PID 1) — that binary reads `mvm.roothash=…` from the cmdline,
+    // builds the verity device-mapper target via raw ioctls, mounts
+    // /dev/mapper/root, and switch_root's to /sysroot/init.
+    //
+    // We deliberately do NOT add `root=/dev/dm-0` here: Firecracker on
+    // aarch64 unconditionally appends `root=/dev/vda ro` after our
+    // boot_args, and the kernel uses last-wins for `root=`. By owning
+    // the pivot in userspace via the initramfs, the kernel's `root=`
+    // setting becomes irrelevant — `mvm-verity-init` chooses the real
+    // root explicitly via `mount` + `switch_root`.
+    let verity_initrd_path = config
         .verity_path
         .as_deref()
         .zip(config.roothash.as_deref())
-        .map(|(_, hash)| build_verity_dm_create_arg(&config.rootfs_path, hash))
-        .transpose()?;
-    let boot_args = if config.initrd_path.is_some() {
-        // NixOS stage-1 owns root mounting; verity wiring there would
-        // need stage-1 patches. Out of scope for this iteration —
-        // production flake's mkGuest path doesn't use an initrd.
-        base_args
-    } else if let Some(dm) = &dm_create {
-        format!(
-            "root=/dev/dm-0 ro rootwait init=/init {dm} {base_args}",
-            dm = dm
-        )
+        .and_then(|_| {
+            // Convention from `nix/flake.nix`: the verity initrd lives
+            // at `<rev_dir>/rootfs.initrd`, alongside `rootfs.{ext4,
+            // verity,roothash}`. Fall back to `None` if the file isn't
+            // present (older templates that pre-date the initrd path).
+            std::path::Path::new(&config.rootfs_path)
+                .parent()
+                .map(|p| format!("{}/rootfs.initrd", p.display()))
+        })
+        .filter(|p| std::path::Path::new(p).exists());
+    let verity_args: Option<String> = config
+        .roothash
+        .as_deref()
+        .map(|h| format!("mvm.roothash={h} mvm.data=/dev/vda mvm.hash=/dev/vdb"));
+
+    // Pick the initrd to attach: caller-supplied (NixOS stage-1) wins
+    // over the verity initrd. They can't both be present in practice —
+    // the production minimal-init path doesn't use a NixOS stage-1 —
+    // but the precedence is documented for future contributors.
+    let effective_initrd = config
+        .initrd_path
+        .clone()
+        .or_else(|| verity_initrd_path.clone());
+
+    let boot_args = if effective_initrd.is_some() {
+        // initrd owns root mounting. Verity adds the cmdline knobs the
+        // initramfs reads to construct /dev/mapper/root.
+        match &verity_args {
+            Some(extra) => format!("{base_args} {extra}"),
+            None => base_args,
+        }
     } else {
         format!("root=/dev/vda rw rootwait init=/init {base_args}")
     };
 
     ui::info(&format!("Setting boot source: {}", config.vmlinux_path));
-    let boot_source = match &config.initrd_path {
+    let boot_source = match &effective_initrd {
         Some(initrd) => {
             ui::info(&format!("Using initrd: {}", initrd));
             format!(
@@ -2121,25 +2102,11 @@ mod tests {
 
     // ──── Verity (ADR-002 §W3) ────────────────────────────────────────
     //
-    // Live verity boot is exercised in the Linux/KVM CI lane (it
-    // requires a real microVM and a working dm-mod.create kernel
-    // path). The unit tests here cover the host-side helpers that
-    // build the kernel cmdline and validate the inputs — those run
-    // unconditionally on every commit so a refactor that breaks the
-    // format-string contract surfaces locally before CI.
-
-    #[test]
-    fn build_verity_dm_create_rejects_short_hash() {
-        let res = build_verity_dm_create_arg("/tmp/whatever", "deadbeef");
-        assert!(res.is_err(), "short hash must be rejected");
-    }
-
-    #[test]
-    fn build_verity_dm_create_rejects_non_hex_hash() {
-        let bad = "z".repeat(64);
-        let res = build_verity_dm_create_arg("/tmp/whatever", &bad);
-        assert!(res.is_err(), "non-hex hash must be rejected");
-    }
+    // The host-side cmdline shape and DM-table construction now live
+    // in `mvm-verity-init` (initramfs PID 1) — those are exercised by
+    // the live boot regression in `specs/runbooks/w3-verified-boot.md`.
+    // The unit test below covers the only host-side helper still
+    // running on the cold-boot path: the sidecar path probe.
 
     #[test]
     fn probe_verity_sidecar_returns_none_for_path_without_parent() {

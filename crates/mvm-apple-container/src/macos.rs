@@ -475,6 +475,9 @@ pub fn start_vm(
         if !Path::new(v.verity_path).exists() {
             return Err(format!("Verity sidecar not found: {}", v.verity_path));
         }
+        if !Path::new(v.initrd_path).exists() {
+            return Err(format!("Verity initramfs not found: {}", v.initrd_path));
+        }
         if v.roothash.len() != 64 || !v.roothash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!(
                 "Invalid root hash {:?} (expected 64 hex chars)",
@@ -537,11 +540,14 @@ pub fn start_vm(
             .ok()
             .filter(|s| s.starts_with('/') && s != "/")
             .filter(|s| !s.contains([' ', '\t', '\n', '=']));
-        // When dm-verity is on, the rootfs is mounted via /dev/dm-0
-        // (the verity-protected mapping) and is read-only by definition
-        // — verity hashes are tied to fixed bytes. ADR-002 §W3.2.
+        // When dm-verity is on we boot via the verity initramfs (its
+        // PID 1 is `mvm-verity-init`, which reads `mvm.roothash=` from
+        // the cmdline, constructs /dev/mapper/root, and switch_root's
+        // to /sysroot/init). The kernel-level `root=` setting is
+        // irrelevant in that case — the initramfs picks the real root
+        // explicitly. ADR-002 §W3.
         let mut cmdline = if verity.is_some() {
-            "console=hvc0 root=/dev/dm-0 ro init=/init".to_string()
+            "console=hvc0 init=/init".to_string()
         } else {
             "console=hvc0 root=/dev/vda rw init=/init".to_string()
         };
@@ -552,34 +558,17 @@ pub fn start_vm(
             cmdline.push_str(&format!(" mvm.datadir={p}"));
         }
         if let Some(v) = &verity {
-            // The verity sidecar is the second VirtioBlk device → /dev/vdb
-            // when there's no overlayfs upper. dm-mod.create syntax:
-            //   <name>,<uuid>,<minor>,<flags>,<table-line>
-            // Empty fields default; `ro` is the only flag. Table line for
-            // verity:
-            //   <start-sector> <num-sectors> verity <version> <data-dev>
-            //   <hash-dev> <data-block-size> <hash-block-size>
-            //   <num-data-blocks> <hash-start-block> <algo> <root-hash>
-            //   <salt>  [#opt-args ...]
-            //
-            // We size num-data-blocks from the rootfs size (in 4 KiB
-            // blocks). hash-start-block is 0 because the sidecar is its
-            // own device. salt is zero (matches the deterministic salt
-            // pinned by mkGuest's verityArtifacts).
-            let rootfs_bytes = std::fs::metadata(rootfs_path)
-                .map_err(|e| format!("verity rootfs metadata: {e}"))?
-                .len();
-            // Verity blocks are 4096 bytes; the data area is the rootfs's
-            // exact byte length rounded down to the block size. The
-            // veritysetup format pass already rejected non-aligned input.
-            let data_blocks = rootfs_bytes / 4096;
-            let num_sectors = data_blocks * 8; // 4096 / 512
-            let dm_table = format!(
-                "0 {num_sectors} verity 1 /dev/vda /dev/vdb 4096 4096 {data_blocks} 0 sha256 {} {}",
-                v.roothash,
-                "0".repeat(64),
-            );
-            cmdline.push_str(&format!(" dm-mod.create=rootfs,,,ro,{dm_table}"));
+            // mvm-verity-init reads these three knobs from /proc/cmdline:
+            //   mvm.roothash=<hex>   (required)
+            //   mvm.data=<dev>       (defaults to /dev/vda)
+            //   mvm.hash=<dev>       (defaults to /dev/vdb)
+            // The defaults match our drive ordering, so we only need
+            // to pass the roothash.
+            cmdline.push_str(&format!(" mvm.roothash={}", v.roothash));
+            // Attach the verity initramfs. The objc2 binding marks the
+            // setter as safe; we're already inside the surrounding
+            // `unsafe` block from the rest of `start_vm`.
+            boot_loader.setInitialRamdiskURL(Some(&nsurl(v.initrd_path)));
         }
         boot_loader.setCommandLine(&NSString::from_str(&cmdline));
 
@@ -1180,28 +1169,32 @@ mod tests {
     // contract so a refactor that loosens the check (e.g., accepting
     // uppercase hex, accepting wrong lengths) is caught immediately.
 
-    fn dummy_paths() -> (tempfile::TempDir, String, String, String) {
+    fn dummy_paths() -> (tempfile::TempDir, String, String, String, String) {
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("vmlinux");
         let rootfs = dir.path().join("rootfs.ext4");
         let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
         std::fs::write(&kernel, b"FAKE_KERNEL").unwrap();
         std::fs::write(&rootfs, vec![0u8; 4096]).unwrap();
         std::fs::write(&verity, b"FAKE_VERITY").unwrap();
+        std::fs::write(&initrd, b"FAKE_INITRD").unwrap();
         (
             dir,
             kernel.to_string_lossy().into(),
             rootfs.to_string_lossy().into(),
             verity.to_string_lossy().into(),
+            initrd.to_string_lossy().into(),
         )
     }
 
     #[test]
     fn start_vm_rejects_short_roothash() {
-        let (_dir, k, r, v) = dummy_paths();
+        let (_dir, k, r, v, i) = dummy_paths();
         let cfg = crate::VerityConfig {
             verity_path: &v,
             roothash: "deadbeef",
+            initrd_path: &i,
         };
         let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
         assert!(
@@ -1212,11 +1205,12 @@ mod tests {
 
     #[test]
     fn start_vm_rejects_non_hex_roothash() {
-        let (_dir, k, r, v) = dummy_paths();
+        let (_dir, k, r, v, i) = dummy_paths();
         let bad = "z".repeat(64);
         let cfg = crate::VerityConfig {
             verity_path: &v,
             roothash: &bad,
+            initrd_path: &i,
         };
         let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
         assert!(
@@ -1227,16 +1221,33 @@ mod tests {
 
     #[test]
     fn start_vm_rejects_missing_verity_sidecar() {
-        let (_dir, k, r, _v) = dummy_paths();
+        let (_dir, k, r, _v, i) = dummy_paths();
         let valid_hash = "a".repeat(64);
         let cfg = crate::VerityConfig {
             verity_path: "/nonexistent/path/to/rootfs.verity",
             roothash: &valid_hash,
+            initrd_path: &i,
         };
         let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
         assert!(
             err.contains("Verity sidecar not found"),
             "expected missing-sidecar error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn start_vm_rejects_missing_verity_initrd() {
+        let (_dir, k, r, v, _i) = dummy_paths();
+        let valid_hash = "a".repeat(64);
+        let cfg = crate::VerityConfig {
+            verity_path: &v,
+            roothash: &valid_hash,
+            initrd_path: "/nonexistent/path/to/rootfs.initrd",
+        };
+        let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
+        assert!(
+            err.contains("Verity initramfs not found"),
+            "expected missing-initramfs error, got: {err}"
         );
     }
 }
