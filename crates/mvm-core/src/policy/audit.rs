@@ -47,6 +47,13 @@ pub enum LocalAuditKind {
     ConfigChange,
     ConsoleSessionStart,
     ConsoleSessionEnd,
+    // --- MCP server (plan 32 / Proposal A) ---
+    /// `tools/call run` invocation — every LLM-driven code execution
+    /// against a microVM is auditable.
+    McpToolsCallRun,
+    /// `tools/call run` failed before completing (orchestration error,
+    /// not a non-zero guest exit code).
+    McpToolsCallRunError,
 }
 
 /// A single local audit log entry.

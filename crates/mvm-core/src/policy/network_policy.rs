@@ -53,6 +53,14 @@ pub enum NetworkPreset {
     Registries,
     /// Developer preset: registries + GitHub + OpenAI + Anthropic APIs.
     Dev,
+    /// LLM-agent preset (plan 32 / Proposal D / ADR-004): the LLM
+    /// inference APIs an agent typically calls (Anthropic, OpenAI),
+    /// plus GitHub for source operations. Minimum surface for
+    /// `nix/images/examples/llm-agent/`'s `claude-code-vm`. Strictly
+    /// smaller than `dev` — does NOT include package registries,
+    /// because an agent VM is meant to run trusted closures, not
+    /// re-resolve npm/PyPI on the fly.
+    Agent,
 }
 
 impl NetworkPreset {
@@ -67,6 +75,7 @@ impl NetworkPreset {
                 rules.extend(dev_extra_rules());
                 rules
             }
+            Self::Agent => agent_rules(),
         }
     }
 
@@ -90,8 +99,9 @@ impl FromStr for NetworkPreset {
             "none" => Ok(Self::None),
             "registries" => Ok(Self::Registries),
             "dev" => Ok(Self::Dev),
+            "agent" => Ok(Self::Agent),
             _ => anyhow::bail!(
-                "unknown network preset {:?} (expected: unrestricted, none, registries, dev)",
+                "unknown network preset {:?} (expected: unrestricted, none, registries, dev, agent)",
                 s
             ),
         }
@@ -105,6 +115,7 @@ impl fmt::Display for NetworkPreset {
             Self::None => write!(f, "none"),
             Self::Registries => write!(f, "registries"),
             Self::Dev => write!(f, "dev"),
+            Self::Agent => write!(f, "agent"),
         }
     }
 }
@@ -260,6 +271,21 @@ fn dev_extra_rules() -> Vec<HostPort> {
     ]
 }
 
+/// LLM-agent preset rules (plan 32 / Proposal D / ADR-004).
+///
+/// Strictly smaller than `dev` — agent VMs are meant to run trusted
+/// closures (claude-code, opencode, …) against an inference endpoint
+/// plus a code host, not pull arbitrary packages on the fly.
+fn agent_rules() -> Vec<HostPort> {
+    vec![
+        HostPort::new("api.anthropic.com", 443),
+        HostPort::new("api.openai.com", 443),
+        HostPort::new("github.com", 443),
+        HostPort::new("github.com", 22),
+        HostPort::new("api.github.com", 443),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +382,45 @@ mod tests {
         assert!(hosts.contains(&"github.com"));
         assert!(hosts.contains(&"api.openai.com"));
         assert!(hosts.contains(&"api.anthropic.com"));
+    }
+
+    #[test]
+    fn preset_agent_parses_and_displays() {
+        assert_eq!(
+            "agent".parse::<NetworkPreset>().unwrap(),
+            NetworkPreset::Agent
+        );
+        assert_eq!(NetworkPreset::Agent.to_string(), "agent");
+    }
+
+    #[test]
+    fn preset_agent_has_inference_apis_and_github() {
+        let rules = NetworkPreset::Agent.rules();
+        let hosts: Vec<&str> = rules.iter().map(|r| r.host.as_str()).collect();
+        assert!(
+            hosts.contains(&"api.anthropic.com"),
+            "agent preset must include Anthropic"
+        );
+        assert!(
+            hosts.contains(&"api.openai.com"),
+            "agent preset must include OpenAI"
+        );
+        assert!(
+            hosts.contains(&"github.com"),
+            "agent preset must include GitHub"
+        );
+    }
+
+    #[test]
+    fn preset_agent_excludes_package_registries() {
+        // Plan 32 / Proposal D: agent preset is strictly smaller than dev.
+        // No npm, no PyPI, no crates.io — agents are meant to run
+        // pre-resolved closures, not pull packages at runtime.
+        let rules = NetworkPreset::Agent.rules();
+        let hosts: Vec<&str> = rules.iter().map(|r| r.host.as_str()).collect();
+        assert!(!hosts.contains(&"registry.npmjs.org"));
+        assert!(!hosts.contains(&"crates.io"));
+        assert!(!hosts.contains(&"pypi.org"));
     }
 
     #[test]

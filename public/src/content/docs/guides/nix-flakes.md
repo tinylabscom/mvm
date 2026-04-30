@@ -240,3 +240,39 @@ mvmctl build --flake . --profile gateway
 ```
 
 These map to `packages.${system}.<profile>` in the flake.
+
+## Running an LLM agent inside a microVM
+
+[`nix/images/examples/llm-agent/`](https://github.com/auser/mvm/tree/main/nix/images/examples/llm-agent)
+is a worked example that boots `claude-code` inside a Firecracker
+microVM. It pulls the agent binary from
+[`numtide/llm-agents.nix`](https://github.com/numtide/llm-agents.nix)
+(binary cache at `cache.numtide.com`), runs it as a per-service uid
+under `setpriv` with seccomp tier `network`, and reads the Anthropic
+API key from `/run/mvm-secrets/claude-code/anthropic-api-key` so the
+secret never enters the rootfs.
+
+```bash
+mkdir -p ~/.config/mvm/secrets
+printf '%s\n' 'sk-ant-…' > ~/.config/mvm/secrets/anthropic
+chmod 0400 ~/.config/mvm/secrets/anthropic
+
+mvmctl template create claude-code-vm \
+  --flake ./nix/images/examples/llm-agent \
+  --profile minimal --role agent --cpus 2 --mem 1024
+mvmctl template build claude-code-vm
+
+mvmctl up --template claude-code-vm \
+  --add-dir "$PWD:/workspace:rw" \
+  --secret-file "$HOME/.config/mvm/secrets/anthropic:claude-code/anthropic-api-key"
+```
+
+Why a microVM and not a process sandbox: process sandboxes share the
+host kernel and trust it. A microVM gives the agent its own kernel,
+so a kernel exploit can't pivot to the host.
+
+The example's full security composition (per-service uid, seccomp,
+secrets mode, verified boot) is documented in the
+[example README](https://github.com/auser/mvm/tree/main/nix/images/examples/llm-agent#readme)
+and threat-modelled in
+[ADR-002](https://github.com/auser/mvm/blob/main/specs/adrs/002-microvm-security-posture.md).

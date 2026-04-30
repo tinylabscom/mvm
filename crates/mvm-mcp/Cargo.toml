@@ -1,0 +1,36 @@
+[package]
+name = "mvm-mcp"
+version.workspace = true
+edition.workspace = true
+description = "Model Context Protocol server for mvm — wire types, tool schemas, and stdio JSON-RPC loop"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# ── Feature flags (plan 33: cross-repo handoff with mvmd) ──────────────
+#
+# `protocol-only` is the wire-only surface: JSON-RPC types, tool
+# schemas, the Dispatcher trait. No stdin/stdout. This is what mvmd's
+# hosted MCP transport (plan 33) will depend on so the wire schema
+# stays a single source of truth.
+#
+# `stdio` (default) layers on the JSON-RPC stdio loop. No dispatcher
+# implementations live here — callers (mvm-cli for the local mvmctl,
+# mvmd for the hosted variant) provide their own `Dispatcher` impl.
+# This keeps mvm-mcp free of any dependency on mvm-cli or mvm-runtime,
+# which would create a cycle.
+[features]
+default = ["stdio"]
+protocol-only = []
+stdio = ["dep:tracing", "dep:tracing-subscriber"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

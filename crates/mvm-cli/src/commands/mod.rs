@@ -105,6 +105,14 @@ pub(in crate::commands) enum Commands {
     /// `mvmctl exec` flags. Alternatively, pass `--launch-plan ./launch.json` to invoke an
     /// mvmforge-emitted entrypoint instead of an inline argv.
     Exec(vm::exec::Args),
+    /// Speak Model Context Protocol — exposes mvmctl as a sandbox surface for LLM clients.
+    ///
+    /// Single parameterized `run` tool whose `env` parameter selects from `mvmctl template list`.
+    /// Each call boots a transient microVM, runs the supplied code, and tears down. Like
+    /// `mvmctl exec`, the dispatch path requires a dev-feature guest agent (ADR-002 §W4.3);
+    /// against a production guest the call returns "exec not available" gracefully. ADR-003
+    /// documents the threat model and design.
+    Mcp(ops::mcp::Args),
 }
 
 // ============================================================================
@@ -200,6 +208,7 @@ pub fn run() -> Result<()> {
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Security(a) => ops::security::run(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
+        Commands::Mcp(a) => ops::mcp::run(&cli, a, &cfg),
     };
 
     with_hints(result)
