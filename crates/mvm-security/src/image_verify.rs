@@ -171,23 +171,90 @@ pub fn parse_manifest(bytes: &[u8]) -> VerifyResult<SignedManifest> {
 /// success.
 ///
 /// `cosign_bundle` is the modern Sigstore format produced by
-/// `cosign sign-blob --bundle`; the existing release workflow uses this
-/// format for `mvmctl` tarballs and the SBOM
-/// (`release.yml::Sign release tarballs and SBOM`).
+/// `cosign sign-blob --bundle`; the existing release workflow already
+/// uses this format for `mvmctl` tarballs and the SBOM
+/// (`release.yml::Sign release tarballs and SBOM`). Plan 36 reuses the
+/// same format for image manifests.
 ///
-/// **TODO(plan-36 PR-A.2):** wire up the `sigstore` Rust crate's offline
-/// bundle verification. Until then, this function fails closed with
-/// `SignatureInvalid` so no caller can accidentally accept unsigned
-/// manifests during the rollout.
+/// `expected_identity` is the *exact* SAN that the signing certificate
+/// must carry — e.g.
+/// `https://github.com/auser/mvm/.github/workflows/release.yml@refs/tags/v0.14.0`.
+/// Caller builds it from the manifest's expected version so each tagged
+/// release verifies against its own bound identity. Sigstore's
+/// `Identity` policy is exact-match only; there is no glob/regex
+/// option, which is by design — wildcarding the identity would be a
+/// trust regression.
+///
+/// `expected_issuer` is the OIDC issuer; for GitHub Actions keyless
+/// signing it's `https://token.actions.githubusercontent.com`.
+///
+/// On success returns the manifest parsed from the verified bytes —
+/// callers should never trust the manifest content before this returns
+/// `Ok`. On failure returns `SignatureInvalid` with a message suitable
+/// for surfacing to operators.
+///
+/// Compiled out when the `manifest-verify` Cargo feature is disabled;
+/// the no-feature variant returns `SignatureInvalid` unconditionally,
+/// preserving the fail-closed contract.
+#[cfg(feature = "manifest-verify")]
+pub fn verify_manifest(
+    manifest_bytes: &[u8],
+    cosign_bundle: &[u8],
+    expected_identity: &str,
+    expected_issuer: &str,
+) -> VerifyResult<SignedManifest> {
+    use sigstore::bundle::Bundle;
+    use sigstore::bundle::verify::{blocking::Verifier, policy::Identity};
+
+    let bundle: Bundle =
+        serde_json::from_slice(cosign_bundle).map_err(|e| VerifyError::SignatureInvalid {
+            reason: format!("cosign bundle parse failed: {e}"),
+        })?;
+
+    // `Verifier::production()` fetches Sigstore's public-good TUF root
+    // on first construction. The fetch is blocking and one-shot per
+    // process; subsequent calls reuse the in-memory trust state. A
+    // network-down host on first run will surface as SignatureInvalid
+    // with a clear "trust root init failed" reason.
+    let verifier = Verifier::production().map_err(|e| VerifyError::SignatureInvalid {
+        reason: format!("sigstore trust root init failed: {e}"),
+    })?;
+
+    let policy = Identity::new(expected_identity, expected_issuer);
+
+    // `offline = false` lets the verifier consult Rekor for the
+    // transparency log entry. Plan 36's "offline-bundle" path
+    // (`offline = true`) is reachable when the bundle already includes
+    // the inclusion proof inline — wire that into mvmd's reconciliation
+    // loop in plan 23 Phase 1, where re-querying Rekor on every pool
+    // verify is too expensive.
+    verifier
+        .verify(manifest_bytes, bundle, &policy, false)
+        .map_err(|e| VerifyError::SignatureInvalid {
+            reason: format!("manifest signature verification failed: {e}"),
+        })?;
+
+    parse_manifest(manifest_bytes)
+}
+
+/// No-feature fallback: refuse to accept any manifest as signed.
+///
+/// Builds without `manifest-verify` (e.g. `cargo install
+/// --no-default-features`) drop the heavy `sigstore` dependency tree
+/// in exchange for losing manifest verification. The fail-closed
+/// contract is preserved so a downstream caller can't accidentally
+/// accept unsigned manifests after a feature-flag flip.
+#[cfg(not(feature = "manifest-verify"))]
 pub fn verify_manifest(
     _manifest_bytes: &[u8],
     _cosign_bundle: &[u8],
     _expected_identity: &str,
+    _expected_issuer: &str,
 ) -> VerifyResult<SignedManifest> {
     Err(VerifyError::SignatureInvalid {
-        reason: "cosign verification not yet implemented (plan-36 PR-A.2 \
-                 wires up the sigstore Rust crate). Until then, refuse to \
-                 accept any manifest as signed."
+        reason: "manifest-verify feature is disabled in this build; rebuild \
+                 mvmctl with default features or set MVM_SKIP_COSIGN_VERIFY=1 \
+                 in an emergency rotation."
             .to_string(),
     })
 }
@@ -540,14 +607,28 @@ mod tests {
     }
 
     #[test]
-    fn verify_manifest_fails_closed_until_sigstore_lands() {
-        // PR-A intentionally fails-closed on the cosign step. Confirm the
-        // error variant is `SignatureInvalid` so a future implementation
-        // is a drop-in replacement and consumers don't need to retune
-        // their pattern-matching.
-        match verify_manifest(b"{}", b"bundle", "identity") {
+    fn verify_manifest_rejects_garbage_bundle() {
+        // Hand verify_manifest something that can't possibly be a
+        // sigstore bundle. The error must come back as SignatureInvalid
+        // (not Parse — Parse is reserved for the manifest-JSON parse
+        // step that runs *after* signature verification). The exact
+        // reason wording differs between feature-on (sigstore parse
+        // error) and feature-off (feature-disabled), so we only assert
+        // the variant.
+        match verify_manifest(b"{}", b"not a bundle", "identity", "issuer") {
+            Err(VerifyError::SignatureInvalid { .. }) => {}
+            other => panic!("expected SignatureInvalid, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(feature = "manifest-verify"))]
+    #[test]
+    fn verify_manifest_no_feature_fails_closed() {
+        // Without the feature, every call must return SignatureInvalid
+        // with a wording that points the operator at how to recover.
+        match verify_manifest(b"{}", b"bundle", "id", "issuer") {
             Err(VerifyError::SignatureInvalid { reason }) => {
-                assert!(reason.contains("not yet implemented"));
+                assert!(reason.contains("manifest-verify feature is disabled"));
             }
             other => panic!("expected SignatureInvalid, got {other:?}"),
         }
