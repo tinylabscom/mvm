@@ -160,12 +160,18 @@ jobs:
         working-directory: crates/mvm-guest
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
+          # `cargo fuzz` requires nightly (-Z sanitizer flags). The
+          # repo-root `rust-toolchain.toml` pins stable, and rustup walks
+          # up from this `working-directory` so it would otherwise win.
+          # RUSTUP_TOOLCHAIN bypasses the toolchain-file lookup entirely.
+          RUSTUP_TOOLCHAIN: nightly
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
       - name: Fuzz AuthenticatedFrame
         working-directory: crates/mvm-guest
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly
         run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
 
       - name: Upload corpus on failure

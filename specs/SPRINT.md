@@ -260,6 +260,24 @@ W1 is shipped. W2–W6 are independent and can land in any order; W3
 - Multi-tenant guests. One guest = one workload.
 - TPM/SEV/hardware attestation. Out of scope for v1.
 - Hypervisor-level egress policy enforcement (beyond NAT/tap choice).
+  *Scoped for the next sprint as plan 32 / Proposal D —
+  [`plans/32-mcp-agent-adoption.md`](plans/32-mcp-agent-adoption.md).
+  Remains a non-goal for Sprint 42.*
+
+## Up next (Sprint 43 preview)
+
+[`plans/32-mcp-agent-adoption.md`](plans/32-mcp-agent-adoption.md) is
+the approved master plan for the next sprint:
+
+- **A** — `mvmctl mcp` server (single-tool MCP surface, ADR-003).
+- **A.2** — MCP session semantics (snapshot-resumed VMs).
+- **B** — `nix/images/examples/llm-agent/` showcase flake.
+- **C** — local-LLM-default flip for `mvmctl template init --prompt`.
+- **D** — hypervisor egress policy with domain-pinning (ADR-004).
+
+Cross-repo handoff for hosted MCP transport (HTTP/SSE) is documented
+in [`plans/33-hosted-mcp-transport.md`](plans/33-hosted-mcp-transport.md);
+implementation lives in mvmd, not this repo.
 
 ## Completed Sprints
 
