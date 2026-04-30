@@ -211,7 +211,7 @@ jobs:
       - name: Build default-microvm and assert verity output
         run: |
           set -euo pipefail
-          nix build "./nix/default-microvm#packages.x86_64-linux.default" \
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           out=$(head -1 /tmp/store-path.txt)
           for f in rootfs.ext4 rootfs.verity rootfs.roothash vmlinux; do
