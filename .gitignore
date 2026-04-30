@@ -9,3 +9,11 @@ nixos.qcow2
 .ash_history
 keys
 
+# Override the user's global gitignore for this specific path. The CLI
+# crate has a `build/` subdirectory that hosts the `mvmctl build`
+# subcommand (`build.rs` + `flake.rs` + `image.rs` + `template.rs`).
+# Many global gitignores blanket-ignore `build/`; the negation here
+# re-includes only this in-repo path.
+!crates/mvm-cli/src/commands/build/
+!crates/mvm-cli/src/commands/build/**
+

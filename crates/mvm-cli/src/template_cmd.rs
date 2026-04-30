@@ -548,11 +548,17 @@ fn llm_generation_config_from_env() -> Result<Option<LlmGenerationConfig>> {
         .to_ascii_lowercase();
 
     match provider.as_str() {
+        // auto: try local first (probe Ollama / llama.cpp on loopback),
+        // then fall through to OpenAI if a key is configured. The order
+        // flip lets users with a local model running get sane defaults
+        // without having to also set MVM_TEMPLATE_PROVIDER=local.
         "auto" => {
-            if let Some(config) = openai_generation_config_from_env() {
+            if let Some(config) = local_generation_config_with_probe() {
+                Ok(Some(config))
+            } else if let Some(config) = openai_generation_config_from_env() {
                 Ok(Some(config))
             } else {
-                Ok(local_generation_config_from_env())
+                Ok(None)
             }
         }
         "openai" => Ok(Some(openai_generation_config_from_env().context(
@@ -601,6 +607,70 @@ fn local_generation_config_from_env() -> Option<LlmGenerationConfig> {
         base_url,
         model,
     })
+}
+
+/// Default loopback targets probed for an OpenAI-compatible local endpoint
+/// when neither `MVM_TEMPLATE_LOCAL_BASE_URL` nor `LOCALAI_BASE_URL` is set.
+const DEFAULT_LOCAL_PROBE_TARGETS: &[&str] = &["http://127.0.0.1:11434", "http://127.0.0.1:8080"];
+
+/// Try to discover a running local OpenAI-compatible endpoint on loopback.
+///
+/// Returns a [`LlmGenerationConfig`] when one of the probe targets responds
+/// to `GET /v1/models` within ~200ms; otherwise `None`. The escape hatch
+/// `MVM_TEMPLATE_NO_LOCAL_PROBE=1` skips the probe entirely (used in CI
+/// or sandboxed environments where loopback connects can hang).
+fn local_generation_config_with_probe() -> Option<LlmGenerationConfig> {
+    if let Some(config) = local_generation_config_from_env() {
+        return Some(config);
+    }
+    if std::env::var_os("MVM_TEMPLATE_NO_LOCAL_PROBE").is_some() {
+        return None;
+    }
+    let base_url = probe_local_openai_endpoint()?;
+    let model = std::env::var("MVM_TEMPLATE_LOCAL_MODEL")
+        .ok()
+        .or_else(|| std::env::var("LOCALAI_MODEL").ok())
+        .unwrap_or_else(|| "qwen2.5-coder-7b-instruct".to_string());
+    let api_key = std::env::var("MVM_TEMPLATE_LOCAL_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("LOCALAI_API_KEY").ok());
+    Some(LlmGenerationConfig {
+        provider: LlmProvider::Local,
+        api_key,
+        base_url,
+        model,
+    })
+}
+
+/// Probe each candidate base URL for an OpenAI-compatible `/v1/models`
+/// endpoint. Returns the first one that responds with 2xx within 200ms.
+fn probe_local_openai_endpoint() -> Option<String> {
+    let targets_env = std::env::var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS").ok();
+    let owned: Vec<String> = match targets_env.as_deref() {
+        Some(s) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        None => DEFAULT_LOCAL_PROBE_TARGETS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .build()
+        .ok()?;
+    for base in owned {
+        let endpoint = format!("{}/v1/models", base.trim_end_matches('/'));
+        if let Ok(resp) = client.get(&endpoint).send()
+            && resp.status().is_success()
+        {
+            return Some(base);
+        }
+    }
+    None
 }
 
 fn generate_spec_with_llm(

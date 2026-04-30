@@ -160,12 +160,18 @@ jobs:
         working-directory: crates/mvm-guest
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
+          # `cargo fuzz` requires nightly (-Z sanitizer flags). The
+          # repo-root `rust-toolchain.toml` pins stable, and rustup walks
+          # up from this `working-directory` so it would otherwise win.
+          # RUSTUP_TOOLCHAIN bypasses the toolchain-file lookup entirely.
+          RUSTUP_TOOLCHAIN: nightly
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
       - name: Fuzz AuthenticatedFrame
         working-directory: crates/mvm-guest
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly
         run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
 
       - name: Upload corpus on failure
@@ -211,7 +217,7 @@ jobs:
       - name: Build default-microvm and assert verity output
         run: |
           set -euo pipefail
-          nix build "./nix/default-microvm#packages.x86_64-linux.default" \
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           out=$(head -1 /tmp/store-path.txt)
           for f in rootfs.ext4 rootfs.verity rootfs.roothash vmlinux; do
