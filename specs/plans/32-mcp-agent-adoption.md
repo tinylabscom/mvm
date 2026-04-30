@@ -437,12 +437,34 @@ D is independent of A, B, C but most useful *with* B (gives the
 
 # Proposal A.2 — MCP session semantics (mvm follow-up to A)
 
-**Status (schema-ready):** wire schema is in place — `RunParams` now
-carries both `session: Option<String>` and `close: Option<bool>`, and
-the `tools/list` JSON Schema documents both fields. v1 server still
-ignores them (clients may set them without error). Server-side
-session map + reaper thread + `run_in_existing` exec path remain
-deferred to a later branch.
+**Status (v1 shipped — bookkeeping; v2 deferred — warm-VM materialisation):**
+
+v1 (shipped on `feat/mcp-session-semantics`):
+- Wire schema in `mvm_mcp::tools` accepts `session: Option<String>`
+  and `close: Option<bool>` with full JSON-Schema descriptions.
+- `mvm_mcp::session` ships a protocol-only `SessionMap` + `Reaper`
+  trait + `SessionConfig` (idle / max from `MVM_MCP_SESSION_IDLE` /
+  `MVM_MCP_SESSION_MAX`). Pure unit tests cover create / touch /
+  idle-reap / max-lifetime / close / drain transitions.
+- `ExecDispatcher` (mvm-cli) holds the map, spawns a 30 s-tick
+  reaper thread at startup, drains on `Drop` (clean shutdown),
+  and emits `LocalAuditKind::McpSessionStarted` /
+  `McpSessionClosed` events with the close reason (`idle` /
+  `max_lifetime` / `closed` / `shutdown`).
+
+v2 (deferred):
+- The map's `vm_name: Option<String>` is always `None` in v1
+  because `crate::exec::run_captured` is still cold-boot per call.
+  v2 will refactor exec.rs to expose
+  `boot_session_vm` / `dispatch_in_session` / `tear_down_session`
+  primitives, set `vm_name = Some(...)` on first boot, and skip
+  the cold-boot path on subsequent calls in the same session. The
+  `ExecDispatcher` already holds the map under
+  `Arc<Mutex<SessionMap>>` so v2 plugs in without touching the
+  wire types or the `Reaper` trait.
+- `// TODO(A.2 v2)` markers in
+  `crates/mvm-cli/src/commands/ops/mcp.rs` flag the exact lines
+  that change.
 
 ## Why
 

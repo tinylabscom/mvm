@@ -54,6 +54,12 @@ pub enum LocalAuditKind {
     /// `tools/call run` failed before completing (orchestration error,
     /// not a non-zero guest exit code).
     McpToolsCallRunError,
+    /// MCP session opened — first call with a previously-unseen
+    /// `session=ID` parameter (plan 32 / Proposal A.2).
+    McpSessionStarted,
+    /// MCP session closed by the client (`close: true`) or reaped
+    /// by the server (idle / max-lifetime / shutdown drain).
+    McpSessionClosed,
 }
 
 /// A single local audit log entry.

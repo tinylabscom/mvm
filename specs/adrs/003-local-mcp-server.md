@@ -98,10 +98,17 @@ Surfaces specific to this ADR:
    cross-repo handoff. mvm owns the protocol; mvmd owns
    tenant-aware HTTP/SSE transport, auth, rate limits.
 
-6. **Session semantics deferred to A.2.** The `session` parameter
-   exists in the v1 schema but is ignored — clients can adopt the
-   field ahead of the server. The implementation (snapshot-resumed
-   warm VMs) is in plan 32 / Proposal A.2.
+6. **Session semantics split into A.2 v1 (bookkeeping, shipped) +
+   v2 (warm VMs, deferred).** v1 ships a `SessionMap` + `Reaper`
+   trait + reaper thread + idle/max/close/shutdown audit events,
+   so client correlation and policy enforcement work today. v2
+   adds the actual warm-VM materialisation (snapshot-resumed VMs
+   that persist across calls); the v1 map's `vm_name: Option<…>`
+   is the integration point. v2 requires an exec.rs refactor that
+   's risky to land without live-KVM integration tests, so it
+   stages on a separate branch. `// TODO(A.2 v2)` markers in
+   `commands/ops/mcp.rs` and the plan-32 status block document the
+   exact lines that change.
 
 ## Consequences
 

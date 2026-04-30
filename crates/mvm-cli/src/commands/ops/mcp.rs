@@ -14,12 +14,17 @@
 //! useful when pointed at dev VMs, harmless when pointed at prod ones.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_core::user_config::MvmConfig;
-use mvm_mcp::{ContentBlock, Dispatcher, RunParams, ToolResult};
+use mvm_mcp::{
+    ContentBlock, Dispatcher, ReapReason, Reaper, RunParams, SessionConfig, SessionLookup,
+    SessionMap, SessionState, ToolResult,
+};
 
 use super::Cli;
 
@@ -43,6 +48,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         McpTransport::Stdio => {
             mvm_mcp::init_stderr_tracing();
             let dispatcher = ExecDispatcher::default();
+            // Spawn the session reaper. Drops out when the process exits;
+            // sessions still in the map at shutdown get drained by the
+            // dispatcher's Drop impl (RAII via Arc<Mutex<SessionMap>>
+            // + the Drop on ExecDispatcher).
+            dispatcher.spawn_reaper();
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             mvm_mcp::run_with_dispatcher(stdin.lock(), &mut stdout.lock(), &dispatcher)
@@ -80,11 +90,27 @@ const DEFAULT_MEM_CEILING_MIB: u32 = 4096;
 const DEFAULT_VM_CPUS: u32 = 2;
 const DEFAULT_VM_MEM_MIB: u32 = 1024;
 
+/// How often the reaper sweeps the session map. Smaller intervals
+/// reap closer to the configured idle/max boundary at the cost of
+/// extra wake-ups; the default is generous because session timeouts
+/// are measured in minutes-to-hours.
+const REAPER_TICK_SECS: u64 = 30;
+
 /// Concrete dispatcher backed by [`crate::exec::run_captured`].
+///
+/// Holds the MCP session map (plan 32 / Proposal A.2). v1 ships the
+/// bookkeeping/correlation tier — sessions show up in audit logs and
+/// the reaper trims stale entries — but warm-VM materialisation is
+/// staged for A.2 v2 alongside the exec.rs refactor (see
+/// `TODO(A.2 v2)` markers below). Today every `tools/call run` still
+/// cold-boots its own VM; the session map is the wire-compatible
+/// foundation the v2 work composes against.
 struct ExecDispatcher {
     inflight: AtomicUsize,
     max_inflight: usize,
     mem_ceiling_mib: u32,
+    sessions: Arc<Mutex<SessionMap>>,
+    reaper: Arc<DispatcherReaper>,
 }
 
 impl Default for ExecDispatcher {
@@ -93,7 +119,79 @@ impl Default for ExecDispatcher {
             inflight: AtomicUsize::new(0),
             max_inflight: parse_env_usize("MVM_MCP_MAX_INFLIGHT", DEFAULT_MAX_INFLIGHT),
             mem_ceiling_mib: parse_env_u32("MVM_MCP_MEM_CEILING_MIB", DEFAULT_MEM_CEILING_MIB),
+            sessions: Arc::new(Mutex::new(SessionMap::new(SessionConfig::from_env()))),
+            reaper: Arc::new(DispatcherReaper),
         }
+    }
+}
+
+impl ExecDispatcher {
+    /// Start a background thread that sweeps the session map every
+    /// [`REAPER_TICK_SECS`]. Idempotent — safe to call once at
+    /// startup. The thread is detached: it dies with the process.
+    fn spawn_reaper(&self) {
+        let sessions = Arc::clone(&self.sessions);
+        let reaper = Arc::clone(&self.reaper);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(REAPER_TICK_SECS));
+                let n = match sessions.lock() {
+                    Ok(mut map) => map.reap_expired(reaper.as_ref()),
+                    Err(_) => return, // poisoned mutex = process is unwinding
+                };
+                if n > 0 {
+                    tracing::debug!(reaped = n, "MCP session reaper swept");
+                }
+            }
+        });
+    }
+}
+
+/// On Drop, drain the session map and audit-log every remaining
+/// session as `Shutdown`. Kicks in when the stdio loop exits cleanly.
+impl Drop for ExecDispatcher {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.sessions.lock() {
+            let n = map.drain(self.reaper.as_ref());
+            if n > 0 {
+                tracing::info!(drained = n, "MCP server shutdown drained sessions");
+            }
+        }
+    }
+}
+
+/// Reaper impl that turns map evictions into audit-log events. The
+/// trait-based design (per `mvm_mcp::session`) means mvmd's hosted
+/// variant can plug in its own reaper that also kills the per-tenant
+/// VMs without changing the map contract.
+struct DispatcherReaper;
+
+impl Reaper for DispatcherReaper {
+    fn on_reap(&self, session_id: &str, state: &SessionState, reason: ReapReason) {
+        let detail = serde_json::json!({
+            "session": session_id,
+            "env": state.env,
+            "reason": reason_str(reason),
+            "vm_name": state.vm_name,
+            "lifetime_secs": state.started_at.elapsed().as_secs(),
+        })
+        .to_string();
+        mvm_core::policy::audit::emit(
+            mvm_core::policy::audit::LocalAuditKind::McpSessionClosed,
+            state.vm_name.as_deref(),
+            Some(&detail),
+        );
+        // TODO(A.2 v2): when v2 materialises warm VMs, this is where
+        // the actual `backend.stop(VmId(state.vm_name))` call lands.
+    }
+}
+
+fn reason_str(r: ReapReason) -> &'static str {
+    match r {
+        ReapReason::Idle => "idle",
+        ReapReason::MaxLifetime => "max_lifetime",
+        ReapReason::Closed => "closed",
+        ReapReason::Shutdown => "shutdown",
     }
 }
 
@@ -113,6 +211,32 @@ impl Dispatcher for ExecDispatcher {
         // Validate env against the local template registry.
         if let Err(e) = validate_env(&params.env) {
             return error_result(format!("{e}"));
+        }
+
+        // Session bookkeeping (A.2 v1). Touch the map before the
+        // exec so audit logs see "session started" before "tools/call
+        // ran". v1 doesn't materialise a warm VM — the cold-boot path
+        // below is taken regardless of session state.
+        // TODO(A.2 v2): when warm VMs land, look the VM up here and
+        // skip the cold-boot path when present.
+        if let Some(session_id) = params.session.as_deref() {
+            let lookup = self
+                .sessions
+                .lock()
+                .map(|mut map| map.touch_or_insert(session_id, &params.env, None))
+                .unwrap_or(SessionLookup::Created);
+            if matches!(lookup, SessionLookup::Created) {
+                let detail = serde_json::json!({
+                    "session": session_id,
+                    "env": params.env,
+                })
+                .to_string();
+                mvm_core::policy::audit::emit(
+                    mvm_core::policy::audit::LocalAuditKind::McpSessionStarted,
+                    Some(&params.env),
+                    Some(&detail),
+                );
+            }
         }
 
         // Memory ceiling check: reject envs whose recorded mem_mib
@@ -147,6 +271,15 @@ impl Dispatcher for ExecDispatcher {
         let started = std::time::Instant::now();
         let result = crate::exec::run_captured(req);
         let elapsed = started.elapsed();
+
+        // After the dispatch completes (regardless of success), honour
+        // an explicit close request so the reaper has nothing left to
+        // do for this session.
+        if let (Some(session_id), Some(true)) = (params.session.as_deref(), params.close)
+            && let Ok(mut map) = self.sessions.lock()
+        {
+            map.remove(session_id, ReapReason::Closed, self.reaper.as_ref());
+        }
 
         match result {
             Ok(out) => {

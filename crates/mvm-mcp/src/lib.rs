@@ -26,12 +26,17 @@
 
 pub mod dispatcher;
 pub mod protocol;
+pub mod session;
 pub mod tools;
 
 pub use dispatcher::Dispatcher;
 pub use protocol::{
     ContentBlock, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION, SERVER_NAME,
     SERVER_VERSION, ToolResult,
+};
+pub use session::{
+    DEFAULT_IDLE_SECS, DEFAULT_MAX_SECS, ReapReason, Reaper, SessionConfig, SessionLookup,
+    SessionMap, SessionState,
 };
 pub use tools::{RunParams, ToolSchema, all_tools, run_input_schema};
 
