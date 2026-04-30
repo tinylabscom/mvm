@@ -161,21 +161,34 @@ existing CLI behavior); when true, return captured bytes in
 `ExecResult { exit_code, stdout, stderr }`. The CLI path keeps streaming;
 the MCP path captures. ~30 LoC change.
 
-## CI gate
+## CI gate (✅ shipped on `feat/mcp-server-smoke`)
 
-Add a CI job `mcp-server-smoke` to `.github/workflows/ci.yml`:
+The `mcp-server-smoke` job in `.github/workflows/ci.yml` runs
+`scripts/test-mcp-roundtrip.sh`, which spawns `mvmctl mcp stdio` as
+a child process and asserts five things in one real JSON-RPC
+roundtrip:
 
-```yaml
-mcp-server-smoke:
-  runs-on: ubuntu-latest
-  steps:
-    - checkout / install Rust
-    - cargo build -p mvm-mcp --release
-    - cargo test -p mvm-mcp                    # protocol_smoke + budget
-    - run scripts/test-mcp-roundtrip.sh        # spawns mvmctl mcp, sends real JSON-RPC
-```
+1. `initialize` returns the pinned protocol version + serverInfo
+   (`name=mvm`) + `capabilities.tools.listChanged=false`.
+2. `tools/list` returns exactly one tool named `run` with the
+   expected schema fields (`env`, `code`, `session`, `close`,
+   `timeout_secs`).
+3. `tools/call run` against an unregistered env returns a
+   structured `ToolResult { is_error: true }` whose text mentions
+   the rejected env name — *not* a JSON-RPC error frame (LLM
+   clients tend to retry those).
+4. Every line on stdout parses as JSON (the stdout-only-JSON-RPC
+   discipline contract from cross-cutting "A: stdout-only").
+5. Under `RUST_LOG=trace`, the sentinel `mvm-mcp stdio loop ready`
+   info line lands on stderr — verifying that
+   `init_stderr_tracing` is wired AND that
+   `commands/mod.rs::run` correctly skips the parent
+   `logging::init` for the `mcp` subcommand. Without that skip,
+   the parent's stdout-writing subscriber would corrupt JSON-RPC
+   framing on any tracing event.
 
-The roundtrip script is shell + `jq`, no Node/Python deps.
+The roundtrip script is shell + `jq`, no Node/Python deps. CI
+installs jq via apt; locally `brew install jq`.
 
 ## Verification
 

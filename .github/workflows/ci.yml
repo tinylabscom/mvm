@@ -237,3 +237,28 @@ jobs:
 
       - name: Build prod agent and check for do_exec
         run: ./scripts/check-prod-agent-no-exec.sh
+
+  mcp-server-smoke:
+    name: MCP server stdio roundtrip (plan 32 / Proposal A)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install jq (for JSON-RPC response parsing)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mcp-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-mcp-smoke-
+
+      - name: Build mvmctl + run MCP roundtrip smoke
+        run: ./scripts/test-mcp-roundtrip.sh

@@ -36,6 +36,16 @@ pub fn run_with_dispatcher<R: BufRead, W: Write, D: Dispatcher>(
     writer: &mut W,
     dispatcher: &D,
 ) -> Result<()> {
+    // Sentinel log line — proves the stderr-only tracing subscriber
+    // is wired before the dispatch loop opens, and gives the
+    // mcp-server-smoke CI gate a known string to grep for. Stays at
+    // info so default `RUST_LOG=mvm=info` includes it.
+    tracing::info!(
+        protocol_version = PROTOCOL_VERSION,
+        server = SERVER_NAME,
+        version = SERVER_VERSION,
+        "mvm-mcp stdio loop ready"
+    );
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,

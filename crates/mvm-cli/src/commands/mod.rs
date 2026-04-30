@@ -140,7 +140,14 @@ pub fn run() -> Result<()> {
     let verbose = cli.verbose || std::env::var_os("RUST_LOG").is_some();
     mvm_runtime::ui::set_verbose(verbose);
 
-    // Initialize logging
+    // Initialize logging.
+    //
+    // The MCP stdio subcommand needs *exclusive* control of stdout so
+    // JSON-RPC framing isn't corrupted by stray log lines (cross-cutting
+    // "A: stdout-only-JSON-RPC discipline" — plan 32 §"Cross-cutting
+    // considerations"). Skip the default `logging::init` (which installs
+    // a stdout-writing subscriber) for `mvmctl mcp` and let
+    // `mvm_mcp::init_stderr_tracing` install its own stderr-only one.
     let log_format = match cli.log_format.as_deref() {
         Some("json") => LogFormat::Json,
         Some("human") => LogFormat::Human,
@@ -153,7 +160,9 @@ pub fn run() -> Result<()> {
         }
         None => LogFormat::Human,
     };
-    logging::init(log_format);
+    if !matches!(cli.command, Commands::Mcp(_)) {
+        logging::init(log_format);
+    }
 
     // Install Ctrl-C / SIGTERM handler for graceful shutdown.
     let pids = Arc::clone(&CHILD_PIDS);
