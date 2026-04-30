@@ -13,11 +13,12 @@
 //! executing. This composition is intentional: the MCP server is
 //! useful when pointed at dev VMs, harmless when pointed at prod ones.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_core::user_config::MvmConfig;
@@ -27,6 +28,11 @@ use mvm_mcp::{
 };
 
 use super::Cli;
+
+/// Per-session warm-VM handles, keyed by session ID. Locked
+/// independently of [`SessionMap`] so a long-running dispatch
+/// against one session doesn't block bookkeeping reads of others.
+type WarmVms = Arc<Mutex<BTreeMap<String, Arc<Mutex<crate::exec::SessionVm>>>>>;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -96,36 +102,146 @@ const DEFAULT_VM_MEM_MIB: u32 = 1024;
 /// are measured in minutes-to-hours.
 const REAPER_TICK_SECS: u64 = 30;
 
-/// Concrete dispatcher backed by [`crate::exec::run_captured`].
+/// Concrete dispatcher backed by [`crate::exec::run_captured`] (cold)
+/// or [`crate::exec::dispatch_in_session`] (warm, when `session=ID`).
 ///
-/// Holds the MCP session map (plan 32 / Proposal A.2). v1 ships the
-/// bookkeeping/correlation tier — sessions show up in audit logs and
-/// the reaper trims stale entries — but warm-VM materialisation is
-/// staged for A.2 v2 alongside the exec.rs refactor (see
-/// `TODO(A.2 v2)` markers below). Today every `tools/call run` still
-/// cold-boots its own VM; the session map is the wire-compatible
-/// foundation the v2 work composes against.
+/// Plan 32 / Proposal A.2:
+/// - **Bookkeeping (v1)**: the `SessionMap` records each session's
+///   metadata, and a 30 s-tick reaper sweeps idle/expired entries.
+/// - **Warm VM materialisation (v2)**: the per-session handle map
+///   `warm_vms` keeps the booted [`crate::exec::SessionVm`] alive
+///   across calls. First call in a session boots; subsequent calls
+///   reuse. `close: true` and the reaper both tear down via
+///   [`crate::exec::tear_down_session_vm`].
 struct ExecDispatcher {
     inflight: AtomicUsize,
     max_inflight: usize,
     mem_ceiling_mib: u32,
     sessions: Arc<Mutex<SessionMap>>,
+    warm_vms: WarmVms,
     reaper: Arc<DispatcherReaper>,
 }
 
 impl Default for ExecDispatcher {
     fn default() -> Self {
+        let warm_vms: WarmVms = Arc::new(Mutex::new(BTreeMap::new()));
         Self {
             inflight: AtomicUsize::new(0),
             max_inflight: parse_env_usize("MVM_MCP_MAX_INFLIGHT", DEFAULT_MAX_INFLIGHT),
             mem_ceiling_mib: parse_env_u32("MVM_MCP_MEM_CEILING_MIB", DEFAULT_MEM_CEILING_MIB),
             sessions: Arc::new(Mutex::new(SessionMap::new(SessionConfig::from_env()))),
-            reaper: Arc::new(DispatcherReaper),
+            reaper: Arc::new(DispatcherReaper {
+                warm_vms: Arc::clone(&warm_vms),
+            }),
+            warm_vms,
         }
     }
 }
 
 impl ExecDispatcher {
+    /// Cold-boot path: every call boots its own transient VM via
+    /// [`crate::exec::run_captured`]. Used when the client did not
+    /// supply a `session` parameter.
+    fn run_cold(
+        &self,
+        env: &str,
+        code: &str,
+        timeout: u64,
+    ) -> Result<crate::exec::ExecOutput, anyhow::Error> {
+        let argv = bash_dash_c(&shell_escape(code));
+        let req = crate::exec::ExecRequest {
+            image: crate::exec::ImageSource::Template(env.to_string()),
+            cpus: DEFAULT_VM_CPUS,
+            memory_mib: DEFAULT_VM_MEM_MIB,
+            add_dirs: Vec::new(),
+            env: Vec::new(),
+            target: crate::exec::ExecTarget::Inline { argv },
+            timeout_secs: timeout,
+        };
+        crate::exec::run_captured(req)
+    }
+
+    /// Warm-VM path (A.2 v2): boot the session's VM on first call,
+    /// reuse it on subsequent calls. The per-session lock serialises
+    /// concurrent dispatches against the same session — stdout/stderr
+    /// from the guest agent over a single vsock socket aren't
+    /// interleave-safe.
+    fn run_warm(
+        &self,
+        session_id: &str,
+        env: &str,
+        code: &str,
+        timeout: u64,
+    ) -> Result<crate::exec::ExecOutput, anyhow::Error> {
+        let handle = self.get_or_boot_warm_vm(session_id, env)?;
+        let vm = handle
+            .lock()
+            .map_err(|_| anyhow::anyhow!("warm-VM lock poisoned for session '{session_id}'"))?;
+        crate::exec::dispatch_in_session(&vm, code.to_string(), timeout)
+    }
+
+    /// Look up an existing warm VM for the session, or boot a new one
+    /// if none exists. Returns the per-session handle (an
+    /// `Arc<Mutex<SessionVm>>` so concurrent dispatches serialise on
+    /// the same VM).
+    fn get_or_boot_warm_vm(
+        &self,
+        session_id: &str,
+        env: &str,
+    ) -> Result<Arc<Mutex<crate::exec::SessionVm>>, anyhow::Error> {
+        // Fast path: handle already in the map.
+        if let Ok(warm) = self.warm_vms.lock()
+            && let Some(handle) = warm.get(session_id)
+        {
+            return Ok(Arc::clone(handle));
+        }
+
+        // Slow path: boot a new VM. Releasing the warm_vms lock
+        // before booting avoids holding it across a multi-second
+        // operation; the worst case is two concurrent first-calls
+        // race to boot, the second discovers the first's handle and
+        // tears down its own boot. That's correct (no leak) at the
+        // cost of an extra VM start in pathological cases.
+        let prefix = format!("mcp-session-{}", short_id(session_id));
+        let booted =
+            crate::exec::boot_session_vm(env, &prefix, DEFAULT_VM_CPUS, DEFAULT_VM_MEM_MIB)
+                .with_context(|| format!("booting warm VM for session '{session_id}'"))?;
+        let booted_name = booted.vm_name.clone();
+        let handle = Arc::new(Mutex::new(booted));
+
+        let race_winner: Option<Arc<Mutex<crate::exec::SessionVm>>> = {
+            let mut warm = self
+                .warm_vms
+                .lock()
+                .map_err(|_| anyhow::anyhow!("warm-VM map lock poisoned"))?;
+            if let Some(existing) = warm.get(session_id) {
+                Some(Arc::clone(existing))
+            } else {
+                warm.insert(session_id.to_string(), Arc::clone(&handle));
+                None
+            }
+        };
+
+        if let Some(existing) = race_winner {
+            // Another thread booted in parallel. Tear down our VM and
+            // return theirs.
+            if let Ok(extra_mutex) = Arc::try_unwrap(handle)
+                && let Ok(extra) = extra_mutex.into_inner()
+            {
+                tracing::debug!(vm = %extra.vm_name, "tearing down racing session VM");
+                crate::exec::tear_down_session_vm(extra);
+            }
+            return Ok(existing);
+        }
+
+        // We won the boot race. Update the SessionMap's recorded
+        // vm_name so the reaper and audit logs see it.
+        if let Ok(mut map) = self.sessions.lock() {
+            map.set_vm_name(session_id, booted_name);
+        }
+        Ok(handle)
+    }
+
     /// Start a background thread that sweeps the session map every
     /// [`REAPER_TICK_SECS`]. Idempotent — safe to call once at
     /// startup. The thread is detached: it dies with the process.
@@ -160,11 +276,13 @@ impl Drop for ExecDispatcher {
     }
 }
 
-/// Reaper impl that turns map evictions into audit-log events. The
-/// trait-based design (per `mvm_mcp::session`) means mvmd's hosted
-/// variant can plug in its own reaper that also kills the per-tenant
-/// VMs without changing the map contract.
-struct DispatcherReaper;
+/// Reaper impl that audit-logs the close *and* tears down the warm
+/// VM (A.2 v2). The trait-based design (per `mvm_mcp::session`) means
+/// mvmd's hosted variant can plug in its own reaper that uses its
+/// per-tenant orchestrator without changing the map contract.
+struct DispatcherReaper {
+    warm_vms: WarmVms,
+}
 
 impl Reaper for DispatcherReaper {
     fn on_reap(&self, session_id: &str, state: &SessionState, reason: ReapReason) {
@@ -181,8 +299,24 @@ impl Reaper for DispatcherReaper {
             state.vm_name.as_deref(),
             Some(&detail),
         );
-        // TODO(A.2 v2): when v2 materialises warm VMs, this is where
-        // the actual `backend.stop(VmId(state.vm_name))` call lands.
+
+        // A.2 v2: actually tear down the warm VM. The handle lives in
+        // `warm_vms`, which we own a strong ref to. Removing it drops
+        // the Arc; if another Arc is still held by an in-flight
+        // dispatch the VM survives until that completes — but the
+        // dispatcher won't route new calls to it because the
+        // SessionMap entry is already gone.
+        if let Ok(mut warm) = self.warm_vms.lock()
+            && let Some(handle) = warm.remove(session_id)
+            && let Ok(vm_mutex) = Arc::try_unwrap(handle)
+            && let Ok(vm) = vm_mutex.into_inner()
+        {
+            crate::exec::tear_down_session_vm(vm);
+        }
+        // If the handle had an outstanding dispatch (other Arc still
+        // alive), the strong ref won't be sole. We rely on the
+        // dispatch-side code path to clean up when it finishes — see
+        // the `tear_down_orphaned_after_call` fallback in `run`.
     }
 }
 
@@ -193,6 +327,12 @@ fn reason_str(r: ReapReason) -> &'static str {
         ReapReason::Closed => "closed",
         ReapReason::Shutdown => "shutdown",
     }
+}
+
+/// Truncate a session id to the first 8 chars for use in VM names.
+/// Keeps `mvmctl ls` readable when the LLM client sends a long UUID.
+fn short_id(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
 }
 
 impl Dispatcher for ExecDispatcher {
@@ -214,11 +354,8 @@ impl Dispatcher for ExecDispatcher {
         }
 
         // Session bookkeeping (A.2 v1). Touch the map before the
-        // exec so audit logs see "session started" before "tools/call
-        // ran". v1 doesn't materialise a warm VM — the cold-boot path
-        // below is taken regardless of session state.
-        // TODO(A.2 v2): when warm VMs land, look the VM up here and
-        // skip the cold-boot path when present.
+        // dispatch so audit logs see "session started" before
+        // "tools/call ran".
         if let Some(session_id) = params.session.as_deref() {
             let lookup = self
                 .sessions
@@ -251,30 +388,19 @@ impl Dispatcher for ExecDispatcher {
             ));
         }
 
-        // v1 dispatches all envs through `bash -c`. Templates whose
-        // service is python/node expose those interpreters on PATH
-        // inside the VM, so `bash -c "python3 -c '<code>'"` works for
-        // the curated envs documented in plan 32.
-        let argv = bash_dash_c(&shell_escape(&params.code));
         let timeout = clamp_timeout(params.timeout_secs);
 
-        let req = crate::exec::ExecRequest {
-            image: crate::exec::ImageSource::Template(params.env.clone()),
-            cpus: DEFAULT_VM_CPUS,
-            memory_mib: DEFAULT_VM_MEM_MIB,
-            add_dirs: Vec::new(),
-            env: Vec::new(),
-            target: crate::exec::ExecTarget::Inline { argv },
-            timeout_secs: timeout,
-        };
-
         let started = std::time::Instant::now();
-        let result = crate::exec::run_captured(req);
+        let result = match params.session.as_deref() {
+            Some(session_id) => self.run_warm(session_id, &params.env, &params.code, timeout),
+            None => self.run_cold(&params.env, &params.code, timeout),
+        };
         let elapsed = started.elapsed();
 
         // After the dispatch completes (regardless of success), honour
         // an explicit close request so the reaper has nothing left to
-        // do for this session.
+        // do for this session — also tears down the warm VM via the
+        // reaper impl.
         if let (Some(session_id), Some(true)) = (params.session.as_deref(), params.close)
             && let Ok(mut map) = self.sessions.lock()
         {

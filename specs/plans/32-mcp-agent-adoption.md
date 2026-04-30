@@ -450,34 +450,46 @@ D is independent of A, B, C but most useful *with* B (gives the
 
 # Proposal A.2 — MCP session semantics (mvm follow-up to A)
 
-**Status (v1 shipped — bookkeeping; v2 deferred — warm-VM materialisation):**
+**Status (v1 + v2 shipped):**
 
-v1 (shipped on `feat/mcp-session-semantics`):
+v1 — bookkeeping (shipped on `feat/mcp-session-semantics`):
 - Wire schema in `mvm_mcp::tools` accepts `session: Option<String>`
   and `close: Option<bool>` with full JSON-Schema descriptions.
 - `mvm_mcp::session` ships a protocol-only `SessionMap` + `Reaper`
   trait + `SessionConfig` (idle / max from `MVM_MCP_SESSION_IDLE` /
-  `MVM_MCP_SESSION_MAX`). Pure unit tests cover create / touch /
-  idle-reap / max-lifetime / close / drain transitions.
+  `MVM_MCP_SESSION_MAX`).
 - `ExecDispatcher` (mvm-cli) holds the map, spawns a 30 s-tick
   reaper thread at startup, drains on `Drop` (clean shutdown),
   and emits `LocalAuditKind::McpSessionStarted` /
   `McpSessionClosed` events with the close reason (`idle` /
   `max_lifetime` / `closed` / `shutdown`).
 
-v2 (deferred):
-- The map's `vm_name: Option<String>` is always `None` in v1
-  because `crate::exec::run_captured` is still cold-boot per call.
-  v2 will refactor exec.rs to expose
-  `boot_session_vm` / `dispatch_in_session` / `tear_down_session`
-  primitives, set `vm_name = Some(...)` on first boot, and skip
-  the cold-boot path on subsequent calls in the same session. The
-  `ExecDispatcher` already holds the map under
-  `Arc<Mutex<SessionMap>>` so v2 plugs in without touching the
-  wire types or the `Reaper` trait.
-- `// TODO(A.2 v2)` markers in
-  `crates/mvm-cli/src/commands/ops/mcp.rs` flag the exact lines
-  that change.
+v2 — warm-VM materialisation (shipped on `feat/mcp-session-warm-vm`):
+- `crate::exec::{boot_session_vm, dispatch_in_session,
+  tear_down_session_vm}` + `pub struct SessionVm` factor the
+  cold-boot path's primitives out without touching `run_captured`.
+- `SessionMap::set_vm_name` records the booted VM name on the
+  session entry so the reaper sees it.
+- `ExecDispatcher` gains `warm_vms: Arc<Mutex<BTreeMap<SessionId,
+  Arc<Mutex<SessionVm>>>>>` — first call in a session boots, sets
+  the name, subsequent calls reuse the same VM via
+  `dispatch_in_session`. Per-session `Mutex` serialises concurrent
+  dispatches against the same VM (vsock socket isn't interleave-
+  safe). Boot-race handling tears down the loser.
+- `DispatcherReaper` now actually tears the VM down via
+  `tear_down_session_vm` on idle / max-lifetime / closed /
+  shutdown — the audit-log event still fires, but now with a
+  real backend.stop behind it.
+- Snapshot-resume reused for warm-VM boot when the template has
+  one; cold-boot fallback on snapshot failures (matches the
+  existing `restore_via_snapshot` behaviour from `run_inner`).
+- VM names are `mcp-session-<short-id>-<nanos>` so `mvmctl ls`
+  shows which session a VM belongs to.
+
+Live integration testing (cold-boot vs warm-VM latency, snapshot
+resume against `claude-code-vm`) is deferred to the next live-KVM
+smoke session — pure-unit tests can't cover boot/dispatch/teardown
+without an actual hypervisor.
 
 ## Why
 

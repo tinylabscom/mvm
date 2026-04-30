@@ -188,6 +188,21 @@ impl SessionMap {
         self.sessions.get(session_id)
     }
 
+    /// Record the warm-VM name on an existing session. Used by A.2 v2
+    /// after `boot_session_vm` succeeds, so the reaper has something
+    /// to tear down. No-op if the session is unknown (the VM was
+    /// reaped between insert and this call — caller should tear down
+    /// the orphaned VM themselves).
+    pub fn set_vm_name(&mut self, session_id: &str, vm_name: String) -> bool {
+        match self.sessions.get_mut(session_id) {
+            Some(state) => {
+                state.vm_name = Some(vm_name);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove a session by id, calling the reaper with the given
     /// reason. Used for explicit `close: true` and shutdown drain.
     pub fn remove(&mut self, session_id: &str, reason: ReapReason, reaper: &dyn Reaper) -> bool {
@@ -388,6 +403,26 @@ mod tests {
         map.touch_or_insert("s1", "shell", Some("mcp-session-s1".to_string()));
         let state = map.get("s1").unwrap();
         assert_eq!(state.vm_name.as_deref(), Some("mcp-session-s1"));
+    }
+
+    #[test]
+    fn set_vm_name_records_after_boot() {
+        // A.2 v2: dispatcher inserts on first call (vm_name=None),
+        // then sets the name once boot_session_vm returns.
+        let mut map = SessionMap::new(cfg(300, 3600));
+        map.touch_or_insert("s1", "shell", None);
+        assert!(map.get("s1").unwrap().vm_name.is_none());
+        assert!(map.set_vm_name("s1", "mcp-session-s1-deadbeef".to_string()));
+        assert_eq!(
+            map.get("s1").unwrap().vm_name.as_deref(),
+            Some("mcp-session-s1-deadbeef")
+        );
+    }
+
+    #[test]
+    fn set_vm_name_returns_false_for_unknown_session() {
+        let mut map = SessionMap::new(cfg(300, 3600));
+        assert!(!map.set_vm_name("ghost", "mcp-ghost".to_string()));
     }
 
     #[test]

@@ -732,6 +732,158 @@ fn run_in_guest(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Warm-VM session primitives (plan 32 / Proposal A.2 v2)
+// ---------------------------------------------------------------------------
+//
+// `mvmctl exec` and `mvmctl mcp tools/call run` (cold) both go through
+// `run_inner` above — boot, run, tear down. The MCP `session=ID` path
+// (A.2) needs to keep the VM alive across many calls. The three
+// primitives below split that lifecycle apart so the dispatcher can:
+//
+//   1. boot once   → SessionVm handle
+//   2. dispatch N  → ExecOutput per call
+//   3. tear down   → on idle / max / close / shutdown
+//
+// They deliberately NOT support `--add-dir` (volumes, rsync-back,
+// staging dirs) — session VMs are meant for inference workloads
+// against a clean closure, not interactive file mounts. If a future
+// session use case needs writable mounts, that's a separate plan.
+
+/// Handle to a long-running session microVM.
+///
+/// Owns nothing beyond the VM name; backend selection is repeated at
+/// teardown so the handle stays trivially `Send + Sync`.
+pub struct SessionVm {
+    pub vm_name: String,
+}
+
+/// Boot a session microVM from a registered template. Snapshot-resume
+/// is taken when the template has one and the backend supports it
+/// (matches the eligibility rule in [`snapshot_eligible`] for the
+/// no-`--add-dir` case).
+///
+/// `vm_name_prefix` becomes the human-readable part of the VM name —
+/// callers typically pass `"mcp-session-<short-id>"` so `mvmctl ls`
+/// shows which MCP session a VM belongs to.
+pub fn boot_session_vm(
+    env: &str,
+    vm_name_prefix: &str,
+    cpus: u32,
+    memory_mib: u32,
+) -> Result<SessionVm> {
+    let (spec, vmlinux, initrd, rootfs, rev) =
+        mvm_runtime::vm::template::lifecycle::template_artifacts(env)
+            .with_context(|| format!("Loading template '{env}'"))?;
+    let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info(env)
+        .ok()
+        .flatten();
+
+    let backend = AnyBackend::auto_select();
+    // Append the same nanosecond suffix transient_vm_name uses so
+    // concurrent boots in the same session don't collide.
+    let vm_name = format!("{}-{}", vm_name_prefix, transient_vm_name());
+
+    let (verity_path, roothash) = mvm_runtime::vm::microvm::probe_verity_sidecar(&rootfs);
+
+    let start_config = VmStartConfig {
+        name: vm_name.clone(),
+        rootfs_path: rootfs.clone(),
+        kernel_path: Some(vmlinux),
+        initrd_path: initrd,
+        verity_path,
+        roothash,
+        revision_hash: rev,
+        flake_ref: spec.flake_ref,
+        profile: Some(spec.profile),
+        cpus,
+        memory_mib,
+        ports: vec![],
+        volumes: vec![],
+        config_files: vec![],
+        secret_files: vec![],
+        runner_dir: None,
+    };
+
+    let use_snapshot = snap_info.is_some() && backend.capabilities().snapshots;
+    let booted = if use_snapshot {
+        let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
+        match restore_via_snapshot(&vm_name, env, snap, &start_config) {
+            Ok(()) => true,
+            Err(e) => {
+                ui::warn(&format!(
+                    "Session VM snapshot restore failed: {e}; cold-booting."
+                ));
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !booted {
+        ui::info(&format!(
+            "Booting session VM '{vm_name}' for env '{env}'..."
+        ));
+        backend
+            .start(&start_config)
+            .with_context(|| format!("starting session microVM '{vm_name}'"))?;
+    }
+
+    Ok(SessionVm { vm_name })
+}
+
+/// Dispatch a single command into an already-booted session VM,
+/// capturing stdout/stderr. Equivalent to the dispatch step of
+/// [`run_captured`] without any boot/teardown.
+pub fn dispatch_in_session(vm: &SessionVm, code: String, timeout_secs: u64) -> Result<ExecOutput> {
+    if !wait_for_agent(&vm.vm_name, 30) {
+        anyhow::bail!("guest agent did not become reachable within 30s");
+    }
+    // Reuse build_guest_wrapper by constructing a minimal ExecRequest
+    // with no add_dirs (sessions don't take --add-dir). The wrapper
+    // emits `set -e\n<env exports>\n<argv>\n`.
+    let req = ExecRequest {
+        image: ImageSource::Template(String::new()),
+        cpus: 0,
+        memory_mib: 0,
+        add_dirs: vec![],
+        env: vec![],
+        target: ExecTarget::Inline {
+            argv: vec!["bash".to_string(), "-c".to_string(), code],
+        },
+        timeout_secs,
+    };
+    let wrapper = build_guest_wrapper(&req, &[]);
+    let resp = send_request(&vm.vm_name, &wrapper, timeout_secs)?;
+    match resp {
+        mvm_guest::vsock::GuestResponse::ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+        } => Ok(ExecOutput {
+            exit_code,
+            stdout,
+            stderr,
+        }),
+        mvm_guest::vsock::GuestResponse::Error { message } => {
+            anyhow::bail!("guest exec error: {message}")
+        }
+        other => anyhow::bail!("unexpected guest response: {other:?}"),
+    }
+}
+
+/// Tear down a session VM. Best-effort — failures (already-stopped,
+/// backend mismatch) are logged via `tracing::warn!` rather than
+/// propagated, since the reaper calls this from a background thread
+/// where there's nobody to receive an error.
+pub fn tear_down_session_vm(vm: SessionVm) {
+    let backend = AnyBackend::auto_select();
+    if let Err(e) = backend.stop(&VmId(vm.vm_name.clone())) {
+        tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
+    }
+}
+
 fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {

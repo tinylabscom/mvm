@@ -98,17 +98,17 @@ Surfaces specific to this ADR:
    cross-repo handoff. mvm owns the protocol; mvmd owns
    tenant-aware HTTP/SSE transport, auth, rate limits.
 
-6. **Session semantics split into A.2 v1 (bookkeeping, shipped) +
-   v2 (warm VMs, deferred).** v1 ships a `SessionMap` + `Reaper`
-   trait + reaper thread + idle/max/close/shutdown audit events,
-   so client correlation and policy enforcement work today. v2
-   adds the actual warm-VM materialisation (snapshot-resumed VMs
-   that persist across calls); the v1 map's `vm_name: Option<…>`
-   is the integration point. v2 requires an exec.rs refactor that
-   's risky to land without live-KVM integration tests, so it
-   stages on a separate branch. `// TODO(A.2 v2)` markers in
-   `commands/ops/mcp.rs` and the plan-32 status block document the
-   exact lines that change.
+6. **Session semantics shipped in two stages.** A.2 v1 added the
+   `SessionMap` + `Reaper` trait + reaper thread + idle/max/close/
+   shutdown audit events (bookkeeping). A.2 v2 added warm-VM
+   materialisation via `crate::exec::{boot_session_vm,
+   dispatch_in_session, tear_down_session_vm}` + a per-session
+   `Arc<Mutex<SessionVm>>` map on the dispatcher that boots once and
+   reuses on subsequent calls. The `Reaper` impl now tears VMs down
+   on expiry rather than just audit-logging. Snapshot-resume is
+   reused from `run_captured`'s cold-boot path. Per-session lock
+   serialises concurrent dispatches against the same VM (vsock
+   socket isn't interleave-safe).
 
 ## Consequences
 
