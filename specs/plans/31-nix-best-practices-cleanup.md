@@ -512,24 +512,30 @@ After the audit, several originally-deferred items belong in this work because t
 
 Each gets a header comment listing what host state it changes and why elevated privileges are required (per the guide's "explicit reviewed files" requirement). Phase 5 becomes a small follow-up rather than a deferred separate effort.
 
-## Items deferred — needs your decision
+## Items deferred — resolved 2026-04-30
 
-### `mvmctl` host mutation (network.rs / TAP+bridge+iptables)
+### `mvmctl` host mutation (network.rs / TAP+bridge+iptables) — **resolved: lenient reading**
 
-This is the most consequential gap I haven't already folded in. `mvmctl dev up` and `mvmctl run` invoke `crates/mvm-runtime/src/vm/network.rs` to:
+`mvmctl dev up` and `mvmctl run` continue to invoke
+`crates/mvm-runtime/src/vm/network.rs` to set up the Linux bridge
+(`br-mvm`), TAP interfaces, and iptables NAT rules.
 
-- Create a Linux bridge (`br-mvm`)
-- Add TAP interfaces
-- Configure iptables NAT rules
+Decision rationale: the guide's hard rule targets Nix *entry points*
+(`flake.nix`, `devShells`, `shellHook`) — the things that mutate the
+host on a `nix develop` invocation. `mvmctl dev up` is a user-invoked
+CLI command that's explicit about what it does (asks for sudo, prints
+the operations before running them). That's the visibility the
+host-mutation boundary asks for; an extra `ops/networking/bridge-setup.sh`
+ritual would re-introduce setup ceremony without adding clarity, since
+the user already typed the command that runs the mutations.
 
-These are **host mutations**. They don't happen from `nix develop` (which doesn't exist yet, so it's vacuously compliant) — they happen from a user-invoked CLI command. The guide's hard rule names `iptables`, `ip link`, "bridge/TAP mutations" as forbidden in `flake.nix`/`devShells`/`shellHook`, and the "Host Mutation Boundary" section forbids automatic host setup. mvmctl currently does this automatically on first `dev up`.
+If a later product decision flips this — e.g. mvmd's production target
+where bridge setup happens at deploy time, not on first `mvmctl run` —
+the migration is mechanical: extract the `iptables`/`ip link`/`bridge`
+calls from `network.rs` into `ops/networking/bridge-setup.sh`, and
+have `network.rs` precondition-check that the bridge exists.
 
-Two ways to read the guide:
-
-1. **Strict:** any host mutation should be a separate, explicit, user-run script under `ops/networking/`. `mvmctl dev up` should warn if the bridge isn't there and exit, telling the user to run `sudo ops/networking/bridge-setup.sh` once.
-2. **Lenient:** the guide is about *Nix entry points* (`nix develop`/`shellHook`), not user-invoked CLIs. mvmctl asking for sudo and being explicit about what it changes is fine because it's not a hidden side effect — the user typed `mvmctl dev up`.
-
-Reading 2 is closer to current reality and avoids a UX regression. Reading 1 is closer to the guide's spirit. **This is a product decision, not a Nix-cleanup decision** — flagging it but not folding it in until you say which read you want. If you want strict, it adds an item to Phase 5: extract the iptables/bridge calls from `network.rs` into `ops/networking/bridge-setup.sh`, and have `network.rs` run a precondition check + clear error message instead.
+Documented in `ops/networking/README.md`.
 
 ## Pulled in per your latest direction
 
@@ -626,7 +632,7 @@ The audit at the top of this plan separated these. The middle row (Nix-sandbox `
 ## Items that genuinely stay out of scope
 
 - **mvmd-side modules** — separate repo.
-- **`mvmctl` host mutation in `network.rs`** (TAP/bridge/iptables) — flagged above under "Items deferred — needs your decision." Pending your read of strict vs. lenient guide interpretation.
+- **`mvmctl` host mutation in `network.rs`** (TAP/bridge/iptables) — *resolved 2026-04-30: lenient reading retained.* See "Items deferred — resolved" above and `ops/networking/README.md`.
 
 ## Quick answers to your questions
 
