@@ -30,6 +30,8 @@ impl FirecrackerConfig {
             vmlinux_path: config.kernel_path.clone().unwrap_or_default(),
             initrd_path: config.initrd_path.clone(),
             rootfs_path: config.rootfs_path.clone(),
+            verity_path: config.verity_path.clone(),
+            roothash: config.roothash.clone(),
             revision_hash: config.revision_hash.clone(),
             flake_ref: config.flake_ref.clone(),
             profile: config.profile.clone(),
@@ -408,9 +410,33 @@ mod tests {
 
     #[test]
     fn test_apple_container_via_any_backend_list_empty() {
+        // Isolate HOME so the persisted ~/.mvm/vms registry doesn't bleed
+        // into this assertion when the developer's real dev VM is running.
+        let temp = std::path::PathBuf::from(format!(
+            "/tmp/mvmac-anybe-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp HOME");
+        let saved = std::env::var("HOME").ok();
+        // SAFETY: list() is the only HOME consumer in this test; no other
+        // threads in this test process race with it.
+        unsafe { std::env::set_var("HOME", &temp) };
+
         let backend = AnyBackend::from_hypervisor("apple-container");
         let vms = backend.list().unwrap();
         assert!(vms.is_empty());
+
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

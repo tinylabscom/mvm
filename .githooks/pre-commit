@@ -45,4 +45,54 @@ fi
 echo "All tests passed"
 echo ""
 
+# Supply-chain gate — ADR-002 §W5.2. cargo-deny is the load-bearing
+# tool (advisories + licenses + bans + sources); cargo-audit is a
+# narrower second opinion against the same advisory DB. Both run if
+# installed; missing tools log a notice but don't block the commit
+# (CI is the enforcement point).
+if command -v cargo-deny >/dev/null 2>&1; then
+    echo "Running cargo-deny (supply chain)..."
+    if ! cargo deny check; then
+        echo "cargo-deny failed!"
+        echo "   See deny.toml for ignore/skip syntax."
+        exit 1
+    fi
+    echo "cargo-deny passed"
+    echo ""
+else
+    echo "(cargo-deny not installed — install with 'cargo install cargo-deny' to gate locally)"
+    echo ""
+fi
+
+if command -v cargo-audit >/dev/null 2>&1; then
+    echo "Running cargo-audit..."
+    if ! cargo audit; then
+        echo "cargo-audit failed!"
+        exit 1
+    fi
+    echo "cargo-audit passed"
+    echo ""
+else
+    echo "(cargo-audit not installed — install with 'cargo install cargo-audit' to gate locally)"
+    echo ""
+fi
+
+# Nix formatter (W7.4). `nix fmt --check` runs the formatter from
+# `nix/flake.nix#formatter.${system}` (nixfmt-rfc-style) and exits
+# non-zero on drift. Skipped when nix isn't on PATH (matches cargo-deny
+# / cargo-audit gates above — CI is the enforcement point).
+if command -v nix >/dev/null 2>&1; then
+    echo "Running nix fmt --check..."
+    if ! nix --extra-experimental-features 'nix-command flakes' fmt -- --check ./nix; then
+        echo "nix fmt detected drift!"
+        echo "   Run 'nix fmt ./nix' to auto-format."
+        exit 1
+    fi
+    echo "nix fmt clean"
+    echo ""
+else
+    echo "(nix not installed — install Nix to gate formatting locally)"
+    echo ""
+fi
+
 echo "All pre-commit checks passed!"

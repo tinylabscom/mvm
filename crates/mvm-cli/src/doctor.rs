@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::ui;
 use mvm_core::config::fc_version;
 use mvm_core::platform::{self, Platform};
+use mvm_runtime::config::VM_NAME;
 use mvm_runtime::shell;
 use mvm_runtime::vm::lima;
 
@@ -40,7 +41,7 @@ pub fn run(json: bool) -> Result<()> {
         if platform::current().needs_lima() {
             checks.push(check_cmd("limactl", "tools", "limactl --version"));
         }
-        checks.push(nix_version_check(Some("mvm")));
+        checks.push(nix_version_check(Some(VM_NAME)));
         checks.push(check_vm_cmd(
             "firecracker",
             "tools",
@@ -173,7 +174,7 @@ fn check_cmd(name: &'static str, category: &'static str, cmd: &'static str) -> C
 }
 
 fn check_vm_cmd(name: &'static str, category: &'static str, cmd: &'static str) -> Check {
-    match shell::run_on_vm("mvm", cmd) {
+    match shell::run_on_vm(VM_NAME, cmd) {
         Ok(out) if out.status.success() => Check {
             name,
             category,
@@ -486,7 +487,7 @@ fn nix_flakes_check(in_vm: bool) -> Check {
     let output_result = if in_vm {
         shell::run_host("bash", &["-lc", cmd])
     } else {
-        shell::run_on_vm("mvm", cmd)
+        shell::run_on_vm(VM_NAME, cmd)
     };
 
     match output_result {
@@ -533,7 +534,7 @@ fn nix_flakes_check(in_vm: bool) -> Check {
 
 /// Check Lima VM disk usage — warn if > 80% full.
 fn lima_disk_check() -> Check {
-    match shell::run_on_vm("mvm", "df -h / 2>/dev/null") {
+    match shell::run_on_vm(VM_NAME, "df -h / 2>/dev/null") {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             // Parse "Use%" column from df output (5th column of 2nd line)
@@ -590,7 +591,7 @@ fn nix_store_check(in_vm: bool) -> Check {
     let output_result = if in_vm {
         shell::run_host("bash", &["-lc", cmd])
     } else {
-        shell::run_on_vm("mvm", cmd)
+        shell::run_on_vm(VM_NAME, cmd)
     };
 
     match output_result {
@@ -630,7 +631,7 @@ fn nix_store_size_check(in_vm: bool) -> Check {
     let output_result = if in_vm {
         shell::run_host("bash", &["-lc", cmd])
     } else {
-        shell::run_on_vm("mvm", cmd)
+        shell::run_on_vm(VM_NAME, cmd)
     };
 
     match output_result {

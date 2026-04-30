@@ -1,0 +1,7 @@
+# CA-bundle symlinks for the OCI image. Same anchors as
+# `populate-cacert.sh.in` but rooted at the OCI image's cwd
+# rather than `./files/`.
+mkdir -p ./etc/ssl/certs ./etc/pki/tls/certs
+ln -sf @cacert@/etc/ssl/certs/ca-bundle.crt ./etc/ssl/certs/ca-bundle.crt
+ln -sf @cacert@/etc/ssl/certs/ca-bundle.crt ./etc/ssl/certs/ca-certificates.crt
+ln -sf @cacert@/etc/ssl/certs/ca-bundle.crt ./etc/pki/tls/certs/ca-bundle.crt

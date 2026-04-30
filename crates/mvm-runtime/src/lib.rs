@@ -6,7 +6,9 @@ pub mod config;
 pub mod linux_env;
 pub mod security;
 pub mod shell;
-pub mod shell_mock;
 pub mod ui;
 
 pub mod vm;
+
+// Legacy re-export — preserve `mvm_runtime::shell_mock::*` path.
+pub use shell::mock as shell_mock;

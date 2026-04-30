@@ -1,0 +1,66 @@
+# ── 2. Minimal /etc ──────────────────────────────────────────────
+# Write the resolved /etc/{passwd,group,nsswitch.conf} files to a
+# tmpfs staging area at /run/mvm-etc/, then bind-mount them
+# read-only over /etc/. This makes a compromised guest service
+# unable to mint a uid 0 entry by appending to /etc/passwd —
+# rewriting the bind-mount target needs CAP_SYS_ADMIN, which the
+# `setpriv --bounding-set=-all` launcher already drops. ADR-002
+# §W2.2.
+mkdir -p /etc/mvm/integrations.d /run/mvm-etc
+
+# Touch staging files; redirect /etc/{passwd,group,nsswitch.conf}
+# to them via symlinks BEFORE any user/group references happen so
+# `chown user:group` works the first time. Once the user blocks
+# below have appended their entries, we promote the symlinks to
+# read-only bind-mounts (next stanza).
+: > /run/mvm-etc/passwd
+: > /run/mvm-etc/group
+: > /run/mvm-etc/nsswitch.conf
+ln -sf /run/mvm-etc/passwd /etc/passwd
+ln -sf /run/mvm-etc/group /etc/group
+ln -sf /run/mvm-etc/nsswitch.conf /etc/nsswitch.conf
+
+# Hostname / hosts / nsswitch get their content now.
+echo "@hostname@" > /etc/hostname
+hostname "@hostname@"
+printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
+echo "hosts: files dns" > /etc/nsswitch.conf
+
+# Root + default service user/group.
+echo "root:x:0:0:root:/root:@busybox@/bin/sh" > /etc/passwd
+echo "root:x:0:" > /etc/group
+echo "@serviceGroup@:x:900:" >> /etc/group
+echo "@serviceGroup@:x:900:900:@serviceGroup@:/home/@serviceGroup@:@busybox@/bin/sh" >> /etc/passwd
+mkdir -p /home/@serviceGroup@
+chown @serviceGroup@:@serviceGroup@ /home/@serviceGroup@
+
+# Guest-agent user (uid 901, group 901). The agent is the host-facing
+# RPC endpoint and must not run as root — see ADR-002 §W4.5. It is
+# enrolled in @serviceGroup@ (gid 900) so it can read shared
+# integration drop-in configs at /etc/mvm/integrations.d/ and the
+# legacy shared-secret bucket. Vsock binds are unprivileged on Linux,
+# so port 52 + the host-bound port can be opened without CAP_NET_*.
+echo "mvm-agent:x:901:" >> /etc/group
+echo "mvm-agent:x:901:901:mvm-agent:/var/empty:@busybox@/bin/sh" >> /etc/passwd
+sed -i 's/^@serviceGroup@:x:900:.*$/&,mvm-agent/' /etc/group
+sed -i 's/^@serviceGroup@:x:900:,/@serviceGroup@:x:900:/' /etc/group
+
+# Generated user blocks (zero or more). Each block adds one user/group
+# pair to /etc/passwd and /etc/group, creates their home dir, and
+# enrolls them in the service group so they can read /mnt/secrets.
+@userBlocks@
+
+# Promote the staging files to the live /etc paths via bind-mount.
+# Linux requires a two-step dance to make a bind read-only: first the
+# bind, then a remount with `bind,ro` flags applied. Doing it in a
+# single `mount --bind -o ro …` is silently a no-op on the ro flag.
+rm -f /etc/passwd /etc/group /etc/nsswitch.conf
+touch /etc/passwd /etc/group /etc/nsswitch.conf
+for f in passwd group nsswitch.conf; do
+  mount --bind /run/mvm-etc/$f /etc/$f
+  mount -o remount,bind,ro /etc/$f
+done
+echo "[init] /etc/{passwd,group,nsswitch.conf} are read-only bind-mounts" > /dev/console
+
+# Service PID tracking for post-restore signal.
+mkdir -p /run/mvm-services

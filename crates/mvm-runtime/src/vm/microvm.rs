@@ -492,6 +492,14 @@ pub struct FlakeRunConfig {
     pub initrd_path: Option<String>,
     /// Absolute path to the root filesystem inside the Lima VM.
     pub rootfs_path: String,
+    /// Absolute path to the dm-verity sidecar (Merkle hash tree) inside
+    /// the Lima VM. Present when the flake was built with
+    /// `verifiedBoot = true` (the production default per ADR-002 §W3).
+    /// Must be paired with `roothash`.
+    pub verity_path: Option<String>,
+    /// 64-char lowercase-hex root hash from `rootfs.roothash`. Baked
+    /// into the kernel cmdline as `dm-mod.create=`. ADR-002 §W3.2.
+    pub roothash: Option<String>,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -1262,9 +1270,6 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
     let toml_content = format!("# Dev-mode {} config stub\n", role);
     let escaped_toml = toml_content.replace('\'', "'\\''");
 
-    // Dev-mode security policy enables debug_exec for vsock exec support
-    let security_policy = r#"{"access":{"debug_exec":true}}"#;
-
     // Build injection commands for custom config files
     let extra_cmds = drive_file_inject_commands(&config.config_files);
 
@@ -1278,8 +1283,7 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
         sudo mount {path} "$MOUNT_DIR"
         echo '{json}' | sudo tee "$MOUNT_DIR/config.json" >/dev/null
         echo '{toml}' | sudo tee "$MOUNT_DIR/{toml_name}" >/dev/null
-        echo '{security_policy}' | sudo tee "$MOUNT_DIR/security-policy.json" >/dev/null
-        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}" "$MOUNT_DIR/security-policy.json"
+        sudo chmod 0444 "$MOUNT_DIR/config.json" "$MOUNT_DIR/{toml_name}"
         {extra}
         sudo umount "$MOUNT_DIR"
         rmdir "$MOUNT_DIR"
@@ -1289,7 +1293,6 @@ pub fn create_dev_config_drive(abs_dir: &str, config: &FlakeRunConfig) -> Result
         json = escaped_json,
         toml = escaped_toml,
         toml_name = toml_name,
-        security_policy = security_policy,
         extra = extra_cmds,
     ))?;
     Ok(path)
@@ -1320,6 +1323,83 @@ pub fn create_dev_secrets_drive(abs_dir: &str, secret_files: &[DriveFile]) -> Re
         extra = extra_cmds,
     ))?;
     Ok(path)
+}
+
+/// Probe the directory containing `rootfs_path` (inside the Lima VM)
+/// for the dm-verity sidecar files emitted by mkGuest when
+/// `verifiedBoot = true`. Returns `(Some(verity_path), Some(roothash))`
+/// when both files are present and the roothash decodes to a 64-char
+/// hex string; otherwise `(None, None)` so callers fall back to the
+/// unverified-boot path. ADR-002 §W3.
+pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
+    use crate::shell::{run_in_vm, run_in_vm_stdout};
+    use std::path::Path;
+
+    let Some(parent) = Path::new(rootfs_path).parent() else {
+        return (None, None);
+    };
+    let parent = parent.to_string_lossy();
+    let verity = format!("{parent}/rootfs.verity");
+    let roothash_file = format!("{parent}/rootfs.roothash");
+
+    if run_in_vm(&format!("[ -f {verity} ]")).is_err() {
+        return (None, None);
+    }
+    let Ok(raw) = run_in_vm_stdout(&format!("cat {roothash_file}")) else {
+        return (None, None);
+    };
+    let hash = raw.trim().to_string();
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (None, None);
+    }
+    (Some(verity), Some(hash))
+}
+
+/// Build the `dm-mod.create=` kernel cmdline argument that creates a
+/// verity-protected root device pointing at `/dev/vda` (data) and
+/// `/dev/vdb` (hash tree).
+///
+/// Format reference: kernel doc Documentation/admin-guide/device-mapper/dm-init.rst:
+///
+///   dm-mod.create="<name>,<uuid>,<minor>,<flags>,<table-line>"
+///
+/// Verity table line:
+///
+///   0 <num-sectors> verity 1 /dev/vda /dev/vdb 4096 4096
+///                           <data-blocks> 0 sha256 <root-hash> <salt-hex>
+///
+/// `data-blocks = rootfs_size / 4096`. Salt is zero (matches the
+/// deterministic salt pinned by mkGuest's verityArtifacts derivation
+/// in `nix/flake.nix`). ADR-002 §W3.2.
+fn build_verity_dm_create_arg(rootfs_path: &str, roothash: &str) -> Result<String> {
+    if roothash.len() != 64 || !roothash.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "invalid root hash {:?} (expected 64 lowercase hex chars)",
+            roothash
+        );
+    }
+    // Querying file size on the host (we're in mvmctl, not in the
+    // Lima VM that holds the rootfs) is unreliable when the path is
+    // inside a Linux-only filesystem mount — drop back to running
+    // `stat -c %s` inside the VM.
+    use crate::shell::run_in_vm_stdout;
+    let size_str = run_in_vm_stdout(&format!("stat -c %s {rootfs_path}"))?;
+    let size: u64 = size_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("parse rootfs size {:?}: {e}", size_str.trim()))?;
+    if !size.is_multiple_of(4096) {
+        anyhow::bail!(
+            "rootfs size {size} is not a multiple of 4096 — verity setup must have rejected \
+             this image, but we got here anyway"
+        );
+    }
+    let data_blocks = size / 4096;
+    let num_sectors = data_blocks * 8; // 4096 bytes per block / 512 sectors
+    let salt = "0".repeat(64);
+    Ok(format!(
+        "dm-mod.create=\"rootfs,,,ro,0 {num_sectors} verity 1 /dev/vda /dev/vdb 4096 4096 {data_blocks} 0 sha256 {roothash} {salt}\""
+    ))
 }
 
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
@@ -1358,8 +1438,27 @@ pub fn configure_flake_microvm_with_drives_dir(
         ip = slot.guest_ip,
         gw = BRIDGE_IP,
     );
+    // dm-verity boot path: root maps to /dev/dm-0, mounted ro. The
+    // kernel constructs the verity target from the cmdline before init
+    // runs (CONFIG_DM_INIT in firecracker-aarch64.config). A tampered
+    // ext4 fails the hash check at first read and the kernel panics
+    // before init starts. ADR-002 §W3.2.
+    let dm_create = config
+        .verity_path
+        .as_deref()
+        .zip(config.roothash.as_deref())
+        .map(|(_, hash)| build_verity_dm_create_arg(&config.rootfs_path, hash))
+        .transpose()?;
     let boot_args = if config.initrd_path.is_some() {
+        // NixOS stage-1 owns root mounting; verity wiring there would
+        // need stage-1 patches. Out of scope for this iteration —
+        // production flake's mkGuest path doesn't use an initrd.
         base_args
+    } else if let Some(dm) = &dm_create {
+        format!(
+            "root=/dev/dm-0 ro rootwait init=/init {dm} {base_args}",
+            dm = dm
+        )
     } else {
         format!("root=/dev/vda rw rootwait init=/init {base_args}")
     };
@@ -1399,15 +1498,37 @@ pub fn configure_flake_microvm_with_drives_dir(
         ),
     )?;
 
+    // Verity-on means the rootfs is read-only and re-mounted via
+    // /dev/dm-0; opening a writable handle would let any host process
+    // mutate the bytes the Merkle tree was built against and silently
+    // break the integrity check.
+    let rootfs_read_only = config.verity_path.is_some();
     ui::info(&format!("Setting rootfs: {}", config.rootfs_path));
     api_put_socket(
         socket,
         "/drives/rootfs",
         &format!(
-            r#"{{"drive_id": "rootfs", "path_on_host": "{rootfs}", "is_root_device": true, "is_read_only": false}}"#,
+            r#"{{"drive_id": "rootfs", "path_on_host": "{rootfs}", "is_root_device": true, "is_read_only": {ro}}}"#,
             rootfs = config.rootfs_path,
+            ro = rootfs_read_only,
         ),
     )?;
+
+    // dm-verity Merkle tree → /dev/vdb. Firecracker assigns drive
+    // letters in API-call order, so this PUT must precede the config /
+    // secrets drives below. Always mounted read-only — modifying the
+    // hash tree would break verity at the next read.
+    if let Some(verity_path) = &config.verity_path {
+        ui::info(&format!("Attaching dm-verity sidecar: {}", verity_path));
+        api_put_socket(
+            socket,
+            "/drives/verity",
+            &format!(
+                r#"{{"drive_id": "verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+                path = verity_path,
+            ),
+        )?;
+    }
 
     // Create and attach mvm-config drive (config.json + role.toml)
     ui::info("Creating config drive...");
@@ -1996,5 +2117,39 @@ mod tests {
             !is_pid_alive(999_999_999),
             "impossible PID must not be alive"
         );
+    }
+
+    // ──── Verity (ADR-002 §W3) ────────────────────────────────────────
+    //
+    // Live verity boot is exercised in the Linux/KVM CI lane (it
+    // requires a real microVM and a working dm-mod.create kernel
+    // path). The unit tests here cover the host-side helpers that
+    // build the kernel cmdline and validate the inputs — those run
+    // unconditionally on every commit so a refactor that breaks the
+    // format-string contract surfaces locally before CI.
+
+    #[test]
+    fn build_verity_dm_create_rejects_short_hash() {
+        let res = build_verity_dm_create_arg("/tmp/whatever", "deadbeef");
+        assert!(res.is_err(), "short hash must be rejected");
+    }
+
+    #[test]
+    fn build_verity_dm_create_rejects_non_hex_hash() {
+        let bad = "z".repeat(64);
+        let res = build_verity_dm_create_arg("/tmp/whatever", &bad);
+        assert!(res.is_err(), "non-hex hash must be rejected");
+    }
+
+    #[test]
+    fn probe_verity_sidecar_returns_none_for_path_without_parent() {
+        // A bare relative path with no parent triggers the early-return
+        // branch — should not shell out, should not panic.
+        let (v, h) = probe_verity_sidecar("rootfs.ext4");
+        // Either the parent is "" and the probe falls through to a
+        // shell call that fails, or we return early. Both produce
+        // (None, None); the assertion catches either way.
+        assert!(v.is_none());
+        assert!(h.is_none());
     }
 }

@@ -41,7 +41,15 @@ const CONNECT_RETRY_DELAY_MS: u64 = 500;
 // ============================================================================
 
 /// Request sent from host to guest vsock agent.
+///
+/// `#[serde(deny_unknown_fields)]` is load-bearing: ADR-002 §W4.1
+/// requires the guest agent to refuse frames whose JSON contains
+/// fields the deserializer doesn't recognise, on the principle that
+/// silent acceptance of unknown fields is a deserialization-bug
+/// gadget waiting to happen. Today every variant is a struct or
+/// unit, so the attribute applies cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum GuestRequest {
     /// Query current worker status.
     WorkerStatus,
@@ -91,7 +99,12 @@ pub enum GuestRequest {
 }
 
 /// Response from guest vsock agent to host.
+///
+/// Same `deny_unknown_fields` discipline as `GuestRequest` — a
+/// compromised guest must not be able to slip extra fields past the
+/// host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum GuestResponse {
     /// Worker status with optional last-busy timestamp.
     WorkerStatus {
@@ -149,6 +162,7 @@ pub enum GuestResponse {
 
 /// A single filesystem change detected since boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct FsChange {
     /// Path relative to the filesystem root.
     pub path: String,
@@ -177,6 +191,7 @@ pub const HOST_BOUND_PORT: u32 = 53;
 /// Request FROM a guest VM (gateway) TO the host agent.
 /// Used for wake-on-demand: the gateway VM asks the host to wake a worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum HostBoundRequest {
     /// Wake a sleeping instance.
     WakeInstance {
@@ -194,6 +209,7 @@ pub enum HostBoundRequest {
 
 /// Response from host agent to a guest VM's host-bound request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum HostBoundResponse {
     /// Result of a wake request.
     WakeResult {
@@ -1016,6 +1032,74 @@ mod tests {
             let json2 = serde_json::to_string(&parsed).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    /// W4.1 regression: unknown fields in a `GuestRequest` JSON frame must be
+    /// rejected outright. Without `deny_unknown_fields`, an attacker could
+    /// smuggle extra keys past serde to (a) trip up downstream consumers that
+    /// re-parse the same blob, (b) probe for upcoming variants, or (c) create
+    /// drift between versions of the agent and host. ADR-002 §W4.1.
+    #[test]
+    fn test_guest_request_rejects_unknown_field_inside_variant() {
+        let json = r#"{"SleepPrep":{"drain_timeout_secs":30,"smuggled":1}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field") && err.to_string().contains("smuggled"),
+            "expected 'unknown field `smuggled`', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_guest_request_rejects_unknown_top_level_variant() {
+        let json = r#"{"NotARealVariant":{}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected 'unknown variant', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_guest_response_rejects_unknown_field_inside_variant() {
+        let json = r#"{"WorkerStatus":{"status":"idle","last_busy_at":null,"x":1}}"#;
+        let err = serde_json::from_str::<GuestResponse>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_host_bound_request_rejects_unknown_field() {
+        let json =
+            r#"{"WakeInstance":{"tenant_id":"a","pool_id":"b","instance_id":"c","extra":true}}"#;
+        let err = serde_json::from_str::<HostBoundRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_host_bound_response_rejects_unknown_field() {
+        let json = r#"{"WakeResult":{"success":true,"detail":null,"oops":1}}"#;
+        let err = serde_json::from_str::<HostBoundResponse>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_fs_change_rejects_unknown_field() {
+        let json = r#"{"path":"/x","kind":"created","size":0,"hidden":42}"#;
+        let err = serde_json::from_str::<FsChange>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    /// Sanity check: the well-formed frames the same tests cover above must
+    /// still parse cleanly with the attribute applied.
+    #[test]
+    fn test_guest_request_well_formed_still_accepted() {
+        let json = r#"{"SleepPrep":{"drain_timeout_secs":30}}"#;
+        let req: GuestRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            req,
+            GuestRequest::SleepPrep {
+                drain_timeout_secs: 30
+            }
+        ));
     }
 
     #[test]

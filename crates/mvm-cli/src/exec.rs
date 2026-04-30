@@ -6,8 +6,10 @@
 //! template entrypoint) can be added without churning the inline-command
 //! surface.
 //!
-//! Dev-mode only: inherits the existing `policy.access.debug_exec` gate
-//! enforced by the guest agent.
+//! Dev-mode only: the guest agent's Exec handler is gated at compile time
+//! by the `dev-shell` Cargo feature. Production guest binaries are built
+//! without `dev-shell`, so the handler is not present and `exec` returns
+//! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result};
 use mvm_core::vm_backend::{VmId, VmStartConfig, VmVolume};
@@ -172,14 +174,30 @@ fn quote_argv_for_exec(argv: &[String]) -> String {
 // mvmforge launch.json parser
 // ---------------------------------------------------------------------------
 
-/// Permissive deserialization shapes for the subset of mvmforge's v0
-/// Workload IR that `mvmctl exec` consumes.
+/// Permissive deserialization shapes for the two JSON documents mvmforge
+/// produces:
+///
+/// 1. **LaunchPlan artifact** (`<artifact-dir>/launch.json` from
+///    `mvmforge compile`): top-level `entrypoint` + `env`, plus
+///    `flake_attribute` / `workload_id` / `artifact_format_version`
+///    metadata. This is the canonical handoff to mvm.
+/// 2. **Workload IR manifest** (`mvmforge emit` stdout, also accepted by
+///    `mvmforge compile` as input): top-level `apps[]` with
+///    `apps[].entrypoint`. Useful for callers that wire mvmforge's emitter
+///    to `mvmctl exec` without going through `compile`.
 ///
 /// `deny_unknown_fields` is intentionally NOT set so newer mvmforge
-/// releases that add optional fields don't break parsing. We *do* require
-/// `apps[].entrypoint.command` because without it there is nothing to run.
+/// releases that add optional fields don't break parsing.
 #[derive(Debug, Deserialize)]
 struct RawLaunchPlan {
+    /// Present only on the LaunchPlan artifact shape.
+    #[serde(default)]
+    entrypoint: Option<RawLaunchEntrypoint>,
+    /// Present only on the LaunchPlan artifact shape (top-level env merged
+    /// under `entrypoint.env`).
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// Present only on the Workload IR shape.
     #[serde(default)]
     apps: Vec<RawLaunchApp>,
 }
@@ -203,13 +221,12 @@ struct RawLaunchEntrypoint {
     env: BTreeMap<String, String>,
 }
 
-/// Read and parse an mvmforge `launch.json` from disk.
+/// Read and parse an mvmforge document from disk.
 ///
-/// v1 contract:
-///   - file must exist and be readable
-///   - JSON must contain at least one app with a non-empty entrypoint command
-///   - if multiple apps are declared, return an error (v1 doesn't orchestrate
-///     multi-service workloads — that's mvmd's job)
+/// Accepts either the LaunchPlan artifact (`mvmforge compile`'s `launch.json`)
+/// or the Workload IR manifest (`mvmforge emit` stdout). The shape is
+/// auto-detected. v1 supports single-app workloads only — IR with multiple
+/// `apps[]` entries is rejected.
 pub fn load_launch_plan(path: &Path) -> Result<LaunchEntrypoint> {
     let bytes =
         std::fs::read(path).with_context(|| format!("reading launch plan '{}'", path.display()))?;
@@ -219,18 +236,54 @@ pub fn load_launch_plan(path: &Path) -> Result<LaunchEntrypoint> {
 }
 
 fn parse_launch_plan(raw: RawLaunchPlan, source: &str) -> Result<LaunchEntrypoint> {
-    if raw.apps.is_empty() {
-        anyhow::bail!("launch plan '{source}' has no `apps[]` entries");
+    let RawLaunchPlan {
+        entrypoint: top_entrypoint,
+        env: top_env,
+        apps,
+    } = raw;
+    match (top_entrypoint, apps.is_empty()) {
+        (Some(entrypoint), true) => parse_launch_artifact(entrypoint, top_env, source),
+        (None, false) => parse_workload_ir(apps, source),
+        (Some(_), false) => anyhow::bail!(
+            "launch plan '{source}': both top-level `entrypoint` and `apps[]` present — pick one shape (mvmforge launch.json artifact or Workload IR manifest)",
+        ),
+        (None, true) => anyhow::bail!(
+            "launch plan '{source}': missing both top-level `entrypoint` (mvmforge launch.json artifact) and `apps[]` (Workload IR manifest)",
+        ),
     }
-    if raw.apps.len() > 1 {
-        let names: Vec<&str> = raw
-            .apps
+}
+
+/// Parse the LaunchPlan artifact shape emitted by `mvmforge compile`.
+fn parse_launch_artifact(
+    entrypoint: RawLaunchEntrypoint,
+    top_env: BTreeMap<String, String>,
+    source: &str,
+) -> Result<LaunchEntrypoint> {
+    if entrypoint.command.is_empty() {
+        anyhow::bail!("launch plan '{source}': entrypoint.command must be non-empty");
+    }
+    // mvmforge: top-level env is merged under (overridden by) entrypoint.env.
+    let mut merged = top_env;
+    for (k, v) in entrypoint.env {
+        merged.insert(k, v);
+    }
+    Ok(LaunchEntrypoint {
+        command: entrypoint.command,
+        working_dir: entrypoint.working_dir,
+        env: merged,
+    })
+}
+
+/// Parse the Workload IR manifest shape (top-level `apps[]`).
+fn parse_workload_ir(apps: Vec<RawLaunchApp>, source: &str) -> Result<LaunchEntrypoint> {
+    if apps.len() > 1 {
+        let names: Vec<&str> = apps
             .iter()
             .map(|a| a.name.as_deref().unwrap_or("<unnamed>"))
             .collect();
         anyhow::bail!(
             "launch plan '{source}' has {} apps ({}); `mvmctl exec` v1 supports single-app workloads only",
-            raw.apps.len(),
+            apps.len(),
             names.join(", "),
         );
     }
@@ -238,7 +291,7 @@ fn parse_launch_plan(raw: RawLaunchPlan, source: &str) -> Result<LaunchEntrypoin
         name: _,
         entrypoint,
         env: app_env,
-    } = raw.apps.into_iter().next().expect("len == 1 above");
+    } = apps.into_iter().next().expect("apps non-empty");
     if entrypoint.command.is_empty() {
         anyhow::bail!("launch plan '{source}': entrypoint.command must be non-empty");
     }
@@ -350,7 +403,7 @@ pub fn snapshot_eligible(
 /// agent unreachable, vsock error), returns an error; the VM is torn down
 /// best-effort before returning.
 pub fn run(req: ExecRequest) -> Result<i32> {
-    let backend = AnyBackend::default_backend();
+    let backend = AnyBackend::auto_select();
 
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
@@ -425,11 +478,20 @@ pub fn run(req: ExecRequest) -> Result<i32> {
         backend.capabilities().snapshots,
     );
 
+    // Probe for the verity sidecar alongside the rootfs. ADR-002 §W3.2:
+    // production microVMs ship `rootfs.verity` + `rootfs.roothash` next
+    // to `rootfs.ext4`. Their absence is the dev-VM exemption from §W3.4.
+    // Files live inside the Lima VM, so we can't `Path::exists()` them
+    // from the host — shell out into the VM instead.
+    let (verity_path, roothash) = mvm_runtime::vm::microvm::probe_verity_sidecar(&rootfs);
+
     let start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
         kernel_path: Some(vmlinux.clone()),
         initrd_path: initrd.clone(),
+        verity_path,
+        roothash,
         revision_hash: revision.clone(),
         flake_ref: flake_ref.clone(),
         profile: profile.clone(),
@@ -489,7 +551,7 @@ pub fn run(req: ExecRequest) -> Result<i32> {
         let vm_name = vm_name.clone();
         let _ = ctrlc::set_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-            let backend = AnyBackend::default_backend();
+            let backend = AnyBackend::auto_select();
             let _ = backend.stop(&VmId(vm_name.clone()));
         });
     }
@@ -544,6 +606,8 @@ fn restore_via_snapshot(
         vmlinux_path: start_config.kernel_path.clone().unwrap_or_default(),
         initrd_path: start_config.initrd_path.clone(),
         rootfs_path: start_config.rootfs_path.clone(),
+        verity_path: start_config.verity_path.clone(),
+        roothash: start_config.roothash.clone(),
         revision_hash: start_config.revision_hash.clone(),
         flake_ref: start_config.flake_ref.clone(),
         profile: start_config.profile.clone(),
@@ -908,7 +972,76 @@ mod tests {
     #[test]
     fn launch_plan_rejects_no_apps() {
         let err = parse_str(r#"{ "apps": [] }"#).unwrap_err();
-        assert!(err.to_string().contains("no `apps[]`"));
+        assert!(err.to_string().contains("missing both"));
+    }
+
+    #[test]
+    fn launch_plan_accepts_mvmforge_artifact_shape() {
+        // The JSON `mvmforge compile` actually writes to launch.json: top-level
+        // `entrypoint`, plus toolchain metadata fields we ignore.
+        let plan = r#"{
+            "artifact_format_version": "1.0",
+            "flake_attribute": "mvmforge.workload",
+            "flake_path": ".",
+            "ir_hash": "deadbeef",
+            "ir_schema_version": "0.1",
+            "toolchain_version": "0.1.0",
+            "workload_id": "hello",
+            "image": { "kind": "nix_packages", "packages": ["python312"] },
+            "entrypoint": {
+                "command": ["python", "-m", "hello"],
+                "working_dir": "/app",
+                "env": { "PORT": "8080" }
+            },
+            "env": {},
+            "mounts": [],
+            "network": null,
+            "source": { "kind": "local_path", "subdir": "src", "file_count": 0, "tree_hash": "0" }
+        }"#;
+        let ep = parse_str(plan).unwrap();
+        assert_eq!(ep.command, vec!["python", "-m", "hello"]);
+        assert_eq!(ep.working_dir.as_deref(), Some("/app"));
+        assert_eq!(ep.env.get("PORT").map(String::as_str), Some("8080"));
+    }
+
+    #[test]
+    fn launch_plan_artifact_top_env_merged_under_entrypoint_env() {
+        let plan = r#"{
+            "entrypoint": {
+                "command": ["true"],
+                "env": { "X": "from-entrypoint" }
+            },
+            "env": { "X": "from-top", "Y": "y" }
+        }"#;
+        let ep = parse_str(plan).unwrap();
+        assert_eq!(ep.env.get("X").map(String::as_str), Some("from-entrypoint"));
+        assert_eq!(ep.env.get("Y").map(String::as_str), Some("y"));
+    }
+
+    #[test]
+    fn launch_plan_artifact_rejects_empty_command() {
+        let plan = r#"{ "entrypoint": { "command": [] } }"#;
+        let err = parse_str(plan).unwrap_err();
+        assert!(err.to_string().contains("non-empty"));
+    }
+
+    #[test]
+    fn launch_plan_rejects_both_shapes_present() {
+        // Defensive: a JSON that simultaneously declares `apps[]` and a
+        // top-level `entrypoint` is ambiguous — refuse rather than silently
+        // pick one.
+        let plan = r#"{
+            "apps": [ { "entrypoint": { "command": ["x"] } } ],
+            "entrypoint": { "command": ["y"] }
+        }"#;
+        let err = parse_str(plan).unwrap_err();
+        assert!(err.to_string().contains("both"));
+    }
+
+    #[test]
+    fn launch_plan_rejects_completely_empty_document() {
+        let err = parse_str(r#"{}"#).unwrap_err();
+        assert!(err.to_string().contains("missing both"));
     }
 
     #[test]

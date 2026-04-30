@@ -1,0 +1,43 @@
+# `populateImageCommands` for `nixos/lib/make-ext4-fs.nix`. Runs in
+# the rootfs build derivation with the closure already staged at
+# `./files/nix/store/...`; our job is to add the directory skeleton,
+# the /init wrapper, /etc symlinks, and (when the caller bundled
+# `pkgs.nix`) a pre-seeded Nix database + nix.conf.
+#
+# Substitutions plumbed in by the parent flake — see flake.nix's
+# `renderTemplate` call for the authoritative list.
+
+mkdir -p ./files/dev ./files/proc ./files/sys
+mkdir -p ./files/bin ./files/sbin
+mkdir -p ./files/etc/mvm/integrations.d ./files/etc/mvm/probes.d
+mkdir -p ./files/tmp ./files/run ./files/var/lib ./files/var/run ./files/var/log
+mkdir -p ./files/root ./files/home
+mkdir -p ./files/mnt/config ./files/mnt/secrets ./files/mnt/data
+mkdir -p ./files/nix-host
+
+# Drop-in config dirs for the guest agent. Mode 0750 is baked here so PID 1
+# doesn't have to chmod at boot. The matching `chgrp 900` (the `mvm` service
+# group) cannot be baked: `mkfs.ext4 -d` preserves the populate-phase owner,
+# but the nixbld build user has no privilege to chgrp to an arbitrary gid.
+# The init script's guestAgentBlock keeps a single chgrp at boot for that
+# reason.
+chmod 0755 ./files/etc/mvm
+chmod 0750 ./files/etc/mvm/integrations.d ./files/etc/mvm/probes.d
+
+# Variant marker: "prod" or "dev". The dev sibling flake (nix/dev/) passes
+# variant="dev" alongside the dev guest agent; production stays "prod". Read
+# this file inside the running microVM to self-identify (e.g. `mvmctl
+# security status` cross-checking the agent feature flag).
+echo "@variant@" > ./files/etc/mvm/variant
+chmod 0644 ./files/etc/mvm/variant
+
+# The /init wrapper exists so the rendered minimal-init script can
+# stay a regular text file. busybox sh interprets it via this stub
+# rather than relying on the rendered template having execute bits.
+printf '#!/bin/sh\nexport PATH="@busybox@/bin:/bin:/sbin:$PATH"\nexec @busybox@/bin/sh @initScript@\n' > ./files/init
+chmod +x ./files/init
+ln -s /init ./files/sbin/vminitd
+ln -s @busybox@/bin/sh ./files/bin/sh
+
+@nixBlock@
+@cacertBlock@

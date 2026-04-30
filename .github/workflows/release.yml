@@ -133,7 +133,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           SYSTEM="${ARCH}-linux"
-          nix build "./nix/dev-image#packages.${SYSTEM}.default" \
+          nix build "./nix/images/builder#packages.${SYSTEM}.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
           mkdir -p staging
@@ -174,7 +174,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           SYSTEM="${ARCH}-linux"
-          nix build "./nix/default-microvm#packages.${SYSTEM}.default" \
+          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
           mkdir -p staging

@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::ui;
 use mvm_core::platform::{self, Platform};
+use mvm_runtime::config::{LEGACY_VM_NAME, VM_NAME};
 use mvm_runtime::shell;
 
 /// Check that a package manager is available for the current platform.
@@ -116,6 +117,51 @@ echo "Lima ${LIMA_VERSION} installed successfully"
 /// Check if the platform requires Lima.
 pub fn is_lima_required() -> bool {
     platform::current().needs_lima()
+}
+
+/// Detect a legacy `mvm` Lima VM left over from before W7.2 renamed the
+/// builder VM to `mvm-builder`. Returns true if the legacy VM exists, in
+/// which case `mvmctl` prints a one-line migration command for the user to
+/// run themselves. We do **not** auto-rename: `limactl` lacks an in-place
+/// rename, the legacy VM may still be running tenant work, and the host
+/// mutation boundary in the Nix best-practices guide says destructive ops
+/// stay user-visible.
+///
+/// No-op when Lima isn't required (native Linux + KVM) or `limactl` isn't
+/// installed yet.
+pub fn warn_if_legacy_lima_vm() -> Result<()> {
+    if !is_lima_required() || which::which("limactl").is_err() {
+        return Ok(());
+    }
+
+    let output = match shell::run_host("limactl", &["list", "--json"]) {
+        Ok(out) if out.status.success() => out,
+        _ => return Ok(()),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // `limactl list --json` emits one JSON object per line. Cheap substring
+    // check on the legacy name is enough — false positives just mean an
+    // extra warning, no destructive action attached.
+    let legacy_marker = format!("\"name\":\"{LEGACY_VM_NAME}\"");
+    if !stdout.contains(&legacy_marker) {
+        return Ok(());
+    }
+
+    ui::warn(&format!(
+        "Detected a legacy Lima VM named '{LEGACY_VM_NAME}'. \
+         The builder VM was renamed to '{VM_NAME}' (W7.2).\n\
+         To migrate, run:\n\
+         \n  \
+         limactl stop '{LEGACY_VM_NAME}' && limactl rename '{LEGACY_VM_NAME}' '{VM_NAME}'\n\
+         \n\
+         This is *not* automated: `limactl rename` requires the VM to be \
+         stopped, and an auto-rename could interrupt in-flight builds. \
+         Until you migrate, `mvmctl dev up` will create a fresh \
+         '{VM_NAME}' alongside your existing '{LEGACY_VM_NAME}' \
+         (no data loss; just disk overhead)."
+    ));
+    Ok(())
 }
 
 #[cfg(test)]

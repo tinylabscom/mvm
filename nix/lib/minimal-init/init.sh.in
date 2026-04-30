@@ -1,0 +1,45 @@
+#!@busybox@/bin/sh
+# mvm minimal init — PID 1, no systemd.
+#
+# This is the rootfs's /init. It runs as PID 1 inside the microVM
+# and brings the system up before handing control to the guest agent
+# and any user-defined services. Architecture and substitution
+# scheme are documented in the sibling `default.nix`.
+
+# ── 0. Environment defaults ─────────────────────────────────────
+# extraPathDirs (one of the substitutions plumbed in by default.nix)
+# is rendered as a colon-prefixed string when the caller passed
+# `packages` to mkGuest, or empty when they didn't.
+export PATH="@busybox@/bin@extraPathDirs@"
+export SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
+# HOME points at a writable directory on the host-backed Nix-store
+# disk so nix's eval cache (~/.cache/nix), flake archive, and
+# registry writes land somewhere that (a) isn't the read-only
+# rootfs, (b) isn't the user's project dir (the workdir share at
+# /root), and (c) persists across VM reboots so a second boot
+# doesn't re-fetch every github:nixpkgs ref.
+export HOME=/var/nix-upper/home
+
+# Detect container environment (Docker) — skip kernel-level mounts.
+# All lib fragments key off this flag.
+MVM_CONTAINER=0
+if [ -f /.dockerenv ] || grep -q docker /proc/1/cgroup 2>/dev/null; then
+  MVM_CONTAINER=1
+fi
+
+@mountsLib@
+@nixOverlayLib@
+@hostSharesLib@
+@etcAndUsersLib@
+@networkingLib@
+@optionalDrivesLib@
+@servicesAndAgentLib@
+@signalHandlersLib@
+
+# ── 12. PID 1 reaper: wait for children, re-enter on signal ────
+# Both `post_restore` (USR1) and `shutdown` (TERM/INT) are installed
+# as traps. `wait` returns when a signal interrupts it; the loop
+# keeps PID 1 alive so the VM stays up between events.
+while true; do
+  wait
+done

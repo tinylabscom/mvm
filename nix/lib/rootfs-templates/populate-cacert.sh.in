@@ -1,0 +1,9 @@
+# CA-bundle symlinks under `./files/`. Used by the ext4 rootfs
+# populate step so curl, wget, openssl, etc. can find the trust
+# anchors at the conventional paths regardless of which distro the
+# guest software expects.
+mkdir -p ./files/etc/ssl/certs
+mkdir -p ./files/etc/pki/tls/certs
+ln -s @cacert@/etc/ssl/certs/ca-bundle.crt ./files/etc/ssl/certs/ca-bundle.crt
+ln -s @cacert@/etc/ssl/certs/ca-bundle.crt ./files/etc/ssl/certs/ca-certificates.crt
+ln -s @cacert@/etc/ssl/certs/ca-bundle.crt ./files/etc/pki/tls/certs/ca-bundle.crt

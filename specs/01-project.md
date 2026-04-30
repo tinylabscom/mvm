@@ -10,7 +10,7 @@ macOS Host (this CLI) → Lima VM ("mvm", Ubuntu) → Firecracker microVM (172.1
 
 ## Architecture
 
-The CLI runs on the macOS host. All Linux operations happen inside the Lima VM via `limactl shell mvm bash -c "..."`. The Firecracker microVM runs inside the Lima VM using nested virtualization (/dev/kvm).
+The CLI runs on the macOS host. All Linux operations happen inside the Lima VM via `limactl shell mvm-builder bash -c "..."`. The Firecracker microVM runs inside the Lima VM using nested virtualization (/dev/kvm).
 
 ### Module Map
 

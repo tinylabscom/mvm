@@ -1,0 +1,65 @@
+# ── 10. Post-restore handler (SIGUSR1) ─────────────────────────
+# After snapshot restore, the host sends SIGUSR1 via the guest agent.
+# This remounts config/secrets drives (which now have fresh data from
+# -v mounts) and kills service processes so the respawn loops restart
+# them with the new config/secrets.
+post_restore() {
+  echo "[init] post-restore: remounting drives..." > /dev/console
+  # Kill service processes so respawn loops restart them after remount.
+  for pidfile in /run/mvm-services/*.pid; do
+    [ -f "$pidfile" ] || continue
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  # Remount config drive with fresh data. Skip when /dev/vdb is the
+  # dev VM's writable Nix-store overlay (label mvm-nix).
+  umount /mnt/config 2>/dev/null || true
+  if ! blkid /dev/vdb 2>/dev/null | grep -q 'LABEL="mvm-nix"'; then
+    mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdb /mnt/config 2>/dev/null && \
+      echo "[init] re-mounted config drive" > /dev/console || true
+  fi
+  # Remount secrets drive with tmpfs copy. The shared bucket
+  # under /run/mvm-secrets/ is wiped and refilled; each service's
+  # private subdir at /run/mvm-secrets/<svc>/ is re-populated by
+  # @serviceSecretsBlocks@ below. ADR-002 §W2.1.
+  umount /mnt/secrets 2>/dev/null || true
+  # Wipe top-level files only — preserve the per-svc subdirs that
+  # the generated blocks below repopulate idempotently. `rm -f` without
+  # `-r` silently skips directories, so `/run/mvm-secrets/<svc>/` survives.
+  rm -f /run/mvm-secrets/* 2>/dev/null || true
+  mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdc /mnt/secrets 2>/dev/null && {
+    echo "[init] re-mounted secrets drive" > /dev/console
+    cp /mnt/secrets/* /run/mvm-secrets/ 2>/dev/null || true
+    chown root:@serviceGroup@ /run/mvm-secrets/* 2>/dev/null || true
+    chmod 0440 /run/mvm-secrets/* 2>/dev/null || true
+@serviceSecretsBlocks@
+    umount /mnt/secrets
+    mount --bind /run/mvm-secrets /mnt/secrets
+  } || true
+  # Re-source environment variables (may have changed).
+  if [ -f /mnt/config/mvm-env.env ]; then
+    . /mnt/config/mvm-env.env
+  fi
+  echo "[init] post-restore complete, services restarting" > /dev/console
+}
+trap post_restore USR1
+
+# ── 11. Graceful shutdown handler ───────────────────────────────
+shutdown() {
+  echo "[init] shutting down..." > /dev/console
+  # Signal all service subshells to stop respawning.
+  for pid in $SERVICE_PIDS; do
+    kill -TERM "$pid" 2>/dev/null
+  done
+  [ -n "$AGENT_PID" ] && kill -TERM "$AGENT_PID" 2>/dev/null
+  # Grace period for services to clean up.
+  sleep 2
+  # Force-kill any stragglers.
+  for pid in $SERVICE_PIDS $AGENT_PID; do
+    kill -KILL "$pid" 2>/dev/null
+  done
+  sync
+  echo "[init] goodbye" > /dev/console
+}
+
+trap shutdown TERM INT

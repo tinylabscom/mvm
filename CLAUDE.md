@@ -70,7 +70,7 @@ The `RuntimeBuildEnv` in mvm-runtime implements only `ShellEnvironment`. The ful
 ### Key Design Decisions
 
 - **Firecracker-only**: no Docker/containers. Builds run Nix inside the Lima VM.
-- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvmctl dev` / `mvmctl dev shell`), not the microVM.
+- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The dev environment is the Lima VM (`mvmctl dev` / `mvmctl dev shell`), not the microVM. See **Security model** below for the full posture.
 - **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots an Apple Container with Nix + build tools via PTY-over-vsock console. On macOS <26 or Linux without KVM: uses Lima VM. Use `--lima` to force Lima fallback. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
 - **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
@@ -79,6 +79,56 @@ The `RuntimeBuildEnv` in mvm-runtime implements only `ShellEnvironment`. The ful
 - **Templates use dev_build path**: `mvmctl template build` runs `nix build` locally in the Lima VM (no ephemeral FC builder VMs).
 - **mvm-core stays whole**: orchestration types (tenant, pool, instance, agent, protocol) remain in mvm-core even though they're only used by mvmd. This avoids a third shared-types crate and keeps the facade dependency simple.
 - **No `clippy::too_many_arguments`**: never suppress this lint. Refactor into smaller functions or a config/params struct.
+
+## Security model
+
+mvm makes seven CI-enforced security claims. Each one is backed by a
+test or a workflow gate; ADR-002 (`specs/adrs/002-microvm-security-posture.md`)
+describes the threat model and `specs/plans/25-microvm-hardening.md`
+sequences the implementation.
+
+1. **No host-fs access from a guest beyond explicit shares.** Per-service
+   uid (W2.1), seccomp `standard` default (W1.1, W2.4), and `setpriv
+   --bounding-set=-all --no-new-privs` (W2.3) confine each service.
+2. **No guest binary can elevate to uid 0.** `setpriv --no-new-privs`
+   in the launch path; `/etc/{passwd,group,nsswitch.conf}` are
+   read-only bind-mounts so a compromised service can't mint a uid 0
+   entry (W2.2).
+3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
+   kernel-cmdline roothash (W3 — separate sprint).
+4. **The guest agent does not contain `do_exec` in production
+   builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
+   builds the agent without `dev-shell` and asserts the
+   `mvm_guest_agent::do_exec` symbol is absent (W4.3).
+5. **Vsock framing is fuzzed.** `cargo-fuzz` targets at
+   `crates/mvm-guest/fuzz/` cover `GuestRequest` and
+   `AuthenticatedFrame` (W4.2). `#[serde(deny_unknown_fields)]` on
+   every host↔guest type ensures unexpected fields fail-closed (W4.1).
+6. **Pre-built dev image is hash-verified.** `download_dev_image`
+   fetches the per-arch `*-checksums-sha256.txt` manifest, streams
+   the artifact through SHA-256, and rejects + deletes on mismatch
+   (W5.1). `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
+   escape; never set it in CI.
+7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
+   and `audit` jobs in CI (W5.2). Reproducibility double-build
+   (W5.3) catches non-determinism that could mask injection.
+
+The guest agent itself runs as uid 901 under setpriv (W4.5); the
+host-side vsock proxy socket is mode 0700 (W1.2), the proxy port
+allowlist drops anything outside the agent and forward ranges
+(W1.3), and `~/.mvm` / `~/.cache/mvm` are mode 0700 (W1.5).
+
+Out of scope (named in ADR-002):
+
+- A malicious *host*. mvmctl trusts the host with the hypervisor and
+  private build keys.
+- Multi-tenant guests. One guest = one workload.
+- Hardware-backed key attestation.
+
+`mvmctl security status` reports the live posture on the running
+host. Architecture detail in
+`specs/adrs/002-microvm-security-posture.md`. Implementation
+sequence in `specs/plans/25-microvm-hardening.md`.
 
 ## Testing
 
@@ -160,5 +210,5 @@ macOS / Linux Host
 ## Sprint Management
 
 - Active sprint spec: `specs/SPRINT.md`
-- Completed sprints archived to: `specs/sprints/` (e.g. `specs/sprints/01-foundation.md`)
-- When a sprint is completed, rename `specs/SPRINT.md` to `specs/sprints/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint
+- Completed sprints archived to: `specs/backlog/` (e.g. `specs/backlog/01-foundation.md`)
+- When a sprint is completed, rename `specs/SPRINT.md` to `specs/backlog/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint

@@ -101,7 +101,7 @@ Where Linux commands run. Defined in `mvm-core`:
 - `run_capture()` -- run and capture both stdout and stderr
 
 Implementations:
-- **`LimaEnv`** -- delegates commands via `limactl shell mvm` (macOS <26, or Linux without KVM)
+- **`LimaEnv`** -- delegates commands via `limactl shell mvm-builder` (macOS <26, or Linux without KVM)
 - **`NativeEnv`** -- runs commands directly (Linux with `/dev/kvm`)
 
 ### ShellEnvironment

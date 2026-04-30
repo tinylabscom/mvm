@@ -145,7 +145,7 @@ jobs:
         run: cargo test --test e2e
 
   audit:
-    name: Security Audit
+    name: Security Audit (cargo-audit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -155,3 +155,85 @@ jobs:
 
       - name: Run audit
         run: cargo audit
+
+  deny:
+    name: Supply chain (cargo-deny — ADR-002 §W5.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: Run cargo-deny check
+        run: cargo deny check
+
+  reproducibility:
+    name: Reproducibility (ADR-002 §W5.3)
+    runs-on: ubuntu-latest
+    env:
+      # Pinning SOURCE_DATE_EPOCH and CARGO_INCREMENTAL=0 are the two
+      # cheap knobs that turn rustc into a deterministic compiler in
+      # most cases. The double-build below catches anything that
+      # leaks past these. ADR-002 §W5.3.
+      SOURCE_DATE_EPOCH: "1700000000"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-D warnings --remap-path-prefix=${{ github.workspace }}=."
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build A
+        run: cargo build --release --locked --bin mvmctl
+
+      - name: Hash A
+        run: sha256sum target/release/mvmctl | tee /tmp/hash-a.txt
+
+      - name: Clean
+        run: cargo clean
+
+      - name: Build B
+        run: cargo build --release --locked --bin mvmctl
+
+      - name: Hash B
+        run: sha256sum target/release/mvmctl | tee /tmp/hash-b.txt
+
+      - name: Compare hashes
+        run: |
+          set -euo pipefail
+          a=$(awk '{print $1}' /tmp/hash-a.txt)
+          b=$(awk '{print $1}' /tmp/hash-b.txt)
+          if [ "$a" != "$b" ]; then
+            echo "::error::Reproducibility mismatch: $a != $b" >&2
+            echo "Two builds of the same source produced different binaries." >&2
+            echo "Investigate before merging — non-determinism can mask supply-chain injection." >&2
+            exit 1
+          fi
+          echo "ok: matching sha256 across two clean builds: $a"
+
+  prod-agent-no-exec:
+    name: Prod guest agent has no dev-shell symbols (ADR-002 §W4.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-prodagent-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-prodagent-
+
+      - name: Build prod agent and check for do_exec
+        run: ./scripts/check-prod-agent-no-exec.sh

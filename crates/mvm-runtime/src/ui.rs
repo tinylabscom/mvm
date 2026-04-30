@@ -1,5 +1,24 @@
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ---------------------------------------------------------------------------
+// Verbosity
+// ---------------------------------------------------------------------------
+
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Enable verbose `[mvm]` chatter (info/success/warn/step). Errors are
+/// always printed regardless. Called once at CLI startup based on
+/// `--verbose`/`--debug` or the presence of `RUST_LOG`.
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+/// Whether `[mvm]` chatter is currently enabled.
+pub fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Colored message helpers
@@ -19,7 +38,7 @@ pub fn success(msg: &str) {
     println!("{} {}", prefix(), msg.green());
 }
 
-/// Print an error message: [mvm] ERROR: message (in red)
+/// Print an error message: [mvm] ERROR: message (in red).
 pub fn error(msg: &str) {
     eprintln!("{} {}", "[mvm]".bold().red(), msg.red());
 }
@@ -37,6 +56,16 @@ pub fn step(n: u32, total: u32, msg: &str) {
         format!("Step {}/{}:", n, total).bold().yellow(),
         msg,
     );
+}
+
+/// Print a progress / chatter message that's only useful when
+/// troubleshooting (e.g. "auto-starting dev VM…"). Suppressed by default;
+/// shown when `--verbose`/`--debug` is passed or `RUST_LOG` is set.
+pub fn progress(msg: &str) {
+    if !is_verbose() {
+        return;
+    }
+    println!("{} {}", prefix(), msg);
 }
 
 // ---------------------------------------------------------------------------

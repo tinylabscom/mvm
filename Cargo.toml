@@ -9,6 +9,14 @@ members = [
     "crates/mvm-apple-container",
     "xtask",
 ]
+# cargo-fuzz crates have to be excluded from the main workspace because
+# they depend on libfuzzer-sys, which only builds under cargo-fuzz's
+# wrapper (it injects the right linker flags + sanitizer toolchain).
+# Plain `cargo build --workspace` would otherwise fail with linker
+# errors. ADR-002 §W4.2.
+exclude = [
+    "crates/mvm-guest/fuzz",
+]
 resolver = "3"
 
 [workspace.package]
@@ -65,6 +73,11 @@ names = { version = "0.14", default-features = false }
 # Signal handling
 ctrlc = "3.4"
 libc = "0.2"
+
+# Seccomp BPF compilation (W2.4 — per-service syscall filtering inside
+# guests, applied via the `mvm-seccomp-apply` shim before execve into
+# the service binary).
+seccompiler = "0.5"
 
 # File watching
 notify = "7"

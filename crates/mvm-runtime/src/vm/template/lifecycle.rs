@@ -80,23 +80,31 @@ pub fn template_load(id: &str) -> Result<TemplateSpec> {
 #[instrument(skip_all)]
 pub fn template_list() -> Result<Vec<String>> {
     let base = mvm_core::template::templates_base_dir();
-    let out = shell::run_in_vm_stdout(&format!("ls -1 {base} 2>/dev/null || true"))?
-        .trim()
-        .to_string();
-    Ok(out
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|s| s.to_string())
-        .collect())
+    let entries = match std::fs::read_dir(&base) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to list templates dir {}", base));
+        }
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 #[instrument(skip_all, fields(template_id = id, force))]
 pub fn template_delete(id: &str, force: bool) -> Result<()> {
     let dir = template_dir(id);
-    let flag = if force { "-rf" } else { "-r" };
-    vm_exec(&format!("rm {flag} {dir}"))
-        .with_context(|| format!("Failed to delete template {}", id))?;
-    Ok(())
+    let path = std::path::Path::new(&dir);
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && force => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("Failed to delete template {}", id)),
+    }
 }
 
 /// Initialize an on-disk template directory layout (empty artifacts, no spec).
@@ -563,12 +571,30 @@ pub fn template_build_with_snapshot(id: &str, force: bool, update_hash: bool) ->
 
     // Build a FlakeRunConfig for the temporary VM, using template runtime dir
     // for config/secrets so the snapshot has stable paths.
+    // Verity sidecar lives next to the rootfs in the per-revision dir
+    // when the flake was built with `verifiedBoot = true`. Probe for
+    // both files together; present them as Some only when we can read
+    // the roothash, and lift the absent case to None so callers stay
+    // backward-compatible with pre-W3 templates.
+    let verity_sidecar = format!("{}/rootfs.verity", rev_dir);
+    let roothash_file = format!("{}/rootfs.roothash", rev_dir);
+    let (verity_path, roothash) = match (
+        shell::run_in_vm(&format!("[ -f {verity_sidecar} ]")),
+        shell::run_in_vm_stdout(&format!("cat {roothash_file} 2>/dev/null")),
+    ) {
+        (Ok(_), Ok(hash)) if !hash.trim().is_empty() => {
+            (Some(verity_sidecar.clone()), Some(hash.trim().to_string()))
+        }
+        _ => (None, None),
+    };
     let run_config = microvm::FlakeRunConfig {
         name: snapshot_vm_name.clone(),
         slot: slot.clone(),
         vmlinux_path: format!("{}/vmlinux", rev_dir),
         initrd_path: None,
         rootfs_path: format!("{}/rootfs.ext4", rev_dir),
+        verity_path,
+        roothash,
         revision_hash: rev.clone(),
         flake_ref: spec.flake_ref.clone(),
         profile: Some(spec.profile.clone()),

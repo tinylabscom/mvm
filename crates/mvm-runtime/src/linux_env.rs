@@ -180,7 +180,9 @@ fn is_stdin_tty() -> bool {
 /// connection). Inherits stderr so progress messages reach the user.
 fn start_dev_daemon(vm_id: &str) -> Result<()> {
     let exe = std::env::current_exe().context("locating mvmctl binary for dev auto-start")?;
-    eprintln!("[mvm] dev VM '{vm_id}' is not running — auto-starting...");
+    crate::ui::progress(&format!(
+        "dev VM '{vm_id}' is not running — auto-starting..."
+    ));
     let status = Command::new(&exe)
         .args(["dev", "up"])
         .stdin(Stdio::null())

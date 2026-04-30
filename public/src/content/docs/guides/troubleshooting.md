@@ -8,7 +8,7 @@ description: Common issues and their solutions.
 ### "Lima VM not found"
 
 ```
-Error: Lima VM 'mvm' is not available. Run 'mvmctl setup' or 'mvmctl bootstrap' first.
+Error: Lima VM 'mvm-builder' is not available. Run 'mvmctl setup' or 'mvmctl bootstrap' first.
 ```
 
 **Fix**: Run `mvmctl bootstrap` (macOS) or `mvmctl setup` (Linux with Lima installed).
@@ -19,7 +19,7 @@ The Lima VM exists but is stopped.
 
 **Fix**:
 ```bash
-limactl start mvm
+limactl start mvm-builder
 # or
 mvmctl dev  # auto-starts Lima
 ```
@@ -27,8 +27,8 @@ mvmctl dev  # auto-starts Lima
 ### Lima VM is stuck
 
 ```bash
-limactl stop mvm --force
-limactl start mvm
+limactl stop mvm-builder --force
+limactl start mvm-builder
 ```
 
 If that fails:
@@ -55,7 +55,7 @@ mvmctl logs <name> --hypervisor   # Firecracker logs
 **Fix**:
 ```bash
 # Check for orphaned TAP devices (inside Lima VM)
-limactl shell mvm bash -c "ip link show | grep tap"
+limactl shell mvm-builder bash -c "ip link show | grep tap"
 ```
 
 ### Instance won't start after sleep
@@ -91,7 +91,7 @@ If builds are slow despite no code changes, check that `flake.lock` hasn't chang
 error: flake does not provide attribute ...
 ```
 
-**Cause**: Your `flake.lock` references an old nixpkgs or guest-lib version that doesn't have the expected outputs.
+**Cause**: Your `flake.lock` references an old nixpkgs or `mvm` flake version that doesn't have the expected outputs.
 
 **Fix**:
 ```bash
@@ -158,10 +158,10 @@ error: timed out waiting for ...
 
 ```bash
 # Inside the Lima VM, check NAT rules
-limactl shell mvm bash -c "sudo iptables -t nat -L"
+limactl shell mvm-builder bash -c "sudo iptables -t nat -L"
 
 # Check the TAP device exists
-limactl shell mvm bash -c "ip link show tap0"
+limactl shell mvm-builder bash -c "ip link show tap0"
 ```
 
 ### Can't access project files inside microVM

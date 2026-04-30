@@ -44,6 +44,130 @@ fn persist_vm_state(id: &str) {
     let _ = std::fs::write(dir.join("backend"), "apple-virtualization");
 }
 
+/// Path to the cross-process vsock proxy Unix socket for VM `id`.
+fn vsock_proxy_socket_path(id: &str) -> std::path::PathBuf {
+    vm_state_dir().join(id).join("vsock.sock")
+}
+
+/// Listen on the per-VM Unix socket and forward each connection to a vsock
+/// port on the running in-process VM.
+///
+/// Wire protocol: client sends a little-endian `u32` port, then the proxy
+/// connects to that vsock port via `vsock_connect` and copies bytes both
+/// ways. This mirrors what `vsock_connect_any` (in `lib.rs`) speaks, so any
+/// other `mvmctl` process can reach the dev VM as long as the socket file
+/// exists and the daemon is alive.
+///
+/// Failures here are surfaced via `Err`: the caller (currently `start_vm`)
+/// treats a failed proxy as a failed VM start, since a VM that can't be
+/// reached cross-process is functionally not running.
+fn start_vsock_proxy_listener(id: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::net::UnixListener;
+
+    let socket_path = vsock_proxy_socket_path(id);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create proxy socket dir {}: {e}", parent.display()))?;
+    }
+    // A leftover socket file from a previous (now-dead) daemon would make
+    // bind() fail with EADDRINUSE. The state-cleanup path in `dev down`
+    // already handles this, but be defensive: any pid-checked stale entry
+    // that escaped cleanup must not block a fresh start.
+    let _ = std::fs::remove_file(&socket_path);
+
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|e| format!("bind vsock proxy socket {}: {e}", socket_path.display()))?;
+
+    // ADR-002 W1.2: lock the socket to mode 0700 so a same-host other
+    // user can't speak the proxy protocol. Without this the socket
+    // inherits umask (typically 0755), and any process running as
+    // anyone on the same Mac could open the dev VM's guest agent
+    // and call `Exec` (in the dev image) or `ConsoleOpen` (in any
+    // image). Filesystem perms ARE the auth boundary; we make them
+    // explicit rather than implicit.
+    if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o700)) {
+        tracing::warn!(
+            "could not chmod 0700 on vsock proxy socket {}: {e}",
+            socket_path.display()
+        );
+    }
+
+    let id = id.to_string();
+    std::thread::Builder::new()
+        .name(format!("vsock-proxy-{id}"))
+        .spawn(move || proxy_accept_loop(listener, id))
+        .map_err(|e| format!("spawn vsock proxy thread: {e}"))?;
+    Ok(())
+}
+
+/// Decide whether a port that arrived over the proxy socket is one we
+/// should forward to the in-process VM's vsock. ADR-002 W1.3.
+///
+/// The proxy speaks a one-byte-prefix protocol: client sends a u32 LE
+/// port and then expects bidirectional bytes to that vsock port. Without
+/// an allowlist, a client could connect to *any* vsock port the guest
+/// happens to have listening — not just the guest agent. We restrict
+/// to the three ranges mvmctl actually uses:
+///
+/// * `52` — guest agent control channel.
+/// * `PORT_FORWARD_BASE..=BASE+65535` — traffic forwarders set up by
+///   `start_port_proxy` (BASE = 10000).
+/// * `CONSOLE_PORT_BASE..=BASE+65535` — `ConsoleOpen` data ports
+///   (BASE = 20000).
+fn proxy_port_is_allowed(port: u32) -> bool {
+    const GUEST_AGENT: u32 = 52;
+    const PORT_FORWARD_BASE: u32 = 10_000;
+    const CONSOLE_PORT_BASE: u32 = 20_000;
+    port == GUEST_AGENT
+        || (PORT_FORWARD_BASE..=PORT_FORWARD_BASE + 65_535).contains(&port)
+        || (CONSOLE_PORT_BASE..=CONSOLE_PORT_BASE + 65_535).contains(&port)
+}
+
+fn proxy_accept_loop(listener: std::os::unix::net::UnixListener, id: String) {
+    use std::io::Read;
+
+    for stream in listener.incoming().flatten() {
+        let id = id.clone();
+        std::thread::spawn(move || {
+            let mut client = stream;
+            let mut port_buf = [0u8; 4];
+            if client.read_exact(&mut port_buf).is_err() {
+                return;
+            }
+            let port = u32::from_le_bytes(port_buf);
+
+            if !proxy_port_is_allowed(port) {
+                tracing::warn!(
+                    "vsock proxy: rejecting connection to disallowed port {port} on '{id}'"
+                );
+                return;
+            }
+
+            let vsock = match vsock_connect(&id, port) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("vsock proxy: connect to '{id}' port {port} failed: {e}");
+                    return;
+                }
+            };
+
+            let Ok(mut vsock_read) = vsock.try_clone() else {
+                return;
+            };
+            let Ok(mut client_write) = client.try_clone() else {
+                return;
+            };
+            let copy_up = std::thread::spawn(move || {
+                let _ = std::io::copy(&mut vsock_read, &mut client_write);
+            });
+            let mut vsock_write = vsock;
+            let _ = std::io::copy(&mut client, &mut vsock_write);
+            let _ = copy_up.join();
+        });
+    }
+}
+
 /// Remove VM state from disk and unload launchd agent.
 fn remove_vm_state(id: &str) {
     unload_launchd_agent(id);
@@ -264,38 +388,6 @@ fn sign_binary(exe_str: &str) {
     let _ = std::fs::remove_file(&ent_path);
 }
 
-/// Discover the guest's IP by scanning ARP for recent entries on bridge interfaces.
-/// Waits up to `timeout` for a new IP to appear.
-pub fn discover_guest_ip(timeout: Duration) -> Option<String> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Ok(output) = std::process::Command::new("arp").arg("-a").output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Look for non-permanent, non-incomplete entries on bridge interfaces
-                if line.contains("bridge")
-                    && !line.contains("permanent")
-                    && !line.contains("incomplete")
-                    && !line.contains("ff:ff:ff:ff")
-                {
-                    // Extract IP: "? (192.168.64.9) at ba:b3:..."
-                    if let Some(start) = line.find('(')
-                        && let Some(end) = line.find(')')
-                    {
-                        let ip = &line[start + 1..end];
-                        // Skip bridge gateway IPs (end in .0 or .1)
-                        if !ip.ends_with(".0") && !ip.ends_with(".1") {
-                            return Some(ip.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    None
-}
-
 /// Start a port proxy that forwards localhost:host_port to the guest's
 /// tcp_port via vsock. The guest agent runs a vsock→TCP forwarder on
 /// `PORT_FORWARD_BASE + guest_port`. Runs in a background thread.
@@ -369,6 +461,7 @@ pub fn start_vm(
     rootfs_path: &str,
     cpus: u32,
     memory_mib: u64,
+    verity: Option<crate::VerityConfig<'_>>,
 ) -> Result<(), String> {
     ensure_signed();
 
@@ -377,6 +470,17 @@ pub fn start_vm(
     }
     if !Path::new(rootfs_path).exists() {
         return Err(format!("Rootfs not found: {rootfs_path}"));
+    }
+    if let Some(v) = &verity {
+        if !Path::new(v.verity_path).exists() {
+            return Err(format!("Verity sidecar not found: {}", v.verity_path));
+        }
+        if v.roothash.len() != 64 || !v.roothash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Invalid root hash {:?} (expected 64 hex chars)",
+                v.roothash
+            ));
+        }
     }
 
     // Copy rootfs to a writable location — the Nix store copy is read-only
@@ -406,9 +510,78 @@ pub fn start_vm(
 
         let boot_loader =
             VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &nsurl(kernel_path));
-        boot_loader.setCommandLine(&NSString::from_str(
-            "console=hvc0 root=/dev/vda rw init=/init",
-        ));
+        // Pass the host's project directory through the kernel cmdline so
+        // the guest's init can bind-mount the virtiofs share at the same
+        // absolute path inside the VM. Without this, `nix build
+        // /Users/foo/proj/...` issued from mvmctl ends up running inside
+        // the VM where that absolute path doesn't exist; with it, host
+        // paths "just work" cross-VM.
+        //
+        // Source order: explicit `MVM_HOST_WORKDIR` env var (set by the
+        // CLI before launching the launchd-managed daemon, since the
+        // daemon's `current_dir()` is launchd's `/`), falling back to the
+        // current process's CWD when started directly (Linux dev / tests).
+        // Reject `/` and any path containing whitespace or `=` because the
+        // kernel cmdline parser is whitespace-delimited and a workdir of
+        // `/` would bind-mount virtiofs over the entire root filesystem.
+        let workdir = std::env::var("MVM_HOST_WORKDIR")
+            .ok()
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .filter(|s| s.starts_with('/') && s != "/")
+            .filter(|s| !s.contains([' ', '\t', '\n', '=']));
+        let datadir = std::env::var("MVM_HOST_DATADIR")
+            .ok()
+            .filter(|s| s.starts_with('/') && s != "/")
+            .filter(|s| !s.contains([' ', '\t', '\n', '=']));
+        // When dm-verity is on, the rootfs is mounted via /dev/dm-0
+        // (the verity-protected mapping) and is read-only by definition
+        // — verity hashes are tied to fixed bytes. ADR-002 §W3.2.
+        let mut cmdline = if verity.is_some() {
+            "console=hvc0 root=/dev/dm-0 ro init=/init".to_string()
+        } else {
+            "console=hvc0 root=/dev/vda rw init=/init".to_string()
+        };
+        if let Some(p) = &workdir {
+            cmdline.push_str(&format!(" mvm.workdir={p}"));
+        }
+        if let Some(p) = &datadir {
+            cmdline.push_str(&format!(" mvm.datadir={p}"));
+        }
+        if let Some(v) = &verity {
+            // The verity sidecar is the second VirtioBlk device → /dev/vdb
+            // when there's no overlayfs upper. dm-mod.create syntax:
+            //   <name>,<uuid>,<minor>,<flags>,<table-line>
+            // Empty fields default; `ro` is the only flag. Table line for
+            // verity:
+            //   <start-sector> <num-sectors> verity <version> <data-dev>
+            //   <hash-dev> <data-block-size> <hash-block-size>
+            //   <num-data-blocks> <hash-start-block> <algo> <root-hash>
+            //   <salt>  [#opt-args ...]
+            //
+            // We size num-data-blocks from the rootfs size (in 4 KiB
+            // blocks). hash-start-block is 0 because the sidecar is its
+            // own device. salt is zero (matches the deterministic salt
+            // pinned by mkGuest's verityArtifacts).
+            let rootfs_bytes = std::fs::metadata(rootfs_path)
+                .map_err(|e| format!("verity rootfs metadata: {e}"))?
+                .len();
+            // Verity blocks are 4096 bytes; the data area is the rootfs's
+            // exact byte length rounded down to the block size. The
+            // veritysetup format pass already rejected non-aligned input.
+            let data_blocks = rootfs_bytes / 4096;
+            let num_sectors = data_blocks * 8; // 4096 / 512
+            let dm_table = format!(
+                "0 {num_sectors} verity 1 /dev/vda /dev/vdb 4096 4096 {data_blocks} 0 sha256 {} {}",
+                v.roothash,
+                "0".repeat(64),
+            );
+            cmdline.push_str(&format!(" dm-mod.create=rootfs,,,ro,{dm_table}"));
+        }
+        boot_loader.setCommandLine(&NSString::from_str(&cmdline));
 
         let config = VZVirtualMachineConfiguration::new();
         config.setPlatform(&platform);
@@ -416,20 +589,112 @@ pub fn start_vm(
         config.setCPUCount(cpus as usize);
         config.setMemorySize(memory_mib * 1024 * 1024);
 
-        // Rootfs disk
-        let disk_attach = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
+        // ── Storage devices ───────────────────────────────────────
+        //
+        // /dev/vda — rootfs (read-only ext4 baked by mkGuest). Holds the
+        //            boot closure: busybox, init, the bundled
+        //            `pkgs.nix`, the pre-seeded /nix/var/nix/db.
+        //
+        // /dev/vdb — host-backed Nix store. Sparse ext4 file at
+        //            $MVM_NIX_STORE_DISK on the host, attached as a
+        //            second VirtioBlk device. The init mkfs's it on
+        //            first boot, then mounts it as the *upper* layer of
+        //            an overlayfs over the rootfs's /nix. We use ext4
+        //            (block device) instead of virtiofs because
+        //            overlayfs needs the upper to support `trusted.*`
+        //            xattrs — virtiofs on macOS can't surface those, so
+        //            an overlay over a virtiofs upper silently
+        //            downgrades to read-only.
+        let mut storage_devices: Vec<Retained<VZStorageDeviceConfiguration>> = Vec::new();
+
+        // When verity is on, the rootfs disk MUST be opened read-only
+        // — a writable handle would let any host process mutate the
+        // bytes the verity Merkle tree was built against and break
+        // the integrity check at read time.
+        let rootfs_read_only = verity.is_some();
+        let rootfs_attach = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
             VZDiskImageStorageDeviceAttachment::alloc(),
             &nsurl(rootfs_path),
-            false,
+            rootfs_read_only,
             VZDiskImageCachingMode::Automatic,
             VZDiskImageSynchronizationMode::Full,
         ).map_err(|e| format!("disk: {e}"))?;
-
-        let disk = VZVirtioBlockDeviceConfiguration::initWithAttachment(
+        let rootfs_disk = VZVirtioBlockDeviceConfiguration::initWithAttachment(
             VZVirtioBlockDeviceConfiguration::alloc(),
-            &disk_attach,
+            &rootfs_attach,
         );
-        config.setStorageDevices(&NSArray::from_retained_slice(&[Retained::into_super(disk)]));
+        storage_devices.push(Retained::into_super(rootfs_disk));
+
+        // Verity sidecar (Merkle tree) → /dev/vdb. Production microVMs
+        // that opt into verifiedBoot ship without the writable Nix
+        // store overlay, so no device-letter collision arises. We
+        // refuse to start if both are requested simultaneously.
+        if let Some(v) = &verity {
+            if std::env::var("MVM_NIX_STORE_DISK")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .is_some()
+            {
+                return Err("MVM_NIX_STORE_DISK and dm-verity are mutually exclusive: \
+                     the writable overlay would land on /dev/vdb and collide \
+                     with the verity sidecar. Disable verifiedBoot or remove \
+                     the overlay disk."
+                    .to_string());
+            }
+            let verity_attach =
+                VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
+                    VZDiskImageStorageDeviceAttachment::alloc(),
+                    &nsurl(v.verity_path),
+                    true,
+                    VZDiskImageCachingMode::Automatic,
+                    VZDiskImageSynchronizationMode::Full,
+                ).map_err(|e| format!("verity attach: {e}"))?;
+            let verity_disk = VZVirtioBlockDeviceConfiguration::initWithAttachment(
+                VZVirtioBlockDeviceConfiguration::alloc(),
+                &verity_attach,
+            );
+            storage_devices.push(Retained::into_super(verity_disk));
+        }
+
+        if let Ok(nix_store_disk) = std::env::var("MVM_NIX_STORE_DISK")
+            && !nix_store_disk.is_empty()
+        {
+            // Create the sparse file if missing. truncate(0) sets the
+            // logical length without allocating blocks; the host
+            // filesystem materialises blocks on write. 64 GiB is a
+            // generous-but-finite cap that fits a Rust+Python toolchain
+            // closure several times over and gives nix-collect-garbage
+            // headroom before the user notices.
+            const NIX_STORE_DISK_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+            let path = std::path::Path::new(&nix_store_disk);
+            if !path.exists() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("create nix-store disk parent: {e}"))?;
+                }
+                let f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(|e| format!("create nix-store disk {nix_store_disk}: {e}"))?;
+                f.set_len(NIX_STORE_DISK_BYTES)
+                    .map_err(|e| format!("size nix-store disk: {e}"))?;
+            }
+            let nix_attach = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
+                VZDiskImageStorageDeviceAttachment::alloc(),
+                &nsurl(&nix_store_disk),
+                false,
+                VZDiskImageCachingMode::Automatic,
+                VZDiskImageSynchronizationMode::Full,
+            ).map_err(|e| format!("nix-store disk attach: {e}"))?;
+            let nix_disk = VZVirtioBlockDeviceConfiguration::initWithAttachment(
+                VZVirtioBlockDeviceConfiguration::alloc(),
+                &nix_attach,
+            );
+            storage_devices.push(Retained::into_super(nix_disk));
+        }
+
+        config.setStorageDevices(&NSArray::from_retained_slice(&storage_devices));
 
         // NAT network
         let net = VZVirtioNetworkDeviceConfiguration::new();
@@ -451,12 +716,32 @@ pub fn start_vm(
             vsock,
         )]));
 
-        // Shared directory — mount the current working directory inside the VM.
-        // Uses VirtioFS (tag "workdir") so the guest can mount it at /root/work.
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .to_string_lossy()
-            .to_string();
+        // VirtioFS shares. The launchd-spawned daemon's `current_dir()`
+        // is `/`, so prefer the explicit env vars set by the parent CLI;
+        // without them, sharing `/` would expose the entire macOS root
+        // inside the VM. (The Nix store is NOT a virtiofs share — it's
+        // the second VirtioBlk device above. virtiofs can't carry the
+        // xattrs overlayfs needs for the writable upper layer.)
+        //
+        //   workdir   the user's project directory. The guest's init
+        //             mounts it at /root and bind-mounts it again at
+        //             `mvm.workdir=<host>` so absolute host paths
+        //             resolve cross-VM.
+        //
+        //   datadir   $HOME/.mvm on the host (via MVM_HOST_DATADIR).
+        //             The dev-build pipeline writes artifacts to
+        //             $HOME/.mvm/dev/builds/<hash>/ from inside the
+        //             VM; without this share, those writes would land
+        //             on the read-only rootfs and ENOSPC. Mounted at
+        //             the same absolute host path inside the VM so
+        //             host and guest agree on artifact locations.
+        let mut shares: Vec<Retained<VZVirtioFileSystemDeviceConfiguration>> = Vec::new();
+        let cwd = workdir.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .into_owned()
+        });
         if Path::new(&cwd).is_dir() {
             let shared_dir = VZSharedDirectory::initWithURL_readOnly(
                 VZSharedDirectory::alloc(),
@@ -472,15 +757,51 @@ pub fn start_vm(
                 &NSString::from_str("workdir"),
             );
             fs_config.setShare(Some(&share));
-            config.setDirectorySharingDevices(&NSArray::from_retained_slice(&[
-                Retained::into_super(fs_config),
-            ]));
+            shares.push(fs_config);
+        }
+        if let Ok(datadir) = std::env::var("MVM_HOST_DATADIR")
+            && !datadir.is_empty()
+            && Path::new(&datadir).is_dir()
+        {
+            let shared_dir = VZSharedDirectory::initWithURL_readOnly(
+                VZSharedDirectory::alloc(),
+                &nsurl(&datadir),
+                false,
+            );
+            let share = VZSingleDirectoryShare::initWithDirectory(
+                VZSingleDirectoryShare::alloc(),
+                &shared_dir,
+            );
+            let fs_config = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+                VZVirtioFileSystemDeviceConfiguration::alloc(),
+                &NSString::from_str("datadir"),
+            );
+            fs_config.setShare(Some(&share));
+            shares.push(fs_config);
+        }
+        if !shares.is_empty() {
+            let supers: Vec<Retained<VZDirectorySharingDeviceConfiguration>> =
+                shares.into_iter().map(Retained::into_super).collect();
+            config.setDirectorySharingDevices(&NSArray::from_retained_slice(&supers));
         }
 
         // Serial console — write kernel and init output to log file
+        // ADR-002 W1.4: console log is mode 0600. The kernel + init
+        // write every byte of guest stdout/stderr there, including
+        // anything a guest service prints — secrets, environment,
+        // command output. Default umask leaves it 0644 (world-readable
+        // on macOS multi-user systems). Open with `mode(0o600)` via
+        // OpenOptions so the file is born locked-down rather than
+        // racing a chmod after `File::create`.
+        use std::os::unix::fs::OpenOptionsExt as _;
         let console_log = vm_dir.join("console.log");
-        let console_file =
-            std::fs::File::create(&console_log).map_err(|e| format!("create console log: {e}"))?;
+        let console_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&console_log)
+            .map_err(|e| format!("create console log: {e}"))?;
         use std::os::fd::IntoRawFd;
         let log_fd = console_file.into_raw_fd();
         let write_handle = NSFileHandle::initWithFileDescriptor(NSFileHandle::alloc(), log_fd);
@@ -560,6 +881,15 @@ pub fn start_vm(
                 Ok(Ok(())) => {
                     tracing::info!("VM '{id}' started via Virtualization.framework");
                     persist_vm_state(id);
+                    if let Err(e) = start_vsock_proxy_listener(id) {
+                        // A VM that can't be reached by other processes is
+                        // functionally not running — surface the failure
+                        // and tear down the just-persisted state, but
+                        // leave any launchd plist alone so the agent that
+                        // spawned us isn't cleaned up mid-execution.
+                        let _ = std::fs::remove_dir_all(vm_state_dir().join(id));
+                        return Err(format!("start vsock proxy listener: {e}"));
+                    }
                     return Ok(());
                 }
                 Ok(Err(e)) => return Err(format!("start failed: {e}")),
@@ -588,6 +918,11 @@ pub fn stop_vm(id: &str) -> Result<(), String> {
 
 pub fn list_vm_ids() -> Vec<String> {
     read_persisted_vm_ids()
+}
+
+/// Path to the per-VM cross-process vsock proxy Unix socket.
+pub fn proxy_socket_path(id: &str) -> std::path::PathBuf {
+    vsock_proxy_socket_path(id)
 }
 
 /// Connect to the guest agent via vsock and return a Unix stream.
@@ -668,5 +1003,240 @@ pub fn vsock_connect(id: &str, port: u32) -> Result<std::os::unix::net::UnixStre
             Err(mpsc::TryRecvError::Empty) => return Err("vsock connect timed out".to_string()),
             Err(e) => return Err(format!("channel: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    /// Run `body` with `$HOME` pointed at a short temp dir so the listener
+    /// and readiness probes don't touch the real `~/.mvm/vms/`.
+    ///
+    /// Uses `/tmp` directly rather than `std::env::temp_dir()`, because the
+    /// latter resolves to `/var/folders/...` on macOS, which when combined
+    /// with `.mvm/vms/<id>/vsock.sock` exceeds `SUN_LEN` (~104 bytes).
+    ///
+    /// Holds a process-global mutex while HOME is mutated so concurrent
+    /// `with_temp_home` calls don't race each other into a shared
+    /// (incoherent) HOME — cargo runs tests in parallel by default.
+    fn with_temp_home<F: FnOnce(&std::path::Path)>(body: F) {
+        use std::sync::Mutex;
+        static HOME_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = HOME_LOCK.lock().expect("HOME lock");
+
+        let temp = std::path::PathBuf::from(format!("/tmp/mvmac-{}", unique_id()));
+        std::fs::create_dir_all(&temp).expect("create temp HOME");
+        let saved = std::env::var("HOME").ok();
+        // SAFETY: serialised by HOME_LOCK above.
+        unsafe { std::env::set_var("HOME", &temp) };
+        body(&temp);
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    fn unique_id() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}-{}", std::process::id(), nanos)
+    }
+
+    #[test]
+    fn test_proxy_socket_path_lives_under_home_vms_dir() {
+        with_temp_home(|home| {
+            let p = vsock_proxy_socket_path("vm-x");
+            assert!(
+                p.starts_with(home),
+                "path {} not under {}",
+                p.display(),
+                home.display()
+            );
+            assert!(
+                p.ends_with(".mvm/vms/vm-x/vsock.sock"),
+                "got {}",
+                p.display()
+            );
+        });
+    }
+
+    /// A stale socket file from a previous (now-dead) daemon must not stop a
+    /// fresh listener from binding. The listener also has to accept a
+    /// connection from a peer that speaks the documented wire protocol.
+    #[test]
+    fn test_listener_recovers_from_stale_socket_and_reads_port() {
+        with_temp_home(|_home| {
+            let id = "stale-recover";
+            let path = vsock_proxy_socket_path(id);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create vm dir");
+            std::fs::write(&path, b"left over from a dead daemon").expect("seed stale file");
+
+            start_vsock_proxy_listener(id).expect("listener should rebind");
+            assert!(path.exists(), "socket file must exist after listener start");
+
+            // Connect and send the wire protocol's u32 port. The listener
+            // will hand off to vsock_connect, which fails (no in-process
+            // VM), but the protocol read on this side must succeed.
+            let mut client = UnixStream::connect(&path).expect("connect to proxy");
+            client.write_all(&52u32.to_le_bytes()).expect("write port");
+
+            // Read should return EOF (0 bytes) once the worker thread gives
+            // up on vsock_connect — that's the contract.
+            let mut buf = [0u8; 1];
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .expect("set read timeout");
+            let n = client.read(&mut buf).unwrap_or(0);
+            assert_eq!(n, 0, "expected EOF after vsock_connect failure");
+        });
+    }
+
+    /// ADR-002 W1.2: the proxy socket is born with mode `0700`.
+    ///
+    /// We verify this by binding via the same code path the daemon
+    /// uses (`start_vsock_proxy_listener`), then asking the file
+    /// system what perms it has. If a future change forgets the
+    /// `set_permissions` call, this test fails before any user is
+    /// exposed to a 0755 socket.
+    #[test]
+    fn test_proxy_socket_is_chmod_0700() {
+        use std::os::unix::fs::PermissionsExt as _;
+        with_temp_home(|_home| {
+            let id = "perm-test";
+            start_vsock_proxy_listener(id).expect("listener bind");
+            let path = vsock_proxy_socket_path(id);
+            let mode = std::fs::metadata(&path)
+                .expect("socket exists")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "vsock proxy socket at {} must be mode 0700, was 0{:o}",
+                path.display(),
+                mode
+            );
+        });
+    }
+
+    /// ADR-002 W1.3: the proxy port allowlist accepts the three
+    /// ranges mvmctl actually uses and rejects everything else.
+    /// Pure logic — no daemon needed; just the predicate.
+    ///
+    /// Ranges:
+    ///   guest_agent:  {52}
+    ///   port_forward: 10_000..=75_535  (BASE 10_000 + 0..=65_535)
+    ///   console_data: 20_000..=85_535  (BASE 20_000 + 0..=65_535)
+    ///
+    /// The port_forward and console_data ranges legitimately overlap;
+    /// any port in the union is fine. Only the gaps below 10_000
+    /// (excluding 52) and above 85_535 are forbidden.
+    #[test]
+    fn test_proxy_port_allowlist() {
+        // Allowed: guest agent control channel.
+        assert!(proxy_port_is_allowed(52));
+
+        // Allowed: port-forward range edges + interior.
+        assert!(proxy_port_is_allowed(10_000));
+        assert!(proxy_port_is_allowed(10_080));
+        assert!(proxy_port_is_allowed(75_535));
+
+        // Allowed: console-data range edges + interior (overlaps with
+        // port-forward in 20_000..=75_535; that's fine).
+        assert!(proxy_port_is_allowed(20_000));
+        assert!(proxy_port_is_allowed(20_001));
+        assert!(proxy_port_is_allowed(85_535));
+
+        // Rejected: low ports outside the agent slot.
+        assert!(!proxy_port_is_allowed(0));
+        assert!(!proxy_port_is_allowed(1));
+        assert!(!proxy_port_is_allowed(22));
+        assert!(!proxy_port_is_allowed(51));
+        assert!(!proxy_port_is_allowed(53));
+
+        // Rejected: gap between agent slot and port-forward range.
+        assert!(!proxy_port_is_allowed(100));
+        assert!(!proxy_port_is_allowed(9_999));
+
+        // Rejected: above the union of port_forward and console_data.
+        assert!(!proxy_port_is_allowed(85_536));
+        assert!(!proxy_port_is_allowed(u32::MAX));
+    }
+
+    // ──── Verity input validation (ADR-002 §W3.2) ────────────────────
+    //
+    // The `start_vm` body validates the verity config's roothash shape
+    // before constructing any objc objects. Live boot through VZ is
+    // exercised in the macOS CI lane; these tests pin the validation
+    // contract so a refactor that loosens the check (e.g., accepting
+    // uppercase hex, accepting wrong lengths) is caught immediately.
+
+    fn dummy_paths() -> (tempfile::TempDir, String, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        std::fs::write(&kernel, b"FAKE_KERNEL").unwrap();
+        std::fs::write(&rootfs, vec![0u8; 4096]).unwrap();
+        std::fs::write(&verity, b"FAKE_VERITY").unwrap();
+        (
+            dir,
+            kernel.to_string_lossy().into(),
+            rootfs.to_string_lossy().into(),
+            verity.to_string_lossy().into(),
+        )
+    }
+
+    #[test]
+    fn start_vm_rejects_short_roothash() {
+        let (_dir, k, r, v) = dummy_paths();
+        let cfg = crate::VerityConfig {
+            verity_path: &v,
+            roothash: "deadbeef",
+        };
+        let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
+        assert!(
+            err.contains("Invalid root hash"),
+            "expected validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn start_vm_rejects_non_hex_roothash() {
+        let (_dir, k, r, v) = dummy_paths();
+        let bad = "z".repeat(64);
+        let cfg = crate::VerityConfig {
+            verity_path: &v,
+            roothash: &bad,
+        };
+        let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
+        assert!(
+            err.contains("Invalid root hash"),
+            "expected validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn start_vm_rejects_missing_verity_sidecar() {
+        let (_dir, k, r, _v) = dummy_paths();
+        let valid_hash = "a".repeat(64);
+        let cfg = crate::VerityConfig {
+            verity_path: "/nonexistent/path/to/rootfs.verity",
+            roothash: &valid_hash,
+        };
+        let err = start_vm("test-id", &k, &r, 1, 256, Some(cfg)).unwrap_err();
+        assert!(
+            err.contains("Verity sidecar not found"),
+            "expected missing-sidecar error, got: {err}"
+        );
     }
 }

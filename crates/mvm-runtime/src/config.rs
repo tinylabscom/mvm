@@ -3,7 +3,23 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 
-pub const VM_NAME: &str = "mvm";
+/// Lima VM name. Renamed from `mvm` to `mvm-builder` (W7.2) to make its role
+/// — hosting `nix build`, Firecracker, and the per-tenant microVMs — visible
+/// at the limactl level. The bridge name `br-mvm`, log filter `RUST_LOG=mvm`,
+/// path `/var/lib/mvm/`, OCI label `mvm`, and Apple Container guest hostname
+/// `mvm-dev` are deliberately unchanged: they are not the Lima VM name.
+///
+/// Migration: an existing `mvm` Lima VM on a developer's machine continues to
+/// work — `mvmctl bootstrap` detects it and prints a one-line migration
+/// command instead of auto-renaming, since `limactl` lacks an in-place
+/// rename.
+pub const VM_NAME: &str = "mvm-builder";
+
+/// Legacy Lima VM name. Kept as a constant so the migration UX in
+/// `mvm-cli::bootstrap` can detect a pre-rename install and tell the user
+/// what to run. Once we're confident the rename has propagated, this can
+/// go away.
+pub const LEGACY_VM_NAME: &str = "mvm";
 pub const API_SOCKET: &str = "/tmp/firecracker.socket";
 pub const TAP_DEV: &str = "tap0";
 pub const TAP_IP: &str = "172.16.0.1";
@@ -476,7 +492,7 @@ mod tests {
             .unwrap()
             .read_to_string(&mut content)
             .unwrap();
-        assert_eq!(content, "custom: mvm");
+        assert_eq!(content, "custom: mvm-builder");
     }
 
     #[test]

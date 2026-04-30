@@ -226,9 +226,33 @@ mod tests {
 
     #[test]
     fn test_apple_container_list_returns_empty() {
+        // Isolate HOME so the persisted ~/.mvm/vms registry doesn't bleed
+        // into this assertion when the developer's real dev VM is running.
+        let temp = std::path::PathBuf::from(format!(
+            "/tmp/mvmac-list-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp HOME");
+        let saved = std::env::var("HOME").ok();
+        // SAFETY: list() is the only HOME consumer in this test; no other
+        // threads in this test process race with it.
+        unsafe { std::env::set_var("HOME", &temp) };
+
         let backend = AppleContainerBackend;
         let vms = backend.list().unwrap();
         assert!(vms.is_empty());
+
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

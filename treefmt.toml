@@ -1,0 +1,40 @@
+# treefmt config — drives `nix fmt` over the whole repo.
+#
+# `nix/flake.nix` exposes `formatter.${system} = pkgs.nixfmt-rfc-style`,
+# which today only handles `*.nix`. This config file is in place so a
+# follow-up PR can switch the formatter output to `pkgs.treefmt` and
+# pick up rust/markdown/shell formatting in one pass without churning
+# the flake again.
+
+[formatter.nix]
+command = "nixfmt"
+includes = ["*.nix"]
+
+[formatter.rust]
+command = "rustfmt"
+options = ["--edition", "2024"]
+includes = ["*.rs"]
+excludes = [
+  "target/**",
+  ".git/**",
+]
+
+[formatter.shell]
+command = "shfmt"
+options = ["-i", "2", "-ci", "-w"]
+includes = ["*.sh", "*.sh.in"]
+excludes = [
+  "target/**",
+  "nix/lib/minimal-init/lib/**",   # heredoc-heavy generated init fragments
+]
+
+[formatter.markdown]
+command = "prettier"
+options = ["--prose-wrap", "preserve", "--write"]
+includes = ["*.md"]
+excludes = [
+  "node_modules/**",
+  "target/**",
+  "public/.astro/**",
+  "specs/backlog/**",   # archived; preserve as-was
+]

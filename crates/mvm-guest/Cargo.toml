@@ -16,15 +16,31 @@ path = "src/bin/mvm-builder-agent.rs"
 name = "mvm-guest-agent"
 path = "src/bin/mvm-guest-agent.rs"
 
+# Exec-shim that compiles a syscall allowlist into a BPF program via
+# seccompiler, applies it via prctl, and execve's into the wrapped
+# command. mkServiceBlock wraps every guest service launch with this
+# shim so per-service seccomp filters are the default. ADR-002 §W2.4.
+[[bin]]
+name = "mvm-seccomp-apply"
+path = "src/bin/mvm-seccomp-apply.rs"
+
 [features]
 dev-shell = []
 
 [dependencies]
 mvm-core.workspace = true
+mvm-security.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
+libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+
+# seccompiler builds Linux-only — guests are always Linux microVMs,
+# but the workspace also compiles on macOS for CLI development. Gate
+# the dep so `cargo check` on a Mac doesn't try to build it.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { workspace = true }

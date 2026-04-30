@@ -22,7 +22,29 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Optional dm-verity attestation alongside a rootfs. When `Some`, the
+/// backend attaches the Merkle tree as a second VirtioBlk device and
+/// sets up a kernel `dm-mod.create=` cmdline so the verity target is
+/// constructed before init runs. ADR-002 §W3.2.
+///
+/// Both fields must be present together — a verity sidecar without a
+/// root hash is unverifiable, and a root hash without the sidecar is
+/// unconstructible. `None` means the backend boots the rootfs as
+/// `/dev/vda rw` with no integrity check (the dev-VM exemption from
+/// ADR-002 §W3.4).
+#[derive(Debug, Clone)]
+pub struct VerityConfig<'a> {
+    /// Path to `rootfs.verity` (the Merkle hash tree).
+    pub verity_path: &'a str,
+    /// 64-char lowercase hex root hash.
+    pub roothash: &'a str,
+}
+
 /// Start a VM from a local kernel + ext4 rootfs using Virtualization.framework.
+///
+/// Convenience wrapper around `start_with_verity` for callers that don't
+/// (yet) ship a verity sidecar — typically the dev VM, which is exempt
+/// from verified boot per ADR-002 §W3.4.
 pub fn start(
     id: &str,
     kernel_path: &str,
@@ -30,13 +52,31 @@ pub fn start(
     cpus: u32,
     memory_mib: u64,
 ) -> Result<(), String> {
+    start_with_verity(id, kernel_path, rootfs_path, cpus, memory_mib, None)
+}
+
+/// Start a VM with optional dm-verity sidecar.
+///
+/// When `verity` is Some, the kernel cmdline carries `dm-mod.create=…`
+/// alongside `root=/dev/dm-0`, the rootfs.verity file is attached as
+/// a second VirtioBlk device, and the kernel constructs the verity
+/// target before init runs. A tampered ext4 fails verity setup and
+/// panics in early boot. ADR-002 §W3.2.
+pub fn start_with_verity(
+    id: &str,
+    kernel_path: &str,
+    rootfs_path: &str,
+    cpus: u32,
+    memory_mib: u64,
+    verity: Option<VerityConfig<'_>>,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        macos::start_vm(id, kernel_path, rootfs_path, cpus, memory_mib)
+        macos::start_vm(id, kernel_path, rootfs_path, cpus, memory_mib, verity)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (id, kernel_path, rootfs_path, cpus, memory_mib);
+        let _ = (id, kernel_path, rootfs_path, cpus, memory_mib, verity);
         Err("Apple Virtualization not available on this platform".to_string())
     }
 }
@@ -84,19 +124,6 @@ pub fn install_launchd_direct(
     }
 }
 
-/// Discover the guest's IP address via ARP scanning.
-pub fn discover_guest_ip(timeout_secs: u64) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::discover_guest_ip(std::time::Duration::from_secs(timeout_secs))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = timeout_secs;
-        None
-    }
-}
-
 /// Start a port proxy from localhost:host_port to guest tcp/guest_port via vsock.
 pub fn start_port_proxy(vm_id: &str, host_port: u16, guest_port: u16) {
     #[cfg(target_os = "macos")]
@@ -127,12 +154,20 @@ pub fn vsock_connect(id: &str, port: u32) -> Result<std::os::unix::net::UnixStre
 
 /// Path to the cross-process vsock proxy Unix socket for VM `id`.
 ///
-/// The dev daemon (started by `mvmctl dev up`) listens on this path and
-/// forwards each connection to the in-process VZVirtualMachine vsock,
-/// allowing other `mvmctl` invocations to talk to the dev VM.
+/// The owning daemon (started by `mvmctl dev up`, or any other path that
+/// calls [`start`]) listens on this path and forwards each connection to
+/// the in-process VZVirtualMachine vsock, allowing other `mvmctl`
+/// invocations to talk to the VM.
 pub fn vsock_proxy_path(id: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(format!("{home}/.mvm/vms/{id}/vsock.sock"))
+    #[cfg(target_os = "macos")]
+    {
+        macos::proxy_socket_path(id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(format!("{home}/.mvm/vms/{id}/vsock.sock"))
+    }
 }
 
 /// Connect to VM `id`'s guest vsock, falling back to the cross-process

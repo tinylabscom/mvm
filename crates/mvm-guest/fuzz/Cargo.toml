@@ -1,0 +1,36 @@
+[package]
+name = "mvm-guest-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# cargo-fuzz looks for this metadata key; without it the harness refuses
+# to drive the binaries.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.mvm-guest]
+path = ".."
+
+[dependencies.mvm-core]
+path = "../../mvm-core"
+
+# Forbid building these as bench/test/doc; they are libfuzzer harnesses
+# only, driven by `cargo fuzz run <name>`.
+[[bin]]
+name = "fuzz_guest_request"
+path = "fuzz_targets/fuzz_guest_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_authenticated_frame"
+path = "fuzz_targets/fuzz_authenticated_frame.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,51 @@
+# Bake a populated Nix database into the read-only rootfs. Every
+# path the registration manifest names already exists in
+# /nix/store at build time, so `--load-db` is purely a metadata
+# insert; no NAR verification, no writes outside the store dir,
+# no boot-time work.
+mkdir -p ./files/nix/var/nix/db ./files/nix/var/nix/gcroots ./files/nix/var/nix/profiles
+@nix@/bin/nix-store \
+    --store "$PWD/files" \
+    --load-db < @closureInfoRegistration@
+
+mkdir -p ./files/etc/nix
+# nix.conf for the bundled `pkgs.nix`. The runtime store is plain
+# `/nix` — backed by a kernel overlayfs the init mounts, with the
+# rootfs's read-only Nix store as the lower layer and a host-backed
+# ext4 block device as the writable upper. From Nix's view this is
+# just a normal local store; the overlay is invisible to it.
+#
+#   experimental-features      `nix build`, flakes.
+#   substituters/trusted-..    download from the public binary cache.
+#   builders =                 no remote builders.
+#   build-hook =               disable the hook subprocess. The
+#                              bundled pkgs.nix is RPATH-linked
+#                              against an openssl that isn't fully
+#                              in the closure (a nixpkgs packaging
+#                              quirk); the hook child fails with
+#                              `libcrypto.so.3: cannot open shared
+#                              object file` even when there's
+#                              nothing to do. Inline builds in the
+#                              parent process don't hit this.
+#   build-users-group =        no nixbld user separation. PID 1
+#                              owns the build pool; per-build
+#                              isolation comes from the Linux
+#                              namespace sandbox.
+#   sandbox = true             use Linux mount/pid/uts namespaces
+#                              per build. The microVM's a fresh
+#                              kernel with full ns support;
+#                              sandbox=false would reject builds
+#                              whenever /homeless-shelter gets
+#                              created mid-build, which nixpkgs
+#                              does inadvertently for many
+#                              derivations.
+cat > ./files/etc/nix/nix.conf <<'NIXCONF'
+experimental-features = nix-command flakes
+substituters = https://cache.nixos.org/
+trusted-substituters = https://cache.nixos.org/
+trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+builders =
+build-hook =
+build-users-group =
+sandbox = true
+NIXCONF

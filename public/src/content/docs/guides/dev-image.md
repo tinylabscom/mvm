@@ -17,7 +17,7 @@ The dev image is built using the same `mkGuest` helper that builds all microVM i
 
 ## Customizing the dev image
 
-The dev image flake lives at [`nix/dev-image/flake.nix`](https://github.com/auser/mvm/blob/main/nix/dev-image/flake.nix). It imports the guest library from `nix/guest-lib` and calls `mkGuest` with a list of packages.
+The dev image flake lives at [`nix/dev-image/flake.nix`](https://github.com/auser/mvm/blob/main/nix/dev-image/flake.nix). It imports the parent flake at `nix/` and calls `mkGuest` with a list of packages.
 
 ### Adding packages
 
@@ -127,14 +127,15 @@ The release workflow (`.github/workflows/release.yml`) builds dev images for bot
 
 ```
 nix/
-├── guest-lib/           # Core library (mkGuest, kernel, init, guest agent)
-│   ├── flake.nix
-│   ├── firecracker-kernel-pkg.nix
-│   ├── minimal-init.nix
-│   └── guest-agent-pkg.nix
-└── dev-image/           # Dev environment image
-    ├── flake.nix        # Calls mkGuest with dev tools
+├── flake.nix                    # Parent flake — defines mkGuest (production)
+├── firecracker-kernel-pkg.nix
+├── minimal-init.nix
+├── guest-agent-pkg.nix
+├── dev/                         # Sibling flake — dev variant of mkGuest
+│   └── flake.nix
+└── dev-image/                   # Dev environment image
+    ├── flake.nix                # Calls mkGuest with dev tools
     └── flake.lock
 ```
 
-The dev image flake references the guest library via a relative path (`mvm.url = "path:../guest-lib"`), so changes to the kernel or init system in `guest-lib` are picked up automatically on the next build.
+The dev image flake references the parent via a relative path (`mvm.url = "path:.."`), so changes to the kernel or init system are picked up automatically on the next build.

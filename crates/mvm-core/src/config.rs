@@ -69,6 +69,53 @@ pub fn mvm_data_dir() -> String {
     format!("{}/.mvm", home)
 }
 
+/// Create `~/.mvm` (or whatever `mvm_data_dir()` resolves to) with
+/// mode `0700` and return its path. Idempotent: if the dir already
+/// exists with looser perms, chmod it to `0700` so a host that was
+/// created before ADR-002 W1.5 still gets locked down on the next
+/// `dev up`.
+///
+/// `~/.mvm` holds the dev VM's GC root, the host-backed Nix store
+/// disk image, the per-VM `vsock.sock` proxy listener path, build
+/// artifacts in `dev/builds/<rev>/`, and (for production microVMs)
+/// any persisted volumes — every secret-shaped piece of state in
+/// the project. Defaulting to umask perms (typ. 0755) means a
+/// same-host other user can read all of it; this is the project's
+/// privacy boundary.
+#[cfg(unix)]
+pub fn ensure_data_dir() -> std::io::Result<String> {
+    let dir = mvm_data_dir();
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Create `~/.cache/mvm` (or wherever `mvm_cache_dir()` resolves to)
+/// with mode `0700`. Same rationale as `ensure_data_dir`. The cache
+/// holds the dev image kernel/rootfs, daemon stdout/stderr logs,
+/// and the GC sentinel — none of it is secret on its own, but the
+/// daemon logs *do* capture guest stdout, which can leak whatever
+/// the guest prints. Lock it down by default.
+#[cfg(unix)]
+pub fn ensure_cache_dir() -> std::io::Result<String> {
+    let dir = mvm_cache_dir();
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Create `dir` (and parents) and chmod it to mode `0700`. Both the
+/// initial create and the chmod are idempotent.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir)?;
+    let mut perms = std::fs::metadata(dir)?.permissions();
+    if perms.mode() & 0o777 != 0o700 {
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir, perms)?;
+    }
+    Ok(())
+}
+
 // ============================================================================
 // XDG-compliant directory functions
 // ============================================================================
@@ -309,5 +356,40 @@ mod tests {
         unsafe { std::env::set_var("XDG_DATA_HOME", "/xdg/data") };
         assert_eq!(mvm_share_dir(), "/xdg/data/mvm");
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
+    }
+
+    /// ADR-002 W1.5: `ensure_data_dir` / `ensure_cache_dir` create
+    /// their directories with mode 0700, AND chmod existing dirs
+    /// with looser perms down to 0700 — that's the upgrade path
+    /// for hosts created before this change landed.
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_private_dir_locks_existing_loose_perms() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Pick a stable temp path; tests share env-var state so we
+        // serialise via a unique-id suffix.
+        let temp = format!(
+            "/tmp/mvm-private-dir-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        std::fs::create_dir_all(&temp).expect("create temp");
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
+            .expect("loosen for setup");
+
+        ensure_private_dir(&temp).expect("ensure_private_dir");
+
+        let mode = std::fs::metadata(&temp)
+            .expect("temp exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got 0{:o}", mode);
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

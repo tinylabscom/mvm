@@ -12,7 +12,7 @@ description: Getting started as a contributor to mvm.
 Run the bootstrap script on a fresh machine:
 
 ```bash
-./scripts/dev-setup.sh
+./ops/bootstrap/dev-setup.sh
 ```
 
 ## Building and Running

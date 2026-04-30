@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn test_parse_full_config() {
         let toml = r#"
-            flake = "./nix/examples/openclaw/"
+            flake = "./nix/images/examples/hello/"
 
             [defaults]
             cpus = 2
@@ -180,7 +180,7 @@ mod tests {
         "#;
 
         let config = parse_fleet_config(toml).unwrap();
-        assert_eq!(config.flake, "./nix/examples/openclaw/");
+        assert_eq!(config.flake, "./nix/images/examples/hello/");
         assert_eq!(config.defaults.cpus, Some(2));
         assert_eq!(config.defaults.memory, Some(1024));
         assert_eq!(config.vms.len(), 3);

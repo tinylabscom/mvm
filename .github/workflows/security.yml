@@ -1,0 +1,234 @@
+name: Security
+
+# ADR-002 §W6.3 — single workflow that hosts every CI-side security
+# gate. Lanes correspond to the workstreams in
+# specs/plans/25-microvm-hardening.md and the seven claims in
+# CLAUDE.md::Security model. Failure on any lane blocks merge.
+#
+# Triggers: PRs against main, pushes to main, plus a nightly cron
+# so that advisory-DB additions get caught even on quiet branches.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # 04:17 UTC daily — picks up new RUSTSEC advisories that landed
+    # in the advisory-db without anyone touching the repo.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ── Lane 1: Supply chain ──────────────────────────────────────────
+  # Maps to ADR-002 §W5.2 — advisories, license allowlist, multi-
+  # version bans, and registry source allowlist. Cheap (<2 min).
+  cargo-deny:
+    name: Supply chain — cargo-deny (ADR-002 §W5.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
+
+  cargo-audit:
+    name: Supply chain — cargo-audit (ADR-002 §W5.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
+  # ── Lane 2: Production-agent symbol gate ──────────────────────────
+  # ADR-002 §W4.3 — production builds of mvm-guest-agent must not
+  # contain mvm_guest_agent::do_exec. Catches accidental re-enable
+  # of the dev-shell feature. Anchors on the binary's crate name to
+  # skip stdlib's identically-named symbol.
+  prod-agent-no-exec:
+    name: Guest agent — no dev-shell symbols (ADR-002 §W4.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-prodagent-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-prodagent-
+
+      - name: Build prod agent and check for do_exec
+        run: ./scripts/check-prod-agent-no-exec.sh
+
+  # ── Lane 3: Reproducibility ────────────────────────────────────────
+  # ADR-002 §W5.3 — two clean builds must produce byte-identical
+  # binaries. Catches build-time non-determinism that could mask
+  # supply-chain injection.
+  reproducibility:
+    name: Reproducibility (ADR-002 §W5.3)
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_DATE_EPOCH: "1700000000"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-D warnings --remap-path-prefix=/home/runner/work=."
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build A
+        run: cargo build --release --locked --bin mvmctl
+
+      - name: Hash A
+        run: sha256sum target/release/mvmctl | tee /tmp/hash-a.txt
+
+      - name: Clean
+        run: cargo clean
+
+      - name: Build B
+        run: cargo build --release --locked --bin mvmctl
+
+      - name: Hash B
+        run: sha256sum target/release/mvmctl | tee /tmp/hash-b.txt
+
+      - name: Compare hashes
+        run: |
+          set -euo pipefail
+          a=$(awk '{print $1}' /tmp/hash-a.txt)
+          b=$(awk '{print $1}' /tmp/hash-b.txt)
+          if [ "$a" != "$b" ]; then
+            echo "::error::Reproducibility mismatch: $a != $b" >&2
+            echo "Two builds of the same source produced different binaries." >&2
+            echo "Investigate before merging — non-determinism can mask supply-chain injection." >&2
+            exit 1
+          fi
+          echo "ok: matching sha256 across two clean builds: $a"
+
+  # ── Lane 4: Frame-parser fuzzing (best-effort, time-boxed) ─────────
+  # ADR-002 §W4.2 — cargo-fuzz harnesses for GuestRequest and the
+  # authenticated-frame envelope. Run for 5 minutes per PR; the
+  # nightly cron extends to 30 minutes.
+  fuzz:
+    name: Fuzz — vsock frame parser (ADR-002 §W4.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Determine fuzz duration
+        id: duration
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            echo "secs=1800" >> "$GITHUB_OUTPUT"
+          else
+            echo "secs=300" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fuzz GuestRequest
+        working-directory: crates/mvm-guest
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+        run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
+
+      - name: Fuzz AuthenticatedFrame
+        working-directory: crates/mvm-guest
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+        run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
+
+      - name: Upload corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-corpus-${{ github.run_id }}
+          path: |
+            crates/mvm-guest/fuzz/corpus/
+            crates/mvm-guest/fuzz/artifacts/
+
+  # ── Lane 5: Hash-verify regression ─────────────────────────────────
+  # ADR-002 §W5.1 — the unit tests that exercise the
+  # download-and-verify code path live in mvm-cli. Run them in
+  # isolation so a regression is visible in this workflow even when
+  # the broader test job in ci.yml is skipped.
+  hash-verify-tests:
+    name: Hash-verify regression (ADR-002 §W5.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Run hash-verify tests
+        run: cargo test -p mvm-cli --lib hash_verify_tests
+
+  # ── Lane 6: Verified boot artifact gate ────────────────────────────
+  # ADR-002 §W3.4 — production microVM Nix builds must emit
+  # `rootfs.verity` + `rootfs.roothash` alongside `rootfs.ext4`. If a
+  # refactor flips `verifiedBoot = false` for a production path, this
+  # gate fails the merge before the verity claim breaks silently.
+  verified-boot-artifacts:
+    name: Verified boot artifacts (ADR-002 §W3.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build default-microvm and assert verity output
+        run: |
+          set -euo pipefail
+          nix build "./nix/default-microvm#packages.x86_64-linux.default" \
+            --no-link --print-out-paths > /tmp/store-path.txt
+          out=$(head -1 /tmp/store-path.txt)
+          for f in rootfs.ext4 rootfs.verity rootfs.roothash vmlinux; do
+            if [ ! -f "$out/$f" ]; then
+              echo "::error::missing $f in $out" >&2
+              echo "ADR-002 §W3.4 requires production microVM builds to emit" >&2
+              echo "rootfs.{ext4,verity,roothash} alongside the kernel. The" >&2
+              echo "default-microvm output is missing one of these files," >&2
+              echo "which usually means verifiedBoot was flipped off on the" >&2
+              echo "production path. Either re-enable it or update ADR-002." >&2
+              exit 1
+            fi
+          done
+          # Sanity: roothash must be a 64-char hex string.
+          hash=$(tr -d '\n' < "$out/rootfs.roothash")
+          if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::roothash is not a 64-char lowercase hex string: ${hash}" >&2
+            exit 1
+          fi
+          echo "ok: rootfs.{ext4,verity,roothash} present, roothash=${hash:0:12}…"

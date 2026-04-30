@@ -913,19 +913,7 @@ fn handle_client(
             timeout_secs,
         } => {
             eprintln!("[audit] exec request: {:?}", command);
-            let policy = mvm_guest::builder_agent::load_security_policy()
-                .ok()
-                .flatten()
-                .unwrap_or_else(mvm_core::security::SecurityPolicy::dev_defaults);
-            let allowed = policy.access.debug_exec;
-            if !allowed {
-                GuestResponse::Error {
-                    message: "exec rejected: access.debug_exec not enabled in security policy"
-                        .to_string(),
-                }
-            } else {
-                do_exec(&command, stdin.as_deref(), timeout_secs.unwrap_or(30))
-            }
+            do_exec(&command, stdin.as_deref(), timeout_secs.unwrap_or(30))
         }
 
         #[cfg(not(feature = "dev-shell"))]
@@ -1032,6 +1020,14 @@ fn handle_client(
 // Vsock → TCP port forwarders
 // ============================================================================
 
+/// Loopback host the port forwarder dials when proxying vsock → TCP.
+///
+/// Pinning this to `127.0.0.1` is load-bearing for ADR-002 §W4.4: the agent
+/// must never accept TCP traffic from outside the guest. The forwarder only
+/// originates outbound TCP, but a future "double-ended" forwarder must reuse
+/// this constant rather than reach for `0.0.0.0` or a configurable host.
+const PORT_FORWARD_TCP_HOST: &str = "127.0.0.1";
+
 /// Bind a vsock listener and forward each connection to a local TCP port.
 fn run_port_forwarder(vsock_port: u32, tcp_port: u16) {
     // SAFETY: libc call with constant arguments.
@@ -1088,7 +1084,8 @@ fn run_port_forwarder(vsock_port: u32, tcp_port: u16) {
             // SAFETY: cfd is a valid fd from accept(). UnixStream is a
             // thin wrapper around an fd — works fine for vsock sockets.
             let vsock_stream = unsafe { UnixStream::from_raw_fd(cfd as RawFd) };
-            let Ok(tcp_stream) = std::net::TcpStream::connect(("127.0.0.1", tcp_port)) else {
+            let Ok(tcp_stream) = std::net::TcpStream::connect((PORT_FORWARD_TCP_HOST, tcp_port))
+            else {
                 eprintln!("port-fwd: connect to localhost:{tcp_port} failed");
                 return;
             };
@@ -1348,5 +1345,17 @@ mod tests {
             "Expected Active for healthy integration, got {:?}",
             reports[0].status
         );
+    }
+
+    /// W4.4 regression: the port forwarder's TCP connect target must remain
+    /// loopback. Anything else would let traffic exit the guest's network
+    /// namespace, defeating the "no host network from guest" claim in
+    /// ADR-002. If you ever need to make this configurable, update the ADR
+    /// and the threat model first.
+    #[test]
+    fn test_port_forward_target_is_loopback() {
+        assert_eq!(PORT_FORWARD_TCP_HOST, "127.0.0.1");
+        let parsed: std::net::IpAddr = PORT_FORWARD_TCP_HOST.parse().unwrap();
+        assert!(parsed.is_loopback(), "port-forward target must be loopback");
     }
 }

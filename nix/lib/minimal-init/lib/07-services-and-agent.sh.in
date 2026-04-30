@@ -1,0 +1,20 @@
+# ── 7. Write health check integration configs ───────────────────
+# Generated heredocs that drop one JSON file per healthCheck under
+# /etc/mvm/integrations.d/. Empty when no healthChecks are defined.
+@healthCheckBlocks@
+
+# ── 8. Start services (respawn loops) ───────────────────────────
+# Generated subshells that respawn each service on exit and record
+# the supervising PID in $SERVICE_PIDS so the shutdown trap can
+# signal them. Empty when no services are defined.
+SERVICE_PIDS=""
+@serviceBlocks@
+
+# ── 9. Start guest agent ────────────────────────────────────────
+# Generated subshell that respawns the bundled mvm-guest-agent
+# binary. Empty when guestAgent is null (production builds without
+# dev-shell).
+AGENT_PID=""
+@guestAgentBlock@
+
+echo "[init] all services started" > /dev/console

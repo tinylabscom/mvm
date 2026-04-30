@@ -1,0 +1,43 @@
+# ── 5. Mount optional drives (best-effort) ──────────────────────
+mkdir -p /mnt/config /mnt/secrets /mnt/data
+
+# /dev/vdb is the config drive in production microVMs. In the dev VM
+# it's the writable Nix-store overlay (already consumed in section
+# 1a, identified by label `mvm-nix`). Skip the config-drive mount
+# when the disk is labelled mvm-nix so we don't fight the overlay.
+if ! blkid /dev/vdb 2>/dev/null | grep -q 'LABEL="mvm-nix"'; then
+  mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdb /mnt/config 2>/dev/null && \
+    echo "[init] mounted config drive (vdb)" > /dev/console || true
+fi
+
+mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdc /mnt/secrets 2>/dev/null && {
+  echo "[init] mounted secrets drive (vdc)" > /dev/console
+  # Stage secrets in tmpfs. The shared bucket (mode 0440 root:@serviceGroup@)
+  # remains for back-compat with flakes that read /mnt/secrets directly;
+  # per-service subdirs at /run/mvm-secrets/<svc>/ are populated below
+  # with mode 0400 owned by the per-service uid (ADR-002 §W2.1).
+  mkdir -p /run/mvm-secrets
+  cp /mnt/secrets/* /run/mvm-secrets/ 2>/dev/null || true
+  chown root:@serviceGroup@ /run/mvm-secrets/* 2>/dev/null || true
+  chmod 0440 /run/mvm-secrets/* 2>/dev/null || true
+
+  # Per-service secrets buckets. Each generated block creates
+  # /run/mvm-secrets/<svc>/, copies any /run/mvm-secrets/<svc>.*
+  # files into it, and chowns/chmods them so siblings can't peek.
+@serviceSecretsBlocks@
+
+  umount /mnt/secrets
+  mount --bind /run/mvm-secrets /mnt/secrets
+} || true
+
+mount -t ext4 -o noexec,nosuid,nodev /dev/vdd /mnt/data 2>/dev/null && \
+  echo "[init] mounted data drive (vdd)" > /dev/console || true
+
+# ── 6. Source global environment variables from config drive ─────
+# Variables injected via `mvmctl run -e KEY=VALUE` are written to
+# mvm-env.env on the config drive. Source them here so every
+# service inherits them automatically.
+if [ -f /mnt/config/mvm-env.env ]; then
+  echo "[init] loading environment from mvm-env.env" > /dev/console
+  . /mnt/config/mvm-env.env
+fi

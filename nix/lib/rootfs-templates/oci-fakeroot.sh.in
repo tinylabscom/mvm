@@ -1,0 +1,19 @@
+# `fakeRootCommands` for `dockerTools.streamLayeredImage`. Runs in
+# the OCI image build's fakeroot environment, with the closure
+# already staged at the cwd. We add the directory skeleton, the
+# /init symlink (pointing at the rendered minimal-init), and (when
+# the caller bundled a CA bundle) the trust-anchor symlinks.
+#
+# Substitutions plumbed in by the parent flake — see flake.nix's
+# `renderTemplate` call for the authoritative list.
+
+mkdir -p ./dev ./proc ./sys ./tmp ./run
+mkdir -p ./var/lib ./var/run ./var/log
+mkdir -p ./bin ./sbin ./root ./home
+mkdir -p ./etc/mvm/integrations.d
+mkdir -p ./mnt/config ./mnt/secrets ./mnt/data
+ln -sf @initScript@ ./init
+ln -sf /init ./sbin/vminitd
+ln -sf @busybox@/bin/sh ./bin/sh
+
+@cacertBlock@

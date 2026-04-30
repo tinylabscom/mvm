@@ -31,7 +31,7 @@ Shell execution, VM lifecycle management, and platform-aware operations. Impleme
 
 ## Platform Behavior
 
-- **macOS**: Routes all Linux operations through `limactl shell mvm bash -c <script>`
+- **macOS**: Routes all Linux operations through `limactl shell mvm-builder bash -c <script>`
 - **Native Linux with KVM**: Runs `bash -c <script>` directly
 - **Linux without KVM**: Falls back to Lima (same as macOS)
 
