@@ -397,12 +397,66 @@ pub fn snapshot_eligible(
     matches!(image, ImageSource::Template(_))
 }
 
+/// Captured stdout/stderr/exit-code from a one-shot exec.
+///
+/// `run_captured` returns this instead of streaming guest output to the
+/// CLI's terminal. The MCP server (plan 32 / Proposal A) consumes it
+/// to assemble a `tools/call` response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run the request and capture stdout/stderr instead of streaming.
+///
+/// Same orchestration as [`run`]: boot a transient microVM, dispatch
+/// the command via the guest agent's `Exec` over vsock, tear down.
+/// The only difference is what happens with the guest's stdout/stderr
+/// — captured into the returned [`ExecOutput`] instead of inherited
+/// to the parent process's terminal.
+///
+/// Used by `mvmctl mcp` to build MCP `tools/call run` responses; the
+/// CLI's interactive `mvmctl exec` keeps using [`run`] (streaming) so
+/// human ergonomics don't regress.
+pub fn run_captured(req: ExecRequest) -> Result<ExecOutput> {
+    run_inner(req, /* capture = */ true)
+        .map(|either| either.right().expect("capture mode returns ExecOutput"))
+}
+
 /// Run the request: boot, run, tear down.
 ///
 /// Returns the guest command's exit code. On orchestrator failure (boot,
 /// agent unreachable, vsock error), returns an error; the VM is torn down
 /// best-effort before returning.
 pub fn run(req: ExecRequest) -> Result<i32> {
+    run_inner(req, /* capture = */ false)
+        .map(|either| either.left().expect("streaming mode returns exit code"))
+}
+
+/// Tagged union for the two return shapes [`run`] and [`run_captured`]
+/// share. Internal — the public API exposes the unboxed variants.
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+impl<L, R> Either<L, R> {
+    fn left(self) -> Option<L> {
+        match self {
+            Either::Left(l) => Some(l),
+            Either::Right(_) => None,
+        }
+    }
+    fn right(self) -> Option<R> {
+        match self {
+            Either::Right(r) => Some(r),
+            Either::Left(_) => None,
+        }
+    }
+}
+
+fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>> {
     let backend = AnyBackend::auto_select();
 
     // Resolve image artifacts: either a named template or a pre-built pair.
@@ -557,7 +611,7 @@ pub fn run(req: ExecRequest) -> Result<i32> {
     }
 
     // Run the command + always tear down.
-    let result = run_in_guest(&vm_name, &req, &add_dir_labels);
+    let result = run_in_guest(&vm_name, &req, &add_dir_labels, capture);
 
     let _ = backend.stop(&VmId(vm_name.clone()));
 
@@ -632,8 +686,18 @@ fn restore_via_snapshot(
     )
 }
 
-/// Send the wrapped command to the guest agent and stream stdout/stderr.
-fn run_in_guest(vm_name: &str, req: &ExecRequest, labels: &[String]) -> Result<i32> {
+/// Send the wrapped command to the guest agent and either stream
+/// stdout/stderr (default) or capture them (when `capture=true`).
+///
+/// `capture=true` is used by [`run_captured`] / `mvmctl mcp` to assemble
+/// MCP `tools/call` responses; the streaming path keeps the existing
+/// `mvmctl exec` ergonomics.
+fn run_in_guest(
+    vm_name: &str,
+    req: &ExecRequest,
+    labels: &[String],
+    capture: bool,
+) -> Result<Either<i32, ExecOutput>> {
     if !wait_for_agent(vm_name, 30) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
@@ -645,13 +709,21 @@ fn run_in_guest(vm_name: &str, req: &ExecRequest, labels: &[String]) -> Result<i
             stdout,
             stderr,
         } => {
-            if !stdout.is_empty() {
-                print!("{stdout}");
+            if capture {
+                Ok(Either::Right(ExecOutput {
+                    exit_code,
+                    stdout,
+                    stderr,
+                }))
+            } else {
+                if !stdout.is_empty() {
+                    print!("{stdout}");
+                }
+                if !stderr.is_empty() {
+                    eprint!("{stderr}");
+                }
+                Ok(Either::Left(exit_code))
             }
-            if !stderr.is_empty() {
-                eprint!("{stderr}");
-            }
-            Ok(exit_code)
         }
         mvm_guest::vsock::GuestResponse::Error { message } => {
             anyhow::bail!("guest exec error: {message}")

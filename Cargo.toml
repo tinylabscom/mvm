@@ -6,6 +6,7 @@ members = [
     "crates/mvm-build",
     "crates/mvm-guest",
     "crates/mvm-cli",
+    "crates/mvm-mcp",
     "crates/mvm-apple-container",
     "xtask",
 ]
@@ -100,6 +101,7 @@ mvm-build = { path = "crates/mvm-build", version = "0.13.0" }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.13.0" }
 mvm-security = { path = "crates/mvm-security", version = "0.13.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.13.0" }
+mvm-mcp = { path = "crates/mvm-mcp", version = "0.13.0" }
 mvm-apple-container = { path = "crates/mvm-apple-container", version = "0.7.0" }
 
 # Dev dependencies

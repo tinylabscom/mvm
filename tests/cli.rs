@@ -860,6 +860,13 @@ fn test_template_init_preset_unknown_shows_error() {
 fn test_template_init_prompt_generates_metadata_and_infers_preset() {
     let dir = tempfile::tempdir().expect("temp dir");
     mvm()
+        // Plan 32 / Proposal C added a loopback probe in `auto` mode that picks
+        // up Ollama / LocalAI on `:11434` / `:8080`. CI / dev hosts running one
+        // of those would otherwise route this prompt at a real model. Force
+        // heuristic fallback so the test stays deterministic.
+        .env("MVM_TEMPLATE_NO_LOCAL_PROBE", "1")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("MVM_TEMPLATE_LOCAL_BASE_URL")
         .args([
             "template",
             "init",
@@ -910,6 +917,10 @@ fn test_template_init_prompt_uses_openai_when_configured() {
     let (base_url, request_capture) = spawn_fake_openai_response_server(response_body);
     let dir = tempfile::tempdir().expect("temp dir");
     mvm()
+        // Disable the loopback Ollama / LocalAI probe (Proposal C) so the
+        // OPENAI_API_KEY path is taken even on hosts running a local model.
+        .env("MVM_TEMPLATE_NO_LOCAL_PROBE", "1")
+        .env_remove("MVM_TEMPLATE_LOCAL_BASE_URL")
         .env("OPENAI_API_KEY", "test-key")
         .env("MVM_TEMPLATE_OPENAI_BASE_URL", base_url)
         .args([
