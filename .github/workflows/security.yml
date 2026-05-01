@@ -55,7 +55,10 @@ jobs:
         run: cargo install --locked cargo-audit
 
       - name: cargo audit
-        run: cargo audit
+        # Ignored advisories must mirror deny.toml's `[advisories].ignore`.
+        # cargo-audit doesn't read deny.toml; CLI flags are the
+        # discoverable way to keep the two tools in sync.
+        run: cargo audit --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0009
 
   # ── Lane 2: Production-agent symbol gate ──────────────────────────
   # ADR-002 §W4.3 — production builds of mvm-guest-agent must not

@@ -62,6 +62,16 @@ ignore = [
     # the shipped binary. Will resolve when sigstore (or its
     # json-syntax dep) bumps to proc-macro-error2.
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error v1 unmaintained; build-time-only via sigstore→json-syntax; no runtime surface; audited 2026-05-01" },
+    # `time v0.3.x` stack-exhaustion DoS via crafted parsed input.
+    # Path: sigstore → openidconnect → serde_with → time. mvmctl uses
+    # the time crate transitively only inside the cosign verification
+    # path, where the input is the manifest signature material from
+    # the project's release pipeline — not attacker-influenced bytes
+    # capable of triggering the stack exhaustion. The advisory's DoS
+    # only matters when parsing externally-supplied time strings;
+    # we don't expose that surface. Re-evaluate when time v0.4
+    # ships with the bound.
+    { id = "RUSTSEC-2026-0009", reason = "time stack-exhaustion DoS; transitive via sigstore→openidconnect→serde_with; no untrusted-time-string parsing surface in mvmctl; audited 2026-05-01" },
 ]
 
 # ── Licenses ──────────────────────────────────────────────────────
