@@ -13,22 +13,22 @@ use serde::{Deserialize, Serialize};
 /// specifies a ULID; we keep the type opaque so the constructor can
 /// switch generators (UUIDv7, snowflake, etc.) without touching the
 /// wire format. Audit entries reference this id verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlanId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TenantId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkloadId(pub String);
 
 /// Reference to a runtime profile (Firecracker / Apple Container /
 /// MicrovmNix / Lima / containerd). Plan 37 §3.1's open
 /// `BackendRegistry` resolves the name to a backend factory.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RuntimeProfileRef(pub String);
 
@@ -73,11 +73,11 @@ pub struct TimeoutSpec {
 /// `mvm-policy::PolicyBundle` resolver; until then this is a name
 /// the supervisor's `Noop` resolver maps to a default-deny / open
 /// stance per its bundle.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PolicyRef(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FsPolicyRef(pub String);
 

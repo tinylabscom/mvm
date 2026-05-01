@@ -1,0 +1,21 @@
+[package]
+name = "mvm-policy"
+description = "PolicyBundle: signed network/egress/pii/tool/artifact/key/audit policy bundle. Plan 37 §10."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-core.workspace = true
+mvm-plan.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "1"
+
+[dev-dependencies]
+rand.workspace = true
