@@ -205,6 +205,15 @@ pub enum HostBoundRequest {
         pool_id: String,
         instance_id: String,
     },
+    /// Query host wall-clock time. Plan 37 Addendum B11.
+    ///
+    /// The guest agent calls this at boot (and after snapshot
+    /// restore / wake) to set its own clock against host-trusted
+    /// time. Without it, a guest with a broken clock could
+    /// silently bypass TLS certificate-validity checks, JWT
+    /// `exp` checks, and any `expires_at` field in plans /
+    /// secrets / attestation reports.
+    QueryHostTime,
 }
 
 /// Response from host agent to a guest VM's host-bound request.
@@ -220,6 +229,16 @@ pub enum HostBoundResponse {
     InstanceStatus {
         status: String,
         guest_ip: Option<String>,
+    },
+    /// Host wall-clock time. Plan 37 Addendum B11. Reported as
+    /// (unix_seconds, unix_nanos) so the response is
+    /// representation-stable across host clock crates and
+    /// language runtimes — the guest reconstructs the
+    /// `chrono::DateTime<Utc>` (or platform equivalent) locally.
+    /// `unix_nanos` is the sub-second component, in `[0, 1_000_000_000)`.
+    HostTime {
+        unix_seconds: i64,
+        unix_nanos: u32,
     },
     /// Error from host agent.
     Error { message: String },
@@ -1169,6 +1188,7 @@ mod tests {
                 pool_id: "workers".to_string(),
                 instance_id: "i-abc123".to_string(),
             },
+            HostBoundRequest::QueryHostTime,
         ];
 
         for req in &variants {
@@ -1177,6 +1197,48 @@ mod tests {
             let json2 = serde_json::to_string(&parsed).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    #[test]
+    fn test_query_host_time_serialises_as_bare_variant() {
+        // QueryHostTime is unit-shaped — make sure it serialises
+        // as the bare string form rather than picking up an empty
+        // object body, so the wire format is forward-compatible
+        // with other unit variants in the enum.
+        let req = HostBoundRequest::QueryHostTime;
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "\"QueryHostTime\"");
+    }
+
+    #[test]
+    fn test_host_time_response_roundtrip() {
+        let resp = HostBoundResponse::HostTime {
+            unix_seconds: 1_777_372_800,
+            unix_nanos: 123_456_789,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostBoundResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            HostBoundResponse::HostTime {
+                unix_seconds,
+                unix_nanos,
+            } => {
+                assert_eq!(unix_seconds, 1_777_372_800);
+                assert_eq!(unix_nanos, 123_456_789);
+            }
+            other => panic!("expected HostTime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_host_time_response_unknown_field_rejected() {
+        // deny_unknown_fields must reject an extra field even on a
+        // successful-looking variant — defends against a future
+        // host accidentally emitting a richer HostTime that older
+        // guests don't understand.
+        let json = r#"{"HostTime":{"unix_seconds":0,"unix_nanos":0,"timezone":"UTC"}}"#;
+        let result: Result<HostBoundResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "extra field must be rejected");
     }
 
     #[test]
