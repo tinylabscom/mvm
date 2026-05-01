@@ -6,7 +6,7 @@ All Nix builds, Firecracker operations, `mvmctl` runtime commands (anything that
 
 **Run cargo on the macOS host wherever it compiles cleanly.** `cargo test`, `cargo check`, and `cargo build` should default to the host so worktrees don't deadlock on the single shared Lima VM (cargo target-dir contention, registry locks, and `.git/index` cross-mount races are real and have caused us to lose work). Tests that genuinely need Linux — vsock, jailer/seccomp, dm-verity, network namespaces, anything that pokes at `/dev/kvm` or `/proc/net` — should be gated with `#[cfg(target_os = "linux")]` and only those sub-targets are run inside Lima. Workspace-wide `cargo clippy --workspace --all-targets -- -D warnings` is still expected to pass inside Lima before merge, since clippy needs to see the Linux-gated code paths.
 
-**git always runs on the macOS host, never inside Lima.** The repo is shared with the Lima VM via 9p/virtiofs and the two sides do not share git's lock semantics — running `git` from inside Lima while another worktree is also doing git work on the host produces "unable to write new index file" deadlocks. Only cargo/nix/firecracker/mvmctl operations cross into the VM.
+**git only runs from the main `mvm/` checkout, never from inside a worktree directory and never from inside Lima.** The main checkout is the single git operator for the whole repo. To act on a worktree's branch, use `git -C /path/to/mvm-<slug> <cmd>` from the main checkout — that drives the worktree's index/HEAD/refs while keeping the running git process anchored at the main checkout. Reasons: (1) only one git process at a time touches `.git/objects`, `.git/packed-refs`, and the shared `.git/hooks/` invocation context, eliminating the cross-worktree contention that has caused us to lose work; (2) the 9p/virtiofs share with Lima does not share git's lock semantics, so git from inside Lima deadlocks against host-side git. Cargo/nix/firecracker/mvmctl commands still run from each worktree's own directory — only `git` is centralized.
 
 If the Lima VM is not running, boot it with:
 
@@ -36,16 +36,41 @@ Examples:
 
 ## Worktree Workflow for Features
 
-Every feature, refactor, or non-trivial bug fix MUST be developed in a git worktree, never on the main checkout. This isolates in-flight work from the main checkout's `~/.mvm` registry, build cache, and dev VM state.
+Every feature, refactor, or non-trivial bug fix is developed in a git worktree — code edits and cargo invocations happen inside the worktree directory. Git operations (status, add, commit, stash, rebase, push, fetch, pull, hook execution) happen from the main `mvm/` checkout, with `-C` pointing at the worktree when needed. The main checkout is the single git operator; worktree directories are code+build sandboxes only.
 
 ### Creating the worktree
 
+From the main `mvm/` checkout:
+
 ```bash
+cd /Users/auser/work/personal/microvm/kv/mvm
 git worktree add ../mvm-<feature-slug> -b feat/<feature-slug>
+```
+
+Then switch terminals/agents into the worktree directory for code work:
+
+```bash
 cd ../mvm-<feature-slug>
+# edit code, run cargo, run mvmctl from here
 ```
 
 Branch names follow the existing pattern (`feat/<slug>`, `fix/<slug>`, `chore/<slug>`).
+
+### Doing git work for a worktree
+
+Always from the main `mvm/` checkout, with `-C` pointing at the worktree:
+
+```bash
+cd /Users/auser/work/personal/microvm/kv/mvm
+git -C ../mvm-<feature-slug> status
+git -C ../mvm-<feature-slug> add path/to/file
+git -C ../mvm-<feature-slug> commit -m "..."
+git -C ../mvm-<feature-slug> push -u origin feat/<feature-slug>
+```
+
+This serializes all git activity through one process and keeps `.git/objects`, `.git/packed-refs`, and the hooks dir from being touched by multiple agents at once. The pre-commit hook fires once per commit, in the main checkout — no concurrent-hook fan-out.
+
+Agents working inside a worktree directory should not invoke `git` directly. If you need git state, ask the operator at the main checkout, or run a read-only `git -C <main-checkout> status` if you must.
 
 ### Isolating mutable state
 
@@ -68,7 +93,7 @@ A `bin/dev` wrapper, `scripts/dev-env.sh`, and `just dev-*` recipes that bake al
 
 Even with per-worktree isolation, a few resources are shared and can cause concurrent commands to interfere:
 
-- **`.git/objects/`, `.git/packed-refs`, and the shared hooks dir.** Each `git worktree add` directory has its own index, HEAD, and refs (in `.git/worktrees/<name>/`), but the object store and packed refs are one set. Concurrent `git status` is fine (read-only); concurrent `git stash`, `git commit`, and especially `git rebase` from multiple worktrees can race on `.git/packed-refs` and the shared `.git/hooks/` invocation context. Don't run heavy hooks (full `cargo test --workspace`) on every commit — the pre-commit hook should be limited to formatting + fast checks.
+- **`.git/objects/`, `.git/packed-refs`, and the shared hooks dir.** Each `git worktree add` directory has its own index, HEAD, and refs (in `.git/worktrees/<name>/`), but the object store, packed refs, and hooks dir are one set. The "git only runs from the main checkout" rule (see the top of this doc) is what keeps these from colliding — never bypass it. Even with that rule, the pre-commit hook still gets invoked on every commit, so keep it limited to formatting + fast checks; don't run a full `cargo test --workspace` from inside a hook.
 - **The Lima VM's `/var/lib/mvm/`, `br-mvm` bridge, and TAP devices.** Vary microVM and TAP names between worktrees if you need two microVMs running at the same time.
 - **The Nix store inside Lima.** This is shared by design (warm cache) and Nix's own locking handles it.
 
