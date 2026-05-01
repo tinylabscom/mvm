@@ -12,11 +12,11 @@ default:
 
 # ── Development ──────────────────────────────────────────────────────────
 
-# One-time setup: point git at the committed .githooks/ dir so the
-# lightweight pre-commit hook (cargo fmt + nix fmt --check) actually runs.
-# Without this, git falls back to .git/hooks/pre-commit, which may be a
-# stale local copy or the legacy heavy hook.
+# Wire core.hooksPath at .githooks/ (one-time per clone)
 install-hooks:
+    # Without this, git falls back to .git/hooks/pre-commit, which may
+    # be a stale local copy or the legacy heavy hook. .githooks/pre-commit
+    # is intentionally light (cargo fmt + nix fmt --check).
     git config core.hooksPath .githooks
     @echo "core.hooksPath -> .githooks/"
 
