@@ -22,10 +22,12 @@
 
 pub mod bundle;
 pub mod policies;
+pub mod resolver;
 pub mod signing;
 
 pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
 pub use policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
+pub use resolver::{EffectivePolicy, EmergencyDeny, resolve};
 pub use signing::{BundleVerifyError, SignedPolicyBundle, sign_bundle, verify_bundle};
