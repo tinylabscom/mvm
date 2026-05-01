@@ -38,6 +38,18 @@ Examples:
 
 Every feature, refactor, or non-trivial bug fix is developed in a git worktree — code edits and cargo invocations happen inside the worktree directory. Git operations (status, add, commit, stash, rebase, push, fetch, pull, hook execution) happen from the main `mvm/` checkout, with `-C` pointing at the worktree when needed. The main checkout is the single git operator; worktree directories are code+build sandboxes only.
 
+### Never commit directly to `main`
+
+`main` is updated only via merged pull requests — never by `git commit` against the local `main` branch, even from the main checkout, even for docs-only changes, even with `--no-verify`. Reasons:
+
+- **Safety against parallel agents.** Multiple agents share `.git/`. Any agent that pulls/rebases/`reset --hard origin/main` (a routine recovery move) silently discards local-only commits on main. Branches that exist on `origin` cannot be wiped this way.
+- **CI gating.** The full clippy + nextest + supply-chain + flake-check matrix only runs on PRs. A direct commit ships untested.
+- **Audit trail.** PR descriptions, CI status, review comments, and merge events form the project's history. A local commit pushed to main loses all of it.
+
+If you have changes intended for `main`, push them to a branch and open a PR — even a one-line typo fix. The repo's GitHub settings are not branch-protected, so the convention is the only thing keeping main clean.
+
+The only `git` commands that should ever target `main` directly are read-only (`git log main`, `git show main:path`) or routine sync (`git fetch origin`, `git pull --ff-only origin main`).
+
 ### Creating the worktree
 
 From the main `mvm/` checkout:
