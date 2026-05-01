@@ -2390,6 +2390,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-plan"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "mvm-core",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "mvm-runtime"
 version = "0.13.0"
 dependencies = [

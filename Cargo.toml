@@ -8,6 +8,7 @@ members = [
     "crates/mvm-cli",
     "crates/mvm-mcp",
     "crates/mvm-apple-container",
+    "crates/mvm-plan",
     "xtask",
 ]
 # cargo-fuzz crates have to be excluded from the main workspace because
@@ -103,6 +104,7 @@ mvm-security = { path = "crates/mvm-security", version = "0.13.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.13.0" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.13.0" }
 mvm-apple-container = { path = "crates/mvm-apple-container", version = "0.7.0" }
+mvm-plan = { path = "crates/mvm-plan", version = "0.13.0" }
 
 # Dev dependencies
 assert_cmd = "2"

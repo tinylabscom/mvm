@@ -1,0 +1,22 @@
+[package]
+name = "mvm-plan"
+description = "Decorated, signed execution plans — the contract between intent and runtime (whitepaper §3.3, plan 37 Wave 1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-core.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror = "1"
+uuid.workspace = true
