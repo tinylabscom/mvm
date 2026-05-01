@@ -90,6 +90,8 @@ FLAKE_LOCKS=$(
     -not -path './.git/*' \
     -not -path './node_modules/*' \
     -not -path './.claude/*' \
+    -not -path './*/resources/template_scaffold/*' \
+    -not -path './resources/template_scaffold/*' \
     | sort \
     | while read -r f; do
         rel="${f#./}"

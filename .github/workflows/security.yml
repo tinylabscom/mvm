@@ -282,7 +282,12 @@ jobs:
             fi
             mv "$d/flake.lock.original" "$d/flake.lock"
             echo "::endgroup::"
-          done < <(find . -name flake.nix -not -path './target/*' -not -path './.git/*' -not -path './node_modules/*')
+          done < <(find . -name flake.nix \
+            -not -path './target/*' \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -not -path './*/resources/template_scaffold/*' \
+            -not -path './resources/template_scaffold/*')
           exit "$fail"
 
   # ── Lane 8: Builder image reproducibility (plan 36 §Layer 0) ───────
