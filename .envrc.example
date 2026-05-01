@@ -1,0 +1,5 @@
+# Optional convenience for direnv users.
+# If you have direnv installed:
+#   cp .envrc.example .envrc
+#   direnv allow
+source_env scripts/dev-env.sh

@@ -24,6 +24,22 @@ check:
 run *ARGS:
     cargo run -- {{ARGS}}
 
+# Run mvmctl with the dev env set (worktree-local MVM_DATA_DIR).
+dev *ARGS:
+    bin/dev {{ARGS}}
+
+# Run cargo test --workspace with the dev env.
+dev-test:
+    bash -c 'source scripts/dev-env.sh && cargo test --workspace'
+
+# Run clippy with the dev env.
+dev-clippy:
+    bash -c 'source scripts/dev-env.sh && cargo clippy --workspace -- -D warnings'
+
+# Run cargo check with the dev env.
+dev-check:
+    bash -c 'source scripts/dev-env.sh && cargo check --workspace'
+
 # ── Testing (nextest) ────────────────────────────────────────────────────
 
 # Run all tests

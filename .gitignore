@@ -17,3 +17,7 @@ keys
 !crates/mvm-cli/src/commands/build/
 !crates/mvm-cli/src/commands/build/**
 
+# Worktree-local dev env (use .envrc.example as template)
+/.envrc
+/.mvm-test/
+

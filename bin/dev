@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_DIR"
+# shellcheck source=scripts/dev-env.sh
+source scripts/dev-env.sh
+exec cargo run --quiet -- "$@"

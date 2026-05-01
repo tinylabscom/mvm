@@ -27,6 +27,60 @@ Examples:
 
 **Important:** `mvmctl` (via `cargo run`) commands like `template build`, `run`, `stop`, `logs`, and `status` must be run inside the Lima VM — they talk to Firecracker which only runs inside Linux. `cargo test`, `cargo clippy`, and `cargo check` must also run inside the Lima VM to ensure correct Linux-target compilation and test execution. The `cargo run -- dev` bootstrap command is the only one that runs on the macOS host directly.
 
+## Worktree Workflow for Features
+
+Every feature, refactor, or non-trivial bug fix MUST be developed in a git worktree, never on the main checkout. This isolates in-flight work from the main checkout's `~/.mvm` registry, build cache, and dev VM state.
+
+### Creating the worktree
+
+```bash
+git worktree add ../mvm-<feature-slug> -b feat/<feature-slug>
+cd ../mvm-<feature-slug>
+```
+
+Branch names follow the existing pattern (`feat/<slug>`, `fix/<slug>`, `chore/<slug>`).
+
+### Isolating mutable state
+
+Worktrees share `~/.mvm`, `~/.cache/mvm`, the Lima VM, and any pushed registries with the main checkout. Use the `bin/dev` wrapper or the `just dev-*` recipes for any `mvmctl` invocation in a worktree — they source `scripts/dev-env.sh`, which redirects `mvmctl`'s data dir into the worktree (`MVM_DATA_DIR="$PWD/.mvm-test"`) and silences the legacy-banner.
+
+Examples:
+
+```bash
+bin/dev template build              # equivalent to: cargo run --quiet -- template build
+just dev-test                       # cargo test --workspace with the dev env
+just dev-clippy                     # cargo clippy with the dev env
+```
+
+The dev env files are committed; new contributors get the right behaviour with no setup.
+
+### Lima VM sharing
+
+The Lima VM (`mvm-builder`) is shared across worktrees by design — it's expensive to boot and Nix builds benefit from a warm store. The data-dir override above keeps `mvmctl`'s per-feature state isolated; Nix store reuse is intentional.
+
+### Optional: direnv
+
+Users who already have direnv installed can opt in:
+
+```bash
+cp .envrc.example .envrc
+direnv allow
+```
+
+This is a convenience, not a requirement. The wrapper script path (`bin/dev` / `just dev-*`) works for everyone with no additional tools.
+
+### Cleaning up
+
+After the feature merges:
+
+```bash
+git worktree remove ../mvm-<feature-slug>
+```
+
+### When NOT to use a worktree
+
+Trivial single-line changes (typo fixes, doc word swaps, dependency bumps) can land directly on a topic branch in the main checkout. The worktree rule applies to anything that touches code, runtime state, or the registry.
+
 ## Definition of Done
 
 No task is complete without tests. Every feature, bug fix, or refactor must include:
