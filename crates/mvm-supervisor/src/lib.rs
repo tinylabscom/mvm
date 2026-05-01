@@ -33,6 +33,7 @@
 
 pub mod artifact;
 pub mod audit;
+pub mod backend;
 pub mod egress;
 pub mod keystore;
 pub mod state;
@@ -41,6 +42,7 @@ pub mod tool_gate;
 
 pub use artifact::{ArtifactCollector, ArtifactError, NoopArtifactCollector};
 pub use audit::{AuditError, AuditSigner, NoopAuditSigner};
+pub use backend::{BackendError, BackendLauncher, NoopBackendLauncher};
 pub use egress::{EgressDecision, EgressError, EgressProxy, NoopEgressProxy};
 pub use keystore::{KeystoreError, KeystoreReleaser, NoopKeystoreReleaser, SecretGrant};
 pub use state::{PlanState, PlanStateMachine, StateTransitionError};
