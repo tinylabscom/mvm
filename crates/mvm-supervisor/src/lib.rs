@@ -41,7 +41,7 @@ pub mod supervisor;
 pub mod tool_gate;
 
 pub use artifact::{ArtifactCollector, ArtifactError, NoopArtifactCollector};
-pub use audit::{AuditError, AuditSigner, NoopAuditSigner};
+pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use backend::{BackendError, BackendLauncher, NoopBackendLauncher};
 pub use egress::{EgressDecision, EgressError, EgressProxy, NoopEgressProxy};
 pub use keystore::{KeystoreError, KeystoreReleaser, NoopKeystoreReleaser, SecretGrant};
