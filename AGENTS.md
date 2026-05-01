@@ -49,14 +49,28 @@ Branch names follow the existing pattern (`feat/<slug>`, `fix/<slug>`, `chore/<s
 
 ### Isolating mutable state
 
-Worktrees share `~/.mvm`, `~/.cache/mvm`, the Lima VM, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding `mvmctl`'s data dir for the duration of a command:
+Worktrees share `~/.mvm`, `~/.cache/mvm`, `~/.cargo`, `~/.rustup`, the Lima VM, the Nix store, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding three env vars for the duration of a command:
 
 ```bash
-MVM_DATA_DIR="$PWD/.mvm-test" cargo run --quiet -- template build
-MVM_DATA_DIR="$PWD/.mvm-test" cargo test --workspace
+MVM_DATA_DIR="$PWD/.mvm-test"      \
+CARGO_TARGET_DIR="$PWD/.mvm-test/target" \
+CARGO_HOME="$PWD/.mvm-test/cargo"  \
+  cargo test --workspace
 ```
 
-A `bin/dev` wrapper, `scripts/dev-env.sh`, and `just dev-*` recipes that bake this in are planned but not yet committed — until they land, set `MVM_DATA_DIR` explicitly in worktrees.
+- `MVM_DATA_DIR` redirects mvmctl's templates, sockets, microVM registry, snapshots, and signing keys away from `~/.mvm`.
+- `CARGO_TARGET_DIR` gives the worktree its own `target/` so two worktrees compiling at once don't fight over output paths or rustc invocation locks.
+- `CARGO_HOME` gives the worktree its own cargo registry/cache and (most importantly) its own `.package-cache` lock — without this, two concurrent `cargo test` invocations across worktrees serialize on `~/.cargo/registry/.package-cache` and one will block until the other finishes downloading or resolving.
+
+A `bin/dev` wrapper, `scripts/dev-env.sh`, and `just dev-*` recipes that bake all three in are planned but not yet committed — until they land, set the env vars explicitly in worktrees, or `direnv allow` an `.envrc` that exports them.
+
+### What still collides between worktrees
+
+Even with per-worktree isolation, a few resources are shared and can cause concurrent commands to interfere:
+
+- **`.git/objects/`, `.git/packed-refs`, and the shared hooks dir.** Each `git worktree add` directory has its own index, HEAD, and refs (in `.git/worktrees/<name>/`), but the object store and packed refs are one set. Concurrent `git status` is fine (read-only); concurrent `git stash`, `git commit`, and especially `git rebase` from multiple worktrees can race on `.git/packed-refs` and the shared `.git/hooks/` invocation context. Don't run heavy hooks (full `cargo test --workspace`) on every commit — the pre-commit hook should be limited to formatting + fast checks.
+- **The Lima VM's `/var/lib/mvm/`, `br-mvm` bridge, and TAP devices.** Vary microVM and TAP names between worktrees if you need two microVMs running at the same time.
+- **The Nix store inside Lima.** This is shared by design (warm cache) and Nix's own locking handles it.
 
 ### Lima VM sharing
 
