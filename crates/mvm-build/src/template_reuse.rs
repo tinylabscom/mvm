@@ -42,20 +42,21 @@ pub(crate) fn reuse_template_artifacts(
     let rev_meta: TemplateRevision = serde_json::from_str(&meta_json)?;
     let spec = env.load_pool_spec(tenant_id, pool_id)?;
 
-    // Build-identity check: profile + role + flake.lock must match (via composite cache key).
-    // Build a pool-side "expected" cache key from the pool spec and the template's flake_lock_hash.
+    // Build-identity check: profile + flake.lock must match (via composite cache key).
+    // Build a pool-side "expected" cache key from the pool spec and the template's
+    // flake_lock_hash. Plan 38 dropped `role` from this key: role-shaped flake
+    // variants now live behind the flake's profile selector or its passthru, not
+    // in the host-side cache identity.
     let pool_cache_key = {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
         h.update(rev_meta.flake_lock_hash.as_bytes());
         h.update(b":");
         h.update(spec.profile.as_bytes());
-        h.update(b":");
-        h.update(spec.role.to_string().as_bytes());
         format!("{:x}", h.finalize())
     };
     if rev_meta.cache_key() != pool_cache_key {
-        env.log_warn("Template cache key mismatch (profile/role/flake.lock); skipping reuse");
+        env.log_warn("Template cache key mismatch (profile/flake.lock); skipping reuse");
         return Ok(false);
     }
 

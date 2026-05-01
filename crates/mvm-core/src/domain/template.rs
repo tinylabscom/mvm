@@ -153,15 +153,20 @@ pub struct TemplateRevision {
 }
 
 impl TemplateRevision {
-    /// Composite cache key from the three dimensions that define a unique build
-    /// output: flake.lock content, Nix profile, and workload role.
+    /// Composite cache key from the two dimensions that define a unique build
+    /// output: flake.lock content and Nix profile.
+    ///
+    /// Plan 38 dropped the historical `role` component: role is a fleet
+    /// concept (mvmd's territory) and role-shaped flake variants live behind
+    /// `profile` (`packages.<system>.gateway` vs `packages.<system>.worker`)
+    /// or `passthru` inside the flake itself. The struct's `role` field is
+    /// preserved for forward-/backward-compat with on-disk revision JSON,
+    /// but it no longer participates in build identity.
     pub fn cache_key(&self) -> String {
         let mut hasher = sha2::Sha256::new();
         hasher.update(self.flake_lock_hash.as_bytes());
         hasher.update(b":");
         hasher.update(self.profile.as_bytes());
-        hasher.update(b":");
-        hasher.update(self.role.as_bytes());
         format!("{:x}", hasher.finalize())
     }
 }
@@ -209,10 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn different_role_different_cache_key() {
+    fn role_does_not_affect_cache_key() {
+        // Plan 38: role was dropped from the cache key. Two revisions
+        // that differ only in `role` (same flake.lock + profile) hash
+        // to the same key — they refer to the same build output.
         let a = make_revision("lock1", "minimal", "worker");
         let b = make_revision("lock1", "minimal", "gateway");
-        assert_ne!(a.cache_key(), b.cache_key());
+        assert_eq!(a.cache_key(), b.cache_key());
     }
 
     #[test]
@@ -228,7 +236,7 @@ mod tests {
         a.revision_hash = "rev-aaa".to_string();
         let mut b = make_revision("same-lock", "minimal", "worker");
         b.revision_hash = "rev-zzz".to_string();
-        // Different revision hashes but same flake_lock/profile/role → same cache key
+        // Different revision hashes but same flake_lock/profile → same cache key
         assert_eq!(a.cache_key(), b.cache_key());
     }
 

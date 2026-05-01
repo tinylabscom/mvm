@@ -42,21 +42,22 @@ Branch names follow the existing pattern (`feat/<slug>`, `fix/<slug>`, `chore/<s
 
 ### Isolating mutable state
 
-Worktrees share `~/.mvm`, `~/.cache/mvm`, the Lima VM, and any pushed registries with the main checkout. Use the `bin/dev` wrapper or the `just dev-*` recipes for any `mvmctl` invocation in a worktree — they source `scripts/dev-env.sh`, which redirects `mvmctl`'s data dir into the worktree (`MVM_DATA_DIR="$PWD/.mvm-test"`) and silences the legacy-banner.
-
-Examples:
+Worktrees share `~/.mvm`, `~/.cache/mvm`, the Lima VM, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding `mvmctl`'s data dir for the duration of a command:
 
 ```bash
-bin/dev template build              # equivalent to: cargo run --quiet -- template build
-just dev-test                       # cargo test --workspace with the dev env
-just dev-clippy                     # cargo clippy with the dev env
+MVM_DATA_DIR="$PWD/.mvm-test" cargo run --quiet -- template build
+MVM_DATA_DIR="$PWD/.mvm-test" cargo test --workspace
 ```
 
-The dev env files are committed; new contributors get the right behaviour with no setup.
+A `bin/dev` wrapper, `scripts/dev-env.sh`, and `just dev-*` recipes that bake this in are planned but not yet committed — until they land, set `MVM_DATA_DIR` explicitly in worktrees.
 
 ### Lima VM sharing
 
-The Lima VM (`mvm-builder`) is shared across worktrees by design — it's expensive to boot and Nix builds benefit from a warm store. The data-dir override above keeps `mvmctl`'s per-feature state isolated; Nix store reuse is intentional.
+The Lima VM (`mvm-builder`) is shared across worktrees by design — **never fork it per worktree**. It is expensive to boot, and the Nix store inside it is the warm cache that makes builds fast; a per-worktree VM would duplicate tens of GB of store, re-download the kernel/rootfs, and multiply boot time with no isolation benefit. There is also no second VM name baked into the codebase: `mvmctl`, the `Justfile`, CI, and AGENTS.md examples all hard-code `mvm-builder`, and `RuntimeBuildEnv` / `run_on_vm` route through `mvm_runtime::config::VM_NAME`.
+
+The `MVM_DATA_DIR` override is what isolates per-feature state — templates, sockets, the microVM registry, snapshots, signing keys. Anything that would otherwise land in `~/.mvm` ends up under the worktree.
+
+State that *does* live inside the shared Lima VM (`/var/lib/mvm/`, the `br-mvm` bridge, TAP devices, in-flight microVMs) is the only collision surface between worktrees. If two worktrees need to run microVMs concurrently, give them distinct microVM and TAP names — do not spin up a second Lima VM.
 
 ### Optional: direnv
 
@@ -67,7 +68,7 @@ cp .envrc.example .envrc
 direnv allow
 ```
 
-This is a convenience, not a requirement. The wrapper script path (`bin/dev` / `just dev-*`) works for everyone with no additional tools.
+This is a convenience, not a requirement. Once the `bin/dev` / `just dev-*` wrappers land, those will be the default; until then, set `MVM_DATA_DIR` inline as shown above.
 
 ### Cleaning up
 
