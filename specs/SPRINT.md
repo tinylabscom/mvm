@@ -339,6 +339,141 @@ Cross-repo handoff for hosted MCP transport (HTTP/SSE) is documented
 in [`plans/33-hosted-mcp-transport.md`](plans/33-hosted-mcp-transport.md);
 implementation lives in mvmd, not this repo.
 
+## Sprint 44 — Whitepaper alignment (proposed)
+
+Master plan: [`plans/37-whitepaper-alignment.md`](plans/37-whitepaper-alignment.md).
+Walks the V2 whitepaper (`specs/docs/whitepaper.md`) section by section,
+identifies what `mvm` (the runtime/CLI half — not `mvmd`) is missing
+relative to its claims, and sequences the work into six waves. Includes
+ADR-004 (PII redaction lives in `mvm`, not `mvmd`) staged for creation
+at `specs/adrs/004-pii-redaction-in-mvm.md` when implementation begins.
+
+### Why this sprint
+
+The whitepaper's load-bearing AI-native claims — signed `ExecutionPlan`
+contract, Zone B runtime supervisor, L7 egress + PII redaction,
+tool-call mediation, attestation-gated key release, signed policy
+bundles, runtime artifact capture, audit binding to plan version — have
+no code path on `mvm` today. Sprint 42 closed the local-isolation
+substrate (W1–W6); Sprint 43 shipped MCP + L3 egress + the L7 proxy
+foundation (PR #23). Sprint 44 builds the rest of the whitepaper's
+runtime contract on top of that substrate.
+
+### Wave breakdown
+
+Effort labels: **XS** ≤ ½ day · **S** 1–2 days · **M** 3–5 days · **L** > 1 sprint.
+
+- **Wave 0 — Whitepaper truth fixes (XS, prereq).** Soften §3.1 backend
+  list, §14 hardware claims, §15.1 PII as design intent until built.
+  Update CLAUDE.md / MEMORY.md: W3 dm-verity is **shipped**.
+- **Wave 1 — Foundation (S+M).** New crates `mvm-plan`, `mvm-policy`,
+  `mvm-supervisor` (lifted from `mvm-hostd`). `Supervisor::launch(plan)`
+  happy path. Audit binds to plan/policy/image. Plus B6 (kill switch),
+  B8 (cosign verify cache), B15 (zeroize lint), B16 (local registry),
+  B19 (admission audit), B21 (config-change audit), C1 (supervisor
+  self-attest), C3 (anti-debug), C4 (supervisor death = fail-closed),
+  E2 (policy precedence), G4 (plan replay protection — latent bug fix).
+- **Wave 2 — Differentiator (M).** L7 egress proxy in supervisor (plan
+  34 expanded); inspector chain (SecretsScanner, SsrfGuard,
+  InjectionGuard, DestinationPolicy); AiProviderRouter + PiiRedactor
+  (detect-only first); tool-call vsock RPC + ToolGate wired. Plus B17
+  (egress audit completeness with audit-emits-before-forward CI gate),
+  B18 (tool audit), E1 (false-positive circuit breaker — ship-blocker),
+  G1 (streaming session audit), G2 (retry-storm dedup).
+- **Wave 3 — Identity & artifact closure (M).** Attestation key-release
+  gate with TPM2 provider; per-run secret grants + revoke-on-stop;
+  audit chain signing + per-tenant streams + export; artifact capture
+  path (virtiofs `/artifacts` + ArtifactCollector). Plus B7 (audit
+  buffering during mvmd outage), B9 (workload identity JWT), B10
+  (memory scrub on stop), B11 (host-published trusted time), B12 (crash
+  dump capture), B14 (snapshot integrity + plan-id binding), B20
+  (secret-grant pairing CI), B22 (audit-write health metrics), C2
+  (channel rekey), D1 (webhook inspection), D2 (RAG/retrieved-content
+  inspection), D3 (file-upload inspection), E3 (attestation clock
+  skew), E4 (disk-full audit), F1 (cost telemetry), F2 (stuck-workload
+  detection), F4 (tenant-visible audit projection), G3 (cross-plan
+  request stitching).
+- **Wave 4 — Multi-tenant + release (M).** Per-tenant netns,
+  per-tenant DEK, ReleasePin admission + two-slot policy rollback,
+  DataClass admission gate.
+- **Wave 5 — Surface & ergonomics (S+M).** Local HTTP API on supervisor
+  Unix socket, `mvm-sdk` crate, cross-backend CI matrix on §3.3 fixture
+  plan, threat-control matrix CI generator. Plus F3 (reproducible plan
+  execution).
+- **Wave 6 — Confidential & adapters (L, optional).** SEV-SNP / TDX
+  provider real impls; Lima/Incus/containerd adapters; Vault / AWS SM /
+  GCP SM secret providers.
+
+### Cornerstones
+
+Two pieces unblock everything else and should land first:
+
+1. **`mvm_core::ExecutionPlan`** (§3.3, Wave 1) — typed, signed plan
+   replacing scattered `RunParams` / `FlakeRunConfig`. Every
+   "signed/audited/policy-pinned" claim hangs off this. Including
+   `valid_from` / `valid_until` / `nonce` (G4) closes the latent
+   replay bug.
+2. **`mvm-supervisor` daemon** (§7B, Wave 1) — packages the existing
+   `mvm-hostd` skeleton plus EgressProxy, ToolGate, KeystoreReleaser,
+   AuditSigner, ArtifactCollector behind a single trusted process.
+   Owns the data path so tenant code can't bypass policy.
+
+### Differentiator
+
+L7 egress + AI-provider PII redaction (§15 + §15.1, Wave 2). The
+single most important AI-native claim in the whitepaper and currently
+zero code. Ships as **detect-only** first to safely measure detector
+quality on real traffic before transforms are enabled. **Fail-closed**
+on detector error — any inspection failure blocks the request, never
+forwards raw.
+
+### Trust boundary decision (ADR-004)
+
+PII redaction stays in `mvm`, not `mvmd`. The host running the microVM
+is the only point at which a request body is in plaintext on
+infrastructure we trust. Putting redaction in `mvmd` would collapse §8
+plane separation, expand §13 control-plane blast radius (an `mvmd`
+compromise would expose every prompt), break §19 residency, and add a
+network round-trip per AI call. `mvmd` owns policy authoring,
+signing, distribution, and fleet-aggregated reporting; `mvm` owns the
+engine on the data path. ADR-004 staged in plan 37 Addendum A.
+
+### Sprint 44 success criteria
+
+By sprint close, the project should be able to claim:
+
+1. *Workloads run from typed, signed `ExecutionPlan`s with replay
+   protection.* (Wave 1)
+2. *A trusted supervisor process owns the data path; tenant code
+   cannot bypass policy.* (Wave 1)
+3. *Every outbound egress event produces a signed, plan-bound audit
+   entry.* (Wave 2)
+4. *AI-provider requests pass through PII inspection; detector errors
+   fail closed.* (Wave 2)
+5. *Tool calls are mediated by the supervisor's `ToolGate` and
+   audited.* (Wave 2)
+6. *Attestation gates secret release; TPM2 implementation exists.*
+   (Wave 3)
+7. *Workload outputs are captured under `ArtifactPolicy` retention,
+   not destroyed on exit.* (Wave 3)
+
+Waves 4–6 are post-44 follow-ups; the sprint can close on Waves 0–3.
+
+### Non-goals (named explicitly)
+
+- **mvmd-side concerns:** fleet placement, releases / canary / rollout,
+  host registration, cross-host wake/sleep, policy distribution,
+  control-layer key rotation. Wire types live in
+  `mvm_core::mvmd_iface` so mvmd can land later without reshaping
+  `mvm`.
+- **Hardware-attested vendor trust roots beyond TPM2 in the first pass.**
+  SEV-SNP / TDX providers ship as `unimplemented!()` scaffolds.
+- **Vendor-specific PII detector beyond regex/dictionary v0.**
+  `Detector` trait is open for later additions.
+- **Workflow-engine specific SDKs beyond the generic `mvm-sdk`.**
+- **Model selection, prompt engineering, cost optimization, federated
+  learning** (plan 37 Addendum H — application concerns, not runtime).
+
 ## Completed Sprints
 
 - [01-foundation.md](sprints/01-foundation.md)
