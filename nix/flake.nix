@@ -370,20 +370,20 @@
       in {
         # ── mkNodeService — Node.js service helper ──────────────────────
         #
-        # Builds a Node.js app from source (npm install → autoPatchelf → tsc),
-        # and returns { package, service, healthCheck } for use with mkGuest.
+        # Builds a Node.js app from source via `pkgs.buildNpmPackage`
+        # (single-stage, autoPatchelf'd in place) and returns
+        # `{ package, service, healthCheck }` for use with mkGuest.
         #
-        # TODO(W7.4): replace the manual 3-stage FOD-then-patch pattern
-        # below (`node-src` / `node-pkg` / `node-built`) with
-        # `pkgs.buildNpmPackage`. The current pattern still relies on
-        # `chmod -R u+w` to overwrite the 0555 store-path output of the
-        # previous stage — which is normal Nix-sandbox idiom (audit
-        # category B in the plan), but `buildNpmPackage` removes the
-        # need entirely. Deferred because the swap changes output
-        # layout (`$out/dist/...` → `$out/lib/node_modules/<pname>/dist/...`),
-        # which would require updating `entrypoint` paths in every
-        # consumer flake. Validate the rebuild against `hello-node`
-        # inside the builder VM before flipping.
+        # The previous 3-stage FOD-then-patch pattern (`node-src` /
+        # `node-pkg` / `node-built`) leaned on `chmod -R u+w` to
+        # overwrite the 0555 store-path output of the previous stage —
+        # standard Nix-sandbox idiom (audit category B in the W7
+        # plan), but `buildNpmPackage` collapses it into one
+        # derivation. Output layout is preserved: package files land
+        # flat at `$out/` (not `$out/lib/node_modules/<pname>/`) so
+        # `entrypoint = "dist/index.js"` resolves as
+        # `${pkg}/dist/index.js`, matching the pre-swap interface and
+        # leaving consumer flakes (hello-node etc.) unchanged.
         #
         # Usage:
         #   let p = mvm.lib.${system}.mkNodeService {
@@ -426,69 +426,76 @@
 
             portHex = intToHex4 port;
 
-            node-src = pkgs.stdenv.mkDerivation {
-              pname = "${name}-src";
+            pkg = pkgs.buildNpmPackage {
+              pname = name;
               version = "0";
-              inherit src;
-              dontFixup = true;
-              outputHashMode = "recursive";
-              outputHashAlgo = "sha256";
-              outputHash = npmHash;
-              nativeBuildInputs = [ nodejs pkgs.cacert ];
-              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-              buildPhase = ''
-                export HOME=$TMPDIR
-                export npm_config_cache=$TMPDIR/.npm
-                cp -r $src $out
-                chmod -R u+w $out
-                cd $out
-                npm install --ignore-scripts --no-bin-links --legacy-peer-deps
-              '';
-              installPhase = "true";
-            };
+              inherit src nodejs;
+              # `npmHash` is the parameter name the API has always used.
+              # `buildNpmPackage` calls the same value `npmDepsHash` —
+              # they are content-equivalent (the FOD shape is the same),
+              # so existing consumer flakes can keep their hash strings
+              # unchanged across this refactor.
+              npmDepsHash = npmHash;
 
-            node-pkg = pkgs.stdenv.mkDerivation {
-              pname = "${name}";
-              version = "0";
-              src = node-src;
+              # autoPatchelf for native node modules (postgres bindings,
+              # etc.) lives in the same derivation now — no separate
+              # FOD-then-patch stage. `buildNpmPackage`'s npmDeps FOD
+              # only captures `node_modules/`; patching the consumer
+              # output doesn't disturb the FOD's content addressing.
               nativeBuildInputs = [ pkgs.autoPatchelfHook ];
               buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.glibc ];
               autoPatchelfIgnoreMissingDeps = true;
-              dontBuild = true;
-              installPhase = "cp -r $src $out";
-            };
 
-            node-built = pkgs.stdenv.mkDerivation {
-              pname = "${name}-built";
-              version = "0";
-              src = node-pkg;
-              nativeBuildInputs = [ nodejs ];
+              # Match the previous mkNodeService's npm flags. Without
+              # `--ignore-scripts`, postinstall hooks (e.g. esbuild's
+              # binary download) try to fetch the network and fail in
+              # the FOD sandbox.
+              npmFlags = [
+                "--ignore-scripts"
+                "--no-bin-links"
+                "--legacy-peer-deps"
+              ];
+
+              # Skip the default `npm run build`; we run our own buildPhase.
+              dontNpmBuild = true;
+
               buildPhase = ''
+                runHook preBuild
                 export HOME=$TMPDIR
-                cp -r $src $TMPDIR/build
-                chmod -R u+w $TMPDIR/build
-                cd $TMPDIR/build
-                TSC="$TMPDIR/build/node_modules/typescript/bin/tsc"
-                VITE="$TMPDIR/build/node_modules/vite/bin/vite.js"
+                TSC="node_modules/typescript/bin/tsc"
+                VITE="node_modules/vite/bin/vite.js"
                 ${buildPhase}
-              '' + pkgs.lib.optionalString pruneDevDeps ''
-                for pkg in typescript vite "@vitejs" vitest "@vitest" eslint "@eslint" tsx esbuild drizzle-kit; do
-                  rm -rf "node_modules/$pkg"
-                done
-                rm -rf node_modules/@types
-                find node_modules -name '*.d.ts' -not -path '*/dist/*' -delete 2>/dev/null || true
-              '' + ''
-                mkdir -p $out
-                cp -r $TMPDIR/build/* $out/
+                runHook postBuild
               '';
-              installPhase = "true";
+
+              # Override the default `installPhase` (which puts the
+              # package at `$out/lib/node_modules/<pname>/`) to keep
+              # the previous flat-at-`$out/` layout. Consumer flakes
+              # write `entrypoint = "dist/index.js"` and reference
+              # `${pkg}/dist/index.js` — preserving that resolution
+              # is the whole point of overriding here.
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out
+                cp -r . $out/
+              '' + pkgs.lib.optionalString pruneDevDeps ''
+                for p in typescript vite "@vitejs" vitest "@vitest" eslint "@eslint" tsx esbuild drizzle-kit; do
+                  rm -rf "$out/node_modules/$p"
+                done
+                rm -rf $out/node_modules/@types
+                # Strip stray .d.ts files outside dist/ to shrink the
+                # rootfs. These never get loaded at runtime.
+                find $out/node_modules -name '*.d.ts' -not -path '*/dist/*' -delete 2>/dev/null || true
+              '' + ''
+                runHook postInstall
+              '';
             };
           in {
-            package = node-built;
+            package = pkg;
             service = {
               command = pkgs.writeShellScript "${name}-start" ''
                 set -eu
-                exec ${nodejs}/bin/node ${node-built}/${entrypoint}
+                exec ${nodejs}/bin/node ${pkg}/${entrypoint}
               '';
               env = { NODE_ENV = "production"; } // env;
               user = user;
