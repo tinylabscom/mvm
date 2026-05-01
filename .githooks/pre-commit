@@ -66,7 +66,14 @@ fi
 
 if command -v cargo-audit >/dev/null 2>&1; then
     echo "Running cargo-audit..."
-    if ! cargo audit; then
+    # cargo-deny (above) and cargo-audit both default to
+    # `~/.cargo/advisory-db`, but they store in incompatible layouts
+    # (cargo-deny uses a content-addressed `advisory-db-<hash>/`
+    # subdir; cargo-audit clones flat at the root). When cargo-deny
+    # runs first and populates the dir, cargo-audit refuses with
+    # "Refusing to initialize the non-empty directory".
+    # Point cargo-audit at its own path to break the conflict.
+    if ! cargo audit --db "$HOME/.cargo/cargo-audit-db"; then
         echo "cargo-audit failed!"
         exit 1
     fi
