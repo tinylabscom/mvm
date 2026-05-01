@@ -1295,6 +1295,173 @@ fn try_fetch_revocation_list() -> Result<Option<mvm_security::image_verify::Revo
     Ok(Some(list))
 }
 
+/// `mvmctl dev import-image` — sideload a verified dev image from local files.
+///
+/// Plan 36 PR-D.2 / §"Air-gapped install path". Runs the same
+/// cosign + SHA-256 + version-pin + max-age + revocation pipeline
+/// as `download_dev_image`, but against operator-provided local
+/// files instead of the GitHub Releases URL. On success the verified
+/// artifacts are copied into the version-namespaced cache so the next
+/// `mvmctl dev up` boots from them with no further verification or
+/// network round-trip.
+///
+/// The intended user is anyone running mvmctl in a regulated /
+/// gov / air-gapped environment that can't reach github.com but
+/// that legitimately wants the supply-chain check. Without this
+/// path the only option for these users was MVM_SKIP_HASH_VERIFY=1,
+/// which disables verification entirely — exactly the unsafe escape
+/// plan 36 exists to discourage.
+pub fn cmd_dev_import_image(
+    manifest_path: &str,
+    bundle_path: &str,
+    vmlinux_path: &str,
+    rootfs_path: &str,
+) -> Result<()> {
+    use mvm_security::image_verify;
+
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+
+    ui::info(&format!(
+        "Importing dev image (v{version}, {arch}) from local files..."
+    ));
+
+    let manifest_bytes = std::fs::read(manifest_path)
+        .with_context(|| format!("reading manifest file at {manifest_path}"))?;
+    let bundle_bytes = std::fs::read(bundle_path)
+        .with_context(|| format!("reading cosign bundle at {bundle_path}"))?;
+
+    let expected_identity =
+        format!("https://github.com/auser/mvm/.github/workflows/release.yml@refs/tags/v{version}");
+    let expected_issuer = "https://token.actions.githubusercontent.com";
+
+    let manifest = if std::env::var_os("MVM_SKIP_COSIGN_VERIFY").is_some() {
+        ui::warn(
+            "MVM_SKIP_COSIGN_VERIFY set — accepting unverified manifest. \
+             Plan 36 documents this as an emergency-rotation escape only.",
+        );
+        image_verify::parse_manifest(&manifest_bytes)
+            .map_err(|e| anyhow::anyhow!("manifest parse failed: {e}"))?
+    } else {
+        image_verify::verify_manifest(
+            &manifest_bytes,
+            &bundle_bytes,
+            &expected_identity,
+            expected_issuer,
+        )
+        .map_err(|e| {
+            bump_verify_outcome("sig_invalid");
+            anyhow::anyhow!(
+                "Cosign verification failed for the imported manifest: {e}\n\
+                 \n\
+                 Plan 36 / ADR 005: a sideloaded manifest must carry the\n\
+                 same release-workflow OIDC signature as the network path.\n\
+                 \n\
+                 Common causes:\n\
+                 - mismatched manifest + bundle pair (re-export both as a set);\n\
+                 - manifest belongs to a different mvmctl version (check `mvmctl --version`);\n\
+                 - clock skew (signature time-window).\n\
+                 \n\
+                 Emergency rotation: MVM_SKIP_COSIGN_VERIFY=1 keeps SHA-256\n\
+                 verification active while bypassing the signature step."
+            )
+        })?
+    };
+
+    image_verify::check_version_pin(&manifest, version).map_err(|e| {
+        bump_verify_outcome("version_skew");
+        anyhow::anyhow!(
+            "Imported manifest is for a different mvmctl version: {e}\n\
+             \n\
+             Plan 36 pins manifest.version == mvmctl version exactly. Re-export\n\
+             the manifest from a release matching v{version}, or upgrade mvmctl."
+        )
+    })?;
+
+    let now = chrono::Utc::now();
+    if let Err(e) = image_verify::check_not_after(&manifest, now) {
+        bump_verify_outcome("expired");
+        ui::warn(&format!(
+            "Imported manifest is past its max-age ({e}). Sideloaded images \
+             from older releases remain cryptographically valid but may \
+             carry unpatched vulnerabilities."
+        ));
+    }
+
+    if let Some(revocations) = try_fetch_revocation_list()? {
+        image_verify::check_revocation(&manifest, &revocations).map_err(|e| {
+            bump_verify_outcome("revoked");
+            anyhow::anyhow!(
+                "Imported manifest is on the project's revocation list: {e}\n\
+                 \n\
+                 Plan 36: a `revocations` release entry has marked v{version} \
+                 unsafe to run. Refusing to import."
+            )
+        })?;
+    }
+
+    if manifest.arch != arch {
+        anyhow::bail!(
+            "Manifest is for arch {} but this host is {arch}. Wrong-arch image \
+             would not boot. Re-export the manifest for the correct arch.",
+            manifest.arch
+        );
+    }
+
+    let kernel_name = format!("dev-vmlinux-{arch}");
+    let rootfs_name = format!("dev-rootfs-{arch}.{}", manifest.rootfs_format);
+
+    let kernel_digest = manifest
+        .artifact(&kernel_name)
+        .ok_or_else(|| anyhow::anyhow!("manifest does not list {kernel_name}"))?;
+    let rootfs_digest = manifest
+        .artifact(&rootfs_name)
+        .ok_or_else(|| anyhow::anyhow!("manifest does not list {rootfs_name}"))?;
+
+    image_verify::verify_artifact(std::path::Path::new(vmlinux_path), kernel_digest).map_err(
+        |e| {
+            bump_verify_outcome("digest_mismatch");
+            anyhow::anyhow!("kernel SHA-256 mismatch: {e}")
+        },
+    )?;
+    image_verify::verify_artifact(std::path::Path::new(rootfs_path), rootfs_digest).map_err(
+        |e| {
+            bump_verify_outcome("digest_mismatch");
+            anyhow::anyhow!("rootfs SHA-256 mismatch: {e}")
+        },
+    )?;
+
+    // Copy the verified artifacts into the version-namespaced cache.
+    // The next `mvmctl dev up` picks them up without re-running
+    // verification (the cache hit precedes download_dev_image).
+    let prebuilt_dir = format!(
+        "{}/dev/prebuilt/v{version}",
+        mvm_core::config::mvm_data_dir()
+    );
+    std::fs::create_dir_all(&prebuilt_dir)
+        .with_context(|| format!("creating prebuilt dir {prebuilt_dir}"))?;
+    let target_kernel = format!("{prebuilt_dir}/vmlinux");
+    let target_rootfs = format!("{prebuilt_dir}/rootfs.ext4");
+    std::fs::copy(vmlinux_path, &target_kernel)
+        .with_context(|| format!("copying kernel to {target_kernel}"))?;
+    std::fs::copy(rootfs_path, &target_rootfs)
+        .with_context(|| format!("copying rootfs to {target_rootfs}"))?;
+
+    mvm_core::observability::metrics::global()
+        .dev_image_verify_ok
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    ui::success(&format!(
+        "Imported and verified dev image v{version} into {prebuilt_dir}. \
+         Run `mvmctl dev up` to boot the dev VM from the cached artifacts."
+    ));
+    Ok(())
+}
+
 /// Bump the dev_image_verify_<outcome> counter. Plan 36 §Layer 4 step 11.
 ///
 /// Caller passes the outcome name; centralising the lookup keeps the
