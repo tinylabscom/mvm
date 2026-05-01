@@ -36,6 +36,7 @@ pub mod audit;
 pub mod backend;
 pub mod destination;
 pub mod egress;
+pub mod injection_guard;
 pub mod inspector;
 pub mod keystore;
 pub mod secrets_scanner;
@@ -49,6 +50,7 @@ pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopA
 pub use backend::{BackendError, BackendLauncher, NoopBackendLauncher};
 pub use destination::DestinationPolicy;
 pub use egress::{EgressDecision, EgressError, EgressProxy, NoopEgressProxy};
+pub use injection_guard::{InjectionGuard, InjectionRule, RuleFamily};
 pub use inspector::{Inspector, InspectorChain, InspectorVerdict, RequestCtx};
 pub use keystore::{KeystoreError, KeystoreReleaser, NoopKeystoreReleaser, SecretGrant};
 pub use secrets_scanner::{DEFAULT_RULES, SecretRule, SecretsScanner};
