@@ -115,6 +115,88 @@ fn collect_checks() -> Vec<PostureCheck> {
         no_vm_check(SecurityLayer::GuestHardening, "Built template exists")
     });
 
+    // SupplyChainIntegrity — dev image cache exists for the current
+    // mvmctl version. A populated cache is the host-side fingerprint
+    // that the cosign + SHA-256 verification pipeline has completed
+    // at least once for this version (download_dev_image only writes
+    // the cache after every step succeeds). Plan 36 §Layer 4.
+    let version = env!("CARGO_PKG_VERSION");
+    let prebuilt_dir = format!(
+        "{}/dev/prebuilt/v{version}",
+        mvm_core::config::mvm_data_dir()
+    );
+    let kernel = format!("{prebuilt_dir}/vmlinux");
+    let rootfs = format!("{prebuilt_dir}/rootfs.ext4");
+    let cache_present =
+        std::path::Path::new(&kernel).exists() && std::path::Path::new(&rootfs).exists();
+    checks.push(PostureCheck {
+        layer: SecurityLayer::SupplyChainIntegrity,
+        name: "Dev image verified for this version".to_string(),
+        passed: cache_present,
+        detail: if cache_present {
+            format!("verified prebuilt cached at {prebuilt_dir}")
+        } else {
+            format!(
+                "no verified prebuilt for v{version}; run `mvmctl dev up` (network) or \
+                 `mvmctl dev import-image` (air-gapped) to populate"
+            )
+        },
+    });
+
+    // SupplyChainIntegrity — revocation list freshness. The cosign-
+    // signed list is cached at ~/.cache/mvm/revocations/ with a 24h
+    // refresh policy and 7d offline tolerance. After 7d staleness
+    // mvmctl silently skips revocation enforcement (with a warning),
+    // so we surface that gap here instead of letting it stay invisible.
+    let rev_path = format!(
+        "{}/revocations/revoked-versions.json",
+        mvm_core::config::mvm_cache_dir()
+    );
+    let rev_age_secs = std::fs::metadata(&rev_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs());
+    let twenty_four_hours = 24 * 60 * 60;
+    let seven_days = 7 * 24 * 60 * 60;
+    checks.push(match rev_age_secs {
+        None => PostureCheck {
+            layer: SecurityLayer::SupplyChainIntegrity,
+            name: "Revocation list cached".to_string(),
+            // No cache yet is an info state — the list 404s today
+            // (bootstrap; project hasn't published the `revocations`
+            // tag yet). Mark as passed; will flip to an enforcement
+            // check once the project publishes its first list.
+            passed: true,
+            detail: "no revocation cache (bootstrap; no recalls have been published yet)"
+                .to_string(),
+        },
+        Some(age) if age < twenty_four_hours => PostureCheck {
+            layer: SecurityLayer::SupplyChainIntegrity,
+            name: "Revocation list cached".to_string(),
+            passed: true,
+            detail: format!("fresh ({} hours old)", age / 3600),
+        },
+        Some(age) if age < seven_days => PostureCheck {
+            layer: SecurityLayer::SupplyChainIntegrity,
+            name: "Revocation list cached".to_string(),
+            passed: true,
+            detail: format!(
+                "stale but within 7-day tolerance ({} hours old; refresh on next online run)",
+                age / 3600
+            ),
+        },
+        Some(age) => PostureCheck {
+            layer: SecurityLayer::SupplyChainIntegrity,
+            name: "Revocation list cached".to_string(),
+            passed: false,
+            detail: format!(
+                "expired ({} days old; revocation enforcement is silently skipped — refresh required)",
+                age / 86400
+            ),
+        },
+    });
+
     checks
 }
 
