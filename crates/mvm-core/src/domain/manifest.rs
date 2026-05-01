@@ -247,6 +247,221 @@ pub fn canonical_key_for_path(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Slot directory for a given canonical-path-hash:
+/// `~/.mvm/templates/<slot_hash>/`. Reuses
+/// `crate::template::templates_base_dir()` so legacy and modern
+/// slots share the same base. Documented in plan 38 §3.
+pub fn slot_dir(slot_hash: &str) -> String {
+    format!("{}/{}", crate::template::templates_base_dir(), slot_hash)
+}
+
+/// Path to a slot's persisted manifest record:
+/// `<slot>/manifest.json`.
+pub fn slot_manifest_path(slot_hash: &str) -> String {
+    format!("{}/manifest.json", slot_dir(slot_hash))
+}
+
+/// Combined helper: canonicalise `path`, hash it, return the slot
+/// directory path. Errors if `path` can't be canonicalised.
+pub fn slot_dir_for_manifest_path(path: &Path) -> Result<String> {
+    let key = canonical_key_for_path(path)?;
+    Ok(slot_dir(&key))
+}
+
+/// True if `name` looks like a modern slot directory name —
+/// 64 lowercase hex characters. Used to distinguish hash-keyed
+/// slots from legacy name-keyed slots during migration (plan 38
+/// §8a "Migration strategy").
+pub fn is_slot_hash_dirname(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// Build provenance recorded alongside each slot's persisted
+/// manifest. Defined in plan 38 §3 / §7c. Ties the artifacts back
+/// to the build environment without introducing a new signing
+/// scheme.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Provenance {
+    /// `mvmctl` (workspace) version that wrote this slot.
+    pub toolchain_version: String,
+    /// SHA-256 (or similar) digest of the sealed-signed builder
+    /// image used. `None` for builds done outside that pipeline.
+    /// Populated when plan 36 is in use.
+    #[serde(default)]
+    pub builder_image_digest: Option<String>,
+    /// Host arch + OS, e.g. `"x86_64-linux"`, `"aarch64-darwin"`.
+    pub host_arch: String,
+    /// ISO-8601 UTC timestamp when this slot was last written.
+    pub built_at: String,
+    /// Workload IR hash when the manifest was emitted by mvmforge.
+    /// `None` for hand-written manifests.
+    #[serde(default)]
+    pub ir_hash: Option<String>,
+}
+
+impl Provenance {
+    /// Provenance for a build happening *now* on the current host.
+    /// `built_at` is filled with a UTC ISO-8601 timestamp via
+    /// `crate::util::time::utc_now()`. `builder_image_digest` and
+    /// `ir_hash` default to `None`; callers populate them when
+    /// they have the data.
+    pub fn current() -> Self {
+        Self {
+            toolchain_version: env!("CARGO_PKG_VERSION").to_string(),
+            builder_image_digest: None,
+            host_arch: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            built_at: crate::util::time::utc_now(),
+            ir_hash: None,
+        }
+    }
+}
+
+/// Slot-resident JSON record that persists what `template build`
+/// stored about a slot. Lives at
+/// `~/.mvm/templates/<sha256(canonical_manifest_path)>/manifest.json`
+/// per plan 38 §3.
+///
+/// Coexists with the legacy name-keyed `TemplateSpec` for the
+/// duration of the refactor. The runtime layer migrates to this
+/// type in a subsequent slice; for now it's pure addition.
+///
+/// Sizing fields are stored numeric (already parsed from the
+/// `Manifest`'s human-readable strings) so the slot record is
+/// self-contained and doesn't need to re-parse on every read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedManifest {
+    #[serde(default = "default_persisted_schema_version")]
+    pub schema_version: u32,
+
+    /// Absolute, canonicalised path to the source `mvm.toml` /
+    /// `Mvmfile.toml`. Identifies the slot for migration / display.
+    pub manifest_path: String,
+
+    /// `sha256(canonical_manifest_path)` — the slot directory key.
+    /// Stored alongside `manifest_path` for cheap lookups without
+    /// re-canonicalising on every read.
+    pub manifest_hash: String,
+
+    /// Resolved flake reference (verbatim from `Manifest::flake`).
+    pub flake_ref: String,
+
+    /// Selected flake profile.
+    pub profile: String,
+
+    pub vcpus: u8,
+    pub mem_mib: u32,
+    pub data_disk_mib: u32,
+
+    /// Display name from the manifest (NOT the registry key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// VM backend the slot was built on. Used by §7b's
+    /// "warn on backend mismatch at boot" check. Free-form string
+    /// matching `AnyBackend::name()`.
+    pub backend: String,
+
+    pub provenance: Provenance,
+
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn default_persisted_schema_version() -> u32 {
+    MANIFEST_SCHEMA_VERSION
+}
+
+impl PersistedManifest {
+    /// Build a `PersistedManifest` from a parsed `Manifest`, the
+    /// (canonical) source path, the chosen backend name, and a
+    /// `Provenance` block. Numeric sizing fields are parsed out of
+    /// the manifest's human-readable strings here so the slot
+    /// record is self-contained.
+    pub fn from_manifest(
+        manifest: &Manifest,
+        canonical_path: &Path,
+        backend: &str,
+        provenance: Provenance,
+    ) -> Result<Self> {
+        let manifest_path = canonical_path
+            .to_str()
+            .ok_or_else(|| anyhow!("manifest path is not valid UTF-8: {:?}", canonical_path))?
+            .to_string();
+        let manifest_hash = canonical_key_for_path(canonical_path)?;
+        let mem_mib = manifest.mem_mib()?;
+        let data_disk_mib = manifest.data_disk_mib()?;
+        let now = provenance.built_at.clone();
+        Ok(Self {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_path,
+            manifest_hash,
+            flake_ref: manifest.flake.clone(),
+            profile: manifest.profile.clone(),
+            vcpus: manifest.vcpus,
+            mem_mib,
+            data_disk_mib,
+            name: manifest.name.clone(),
+            backend: backend.to_string(),
+            provenance,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    /// Produce an updated copy with `updated_at` and `provenance`
+    /// refreshed (used on rebuild). `created_at` is preserved.
+    pub fn touch(self, provenance: Provenance) -> Self {
+        let updated_at = provenance.built_at.clone();
+        Self {
+            updated_at,
+            provenance,
+            ..self
+        }
+    }
+
+    /// Atomically write `<slot_dir>/manifest.json`
+    /// (write-temp-then-rename via `tempfile::NamedTempFile::persist`).
+    /// Crash mid-write leaves either the previous file or no
+    /// change — never a half-written file. Plan 38 §7b "Atomic
+    /// slot writes".
+    pub fn write_to_slot(&self, slot_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(slot_dir)
+            .with_context(|| format!("Failed to create slot dir {}", slot_dir.display()))?;
+        let dst = slot_dir.join("manifest.json");
+        let json =
+            serde_json::to_string_pretty(self).context("Failed to serialise PersistedManifest")?;
+        let mut tmp = tempfile::NamedTempFile::new_in(slot_dir).with_context(|| {
+            format!(
+                "Failed to create tempfile inside slot dir {}",
+                slot_dir.display()
+            )
+        })?;
+        use std::io::Write;
+        tmp.write_all(json.as_bytes())
+            .context("Failed to write persisted manifest body")?;
+        tmp.persist(&dst).map_err(|e| {
+            anyhow!(
+                "Failed to atomically replace {}: {}",
+                dst.display(),
+                e.error
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Read `<slot_dir>/manifest.json` and deserialise.
+    pub fn read_from_slot(slot_dir: &Path) -> Result<Self> {
+        let path = slot_dir.join("manifest.json");
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str(&body)
+            .with_context(|| format!("Failed to parse persisted manifest at {}", path.display()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +751,274 @@ mod tests {
             "#,
         );
         assert!(Manifest::read_file(&tmp.path().join("mvm.toml")).is_err());
+    }
+
+    // ----- Slot path helpers -----------------------------------------
+
+    #[test]
+    fn slot_dir_has_templates_base_and_hash() {
+        let s = slot_dir("abcd1234");
+        assert!(s.contains("/templates/abcd1234"), "got {s}");
+    }
+
+    #[test]
+    fn slot_manifest_path_is_under_slot_dir() {
+        let p = slot_manifest_path("abcd1234");
+        assert!(p.ends_with("/abcd1234/manifest.json"), "got {p}");
+    }
+
+    #[test]
+    fn slot_dir_for_manifest_path_combines_canonical_key_and_slot_dir() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "mvm.toml", minimal_manifest_toml());
+        let key = canonical_key_for_path(&tmp.path().join("mvm.toml")).unwrap();
+        let dir = slot_dir_for_manifest_path(&tmp.path().join("mvm.toml")).unwrap();
+        assert_eq!(dir, slot_dir(&key));
+    }
+
+    #[test]
+    fn is_slot_hash_dirname_recognises_64_hex() {
+        let key = "0123456789abcdef".repeat(4);
+        assert_eq!(key.len(), 64);
+        assert!(is_slot_hash_dirname(&key));
+    }
+
+    #[test]
+    fn is_slot_hash_dirname_rejects_legacy_names() {
+        assert!(!is_slot_hash_dirname("openclaw"));
+        assert!(!is_slot_hash_dirname("agent-foo"));
+        assert!(!is_slot_hash_dirname(""));
+        // Wrong length.
+        assert!(!is_slot_hash_dirname(&"a".repeat(63)));
+        assert!(!is_slot_hash_dirname(&"a".repeat(65)));
+        // Right length, wrong charset.
+        assert!(!is_slot_hash_dirname(&"X".repeat(64)));
+        assert!(!is_slot_hash_dirname(&"g".repeat(64))); // beyond hex range
+    }
+
+    // ----- Provenance ------------------------------------------------
+
+    #[test]
+    fn provenance_current_populates_required_fields() {
+        let p = Provenance::current();
+        assert!(!p.toolchain_version.is_empty());
+        assert!(p.host_arch.contains('-'), "{}", p.host_arch);
+        assert!(p.built_at.ends_with('Z'));
+        assert!(p.builder_image_digest.is_none());
+        assert!(p.ir_hash.is_none());
+    }
+
+    #[test]
+    fn provenance_serde_roundtrip_with_optional_fields() {
+        let p = Provenance {
+            toolchain_version: "0.13.0".to_string(),
+            builder_image_digest: Some("sha256:deadbeef".to_string()),
+            host_arch: "x86_64-linux".to_string(),
+            built_at: "2026-04-30T12:00:00Z".to_string(),
+            ir_hash: Some("sha256:cafef00d".to_string()),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn provenance_deserialises_when_optional_fields_omitted() {
+        let json = r#"{
+            "toolchain_version": "0.13.0",
+            "host_arch": "aarch64-darwin",
+            "built_at": "2026-04-30T12:00:00Z"
+        }"#;
+        let p: Provenance = serde_json::from_str(json).unwrap();
+        assert!(p.builder_image_digest.is_none());
+        assert!(p.ir_hash.is_none());
+    }
+
+    // ----- PersistedManifest -----------------------------------------
+
+    fn fixture_persisted(tmp: &TempDir) -> PersistedManifest {
+        write(tmp.path(), "mvm.toml", minimal_manifest_toml());
+        let manifest = Manifest::read_file(&tmp.path().join("mvm.toml")).unwrap();
+        let canonical = std::fs::canonicalize(tmp.path().join("mvm.toml")).unwrap();
+        PersistedManifest::from_manifest(
+            &manifest,
+            &canonical,
+            "firecracker",
+            Provenance {
+                toolchain_version: "0.13.0".to_string(),
+                builder_image_digest: None,
+                host_arch: "x86_64-linux".to_string(),
+                built_at: "2026-04-30T12:00:00Z".to_string(),
+                ir_hash: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn persisted_from_manifest_populates_numeric_sizing() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        assert_eq!(p.vcpus, 2);
+        assert_eq!(p.mem_mib, 1024);
+        assert_eq!(p.data_disk_mib, 0);
+        assert_eq!(p.flake_ref, ".");
+        assert_eq!(p.profile, "default");
+        assert_eq!(p.backend, "firecracker");
+        assert_eq!(p.schema_version, MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn persisted_from_manifest_sets_canonical_path_and_hash() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        let expected_hash = canonical_key_for_path(&tmp.path().join("mvm.toml")).unwrap();
+        assert_eq!(p.manifest_hash, expected_hash);
+        // canonicalised path is absolute and ends with mvm.toml.
+        assert!(p.manifest_path.ends_with("mvm.toml"));
+        assert!(std::path::Path::new(&p.manifest_path).is_absolute());
+    }
+
+    #[test]
+    fn persisted_from_manifest_initialises_created_and_updated_to_built_at() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        assert_eq!(p.created_at, "2026-04-30T12:00:00Z");
+        assert_eq!(p.updated_at, p.created_at);
+        assert_eq!(p.provenance.built_at, p.created_at);
+    }
+
+    #[test]
+    fn persisted_serde_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        let json = serde_json::to_string_pretty(&p).unwrap();
+        let back: PersistedManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn persisted_skips_serialising_omitted_name() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        assert!(p.name.is_none());
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("\"name\""));
+    }
+
+    #[test]
+    fn persisted_with_name_roundtrips() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+            flake = "."
+            profile = "default"
+            vcpus = 2
+            mem = "1G"
+            data_disk = "0"
+            name = "openclaw"
+        "#;
+        write(tmp.path(), "mvm.toml", toml);
+        let manifest = Manifest::read_file(&tmp.path().join("mvm.toml")).unwrap();
+        let canonical = std::fs::canonicalize(tmp.path().join("mvm.toml")).unwrap();
+        let p = PersistedManifest::from_manifest(
+            &manifest,
+            &canonical,
+            "firecracker",
+            Provenance::current(),
+        )
+        .unwrap();
+        assert_eq!(p.name.as_deref(), Some("openclaw"));
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"name\":\"openclaw\""));
+    }
+
+    #[test]
+    fn touch_preserves_created_at_and_advances_updated_at_and_provenance() {
+        let tmp = TempDir::new().unwrap();
+        let original = fixture_persisted(&tmp);
+        let new_provenance = Provenance {
+            toolchain_version: "0.14.0".to_string(),
+            builder_image_digest: Some("sha256:newer".to_string()),
+            host_arch: original.provenance.host_arch.clone(),
+            built_at: "2026-05-01T08:00:00Z".to_string(),
+            ir_hash: None,
+        };
+        let touched = original.clone().touch(new_provenance.clone());
+        assert_eq!(touched.created_at, original.created_at);
+        assert_eq!(touched.updated_at, "2026-05-01T08:00:00Z");
+        assert_eq!(touched.provenance, new_provenance);
+        assert_eq!(touched.flake_ref, original.flake_ref);
+        assert_eq!(touched.manifest_hash, original.manifest_hash);
+    }
+
+    // ----- Atomic write / read --------------------------------------
+
+    #[test]
+    fn write_then_read_roundtrips() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        let slot = tmp.path().join("slot");
+        p.write_to_slot(&slot).unwrap();
+        let back = PersistedManifest::read_from_slot(&slot).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn write_creates_slot_dir_if_missing() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        let slot = tmp.path().join("nested/under/slot");
+        assert!(!slot.exists());
+        p.write_to_slot(&slot).unwrap();
+        assert!(slot.join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn write_replaces_existing_manifest_atomically() {
+        let tmp = TempDir::new().unwrap();
+        let original = fixture_persisted(&tmp);
+        let slot = tmp.path().join("slot");
+        original.write_to_slot(&slot).unwrap();
+
+        // Mutate and rewrite — second write must replace the file
+        // wholesale, not append.
+        let new_provenance = Provenance {
+            toolchain_version: "0.14.0".to_string(),
+            builder_image_digest: None,
+            host_arch: original.provenance.host_arch.clone(),
+            built_at: "2026-05-01T00:00:00Z".to_string(),
+            ir_hash: None,
+        };
+        let touched = original.clone().touch(new_provenance.clone());
+        touched.write_to_slot(&slot).unwrap();
+
+        let back = PersistedManifest::read_from_slot(&slot).unwrap();
+        assert_eq!(back.updated_at, "2026-05-01T00:00:00Z");
+        assert_eq!(back.provenance, new_provenance);
+        assert_eq!(back.created_at, original.created_at);
+    }
+
+    #[test]
+    fn write_does_not_leave_tempfile_after_success() {
+        let tmp = TempDir::new().unwrap();
+        let p = fixture_persisted(&tmp);
+        let slot = tmp.path().join("slot");
+        p.write_to_slot(&slot).unwrap();
+        // Only `manifest.json` should remain — the temp file is
+        // renamed by `persist`, not deleted.
+        let entries: Vec<String> = std::fs::read_dir(&slot)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        assert_eq!(entries, vec!["manifest.json"]);
+    }
+
+    #[test]
+    fn read_errors_when_manifest_missing() {
+        let tmp = TempDir::new().unwrap();
+        let slot = tmp.path().join("empty-slot");
+        std::fs::create_dir_all(&slot).unwrap();
+        assert!(PersistedManifest::read_from_slot(&slot).is_err());
     }
 }
