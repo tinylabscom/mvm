@@ -39,6 +39,12 @@ rustPlatform.buildRustPackage {
   # used by the init's `mkServiceBlock`. It ships in the same store path
   # as the guest agent so `mkServiceBlock` can reference it via
   # `${guestAgentPkg}/bin/mvm-seccomp-apply` without a separate package.
+  #
+  # `mvm-verity-init` is NOT built here because it has to run from the
+  # initramfs (no glibc available); it's built statically by
+  # `nix/packages/mvm-verity-init.nix` against musl. Building it both
+  # ways would just be busywork — the agent + seccomp-apply run after
+  # the rootfs is mounted and can keep dynamic linking against glibc.
   cargoBuildFlags =
     [ "-p" "mvm-guest" "--bin" "mvm-guest-agent" "--bin" "mvm-seccomp-apply" ]
     ++ pkgs.lib.optionals devShell [ "--features" "dev-shell" ];

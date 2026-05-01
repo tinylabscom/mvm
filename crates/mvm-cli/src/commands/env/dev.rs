@@ -81,6 +81,35 @@ pub(in crate::commands) enum DevAction {
         #[arg(long, short = 's')]
         shell: bool,
     },
+    /// Import a dev image from local files (air-gapped install).
+    ///
+    /// Plan 36 §"Air-gapped install path": runs the same cosign sig +
+    /// SHA-256 + version-pin + max-age + revocation verification
+    /// pipeline as the network path, against local files. On success
+    /// the verified artifacts are deposited into the version-namespaced
+    /// cache (`~/.cache/mvm/dev/prebuilt/v{version}/`) and the next
+    /// `mvmctl dev up` boots from them without re-downloading.
+    ///
+    /// The trusted path for operators in regulated/gov/air-gapped
+    /// environments. Without this, the only option to run an
+    /// unreachable-network host was `MVM_SKIP_HASH_VERIFY=1`, which
+    /// disables the supply-chain check entirely.
+    ImportImage {
+        /// Path to the cosign-signed manifest JSON
+        /// (`dev-image-{arch}.manifest.json`).
+        #[arg(long, value_name = "FILE")]
+        manifest: String,
+        /// Path to the manifest's cosign bundle
+        /// (`dev-image-{arch}.manifest.json.bundle`).
+        #[arg(long, value_name = "FILE")]
+        bundle: String,
+        /// Path to the kernel binary (`dev-vmlinux-{arch}`).
+        #[arg(long, value_name = "FILE")]
+        vmlinux: String,
+        /// Path to the rootfs (`dev-rootfs-{arch}.ext4`).
+        #[arg(long, value_name = "FILE")]
+        rootfs: String,
+    },
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -198,6 +227,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 dev_status()
             }
         }
+        DevAction::ImportImage {
+            manifest,
+            bundle,
+            vmlinux,
+            rootfs,
+        } => apple_container::cmd_dev_import_image(&manifest, &bundle, &vmlinux, &rootfs),
         DevAction::Rebuild {
             lima_cpus,
             lima_mem,

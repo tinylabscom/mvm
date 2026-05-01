@@ -86,6 +86,16 @@
           devShell = true;
         };
 
+        # Static musl build of `mvm-verity-init` for the verity
+        # initramfs (ADR-002 §W3). Separate derivation because the
+        # initramfs has no glibc loader and a dynamic build panics
+        # the kernel with ENOENT for `/init`. Linux-only.
+        mvm-verity-init = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+          import ./packages/mvm-verity-init.nix {
+            inherit pkgs mvmSrc;
+          }
+        );
+
         busybox = pkgs.pkgsStatic.busybox;
 
         # Shared kernel copy logic. Always exposes the kernel as $out/vmlinux
@@ -128,9 +138,18 @@
             mkdir -p $out
             cp ${rootfsImage} $out/rootfs.ext4
             chmod u+w $out/rootfs.ext4
+            # data-block-size=1024 matches the ext4 we ship (mkGuest's
+            # rootfs is mke2fs'd with 1 KiB blocks at the sizes we
+            # build at). Verity exposes its data-block-size as the
+            # device's logical block size, and the kernel's ext4
+            # refuses to mount when filesystem block size < device
+            # logical block size — so they have to match.
+            #
+            # hash-block-size stays at 4096 because that's the typical
+            # tree fan-out and what veritysetup defaults to.
             ${pkgs.cryptsetup}/bin/veritysetup format \
               --hash=sha256 \
-              --data-block-size=4096 \
+              --data-block-size=1024 \
               --hash-block-size=4096 \
               --salt=0000000000000000000000000000000000000000000000000000000000000000 \
               $out/rootfs.ext4 $out/rootfs.verity \
@@ -188,6 +207,15 @@
           assert pkgs.lib.assertMsg
             ((variant == "prod") -> !(guestAgent.passthru.devShell or false))
             "mkGuest: variant=\"prod\" requires a guest agent built without the dev-shell feature";
+          # ADR-002 §W3.4 / plan 36: the dev variant's overlay-on-/nix
+          # mutates the lower layer at runtime, which can't compose with
+          # dm-verity (the lower hash would change on every write). Refuse
+          # the combination at evaluation time so a dev override applied
+          # to a sealed builder output (or any future flake) fails loudly
+          # instead of producing a runtime kernel panic at boot.
+          assert pkgs.lib.assertMsg
+            ((variant == "dev") -> !verifiedBoot)
+            "mkGuest: variant=\"dev\" cannot compose with verifiedBoot=true; the dev VM's writable /nix overlay conflicts with dm-verity (ADR-002 §W3.4 / plan 36)";
           let
             # Compose `<pkg>/bin` for every caller-supplied package so
             # PID 1's PATH can find them. Without this, packages live in
@@ -280,6 +308,19 @@
             verityOut = pkgs.lib.optionalString verifiedBoot
               "${verityArtifacts rootfs}";
 
+            # The verity initramfs (cpio.gz) bakes `mvm-verity-init` as
+            # `/init` and ships empty mount targets for /proc, /dev,
+            # /sysroot. The host's start_vm path points the VM's
+            # `initrd_path` at this file when verifiedBoot is on. The
+            # initramfs runs the verity setup in early userspace and
+            # switch_root's to the real /init, which sidesteps the
+            # Firecracker-aarch64 cmdline-append bug. ADR-002 §W3.
+            verityInitrd = pkgs.lib.optionalString verifiedBoot
+              "${import ./packages/verity-initrd.nix {
+                inherit pkgs;
+                verityInitPkg = mvm-verity-init;
+              }}";
+
             ociImage = pkgs.dockerTools.streamLayeredImage {
               inherit name;
               tag = "latest";
@@ -317,6 +358,11 @@
               cp "${verityOut}/rootfs.ext4"   "$out/rootfs.ext4"
               cp "${verityOut}/rootfs.verity" "$out/rootfs.verity"
               cp "${verityOut}/rootfs.roothash" "$out/rootfs.roothash"
+              # ADR-002 §W3: the verity initramfs runs as PID 1 before
+              # the real init and bypasses Firecracker's auto-appended
+              # `root=/dev/vda` by switch_root'ing into the verity
+              # device-mapper mount itself.
+              cp "${verityInitrd}" "$out/rootfs.initrd"
             '' else ''
               ${copyKernel (firecrackerKernel null)}
               cp "${rootfs}" "$out/rootfs.ext4"

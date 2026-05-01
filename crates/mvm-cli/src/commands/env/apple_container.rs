@@ -902,7 +902,51 @@ fn prune_old_prebuilts(prebuilt_root: &str, current_version: &str) {
 }
 
 /// Download a pre-built dev image (kernel + rootfs) from GitHub releases.
+///
+/// Plan 36 / ADR 005 trust chain:
+///
+/// 1. Try the cosign-keyless-signed manifest first
+///    (`dev-image-{arch}.manifest.json` + `.bundle`). If present,
+///    `mvm-security::image_verify::verify_manifest` validates the
+///    Sigstore bundle against the project's release-workflow OIDC
+///    identity, parses the manifest, and we use *its* artifact
+///    digests as the source of truth.
+///
+/// 2. If the manifest is 404 (older release predating plan 36) or
+///    its companion bundle is missing, fall back to the W5.1
+///    unsigned-checksum path with a loud deprecation warning. This
+///    keeps mvmctl pointing at older releases working through the
+///    rollout, and the deprecation banner sets the stage for making
+///    the manifest mandatory in a future major version.
+///
+/// 3. Either way, every downloaded artifact gets streaming SHA-256
+///    verification (W5.1) against the expected digest.
+///
+/// Escape hatches (both print loud warnings):
+///   - `MVM_SKIP_HASH_VERIFY=1` — skip SHA-256 step (existing W5.1).
+///   - `MVM_SKIP_COSIGN_VERIFY=1` — skip cosign signature check on
+///     the manifest body but still parse and use it. Only for
+///     emergency Sigstore-side rotation; SHA-256 still applies.
 fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, String)> {
+    // Wrap the verification pipeline so every exit path — success or
+    // failure — emits the verify_duration gauge and bumps the
+    // appropriate outcome counter. Plan 36 §Layer 4 step 11.
+    let verify_start = std::time::Instant::now();
+    let result = download_dev_image_inner(kernel_path, rootfs_path);
+    let elapsed_ms = verify_start.elapsed().as_millis() as u64;
+    let metrics = mvm_core::observability::metrics::global();
+    metrics
+        .dev_image_verify_duration_ms
+        .store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+    if result.is_ok() {
+        metrics
+            .dev_image_verify_ok
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    result
+}
+
+fn download_dev_image_inner(kernel_path: &str, rootfs_path: &str) -> Result<(String, String)> {
     let version = env!("CARGO_PKG_VERSION");
     let base_url = format!("https://github.com/auser/mvm/releases/download/v{version}");
     // Detect host arch to download the right image.
@@ -915,18 +959,45 @@ fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, S
     };
     let kernel_name = format!("dev-vmlinux-{arch}");
     let rootfs_name = format!("dev-rootfs-{arch}.ext4");
-    let checksums_name = format!("dev-image-{arch}-checksums-sha256.txt");
     let kernel_url = format!("{base_url}/{kernel_name}");
     let rootfs_url = format!("{base_url}/{rootfs_name}");
-    let checksums_url = format!("{base_url}/{checksums_name}");
 
     ui::info(&format!("Downloading dev image (v{version})..."));
 
-    let expected = fetch_expected_hashes(&checksums_url, &[&kernel_name, &rootfs_name])?;
+    // Plan 36 PR-C.2: prefer the cosign-signed manifest. Falls back
+    // to the W5.1 unsigned checksum file when the manifest is 404
+    // (older release).
+    let expected = match try_fetch_signed_manifest(&base_url, version, arch, "dev")? {
+        Some(manifest) => {
+            ui::success(&format!(
+                "  ✓ cosign-verified manifest for v{} (built {} UTC, valid until {} UTC)",
+                manifest.version,
+                manifest.built_at.format("%Y-%m-%d"),
+                manifest.not_after.format("%Y-%m-%d"),
+            ));
+            manifest
+                .artifacts
+                .iter()
+                .map(|a| (a.name.clone(), a.sha256.to_ascii_lowercase()))
+                .collect::<std::collections::HashMap<_, _>>()
+        }
+        None => {
+            ui::warn(&format!(
+                "No cosign-signed manifest found for v{version}. Falling back to \
+                 unsigned checksum file (legacy path predating plan 36 / ADR 005). \
+                 Future releases will require the signed manifest."
+            ));
+            let checksums_name = format!("dev-image-{arch}-checksums-sha256.txt");
+            let checksums_url = format!("{base_url}/{checksums_name}");
+            fetch_expected_hashes(&checksums_url, &[&kernel_name, &rootfs_name])?
+        }
+    };
 
     ui::info("  Fetching kernel...");
-    download_file(&kernel_url, kernel_path)
-        .with_context(|| format!("Failed to download kernel from {kernel_url}"))?;
+    download_file(&kernel_url, kernel_path).map_err(|e| {
+        bump_verify_outcome("network");
+        e.context(format!("Failed to download kernel from {kernel_url}"))
+    })?;
     verify_artifact_hash(
         kernel_path,
         &kernel_name,
@@ -934,8 +1005,10 @@ fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, S
     )?;
 
     ui::info("  Fetching rootfs...");
-    download_file(&rootfs_url, rootfs_path)
-        .with_context(|| format!("Failed to download rootfs from {rootfs_url}"))?;
+    download_file(&rootfs_url, rootfs_path).map_err(|e| {
+        bump_verify_outcome("network");
+        e.context(format!("Failed to download rootfs from {rootfs_url}"))
+    })?;
     verify_artifact_hash(
         rootfs_path,
         &rootfs_name,
@@ -944,6 +1017,497 @@ fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, S
 
     ui::success("Dev image downloaded, hash-verified, and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
+}
+
+/// Probe for and verify the cosign-signed manifest at
+/// `{base_url}/{variant}-image-{arch}.manifest.json{,.bundle}`.
+///
+/// Returns:
+/// - `Ok(Some(manifest))` — manifest + bundle present, signature verified,
+///   version pinned to runtime, max-age window not yet exceeded.
+/// - `Ok(None)` — manifest URL 404. This is the legacy fallback for
+///   older releases that predate plan 36; caller can fall back to the
+///   W5.1 unsigned-checksum path with a deprecation warning.
+/// - `Err(_)` — manifest fetched but verification or parsing failed.
+///   Hard error; never silently fall through. `MVM_SKIP_COSIGN_VERIFY=1`
+///   downgrades signature failures to a parse-only path.
+fn try_fetch_signed_manifest(
+    base_url: &str,
+    version: &str,
+    arch: &str,
+    variant: &str,
+) -> Result<Option<mvm_security::image_verify::SignedManifest>> {
+    use mvm_security::image_verify;
+
+    let manifest_name = format!("{variant}-image-{arch}.manifest.json");
+    let manifest_url = format!("{base_url}/{manifest_name}");
+    let bundle_url = format!("{manifest_url}.bundle");
+
+    // HEAD-probe the manifest URL. If absent (older release without
+    // plan-36 signing), fall back gracefully.
+    if !url_exists(&manifest_url)? {
+        return Ok(None);
+    }
+
+    let manifest_tmp = tempfile::NamedTempFile::new().context("creating manifest tempfile")?;
+    let bundle_tmp = tempfile::NamedTempFile::new().context("creating bundle tempfile")?;
+    let manifest_path = manifest_tmp.path().to_string_lossy().into_owned();
+    let bundle_path = bundle_tmp.path().to_string_lossy().into_owned();
+
+    download_file(&manifest_url, &manifest_path).map_err(|e| {
+        bump_verify_outcome("network");
+        e.context(format!(
+            "Failed to download signed manifest from {manifest_url}"
+        ))
+    })?;
+    download_file(&bundle_url, &bundle_path).map_err(|e| {
+        bump_verify_outcome("network");
+        e.context(format!(
+            "Failed to download cosign bundle from {bundle_url}. Plan 36 \
+             requires a manifest's signature to be present alongside the \
+             manifest body — refusing to trust an unsigned manifest."
+        ))
+    })?;
+
+    let manifest_bytes =
+        std::fs::read(&manifest_path).context("reading downloaded manifest body")?;
+    let bundle_bytes = std::fs::read(&bundle_path).context("reading downloaded cosign bundle")?;
+
+    // GitHub Actions keyless OIDC: the SAN encodes the workflow URL
+    // bound to the tag, and the issuer is GitHub's token endpoint.
+    let expected_identity =
+        format!("https://github.com/auser/mvm/.github/workflows/release.yml@refs/tags/v{version}");
+    let expected_issuer = "https://token.actions.githubusercontent.com";
+
+    let manifest = if std::env::var_os("MVM_SKIP_COSIGN_VERIFY").is_some() {
+        tracing::warn!(
+            "MVM_SKIP_COSIGN_VERIFY set — accepting unverified manifest body. \
+             Plan 36 documents this as an emergency-rotation escape hatch only."
+        );
+        image_verify::parse_manifest(&manifest_bytes)
+            .map_err(|e| anyhow::anyhow!("manifest parse failed: {e}"))?
+    } else {
+        image_verify::verify_manifest(
+            &manifest_bytes,
+            &bundle_bytes,
+            &expected_identity,
+            expected_issuer,
+        )
+        .map_err(|e| {
+            bump_verify_outcome("sig_invalid");
+            anyhow::anyhow!(
+                "Cosign verification failed for {manifest_name}: {e}\n\
+                 \n\
+                 Plan 36 / ADR 005 requires every dev image manifest to be cosign-keyless\n\
+                 signed against the release workflow's OIDC identity. Refusing to use this\n\
+                 image. Possible causes:\n\
+                 - account/CDN compromise (open a security issue);\n\
+                 - the release was published without going through the signing job;\n\
+                 - clock skew (manifest expired); check `date -u`.\n\
+                 \n\
+                 Emergency rotation: set MVM_SKIP_COSIGN_VERIFY=1 to bypass the signature\n\
+                 check while keeping SHA-256 verification active."
+            )
+        })?
+    };
+
+    // Pin the manifest's claimed version to mvmctl's own version. A
+    // mismatch means someone is feeding us a different release's
+    // manifest — refuse.
+    image_verify::check_version_pin(&manifest, version).map_err(|e| {
+        bump_verify_outcome("version_skew");
+        anyhow::anyhow!("manifest version pin failed: {e}")
+    })?;
+
+    // Enforce max-age (default 90d). mvmctl warns and proceeds; mvmd
+    // refuses (different risk tolerance — handled in mvmd plan 23).
+    let now = chrono::Utc::now();
+    if let Err(e) = image_verify::check_not_after(&manifest, now) {
+        bump_verify_outcome("expired");
+        ui::warn(&format!(
+            "Dev image manifest is past its max-age ({e}). Consider upgrading \
+             mvmctl — older signed images are still cryptographically valid but \
+             may carry unpatched vulnerabilities."
+        ));
+    }
+
+    // Plan 36 §Layer 4 step 4: consult the cosign-signed revocation
+    // list. Cached up to 24h; tolerated up to 7d offline. A signed
+    // image whose version is on the list hard-fails — recall is the
+    // primary mechanism for "we know this build is bad."
+    if let Some(revocations) = try_fetch_revocation_list()? {
+        image_verify::check_revocation(&manifest, &revocations).map_err(|e| {
+            bump_verify_outcome("revoked");
+            anyhow::anyhow!(
+                "Dev image manifest is on the project's revocation list: {e}\n\
+                 \n\
+                 Plan 36 / ADR 005: a published `revocations` release entry has\n\
+                 marked v{version} unsafe to run. Refusing to use this image.\n\
+                 Upgrade mvmctl to a non-revoked release."
+            )
+        })?;
+    }
+
+    Ok(Some(manifest))
+}
+
+/// Fetch + verify the project's signed revocation list, caching it
+/// under `~/.cache/mvm/revocations/`.
+///
+/// Plan 36 §Layer 4 step 4. The revocation list lives at a stable
+/// `revocations` release tag whose only assets are
+/// `revoked-versions.json` and its cosign bundle. Append-only across
+/// releases; updated by cutting a new entry on that tag.
+///
+/// Cache policy:
+///   - Refresh from upstream if the cached file is >24h old.
+///   - Tolerate up to 7d of cached staleness when the network is
+///     unavailable; surface a warning rather than blocking.
+///   - 404 on the upstream URL is treated as "no recalls today" —
+///     bootstrap state until the project publishes its first
+///     revocations entry. Returns Ok(None).
+///
+/// Returns Ok(None) when the list isn't available *and* we have no
+/// cached copy — caller proceeds without revocation enforcement (with
+/// a warning). Returns Err on signature verification failure.
+fn try_fetch_revocation_list() -> Result<Option<mvm_security::image_verify::RevocationList>> {
+    use mvm_security::image_verify;
+    use std::time::{Duration, SystemTime};
+
+    let cache_dir = format!("{}/revocations", mvm_core::config::mvm_cache_dir());
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("creating revocations cache dir {cache_dir}"))?;
+    let cache_json = format!("{cache_dir}/revoked-versions.json");
+    let cache_bundle = format!("{cache_dir}/revoked-versions.json.bundle");
+
+    let cache_age = std::fs::metadata(&cache_json)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .unwrap_or(Duration::from_secs(u64::MAX));
+
+    let twenty_four_hours = Duration::from_secs(24 * 60 * 60);
+    let seven_days = Duration::from_secs(7 * 24 * 60 * 60);
+
+    // Refresh if cache is stale (or absent).
+    if cache_age > twenty_four_hours {
+        let base = "https://github.com/auser/mvm/releases/download/revocations";
+        let json_url = format!("{base}/revoked-versions.json");
+        let bundle_url = format!("{base}/revoked-versions.json.bundle");
+
+        match url_exists(&json_url) {
+            Ok(true) => {
+                let tmp_json =
+                    tempfile::NamedTempFile::new().context("creating revocations tempfile")?;
+                let tmp_bundle = tempfile::NamedTempFile::new()
+                    .context("creating revocations bundle tempfile")?;
+                let tmp_json_path = tmp_json.path().to_string_lossy().into_owned();
+                let tmp_bundle_path = tmp_bundle.path().to_string_lossy().into_owned();
+                let download_result = download_file(&json_url, &tmp_json_path)
+                    .and_then(|()| download_file(&bundle_url, &tmp_bundle_path));
+                match download_result {
+                    Ok(()) => {
+                        std::fs::copy(&tmp_json_path, &cache_json)
+                            .context("caching revoked-versions.json")?;
+                        std::fs::copy(&tmp_bundle_path, &cache_bundle)
+                            .context("caching revoked-versions.json.bundle")?;
+                    }
+                    Err(e) if cache_age <= seven_days => {
+                        ui::warn(&format!(
+                            "Could not refresh revocation list ({e}); using cached copy \
+                             (last refreshed {} hours ago).",
+                            cache_age.as_secs() / 3600
+                        ));
+                    }
+                    Err(e) => {
+                        ui::warn(&format!(
+                            "Could not refresh revocation list ({e}) and no fresh cache \
+                             is available; proceeding without recall enforcement. \
+                             Plan 36 §Layer 4."
+                        ));
+                        return Ok(None);
+                    }
+                }
+            }
+            Ok(false) => {
+                // 404: the project hasn't published a revocations
+                // release yet. Bootstrap state — no recalls means
+                // nothing to enforce. Don't cache this; a future
+                // refresh should pick up the first published list.
+                return Ok(None);
+            }
+            Err(e) if cache_age <= seven_days => {
+                ui::warn(&format!(
+                    "Could not probe revocation list ({e}); using cached copy."
+                ));
+            }
+            Err(e) => {
+                ui::warn(&format!(
+                    "Could not probe revocation list ({e}) and no fresh cache \
+                     is available; proceeding without recall enforcement."
+                ));
+                return Ok(None);
+            }
+        }
+    }
+
+    // No cached file → nothing to enforce.
+    if !std::path::Path::new(&cache_json).exists() {
+        return Ok(None);
+    }
+
+    let json_bytes = std::fs::read(&cache_json).context("reading cached revocations.json")?;
+    let bundle_bytes =
+        std::fs::read(&cache_bundle).context("reading cached revocations.json.bundle")?;
+
+    // The revocations tag is signed by a dedicated revocations
+    // workflow's OIDC identity, not the per-release workflow. A
+    // separate identity ensures a leaked image-signing cert can't
+    // fabricate a permissive revocation list (and vice versa).
+    let expected_identity =
+        "https://github.com/auser/mvm/.github/workflows/revocations.yml@refs/tags/revocations";
+    let expected_issuer = "https://token.actions.githubusercontent.com";
+
+    if std::env::var_os("MVM_SKIP_COSIGN_VERIFY").is_some() {
+        // The same MVM_SKIP_COSIGN_VERIFY emergency-rotation escape
+        // hatch covers both the manifest and the revocation list.
+        // SHA-256 of artifacts still applies separately at the
+        // verify_artifact_hash callsite.
+        let list: image_verify::RevocationList = serde_json::from_slice(&json_bytes)
+            .context("parsing revocations JSON without signature verification")?;
+        return Ok(Some(list));
+    }
+
+    image_verify::verify_signed_payload(
+        &json_bytes,
+        &bundle_bytes,
+        expected_identity,
+        expected_issuer,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Revocation list signature verification failed: {e}. Refusing to \
+             trust an unverified recall. Plan 36 §Layer 4."
+        )
+    })?;
+    let list: image_verify::RevocationList =
+        serde_json::from_slice(&json_bytes).context("parsing verified revocations JSON")?;
+    Ok(Some(list))
+}
+
+/// `mvmctl dev import-image` — sideload a verified dev image from local files.
+///
+/// Plan 36 PR-D.2 / §"Air-gapped install path". Runs the same
+/// cosign + SHA-256 + version-pin + max-age + revocation pipeline
+/// as `download_dev_image`, but against operator-provided local
+/// files instead of the GitHub Releases URL. On success the verified
+/// artifacts are copied into the version-namespaced cache so the next
+/// `mvmctl dev up` boots from them with no further verification or
+/// network round-trip.
+///
+/// The intended user is anyone running mvmctl in a regulated /
+/// gov / air-gapped environment that can't reach github.com but
+/// that legitimately wants the supply-chain check. Without this
+/// path the only option for these users was MVM_SKIP_HASH_VERIFY=1,
+/// which disables verification entirely — exactly the unsafe escape
+/// plan 36 exists to discourage.
+pub fn cmd_dev_import_image(
+    manifest_path: &str,
+    bundle_path: &str,
+    vmlinux_path: &str,
+    rootfs_path: &str,
+) -> Result<()> {
+    use mvm_security::image_verify;
+
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+
+    ui::info(&format!(
+        "Importing dev image (v{version}, {arch}) from local files..."
+    ));
+
+    let manifest_bytes = std::fs::read(manifest_path)
+        .with_context(|| format!("reading manifest file at {manifest_path}"))?;
+    let bundle_bytes = std::fs::read(bundle_path)
+        .with_context(|| format!("reading cosign bundle at {bundle_path}"))?;
+
+    let expected_identity =
+        format!("https://github.com/auser/mvm/.github/workflows/release.yml@refs/tags/v{version}");
+    let expected_issuer = "https://token.actions.githubusercontent.com";
+
+    let manifest = if std::env::var_os("MVM_SKIP_COSIGN_VERIFY").is_some() {
+        ui::warn(
+            "MVM_SKIP_COSIGN_VERIFY set — accepting unverified manifest. \
+             Plan 36 documents this as an emergency-rotation escape only.",
+        );
+        image_verify::parse_manifest(&manifest_bytes)
+            .map_err(|e| anyhow::anyhow!("manifest parse failed: {e}"))?
+    } else {
+        image_verify::verify_manifest(
+            &manifest_bytes,
+            &bundle_bytes,
+            &expected_identity,
+            expected_issuer,
+        )
+        .map_err(|e| {
+            bump_verify_outcome("sig_invalid");
+            anyhow::anyhow!(
+                "Cosign verification failed for the imported manifest: {e}\n\
+                 \n\
+                 Plan 36 / ADR 005: a sideloaded manifest must carry the\n\
+                 same release-workflow OIDC signature as the network path.\n\
+                 \n\
+                 Common causes:\n\
+                 - mismatched manifest + bundle pair (re-export both as a set);\n\
+                 - manifest belongs to a different mvmctl version (check `mvmctl --version`);\n\
+                 - clock skew (signature time-window).\n\
+                 \n\
+                 Emergency rotation: MVM_SKIP_COSIGN_VERIFY=1 keeps SHA-256\n\
+                 verification active while bypassing the signature step."
+            )
+        })?
+    };
+
+    image_verify::check_version_pin(&manifest, version).map_err(|e| {
+        bump_verify_outcome("version_skew");
+        anyhow::anyhow!(
+            "Imported manifest is for a different mvmctl version: {e}\n\
+             \n\
+             Plan 36 pins manifest.version == mvmctl version exactly. Re-export\n\
+             the manifest from a release matching v{version}, or upgrade mvmctl."
+        )
+    })?;
+
+    let now = chrono::Utc::now();
+    if let Err(e) = image_verify::check_not_after(&manifest, now) {
+        bump_verify_outcome("expired");
+        ui::warn(&format!(
+            "Imported manifest is past its max-age ({e}). Sideloaded images \
+             from older releases remain cryptographically valid but may \
+             carry unpatched vulnerabilities."
+        ));
+    }
+
+    if let Some(revocations) = try_fetch_revocation_list()? {
+        image_verify::check_revocation(&manifest, &revocations).map_err(|e| {
+            bump_verify_outcome("revoked");
+            anyhow::anyhow!(
+                "Imported manifest is on the project's revocation list: {e}\n\
+                 \n\
+                 Plan 36: a `revocations` release entry has marked v{version} \
+                 unsafe to run. Refusing to import."
+            )
+        })?;
+    }
+
+    if manifest.arch != arch {
+        anyhow::bail!(
+            "Manifest is for arch {} but this host is {arch}. Wrong-arch image \
+             would not boot. Re-export the manifest for the correct arch.",
+            manifest.arch
+        );
+    }
+
+    let kernel_name = format!("dev-vmlinux-{arch}");
+    let rootfs_name = format!("dev-rootfs-{arch}.{}", manifest.rootfs_format);
+
+    let kernel_digest = manifest
+        .artifact(&kernel_name)
+        .ok_or_else(|| anyhow::anyhow!("manifest does not list {kernel_name}"))?;
+    let rootfs_digest = manifest
+        .artifact(&rootfs_name)
+        .ok_or_else(|| anyhow::anyhow!("manifest does not list {rootfs_name}"))?;
+
+    image_verify::verify_artifact(std::path::Path::new(vmlinux_path), kernel_digest).map_err(
+        |e| {
+            bump_verify_outcome("digest_mismatch");
+            anyhow::anyhow!("kernel SHA-256 mismatch: {e}")
+        },
+    )?;
+    image_verify::verify_artifact(std::path::Path::new(rootfs_path), rootfs_digest).map_err(
+        |e| {
+            bump_verify_outcome("digest_mismatch");
+            anyhow::anyhow!("rootfs SHA-256 mismatch: {e}")
+        },
+    )?;
+
+    // Copy the verified artifacts into the version-namespaced cache.
+    // The next `mvmctl dev up` picks them up without re-running
+    // verification (the cache hit precedes download_dev_image).
+    let prebuilt_dir = format!(
+        "{}/dev/prebuilt/v{version}",
+        mvm_core::config::mvm_data_dir()
+    );
+    std::fs::create_dir_all(&prebuilt_dir)
+        .with_context(|| format!("creating prebuilt dir {prebuilt_dir}"))?;
+    let target_kernel = format!("{prebuilt_dir}/vmlinux");
+    let target_rootfs = format!("{prebuilt_dir}/rootfs.ext4");
+    std::fs::copy(vmlinux_path, &target_kernel)
+        .with_context(|| format!("copying kernel to {target_kernel}"))?;
+    std::fs::copy(rootfs_path, &target_rootfs)
+        .with_context(|| format!("copying rootfs to {target_rootfs}"))?;
+
+    mvm_core::observability::metrics::global()
+        .dev_image_verify_ok
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    ui::success(&format!(
+        "Imported and verified dev image v{version} into {prebuilt_dir}. \
+         Run `mvmctl dev up` to boot the dev VM from the cached artifacts."
+    ));
+    Ok(())
+}
+
+/// Bump the dev_image_verify_<outcome> counter. Plan 36 §Layer 4 step 11.
+///
+/// Caller passes the outcome name; centralising the lookup keeps the
+/// counter set discoverable in one place. mvmd plan 23's
+/// reconciliation loop will alert on attack-shaped spikes
+/// (sig_invalid, digest_mismatch, revoked).
+fn bump_verify_outcome(outcome: &str) {
+    let m = mvm_core::observability::metrics::global();
+    let counter = match outcome {
+        "sig_invalid" => &m.dev_image_verify_sig_invalid,
+        "digest_mismatch" => &m.dev_image_verify_digest_mismatch,
+        "version_skew" => &m.dev_image_verify_version_skew,
+        "revoked" => &m.dev_image_verify_revoked,
+        "expired" => &m.dev_image_verify_expired,
+        "network" => &m.dev_image_verify_network,
+        // Defensive: an unknown outcome is itself a bug worth surfacing
+        // — log a warning rather than silently swallowing the metric.
+        _ => {
+            tracing::warn!("bump_verify_outcome: unknown outcome '{outcome}'");
+            return;
+        }
+    };
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// HEAD-probe a URL. Returns Ok(true) when the resource is reachable
+/// (HTTP 2xx), Ok(false) on 404, Err for transient failures.
+fn url_exists(url: &str) -> Result<bool> {
+    let output = std::process::Command::new("curl")
+        .args(["-fSI", "-o", "/dev/null", "-w", "%{http_code}", url])
+        .output()
+        .context("Failed to run curl HEAD probe")?;
+    let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match code.as_str() {
+        "200" | "302" => Ok(true),
+        "404" => Ok(false),
+        _ => {
+            // Other status (5xx, network error, redirect chain failure)
+            // — don't silently fall through to the unsigned path.
+            anyhow::bail!(
+                "HEAD probe of {url} returned status {code}; refusing to guess \
+                 whether the signed manifest is missing or transiently unavailable. \
+                 Retry, or investigate."
+            )
+        }
+    }
 }
 
 /// Download the per-release `sha256sum`-format checksum file and parse it
@@ -1032,6 +1596,7 @@ fn verify_artifact_hash(path: &str, name: &str, expected: Option<&String>) -> Re
 
     if actual != *expected {
         let _ = std::fs::remove_file(path);
+        bump_verify_outcome("digest_mismatch");
         anyhow::bail!(
             "Integrity check failed for {name}.\n\
              expected sha256: {expected}\n\

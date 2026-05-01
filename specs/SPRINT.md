@@ -81,43 +81,49 @@ landed with regression tests; `cargo test --workspace` and
       Linux-only target). Default tier is `standard`; override via
       `services.<n>.seccomp = "essential" | … | "unrestricted"`.
 
-### W3 — Verified boot via dm-verity  🟡 host-side shipped + verity device builds correctly, but Firecracker aarch64 cmdline-append clobbers `root=/dev/dm-0` (initramfs fix outstanding)  [`plans/27-w3-verified-boot.md`](plans/27-w3-verified-boot.md) | runbook: [`runbooks/w3-verified-boot.md`](runbooks/w3-verified-boot.md)
+### W3 — Verified boot via dm-verity  ✅ shipped — 2026-04-30 (initramfs landed, all 5 runbook steps green)  [`plans/27-w3-verified-boot.md`](plans/27-w3-verified-boot.md) | runbook: [`runbooks/w3-verified-boot.md`](runbooks/w3-verified-boot.md)
 
 - [x] **Kernel** `firecracker-aarch64.config` enables
       `CONFIG_MD`, `CONFIG_BLK_DEV_DM`, `CONFIG_DM_INIT`, and
-      `CONFIG_DM_VERITY` so `dm-mod.create=` parses on the cmdline.
+      `CONFIG_DM_VERITY` so the kernel can construct verity targets.
 - [x] **W3.1** `nix/flake.nix::verityArtifacts` runs
-      `veritysetup format` with a pinned zero salt and emits
-      `rootfs.{ext4,verity,roothash}` deterministically.
+      `veritysetup format` with `--data-block-size=1024` and a pinned
+      zero salt, emits `rootfs.{ext4,verity,roothash}`
+      deterministically.
 - [x] **W3.2** Apple Container backend gained `VerityConfig` +
       `start_with_verity()`; opens the rootfs read-only, attaches
-      the sidecar at `/dev/vdb`, sets the kernel cmdline to
-      `root=/dev/dm-0 ro` plus a full `dm-mod.create=…` string.
-      Mutual-exclusion check rejects `MVM_NIX_STORE_DISK` + verity.
+      the sidecar at `/dev/vdb`, attaches the verity initramfs via
+      `setInitialRamdiskURL`, and passes `mvm.roothash=<hex>` on the
+      cmdline. Mutual-exclusion check rejects `MVM_NIX_STORE_DISK`.
 - [x] **W3.3** Firecracker backend extended `FlakeRunConfig` +
-      `VmStartConfig` with `verity_path` / `roothash`. The Lima-VM
-      cold-boot, snapshot-restore, and template-snapshot paths all
-      probe for the sidecar via `microvm::probe_verity_sidecar()`
-      and PUT a third `/drives/verity` to land it at `/dev/vdb`.
-      `build_verity_dm_create_arg()` produces the same dm-mod.create
-      shape as the Apple Container path.
+      `VmStartConfig` with `verity_path` / `roothash`. Cold-boot,
+      snapshot-restore, and template-snapshot paths all probe for
+      the sidecar + initramfs via `microvm::probe_verity_sidecar()`
+      and pass `initrd_path` to `/boot-source` so the initramfs
+      runs as PID 1.
 - [x] **W3.4** `mkGuest` accepts `verifiedBoot ? true`;
       `nix/dev-image/flake.nix` sets `verifiedBoot = false` (overlay
       can't compose with verity). The dev sibling flake forwards
       the kwarg transparently.
+- [x] **Initramfs** `nix/packages/mvm-verity-init.nix` builds a
+      static-musl `mvm-verity-init` that runs as PID 1 from the
+      cpio.gz at `nix/packages/verity-initrd.nix`. Reads
+      `mvm.roothash=` from cmdline, builds `/dev/mapper/root` via
+      DM ioctls (DM_DEV_CREATE → DM_TABLE_LOAD → DM_DEV_SUSPEND),
+      mounts it at `/sysroot`, then `switch_root`s to the real
+      `/init`. Bypasses Firecracker's auto-appended
+      `root=/dev/vda ro` by owning the boot pivot in userspace.
 - [x] **CI gate** `verified-boot-artifacts` lane in
       `security.yml` builds `nix/default-microvm/` and asserts
-      `rootfs.{ext4,verity,roothash}` plus a 64-char hex roothash.
-- [ ] **Initramfs (Finding #1)**: small initramfs that runs
-      `veritysetup open … && switch_root` so Firecracker's
-      auto-appended `root=/dev/vda ro` no longer overrides our
-      `root=/dev/dm-0`. Without this the verity device is built
-      but the kernel still mounts the raw rootfs.
-- [ ] **Boot regression** (live KVM): boot a microVM with verity
-      and assert `mount | grep dm-0`. Re-runs after Finding #1.
-- [ ] **Tamper regression** (live KVM): flip a byte in
-      `rootfs.ext4`, assert the kernel panics on first read.
-      Re-runs after Finding #1.
+      `rootfs.{ext4,verity,roothash,initrd}` plus a 64-char hex
+      roothash.
+- [x] **Boot regression** (live KVM): full
+      `specs/runbooks/w3-verified-boot.md` Step 3 green —
+      `mvm-verity-init` reaches userspace from `/dev/dm-0`.
+- [x] **Tamper regression** (live KVM): tampering the ext4
+      superblock triggers
+      `device-mapper: verity: 254:0: data block 1 is corrupted`
+      and the kernel panics before userspace.
 
 ### W4 — Guest agent attack surface  ✅ shipped — 2026-04-30  [`plans/28-w4-guest-agent-attack-surface.md`](plans/28-w4-guest-agent-attack-surface.md)
 

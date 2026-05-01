@@ -24,20 +24,27 @@ pub fn is_available() -> bool {
 
 /// Optional dm-verity attestation alongside a rootfs. When `Some`, the
 /// backend attaches the Merkle tree as a second VirtioBlk device and
-/// sets up a kernel `dm-mod.create=` cmdline so the verity target is
-/// constructed before init runs. ADR-002 §W3.2.
+/// boots the VM with the verity initramfs at `initrd_path`, which
+/// reads `mvm.roothash=` from the kernel cmdline, builds the
+/// device-mapper target via raw ioctls, and `switch_root`s to the
+/// real init. ADR-002 §W3.
 ///
-/// Both fields must be present together — a verity sidecar without a
-/// root hash is unverifiable, and a root hash without the sidecar is
-/// unconstructible. `None` means the backend boots the rootfs as
-/// `/dev/vda rw` with no integrity check (the dev-VM exemption from
-/// ADR-002 §W3.4).
+/// All three fields must be present together — a verity sidecar
+/// without a root hash is unverifiable, a root hash without the
+/// sidecar is unconstructible, and either without the initramfs has
+/// no way to wire up the device-mapper target before the kernel
+/// commits to a root device. `None` means the backend boots the
+/// rootfs as `/dev/vda rw` with no integrity check (the dev-VM
+/// exemption from ADR-002 §W3.4).
 #[derive(Debug, Clone)]
 pub struct VerityConfig<'a> {
     /// Path to `rootfs.verity` (the Merkle hash tree).
     pub verity_path: &'a str,
     /// 64-char lowercase hex root hash.
     pub roothash: &'a str,
+    /// Path to the verity initramfs (cpio.gz). Baked alongside the
+    /// rootfs by `mkGuest` when `verifiedBoot = true`.
+    pub initrd_path: &'a str,
 }
 
 /// Start a VM from a local kernel + ext4 rootfs using Virtualization.framework.

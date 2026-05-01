@@ -55,7 +55,10 @@ jobs:
         run: cargo install --locked cargo-audit
 
       - name: cargo audit
-        run: cargo audit
+        # Ignored advisories must mirror deny.toml's `[advisories].ignore`.
+        # cargo-audit doesn't read deny.toml; CLI flags are the
+        # discoverable way to keep the two tools in sync.
+        run: cargo audit --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0009
 
   # ── Lane 2: Production-agent symbol gate ──────────────────────────
   # ADR-002 §W4.3 — production builds of mvm-guest-agent must not
@@ -238,3 +241,115 @@ jobs:
             exit 1
           fi
           echo "ok: rootfs.{ext4,verity,roothash} present, roothash=${hash:0:12}…"
+
+  # ── Lane 7: Flake lockfile cleanliness (plan 36 §Layer 0) ──────────
+  # Every flake.lock in the repo must be committed and in sync with
+  # its flake.nix. A stale lock means the input closure recorded in a
+  # signed manifest doesn't match what nix would actually use on
+  # rebuild — the trust chain breaks silently. Cheap (eval-only).
+  flake-locks-clean:
+    name: Flake locks — committed + in sync (plan 36 §Layer 0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Assert every flake.lock is committed and in sync
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r flake; do
+            d=$(dirname "$flake")
+            echo "::group::$d"
+            if [ ! -f "$d/flake.lock" ]; then
+              echo "::error::missing $d/flake.lock — every flake must commit its lockfile (plan 36 §Layer 0)" >&2
+              fail=1
+              echo "::endgroup::"
+              continue
+            fi
+            # `nix flake lock` updates the lockfile if it diverges from
+            # flake.nix. If `git diff --quiet` reports nothing changed,
+            # the committed lock is authoritative for the current
+            # flake.nix inputs.
+            cp "$d/flake.lock" "$d/flake.lock.original"
+            nix flake lock "$d" 2>&1 || true
+            if ! diff -q "$d/flake.lock" "$d/flake.lock.original" > /dev/null; then
+              echo "::error::$d/flake.lock is out of sync with $d/flake.nix" >&2
+              echo "Run \`nix flake lock $d\` locally and commit the updated lockfile." >&2
+              diff -u "$d/flake.lock.original" "$d/flake.lock" | head -40 >&2 || true
+              fail=1
+            else
+              echo "ok"
+            fi
+            mv "$d/flake.lock.original" "$d/flake.lock"
+            echo "::endgroup::"
+          done < <(find . -name flake.nix \
+            -not -path './target/*' \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -not -path './*/resources/template_scaffold/*' \
+            -not -path './resources/template_scaffold/*')
+          exit "$fail"
+
+  # ── Lane 8: Builder image reproducibility (plan 36 §Layer 0) ───────
+  # Build the new mvm-builder-prod sealed image twice and assert the
+  # outputs are byte-identical. Catches non-determinism (timestamps in
+  # compressed layers, embedded host paths, builder-host nonces) that
+  # would silently break the cosign-signed manifest's nix_store_hash
+  # field. Heavy (~10 min for the double build), so PR-skipped — runs
+  # on push to main, schedule, and workflow_dispatch only. The mvmctl
+  # binary's reproducibility lane (above) covers PR feedback for the
+  # cheap case.
+  builder-image-reproducibility:
+    name: Builder image reproducibility (plan 36 §Layer 0)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build A
+        run: |
+          set -euo pipefail
+          nix build "./nix/images/builder#packages.x86_64-linux.builder" \
+            --no-link --print-out-paths > /tmp/path-a.txt
+          out=$(head -1 /tmp/path-a.txt)
+          # Hash the contents under stable relative names so the
+          # store path component (which encodes input-hash, not output)
+          # doesn't pollute the comparison.
+          ( cd "$out" && sha256sum rootfs.ext4 rootfs.verity rootfs.roothash vmlinux ) > /tmp/hash-a.txt
+          cat /tmp/hash-a.txt
+
+      - name: Build B (force rebuild)
+        run: |
+          set -euo pipefail
+          nix build "./nix/images/builder#packages.x86_64-linux.builder" \
+            --rebuild --no-link --print-out-paths > /tmp/path-b.txt
+          out=$(head -1 /tmp/path-b.txt)
+          ( cd "$out" && sha256sum rootfs.ext4 rootfs.verity rootfs.roothash vmlinux ) > /tmp/hash-b.txt
+          cat /tmp/hash-b.txt
+
+      - name: Compare hashes
+        run: |
+          set -euo pipefail
+          if ! diff -q /tmp/hash-a.txt /tmp/hash-b.txt > /dev/null; then
+            echo "::error::Builder image is non-deterministic — two clean builds produced different artifacts" >&2
+            echo "Plan 36 §Layer 0 requires the sealed builder image to reproduce byte-for-byte so the" >&2
+            echo "cosign-signed manifest's nix_store_hash and per-artifact sha256 fields are stable." >&2
+            echo >&2
+            echo "Build A:" >&2
+            cat /tmp/hash-a.txt >&2
+            echo >&2
+            echo "Build B:" >&2
+            cat /tmp/hash-b.txt >&2
+            echo >&2
+            echo "Diff:" >&2
+            diff -u /tmp/hash-a.txt /tmp/hash-b.txt >&2 || true
+            exit 1
+          fi
+          echo "ok: builder image reproduces byte-identically across two clean builds"
+          cat /tmp/hash-a.txt

@@ -1364,6 +1364,14 @@ mod tests {
             build_image_duration_ms: 0,
             vm_start_duration_ms: 0,
             vsock_handshake_rtt_ms: 0,
+            dev_image_verify_ok: 0,
+            dev_image_verify_sig_invalid: 0,
+            dev_image_verify_digest_mismatch: 0,
+            dev_image_verify_version_skew: 0,
+            dev_image_verify_revoked: 0,
+            dev_image_verify_expired: 0,
+            dev_image_verify_network: 0,
+            dev_image_verify_duration_ms: 0,
         };
         let resp = AgentResponse::Metrics(snapshot);
         let json = serde_json::to_string(&resp).unwrap();

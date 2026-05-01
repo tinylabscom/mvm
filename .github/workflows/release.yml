@@ -136,11 +136,26 @@ jobs:
           nix build "./nix/images/builder#packages.${SYSTEM}.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
+          echo "${STORE_PATH}" > /tmp/dev-store-path.txt
           mkdir -p staging
           cp "$STORE_PATH/vmlinux" "staging/dev-vmlinux-${ARCH}"
           cp "$STORE_PATH/rootfs.ext4" "staging/dev-rootfs-${ARCH}.ext4"
           cd staging
           sha256sum "dev-vmlinux-${ARCH}" "dev-rootfs-${ARCH}.ext4" > "dev-image-${ARCH}-checksums-sha256.txt"
+
+      # Plan 36: emit the cosign-signable SignedManifest JSON. The
+      # script lives at scripts/generate-image-manifest.sh and pins
+      # the schema that mvm-security::image_verify consumes.
+      - name: Generate signed-image manifest (plan 36)
+        env:
+          ARCH: ${{ matrix.arch }}
+          VARIANT: dev
+          ROOTFS_EXT: ext4
+          STAGING_DIR: ${{ github.workspace }}/staging
+        run: |
+          STORE_PATH=$(cat /tmp/dev-store-path.txt)
+          export STORE_PATH
+          bash scripts/generate-image-manifest.sh
 
       - name: Upload dev image artifacts
         uses: actions/upload-artifact@v7
@@ -150,6 +165,78 @@ jobs:
             staging/dev-vmlinux-${{ matrix.arch }}
             staging/dev-rootfs-${{ matrix.arch }}.ext4
             staging/dev-image-${{ matrix.arch }}-checksums-sha256.txt
+            staging/dev-image-${{ matrix.arch }}.manifest.json
+
+  # Plan 36 / ADR 005: the sealed builder image consumed by mvmd's
+  # pool-build pipeline. Same package set as the dev variant but
+  # sourced from the parent flake (no Exec handler, verifiedBoot=true,
+  # dm-verity sidecar emitted). Built without mvmctl's dev override —
+  # the `builder` output of nix/images/builder/flake.nix is wired to
+  # mvm-prod (the parent), so the prod guest agent lands in the
+  # rootfs regardless of any caller's --override-input.
+  builder-image:
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build sealed builder image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/images/builder#packages.${SYSTEM}.builder" \
+            --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          echo "${STORE_PATH}" > /tmp/builder-store-path.txt
+          mkdir -p staging
+          cp "$STORE_PATH/vmlinux" "staging/builder-vmlinux-${ARCH}"
+          cp "$STORE_PATH/rootfs.ext4" "staging/builder-rootfs-${ARCH}.ext4"
+          # The builder variant ships dm-verity sidecars; mvmd-agent
+          # verifies them on every boot.
+          cp "$STORE_PATH/rootfs.verity" "staging/builder-rootfs-${ARCH}.verity"
+          cp "$STORE_PATH/rootfs.roothash" "staging/builder-rootfs-${ARCH}.roothash"
+          cp "$STORE_PATH/rootfs.initrd" "staging/builder-initrd-${ARCH}"
+          cd staging
+          sha256sum "builder-vmlinux-${ARCH}" \
+                    "builder-rootfs-${ARCH}.ext4" \
+                    "builder-rootfs-${ARCH}.verity" \
+                    "builder-rootfs-${ARCH}.roothash" \
+                    "builder-initrd-${ARCH}" \
+            > "builder-image-${ARCH}-checksums-sha256.txt"
+
+      - name: Generate signed-image manifest (plan 36)
+        env:
+          ARCH: ${{ matrix.arch }}
+          VARIANT: builder
+          ROOTFS_EXT: ext4
+          STAGING_DIR: ${{ github.workspace }}/staging
+        run: |
+          STORE_PATH=$(cat /tmp/builder-store-path.txt)
+          export STORE_PATH
+          bash scripts/generate-image-manifest.sh
+
+      - name: Upload builder image artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: builder-image-${{ matrix.arch }}
+          path: |
+            staging/builder-vmlinux-${{ matrix.arch }}
+            staging/builder-rootfs-${{ matrix.arch }}.ext4
+            staging/builder-rootfs-${{ matrix.arch }}.verity
+            staging/builder-rootfs-${{ matrix.arch }}.roothash
+            staging/builder-initrd-${{ matrix.arch }}
+            staging/builder-image-${{ matrix.arch }}-checksums-sha256.txt
+            staging/builder-image-${{ matrix.arch }}.manifest.json
 
   default-microvm:
     # Build the bundled default microVM image used by `mvmctl exec` /
@@ -194,7 +281,7 @@ jobs:
             staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
 
   release:
-    needs: [build, dev-image, default-microvm]
+    needs: [build, dev-image, builder-image, default-microvm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -246,6 +333,29 @@ jobs:
             sbom.cdx.json
           echo "Signed: sbom.cdx.json"
 
+      # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant)
+      # SignedManifest JSON. The bundle (.bundle) carries the signature,
+      # the Fulcio short-lived cert, and the Rekor inclusion proof —
+      # mvm-security::image_verify consumes exactly this format.
+      - name: Sign image manifests (plan 36)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(artifacts/*-image-*.manifest.json)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error::no image manifests found in artifacts/" >&2
+            ls -la artifacts/ >&2 || true
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            cosign sign-blob \
+              --yes \
+              --bundle "${manifest}.bundle" \
+              "${manifest}"
+            echo "Signed: ${manifest}"
+          done
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -260,6 +370,14 @@ jobs:
             artifacts/dev-vmlinux-* \
             artifacts/dev-rootfs-* \
             artifacts/dev-image-*-checksums-sha256.txt \
+            artifacts/dev-image-*.manifest.json \
+            artifacts/dev-image-*.manifest.json.bundle \
+            artifacts/builder-vmlinux-* \
+            artifacts/builder-rootfs-* \
+            artifacts/builder-initrd-* \
+            artifacts/builder-image-*-checksums-sha256.txt \
+            artifacts/builder-image-*.manifest.json \
+            artifacts/builder-image-*.manifest.json.bundle \
             artifacts/default-microvm-vmlinux-* \
             artifacts/default-microvm-rootfs-* \
             artifacts/default-microvm-*-checksums-sha256.txt \

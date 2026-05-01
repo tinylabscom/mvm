@@ -46,6 +46,22 @@ pub struct Metrics {
     pub build_image_duration_ms: AtomicU64,
     pub vm_start_duration_ms: AtomicU64,
     pub vsock_handshake_rtt_ms: AtomicU64,
+
+    // ── Dev/builder image verification (plan 36 §Layer 4 step 11) ───
+    // One counter per outcome of the cosign-signed manifest +
+    // SHA-256 verification pipeline at apple_container.rs::download_dev_image.
+    // The duration gauge is the last observed wall-clock from
+    // try_fetch_signed_manifest entry through verify_artifact_hash exit.
+    // mvmd plan 23 will read these via the prometheus exposition to alert
+    // on attack-shaped failure spikes (sig_invalid / digest_mismatch).
+    pub dev_image_verify_ok: AtomicU64,
+    pub dev_image_verify_sig_invalid: AtomicU64,
+    pub dev_image_verify_digest_mismatch: AtomicU64,
+    pub dev_image_verify_version_skew: AtomicU64,
+    pub dev_image_verify_revoked: AtomicU64,
+    pub dev_image_verify_expired: AtomicU64,
+    pub dev_image_verify_network: AtomicU64,
+    pub dev_image_verify_duration_ms: AtomicU64,
 }
 
 impl Metrics {
@@ -75,6 +91,14 @@ impl Metrics {
             build_image_duration_ms: AtomicU64::new(0),
             vm_start_duration_ms: AtomicU64::new(0),
             vsock_handshake_rtt_ms: AtomicU64::new(0),
+            dev_image_verify_ok: AtomicU64::new(0),
+            dev_image_verify_sig_invalid: AtomicU64::new(0),
+            dev_image_verify_digest_mismatch: AtomicU64::new(0),
+            dev_image_verify_version_skew: AtomicU64::new(0),
+            dev_image_verify_revoked: AtomicU64::new(0),
+            dev_image_verify_expired: AtomicU64::new(0),
+            dev_image_verify_network: AtomicU64::new(0),
+            dev_image_verify_duration_ms: AtomicU64::new(0),
         }
     }
 
@@ -105,6 +129,18 @@ impl Metrics {
             build_image_duration_ms: self.build_image_duration_ms.load(Ordering::Relaxed),
             vm_start_duration_ms: self.vm_start_duration_ms.load(Ordering::Relaxed),
             vsock_handshake_rtt_ms: self.vsock_handshake_rtt_ms.load(Ordering::Relaxed),
+            dev_image_verify_ok: self.dev_image_verify_ok.load(Ordering::Relaxed),
+            dev_image_verify_sig_invalid: self.dev_image_verify_sig_invalid.load(Ordering::Relaxed),
+            dev_image_verify_digest_mismatch: self
+                .dev_image_verify_digest_mismatch
+                .load(Ordering::Relaxed),
+            dev_image_verify_version_skew: self
+                .dev_image_verify_version_skew
+                .load(Ordering::Relaxed),
+            dev_image_verify_revoked: self.dev_image_verify_revoked.load(Ordering::Relaxed),
+            dev_image_verify_expired: self.dev_image_verify_expired.load(Ordering::Relaxed),
+            dev_image_verify_network: self.dev_image_verify_network.load(Ordering::Relaxed),
+            dev_image_verify_duration_ms: self.dev_image_verify_duration_ms.load(Ordering::Relaxed),
         }
     }
 
@@ -258,6 +294,59 @@ impl Metrics {
             "Last vsock auth handshake RTT in milliseconds",
         );
 
+        // Plan 36 §Layer 4 step 11: dev/builder image verification
+        // outcomes. One counter per outcome lets a Prometheus query
+        // alert on attack-shaped failure spikes
+        // (sig_invalid / digest_mismatch in particular).
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_ok_total",
+            s.dev_image_verify_ok,
+            "Successful dev/builder image manifest verifications",
+        );
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_sig_invalid_total",
+            s.dev_image_verify_sig_invalid,
+            "Cosign signature failures on dev/builder image manifests",
+        );
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_digest_mismatch_total",
+            s.dev_image_verify_digest_mismatch,
+            "SHA-256 mismatches on downloaded dev/builder image artifacts",
+        );
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_version_skew_total",
+            s.dev_image_verify_version_skew,
+            "Manifest version did not match runtime mvmctl version",
+        );
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_revoked_total",
+            s.dev_image_verify_revoked,
+            "Image rejected because its version is on the cosign-signed revocation list",
+        );
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_expired_total",
+            s.dev_image_verify_expired,
+            "Image manifest past its not_after window",
+        );
+        write_metric(
+            &mut out,
+            "mvm_dev_image_verify_network_total",
+            s.dev_image_verify_network,
+            "Network failures during dev/builder image manifest fetch or revocation refresh",
+        );
+        write_gauge(
+            &mut out,
+            "mvm_dev_image_verify_duration_milliseconds",
+            s.dev_image_verify_duration_ms,
+            "Last dev/builder image verification wall-clock in milliseconds",
+        );
+
         out
     }
 }
@@ -303,6 +392,22 @@ pub struct MetricsSnapshot {
     pub build_image_duration_ms: u64,
     pub vm_start_duration_ms: u64,
     pub vsock_handshake_rtt_ms: u64,
+    #[serde(default)]
+    pub dev_image_verify_ok: u64,
+    #[serde(default)]
+    pub dev_image_verify_sig_invalid: u64,
+    #[serde(default)]
+    pub dev_image_verify_digest_mismatch: u64,
+    #[serde(default)]
+    pub dev_image_verify_version_skew: u64,
+    #[serde(default)]
+    pub dev_image_verify_revoked: u64,
+    #[serde(default)]
+    pub dev_image_verify_expired: u64,
+    #[serde(default)]
+    pub dev_image_verify_network: u64,
+    #[serde(default)]
+    pub dev_image_verify_duration_ms: u64,
 }
 
 #[cfg(test)]

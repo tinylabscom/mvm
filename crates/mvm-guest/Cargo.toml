@@ -24,6 +24,16 @@ path = "src/bin/mvm-guest-agent.rs"
 name = "mvm-seccomp-apply"
 path = "src/bin/mvm-seccomp-apply.rs"
 
+# Early-userspace init (PID 1) that runs from the verity initramfs
+# baked by `mkGuest` when `verifiedBoot = true`. Reads the roothash
+# from /proc/cmdline, constructs the dm-verity device-mapper target
+# via raw ioctls, mounts it, and switch_roots to the real /init.
+# Bypasses Firecracker's auto-appended `root=/dev/vda` by owning the
+# boot pivot in userspace. ADR-002 §W3.
+[[bin]]
+name = "mvm-verity-init"
+path = "src/bin/mvm-verity-init.rs"
+
 [features]
 dev-shell = []
 
