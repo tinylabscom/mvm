@@ -5,16 +5,19 @@
 All Nix builds, Firecracker operations, `mvmctl` commands, test execution, clippy checks, and Linux-specific commands MUST be run inside the Lima VM. Use `limactl shell mvm-builder -- <command>` to execute commands inside the VM. The Lima VM name is `mvm-builder` (renamed from `mvm` in W7.2).
 
 If the Lima VM is not running, boot it with:
+
 ```bash
 cargo run -- dev
 ```
 
 Once running, access it with:
+
 ```bash
 limactl shell mvm-builder
 ```
 
 Examples:
+
 - `limactl shell mvm-builder -- cargo run --quiet -- template build openclaw --force`
 - `limactl shell mvm-builder -- cargo run --quiet -- run --template openclaw --name oc`
 - `limactl shell mvm-builder -- cargo run --quiet -- logs oc`
@@ -117,6 +120,7 @@ Privacy and security are **critical priorities** for this project and must be co
 **ALWAYS** run `cargo clippy --workspace -- -D warnings` after every code change and fix every finding before committing or declaring a task done. Clippy warnings are treated as errors — the CI pre-commit hook enforces this and will block commits.
 
 Rules:
+
 - **Never suppress a lint with `#[allow(...)]`** — fix the underlying issue instead. If you think a suppression is genuinely necessary, explain why in a comment and get explicit approval.
 - **Fix warnings immediately** — do not accumulate clippy debt. A warning introduced now becomes harder to diagnose later.
 - **Common findings to watch for**: `clippy::too_many_arguments` (refactor into a params struct), `clippy::redundant_closure`, `clippy::needless_pass_by_value`, `clippy::single_match` → `if let`, unused imports/variables.
@@ -163,6 +167,7 @@ Documentation is a **first-class deliverable**. Every code change that touches u
 **NEVER** save screenshots, images, or any binary artifacts to the project root or any directory within the repository. Always save screenshots and temporary files to `/tmp/` (e.g. `/tmp/screenshot.png`, `/tmp/page-snapshot.png`). This prevents binary files from polluting the git history.
 
 When using Playwright or other browser tools, explicitly set the output path to `/tmp/`:
+
 - Screenshots: `filename: "/tmp/screenshot.png"`
 - Snapshots: `filename: "/tmp/snapshot.md"`
 

@@ -2463,6 +2463,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-supervisor"
+version = "0.13.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "mvm-core",
+ "mvm-plan",
+ "mvm-policy",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "mvmctl"
 version = "0.13.0"
 dependencies = [

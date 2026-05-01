@@ -4,6 +4,7 @@ members = [
     "crates/mvm-security",
     "crates/mvm-plan",
     "crates/mvm-policy",
+    "crates/mvm-supervisor",
     "crates/mvm-runtime",
     "crates/mvm-build",
     "crates/mvm-guest",
@@ -104,6 +105,7 @@ mvm-runtime = { path = "crates/mvm-runtime", version = "0.13.0" }
 mvm-security = { path = "crates/mvm-security", version = "0.13.0" }
 mvm-plan = { path = "crates/mvm-plan", version = "0.13.0" }
 mvm-policy = { path = "crates/mvm-policy", version = "0.13.0" }
+mvm-supervisor = { path = "crates/mvm-supervisor", version = "0.13.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.13.0" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.13.0" }
 mvm-apple-container = { path = "crates/mvm-apple-container", version = "0.7.0" }
