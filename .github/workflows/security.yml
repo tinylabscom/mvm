@@ -19,6 +19,14 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
 
+# Cancel a previous run when a new commit lands on the same branch.
+# Same rationale as ci.yml — keep the PR check panel free of stale
+# failed runs from superseded SHAs. `main` pushes and the nightly
+# cron are never cancelled (different ref → different group).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

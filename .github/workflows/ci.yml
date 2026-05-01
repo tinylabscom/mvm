@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel a previous run when a new commit lands on the same branch.
+# Without this, the PR check panel accumulates stale failed runs from
+# superseded SHAs (we hit this on PRs #17 and #18). `main` runs are
+# never cancelled because the group is keyed on workflow + ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -268,3 +276,33 @@ jobs:
 
       - name: Build mvmctl + run MCP roundtrip smoke
         run: ./scripts/test-mcp-roundtrip.sh
+
+  # ── Lane: Nix flake check (Linux eval) ────────────────────────────
+  # Catches eval-time bugs that only surface on Linux. The host-side
+  # `nix flake check` was only ever exercised on the macOS runner;
+  # Linux-only output paths (`packages.<sys>.{mvm-guest-agent,
+  # mvm-guest-agent-dev}`, `devShells.<sys>.builder`) never got
+  # evaluated in CI before. The `flake-utils.lib.eachSystem`
+  # inversion-semantics bug we almost shipped during W7 would have
+  # been caught here.
+  nix-flake-check:
+    name: Nix flake check (Linux eval)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: Eval-check every flake
+        run: |
+          set -euo pipefail
+          for d in ./nix \
+                   ./nix/dev \
+                   ./nix/images/builder \
+                   ./nix/images/default-tenant \
+                   ./nix/images/examples/hello \
+                   ./nix/images/examples/hello-node \
+                   ./nix/images/examples/hello-python \
+                   ./nix/images/examples/llm-agent; do
+            echo "=== $d ==="
+            nix flake check --no-build "$d"
+          done

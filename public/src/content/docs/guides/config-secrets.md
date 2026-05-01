@@ -86,108 +86,113 @@ The `DriveFile` type is content-agnostic — it's just `{name, content, mode}`. 
 - Adding support for new applications doesn't require code changes
 - NixOS `EnvironmentFile` can load `.env` files directly as systemd environment variables
 
-## Example: OpenClaw
+## Example: generic flake with config + secrets mounts
 
-The [OpenClaw example](/nix/examples/openclaw/) demonstrates all of these features. It ships with a default config baked into the image, but you can override it by mounting host directories.
+The pattern below works with any `mkGuest` flake that reads
+`/mnt/config/` and/or `/mnt/secrets/` at boot. See
+[`nix/images/examples/`](https://github.com/auser/mvm/tree/main/nix/images/examples)
+for concrete flakes (`hello`, `hello-node`, `hello-python`, `llm-agent`).
 
-### Running with example config
+### Running with host-mounted config and secrets
 
 ```bash
-mvmctl template build openclaw
-mvmctl up --template openclaw --name oc \
-    -v nix/examples/openclaw/config:/mnt/config \
-    -v nix/examples/openclaw/secrets:/mnt/secrets \
+mvmctl template build my-template
+mvmctl up --template my-template --name my-vm \
+    -v ./config:/mnt/config \
+    -v ./secrets:/mnt/secrets \
     -p 3000:3000
-mvmctl forward oc 3000:3000
+mvmctl forward my-vm 3000:3000
 ```
 
-The default config uses `auth.mode: "none"` — no token is required to access the Control UI. The gateway binds to loopback inside the VM with a TCP proxy forwarding external connections, so all connections appear local and are auto-approved by OpenClaw (no device pairing prompts). To enable token auth, set `"auth": { "mode": "token" }` in your config and `OPENCLAW_GATEWAY_TOKEN` in `secrets/api-keys.env`.
+Each `-v` flag mounts a host directory as an ext4 drive read-only by
+default. Secrets land at `/mnt/secrets/` (mode 0440 root:mvm by the
+init script) and are also re-staged to `/run/mvm-secrets/<svc>/`
+with mode 0400 owned by the per-service uid (ADR-002 §W2.1) so
+sibling services on the same microVM can't cross-read.
 
-### Running with custom config and API keys
+### Custom config + API keys at runtime
 
 ```bash
-# Create config directory with OpenClaw gateway settings
-mkdir -p /tmp/oc-config
-cat > /tmp/oc-config/openclaw.json << 'EOF'
-{
-  "gateway": {
-    "mode": "local",
-    "channelHealthCheckMinutes": 0,
-    "auth": { "mode": "none" },
-    "reload": { "mode": "off" },
-    "controlUi": {
-      "dangerouslyAllowHostHeaderOriginFallback": true
-    }
-  }
-}
+# Create a config directory with whatever shape your flake expects
+mkdir -p /tmp/my-config
+cat > /tmp/my-config/app.json << 'EOF'
+{ "feature_flag": "value" }
 EOF
 
-# Create secrets directory with API keys
-mkdir -p /tmp/oc-secrets
-cat > /tmp/oc-secrets/api-keys.env << 'EOF'
+# Create secrets — typically a .env file the service sources
+mkdir -p /tmp/my-secrets
+cat > /tmp/my-secrets/api-keys.env << 'EOF'
 ANTHROPIC_API_KEY=sk-ant-...
 EOF
 
-mvmctl up --template openclaw --name oc \
-    -v /tmp/oc-config:/mnt/config \
-    -v /tmp/oc-secrets:/mnt/secrets \
+mvmctl up --template my-template --name my-vm \
+    -v /tmp/my-config:/mnt/config \
+    -v /tmp/my-secrets:/mnt/secrets \
     -p 3000:3000
 ```
 
-The OpenClaw service's `preStart` script checks for `/mnt/config/openclaw.json` and uses it (with `envsubst` expansion) instead of the built-in default. The `command` script sources `/mnt/config/env.sh` and `/mnt/secrets/api-keys.env` if they exist, making environment variables available to the gateway process.
+A typical `mkGuest` service uses `preStart` to check for
+`/mnt/config/<file>` and falls back to a built-in default; the
+`command` script sources `/mnt/secrets/<env-file>` if present so
+environment variables are available to the service process.
 
 ### Using snapshots for fast startup
 
-Build the template with `--snapshot` to capture a running VM state. Subsequent runs restore from the snapshot instead of cold-booting, reducing startup time from minutes to **1-2 seconds**:
+Build the template with `--snapshot` to capture a running VM state.
+Subsequent runs restore from the snapshot instead of cold-booting,
+reducing startup time from minutes to **1-2 seconds**:
 
 ```bash
-mvmctl template build openclaw --snapshot
-mvmctl up --template openclaw --name oc \
-    -v nix/examples/openclaw/config:/mnt/config \
-    -v nix/examples/openclaw/secrets:/mnt/secrets \
+mvmctl template build my-template --snapshot
+mvmctl up --template my-template --name my-vm \
+    -v ./config:/mnt/config \
+    -v ./secrets:/mnt/secrets \
     -p 3000:3000
 ```
 
-When restoring from a snapshot with `-v` mounts, the guest agent automatically remounts config/secrets drives and restarts services with the fresh data.
+When restoring from a snapshot with `-v` mounts, the guest agent
+automatically remounts config/secrets drives and restarts services
+with the fresh data.
 
-#### Snapshots + Dynamic Mounts = Instant Boots with Flexible Config
+#### Snapshots + dynamic mounts = instant boots with flexible config
 
-**Key insight:** The snapshot stores the OS and application state (memory, running processes, compiled code caches), but **config and secrets drives are created fresh at runtime** from your host directories. This means:
+**Key insight:** the snapshot stores OS and application state
+(memory, running processes, compiled code caches), but **config and
+secrets drives are created fresh at runtime** from your host
+directories. This means:
 
-- ✅ **Same snapshot** can serve multiple instances with different configs
-- ✅ **Update configs without rebuilding** — just change the files in your host directory
-- ✅ **Instant boot + dynamic configuration** — get both benefits simultaneously
+- ✅ **Same snapshot** can serve multiple instances with different
+  configs.
+- ✅ **Update configs without rebuilding** — change the host files
+  and re-up.
+- ✅ **Instant boot + dynamic configuration** — get both benefits
+  simultaneously.
 
-Example: Run three OpenClaw instances from one snapshot with different API keys:
+Example: run three instances from one snapshot with different API
+keys:
 
 ```bash
-# Production gateway with prod Anthropic key
-mvmctl up --template openclaw --name oc-prod \
+mvmctl up --template my-template --name my-vm-prod \
     -v ./prod/config:/mnt/config \
     -v ./prod/secrets:/mnt/secrets \
     -p 3000:3000
 
-# Staging gateway with test key
-mvmctl up --template openclaw --name oc-staging \
+mvmctl up --template my-template --name my-vm-staging \
     -v ./staging/config:/mnt/config \
     -v ./staging/secrets:/mnt/secrets \
     -p 3001:3000
 
-# Dev gateway with no key (localhost-only testing)
-mvmctl up --template openclaw --name oc-dev \
+mvmctl up --template my-template --name my-vm-dev \
     -v ./dev/config:/mnt/config \
     -p 3002:3000
 ```
 
-All three VMs restore from the same snapshot (1-2 second boot) but get different configs and secrets at runtime.
+All three restore from the same snapshot (1-2 second boot) but get
+different configs and secrets at runtime.
 
 ### Monitoring the VM
 
-Check the OpenClaw gateway logs via the guest console:
-
 ```bash
-mvmctl logs oc        # view console output
-mvmctl logs oc -f     # follow in real time
+mvmctl logs my-vm        # view console output
+mvmctl logs my-vm -f     # follow in real time
 ```
-
-See [nix/examples/openclaw/](https://github.com/auser/mvm/tree/main/nix/examples/openclaw) for the full example with sample config and secrets files.

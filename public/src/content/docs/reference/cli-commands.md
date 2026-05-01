@@ -258,8 +258,9 @@ This applies to:
 - `mvmctl up` / `mvmctl run` / `mvmctl start` — boots a long-running microVM
   with the same image
 
-The image is built from `nix/default-microvm/` on first use and cached at
-`~/.cache/mvm/default-microvm/` (kernel + rootfs). Nix is required to build
+The image is built from `nix/images/default-tenant/` on first use and cached at
+`~/.cache/mvm/default-microvm/` (kernel + rootfs; cache directory name
+unchanged for backward compat). Nix is required to build
 it; pass `--template` or `--flake` if Nix isn't available on your host.
 
 ## Cache

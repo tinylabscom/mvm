@@ -40,7 +40,7 @@ mvmctl exec --launch-plan ./launch.json
 If you don't pass `--template` or `--flake`, `mvmctl exec` boots the
 bundled default image:
 
-- Defined by [`nix/default-microvm/`](https://github.com/auser/mvm/tree/main/nix/default-microvm)
+- Defined by [`nix/images/default-tenant/`](https://github.com/auser/mvm/tree/main/nix/images/default-tenant)
   in the repo: a minimal `mkGuest` rootfs with busybox and the auto-included
   guest agent. No extra packages.
 - Built via Nix on first use, cached at `~/.cache/mvm/default-microvm/`

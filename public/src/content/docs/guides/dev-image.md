@@ -10,18 +10,18 @@ The **dev image** is a minimal Linux VM image (kernel + ext4 rootfs) used by `mv
 When you run `mvmctl dev up`, the CLI:
 
 1. Checks `~/.cache/mvm/dev/` for cached `vmlinux` and `rootfs.ext4`
-2. If missing, builds the image from `nix/dev-image/flake.nix` (requires Nix with a Linux builder)
+2. If missing, builds the image from `nix/images/builder/flake.nix` (requires Nix with a Linux builder)
 3. If Nix build fails (e.g. no Linux builder on macOS), downloads a pre-built image from the matching GitHub release
 
 The dev image is built using the same `mkGuest` helper that builds all microVM images, so it follows the same conventions (busybox init, vsock communication, no SSH).
 
 ## Customizing the dev image
 
-The dev image flake lives at [`nix/dev-image/flake.nix`](https://github.com/auser/mvm/blob/main/nix/dev-image/flake.nix). It imports the parent flake at `nix/` and calls `mkGuest` with a list of packages.
+The dev image flake lives at [`nix/images/builder/flake.nix`](https://github.com/auser/mvm/blob/main/nix/images/builder/flake.nix). It imports the parent flake at `nix/` and calls `mkGuest` with a list of packages.
 
 ### Adding packages
 
-Edit the `packages` list in `nix/dev-image/flake.nix`:
+Edit the `packages` list in `nix/images/builder/flake.nix`:
 
 ```nix
 packages = [
@@ -66,11 +66,11 @@ See the [Nix Flakes guide](/guides/nix-flakes) for the full `mkGuest` API.
 
 ```bash
 # Build for the current architecture
-nix build ./nix/dev-image
+nix build ./nix/images/builder
 
 # Build for a specific architecture
-nix build ./nix/dev-image#packages.aarch64-linux.default
-nix build ./nix/dev-image#packages.x86_64-linux.default
+nix build ./nix/images/builder#packages.aarch64-linux.default
+nix build ./nix/images/builder#packages.x86_64-linux.default
 ```
 
 The output is a Nix store path containing `vmlinux` (kernel) and `rootfs.ext4` (root filesystem).
@@ -90,7 +90,7 @@ mvmctl dev up
 Or copy the built artifacts directly:
 
 ```bash
-STORE_PATH=$(nix build ./nix/dev-image --no-link --print-out-paths)
+STORE_PATH=$(nix build ./nix/images/builder --no-link --print-out-paths)
 mkdir -p ~/.cache/mvm/dev
 cp "$STORE_PATH/vmlinux" ~/.cache/mvm/dev/
 cp "$STORE_PATH/rootfs.ext4" ~/.cache/mvm/dev/
@@ -128,14 +128,22 @@ The release workflow (`.github/workflows/release.yml`) builds dev images for bot
 ```
 nix/
 ├── flake.nix                    # Parent flake — defines mkGuest (production)
-├── firecracker-kernel-pkg.nix
-├── minimal-init.nix
-├── guest-agent-pkg.nix
+├── packages/
+│   ├── firecracker-kernel.nix
+│   ├── mvm-guest-agent.nix
+│   └── mvmctl.nix
+├── lib/
+│   ├── minimal-init/            # PID 1 init script generator
+│   ├── rootfs-templates/        # populate.sh.in etc.
+│   └── kernel-configs/
 ├── dev/                         # Sibling flake — dev variant of mkGuest
 │   └── flake.nix
-└── dev-image/                   # Dev environment image
-    ├── flake.nix                # Calls mkGuest with dev tools
-    └── flake.lock
+└── images/
+    ├── builder/                 # Builder VM image (was nix/dev-image/)
+    │   ├── flake.nix            # Calls mkGuest with dev tools, role = "builder"
+    │   └── flake.lock
+    ├── default-tenant/          # Bundled fallback rootfs (was nix/default-microvm/)
+    └── examples/                # hello, hello-node, hello-python, llm-agent
 ```
 
-The dev image flake references the parent via a relative path (`mvm.url = "path:.."`), so changes to the kernel or init system are picked up automatically on the next build.
+The builder image flake references the parent via a relative path (`mvm.url = "path:../.."`), so changes to the kernel or init system are picked up automatically on the next build.
