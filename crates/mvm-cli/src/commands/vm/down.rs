@@ -39,6 +39,20 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 registry.deregister(n);
                 let _ = registry.save(&registry_path);
             }
+            // B21: state-changing CLI verb emits an audit entry. The
+            // matching VmStart emit lives in `vm/up.rs`; without this
+            // VmStop there is no audit trail of the stop happening.
+            // Best-effort — the underlying op already succeeded or
+            // failed by the time we reach here.
+            mvm_core::audit::emit(
+                mvm_core::audit::LocalAuditKind::VmStop,
+                Some(n),
+                Some(if result.is_ok() {
+                    "ok"
+                } else {
+                    "stop_failed"
+                }),
+            );
             result
         }
         None => {
@@ -48,6 +62,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 for vm_name in fleet_config.vms.keys() {
                     if backend.stop(&VmId::from(vm_name.as_str())).is_ok() {
                         stopped += 1;
+                        mvm_core::audit::emit(
+                            mvm_core::audit::LocalAuditKind::VmStop,
+                            Some(vm_name.as_str()),
+                            Some("ok"),
+                        );
                     }
                 }
 
@@ -60,7 +79,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 ui::success(&format!("Stopped {} VMs", stopped));
                 Ok(())
             } else {
-                backend.stop_all()
+                let result = backend.stop_all();
+                // Audit the broad-effect "stop everything" command so a
+                // tenant can reconstruct who turned the lights off.
+                mvm_core::audit::emit(
+                    mvm_core::audit::LocalAuditKind::VmStop,
+                    None,
+                    Some(if result.is_ok() {
+                        "stop_all_ok"
+                    } else {
+                        "stop_all_failed"
+                    }),
+                );
+                result
             }
         }
     }

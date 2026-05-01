@@ -27,6 +27,13 @@ pub fn default_audit_log() -> String {
 const ROTATE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
 /// Categories of local mvmctl operations that are audit-logged.
+///
+/// Plan 37 §6 invariant: "no unaudited control-plane mutation". Every
+/// state-changing CLI verb emits one of these. Pure read-only verbs
+/// (status / list / inspect / completions / shell-init) are not
+/// audited; everything that mutates host state, registry state, the
+/// data dir, the network, secrets, snapshots, signing keys, or the
+/// audit log itself must be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalAuditKind {
@@ -60,6 +67,44 @@ pub enum LocalAuditKind {
     /// MCP session closed by the client (`close: true`) or reaped
     /// by the server (idle / max-lifetime / shutdown drain).
     McpSessionClosed,
+    // --- Plan 37 future verbs (B21) -----------------------------
+    // These kinds are reserved here so the wire format is stable
+    // before the corresponding CLI verbs ship. Each will be emitted
+    // by its own command in a subsequent PR. Reserving them now
+    // lets the parallel agents working on Wave 2.6 (egress proxy)
+    // and Wave 3 (supervisor commands) land their verbs without
+    // re-bumping the audit schema.
+    /// `mvmctl plan submit <signed-plan>` — admission of a signed
+    /// `ExecutionPlan`. Distinct from the supervisor's per-state
+    /// `plan.admitted` event (B19): this is the local CLI verb that
+    /// hands the plan to the supervisor.
+    PlanSubmit,
+    /// `mvmctl policy apply <signed-bundle>` — install or replace
+    /// the active `PolicyBundle`. Plan 37 §10 / §18.
+    PolicyApply,
+    /// `mvmctl policy rollback` — flip current/previous bundle slot.
+    PolicyRollback,
+    /// `mvmctl host trust set` — add or remove a trusted signer key
+    /// from the supervisor's trust store. Affects which signed plans
+    /// the supervisor will admit.
+    HostTrustSet,
+    /// `mvmctl supervisor restart` — restart the trusted host-side
+    /// supervisor process (plan 37 §7B Zone B).
+    SupervisorRestart,
+    /// `mvmctl quarantine <workload>` — freeze a running workload.
+    /// Distinct from `kill`: quarantined workloads can be resumed
+    /// for forensics; killed workloads cannot.
+    Quarantine,
+    /// `mvmctl kill <workload>` — terminal teardown of a running
+    /// workload. Plan 37 Addendum B6.
+    Kill,
+    /// `mvmctl artifact fetch <plan_id>` — retrieve captured
+    /// artifacts from the supervisor's artifact store. Plan 37 §21.
+    ArtifactFetch,
+    /// `mvmctl wake <workload>` / `mvmctl sleep <workload>` —
+    /// supervisor-driven snapshot suspend/resume.
+    WorkloadWake,
+    WorkloadSleep,
 }
 
 /// A single local audit log entry.
@@ -340,6 +385,55 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    fn b21_reserved_audit_kinds_serde_roundtrip() {
+        // B21 reserves audit kinds for plan-37 future verbs so the
+        // wire format stays stable before each CLI verb ships. This
+        // test is the contract — older builds must accept any of
+        // these snake_case variants without rejecting them.
+        let kinds = vec![
+            LocalAuditKind::PlanSubmit,
+            LocalAuditKind::PolicyApply,
+            LocalAuditKind::PolicyRollback,
+            LocalAuditKind::HostTrustSet,
+            LocalAuditKind::SupervisorRestart,
+            LocalAuditKind::Quarantine,
+            LocalAuditKind::Kill,
+            LocalAuditKind::ArtifactFetch,
+            LocalAuditKind::WorkloadWake,
+            LocalAuditKind::WorkloadSleep,
+        ];
+        for kind in kinds {
+            let event = LocalAuditEvent::now(kind.clone(), None, None);
+            let json = serde_json::to_string(&event).unwrap();
+            let parsed: LocalAuditEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.kind, kind, "kind round-trip diverged: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn b21_audit_kinds_use_snake_case_on_the_wire() {
+        // Pin the casing — we don't want a future rename to silently
+        // break the audit-stream parser of an older mvmctl reading
+        // a newer log.
+        let kinds_and_strings = vec![
+            (LocalAuditKind::PlanSubmit, "plan_submit"),
+            (LocalAuditKind::PolicyApply, "policy_apply"),
+            (LocalAuditKind::PolicyRollback, "policy_rollback"),
+            (LocalAuditKind::HostTrustSet, "host_trust_set"),
+            (LocalAuditKind::SupervisorRestart, "supervisor_restart"),
+            (LocalAuditKind::Quarantine, "quarantine"),
+            (LocalAuditKind::Kill, "kill"),
+            (LocalAuditKind::ArtifactFetch, "artifact_fetch"),
+            (LocalAuditKind::WorkloadWake, "workload_wake"),
+            (LocalAuditKind::WorkloadSleep, "workload_sleep"),
+        ];
+        for (kind, expected) in kinds_and_strings {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+
+    #[test]
     fn test_local_audit_event_serializes() {
         let event = LocalAuditEvent::now(
             LocalAuditKind::VmStart,
@@ -373,6 +467,21 @@ mod tests {
             LocalAuditKind::ConfigChange,
             LocalAuditKind::ConsoleSessionStart,
             LocalAuditKind::ConsoleSessionEnd,
+            LocalAuditKind::McpToolsCallRun,
+            LocalAuditKind::McpToolsCallRunError,
+            LocalAuditKind::McpSessionStarted,
+            LocalAuditKind::McpSessionClosed,
+            // B21 reserved future verbs.
+            LocalAuditKind::PlanSubmit,
+            LocalAuditKind::PolicyApply,
+            LocalAuditKind::PolicyRollback,
+            LocalAuditKind::HostTrustSet,
+            LocalAuditKind::SupervisorRestart,
+            LocalAuditKind::Quarantine,
+            LocalAuditKind::Kill,
+            LocalAuditKind::ArtifactFetch,
+            LocalAuditKind::WorkloadWake,
+            LocalAuditKind::WorkloadSleep,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
