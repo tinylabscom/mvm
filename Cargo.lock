@@ -2390,6 +2390,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-plan"
+version = "0.13.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "mvm-core",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mvm-runtime"
 version = "0.13.0"
 dependencies = [
