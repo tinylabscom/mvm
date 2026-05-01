@@ -21,7 +21,9 @@ pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_port_spec,
     parse_port_specs, parse_volume_spec,
 };
-pub(super) use resolve::{resolve_flake_ref, resolve_network_policy, resolve_running_vm};
+pub(super) use resolve::{
+    resolve_flake_ref, resolve_network_policy, resolve_optional_network_policy, resolve_running_vm,
+};
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(super) use vsock::{request_port_forward, wait_for_guest_agent};

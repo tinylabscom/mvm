@@ -39,15 +39,20 @@ and exits cleanly — the integration health check reports
 ## Build and boot
 
 ```bash
+# `--network-preset agent` baked into the template spec means
+# subsequent `mvmctl up --template claude-code-vm` calls inherit the
+# allowlist without needing the flag each time. Plan 32 §D ergonomic
+# follow-up. Override per-invocation with `--network-preset
+# unrestricted` for debugging.
 mvmctl template create claude-code-vm \
   --flake ./nix/images/examples/llm-agent \
   --profile minimal --role agent \
-  --cpus 2 --mem 1024
+  --cpus 2 --mem 1024 \
+  --network-preset agent
 
 mvmctl template build claude-code-vm
 
 mvmctl up --template claude-code-vm \
-  --network-preset agent \
   --add-dir "$PWD:/workspace:rw" \
   --secret-file "$HOME/.config/mvm/secrets/anthropic:claude-code/anthropic-api-key"
 ```
@@ -56,7 +61,7 @@ mvmctl up --template claude-code-vm \
 VM at `/workspace`. The agent `cd`s there before exec; `git` /
 `ripgrep` / `jq` / `curl` / `bash` are all in PATH inside the VM.
 
-`--network-preset agent` (added by [ADR-004 / plan 32 Proposal D](../../../../specs/adrs/004-hypervisor-egress-policy.md))
+`--network-preset agent` baked at template-create time (ADR-004 / plan 32 Proposal D)
 locks the VM's outbound egress to the LLM-agent allowlist:
 `api.anthropic.com:443`, `api.openai.com:443`, `github.com:{443,22}`,
 `api.github.com:443`, plus DNS. Anything else gets dropped at the

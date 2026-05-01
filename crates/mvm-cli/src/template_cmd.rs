@@ -11,28 +11,36 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
-pub fn create_single(
-    name: &str,
-    flake: &str,
-    profile: &str,
-    role: &str,
-    cpus: u8,
-    mem: u32,
-    data_disk: u32,
-) -> Result<()> {
-    let flake_ref = resolve_flake_ref(flake);
+/// Inputs to [`create_single`] / [`create_multi`]. Bundled into a
+/// struct so adding new spec fields (e.g. plan 32's
+/// `default_network_policy`) doesn't trip clippy's
+/// `too_many_arguments` lint and doesn't churn every callsite.
+#[derive(Debug, Clone)]
+pub struct CreateParams<'a> {
+    pub flake: &'a str,
+    pub profile: &'a str,
+    pub role: &'a str,
+    pub cpus: u8,
+    pub mem: u32,
+    pub data_disk: u32,
+    pub default_network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
+}
+
+pub fn create_single(name: &str, params: CreateParams<'_>) -> Result<()> {
+    let flake_ref = resolve_flake_ref(params.flake);
     let ts = now_iso();
     let spec = TemplateSpec {
         schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
         template_id: name.to_string(),
         flake_ref,
-        profile: profile.to_string(),
-        role: role.to_string(),
-        vcpus: cpus,
-        mem_mib: mem,
-        data_disk_mib: data_disk,
+        profile: params.profile.to_string(),
+        role: params.role.to_string(),
+        vcpus: params.cpus,
+        mem_mib: params.mem,
+        data_disk_mib: params.data_disk,
         created_at: ts.clone(),
         updated_at: ts,
+        default_network_policy: params.default_network_policy,
     };
     tmpl::template_create(&spec)
 }
@@ -74,20 +82,23 @@ pub fn init(
     tmpl::template_init(name)
 }
 
-pub fn create_multi(
-    base: &str,
-    flake: &str,
-    profile: &str,
-    roles: &[String],
-    cpus: u8,
-    mem: u32,
-    data_disk: u32,
-) -> Result<()> {
+pub fn create_multi(base: &str, roles: &[String], params: CreateParams<'_>) -> Result<()> {
     // Resolve once so all variants share the same absolute path.
-    let flake_ref = resolve_flake_ref(flake);
+    let flake_ref = resolve_flake_ref(params.flake);
     for role in roles {
         let name = format!("{base}-{role}");
-        create_single(&name, &flake_ref, profile, role, cpus, mem, data_disk)?;
+        create_single(
+            &name,
+            CreateParams {
+                flake: &flake_ref,
+                profile: params.profile,
+                role,
+                cpus: params.cpus,
+                mem: params.mem,
+                data_disk: params.data_disk,
+                default_network_policy: params.default_network_policy.clone(),
+            },
+        )?;
     }
     Ok(())
 }
@@ -168,6 +179,17 @@ pub fn info(name: &str, json: bool) -> Result<()> {
         println!("  Created: {}", spec.created_at);
         println!("  Updated: {}", spec.updated_at);
         println!("  Path:    {}", template_dir(name));
+        if let Some(policy) = &spec.default_network_policy {
+            use mvm_core::policy::network_policy::NetworkPolicy;
+            let summary = match policy {
+                NetworkPolicy::Preset { preset } => format!("preset={preset}"),
+                NetworkPolicy::AllowList { rules } => {
+                    let hosts: Vec<String> = rules.iter().map(|r| r.to_string()).collect();
+                    format!("allowlist=[{}]", hosts.join(", "))
+                }
+            };
+            println!("  Network: {summary}  (default; mvmctl up flags override)");
+        }
 
         if let Some(rev) = &revision {
             use mvm_core::pool::format_bytes;
@@ -256,6 +278,13 @@ pub fn build(
                 data_disk_mib: variant.data_disk_mib,
                 created_at: ts.clone(),
                 updated_at: ts,
+                // The TOML-driven `template build --config` path doesn't
+                // expose a per-variant network policy yet; callers that
+                // want a default use `mvmctl template create
+                // --network-preset` instead. Future work in plan 32 §D
+                // ergonomic follow-up: extend TemplateConfig variants
+                // with a network field.
+                default_network_policy: None,
             };
             tmpl::template_create(&spec)?;
             if snapshot {

@@ -9,6 +9,7 @@ use mvm_core::util::parse_human_size;
 
 use crate::template_cmd;
 
+use super::super::shared::resolve_optional_network_policy as parse_network_policy;
 use super::Cli;
 use super::shared::clap_flake_ref;
 
@@ -43,6 +44,18 @@ pub(in crate::commands) enum TemplateAction {
         /// Data disk size (supports human-readable sizes: 10G, 512M, or plain MB; 0 = no disk)
         #[arg(long, default_value = "0")]
         data_disk: String,
+        /// Default network policy preset baked into the template spec.
+        /// `mvmctl up` uses this when no `--network-preset` /
+        /// `--network-allow` is supplied. ADR-004 / plan 32 §D.
+        /// Valid: unrestricted (default), none, registries, dev, agent.
+        #[arg(long)]
+        network_preset: Option<String>,
+        /// Explicit allowlist (host:port pairs) baked into the
+        /// template spec. Repeatable; mutually exclusive with
+        /// `--network-preset`. Same semantics as `mvmctl up
+        /// --network-allow`.
+        #[arg(long)]
+        network_allow: Vec<String>,
     },
     /// Create multiple role-specific templates (name-role)
     CreateMulti {
@@ -66,6 +79,15 @@ pub(in crate::commands) enum TemplateAction {
         /// Data disk size (supports human-readable sizes: 10G, 512M, or plain MB; 0 = no disk)
         #[arg(long, default_value = "0")]
         data_disk: String,
+        /// Default network policy preset shared by all created
+        /// variants. Valid: unrestricted, none, registries, dev,
+        /// agent.
+        #[arg(long)]
+        network_preset: Option<String>,
+        /// Explicit allowlist shared by all created variants.
+        /// Mutually exclusive with `--network-preset`.
+        #[arg(long)]
+        network_allow: Vec<String>,
     },
     /// Build a template (shared image via nix build)
     #[command(alias = "b")]
@@ -188,6 +210,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             cpus,
             mem,
             data_disk,
+            network_preset,
+            network_allow,
         } => {
             validate_template_name(&name)
                 .with_context(|| format!("Invalid template name: {:?}", name))?;
@@ -195,7 +219,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 .with_context(|| format!("Invalid flake reference: {:?}", flake))?;
             let mem_mb = parse_human_size(&mem).context("Invalid memory size")?;
             let data_disk_mb = parse_human_size(&data_disk).context("Invalid data disk size")?;
-            template_cmd::create_single(&name, &flake, &profile, &role, cpus, mem_mb, data_disk_mb)
+            let policy = parse_network_policy(network_preset.as_deref(), &network_allow)?;
+            template_cmd::create_single(
+                &name,
+                template_cmd::CreateParams {
+                    flake: &flake,
+                    profile: &profile,
+                    role: &role,
+                    cpus,
+                    mem: mem_mb,
+                    data_disk: data_disk_mb,
+                    default_network_policy: policy,
+                },
+            )
         }
         TemplateAction::CreateMulti {
             base,
@@ -205,6 +241,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             cpus,
             mem,
             data_disk,
+            network_preset,
+            network_allow,
         } => {
             validate_template_name(&base)
                 .with_context(|| format!("Invalid template base name: {:?}", base))?;
@@ -213,14 +251,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             let mem_mb = parse_human_size(&mem).context("Invalid memory size")?;
             let data_disk_mb = parse_human_size(&data_disk).context("Invalid data disk size")?;
             let role_list: Vec<String> = roles.split(',').map(|s| s.trim().to_string()).collect();
+            let policy = parse_network_policy(network_preset.as_deref(), &network_allow)?;
             template_cmd::create_multi(
                 &base,
-                &flake,
-                &profile,
                 &role_list,
-                cpus,
-                mem_mb,
-                data_disk_mb,
+                template_cmd::CreateParams {
+                    flake: &flake,
+                    // The variant role is set per-iteration inside
+                    // create_multi; this base value is shadowed.
+                    profile: &profile,
+                    role: "",
+                    cpus,
+                    mem: mem_mb,
+                    data_disk: data_disk_mb,
+                    default_network_policy: policy,
+                },
             )
         }
         TemplateAction::Build {

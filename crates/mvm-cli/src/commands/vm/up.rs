@@ -105,8 +105,27 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let effective_cpus = args.cpus.or(Some(cfg.default_cpus));
     let effective_memory = memory_mb.or(Some(cfg.default_memory_mib));
 
-    let network_policy =
-        resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?;
+    // Plan 32 §D ergonomic follow-up: if neither --network-preset nor
+    // --network-allow is supplied, consult the template's baked-in
+    // `default_network_policy` (set at `mvmctl template create
+    // --network-preset agent` time). This lets the llm-agent example
+    // ship with the agent allowlist without operators needing to
+    // remember the flag per-invocation. Explicit CLI flags always
+    // win — operators can override the template default with
+    // `--network-preset unrestricted` for debugging.
+    let network_policy = if args.network_preset.is_some() || !args.network_allow.is_empty() {
+        resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?
+    } else if let Some(template_name) = args.template.as_deref()
+        && let Ok(spec) = mvm_runtime::vm::template::lifecycle::template_load(template_name)
+        && let Some(default_policy) = spec.default_network_policy.clone()
+    {
+        crate::ui::info(&format!(
+            "Using template '{template_name}' default network policy"
+        ));
+        default_policy
+    } else {
+        resolve_network_policy(None, &[])?
+    };
     let seccomp_tier: mvm_security::seccomp::SeccompTier =
         args.seccomp.parse().context("Invalid --seccomp value")?;
     let secret_bindings: Vec<mvm_core::secret_binding::SecretBinding> = args

@@ -99,15 +99,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 Some(&name),
             );
 
-            // Create a template from the catalog entry, then build it
+            // Create a template from the catalog entry, then build it.
+            // Catalog entries don't carry a default network policy
+            // today; users opt in via `mvmctl template create
+            // --network-preset`.
             template_cmd::create_single(
                 &entry.name,
-                &entry.flake_ref,
-                &entry.profile,
-                "worker",
-                entry.default_cpus,
-                entry.default_memory_mib,
-                0, // no data disk
+                template_cmd::CreateParams {
+                    flake: &entry.flake_ref,
+                    profile: &entry.profile,
+                    role: "worker",
+                    cpus: entry.default_cpus,
+                    mem: entry.default_memory_mib,
+                    data_disk: 0,
+                    default_network_policy: None,
+                },
             )?;
             ui::success(&format!("Created template {:?} from catalog.", entry.name));
 
