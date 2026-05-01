@@ -25,6 +25,7 @@
 //!     `NoopEgressProxy` default)
 
 use std::fmt;
+use std::net::IpAddr;
 
 use async_trait::async_trait;
 
@@ -44,6 +45,15 @@ pub struct RequestCtx {
     /// methods that carry payloads. Bytes (not `String`) because
     /// bodies may be binary (protobuf, multipart, etc.).
     pub body: Vec<u8>,
+    /// Resolved destination IP, populated by the proxy after DNS
+    /// lookup but before opening the connection. `SsrfGuard` (Wave
+    /// 2.3) inspects this to refuse private/internal/metadata IPs.
+    /// `None` when the host is an IP literal (the proxy uses
+    /// `host` directly) or before the proxy has resolved DNS — the
+    /// guard handles both cases. The proxy must pin the IP it
+    /// resolves here for the actual connect() call to defend
+    /// against DNS rebinding.
+    pub resolved_ip: Option<IpAddr>,
 }
 
 impl RequestCtx {
@@ -53,6 +63,7 @@ impl RequestCtx {
             port,
             path: path.into(),
             body: Vec::new(),
+            resolved_ip: None,
         }
     }
 
@@ -60,6 +71,14 @@ impl RequestCtx {
     /// at the proxy callsite when the body is read upfront.
     pub fn with_body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
+        self
+    }
+
+    /// Builder-style: pin the resolved IP. The proxy calls this once
+    /// DNS resolution succeeds; tests use it to drive `SsrfGuard`
+    /// directly.
+    pub fn with_resolved_ip(mut self, ip: IpAddr) -> Self {
+        self.resolved_ip = Some(ip);
         self
     }
 }
