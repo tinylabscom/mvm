@@ -7,11 +7,12 @@
 //! so a runbook can answer "what plan was this workload running at
 //! the moment of incident?" in O(1) without re-deriving from logs.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    ArtifactPolicy, AttestationRequirement, AuditLabels, FsPolicyRef, KeyRotationSpec, PlanId,
-    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    ArtifactPolicy, AttestationRequirement, AuditLabels, FsPolicyRef, KeyRotationSpec, Nonce,
+    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
     SignedImageRef, TenantId, WorkloadId,
 };
 
@@ -20,7 +21,13 @@ use crate::types::{
 /// unknown schema versions rather than silently skipping unknown
 /// fields — the schema_version field is consulted before any
 /// per-field deserialisation.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped 1 → 2 in plan 37 Addendum G4 with the addition of
+/// `valid_from` / `valid_until` / `nonce`. Older verifiers will
+/// reject v2 plans with `UnsupportedSchema`; this is the correct
+/// fail-closed behavior — they can't enforce the validity window
+/// they don't understand.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Typed contract for one workload's execution.
 ///
@@ -92,4 +99,20 @@ pub struct ExecutionPlan {
     pub release_pin: Option<ReleasePin>,
 
     pub post_run: PostRunLifecycle,
+
+    /// Plan validity window — start. The supervisor refuses to admit
+    /// a plan before `valid_from`. Plan 37 Addendum G4.
+    pub valid_from: DateTime<Utc>,
+
+    /// Plan validity window — end. The supervisor refuses to admit
+    /// a plan at or after `valid_until`. Plan 37 Addendum G4. Without
+    /// this bound, signed plans are forever-valid and replayable.
+    pub valid_until: DateTime<Utc>,
+
+    /// Per-plan nonce for replay protection. The supervisor maintains
+    /// a seen-nonce ledger keyed by signer; an admission attempt with
+    /// a previously-seen nonce for the same signer is refused. The
+    /// ledger self-prunes once `valid_until` passes for a stored
+    /// nonce. Plan 37 Addendum G4.
+    pub nonce: Nonce,
 }

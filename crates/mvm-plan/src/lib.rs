@@ -21,15 +21,22 @@
 //!   using ed25519_dalek directly. Reuses the `SignedPayload` shape
 //!   from `mvm-core::protocol::signing` so plan signatures fit the
 //!   existing audit + control-plane wire types.
+//! - `validity` — `check_window` + `NonceStore` for plan 37
+//!   Addendum G4 replay protection. Distinct from `signing`: the
+//!   envelope check answers "is this signature valid for this plan",
+//!   the validity check answers "should we accept this otherwise-
+//!   valid plan now".
 
 pub mod plan;
 pub mod signing;
 pub mod types;
+pub mod validity;
 
 pub use plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use signing::{PlanVerifyError, SignedExecutionPlan, sign_plan, verify_plan};
 pub use types::{
-    ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef, KeyRotationSpec, PlanId,
-    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SecretSource, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
+    ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef, KeyRotationSpec, Nonce,
+    NonceParseError, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef,
+    SecretBinding, SecretSource, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
 };
+pub use validity::{NonceStore, PlanValidityError, check_window};

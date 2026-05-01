@@ -127,11 +127,12 @@ pub fn verify_plan(
 mod tests {
     use super::*;
     use crate::types::*;
+    use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 
-    fn sample_plan() -> ExecutionPlan {
+    pub(crate) fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
@@ -173,6 +174,9 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
+            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+            nonce: Nonce::from_bytes([0xab; 16]),
         }
     }
 

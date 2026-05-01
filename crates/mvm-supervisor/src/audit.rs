@@ -160,17 +160,18 @@ impl AuditSigner for CapturingAuditSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use mvm_plan::{
         ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef, KeyRotationSpec,
-        PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SignedImageRef, TimeoutSpec,
-        WorkloadId,
+        Nonce, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION,
+        SignedImageRef, TimeoutSpec, WorkloadId,
     };
     use mvm_policy::{AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy};
     use std::collections::BTreeMap;
 
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             plan_id: PlanId("plan-x".to_string()),
             plan_version: 7,
             tenant: TenantId("tenant-a".to_string()),
@@ -210,6 +211,10 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
+            // G4 (plan 37 Addendum G4) replay-protection fields.
+            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+            nonce: Nonce::from_bytes([0xab; 16]),
         }
     }
 

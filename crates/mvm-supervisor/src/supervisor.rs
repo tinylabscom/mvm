@@ -187,6 +187,7 @@ mod tests {
     use super::*;
     use crate::backend::BackendLauncher;
     use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use mvm_plan::*;
     use rand::rngs::OsRng;
@@ -282,6 +283,13 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
+            // G4 (plan 37 Addendum G4) replay-protection fields. The
+            // supervisor's admission gate doesn't enforce these yet —
+            // that's a follow-up PR. Today they're populated so the
+            // wire format compiles and signing roundtrips work.
+            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+            nonce: Nonce::from_bytes([0xab; 16]),
         }
     }
 

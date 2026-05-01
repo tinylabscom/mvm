@@ -1,0 +1,25 @@
+# cargo-audit configuration. Mirrors the advisory-ignore list in
+# `deny.toml` so the project-level pre-commit hook (which calls plain
+# `cargo audit`) honors the same audited acceptances cargo-deny does.
+#
+# These are the *audited* acceptances — each one carries an explicit
+# rationale in `deny.toml`. Re-evaluate at each Cargo.lock major bump
+# and remove anything fixed by an upstream release.
+#
+# Why this file exists separately from deny.toml: cargo-deny and
+# cargo-audit are independent tools with independent config formats.
+# `deny.toml`'s `[advisories.ignore]` is consumed by cargo-deny only;
+# cargo-audit reads `.cargo/audit.toml` instead. Without this file
+# cargo-audit reports the same advisories cargo-deny correctly
+# silences, breaking the pre-commit hook for every contributor.
+
+[advisories]
+ignore = [
+    # See deny.toml for full per-entry rationale on each of these.
+    "RUSTSEC-2025-0057", # fxhash unmaintained — transitive via notify
+    "RUSTSEC-2024-0384", # instant unmaintained — transitive via parking_lot
+    "RUSTSEC-2025-0119", # number_prefix unmaintained — pure formatter
+    "RUSTSEC-2023-0071", # rsa Marvin Attack — transitive via sigstore→openidconnect; verification-only side
+    "RUSTSEC-2024-0370", # proc-macro-error v1 unmaintained — build-time only
+    "RUSTSEC-2026-0009", # time stack-exhaustion DoS — transitive via sigstore; no untrusted-time-string parse
+]
