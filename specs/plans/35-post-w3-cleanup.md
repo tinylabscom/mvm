@@ -48,6 +48,39 @@ verify* in CI. Specifically:
 
 ## Sub-items
 
+### C0 — Carryover housekeeping
+
+W7.1 from sprint 42's plan 31 left
+`nix/images/examples/{paperclip,openclaw}/` undeleted because
+the sandbox blocked `git rm` twice (recorded at sprint 42's
+SPRINT.md note for W7.1). Close it now.
+
+```bash
+git rm -r nix/images/examples/paperclip nix/images/examples/openclaw
+```
+
+Audit `nix/images/examples/flake.nix` (or per-example
+`flake.nix` files) for dangling references after the deletion;
+remove or update them so `nix flake check` stays green on the
+remaining examples.
+
+**Files**
+
+- `nix/images/examples/paperclip/` — full deletion.
+- `nix/images/examples/openclaw/` — full deletion.
+- Any aggregator flake that references these examples — drop
+  the now-dangling entries.
+
+**Tests**
+
+- `nix flake check` (in Lima) passes after deletion: no
+  dangling refs.
+- `git ls-files nix/images/examples/ | grep -E
+  '(paperclip|openclaw)'` returns nothing.
+
+**Estimate**: ½ hour. Smallest workstream in the sprint;
+slots in front of any other PR.
+
 ### C1 — init-script defects exposed by W3 live boot
 
 Two unrelated bugs surfaced in the same boot session:
@@ -183,6 +216,20 @@ Lima as part of `just w3-live-test` (see C4).
 preserved across snapshot — that's the investigation we owe
 upfront.
 
+**Investigation cap (1 day).** dm-verity-across-snapshot
+behaviour is undocumented in the firecracker-microvm spec; we
+won't know until we test. Cap the investigation at 1 day:
+
+- If dm-state IS preserved → ship the regression test +
+  runbook §6, close C2.
+- If NOT → file a follow-up plan for the in-rootfs recovery
+  handler (post-restore vsock RPC re-applies the verity
+  target), defer recovery code to sprint 45+, ship a
+  "verity-not-supported-in-snapshots-yet" doc note in the
+  same PR.
+
+Without this cap, C2 can eat the whole sprint.
+
 ### C3 — Apple Container live-boot smoke
 
 `crates/mvm-apple-container/src/macos.rs::start_vm` calls
@@ -252,6 +299,15 @@ C4 ships option 2. The `security.yml` workflow gains a
 `live-verity-boot` lane that's skipped on standard runners but
 enforced on tagged self-hosted runners.
 
+**Soft-gate acceptance note.** Until a self-hosted KVM runner
+is provisioned, the `live-verity-boot` lane skips silently on
+public GitHub-hosted runners (`[ -e /dev/kvm ]` returns false).
+W3 regressions caught only by operator-run `just w3-live-test`
+inside Lima during that window. Document this gap inline in
+the workflow's comment header so future maintainers don't
+assume the lane is enforcing — a green PR with the lane
+"skipped" is not the same as a green PR with the lane "passed."
+
 **Bonus: A.2 v2 latency comparison**
 
 Sprint 43 deferred a "cold-boot vs warm-VM latency" test
@@ -280,22 +336,67 @@ end on any KVM-capable runner.
 
 **Estimate**: 1-2 days.
 
+### C5 — L7 egress feature-gate (PR #23 follow-up)
+
+PR #23 landed `EgressMode::L3PlusL7` + `EgressProxy` trait +
+`StubEgressProxy` in `main`. The runtime that makes the
+variant actually filter traffic is plan 34, sized as its own
+future sprint. Today the variant is selectable from `mvmctl
+up --egress-mode l3-plus-l7` and silently passes through —
+`StubEgressProxy::apply_network_policy` is a no-op. A user
+who reads `--help` and picks the variant assumes filtering;
+gets none. Visible footgun.
+
+Feature-gate it. Ship now to remove the visibility without
+blocking on plan 34's runtime work.
+
+**Files**
+
+- `crates/mvm-core/Cargo.toml`: add `l7-egress` Cargo feature
+  (default off).
+- `crates/mvm-core/src/policy/network_policy.rs`: gate
+  `EgressMode::L3PlusL7`, the `EgressProxy` trait export, and
+  the `StubEgressProxy` instance behind
+  `#[cfg(feature = "l7-egress")]`.
+- `crates/mvm-cli/src/commands/vm/up.rs`: when parsing
+  `--egress-mode`, emit a clear error message (pointing at
+  plan 34) if the user passes `l3-plus-l7` and the feature
+  is off. Don't silently fall back to `l3-only`.
+- Plan 34's first PR flips the feature on.
+
+**Tests**
+
+- `cargo build -p mvm-cli` (default features): compiles, and
+  `mvmctl up --help | grep -F 'l3-plus-l7'` produces no output.
+- `cargo build -p mvm-cli --features l7-egress`: compiles,
+  and `mvmctl up --help` shows the variant.
+- CLI integration test (`crates/mvm-cli/tests/cli.rs` or
+  similar): with the default feature set, passing
+  `--egress-mode l3-plus-l7` returns an error whose message
+  contains `plan 34`.
+
+**Estimate**: ½ day.
+
 ## Sequencing
 
-C1 → C2 → C3 ‖ C4. C1 unblocks the rest by making the boot
-log noise-free; C2 has investigation depth that may extend the
-sprint; C3 is the lightest item and slots in opportunistically;
-C4 is independent and can land first or last.
+C0 → C1 → C2 → C3 ‖ C4 ‖ C5. C0 is the smallest workstream
+(½ hour) and slots in front. C1 unblocks the rest by making
+the boot log noise-free; C2 has investigation depth that may
+extend the sprint; C3 is the lightest of the verity-side
+items; C4 + C5 are independent and can land in any order
+relative to the boot-side workstreams.
 
 PR sequence:
 
-1. **PR-A**: C1 (init-script defects). Single PR, both fixes.
-2. **PR-B**: C2 (snapshot/restore parity). Includes a new
-   integration test + runbook §6.
-3. **PR-C**: C3 (Apple Container live-boot smoke). Tiny PR;
-   could be folded into PR-B if both are small.
-4. **PR-D**: C4 (live-KVM regression automation). Self-
+1. **PR-A**: C0 (housekeeping deletion). Tiny PR.
+2. **PR-B**: C1 (init-script defects). Single PR, both fixes.
+3. **PR-C**: C2 (snapshot/restore parity). New integration
+   test + runbook §6.
+4. **PR-D**: C3 (Apple Container live-boot smoke). Tiny PR;
+   could be folded into PR-C if both are small.
+5. **PR-E**: C4 (live-KVM regression automation). Self-
    contained.
+6. **PR-F**: C5 (L7 egress feature-gate). Self-contained.
 
 ## Out-of-sprint follow-ups (parked, not blocked on this sprint)
 

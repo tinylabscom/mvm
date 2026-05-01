@@ -47,6 +47,22 @@ The whole sprint is ~1 week of work and 4 small PRs.
 
 ## In-flight workstreams
 
+### C0 — Carryover housekeeping  🟡
+
+Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C0.
+½ hour, smallest PR; lands in front of everything else.
+
+- [ ] **C0.1** `git rm -r nix/images/examples/{paperclip,openclaw}/`
+      (W7.1 sandbox-blocked deletion from sprint 42's plan 31).
+- [ ] **C0.2** Audit `nix/images/examples/flake.nix` (or per-
+      example flake aggregator) for dangling references to the
+      deleted directories; remove or update so `nix flake check`
+      stays green.
+
+**Done when**: `git ls-files nix/images/examples/ | grep -E
+'(paperclip|openclaw)'` returns nothing and `nix flake check`
+on the remaining examples passes.
+
 ### C1 — Init-script defects exposed by W3 live boot  🟡
 
 Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C1.
@@ -127,28 +143,54 @@ Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C4.
 **Done when**: `just w3-live-test` exits 0 on Lima; CI lane
 skips cleanly on public runners.
 
+### C5 — L7 egress feature-gate (PR #23 follow-up)  🟡
+
+Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C5.
+½ day, 1 PR.
+
+- [ ] **C5.1** Add `l7-egress` Cargo feature to
+      `crates/mvm-core/Cargo.toml` (default off).
+- [ ] **C5.2** Gate `EgressMode::L3PlusL7` + `EgressProxy`
+      trait export + `StubEgressProxy` instance behind
+      `#[cfg(feature = "l7-egress")]`.
+- [ ] **C5.3** CLI parser in `crates/mvm-cli/src/commands/vm/up.rs`
+      rejects `--egress-mode l3-plus-l7` with a clear error
+      pointing at plan 34 when feature off.
+
+**Done when**: default `cargo build` doesn't expose
+`l3-plus-l7` in `mvmctl up --help`; `--features l7-egress`
+build does; default-build CLI rejection error contains
+"plan 34". Removes the user-visible footgun PR #23 left
+behind without blocking on plan 34's runtime backing.
+
 ## Success criteria
 
 By sprint close:
 
-1. ✅ Verity-enabled template boots cleanly with no init-script
+1. ✅ Sprint 42's W7.1 paperclip/openclaw deletion closed (C0).
+2. ✅ Verity-enabled template boots cleanly with no init-script
    warnings on console (C1).
-2. ✅ Snapshot/restore round-trip works for verity VMs (C2).
-3. ✅ Apple Container live boot of a verity template succeeds
+3. ✅ Snapshot/restore round-trip works for verity VMs (C2).
+4. ✅ Apple Container live boot of a verity template succeeds
    on macOS (C3).
-4. ✅ `just w3-live-test` exits 0 in Lima end-to-end (C4).
-5. ✅ Sprint 42 archived to `specs/backlog/42-microvm-hardening.md`.
+5. ✅ `just w3-live-test` exits 0 in Lima end-to-end (C4).
+6. ✅ L7 egress variant feature-gated; user can't silently pick
+   the no-op stub (C5).
+7. ✅ Sprint 42 archived to `specs/backlog/42-microvm-hardening.md`.
 
 ## Phasing
 
 PRs are independently mergeable. Suggested order:
 
-1. **PR-A**: C1 (init-script defects). Single PR, smallest.
-2. **PR-B**: C2 (snapshot/restore parity). Investigation may
+1. **PR-A**: C0 (housekeeping deletion). Tiny PR, lands first.
+2. **PR-B**: C1 (init-script defects). Single PR, both fixes.
+3. **PR-C**: C2 (snapshot/restore parity). Investigation may
    extend; ship the test + runbook entry, defer the
    `PostRestore` recovery handler if needed.
-3. **PR-C**: C3 (Apple Container smoke). Foldable.
-4. **PR-D**: C4 (live-KVM regression automation). Self-contained.
+4. **PR-D**: C3 (Apple Container smoke). Foldable into PR-C.
+5. **PR-E**: C4 (live-KVM regression automation).
+   Self-contained.
+6. **PR-F**: C5 (L7 egress feature-gate). Self-contained.
 
 ## Carryover from earlier sprints
 
@@ -160,7 +202,6 @@ but still need a home:
 | L7 egress runtime backing (mitmdump + CA + DNS pinning) | Sprint 43, [`plans/34-egress-l7-proxy.md`](plans/34-egress-l7-proxy.md) | Own sprint (already sized) |
 | Hosted MCP transport (HTTP/SSE) | Sprint 43, [`plans/33-hosted-mcp-transport.md`](plans/33-hosted-mcp-transport.md) | Cross-repo (mvmd) |
 | `mkNodeService` → `pkgs.buildNpmPackage` swap | Sprint 42 W7.4 deferred | Own follow-up; needs hello-node validation |
-| `nix rm` of `nix/images/examples/{paperclip,openclaw}/` | Sprint 42 W7.1 deferred (sandbox-blocked) | Manual `git rm` (½ hour) |
 
 ## Non-goals (named explicitly)
 
