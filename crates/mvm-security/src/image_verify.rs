@@ -237,6 +237,57 @@ pub fn verify_manifest(
     parse_manifest(manifest_bytes)
 }
 
+/// Verify a cosign-signed JSON payload (any shape), returning the
+/// validated bytes on success. Same trust contract as `verify_manifest`
+/// — Sigstore bundle signature checked against the expected identity
+/// and issuer — but generic over the payload type so callers can
+/// reuse the verifier for revocation lists, advisory feeds, or any
+/// other signed JSON the project publishes.
+///
+/// Plan 36 PR-C.3 introduced this so `mvm-cli`'s revocation-list
+/// fetcher doesn't have to depend on the `sigstore` crate directly:
+/// the verification primitive stays inside `mvm-security`.
+#[cfg(feature = "manifest-verify")]
+pub fn verify_signed_payload(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    expected_identity: &str,
+    expected_issuer: &str,
+) -> VerifyResult<()> {
+    use sigstore::bundle::Bundle;
+    use sigstore::bundle::verify::{blocking::Verifier, policy::Identity};
+
+    let bundle: Bundle =
+        serde_json::from_slice(cosign_bundle).map_err(|e| VerifyError::SignatureInvalid {
+            reason: format!("cosign bundle parse failed: {e}"),
+        })?;
+    let verifier = Verifier::production().map_err(|e| VerifyError::SignatureInvalid {
+        reason: format!("sigstore trust root init failed: {e}"),
+    })?;
+    let policy = Identity::new(expected_identity, expected_issuer);
+    verifier
+        .verify(payload_bytes, bundle, &policy, false)
+        .map_err(|e| VerifyError::SignatureInvalid {
+            reason: format!("payload signature verification failed: {e}"),
+        })?;
+    Ok(())
+}
+
+#[cfg(not(feature = "manifest-verify"))]
+pub fn verify_signed_payload(
+    _payload_bytes: &[u8],
+    _cosign_bundle: &[u8],
+    _expected_identity: &str,
+    _expected_issuer: &str,
+) -> VerifyResult<()> {
+    Err(VerifyError::SignatureInvalid {
+        reason: "manifest-verify feature is disabled in this build; rebuild \
+                 mvmctl with default features or set MVM_SKIP_COSIGN_VERIFY=1 \
+                 in an emergency rotation."
+            .to_string(),
+    })
+}
+
 /// No-feature fallback: refuse to accept any manifest as signed.
 ///
 /// Builds without `manifest-verify` (e.g. `cargo install

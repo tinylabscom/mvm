@@ -1099,7 +1099,167 @@ fn try_fetch_signed_manifest(
         ));
     }
 
+    // Plan 36 §Layer 4 step 4: consult the cosign-signed revocation
+    // list. Cached up to 24h; tolerated up to 7d offline. A signed
+    // image whose version is on the list hard-fails — recall is the
+    // primary mechanism for "we know this build is bad."
+    if let Some(revocations) = try_fetch_revocation_list()? {
+        image_verify::check_revocation(&manifest, &revocations).map_err(|e| {
+            anyhow::anyhow!(
+                "Dev image manifest is on the project's revocation list: {e}\n\
+                 \n\
+                 Plan 36 / ADR 005: a published `revocations` release entry has\n\
+                 marked v{version} unsafe to run. Refusing to use this image.\n\
+                 Upgrade mvmctl to a non-revoked release."
+            )
+        })?;
+    }
+
     Ok(Some(manifest))
+}
+
+/// Fetch + verify the project's signed revocation list, caching it
+/// under `~/.cache/mvm/revocations/`.
+///
+/// Plan 36 §Layer 4 step 4. The revocation list lives at a stable
+/// `revocations` release tag whose only assets are
+/// `revoked-versions.json` and its cosign bundle. Append-only across
+/// releases; updated by cutting a new entry on that tag.
+///
+/// Cache policy:
+///   - Refresh from upstream if the cached file is >24h old.
+///   - Tolerate up to 7d of cached staleness when the network is
+///     unavailable; surface a warning rather than blocking.
+///   - 404 on the upstream URL is treated as "no recalls today" —
+///     bootstrap state until the project publishes its first
+///     revocations entry. Returns Ok(None).
+///
+/// Returns Ok(None) when the list isn't available *and* we have no
+/// cached copy — caller proceeds without revocation enforcement (with
+/// a warning). Returns Err on signature verification failure.
+fn try_fetch_revocation_list() -> Result<Option<mvm_security::image_verify::RevocationList>> {
+    use mvm_security::image_verify;
+    use std::time::{Duration, SystemTime};
+
+    let cache_dir = format!("{}/revocations", mvm_core::config::mvm_cache_dir());
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("creating revocations cache dir {cache_dir}"))?;
+    let cache_json = format!("{cache_dir}/revoked-versions.json");
+    let cache_bundle = format!("{cache_dir}/revoked-versions.json.bundle");
+
+    let cache_age = std::fs::metadata(&cache_json)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .unwrap_or(Duration::from_secs(u64::MAX));
+
+    let twenty_four_hours = Duration::from_secs(24 * 60 * 60);
+    let seven_days = Duration::from_secs(7 * 24 * 60 * 60);
+
+    // Refresh if cache is stale (or absent).
+    if cache_age > twenty_four_hours {
+        let base = "https://github.com/auser/mvm/releases/download/revocations";
+        let json_url = format!("{base}/revoked-versions.json");
+        let bundle_url = format!("{base}/revoked-versions.json.bundle");
+
+        match url_exists(&json_url) {
+            Ok(true) => {
+                let tmp_json =
+                    tempfile::NamedTempFile::new().context("creating revocations tempfile")?;
+                let tmp_bundle = tempfile::NamedTempFile::new()
+                    .context("creating revocations bundle tempfile")?;
+                let tmp_json_path = tmp_json.path().to_string_lossy().into_owned();
+                let tmp_bundle_path = tmp_bundle.path().to_string_lossy().into_owned();
+                let download_result = download_file(&json_url, &tmp_json_path)
+                    .and_then(|()| download_file(&bundle_url, &tmp_bundle_path));
+                match download_result {
+                    Ok(()) => {
+                        std::fs::copy(&tmp_json_path, &cache_json)
+                            .context("caching revoked-versions.json")?;
+                        std::fs::copy(&tmp_bundle_path, &cache_bundle)
+                            .context("caching revoked-versions.json.bundle")?;
+                    }
+                    Err(e) if cache_age <= seven_days => {
+                        ui::warn(&format!(
+                            "Could not refresh revocation list ({e}); using cached copy \
+                             (last refreshed {} hours ago).",
+                            cache_age.as_secs() / 3600
+                        ));
+                    }
+                    Err(e) => {
+                        ui::warn(&format!(
+                            "Could not refresh revocation list ({e}) and no fresh cache \
+                             is available; proceeding without recall enforcement. \
+                             Plan 36 §Layer 4."
+                        ));
+                        return Ok(None);
+                    }
+                }
+            }
+            Ok(false) => {
+                // 404: the project hasn't published a revocations
+                // release yet. Bootstrap state — no recalls means
+                // nothing to enforce. Don't cache this; a future
+                // refresh should pick up the first published list.
+                return Ok(None);
+            }
+            Err(e) if cache_age <= seven_days => {
+                ui::warn(&format!(
+                    "Could not probe revocation list ({e}); using cached copy."
+                ));
+            }
+            Err(e) => {
+                ui::warn(&format!(
+                    "Could not probe revocation list ({e}) and no fresh cache \
+                     is available; proceeding without recall enforcement."
+                ));
+                return Ok(None);
+            }
+        }
+    }
+
+    // No cached file → nothing to enforce.
+    if !std::path::Path::new(&cache_json).exists() {
+        return Ok(None);
+    }
+
+    let json_bytes = std::fs::read(&cache_json).context("reading cached revocations.json")?;
+    let bundle_bytes =
+        std::fs::read(&cache_bundle).context("reading cached revocations.json.bundle")?;
+
+    // The revocations tag is signed by a dedicated revocations
+    // workflow's OIDC identity, not the per-release workflow. A
+    // separate identity ensures a leaked image-signing cert can't
+    // fabricate a permissive revocation list (and vice versa).
+    let expected_identity =
+        "https://github.com/auser/mvm/.github/workflows/revocations.yml@refs/tags/revocations";
+    let expected_issuer = "https://token.actions.githubusercontent.com";
+
+    if std::env::var_os("MVM_SKIP_COSIGN_VERIFY").is_some() {
+        // The same MVM_SKIP_COSIGN_VERIFY emergency-rotation escape
+        // hatch covers both the manifest and the revocation list.
+        // SHA-256 of artifacts still applies separately at the
+        // verify_artifact_hash callsite.
+        let list: image_verify::RevocationList = serde_json::from_slice(&json_bytes)
+            .context("parsing revocations JSON without signature verification")?;
+        return Ok(Some(list));
+    }
+
+    image_verify::verify_signed_payload(
+        &json_bytes,
+        &bundle_bytes,
+        expected_identity,
+        expected_issuer,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Revocation list signature verification failed: {e}. Refusing to \
+             trust an unverified recall. Plan 36 §Layer 4."
+        )
+    })?;
+    let list: image_verify::RevocationList =
+        serde_json::from_slice(&json_bytes).context("parsing verified revocations JSON")?;
+    Ok(Some(list))
 }
 
 /// HEAD-probe a URL. Returns Ok(true) when the resource is reachable
