@@ -105,6 +105,13 @@ pub enum LocalAuditKind {
     /// supervisor-driven snapshot suspend/resume.
     WorkloadWake,
     WorkloadSleep,
+    // --- Egress L7 (plan 34 / ADR-006) ---
+    /// Host CA for hypervisor-level L7 egress interception was
+    /// rotated. ADR-006 §"Decisions" 7 — rotation is explicit, not
+    /// implicit; every rotation lands in the audit log with old +
+    /// new fingerprints + the list of VMs whose per-VM leaves were
+    /// re-signed. Plan 34 §"Files (summary)".
+    EgressCaRotated,
 }
 
 /// A single local audit log entry.
@@ -482,11 +489,22 @@ mod tests {
             LocalAuditKind::ArtifactFetch,
             LocalAuditKind::WorkloadWake,
             LocalAuditKind::WorkloadSleep,
+            // Plan 34 / ADR-006 egress L7.
+            LocalAuditKind::EgressCaRotated,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
             assert!(!json.is_empty());
         }
+    }
+
+    #[test]
+    fn test_egress_ca_rotated_uses_snake_case_rename() {
+        // Pin the wire form so a future rename can't silently drift the
+        // audit log shape — downstream parsers (`mvmctl audit`,
+        // out-of-band log shippers) match on the literal string.
+        let json = serde_json::to_string(&LocalAuditKind::EgressCaRotated).unwrap();
+        assert_eq!(json, "\"egress_ca_rotated\"");
     }
 
     #[test]

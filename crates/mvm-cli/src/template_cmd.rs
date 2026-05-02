@@ -182,13 +182,20 @@ pub fn info(name: &str, json: bool) -> Result<()> {
         if let Some(policy) = &spec.default_network_policy {
             use mvm_core::policy::network_policy::NetworkPolicy;
             let summary = match policy {
-                NetworkPolicy::Preset { preset } => format!("preset={preset}"),
-                NetworkPolicy::AllowList { rules } => {
+                NetworkPolicy::Preset { preset, .. } => format!("preset={preset}"),
+                NetworkPolicy::AllowList { rules, .. } => {
                     let hosts: Vec<String> = rules.iter().map(|r| r.to_string()).collect();
                     format!("allowlist=[{}]", hosts.join(", "))
                 }
             };
-            println!("  Network: {summary}  (default; mvmctl up flags override)");
+            // Surface the baked egress mode override (plan 34) when
+            // present. None means "fall back to the host-wide
+            // default" — don't display anything in that case.
+            let mode_suffix = match policy.egress_mode() {
+                Some(mode) => format!(" egress_mode={mode}"),
+                None => String::new(),
+            };
+            println!("  Network: {summary}{mode_suffix}  (default; mvmctl up flags override)");
         }
 
         if let Some(rev) = &revision {
