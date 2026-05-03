@@ -116,8 +116,8 @@ impl RetryStormSuppressor {
     /// Record an observation. Returns whether the caller should
     /// emit a normal audit entry or drop it.
     pub fn observe(&mut self, key: DedupKey, now: DateTime<Utc>) -> Decision {
-        let window_chrono = chrono::TimeDelta::from_std(self.window)
-            .unwrap_or(chrono::TimeDelta::zero());
+        let window_chrono =
+            chrono::TimeDelta::from_std(self.window).unwrap_or(chrono::TimeDelta::zero());
 
         match self.seen.get_mut(&key) {
             None => {
@@ -158,8 +158,8 @@ impl RetryStormSuppressor {
     /// removed from internal state — a fresh observation later
     /// will re-emit (`Decision::Emit`) and reopen the bucket.
     pub fn flush(&mut self, now: DateTime<Utc>) -> Vec<RetryStormSummary> {
-        let window_chrono = chrono::TimeDelta::from_std(self.window)
-            .unwrap_or(chrono::TimeDelta::zero());
+        let window_chrono =
+            chrono::TimeDelta::from_std(self.window).unwrap_or(chrono::TimeDelta::zero());
         let mut out = Vec::new();
         self.seen.retain(|key, state| {
             let aged = now.signed_duration_since(state.last_seen) >= window_chrono;
@@ -212,7 +212,10 @@ mod tests {
     #[test]
     fn first_observation_emits() {
         let mut s = RetryStormSuppressor::new(Duration::from_secs(30));
-        assert_eq!(s.observe(key("egress.blocked", "evil.com"), t(0)), Decision::Emit);
+        assert_eq!(
+            s.observe(key("egress.blocked", "evil.com"), t(0)),
+            Decision::Emit
+        );
     }
 
     #[test]
