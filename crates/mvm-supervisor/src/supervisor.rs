@@ -187,10 +187,7 @@ impl Supervisor {
         // (clippy::await_holding_lock).
         let signer_id = signed.0.signer_id.clone();
         let nonce_check = {
-            let mut store = self
-                .nonce_store
-                .lock()
-                .expect("nonce store mutex poisoned");
+            let mut store = self.nonce_store.lock().expect("nonce store mutex poisoned");
             store.check_and_insert(&signer_id, &plan)
         };
         if let Err(e) = nonce_check {
@@ -204,10 +201,7 @@ impl Supervisor {
         // resource-allocating work so the trail is preserved even
         // if the backend fails next. Audit failure here fails the
         // launch fail-closed (§22 / B17: audit emits before forward).
-        if let Err(e) = self
-            .emit_admission_audit(&plan, "plan.admitted", "")
-            .await
-        {
+        if let Err(e) = self.emit_admission_audit(&plan, "plan.admitted", "").await {
             self.transition_or_warn(PlanState::Failed);
             return Err(e);
         }
@@ -290,7 +284,10 @@ impl Supervisor {
         match self.audit.sign_and_emit(&entry).await {
             Ok(()) => Ok(()),
             Err(crate::audit::AuditError::NotWired) => {
-                warn!(event, "audit signer not wired (Noop) — admission audit dropped");
+                warn!(
+                    event,
+                    "audit signer not wired (Noop) — admission audit dropped"
+                );
                 Ok(())
             }
             Err(e) => Err(SupervisorError::Audit(e.to_string())),
@@ -635,9 +632,9 @@ mod tests {
         let result = s.launch(&signed, &[("test", &vk)]).await;
         assert!(matches!(
             result,
-            Err(SupervisorError::Validity(PlanValidityError::NotYetValid {
-                ..
-            }))
+            Err(SupervisorError::Validity(
+                PlanValidityError::NotYetValid { .. }
+            ))
         ));
         assert_eq!(s.state.current(), PlanState::Failed);
         assert!(backend.launches().is_empty());
@@ -661,9 +658,9 @@ mod tests {
         let result = s.launch(&signed, &[("test", &vk)]).await;
         assert!(matches!(
             result,
-            Err(SupervisorError::Validity(PlanValidityError::NonceReplay {
-                ..
-            }))
+            Err(SupervisorError::Validity(
+                PlanValidityError::NonceReplay { .. }
+            ))
         ));
         // Backend was called exactly once (the original launch).
         assert_eq!(backend.launches(), vec![plan.plan_id.clone()]);
@@ -836,8 +833,10 @@ mod tests {
         // admission audit entry verbatim (§22 — the "what was the
         // contract" record).
         let mut plan = sample_plan();
-        plan.audit_labels.insert("workflow".to_string(), "etl-9".to_string());
-        plan.audit_labels.insert("env".to_string(), "prod".to_string());
+        plan.audit_labels
+            .insert("workflow".to_string(), "etl-9".to_string());
+        plan.audit_labels
+            .insert("env".to_string(), "prod".to_string());
         let (signed, _sk, vk) = sign_sample(&plan);
         let backend = Arc::new(MockBackend::new());
         let (mut s, audit) = make_supervisor_with_audit(backend.clone());
