@@ -236,10 +236,7 @@ pub enum HostBoundResponse {
     /// language runtimes — the guest reconstructs the
     /// `chrono::DateTime<Utc>` (or platform equivalent) locally.
     /// `unix_nanos` is the sub-second component, in `[0, 1_000_000_000)`.
-    HostTime {
-        unix_seconds: i64,
-        unix_nanos: u32,
-    },
+    HostTime { unix_seconds: i64, unix_nanos: u32 },
     /// Error from host agent.
     Error { message: String },
 }

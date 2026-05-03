@@ -47,11 +47,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             mvm_core::audit::emit(
                 mvm_core::audit::LocalAuditKind::VmStop,
                 Some(n),
-                Some(if result.is_ok() {
-                    "ok"
-                } else {
-                    "stop_failed"
-                }),
+                Some(if result.is_ok() { "ok" } else { "stop_failed" }),
             );
             result
         }
