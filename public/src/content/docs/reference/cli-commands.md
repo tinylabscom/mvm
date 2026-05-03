@@ -17,14 +17,14 @@ description: Complete command reference for mvmctl.
 | `mvmctl up -v host:guest:size` | Mount a volume into the VM (repeatable) |
 | `mvmctl up -d` | Run in background (detached mode, via launchd) |
 | `mvmctl up --forward` | Auto-forward declared ports after boot (blocks until Ctrl-C) |
-| `mvmctl up --hypervisor <backend>` | Force backend: `firecracker`, `apple-container`, `docker`, or `qemu` |
+| `mvmctl up --hypervisor <backend>` | Backend: `firecracker` (default), `apple-container`, `docker`, or `qemu` |
 | `mvmctl up --config <path>` | Runtime config (TOML) for persistent resources/volumes |
 | `mvmctl up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
 | `mvmctl up --watch` | Watch flake for changes and auto-rebuild + reboot |
 | `mvmctl up --network-preset <preset>` | Network egress policy: `unrestricted` (default), `none`, `registries`, `dev`, `agent` (LLM-inference + GitHub bundle — see [ADR-004](https://github.com/auser/mvm/blob/main/specs/adrs/004-hypervisor-egress-policy.md)) |
 | `mvmctl up --network-allow host:port` | Allow egress to specific host:port (repeatable, mutually exclusive with preset) |
-| `mvmctl up --seccomp <tier>` | Seccomp profile: `essential`, `minimal`, `standard`, `network`, `unrestricted` (default) |
+| `mvmctl up --seccomp <tier>` | Seccomp profile: `essential`, `minimal`, `standard` (default), `network`, `unrestricted`. Default flipped from `unrestricted` → `standard` per ADR-002 §W1.1. |
 | `mvmctl up --secret KEY:host` | Bind a secret to a domain (repeatable; see [Config & Secrets](/guides/config-secrets/)) |
 | `mvmctl up --network <name>` | Named dev network to attach VM to (default: "default") |
 | `mvmctl down [name]` | Stop VMs by name, or all if omitted |
@@ -53,10 +53,15 @@ description: Complete command reference for mvmctl.
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
 | `mvmctl dev up --lima` | Force Lima backend even on macOS 26+ |
+| `mvmctl dev up --shell` (or `-s`) | Open an interactive shell after starting |
 | `mvmctl dev down` | Stop the Lima development VM |
+| `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
 | `mvmctl dev shell` | Open a shell in the running Lima VM |
 | `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
 | `mvmctl dev status` | Show dev environment status (Lima VM, Firecracker, Nix versions) |
+| `mvmctl dev rebuild` | Stop, clear cache, and rebuild + restart the dev VM |
+| `mvmctl dev rebuild --shell` (or `-s`) | Open an interactive shell after rebuilding |
+| `mvmctl dev import-image <path>` | Side-load a pre-built dev image artifact into the cache (air-gapped install path; from plan 36 sealed builder image) |
 | `mvmctl doctor` | Run system diagnostics and dependency checks |
 | `mvmctl doctor --json` | Output diagnostics as JSON |
 | `mvmctl update` | Check for and install mvmctl updates |
@@ -307,6 +312,7 @@ All commands accept these global options:
 |--------|-------------|
 | `--log-format <human\|json>` | Log format: human (default) or json (structured) |
 | `--fc-version <VERSION>` | Override Firecracker version (e.g., v1.14.0) |
+| `--verbose` (alias `--debug`) | Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set. |
 
 ## Environment Variables
 
@@ -336,3 +342,19 @@ All commands accept these global options:
 | `MVM_TEMPLATE_NO_LOCAL_PROBE` | Set to `1` to skip the local-endpoint probe in `auto` mode (CI / sandboxed environments where loopback connects can hang) | Unset |
 | `MVM_PRODUCTION` | Enable production mode checks | `false` |
 | `RUST_LOG` | Logging level (e.g., `debug`, `mvm=trace`) | `info` |
+| `MVM_CACHE_DIR` | Override cache directory | `~/.cache/mvm` |
+| `MVM_CONFIG_DIR` | Override config directory | XDG default |
+| `MVM_STATE_DIR` | Override state directory | XDG default |
+| `MVM_SHARE_DIR` | Override share directory | XDG default |
+| `MVM_DEV_FLAKE_URL` | Escape hatch for the dev-build's chained `--override-input mvm` target. Suppresses the chained `mvm/mvm` override when set. | Unset (resolves to local `nix/dev/`) |
+| `MVM_SRC` | Override the source repo path passed to `nix build` during dev builds | Workspace root |
+| `MVM_BUILDER_AGENT_BIN` | Override the path to the builder-agent binary baked into the builder VM image | Auto-detected from build closure |
+| `MVM_BUILDER_AGENT_PORT` | Vsock port the builder agent listens on | `54_321` |
+| `MVM_BUILDER_AUTHORIZED_KEY` | SSH public key authorized to drive the builder VM via SSH transport (vs vsock) | Unset |
+| `MVM_MCP_SESSION_IDLE` | MCP session idle timeout in seconds | `300` |
+| `MVM_MCP_SESSION_MAX` | MCP session maximum lifetime in seconds | `1800` |
+| `MVM_MCP_MAX_INFLIGHT` | Max concurrent in-flight `tools/call run` invocations | `8` |
+| `MVM_MCP_MEM_CEILING_MIB` | Per-call memory ceiling enforced before dispatching to a microVM | `8192` |
+| `MVM_TENANT_KEY_<ID>` | Per-tenant encryption key for the keystore (one var per tenant ID) | None |
+| `MVM_SKIP_COSIGN_VERIFY` | Set to `1` to bypass cosign signature verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |
+| `MVM_SKIP_HASH_VERIFY` | Set to `1` to bypass SHA-256 verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |
