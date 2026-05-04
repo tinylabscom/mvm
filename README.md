@@ -51,7 +51,7 @@ mvmctl up --flake .
 mvmctl up --flake . -d -p 8080:8080
 
 # Run from a pre-built template
-mvmctl up --template my-app --name app1
+mvmctl up --manifest my-app --name app1
 
 # List running VMs
 mvmctl ls
@@ -157,11 +157,11 @@ mvmctl template build my-app
 mvmctl template build my-app --snapshot
 
 # Run from template
-mvmctl up --template my-app --name app1
+mvmctl up --manifest my-app --name app1
 
 # Run multiple instances with different configs from same snapshot
-mvmctl up --template my-app --name prod -v ./prod/config:/mnt/config -p 3000:3000
-mvmctl up --template my-app --name staging -v ./staging/config:/mnt/config -p 3001:3000
+mvmctl up --manifest my-app --name prod -v ./prod/config:/mnt/config -p 3000:3000
+mvmctl up --manifest my-app --name staging -v ./staging/config:/mnt/config -p 3001:3000
 
 # Share via S3-compatible registry
 mvmctl template push my-app
@@ -184,7 +184,7 @@ mvmctl template delete my-app
 | Command | Description |
 |---------|-------------|
 | `mvmctl up --flake <ref>` | Build and run a VM from a Nix flake (aliases: `run`, `start`) |
-| `mvmctl up --template <name>` | Run from a pre-built template |
+| `mvmctl up --manifest <path>` | Boot a pre-built manifest (path to `mvm.toml` / its dir, or legacy slot name) |
 | `mvmctl up -d` | Run in background (detached, via launchd) |
 | `mvmctl up -p HOST:GUEST` | Port mapping (repeatable) |
 | `mvmctl up -v host:guest:size` | Volume mount (repeatable) |

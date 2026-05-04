@@ -7,8 +7,8 @@ description: Complete command reference for mvmctl.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl up --flake <ref>` | Build and run a VM from a Nix flake (aliases: `run`, `start`) |
-| `mvmctl up --template <name>` | Run from a pre-built template (skip build) |
+| `mvmctl up --flake <ref>` | Build and run a VM from a Nix flake |
+| `mvmctl up --manifest <path>` | Boot a pre-built manifest (path to `mvm.toml`, its directory, or a legacy slot name; mutually exclusive with `--flake`). Short form: `-m <path>` |
 | `mvmctl up --name <name>` | Specify VM name (auto-generated if omitted) |
 | `mvmctl up --profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl up --cpus N --memory SIZE` | Override vCPU count and memory (supports 512M, 4G, etc.) |
@@ -182,7 +182,7 @@ the feature, so the handler is not present in the binary at all.
 | Command | Description |
 |---------|-------------|
 | `mvmctl exec -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
-| `mvmctl exec --template <name> -- <cmd>...` | Boot a registered template instead of the default |
+| `mvmctl exec --manifest <name> -- <cmd>...` | Boot a registered template instead of the default |
 | `mvmctl exec --launch-plan <path> ` | Run the entrypoint from an [mvmforge](https://github.com/tinylabscom/decorationer) document — either the `launch.json` artifact (top-level `entrypoint`) or the Workload IR manifest (top-level `apps[]`). Mutually exclusive with trailing argv |
 | `mvmctl exec --add-dir HOST:GUEST[:MODE] -- <cmd>` | Mount a host directory inside the guest. `MODE` is `ro` (default — writes discarded) or `rw` (writes rsynced back to the host after the command exits — see [ADR-002](/contributing/adr/002-writable-add-dir/)). Repeatable |
 | `mvmctl exec --env KEY=VAL -- <cmd>` | Inject an environment variable. Repeatable. Overrides any env vars carried by `--launch-plan` |
@@ -193,7 +193,7 @@ Examples:
 
 ```bash
 mvmctl exec -- uname -a                                # default image
-mvmctl exec --template minimal -- /bin/true            # named template
+mvmctl exec --manifest minimal -- /bin/true            # named template
 mvmctl exec --add-dir .:/work -- ls /work              # share current dir, RO
 mvmctl exec --add-dir .:/work:rw -- touch /work/x      # writable, rsynced back
 mvmctl exec -e DEBUG=1 -- env | grep DEBUG             # env var injection
@@ -204,7 +204,7 @@ mvmctl exec --launch-plan ./launch.json                # mvmforge entrypoint
 
 `--launch-plan` accepts either of mvmforge's two JSON documents — the
 shape is auto-detected. Only the entrypoint is consumed (image selection
-still comes from `--template` or the bundled default in v1).
+still comes from `--manifest` or the bundled default in v1).
 
 **LaunchPlan artifact** (`mvmforge compile`'s `launch.json`, top-level
 `entrypoint`):
@@ -246,7 +246,7 @@ highest): top-level/app `env` → `entrypoint.env` → CLI `--env`.
 
 ### Snapshot restore
 
-When the request boots a registered template (`--template <name>`) and
+When the request boots a registered template (`--manifest <name>`) and
 that template has a captured snapshot, `mvmctl exec` restores from the
 snapshot instead of cold-booting — typically sub-second on Linux/KVM.
 
@@ -265,7 +265,7 @@ the full background.
 
 ## Default microVM Image
 
-When an image-taking command is invoked without `--flake` or `--template`,
+When an image-taking command is invoked without `--flake` or `--manifest`,
 `mvmctl` falls back to a bundled minimal image (busybox + the guest agent).
 This applies to:
 
@@ -274,7 +274,7 @@ This applies to:
 
 The image is built from `nix/default-microvm/` on first use and cached at
 `~/.cache/mvm/default-microvm/` (kernel + rootfs). Nix is required to build
-it; pass `--template` or `--flake` if Nix isn't available on your host.
+it; pass `--manifest` or `--flake` if Nix isn't available on your host.
 
 ## Cache
 

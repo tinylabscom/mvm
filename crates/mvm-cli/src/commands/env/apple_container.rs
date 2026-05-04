@@ -1695,8 +1695,8 @@ fn find_dev_image_flake() -> Result<String> {
 /// Locate the bundled `nix/images/default-tenant/` flake.
 ///
 /// This is the fallback used by image-taking commands (`mvmctl exec`,
-/// `mvmctl up`/`run`/`start`) when neither `--flake` nor `--template` is
-/// supplied. (Was `nix/default-microvm/` before W7.3.)
+/// `mvmctl up`) when neither `--flake` nor `--manifest` is supplied.
+/// (Was `nix/default-microvm/` before W7.3.)
 fn find_default_microvm_flake() -> Result<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = std::path::Path::new(manifest_dir)
@@ -1718,7 +1718,7 @@ fn find_default_microvm_flake() -> Result<String> {
 
 /// Ensure the bundled default microVM image (kernel + rootfs) is in the cache.
 ///
-/// Used by any image-taking command when no `--flake` or `--template` was
+/// Used by any image-taking command when no `--flake` or `--manifest` was
 /// supplied. Builds via Nix on first use and caches under
 /// `~/.cache/mvm/default-microvm/`. Returns `(kernel_path, rootfs_path)`.
 ///

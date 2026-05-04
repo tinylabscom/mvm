@@ -65,7 +65,7 @@ Snapshot may be corrupted after a Firecracker version change.
 **Fix**: Delete the snapshot and cold boot:
 ```bash
 mvmctl template build <template> --force
-mvmctl up --template <template> --name <name>
+mvmctl up --manifest <template> --name <name>
 ```
 
 ## Build Issues

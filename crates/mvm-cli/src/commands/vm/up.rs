@@ -26,11 +26,12 @@ use super::shared::{
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     /// Nix flake reference (local path or remote URI)
-    #[arg(long, value_parser = clap_flake_ref, conflicts_with = "template")]
+    #[arg(long, value_parser = clap_flake_ref, conflicts_with = "manifest")]
     pub flake: Option<String>,
-    /// Run from a pre-built template (skip build)
-    #[arg(long)]
-    pub template: Option<String>,
+    /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
+    /// legacy slot name). Mutually exclusive with `--flake`.
+    #[arg(short = 'm', long)]
+    pub manifest: Option<String>,
     /// VM name (auto-generated if omitted)
     #[arg(long, value_parser = clap_vm_name)]
     pub name: Option<String>,
@@ -105,16 +106,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let effective_cpus = args.cpus.or(Some(cfg.default_cpus));
     let effective_memory = memory_mb.or(Some(cfg.default_memory_mib));
 
-    // Plan 38 §4: `--template <PATH>` accepts a manifest path or its
+    // Plan 38 §4: `--manifest <PATH>` accepts a manifest path or its
     // directory in addition to legacy names. Resolve the arg up front
     // and substitute the slot hash for downstream lookups; the
     // dispatched variants in lifecycle.rs branch on
     // `is_slot_hash_dirname` internally so the rest of `cmd_run`
     // doesn't need to know whether a name or a slot hash was used.
-    let resolved_template_arg: Option<String> = match args.template.as_deref() {
-        Some(arg) => match super::shared::resolve_template_arg(arg)? {
-            super::shared::TemplateArgRef::Name(n) => Some(n),
-            super::shared::TemplateArgRef::Slot { slot_hash } => Some(slot_hash),
+    let resolved_template_arg: Option<String> = match args.manifest.as_deref() {
+        Some(arg) => match super::shared::resolve_manifest_arg(arg)? {
+            super::shared::ManifestArgRef::Name(n) => Some(n),
+            super::shared::ManifestArgRef::Slot { slot_hash } => Some(slot_hash),
         },
         None => None,
     };
@@ -456,7 +457,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             1,
             2,
             &format!(
-                "No --flake or --template; using bundled default microVM image for '{}'",
+                "No --flake or --manifest; using bundled default microVM image for '{}'",
                 vm_name
             ),
         );

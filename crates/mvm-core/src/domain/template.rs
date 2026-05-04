@@ -103,9 +103,9 @@ pub fn template_snapshot_dir(template_id: &str, revision: &str) -> String {
 
 /// Metadata about a template's pre-built Firecracker snapshot.
 ///
-/// Created by `template build --snapshot` after booting the VM and
-/// waiting for the service to become healthy. Used by `run --template`
-/// to restore the VM instantly instead of cold-booting.
+/// Created by `mvmctl build --snapshot` after booting the VM and
+/// waiting for the service to become healthy. Used by `mvmctl up
+/// --manifest` to restore the VM instantly instead of cold-booting.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotInfo {
     pub created_at: String,

@@ -364,8 +364,8 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
 /// `id_or_slot` looks like a 64-char lowercase-hex slot hash, or to
 /// the legacy name-keyed function otherwise.
 ///
-/// Used by `mvmctl up`/`run`/`exec` so the CLI can resolve a
-/// `--template <PATH>` argument to a slot hash and pass it through
+/// Used by `mvmctl up` / `mvmctl exec` so the CLI can resolve a
+/// `--manifest <PATH>` argument to a slot hash and pass it through
 /// unchanged. Returns the same shape as [`template_artifacts`].
 #[instrument(skip_all, fields(id_or_slot = id_or_slot))]
 pub fn template_artifacts_dispatched(
@@ -1355,7 +1355,7 @@ pub fn template_build_with_snapshot(id: &str, force: bool, update_hash: bool) ->
         "Snapshot created for template '{}' ({}MB total)",
         id, total_mb
     ));
-    ui::info("Use 'mvmctl run --template' for instant starts from this snapshot.");
+    ui::info("Use 'mvmctl up --manifest' for instant starts from this snapshot.");
 
     Ok(())
 }

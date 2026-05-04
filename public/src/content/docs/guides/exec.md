@@ -13,7 +13,7 @@ Think `docker run --rm`, but with a microVM as the isolation boundary.
 ```bash
 mvmctl exec -- uname -a
 mvmctl exec --add-dir .:/work -- ls /work
-mvmctl exec --template my-tpl -- /bin/true
+mvmctl exec --manifest my-tpl -- /bin/true
 mvmctl exec --launch-plan ./launch.json
 ```
 
@@ -37,7 +37,7 @@ mvmctl exec --launch-plan ./launch.json
 
 ## The bundled default image
 
-If you don't pass `--template` or `--flake`, `mvmctl exec` boots the
+If you don't pass `--manifest` or `--flake`, `mvmctl exec` boots the
 bundled default image:
 
 - Defined by [`nix/default-microvm/`](https://github.com/auser/mvm/tree/main/nix/default-microvm)
@@ -45,10 +45,10 @@ bundled default image:
   guest agent. No extra packages.
 - Built via Nix on first use, cached at `~/.cache/mvm/default-microvm/`
   (kernel + rootfs).
-- Identical for every invocation that doesn't pass `--template`.
+- Identical for every invocation that doesn't pass `--manifest`.
 
 If your host has no working Nix builder, `mvmctl exec` will fail with a
-clear error. Pass `--template <name>` (a registered template you've
+clear error. Pass `--manifest <name>` (a registered template you've
 already built) to skip the Nix path.
 
 ## Sharing host directories: `--add-dir`
@@ -129,7 +129,7 @@ CLI `--env` overrides any env vars the launch plan carries (see below).
 
 ## Snapshot restore (registered templates)
 
-When you pass `--template <name>` and that template has a captured
+When you pass `--manifest <name>` and that template has a captured
 snapshot, `mvmctl exec` restores from the snapshot instead of cold-booting.
 This skips the kernel boot and service-start cost -- typically sub-second
 on Linux/KVM.
@@ -174,7 +174,7 @@ mvmctl exec --launch-plan manifest.json
 ```
 
 Only the entrypoint is consumed in v1; image selection still comes from
-`--template` or the bundled default.
+`--manifest` or the bundled default.
 
 **LaunchPlan artifact** (`mvmforge compile`'s `launch.json` output):
 
@@ -244,7 +244,7 @@ highest):
   `mvmctl` ships with. Production guest images omit the feature and the
   Exec handler is physically absent from the binary.
 - **Network access.** The guest gets the same network configuration
-  any other transient VM gets -- if your `--template` exposes outbound
+  any other transient VM gets -- if your `--manifest` exposes outbound
   internet, so does `mvmctl exec` from that template.
 - **Stdin** is currently *not* forwarded to the guest. Pipe data via a
   `--add-dir`-shared file instead. Streaming stdin is a future

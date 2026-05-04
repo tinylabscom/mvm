@@ -15,17 +15,17 @@ limactl shell mvm-builder
 ```
 
 Examples:
-- `limactl shell mvm-builder -- cargo run --quiet -- template build openclaw --force`
-- `limactl shell mvm-builder -- cargo run --quiet -- run --template openclaw --name oc`
+- `limactl shell mvm-builder -- cargo run --quiet -- build openclaw --force`
+- `limactl shell mvm-builder -- cargo run --quiet -- up --manifest openclaw --name oc`
 - `limactl shell mvm-builder -- cargo run --quiet -- logs oc`
-- `limactl shell mvm-builder -- cargo run --quiet -- stop oc`
+- `limactl shell mvm-builder -- cargo run --quiet -- down oc`
 - `limactl shell mvm-builder -- nix build .#packages.aarch64-linux.default`
 - `limactl shell mvm-builder -- nix path-info -rsh /nix/store/<hash>`
 - `limactl shell mvm-builder -- cargo test --workspace`
 - `limactl shell mvm-builder -- cargo clippy --workspace -- -D warnings`
 - `limactl shell mvm-builder -- cargo check --workspace`
 
-**Important:** `mvmctl` (via `cargo run`) commands like `template build`, `run`, `stop`, `logs`, and `status` must be run inside the Lima VM — they talk to Firecracker which only runs inside Linux. `cargo test`, `cargo clippy`, and `cargo check` must also run inside the Lima VM to ensure correct Linux-target compilation and test execution. The `cargo run -- dev` bootstrap command is the only one that runs on the macOS host directly.
+**Important:** `mvmctl` (via `cargo run`) commands like `build`, `up`, `down`, `logs`, and `ls` must be run inside the Lima VM — they talk to Firecracker which only runs inside Linux. `cargo test`, `cargo clippy`, and `cargo check` must also run inside the Lima VM to ensure correct Linux-target compilation and test execution. The `cargo run -- dev` bootstrap command is the only one that runs on the macOS host directly.
 
 ## Worktree Workflow for Features
 

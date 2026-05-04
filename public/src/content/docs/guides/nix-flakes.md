@@ -257,12 +257,11 @@ mkdir -p ~/.config/mvm/secrets
 printf '%s\n' 'sk-ant-…' > ~/.config/mvm/secrets/anthropic
 chmod 0400 ~/.config/mvm/secrets/anthropic
 
-mvmctl template create claude-code-vm \
-  --flake ./nix/images/examples/llm-agent \
-  --profile minimal --role agent --cpus 2 --mem 1024
-mvmctl template build claude-code-vm
+mvmctl init claude-code-vm --preset minimal
+$EDITOR claude-code-vm/mvm.toml      # set flake = "../nix/images/examples/llm-agent"
+mvmctl build claude-code-vm
 
-mvmctl up --template claude-code-vm \
+mvmctl up --manifest claude-code-vm \
   --add-dir "$PWD:/workspace:rw" \
   --secret-file "$HOME/.config/mvm/secrets/anthropic:claude-code/anthropic-api-key"
 ```

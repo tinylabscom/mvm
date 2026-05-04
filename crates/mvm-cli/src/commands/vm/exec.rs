@@ -12,12 +12,13 @@ use crate::ui;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// Pre-built template to boot. If omitted, the bundled
+    /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
+    /// legacy slot name). If omitted, the bundled
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
     /// cached at `~/.cache/mvm/default-microvm/`). Each invocation boots a
     /// fresh transient microVM — never the long-running `mvmctl dev` VM.
-    #[arg(long)]
-    pub template: Option<String>,
+    #[arg(short = 'm', long)]
+    pub manifest: Option<String>,
     /// vCPU cores (default: 2)
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -87,21 +88,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
         env_pairs.push((k.to_string(), v.to_string()));
     }
-    // Plan 38 §4: --template <PATH> accepts a manifest path / dir in
+    // Plan 38 §4: --manifest <PATH> accepts a manifest path / dir in
     // addition to legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
     // hash (manifest), and the dispatched lifecycle helpers handle
     // both keys transparently.
-    let image = match args.template {
+    let image = match args.manifest {
         Some(arg) => {
-            let resolved = match super::shared::resolve_template_arg(&arg)? {
-                super::shared::TemplateArgRef::Name(n) => n,
-                super::shared::TemplateArgRef::Slot { slot_hash } => slot_hash,
+            let resolved = match super::shared::resolve_manifest_arg(&arg)? {
+                super::shared::ManifestArgRef::Name(n) => n,
+                super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
             };
             crate::exec::ImageSource::Template(resolved)
         }
         None => {
-            ui::info("No --template specified; using bundled default microVM image.");
+            ui::info("No --manifest specified; using bundled default microVM image.");
             let (kernel_path, rootfs_path) = ensure_default_microvm_image()?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,

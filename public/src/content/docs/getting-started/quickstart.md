@@ -81,7 +81,7 @@ mvmctl template create base-worker \
     --cpus 2 --mem 1024
 
 mvmctl template build base-worker
-mvmctl up --template base-worker
+mvmctl up --manifest base-worker
 ```
 
 ## 5. Image Catalog
@@ -108,14 +108,14 @@ mvmctl console myvm --command "ls -la" # One-shot command
 
 `mvmctl exec` boots a fresh transient microVM, runs a single command, and tears
 it down on exit -- like `docker run --rm`, but with a Firecracker microVM as
-the sandbox. No `--flake` or `--template` needed; the bundled default image
+the sandbox. No `--flake` or `--manifest` needed; the bundled default image
 boots automatically the first time.
 
 ```bash
 mvmctl exec -- uname -a                            # bundled default image
 mvmctl exec --add-dir .:/work -- ls /work          # share host dir, read-only
 mvmctl exec --env DEBUG=1 -- env | grep DEBUG      # inject env vars
-mvmctl exec --template my-tpl -- /bin/true         # registered template
+mvmctl exec --manifest my-tpl -- /bin/true         # registered template
 ```
 
 When you reuse a registered template that has a captured snapshot, exec

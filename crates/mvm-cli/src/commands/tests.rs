@@ -186,7 +186,7 @@ fn test_run_defaults() {
     match cli.command {
         Commands::Up(up::Args {
             flake,
-            template,
+            manifest,
             name,
             profile,
             cpus,
@@ -196,7 +196,7 @@ fn test_run_defaults() {
             ..
         }) => {
             assert_eq!(flake, Some(".".to_string()));
-            assert!(template.is_none(), "template should be None when omitted");
+            assert!(manifest.is_none(), "manifest should be None when omitted");
             assert!(name.is_none(), "name should be None when omitted");
             assert!(profile.is_none(), "profile should be None when omitted");
             assert!(cpus.is_none(), "cpus should be None when omitted");
@@ -204,47 +204,59 @@ fn test_run_defaults() {
             assert_eq!(volume.len(), 0);
             assert_eq!(hypervisor, "firecracker");
         }
-        _ => panic!("Expected Run command"),
+        _ => panic!("Expected Up command"),
     }
 }
 
 #[test]
-fn test_run_without_source_uses_default_microvm() {
-    // No --flake / --template: the dispatcher falls back to the bundled
+fn test_up_without_source_uses_default_microvm() {
+    // No --flake / --manifest: the dispatcher falls back to the bundled
     // default microVM image. Clap should accept the bare invocation; the
     // dispatcher then resolves the image at runtime.
     let cli = Cli::try_parse_from(["mvmctl", "up"]).expect("parse");
     match cli.command {
         Commands::Up(up::Args {
-            flake, template, ..
+            flake, manifest, ..
         }) => {
             assert!(flake.is_none(), "no --flake should be parsed");
-            assert!(template.is_none(), "no --template should be parsed");
+            assert!(manifest.is_none(), "no --manifest should be parsed");
         }
-        _ => panic!("Expected Run command"),
+        _ => panic!("Expected Up command"),
     }
 }
 
 #[test]
-fn test_run_template_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--template", "openclaw"]).unwrap();
+fn test_up_manifest_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "up", "--manifest", "openclaw"]).unwrap();
     match cli.command {
         Commands::Up(up::Args {
-            flake, template, ..
+            flake, manifest, ..
         }) => {
             assert!(flake.is_none());
-            assert_eq!(template, Some("openclaw".to_string()));
+            assert_eq!(manifest, Some("openclaw".to_string()));
         }
-        _ => panic!("Expected Run command"),
+        _ => panic!("Expected Up command"),
     }
 }
 
 #[test]
-fn test_run_flake_and_template_conflict() {
-    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--template", "openclaw"]);
+fn test_up_manifest_short_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "up", "-m", "openclaw"]).unwrap();
+    match cli.command {
+        Commands::Up(up::Args { manifest, .. }) => {
+            assert_eq!(manifest, Some("openclaw".to_string()));
+        }
+        _ => panic!("Expected Up command"),
+    }
+}
+
+#[test]
+fn test_up_flake_and_manifest_conflict() {
+    let result =
+        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--manifest", "openclaw"]);
     assert!(
         result.is_err(),
-        "--flake and --template should be mutually exclusive"
+        "--flake and --manifest should be mutually exclusive"
     );
 }
 
@@ -1141,11 +1153,11 @@ fn test_console_with_command() {
 // --- Exec CLI tests ---
 
 #[test]
-fn exec_default_template_argv_only() {
+fn exec_default_manifest_argv_only() {
     let cli = Cli::try_parse_from(["mvmctl", "exec", "--", "uname", "-a"]).expect("parse");
     match cli.command {
         Commands::Exec(exec::Args {
-            template,
+            manifest,
             cpus,
             memory,
             add_dir,
@@ -1154,7 +1166,7 @@ fn exec_default_template_argv_only() {
             launch_plan,
             argv,
         }) => {
-            assert!(template.is_none(), "template should default to None");
+            assert!(manifest.is_none(), "manifest should default to None");
             assert_eq!(cpus, 2);
             assert_eq!(memory, "512M");
             assert!(add_dir.is_empty());
@@ -1200,11 +1212,11 @@ fn exec_launch_plan_conflicts_with_argv() {
 }
 
 #[test]
-fn exec_with_template_and_resources() {
+fn exec_with_manifest_and_resources() {
     let cli = Cli::try_parse_from([
         "mvmctl",
         "exec",
-        "--template",
+        "--manifest",
         "my-tpl",
         "--cpus",
         "4",
@@ -1216,13 +1228,13 @@ fn exec_with_template_and_resources() {
     .expect("parse");
     match cli.command {
         Commands::Exec(exec::Args {
-            template,
+            manifest,
             cpus,
             memory,
             argv,
             ..
         }) => {
-            assert_eq!(template.as_deref(), Some("my-tpl"));
+            assert_eq!(manifest.as_deref(), Some("my-tpl"));
             assert_eq!(cpus, 4);
             assert_eq!(memory, "1G");
             assert_eq!(argv, vec!["/bin/true".to_string()]);
