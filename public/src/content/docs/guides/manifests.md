@@ -3,7 +3,7 @@ title: Manifests
 description: How mvmctl turns a flake + an mvm.toml into a running microVM.
 ---
 
-> **Status:** this guide describes the **plan-38 manifest model**, rolling out across slices 1-9 on `feat/manifest-driven-template-dx-claude`. Slices 1-4 (typed primitives + slot-keyed runtime) are committed; the CLI surface (slices 5-7) is in flight. Once landed, the old `mvmctl template *` namespace is removed outright — there is no deprecation alias.
+> **Status:** this guide describes the **plan-38 manifest model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is `mvm.toml`; the old `mvmctl template *` namespace has been removed. `mvmctl manifest push` and `pull` are tracked in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md) and not yet implemented; everything else listed here works.
 
 A manifest (`mvm.toml` or `Mvmfile.toml`) is the user-facing primitive for "what to build and how to size it". One manifest sits next to a `flake.nix` in your project; together they describe one microVM.
 
@@ -153,22 +153,34 @@ If no current revision exists, you get an error with a hint to run `mvmctl build
 
 If the slot was built on Firecracker but you boot on Apple Virtualization (or vice versa), `mvmctl up` warns and proceeds when artifacts are compatible (cold-boot from rootfs); hard-errors only when the artifact shape can't be loaded.
 
-## Sharing via the registry
+## Local registry inspection / cleanup
 
-Publish/fetch ops sit under the same `mvmctl manifest` namespace:
+The `mvmctl manifest *` namespace is where slot-registry operations live:
 
 ```bash
-mvmctl manifest push                            # publish current slot's artifacts
-mvmctl manifest push --revision <hash>          # specific revision
-mvmctl manifest pull openclaw                   # fetch by `name` (channel)
-mvmctl manifest pull <manifest_hash>            # fetch by hash
-mvmctl manifest verify                          # checksums + (post plan 36) cosign signatures
-mvmctl manifest verify --check-signature        # signature explicitly
-mvmctl manifest prune --orphans                 # cleanup slots whose manifest is gone
-mvmctl manifest prune --legacy                  # cleanup pre-refactor name-keyed slots
+mvmctl manifest verify                          # checksum integrity check (local)
+mvmctl manifest verify --revision <hash>        # specific revision
+mvmctl manifest prune --orphans                 # cleanup builds whose source mvm.toml is gone
+mvmctl manifest prune --orphans --dry-run       # preview what would be removed
 ```
 
-The S3 channel key is derived from `name` if your manifest sets it, otherwise from the manifest hash. Pushing a `name` that already points at a different slot on the remote refuses with a `--force-channel` escape.
+`mvmctl cache prune --orphan-builds` is a convenience that bundles `manifest prune --orphans` into the broader cache-cleanup pass.
+
+## Sharing via a registry (planned)
+
+Pushing a built slot to an S3-compatible registry and pulling it on another machine is **planned but not yet implemented** — the design is captured in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md). The dominant question (where pull installs the slot when the source's `manifest_path` doesn't exist on the target) is resolved there. The shape will be:
+
+```bash
+# producer
+mvmctl manifest push [PATH] [--revision <hash>]
+
+# consumer
+mvmctl manifest pull <CHANNEL-OR-HASH> [DIR]
+mvmctl manifest pull openclaw ./openclaw   # writes mvm.toml in DIR, installs artifacts
+mvmctl manifest verify --check-signature    # cosign verify (gated on plan 36)
+```
+
+Until plan 39 lands, transfer is via flake-level artifacts (Nix's own caching + `flake.lock`). Most of the time that's enough.
 
 ## Drift detection
 

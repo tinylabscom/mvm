@@ -22,12 +22,14 @@ pub(in crate::commands) enum CacheAction {
         /// Print what would be removed without actually removing anything
         #[arg(long)]
         dry_run: bool,
-        /// Also sweep orphaned manifest slots (slots whose source
-        /// `mvm.toml` file is gone). Equivalent to running
-        /// `mvmctl manifest prune --orphans`; bundled here for the
-        /// "clean everything" workflow.
+        /// Also sweep orphaned project builds — built artifacts whose
+        /// source `mvm.toml` file is gone from disk. Equivalent to
+        /// running `mvmctl manifest prune --orphans`; bundled here so
+        /// "clean everything" is one command. ("Builds" is the user-
+        /// facing noun for what `mvmctl build` produces; internally
+        /// these are slot directories under `~/.mvm/templates/`.)
         #[arg(long)]
-        orphan_slots: bool,
+        orphan_builds: bool,
     },
     /// Show cache directory path and disk usage
     Info,
@@ -50,24 +52,25 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
         CacheAction::Prune {
             dry_run,
-            orphan_slots,
+            orphan_builds,
         } => {
-            // Optionally sweep orphaned manifest slots first. Plan 38
-            // §"Edge cases": delegates to template_prune_orphan_slots,
-            // same logic as `mvmctl manifest prune --orphans`.
-            if orphan_slots {
+            // Optionally sweep orphaned builds first. Same logic as
+            // `mvmctl manifest prune --orphans` — bundled here so the
+            // user can do a single clean-everything pass without
+            // remembering both verbs.
+            if orphan_builds {
                 if dry_run {
-                    ui::info("(dry-run) Would scan for orphaned manifest slots — see `mvmctl manifest prune --orphans --dry-run` for details.");
+                    ui::info("(dry-run) Would scan for orphaned builds — see `mvmctl manifest prune --orphans --dry-run` for details.");
                 } else {
                     match mvm_runtime::vm::template::lifecycle::template_prune_orphan_slots() {
                         Ok((count, _)) if count > 0 => {
-                            ui::success(&format!("Pruned {count} orphaned manifest slot(s)."));
+                            ui::success(&format!("Pruned {count} orphaned build(s)."));
                         }
                         Ok(_) => {
-                            ui::info("No orphaned manifest slots.");
+                            ui::info("No orphaned builds.");
                         }
                         Err(e) => {
-                            ui::warn(&format!("Slot prune failed: {e}"));
+                            ui::warn(&format!("Orphan-build prune failed: {e}"));
                         }
                     }
                 }

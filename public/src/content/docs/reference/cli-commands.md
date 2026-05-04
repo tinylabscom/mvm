@@ -81,7 +81,7 @@ description: Complete command reference for mvmctl.
 
 ## Manifests
 
-> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model** (currently rolling out across slices 5-7 on `feat/manifest-driven-template-dx-claude`). The user-facing primitive is now an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. Once landed, the old `mvmctl template <verb>` namespace is removed outright — there is no deprecation alias. mvmctl is pre-v1; we don't ship back-compat shims.
+> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. The old `mvmctl template <verb>` namespace was removed; clap returns "unrecognized subcommand" for old invocations. `mvmctl manifest push` / `pull` are planned in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md) but not yet implemented.
 
 ### Scaffolding (top-level)
 
@@ -115,10 +115,11 @@ description: Complete command reference for mvmctl.
 | `mvmctl manifest info [PATH] [--json]` | Print manifest, slot path, current revision, snapshot info, provenance |
 | `mvmctl manifest rm [PATH] [--force]` | Remove the slot from the registry |
 | `mvmctl manifest rm [PATH] --manifest-file` | Also delete the source `mvm.toml` (off by default) |
-| `mvmctl manifest push [PATH] [--revision <hash>]` | Publish a slot to the configured S3/OCI remote |
-| `mvmctl manifest pull <NAME-OR-HASH>` | Fetch a slot from the remote |
-| `mvmctl manifest verify [PATH] [--check-signature]` | Verify checksums and (post plan 36) cosign signatures |
-| `mvmctl manifest prune --orphans` | Remove slots whose source manifest is missing |
+| `mvmctl manifest verify [PATH] [--revision <hash>]` | Verify checksums for a built slot |
+| `mvmctl manifest verify --check-signature` | Reserved for plan 36 (sealed-signed-builder-image); errors today with "not yet wired" |
+| `mvmctl manifest prune --orphans` | Remove builds whose source manifest is gone |
+| `mvmctl manifest prune --orphans --dry-run` | Preview what would be removed |
+| `mvmctl manifest push` / `mvmctl manifest pull` | **Planned, not yet implemented.** Tracked in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md). |
 
 ## Configuration
 
@@ -282,6 +283,7 @@ it; pass `--template` or `--flake` if Nix isn't available on your host.
 | `mvmctl cache info` | Show cache directory path and disk usage |
 | `mvmctl cache prune` | Remove stale temp files from the cache |
 | `mvmctl cache prune --dry-run` | Show what would be removed without deleting |
+| `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |
 
 ## Security
 

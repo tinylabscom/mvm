@@ -156,7 +156,7 @@ The entire `mvmctl template *` namespace is removed outright — no alias, no de
 |---|---|
 | `mvmctl ls` / `mvmctl down <vm>` / `mvmctl logs <vm>` / `mvmctl console <vm>` / `forward` / `diff` | Operate on running-VM names; today's behaviour preserved. Slot-registry ops live under `mvmctl manifest *` instead, to avoid colliding with these. |
 | `mvmctl image *` | Image catalog (`mvm-core/src/catalog.rs`) — curated bundled images, distinct concept. |
-| `mvmctl cache prune` | Build-cache cleanup; gains `--orphan-slots` flag delegating to `mvmctl manifest prune --orphans` for ergonomic chaining. |
+| `mvmctl cache prune` | Build-cache cleanup; gains `--orphan-builds` flag delegating to `mvmctl manifest prune --orphans` for ergonomic chaining. |
 
 ### 5. Refuse silent drift
 
@@ -458,7 +458,7 @@ This plan is currently at `/Users/auser/.claude/plans/dazzling-meandering-garden
 | `crates/mvm-mcp/src/tools/mod.rs` and `crates/mvm-mcp/src/tools/run.rs` | Sole MCP tool `run` takes `env: String` describing a template name (L25-26, schema L57-87). Update schema + dispatcher to accept manifest path or directory; describe presets (`shell`, `python`, `node`) as named manifests shipped under `~/.mvm/builtins/<preset>/mvm.toml` (or equivalent built-in path) so the existing LLM-client UX keeps working. |
 | `crates/mvm-cli/src/commands/build/build.rs` | `mvmctl build` (Mvmfile path) consumes the new manifest parser; flag-flake path unchanged. |
 | `crates/mvm-cli/src/commands/ops/up.rs` (or wherever `up` lives) | Drop the `--template <NAME>` lookup. Take optional `[PATH]` positional that resolves through `Manifest::discover_from_cwd_or_path` then `slot_dir_for_manifest_path`. Same change in `run.rs` and `exec.rs`; share a manifest-resolution helper. |
-| `crates/mvm-cli/src/commands/ops/cache.rs` | New `--orphan-slots` flag on `cache prune`; delegates to `mvmctl registry prune --orphans` for ergonomics. |
+| `crates/mvm-cli/src/commands/ops/cache.rs` | New `--orphan-builds` flag on `cache prune`; delegates to `mvmctl manifest prune --orphans` for ergonomics. |
 | `crates/mvm-mcp/src/server.rs`, `crates/mvm-mcp/src/env.rs`, `crates/mvm-cli/src/commands/ops/mcp.rs` | Update MCP **tool input schemas** (not just hint strings) — any tool that took a template name takes a manifest path; `list_templates` returns `manifest_path` + `name`; `template_build`, `up`, `run`, `exec` all switch keys. |
 | `public/src/content/docs/guides/manifests.md` (new — replaces `templates.md`, which is deleted) | Full guide to the `mvm.toml` model: schema, discovery, `init`/`build`/`up` flow, drift detection, `manifest *` namespace. |
 | `public/src/content/docs/reference/cli-commands.md:91-93` | Update template command reference. |

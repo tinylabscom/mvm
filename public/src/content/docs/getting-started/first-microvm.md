@@ -41,7 +41,7 @@ $EDITOR flake.nix                     # add your services
 
 The rest of this guide writes the flake by hand to show how `mkGuest` works underneath.
 
-> The plan-38 manifest model is currently rolling out. If you see references to `mvmctl template create/build/...` in older docs, those still work for one release but the new flow above is preferred. See the [Manifests guide](/guides/manifests/) for details.
+> The plan-38 manifest model is shipped. Older docs that reference `mvmctl template create/build/…` are stale; the `template` namespace was removed outright. See the [Manifests guide](/guides/manifests/) for the current flow.
 
 ## Write a Flake
 
