@@ -105,22 +105,35 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let effective_cpus = args.cpus.or(Some(cfg.default_cpus));
     let effective_memory = memory_mb.or(Some(cfg.default_memory_mib));
 
+    // Plan 38 §4: `--template <PATH>` accepts a manifest path or its
+    // directory in addition to legacy names. Resolve the arg up front
+    // and substitute the slot hash for downstream lookups; the
+    // dispatched variants in lifecycle.rs branch on
+    // `is_slot_hash_dirname` internally so the rest of `cmd_run`
+    // doesn't need to know whether a name or a slot hash was used.
+    let resolved_template_arg: Option<String> = match args.template.as_deref() {
+        Some(arg) => match super::shared::resolve_template_arg(arg)? {
+            super::shared::TemplateArgRef::Name(n) => Some(n),
+            super::shared::TemplateArgRef::Slot { slot_hash } => Some(slot_hash),
+        },
+        None => None,
+    };
+
     // Plan 32 §D ergonomic follow-up: if neither --network-preset nor
     // --network-allow is supplied, consult the template's baked-in
-    // `default_network_policy` (set at `mvmctl template create
-    // --network-preset agent` time). This lets the llm-agent example
-    // ship with the agent allowlist without operators needing to
-    // remember the flag per-invocation. Explicit CLI flags always
-    // win — operators can override the template default with
-    // `--network-preset unrestricted` for debugging.
+    // `default_network_policy` (only legacy name-keyed templates carry
+    // this field; manifest-keyed slots don't — runtime policy moves
+    // to `mvmctl up` flags / `~/.mvm/config.toml` / mvmd per plan 38
+    // §"Manifest scope"). Explicit CLI flags always win.
     let network_policy = if args.network_preset.is_some() || !args.network_allow.is_empty() {
         resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?
-    } else if let Some(template_name) = args.template.as_deref()
-        && let Ok(spec) = mvm_runtime::vm::template::lifecycle::template_load(template_name)
+    } else if let Some(id_or_slot) = resolved_template_arg.as_deref()
+        && let Ok(spec) =
+            mvm_runtime::vm::template::lifecycle::template_load_dispatched(id_or_slot)
         && let Some(default_policy) = spec.default_network_policy.clone()
     {
         crate::ui::info(&format!(
-            "Using template '{template_name}' default network policy"
+            "Using template '{id_or_slot}' default network policy"
         ));
         default_policy
     } else {
@@ -137,7 +150,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 
     cmd_run(RunParams {
         flake_ref: args.flake.as_deref(),
-        template_name: args.template.as_deref(),
+        template_name: resolved_template_arg.as_deref(),
         name: args.name.as_deref(),
         profile: args.profile.as_deref(),
         cpus: effective_cpus,
@@ -214,7 +227,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         validate_flake_ref(f).with_context(|| format!("Invalid flake reference: {:?}", f))?;
     }
     if let Some(t) = template_name {
-        validate_template_name(t).with_context(|| format!("Invalid template name: {:?}", t))?;
+        // Slot hashes (64-char lowercase hex) bypass the template-name
+        // validator since they exceed the 63-char name length cap.
+        if !mvm_core::manifest::is_slot_hash_dirname(t) {
+            validate_template_name(t).with_context(|| format!("Invalid template name: {:?}", t))?;
+        }
     }
     // Auto-select backend when no explicit hypervisor is specified.
     // Priority: KVM (Firecracker direct) → Apple Container → Lima + Firecracker
@@ -374,11 +391,12 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             &format!("Loading template '{}' for VM '{}'", tmpl, vm_name),
         );
         let (spec, vmlinux, initrd, rootfs, rev) =
-            mvm_runtime::vm::template::lifecycle::template_artifacts(tmpl)?;
+            mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(tmpl)?;
         ui::info(&format!("Using revision {}", rev));
 
         // Check for pre-built snapshot
-        let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info(tmpl)?;
+        let snap_info =
+            mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(tmpl)?;
         if snap_info.is_some() {
             ui::info("Snapshot available — will restore instantly");
         }
@@ -620,8 +638,16 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             ports: port_mappings,
             network_policy: network_policy.clone(),
         };
-        let rev = mvm_runtime::vm::template::lifecycle::current_revision_id(tmpl)?;
-        let snap_dir = mvm_core::template::template_snapshot_dir(tmpl, &rev);
+        let rev = if mvm_core::manifest::is_slot_hash_dirname(tmpl) {
+            mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(tmpl)?
+        } else {
+            mvm_runtime::vm::template::lifecycle::current_revision_id(tmpl)?
+        };
+        let snap_dir = if mvm_core::manifest::is_slot_hash_dirname(tmpl) {
+            mvm_core::manifest::slot_snapshot_dir(tmpl, &rev)
+        } else {
+            mvm_core::template::template_snapshot_dir(tmpl, &rev)
+        };
         ui::step(
             2,
             2,

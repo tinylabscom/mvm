@@ -246,6 +246,177 @@ pub fn template_list_legacy_names() -> Result<Vec<String>> {
     Ok(legacy)
 }
 
+/// Read a slot's `current` symlink and return the revision hash it
+/// points at. Mirrors [`current_revision_id`] for the slot-keyed world.
+#[instrument(skip_all, fields(slot_hash = slot_hash))]
+pub fn current_revision_id_for_slot(slot_hash: &str) -> Result<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let link = slot_current_symlink(slot_hash);
+    let target = std::fs::read_link(&link)
+        .with_context(|| format!("Slot has no current revision: {}", link))?;
+    let raw = target.as_os_str().as_bytes();
+    let raw = std::str::from_utf8(raw)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // Symlink target is relative `artifacts/revisions/<rev>`; strip the
+    // prefix to recover the bare revision hash.
+    let rev = raw
+        .strip_prefix("artifacts/revisions/")
+        .unwrap_or(&raw)
+        .to_string();
+    if rev.is_empty() {
+        anyhow::bail!("Slot current symlink is empty: {}", link);
+    }
+    Ok(rev)
+}
+
+/// Resolve a slot to its current artifact paths. Mirrors
+/// [`template_artifacts`] but keyed by slot hash; returns the
+/// [`PersistedManifest`] in place of [`TemplateSpec`].
+///
+/// Returns `(persisted_manifest, vmlinux, initrd, rootfs, revision_hash)`.
+#[instrument(skip_all, fields(slot_hash = slot_hash))]
+pub fn template_artifacts_for_slot(
+    slot_hash: &str,
+) -> Result<(PersistedManifest, String, Option<String>, String, String)> {
+    let persisted = template_load_slot(slot_hash)?;
+    let rev = current_revision_id_for_slot(slot_hash)?;
+    let rev_dir = slot_revision_dir(slot_hash, &rev);
+
+    let vmlinux = format!("{rev_dir}/vmlinux");
+    let rootfs = format!("{rev_dir}/rootfs.ext4");
+    let initrd_candidate = format!("{rev_dir}/initrd");
+
+    if !std::path::Path::new(&vmlinux).exists() {
+        anyhow::bail!(
+            "Slot '{}' has no vmlinux (run `mvmctl build {}`)",
+            slot_hash,
+            persisted.manifest_path
+        );
+    }
+    if !std::path::Path::new(&rootfs).exists() {
+        anyhow::bail!(
+            "Slot '{}' has no rootfs (run `mvmctl build {}`)",
+            slot_hash,
+            persisted.manifest_path
+        );
+    }
+
+    let has_initrd = std::path::Path::new(&initrd_candidate).exists();
+    let initrd_path = if has_initrd {
+        Some(initrd_candidate)
+    } else {
+        None
+    };
+
+    Ok((persisted, vmlinux, initrd_path, rootfs, rev))
+}
+
+/// Whether the slot's current revision has a Firecracker snapshot.
+pub fn template_has_snapshot_for_slot(slot_hash: &str) -> Result<bool> {
+    let rev = current_revision_id_for_slot(slot_hash)?;
+    let snap_dir = mvm_core::manifest::slot_snapshot_dir(slot_hash, &rev);
+    let vmstate = std::path::Path::new(&snap_dir).join("vmstate.bin");
+    let mem = std::path::Path::new(&snap_dir).join("mem.bin");
+    Ok(vmstate.exists() && mem.exists())
+}
+
+/// Load snapshot metadata for the slot's current revision.
+pub fn template_snapshot_info_for_slot(slot_hash: &str) -> Result<Option<SnapshotInfo>> {
+    let rev = current_revision_id_for_slot(slot_hash)?;
+    let rev_dir = slot_revision_dir(slot_hash, &rev);
+    let meta_path = format!("{}/revision.json", rev_dir);
+    let data = std::fs::read_to_string(&meta_path)
+        .with_context(|| format!("Failed to read revision.json for slot {}", slot_hash))?;
+    let revision: TemplateRevision = serde_json::from_str(&data)
+        .with_context(|| format!("Corrupt revision.json for slot {}", slot_hash))?;
+    Ok(revision.snapshot)
+}
+
+/// Synthesize a [`TemplateSpec`] from a [`PersistedManifest`] so the
+/// dispatched functions below can return a single shape regardless of
+/// whether the caller passed a name or a slot hash.
+///
+/// `template_id` is set to the manifest hash; `role` is empty (manifest
+/// schema doesn't carry a role); `default_network_policy` is `None`
+/// (the manifest schema doesn't carry network policy either —
+/// runtime policy comes from CLI flags / `~/.mvm/config.toml` / mvmd
+/// per plan 38).
+fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
+    TemplateSpec {
+        schema_version: p.schema_version,
+        template_id: p.manifest_hash.clone(),
+        flake_ref: p.flake_ref.clone(),
+        profile: p.profile.clone(),
+        role: String::new(),
+        vcpus: p.vcpus,
+        mem_mib: p.mem_mib,
+        data_disk_mib: p.data_disk_mib,
+        created_at: p.created_at.clone(),
+        updated_at: p.updated_at.clone(),
+        default_network_policy: None,
+    }
+}
+
+/// Unified entry point that dispatches to the slot-keyed function when
+/// `id_or_slot` looks like a 64-char lowercase-hex slot hash, or to
+/// the legacy name-keyed function otherwise.
+///
+/// Used by `mvmctl up`/`run`/`exec` so the CLI can resolve a
+/// `--template <PATH>` argument to a slot hash and pass it through
+/// unchanged. Returns the same shape as [`template_artifacts`].
+#[instrument(skip_all, fields(id_or_slot = id_or_slot))]
+pub fn template_artifacts_dispatched(
+    id_or_slot: &str,
+) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
+    if is_slot_hash_dirname(id_or_slot) {
+        let (persisted, vmlinux, initrd, rootfs, rev) =
+            template_artifacts_for_slot(id_or_slot)?;
+        Ok((
+            persisted_to_synthetic_spec(&persisted),
+            vmlinux,
+            initrd,
+            rootfs,
+            rev,
+        ))
+    } else {
+        template_artifacts(id_or_slot)
+    }
+}
+
+/// Dispatched variant of [`template_load`] / [`template_load_slot`].
+/// Returns a [`TemplateSpec`] regardless of which key shape was used.
+pub fn template_load_dispatched(id_or_slot: &str) -> Result<TemplateSpec> {
+    if is_slot_hash_dirname(id_or_slot) {
+        let persisted = template_load_slot(id_or_slot)?;
+        Ok(persisted_to_synthetic_spec(&persisted))
+    } else {
+        template_load(id_or_slot)
+    }
+}
+
+/// Dispatched variant of [`template_snapshot_info`] /
+/// [`template_snapshot_info_for_slot`].
+pub fn template_snapshot_info_dispatched(id_or_slot: &str) -> Result<Option<SnapshotInfo>> {
+    if is_slot_hash_dirname(id_or_slot) {
+        template_snapshot_info_for_slot(id_or_slot)
+    } else {
+        template_snapshot_info(id_or_slot)
+    }
+}
+
+/// Dispatched variant of [`template_has_snapshot`] /
+/// [`template_has_snapshot_for_slot`].
+pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
+    if is_slot_hash_dirname(id_or_slot) {
+        template_has_snapshot_for_slot(id_or_slot)
+    } else {
+        template_has_snapshot(id_or_slot)
+    }
+}
+
 /// List modern slots with their metadata (manifest path, optional
 /// display name, last-updated timestamp). Slots whose
 /// `manifest.json` is missing or unparseable are skipped with a

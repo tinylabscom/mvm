@@ -87,8 +87,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
         env_pairs.push((k.to_string(), v.to_string()));
     }
+    // Plan 38 §4: --template <PATH> accepts a manifest path / dir in
+    // addition to legacy names. Resolve up front so the downstream
+    // ImageSource::Template carries either a name (legacy) or a slot
+    // hash (manifest), and the dispatched lifecycle helpers handle
+    // both keys transparently.
     let image = match args.template {
-        Some(name) => crate::exec::ImageSource::Template(name),
+        Some(arg) => {
+            let resolved = match super::shared::resolve_template_arg(&arg)? {
+                super::shared::TemplateArgRef::Name(n) => n,
+                super::shared::TemplateArgRef::Slot { slot_hash } => slot_hash,
+            };
+            crate::exec::ImageSource::Template(resolved)
+        }
         None => {
             ui::info("No --template specified; using bundled default microVM image.");
             let (kernel_path, rootfs_path) = ensure_default_microvm_image()?;

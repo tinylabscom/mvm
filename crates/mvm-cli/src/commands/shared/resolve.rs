@@ -29,6 +29,84 @@ pub fn resolve_running_vm(name: &str) -> Result<String> {
     Ok(abs_dir)
 }
 
+/// One of two ways to refer to a built template: a legacy name (looked
+/// up in the name-keyed registry) or a manifest path that resolves to
+/// a slot hash.
+///
+/// `mvmctl up`/`run`/`exec` accept either form via their `--template`
+/// flag during the plan-38 transition. The `Slot` variant is the new
+/// path; `Name` will go away with slice 7's namespace removal.
+///
+/// Callers that need the persisted manifest re-read it via
+/// `mvm_runtime::vm::template::lifecycle::template_load_slot(slot_hash)`
+/// — keeping the enum lean here avoids the `clippy::large_enum_variant`
+/// warning (`PersistedManifest` is ~350 bytes).
+#[derive(Debug, Clone)]
+pub enum TemplateArgRef {
+    /// Legacy name-keyed template (resolves through `template_load`,
+    /// `template_artifacts`, etc.).
+    Name(String),
+    /// Manifest-keyed slot.
+    Slot { slot_hash: String },
+}
+
+/// Decide whether a `--template` argument refers to a manifest path
+/// (file or directory containing one) or a legacy template name.
+///
+/// Detection rule: if the argument resolves to an existing file or
+/// directory on disk, treat it as a manifest path; otherwise it's a
+/// name. This lets users transparently use either form during the
+/// plan-38 rollout — `mvmctl up --template ./my-app` and
+/// `mvmctl up --template openclaw` both work as long as the
+/// referenced thing actually exists.
+///
+/// Returns `Err` only on validation/IO failures; missing-name is
+/// handled by the caller's downstream `template_load` lookup.
+pub fn resolve_template_arg(arg: &str) -> Result<TemplateArgRef> {
+    use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
+
+    let path = std::path::Path::new(arg);
+    let looks_like_path = arg.contains('/')
+        || arg.starts_with('.')
+        || arg.ends_with(".toml")
+        || path.is_file()
+        || path.is_dir();
+    if !looks_like_path {
+        return Ok(TemplateArgRef::Name(arg.to_string()));
+    }
+
+    if !path.exists() {
+        anyhow::bail!(
+            "Template path '{}' does not exist (expected a manifest file or its directory)",
+            arg
+        );
+    }
+
+    let manifest_path = resolve_manifest_config_path(path)
+        .with_context(|| format!("Resolving --template {arg:?}"))?;
+    let canonical = std::fs::canonicalize(&manifest_path).with_context(|| {
+        format!(
+            "Failed to canonicalize manifest path {}",
+            manifest_path.display()
+        )
+    })?;
+    let slot_hash = canonical_key_for_path(&canonical)?;
+
+    // Verify the slot exists; surface a clear error otherwise so
+    // `mvmctl up` doesn't proceed against a manifest that's never
+    // been built. The slot's persisted record is dropped here —
+    // callers that need it re-read via `template_load_slot`.
+    mvm_runtime::vm::template::lifecycle::template_load_slot(&slot_hash).with_context(|| {
+        format!(
+            "Manifest at {} has no built slot — run `mvmctl build {}` first",
+            canonical.display(),
+            canonical.display()
+        )
+    })?;
+
+    Ok(TemplateArgRef::Slot { slot_hash })
+}
+
 /// Resolve a flake reference: relative/absolute paths are canonicalized,
 /// remote refs (containing `:`) pass through unchanged.
 pub fn resolve_flake_ref(flake_ref: &str) -> Result<String> {

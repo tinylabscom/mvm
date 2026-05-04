@@ -466,11 +466,12 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
         match &req.image {
             ImageSource::Template(name) => {
                 let (spec, vmlinux, initrd, rootfs, rev) =
-                    mvm_runtime::vm::template::lifecycle::template_artifacts(name)
+                    mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
                         .with_context(|| format!("Loading template '{name}'"))?;
-                let snap = mvm_runtime::vm::template::lifecycle::template_snapshot_info(name)
-                    .ok()
-                    .flatten();
+                let snap =
+                    mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
+                        .ok()
+                        .flatten();
                 (
                     vmlinux,
                     initrd,
@@ -676,8 +677,16 @@ fn restore_via_snapshot(
         ports: Vec::new(),
         network_policy: mvm_core::network_policy::NetworkPolicy::default(),
     };
-    let rev = mvm_runtime::vm::template::lifecycle::current_revision_id(template_id)?;
-    let snap_dir = mvm_core::template::template_snapshot_dir(template_id, &rev);
+    let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
+        mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
+    } else {
+        mvm_runtime::vm::template::lifecycle::current_revision_id(template_id)?
+    };
+    let snap_dir = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
+        mvm_core::manifest::slot_snapshot_dir(template_id, &rev)
+    } else {
+        mvm_core::template::template_snapshot_dir(template_id, &rev)
+    };
     mvm_runtime::vm::microvm::restore_from_template_snapshot(
         template_id,
         &run_config,
@@ -773,9 +782,9 @@ pub fn boot_session_vm(
     memory_mib: u32,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
-        mvm_runtime::vm::template::lifecycle::template_artifacts(env)
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(env)
             .with_context(|| format!("Loading template '{env}'"))?;
-    let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info(env)
+    let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(env)
         .ok()
         .flatten();
 
