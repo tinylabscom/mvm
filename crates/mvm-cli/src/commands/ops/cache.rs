@@ -22,6 +22,12 @@ pub(in crate::commands) enum CacheAction {
         /// Print what would be removed without actually removing anything
         #[arg(long)]
         dry_run: bool,
+        /// Also sweep orphaned manifest slots (slots whose source
+        /// `mvm.toml` file is gone). Equivalent to running
+        /// `mvmctl manifest prune --orphans`; bundled here for the
+        /// "clean everything" workflow.
+        #[arg(long)]
+        orphan_slots: bool,
     },
     /// Show cache directory path and disk usage
     Info,
@@ -42,7 +48,31 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
             Ok(())
         }
-        CacheAction::Prune { dry_run } => {
+        CacheAction::Prune {
+            dry_run,
+            orphan_slots,
+        } => {
+            // Optionally sweep orphaned manifest slots first. Plan 38
+            // §"Edge cases": delegates to template_prune_orphan_slots,
+            // same logic as `mvmctl manifest prune --orphans`.
+            if orphan_slots {
+                if dry_run {
+                    ui::info("(dry-run) Would scan for orphaned manifest slots — see `mvmctl manifest prune --orphans --dry-run` for details.");
+                } else {
+                    match mvm_runtime::vm::template::lifecycle::template_prune_orphan_slots() {
+                        Ok((count, _)) if count > 0 => {
+                            ui::success(&format!("Pruned {count} orphaned manifest slot(s)."));
+                        }
+                        Ok(_) => {
+                            ui::info("No orphaned manifest slots.");
+                        }
+                        Err(e) => {
+                            ui::warn(&format!("Slot prune failed: {e}"));
+                        }
+                    }
+                }
+            }
+
             let path = std::path::Path::new(&cache_dir);
             if !path.exists() {
                 ui::info("Cache directory does not exist. Nothing to prune.");

@@ -15,6 +15,7 @@ use super::Cli;
 
 mod info;
 mod ls;
+mod prune;
 mod rm;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -34,6 +35,8 @@ pub(in crate::commands) enum ManifestAction {
     /// Remove a slot's artifacts from the local registry
     #[command(alias = "delete")]
     Rm(rm::Args),
+    /// Cleanup orphaned slots (slots whose source manifest file is gone)
+    Prune(prune::Args),
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -41,5 +44,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         ManifestAction::Ls(a) => ls::run(cli, a, cfg),
         ManifestAction::Info(a) => info::run(cli, a, cfg),
         ManifestAction::Rm(a) => rm::run(cli, a, cfg),
+        ManifestAction::Prune(a) => prune::run(cli, a, cfg),
     }
 }

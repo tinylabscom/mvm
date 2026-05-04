@@ -1311,9 +1311,32 @@ fn test_cache_prune_dry_run() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--dry-run"]).unwrap();
     match cli.command {
         Commands::Cache(cache::Args {
-            action: CacheAction::Prune { dry_run },
+            action:
+                CacheAction::Prune {
+                    dry_run,
+                    orphan_slots,
+                },
         }) => {
             assert!(dry_run);
+            assert!(!orphan_slots);
+        }
+        _ => panic!("Expected Cache Prune command"),
+    }
+}
+
+#[test]
+fn test_cache_prune_orphan_slots_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--orphan-slots"]).unwrap();
+    match cli.command {
+        Commands::Cache(cache::Args {
+            action:
+                CacheAction::Prune {
+                    dry_run,
+                    orphan_slots,
+                },
+        }) => {
+            assert!(!dry_run);
+            assert!(orphan_slots);
         }
         _ => panic!("Expected Cache Prune command"),
     }

@@ -417,6 +417,51 @@ pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
     }
 }
 
+/// Cleanup pass — remove slots whose source manifest file is missing
+/// on disk (e.g. the user `rm`'d their project directory or moved it
+/// elsewhere, leaving the slot dangling under `~/.mvm/templates/`).
+///
+/// Returns `(removed_count, slots_removed)`. Errors on individual
+/// slot deletes are logged at warn but don't abort the sweep — a
+/// single corrupted slot shouldn't block cleaning up the rest.
+///
+/// Slots whose `manifest.json` is missing or unparseable are also
+/// considered orphaned (we can't cross-reference them, so we treat
+/// them as garbage to clean up).
+#[instrument(skip_all)]
+pub fn template_prune_orphan_slots() -> Result<(usize, Vec<String>)> {
+    let mut removed = Vec::new();
+    for slot_hash in template_list_slot_hashes()? {
+        let persisted = match template_load_slot(&slot_hash) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(slot = %slot_hash, error = %e, "removing slot with unreadable manifest.json");
+                if let Err(rm_err) = template_delete_slot(&slot_hash, true) {
+                    tracing::warn!(slot = %slot_hash, error = %rm_err, "failed to remove unreadable slot");
+                    continue;
+                }
+                removed.push(slot_hash);
+                continue;
+            }
+        };
+
+        if !std::path::Path::new(&persisted.manifest_path).exists() {
+            tracing::info!(
+                slot = %slot_hash,
+                manifest_path = %persisted.manifest_path,
+                "removing orphaned slot (manifest file gone)"
+            );
+            if let Err(e) = template_delete_slot(&slot_hash, true) {
+                tracing::warn!(slot = %slot_hash, error = %e, "failed to remove orphaned slot");
+                continue;
+            }
+            removed.push(slot_hash);
+        }
+    }
+    let count = removed.len();
+    Ok((count, removed))
+}
+
 /// List modern slots with their metadata (manifest path, optional
 /// display name, last-updated timestamp). Slots whose
 /// `manifest.json` is missing or unparseable are skipped with a
