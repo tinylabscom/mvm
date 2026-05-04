@@ -57,8 +57,6 @@ pub(in crate::commands) enum Commands {
     Update(env::update::Args),
     /// System diagnostics and dependency checks
     Doctor(env::doctor::Args),
-    /// Manage global templates (shared base images) — legacy; superseded by `manifest`
-    Template(build::template::Args),
     /// Manage built manifest slots (list, info, remove). Plan 38 §4.
     Manifest(manifest::Args),
     /// Build a microVM image from a Mvmfile.toml config or Nix flake
@@ -201,7 +199,6 @@ pub fn run() -> Result<()> {
         Commands::Ps(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
-        Commands::Template(a) => build::template::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Build(a) => build::build::run(&cli, a, &cfg),
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),

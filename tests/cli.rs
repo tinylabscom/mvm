@@ -339,101 +339,52 @@ fn test_setup_help_shows_force_and_resources() {
         .stdout(predicate::str::contains("--lima-mem"));
 }
 
+// ---------------------------------------------------------------------------
+// Plan 38 §4 (slice 7b): the `mvmctl template *` namespace was removed.
+// The tests that previously lived here covered:
+//   - test_template_build_help_shows_force
+//   - test_template_lifecycle_commands
+//   - test_template_edit_help_and_flags
+// Equivalent coverage for the new surface lives on:
+//   - `mvmctl build --help` (--force, --snapshot, --update-hash)
+//   - `mvmctl manifest --help` (ls, info, rm)
+//   - `mvmctl init <DIR> --preset/--prompt` smart-dispatch tests
+//     (see test_init_* below + commands/tests.rs unit tests).
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_template_build_help_shows_force() {
+fn test_build_help_shows_force_and_update_hash() {
+    // --snapshot is not yet exposed on `mvmctl build` for manifest-keyed
+    // slots (deferred); --force / --update-hash are.
     mvm()
-        .args(["template", "build", "--help"])
+        .args(["build", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--force"))
-        .stdout(predicate::str::contains("--snapshot"))
-        .stdout(predicate::str::contains("--config"));
+        .stdout(predicate::str::contains("--update-hash"));
 }
 
-// ---------------------------------------------------------------------------
-// Template command structure
-// ---------------------------------------------------------------------------
-
 #[test]
-fn test_template_lifecycle_commands() {
-    // Top-level help lists template subcommand
+fn test_manifest_namespace_subcommands_listed() {
     mvm()
-        .arg("--help")
+        .args(["manifest", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("template"));
+        .stdout(predicate::str::contains("ls"))
+        .stdout(predicate::str::contains("info"))
+        .stdout(predicate::str::contains("rm"));
+}
 
-    // Template help shows lifecycle subcommands
+#[test]
+fn test_template_namespace_is_gone() {
+    // Plan 38 §4: `mvmctl template *` removed outright.
     mvm()
         .args(["template", "--help"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("create"))
-        .stdout(predicate::str::contains("list"))
-        .stdout(predicate::str::contains("info"))
-        .stdout(predicate::str::contains("edit"))
-        .stdout(predicate::str::contains("build"))
-        .stdout(predicate::str::contains("delete"))
-        .stdout(predicate::str::contains("push"))
-        .stdout(predicate::str::contains("pull"))
-        .stdout(predicate::str::contains("verify"));
-
-    // Template create without required args fails
-    mvm()
-        .args(["template", "create"])
-        .assert()
         .failure()
-        .stderr(predicate::str::contains("required"));
-
-    // Template build requires a name argument
-    mvm()
-        .args(["template", "build"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("required"));
-
-    // Template info requires a name argument
-    mvm()
-        .args(["template", "info"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("required"));
-
-    // Template edit requires a name argument
-    mvm()
-        .args(["template", "edit"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("required"));
-
-    // Template delete requires a name argument
-    mvm()
-        .args(["template", "delete"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("required"));
-}
-
-#[test]
-fn test_template_edit_help_and_flags() {
-    // Template edit help shows all available options
-    mvm()
-        .args(["template", "edit", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--flake"))
-        .stdout(predicate::str::contains("--profile"))
-        .stdout(predicate::str::contains("--role"))
-        .stdout(predicate::str::contains("--cpus"))
-        .stdout(predicate::str::contains("--mem"))
-        .stdout(predicate::str::contains("--data-disk"));
-
-    // Template edit with only name (no flags) should work but do nothing
-    // This will fail in practice because template doesn't exist, but validates argument parsing
-    mvm()
-        .args(["template", "edit", "nonexistent"])
-        .assert()
-        .failure(); // Fails because template doesn't exist, not because of argument parsing
+        .stderr(predicate::str::contains("unrecognized subcommand").or(
+            predicate::str::contains("unexpected argument"),
+        ));
 }
 
 // ---------------------------------------------------------------------------
@@ -752,104 +703,68 @@ fn test_flake_help_lists_in_top_level() {
 }
 
 // ============================================================================
-// Sprint 33: template init --preset
+// Plan 38 §4 (slice 7b): mvmctl init <DIR> --preset/--prompt
+// (project-scaffold smart-dispatch, replaces the deleted
+// `mvmctl template init` flow).
 // ============================================================================
 
 #[test]
-fn test_template_init_help_shows_preset_flag() {
+fn test_init_help_shows_scaffold_flags() {
     mvm()
-        .args(["template", "init", "--help"])
+        .args(["init", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("preset"))
-        .stdout(predicate::str::contains("prompt"));
+        .stdout(predicate::str::contains("prompt"))
+        .stdout(predicate::str::contains("DIR"));
 }
 
 #[test]
-fn test_template_init_preset_minimal_exits_ok() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn test_init_preset_minimal_scaffolds_flake() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("test-minimal");
     mvm()
         .args([
-            "template",
             "init",
-            "test-minimal",
-            "--local",
+            target.to_str().expect("utf8"),
             "--preset",
             "minimal",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
         ])
         .assert()
         .success();
-    assert!(
-        dir.path().join("test-minimal").join("flake.nix").exists(),
-        "flake.nix not scaffolded"
-    );
+    assert!(target.join("flake.nix").exists(), "flake.nix not scaffolded");
 }
 
 #[test]
-fn test_template_init_preset_http_exits_ok() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn test_init_preset_http_emits_http_server() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("test-http");
     mvm()
         .args([
-            "template",
             "init",
-            "test-http",
-            "--local",
+            target.to_str().expect("utf8"),
             "--preset",
             "http",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
         ])
         .assert()
         .success();
-    let flake = dir.path().join("test-http").join("flake.nix");
-    assert!(flake.exists(), "flake.nix not scaffolded");
-    let content = std::fs::read_to_string(&flake).unwrap();
+    let flake = std::fs::read_to_string(target.join("flake.nix")).unwrap();
     assert!(
-        content.contains("http.server"),
+        flake.contains("http.server"),
         "http preset should reference http.server"
     );
 }
 
 #[test]
-fn test_template_init_preset_python_exits_ok() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn test_init_preset_unknown_shows_error() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("test-bad");
     mvm()
         .args([
-            "template",
             "init",
-            "test-python",
-            "--local",
-            "--preset",
-            "python",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
-        ])
-        .assert()
-        .success();
-    let flake = dir.path().join("test-python").join("flake.nix");
-    assert!(flake.exists(), "flake.nix not scaffolded");
-    let content = std::fs::read_to_string(&flake).unwrap();
-    assert!(
-        content.contains("python"),
-        "python preset should reference python"
-    );
-}
-
-#[test]
-fn test_template_init_preset_unknown_shows_error() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    mvm()
-        .args([
-            "template",
-            "init",
-            "test-bad",
-            "--local",
+            target.to_str().expect("utf8"),
             "--preset",
             "nonexistent",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
         ])
         .assert()
         .failure()
@@ -857,55 +772,35 @@ fn test_template_init_preset_unknown_shows_error() {
 }
 
 #[test]
-fn test_template_init_prompt_generates_metadata_and_infers_preset() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn test_init_prompt_generates_metadata_and_infers_preset() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("test-prompt");
     mvm()
-        // Plan 32 / Proposal C added a loopback probe in `auto` mode that picks
-        // up Ollama / LocalAI on `:11434` / `:8080`. CI / dev hosts running one
-        // of those would otherwise route this prompt at a real model. Force
-        // heuristic fallback so the test stays deterministic.
+        // Force heuristic fallback (no LLM) so the test is deterministic
+        // even on dev hosts running Ollama / LocalAI.
         .env("MVM_TEMPLATE_NO_LOCAL_PROBE", "1")
         .env_remove("OPENAI_API_KEY")
         .env_remove("MVM_TEMPLATE_LOCAL_BASE_URL")
         .args([
-            "template",
             "init",
-            "test-prompt",
-            "--local",
+            target.to_str().expect("utf8"),
             "--prompt",
             "python service exposing an HTTP API with postgres",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
         ])
         .assert()
         .success();
-    let template_dir = dir.path().join("test-prompt");
-    let flake = template_dir.join("flake.nix");
-    let metadata = template_dir.join("mvm-template-prompt.json");
-    assert!(flake.exists(), "flake.nix not scaffolded");
-    assert!(metadata.exists(), "prompt metadata not scaffolded");
-    let flake_content = std::fs::read_to_string(&flake).expect("read flake");
-    assert!(
-        flake_content.contains("services.app"),
-        "prompt should generate a python app service"
-    );
-    assert!(
-        flake_content.contains("services.postgres"),
-        "prompt should merge postgres into the generated scaffold"
-    );
-    let metadata_content = std::fs::read_to_string(&metadata).expect("read metadata");
-    assert!(
-        metadata_content.contains("\"primary_preset\": \"python\""),
-        "metadata should capture the primary preset"
-    );
-    assert!(
-        metadata_content.contains("\"postgres\""),
-        "metadata should capture merged features"
-    );
+    let flake_content =
+        std::fs::read_to_string(target.join("flake.nix")).expect("read flake");
+    let metadata_content = std::fs::read_to_string(target.join("mvm-template-prompt.json"))
+        .expect("read metadata");
+    assert!(flake_content.contains("services.app"));
+    assert!(flake_content.contains("services.postgres"));
+    assert!(metadata_content.contains("\"primary_preset\": \"python\""));
+    assert!(metadata_content.contains("\"postgres\""));
 }
 
 #[test]
-fn test_template_init_prompt_uses_openai_when_configured() {
+fn test_init_prompt_uses_openai_when_configured() {
     let response_body = r#"{
         "output": [{
             "content": [{
@@ -915,32 +810,26 @@ fn test_template_init_prompt_uses_openai_when_configured() {
         }]
     }"#;
     let (base_url, request_capture) = spawn_fake_openai_response_server(response_body);
-    let dir = tempfile::tempdir().expect("temp dir");
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("llm-template");
     mvm()
-        // Disable the loopback Ollama / LocalAI probe (Proposal C) so the
-        // OPENAI_API_KEY path is taken even on hosts running a local model.
         .env("MVM_TEMPLATE_NO_LOCAL_PROBE", "1")
         .env_remove("MVM_TEMPLATE_LOCAL_BASE_URL")
         .env("OPENAI_API_KEY", "test-key")
         .env("MVM_TEMPLATE_OPENAI_BASE_URL", base_url)
         .args([
-            "template",
             "init",
-            "llm-template",
-            "--local",
+            target.to_str().expect("utf8"),
             "--prompt",
             "python api with postgres and healthz endpoint",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
         ])
         .assert()
         .success();
 
-    let template_dir = dir.path().join("llm-template");
-    let flake = std::fs::read_to_string(template_dir.join("flake.nix")).expect("read flake");
+    let flake = std::fs::read_to_string(target.join("flake.nix")).expect("read flake");
     let metadata =
-        std::fs::read_to_string(template_dir.join("mvm-template-prompt.json")).expect("metadata");
-    let app = std::fs::read_to_string(template_dir.join("app").join("service.py")).expect("app");
+        std::fs::read_to_string(target.join("mvm-template-prompt.json")).expect("metadata");
+    let app = std::fs::read_to_string(target.join("app").join("service.py")).expect("app");
     let captured_request = request_capture.lock().expect("capture lock").clone();
     let captured_request_lower = captured_request.to_ascii_lowercase();
 
@@ -956,7 +845,7 @@ fn test_template_init_prompt_uses_openai_when_configured() {
 }
 
 #[test]
-fn test_template_init_prompt_uses_local_provider_when_configured() {
+fn test_init_prompt_uses_local_provider_when_configured() {
     let response_body = r#"{
         "output": [{
             "content": [{
@@ -966,29 +855,25 @@ fn test_template_init_prompt_uses_local_provider_when_configured() {
         }]
     }"#;
     let (base_url, request_capture) = spawn_fake_openai_response_server(response_body);
-    let dir = tempfile::tempdir().expect("temp dir");
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("local-template");
     mvm()
         .env_remove("OPENAI_API_KEY")
         .env("MVM_TEMPLATE_PROVIDER", "local")
         .env("MVM_TEMPLATE_LOCAL_BASE_URL", base_url)
         .env("MVM_TEMPLATE_LOCAL_MODEL", "llama.cpp/qwen2.5")
         .args([
-            "template",
             "init",
-            "local-template",
-            "--local",
+            target.to_str().expect("utf8"),
             "--prompt",
             "background worker that polls an API every 30 seconds",
-            "--dir",
-            dir.path().to_str().expect("utf8"),
         ])
         .assert()
         .success();
 
-    let template_dir = dir.path().join("local-template");
-    let flake = std::fs::read_to_string(template_dir.join("flake.nix")).expect("read flake");
+    let flake = std::fs::read_to_string(target.join("flake.nix")).expect("read flake");
     let metadata =
-        std::fs::read_to_string(template_dir.join("mvm-template-prompt.json")).expect("metadata");
+        std::fs::read_to_string(target.join("mvm-template-prompt.json")).expect("metadata");
     let captured_request = request_capture.lock().expect("capture lock").clone();
     let captured_request_lower = captured_request.to_ascii_lowercase();
 
@@ -1000,21 +885,4 @@ fn test_template_init_prompt_uses_local_provider_when_configured() {
     assert!(flake.contains("sleep 30"));
     assert!(metadata.contains("\"provider\": \"local\""));
     assert!(metadata.contains("\"model\": \"llama.cpp/qwen2.5\""));
-}
-
-#[test]
-fn test_template_init_prompt_requires_local() {
-    mvm()
-        .args([
-            "template",
-            "init",
-            "test-prompt-vm",
-            "--prompt",
-            "python worker",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "--prompt currently requires --local",
-        ));
 }

@@ -1,9 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mvm_core::template::{TemplateConfig, TemplateSpec, template_dir, templates_base_dir};
-use mvm_runtime::vm::template::lifecycle as tmpl;
 use std::fs;
-use std::fs::read_dir;
 use std::path::Path;
 use std::time::Duration;
 
@@ -11,58 +8,14 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
-/// Inputs to [`create_single`] / [`create_multi`]. Bundled into a
-/// struct so adding new spec fields (e.g. plan 32's
-/// `default_network_policy`) doesn't trip clippy's
-/// `too_many_arguments` lint and doesn't churn every callsite.
-#[derive(Debug, Clone)]
-pub struct CreateParams<'a> {
-    pub flake: &'a str,
-    pub profile: &'a str,
-    pub role: &'a str,
-    pub cpus: u8,
-    pub mem: u32,
-    pub data_disk: u32,
-    pub default_network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
-}
-
-pub fn create_single(name: &str, params: CreateParams<'_>) -> Result<()> {
-    let flake_ref = resolve_flake_ref(params.flake);
-    let ts = now_iso();
-    let spec = TemplateSpec {
-        schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
-        template_id: name.to_string(),
-        flake_ref,
-        profile: params.profile.to_string(),
-        role: params.role.to_string(),
-        vcpus: params.cpus,
-        mem_mib: params.mem,
-        data_disk_mib: params.data_disk,
-        created_at: ts.clone(),
-        updated_at: ts,
-        default_network_policy: params.default_network_policy,
-    };
-    tmpl::template_create(&spec)
-}
-
-/// Resolve a flake reference to an absolute path if it's a local path.
+/// Initialize a project: scaffold `mvm.toml` + `flake.nix` (+ NixOS
+/// config) in the given directory. Plan 38 §4 — called from the
+/// `mvmctl init <DIR>` smart-dispatch in `commands/env/init.rs`.
 ///
-/// Relative paths like "." or "../foo" are resolved against CWD so that
-/// `nix build` works regardless of which directory the build runs from.
-/// Remote flake refs (e.g., "github:user/repo") are passed through unchanged.
-fn resolve_flake_ref(flake: &str) -> String {
-    // Remote flake refs contain ":" (github:, git+https:, path:, etc.)
-    if flake.contains(':') {
-        return flake.to_string();
-    }
-    // Local path — resolve to absolute
-    match std::path::Path::new(flake).canonicalize() {
-        Ok(abs) => abs.to_string_lossy().to_string(),
-        Err(_) => flake.to_string(),
-    }
-}
-
-/// Initialize an empty template directory layout (idempotent).
+/// `local` is preserved for source compatibility with the CLI args
+/// shape; project-scaffold is always local in plan 38 (the legacy
+/// `--vm` mode that initialised a directory inside the Lima VM is
+/// gone with the rest of the `template *` namespace).
 pub fn init(
     name: &str,
     local: bool,
@@ -70,337 +23,23 @@ pub fn init(
     preset: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<()> {
-    if local {
-        let selected_preset = resolve_scaffold_preset(preset, prompt);
-        let dir = std::path::Path::new(base_dir).join(name);
-        scaffold_template_files(&dir, name, &selected_preset, prompt)?;
-        return Ok(());
+    if !local {
+        anyhow::bail!(
+            "non-local init was a `mvmctl template init --vm` mode that no longer exists; pass a local DIR"
+        );
     }
-    if prompt.is_some() {
-        anyhow::bail!("--prompt currently requires --local");
-    }
-    tmpl::template_init(name)
-}
-
-pub fn create_multi(base: &str, roles: &[String], params: CreateParams<'_>) -> Result<()> {
-    // Resolve once so all variants share the same absolute path.
-    let flake_ref = resolve_flake_ref(params.flake);
-    for role in roles {
-        let name = format!("{base}-{role}");
-        create_single(
-            &name,
-            CreateParams {
-                flake: &flake_ref,
-                profile: params.profile,
-                role,
-                cpus: params.cpus,
-                mem: params.mem,
-                data_disk: params.data_disk,
-                default_network_policy: params.default_network_policy.clone(),
-            },
-        )?;
-    }
+    let selected_preset = resolve_scaffold_preset(preset, prompt);
+    let dir = std::path::Path::new(base_dir).join(name);
+    scaffold_template_files(&dir, name, &selected_preset, prompt)?;
     Ok(())
 }
 
-pub fn list(json: bool) -> Result<()> {
-    let vm_items = tmpl::template_list()?;
-    let local_items = local_templates(Path::new("."))?;
-
-    let base = templates_base_dir();
-
-    if json {
-        #[derive(serde::Serialize)]
-        struct Out {
-            vm_base: String,
-            vm: Vec<String>,
-            local_base: String,
-            local: Vec<String>,
-        }
-        let out = Out {
-            vm_base: base,
-            vm: vm_items,
-            local_base: std::env::current_dir()
-                .unwrap_or_else(|_| Path::new(".").to_path_buf())
-                .display()
-                .to_string(),
-            local: local_items,
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
-    }
-
-    println!("Templates ({base}):");
-    if vm_items.is_empty() {
-        println!("  (none)");
-    } else {
-        for t in &vm_items {
-            println!("  {}", t);
-        }
-    }
-
-    println!("\nLocal templates (base: ./):");
-    if local_items.is_empty() {
-        println!("  (none)");
-    } else {
-        for t in &local_items {
-            println!("  {}", t);
-        }
-    }
-
-    Ok(())
-}
-
-pub fn info(name: &str, json: bool) -> Result<()> {
-    let spec = tmpl::template_load(name)?;
-    let revision = tmpl::template_load_current_revision(name)?;
-
-    if json {
-        #[derive(serde::Serialize)]
-        struct InfoOut {
-            spec: TemplateSpec,
-            revision: Option<mvm_core::template::TemplateRevision>,
-            path: String,
-        }
-        let out = InfoOut {
-            spec,
-            revision,
-            path: template_dir(name),
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        println!("Template: {}", spec.template_id);
-        println!("  Flake:   {}", spec.flake_ref);
-        println!("  Profile: {}", spec.profile);
-        println!("  Role:    {}", spec.role);
-        println!("  vCPUs:   {}", spec.vcpus);
-        println!("  MemMiB:  {}", spec.mem_mib);
-        println!("  DataMiB: {}", spec.data_disk_mib);
-        println!("  Created: {}", spec.created_at);
-        println!("  Updated: {}", spec.updated_at);
-        println!("  Path:    {}", template_dir(name));
-        if let Some(policy) = &spec.default_network_policy {
-            use mvm_core::policy::network_policy::NetworkPolicy;
-            let summary = match policy {
-                NetworkPolicy::Preset { preset } => format!("preset={preset}"),
-                NetworkPolicy::AllowList { rules } => {
-                    let hosts: Vec<String> = rules.iter().map(|r| r.to_string()).collect();
-                    format!("allowlist=[{}]", hosts.join(", "))
-                }
-            };
-            println!("  Network: {summary}  (default; mvmctl up flags override)");
-        }
-
-        if let Some(rev) = &revision {
-            use mvm_core::pool::format_bytes;
-            println!();
-            println!("Current revision:");
-            println!(
-                "  Hash:    {}",
-                &rev.revision_hash[..rev.revision_hash.len().min(12)]
-            );
-            println!("  Built:   {}", rev.built_at);
-            if let Some(sizes) = &rev.artifact_paths.sizes {
-                println!("  Kernel:  {}", format_bytes(sizes.vmlinux_bytes));
-                println!("  Rootfs:  {}", format_bytes(sizes.rootfs_bytes));
-                if let Some(initrd) = sizes.initrd_bytes {
-                    println!("  Initrd:  {}", format_bytes(initrd));
-                }
-                println!("  Total:   {}", format_bytes(sizes.total_bytes()));
-                if let Some(closure) = sizes.nix_closure_bytes {
-                    println!("  Closure: {}", format_bytes(closure));
-                }
-            }
-
-            match &rev.snapshot {
-                Some(snap) => {
-                    println!();
-                    println!("Snapshot:");
-                    println!("  Created: {}", snap.created_at);
-                    println!("  VM state: {}", format_bytes(snap.vmstate_size_bytes));
-                    println!("  Memory:   {}", format_bytes(snap.mem_size_bytes));
-                    println!(
-                        "  Total:    {}",
-                        format_bytes(snap.vmstate_size_bytes + snap.mem_size_bytes)
-                    );
-                }
-                None => {
-                    println!();
-                    println!("Snapshot: (none)");
-                }
-            }
-        } else {
-            println!();
-            println!("Revision: (not yet built)");
-        }
-    }
-    Ok(())
-}
-
-pub fn delete(name: &str, force: bool) -> Result<()> {
-    tmpl::template_delete(name, force)
-}
-
-pub fn build(
-    name: &str,
-    force: bool,
-    snapshot: bool,
-    config: Option<&str>,
-    update_hash: bool,
-) -> Result<()> {
-    if let Some(cfg_path) = config {
-        let cfg = load_config(cfg_path)?;
-        for variant in &cfg.variants {
-            let base = if !cfg.template_id.is_empty() {
-                cfg.template_id.clone()
-            } else {
-                name.to_string()
-            };
-            let template_name = if !variant.name.is_empty() {
-                variant.name.clone()
-            } else {
-                format!("{base}-{}", variant.role)
-            };
-
-            let ts = now_iso();
-            let spec = TemplateSpec {
-                schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
-                template_id: template_name.clone(),
-                flake_ref: resolve_flake_ref(&cfg.flake_ref),
-                profile: if variant.profile.is_empty() {
-                    cfg.profile.clone()
-                } else {
-                    variant.profile.clone()
-                },
-                role: variant.role.clone(),
-                vcpus: variant.vcpus,
-                mem_mib: variant.mem_mib,
-                data_disk_mib: variant.data_disk_mib,
-                created_at: ts.clone(),
-                updated_at: ts,
-                // The TOML-driven `template build --config` path doesn't
-                // expose a per-variant network policy yet; callers that
-                // want a default use `mvmctl template create
-                // --network-preset` instead. Future work in plan 32 §D
-                // ergonomic follow-up: extend TemplateConfig variants
-                // with a network field.
-                default_network_policy: None,
-            };
-            tmpl::template_create(&spec)?;
-            if snapshot {
-                tmpl::template_build_with_snapshot(&template_name, force, update_hash)?;
-            } else {
-                tmpl::template_build(&template_name, force, update_hash)?;
-            }
-        }
-        Ok(())
-    } else if snapshot {
-        // Check if the current backend supports snapshots.
-        // Snapshots are Firecracker-specific; Apple Container and Docker
-        // backends only support image-only templates.
-        let backend = mvm_runtime::vm::backend::AnyBackend::auto_select();
-        if backend.capabilities().snapshots {
-            tmpl::template_build_with_snapshot(name, force, update_hash)
-        } else {
-            crate::ui::warn(&format!(
-                "Backend '{}' does not support snapshots. Building image-only template.",
-                backend.name()
-            ));
-            tmpl::template_build(name, force, update_hash)
-        }
-    } else {
-        tmpl::template_build(name, force, update_hash)
-    }
-}
-
-pub fn push(name: &str, revision: Option<&str>) -> Result<()> {
-    tmpl::template_push(name, revision)
-}
-
-pub fn pull(name: &str, revision: Option<&str>) -> Result<()> {
-    tmpl::template_pull(name, revision)
-}
-
-pub fn verify(name: &str, revision: Option<&str>) -> Result<()> {
-    tmpl::template_verify(name, revision)
-}
-
-pub fn edit(
-    name: &str,
-    flake: Option<&str>,
-    profile: Option<&str>,
-    role: Option<&str>,
-    cpus: Option<u8>,
-    mem: Option<u32>,
-    data_disk: Option<u32>,
-) -> Result<()> {
-    // Load existing template spec
-    let mut spec = tmpl::template_load(name)?;
-
-    // Update fields if provided
-    if let Some(f) = flake {
-        spec.flake_ref = resolve_flake_ref(f);
-    }
-    if let Some(p) = profile {
-        spec.profile = p.to_string();
-    }
-    if let Some(r) = role {
-        spec.role = r.to_string();
-    }
-    if let Some(c) = cpus {
-        spec.vcpus = c;
-    }
-    if let Some(m) = mem {
-        spec.mem_mib = m;
-    }
-    if let Some(d) = data_disk {
-        spec.data_disk_mib = d;
-    }
-
-    // Update timestamp
-    spec.updated_at = now_iso();
-
-    // Save updated spec
-    tmpl::template_create(&spec)?;
-
-    println!("Updated template '{}'", name);
-    println!(" vCPUs:   {}", spec.vcpus);
-    println!(" MemMiB:  {}", spec.mem_mib);
-    println!(" DataMiB: {}", spec.data_disk_mib);
-    println!(
-        "\nRun 'mvmctl template build {} --force' to rebuild with new settings",
-        name
-    );
-
-    Ok(())
-}
-
-fn load_config(path: &str) -> Result<TemplateConfig> {
-    let data = fs::read_to_string(Path::new(path))
-        .map_err(|e| anyhow::anyhow!("Failed to read template config {}: {}", path, e))?;
-    let cfg: TemplateConfig = toml::from_str(&data)
-        .map_err(|e| anyhow::anyhow!("Failed to parse template config {}: {}", path, e))?;
-    Ok(cfg)
-}
-
-fn local_templates(base: &Path) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    if let Ok(entries) = read_dir(base) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let artifacts = path.join("artifacts").join("revisions");
-                if artifacts.exists()
-                    && let Some(name) = path.file_name().and_then(|s| s.to_str())
-                {
-                    names.push(name.to_string());
-                }
-            }
-        }
-    }
-    names.sort();
-    Ok(names)
-}
+// Plan 38 §4 (slice 7b): create_single, create_multi, list, info,
+// edit, delete, build, push, pull, verify, load_config,
+// local_templates were all removed with the `mvmctl template *`
+// namespace. Project scaffolding (`init` above) is the only public
+// entry point that remains in this file; everything below this line
+// is private scaffolding/LLM-planner support that `init` calls into.
 
 fn flake_content_for_preset(preset: &str) -> Result<&'static str> {
     match preset {

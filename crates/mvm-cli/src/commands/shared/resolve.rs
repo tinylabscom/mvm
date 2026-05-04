@@ -151,17 +151,11 @@ pub fn resolve_network_policy(
     }
 }
 
-/// Resolve CLI network flags into an `Option<NetworkPolicy>`. Returns
-/// `None` when both flags are absent — used by `mvmctl template
-/// create` so a missing flag means "no default baked into the spec"
-/// rather than "explicit unrestricted default." Plan 32 §D
-/// ergonomic follow-up.
-pub fn resolve_optional_network_policy(
-    preset: Option<&str>,
-    allow: &[String],
-) -> Result<Option<mvm_core::network_policy::NetworkPolicy>> {
-    if preset.is_none() && allow.is_empty() {
-        return Ok(None);
-    }
-    resolve_network_policy(preset, allow).map(Some)
-}
+// Plan 38 §4 (slice 7b): `resolve_optional_network_policy` was used
+// by `mvmctl template create --network-preset` to bake a default
+// policy into the TemplateSpec. With the `template *` namespace
+// gone and `[network]` removed from `mvm.toml` (plan 38 §3),
+// runtime policy now lives entirely in `mvmctl up` flags / the
+// user-global config / mvmd tenant config. Function deleted; the
+// `resolve_network_policy` form (always returns Some) is the only
+// remaining helper.

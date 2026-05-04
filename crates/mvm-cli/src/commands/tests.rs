@@ -7,7 +7,7 @@ use clap::Parser;
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
-use super::build::{build, template};
+use super::build::build;
 use super::env::{cleanup, dev, init, uninstall};
 use super::ops::{audit, cache, config, metrics, security};
 use super::vm::{console, down, exec, forward, up};
@@ -17,7 +17,6 @@ use cache::CacheAction;
 use config::ConfigAction;
 use dev::DevAction;
 use security::SecurityAction;
-use template::TemplateAction;
 use up::RunParams;
 
 use super::shared::{
@@ -1354,40 +1353,54 @@ fn test_up_network_custom() {
     }
 }
 
+// Plan 38 §4 (slice 7b): the `mvmctl template *` namespace was removed
+// outright. The two tests previously here covered `template init …`
+// preset/prompt parsing — equivalent coverage now lives on
+// `mvmctl init <DIR> --preset/--prompt` (smart-dispatch in
+// `commands/env/init.rs`). See `test_init_*` below.
+
 #[test]
-fn test_template_init_defaults_to_no_preset_or_prompt() {
-    let cli = Cli::try_parse_from(["mvmctl", "template", "init", "demo", "--local"]).unwrap();
+fn test_init_scaffold_dir_dispatches_to_project_mode() {
+    use crate::commands::env::init;
+    let cli = Cli::try_parse_from(["mvmctl", "init", "demo"]).unwrap();
     match cli.command {
-        Commands::Template(template::Args {
-            action: TemplateAction::Init { preset, prompt, .. },
+        Commands::Init(init::Args {
+            dir,
+            preset,
+            prompt,
+            ..
         }) => {
-            assert!(preset.is_none(), "preset should be None when omitted");
-            assert!(prompt.is_none(), "prompt should be None when omitted");
+            assert_eq!(dir.as_deref(), Some("demo"));
+            assert!(preset.is_none());
+            assert!(prompt.is_none());
         }
-        _ => panic!("Expected Template Init command"),
+        _ => panic!("Expected Init command"),
     }
 }
 
 #[test]
-fn test_template_init_parses_prompt_flag() {
+fn test_init_scaffold_with_prompt_flag() {
+    use crate::commands::env::init;
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "template",
         "init",
         "demo",
-        "--local",
         "--prompt",
         "python worker that polls an API",
     ])
     .unwrap();
     match cli.command {
-        Commands::Template(template::Args {
-            action: TemplateAction::Init { prompt, preset, .. },
+        Commands::Init(init::Args {
+            dir,
+            prompt,
+            preset,
+            ..
         }) => {
+            assert_eq!(dir.as_deref(), Some("demo"));
             assert_eq!(prompt.as_deref(), Some("python worker that polls an API"));
-            assert!(preset.is_none(), "preset should remain None when omitted");
+            assert!(preset.is_none());
         }
-        _ => panic!("Expected Template Init command"),
+        _ => panic!("Expected Init command"),
     }
 }
 

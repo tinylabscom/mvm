@@ -3,7 +3,6 @@
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::template_cmd;
 use crate::ui;
 use mvm_core::user_config::MvmConfig;
 
@@ -79,19 +78,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             Ok(())
         }
         ImageAction::Fetch { name } => {
+            // Plan 38 §4 (slice 7b): the `template *` namespace is gone.
+            // `image fetch` previously synthesised a name-keyed template
+            // and ran `template build`; with manifest-keyed slots the
+            // equivalent flow is to scaffold an `mvm.toml` directory and
+            // run `mvmctl build` against it. Slice 7c rewires this path
+            // around the new verbs; for now we surface a copy-pasteable
+            // recipe so the catalog stays useful.
             let entry = catalog
                 .find(&name)
                 .ok_or_else(|| anyhow::anyhow!("Image {:?} not found in catalog", name))?;
-
-            ui::info(&format!(
-                "Fetching image {:?} from {}...",
-                entry.name, entry.flake_ref
-            ));
-            ui::info("This will create a template and build it via Nix.");
-            ui::info(&format!(
-                "Equivalent to: mvmctl template create {} --flake {} --profile {} && mvmctl template build {}",
-                entry.name, entry.flake_ref, entry.profile, entry.name
-            ));
 
             mvm_core::audit::emit(
                 mvm_core::audit::LocalAuditKind::ImageFetch,
@@ -99,30 +95,29 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 Some(&name),
             );
 
-            // Create a template from the catalog entry, then build it.
-            // Catalog entries don't carry a default network policy
-            // today; users opt in via `mvmctl template create
-            // --network-preset`.
-            template_cmd::create_single(
-                &entry.name,
-                template_cmd::CreateParams {
-                    flake: &entry.flake_ref,
-                    profile: &entry.profile,
-                    role: "worker",
-                    cpus: entry.default_cpus,
-                    mem: entry.default_memory_mib,
-                    data_disk: 0,
-                    default_network_policy: None,
-                },
-            )?;
-            ui::success(&format!("Created template {:?} from catalog.", entry.name));
-
-            ui::info(&format!("Building template {:?}...", entry.name));
-            template_cmd::build(&entry.name, false, false, None, false)?;
-            ui::success(&format!(
-                "Image {:?} is ready. Run with: mvmctl up --template {}",
-                entry.name, entry.name
+            ui::info(&format!("Catalog entry: {:?}", entry.name));
+            ui::info(&format!("  flake:   {}", entry.flake_ref));
+            ui::info(&format!("  profile: {}", entry.profile));
+            ui::info(&format!(
+                "  vcpus:   {}, mem: {} MiB",
+                entry.default_cpus, entry.default_memory_mib
             ));
+            ui::info("");
+            ui::info("To materialise this catalog entry as a buildable manifest:");
+            ui::info(&format!("  mkdir -p ./{}", entry.name));
+            ui::info(&format!("  cat > ./{}/mvm.toml <<EOF", entry.name));
+            ui::info(&format!("  flake = \"{}\"", entry.flake_ref));
+            ui::info(&format!("  profile = \"{}\"", entry.profile));
+            ui::info(&format!("  vcpus = {}", entry.default_cpus));
+            ui::info(&format!(
+                "  mem = \"{}M\"",
+                entry.default_memory_mib
+            ));
+            ui::info("  data_disk = \"0\"");
+            ui::info(&format!("  name = \"{}\"", entry.name));
+            ui::info("  EOF");
+            ui::info(&format!("  mvmctl build ./{}", entry.name));
+            ui::info(&format!("  mvmctl up ./{}", entry.name));
             Ok(())
         }
         ImageAction::Info { name } => {
