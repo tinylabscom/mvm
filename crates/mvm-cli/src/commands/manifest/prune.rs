@@ -102,7 +102,10 @@ fn run_dry(json: bool) -> Result<()> {
     if would_remove.is_empty() {
         println!("(dry-run) No orphaned slots.");
     } else {
-        println!("(dry-run) Would remove {} orphaned slot(s):", would_remove.len());
+        println!(
+            "(dry-run) Would remove {} orphaned slot(s):",
+            would_remove.len()
+        );
         for (h, reason) in would_remove {
             println!("  {}  ({})", &h[..h.len().min(12)], reason);
         }

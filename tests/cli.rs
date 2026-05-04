@@ -389,9 +389,10 @@ fn test_template_namespace_is_gone() {
         .args(["template", "--help"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand").or(
-            predicate::str::contains("unexpected argument"),
-        ));
+        .stderr(
+            predicate::str::contains("unrecognized subcommand")
+                .or(predicate::str::contains("unexpected argument")),
+        );
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +739,10 @@ fn test_init_preset_minimal_scaffolds_flake() {
         ])
         .assert()
         .success();
-    assert!(target.join("flake.nix").exists(), "flake.nix not scaffolded");
+    assert!(
+        target.join("flake.nix").exists(),
+        "flake.nix not scaffolded"
+    );
 }
 
 #[test]
@@ -746,12 +750,7 @@ fn test_init_preset_http_emits_http_server() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let target = tmp.path().join("test-http");
     mvm()
-        .args([
-            "init",
-            target.to_str().expect("utf8"),
-            "--preset",
-            "http",
-        ])
+        .args(["init", target.to_str().expect("utf8"), "--preset", "http"])
         .assert()
         .success();
     let flake = std::fs::read_to_string(target.join("flake.nix")).unwrap();
@@ -795,10 +794,9 @@ fn test_init_prompt_generates_metadata_and_infers_preset() {
         ])
         .assert()
         .success();
-    let flake_content =
-        std::fs::read_to_string(target.join("flake.nix")).expect("read flake");
-    let metadata_content = std::fs::read_to_string(target.join("mvm-template-prompt.json"))
-        .expect("read metadata");
+    let flake_content = std::fs::read_to_string(target.join("flake.nix")).expect("read flake");
+    let metadata_content =
+        std::fs::read_to_string(target.join("mvm-template-prompt.json")).expect("read metadata");
     assert!(flake_content.contains("services.app"));
     assert!(flake_content.contains("services.postgres"));
     assert!(metadata_content.contains("\"primary_preset\": \"python\""));

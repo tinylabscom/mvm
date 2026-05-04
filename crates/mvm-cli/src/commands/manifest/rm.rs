@@ -46,7 +46,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     if args.manifest_file && canonical.exists() {
         std::fs::remove_file(&canonical)
             .with_context(|| format!("Failed to delete manifest file {}", canonical.display()))?;
-        println!("Removed slot {} and manifest file {}", slot_hash, canonical.display());
+        println!(
+            "Removed slot {} and manifest file {}",
+            slot_hash,
+            canonical.display()
+        );
     } else {
         println!("Removed slot {}", slot_hash);
     }

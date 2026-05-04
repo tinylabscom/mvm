@@ -372,8 +372,7 @@ pub fn template_artifacts_dispatched(
     id_or_slot: &str,
 ) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
     if is_slot_hash_dirname(id_or_slot) {
-        let (persisted, vmlinux, initrd, rootfs, rev) =
-            template_artifacts_for_slot(id_or_slot)?;
+        let (persisted, vmlinux, initrd, rootfs, rev) = template_artifacts_for_slot(id_or_slot)?;
         Ok((
             persisted_to_synthetic_spec(&persisted),
             vmlinux,
@@ -646,9 +645,7 @@ pub fn template_build_from_manifest(
     // Update the slot's `current` symlink (relative target so the slot
     // is portable across host filesystems).
     let current_link = slot_current_symlink(slot_hash);
-    shell::run_in_vm(&format!(
-        "ln -snf artifacts/revisions/{rev} {current_link}"
-    ))?;
+    shell::run_in_vm(&format!("ln -snf artifacts/revisions/{rev} {current_link}"))?;
 
     // Compute the actual flake.lock hash for accurate cache keys.
     // Pool builds delegate this; dev/manifest builds compute it inline.

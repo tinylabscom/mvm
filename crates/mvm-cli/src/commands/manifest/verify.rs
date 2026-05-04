@@ -36,10 +36,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         Some(p) => resolve_manifest_config_path(std::path::Path::new(p))?,
         None => {
             let cwd = std::env::current_dir().context("Failed to read cwd")?;
-            mvm_core::manifest::discover_manifest_from_dir(&cwd)?
-                .ok_or_else(|| anyhow::anyhow!(
+            mvm_core::manifest::discover_manifest_from_dir(&cwd)?.ok_or_else(|| {
+                anyhow::anyhow!(
                     "No manifest found from cwd. Pass a path explicitly via the positional arg."
-                ))?
+                )
+            })?
         }
     };
 

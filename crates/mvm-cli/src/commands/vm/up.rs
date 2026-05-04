@@ -129,8 +129,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let network_policy = if args.network_preset.is_some() || !args.network_allow.is_empty() {
         resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?
     } else if let Some(id_or_slot) = resolved_template_arg.as_deref()
-        && let Ok(spec) =
-            mvm_runtime::vm::template::lifecycle::template_load_dispatched(id_or_slot)
+        && let Ok(spec) = mvm_runtime::vm::template::lifecycle::template_load_dispatched(id_or_slot)
         && let Some(default_policy) = spec.default_network_policy.clone()
     {
         crate::ui::info(&format!(

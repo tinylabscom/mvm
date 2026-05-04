@@ -252,8 +252,7 @@ fn test_up_manifest_short_flag() {
 
 #[test]
 fn test_up_flake_and_manifest_conflict() {
-    let result =
-        Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--manifest", "openclaw"]);
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--manifest", "openclaw"]);
     assert!(
         result.is_err(),
         "--flake and --manifest should be mutually exclusive"
@@ -691,7 +690,10 @@ fn test_setup_verb_is_unrecognized() {
 #[test]
 fn test_completions_verb_is_unrecognized() {
     let result = Cli::try_parse_from(["mvmctl", "completions", "bash"]);
-    assert!(result.is_err(), "`completions` was folded into `shell-init`");
+    assert!(
+        result.is_err(),
+        "`completions` was folded into `shell-init`"
+    );
 }
 
 #[test]
@@ -1296,8 +1298,7 @@ fn test_init_requires_dir() {
 
 #[test]
 fn test_init_with_catalog_flag() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "init", "demo", "--catalog", "postgres"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "init", "demo", "--catalog", "postgres"]).unwrap();
     match cli.command {
         Commands::Init(init::Args {
             dir,
@@ -1316,9 +1317,19 @@ fn test_init_with_catalog_flag() {
 
 #[test]
 fn test_init_catalog_conflicts_with_preset() {
-    let result =
-        Cli::try_parse_from(["mvmctl", "init", "demo", "--catalog", "http", "--preset", "minimal"]);
-    assert!(result.is_err(), "--catalog and --preset are mutually exclusive");
+    let result = Cli::try_parse_from([
+        "mvmctl",
+        "init",
+        "demo",
+        "--catalog",
+        "http",
+        "--preset",
+        "minimal",
+    ]);
+    assert!(
+        result.is_err(),
+        "--catalog and --preset are mutually exclusive"
+    );
 }
 
 // --- Cache CLI tests ---

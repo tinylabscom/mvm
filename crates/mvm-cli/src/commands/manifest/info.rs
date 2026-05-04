@@ -46,7 +46,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         )
     })?;
 
-    let revision = tmpl::template_snapshot_info_for_slot(&slot_hash).ok().flatten();
+    let revision = tmpl::template_snapshot_info_for_slot(&slot_hash)
+        .ok()
+        .flatten();
 
     if args.json {
         #[derive(serde::Serialize)]

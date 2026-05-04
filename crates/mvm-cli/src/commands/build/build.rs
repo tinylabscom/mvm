@@ -111,7 +111,10 @@ fn build_manifest(
 ) -> Result<()> {
     let manifest = Manifest::read_file(manifest_path)?;
     let canonical = std::fs::canonicalize(manifest_path).with_context(|| {
-        format!("Failed to canonicalize manifest path {}", manifest_path.display())
+        format!(
+            "Failed to canonicalize manifest path {}",
+            manifest_path.display()
+        )
     })?;
 
     // Resolve flake "." relative to the manifest's parent directory so a
@@ -122,8 +125,7 @@ fn build_manifest(
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| ".".to_string())
-    } else if !manifest.flake.contains(':')
-        && !std::path::Path::new(&manifest.flake).is_absolute()
+    } else if !manifest.flake.contains(':') && !std::path::Path::new(&manifest.flake).is_absolute()
     {
         // Relative path inside the flake field — resolve against manifest's parent.
         canonical
@@ -172,12 +174,8 @@ fn build_manifest(
         .to_string();
     // Override flake_ref to the resolved (absolute) path so the slot's
     // record matches what dev_build actually saw.
-    let mut persisted = PersistedManifest::from_manifest(
-        &manifest,
-        &canonical,
-        &backend,
-        Provenance::current(),
-    )?;
+    let mut persisted =
+        PersistedManifest::from_manifest(&manifest, &canonical, &backend, Provenance::current())?;
     persisted.flake_ref = resolved_flake;
 
     let revision = match tmpl::template_build_from_manifest(&persisted, force, update_hash) {
