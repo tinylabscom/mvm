@@ -87,6 +87,14 @@ pub fn run(json: bool) -> Result<()> {
     checks.push(nix_store_check(in_vm));
     checks.push(nix_store_size_check(in_vm));
 
+    // ── Security posture (plan 40 folded `mvmctl security` here) ──
+    checks.push(security_audit_log_check());
+    checks.push(security_data_dir_mode_check());
+    checks.push(security_proxy_socket_mode_check());
+    checks.push(security_dev_image_check());
+    checks.push(security_deny_config_check());
+    checks.push(security_default_network_check());
+
     // ── Render ────────────────────────────────────────────────────
     let all_ok = checks.iter().all(|c| c.ok);
     let report = DoctorReport { checks, all_ok };
@@ -135,6 +143,7 @@ fn render_text(report: &DoctorReport) {
                 "prerequisites" => "Prerequisites",
                 "tools" => "Tools",
                 "platform" => "Platform",
+                "security" => "Security posture",
                 _ => current_category,
             };
             println!("\n{}", title);
@@ -664,6 +673,165 @@ fn nix_store_size_check(in_vm: bool) -> Check {
             category: "disk",
             ok: true,
             info: "unable to check (skipped)".to_string(),
+        },
+    }
+}
+
+// ── Security posture (folded in from `mvmctl security` per plan 40) ─────
+
+fn security_audit_log_check() -> Check {
+    let path = mvm_core::audit::default_audit_log();
+    let exists = std::path::Path::new(&path).exists();
+    Check {
+        name: "audit log",
+        category: "security",
+        ok: true, // informational
+        info: if exists {
+            format!("present at {path}")
+        } else {
+            format!("not yet created at {path}")
+        },
+    }
+}
+
+/// `~/.mvm` should be mode 0700 (ADR-002 §W1.5).
+fn security_data_dir_mode_check() -> Check {
+    let dir = mvm_core::config::mvm_share_dir();
+    let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+        return Check {
+            name: "data dir mode",
+            category: "security",
+            ok: false,
+            info: format!("not present at {dir} — run `mvmctl bootstrap`"),
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        let expected = 0o700;
+        Check {
+            name: "data dir mode",
+            category: "security",
+            ok: mode == expected,
+            info: if mode == expected {
+                format!("0{mode:o} at {dir}")
+            } else {
+                format!("expected 0{expected:o}, got 0{mode:o} at {dir}")
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Check {
+            name: "data dir mode",
+            category: "security",
+            ok: true,
+            info: "non-Unix host; mode check skipped".to_string(),
+        }
+    }
+}
+
+/// Dev VM vsock proxy socket should be mode 0700 (ADR-002 §W1.2).
+fn security_proxy_socket_mode_check() -> Check {
+    let path = format!(
+        "{}/vms/mvm-dev/vsock.sock",
+        mvm_core::config::mvm_share_dir()
+    );
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return Check {
+            name: "vsock socket mode",
+            category: "security",
+            ok: true,
+            info: format!("dev VM not running (no socket at {path})"),
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        let expected = 0o700;
+        Check {
+            name: "vsock socket mode",
+            category: "security",
+            ok: mode == expected,
+            info: if mode == expected {
+                format!("0{mode:o}")
+            } else {
+                format!(
+                    "expected 0{expected:o}, got 0{mode:o} — same-host other users may have access"
+                )
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Check {
+            name: "vsock socket mode",
+            category: "security",
+            ok: true,
+            info: "non-Unix host; mode check skipped".to_string(),
+        }
+    }
+}
+
+/// Cached pre-built dev image presence (informational; absence triggers
+/// hash-verified download per ADR-002 §W5.1).
+fn security_dev_image_check() -> Check {
+    let version = env!("CARGO_PKG_VERSION");
+    let prebuilt_dir = format!("{}/prebuilt/v{version}", mvm_core::config::mvm_share_dir());
+    let kernel = format!("{prebuilt_dir}/vmlinux");
+    let rootfs = format!("{prebuilt_dir}/rootfs.ext4");
+    let cached = std::path::Path::new(&kernel).exists() && std::path::Path::new(&rootfs).exists();
+    Check {
+        name: "pre-built dev image",
+        category: "security",
+        ok: true,
+        info: if cached {
+            format!("cached at {prebuilt_dir}")
+        } else {
+            "not cached; next `mvmctl dev up` will download + hash-verify".to_string()
+        },
+    }
+}
+
+/// `deny.toml` at the workspace root (ADR-002 §W5.2 supply-chain policy).
+fn security_deny_config_check() -> Check {
+    let cwd = std::env::current_dir().ok();
+    let found = cwd.as_deref().and_then(|start| {
+        let mut cur: Option<&std::path::Path> = Some(start);
+        while let Some(p) = cur {
+            if p.join("deny.toml").exists() && p.join("Cargo.toml").exists() {
+                return Some(p.to_path_buf());
+            }
+            cur = p.parent();
+        }
+        None
+    });
+    Check {
+        name: "cargo-deny policy",
+        category: "security",
+        ok: true,
+        info: match found {
+            Some(p) => format!("deny.toml at {}", p.display()),
+            None => "deny.toml not found from cwd (expected only in source checkouts)".to_string(),
+        },
+    }
+}
+
+fn security_default_network_check() -> Check {
+    let path = mvm_core::dev_network::network_path("default");
+    let exists = std::path::Path::new(&path).exists();
+    Check {
+        name: "default dev network",
+        category: "security",
+        ok: true,
+        info: if exists {
+            "configured".to_string()
+        } else {
+            "not configured — run `mvmctl network create default`".to_string()
         },
     }
 }

@@ -8,7 +8,7 @@ mvmctl dev
 mvmctl build --flake .
 
 # Boot a headless Firecracker VM
-mvmctl run --flake . --cpus 2 --memory 1024
+mvmctl up --flake . --cpus 2 --memory 1024
 
 # Check health via vsock
 mvmctl vm ping`;
@@ -41,20 +41,19 @@ const nixFlake = `{
 }`;
 
 const template = `# Scaffold from a preset (minimal, python, http, postgres, worker)
-mvmctl template init my-service --local --preset python
+mvmctl init my-service --preset python
 
-# Register and build (sizes reported on success)
-mvmctl template create my-service
-mvmctl template build my-service
+# Build the manifest at ./my-service
+mvmctl build my-service
 
-# Inspect artifact sizes and snapshot status
-mvmctl template info my-service
+# Inspect manifest slot, sizes, snapshot status
+mvmctl manifest info my-service
 
-# Run from template
-mvmctl run --template my-service
+# Run from the manifest
+mvmctl up my-service
 
 # Build with snapshot for instant restart (<2s boot)
-mvmctl template build my-service --snapshot`;
+mvmctl build my-service --snapshot`;
 
 export function CodeExample() {
   return (

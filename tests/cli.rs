@@ -75,10 +75,9 @@ fn test_help_lists_all_subcommands() {
 
     for cmd in [
         "bootstrap",
-        "setup",
         "dev",
         "cleanup",
-        "ps",
+        "ls",
         "uninstall",
         "audit",
         "update",
@@ -86,6 +85,8 @@ fn test_help_lists_all_subcommands() {
         "down",
         "forward",
         "shell-init",
+        "catalog",
+        "validate",
     ] {
         assert!(
             output.contains(cmd),
@@ -105,12 +106,13 @@ fn test_bootstrap_help() {
 }
 
 #[test]
-fn test_setup_help() {
+fn test_setup_verb_removed() {
+    // Plan 40: `setup` was folded into `bootstrap`.
     mvm()
         .args(["setup", "--help"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Firecracker"));
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
@@ -290,9 +292,9 @@ fn test_up_listed_in_help() {
 }
 
 #[test]
-fn test_run_help_shows_flags() {
+fn test_up_help_shows_flags() {
     mvm()
-        .args(["run", "--help"])
+        .args(["up", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--flake"))
@@ -305,6 +307,21 @@ fn test_run_help_shows_flags() {
         .stdout(predicate::str::contains("--network-preset"))
         .stdout(predicate::str::contains("--network-allow"))
         .stdout(predicate::str::contains("--seccomp"));
+}
+
+#[test]
+fn test_up_aliases_removed() {
+    // Plan 40 dropped the `start` and `run` aliases.
+    mvm()
+        .args(["start", "--help"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
+    mvm()
+        .args(["run", "--help"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
@@ -327,17 +344,7 @@ fn test_doctor_help() {
         .stdout(predicate::str::contains("diagnostics"));
 }
 
-#[test]
-fn test_setup_help_shows_force_and_resources() {
-    mvm()
-        .args(["setup", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--force"))
-        .stdout(predicate::str::contains("--recreate"))
-        .stdout(predicate::str::contains("--lima-cpus"))
-        .stdout(predicate::str::contains("--lima-mem"));
-}
+// Plan 40: `setup` verb is gone — covered by `test_setup_verb_removed`.
 
 // ---------------------------------------------------------------------------
 // Plan 38 §4 (slice 7b): the `mvmctl template *` namespace was removed.
@@ -409,20 +416,20 @@ fn test_e2e_cli_flow_flags_parse() {
     assert!(help.contains("--profile"), "build missing --profile");
     assert!(help.contains("--json"), "build missing --json");
 
-    // run: verify flake/profile/resource/name flags
+    // up: verify flake/profile/resource/name flags
     let out = mvm()
-        .args(["run", "--help"])
+        .args(["up", "--help"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let help = String::from_utf8_lossy(&out);
-    assert!(help.contains("--flake"), "run missing --flake");
-    assert!(help.contains("--profile"), "run missing --profile");
-    assert!(help.contains("--cpus"), "run missing --cpus");
-    assert!(help.contains("--memory"), "run missing --memory");
-    assert!(help.contains("--name"), "run missing --name");
+    assert!(help.contains("--flake"), "up missing --flake");
+    assert!(help.contains("--profile"), "up missing --profile");
+    assert!(help.contains("--cpus"), "up missing --cpus");
+    assert!(help.contains("--memory"), "up missing --memory");
+    assert!(help.contains("--name"), "up missing --name");
 }
 
 // ---------------------------------------------------------------------------
@@ -444,8 +451,8 @@ fn test_shell_init_prints_block() {
     let assert = mvm().arg("shell-init").assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("mvmctl completions"),
-        "shell-init should include completions"
+        stdout.contains("mvmctl shell-init --emit-completions"),
+        "shell-init should include the embedded completion-emit hook"
     );
     assert!(
         stdout.contains("alias mvmctl="),
@@ -566,53 +573,22 @@ fn test_dev_up_accepts_watch_config_flag() {
 }
 
 #[test]
-fn test_run_accepts_watch_config_flag() {
+fn test_up_accepts_watch_config_flag() {
     mvm()
-        .args(["run", "--watch-config", "--help"])
+        .args(["up", "--watch-config", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--watch-config"));
 }
 
 #[test]
-fn test_completions_bash_exits_ok() {
+fn test_completions_verb_removed() {
+    // Plan 40: standalone `completions` was folded into `shell-init`.
     mvm()
         .args(["completions", "bash"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("mvmctl"));
-}
-
-#[test]
-fn test_completions_zsh_exits_ok() {
-    mvm()
-        .args(["completions", "zsh"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("mvmctl"));
-}
-
-#[test]
-fn test_completions_fish_exits_ok() {
-    mvm()
-        .args(["completions", "fish"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("mvmctl"));
-}
-
-#[test]
-fn test_completions_no_shell_shows_error() {
-    mvm().args(["completions"]).assert().failure().code(2);
-}
-
-#[test]
-fn test_top_level_help_lists_completions() {
-    mvm()
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("completions"));
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
@@ -650,56 +626,86 @@ fn test_config_edit_with_true_editor() {
 // ============================================================================
 
 #[test]
-fn test_run_watch_flag_accepted_in_help() {
+fn test_up_watch_flag_accepted_in_help() {
     mvm()
-        .args(["run", "--help"])
+        .args(["up", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("watch"));
 }
 
 #[test]
-fn test_run_watch_without_flake_degrades_gracefully() {
-    // --watch without --flake should fail at argument validation (group "source"
-    // is required), not at parsing — exit code must not be 2 (Clap parse error).
-    // Actually, since --flake and --template are in a required arg group,
-    // omitting both gives exit code 2 even without --watch. So we test that
-    // --watch with a remote flake is accepted at parse time.
+fn test_up_watch_with_remote_flake_parses() {
     mvm()
-        .args(["run", "--flake", "github:auser/mvm", "--watch", "--help"])
+        .args(["up", "--flake", "github:auser/mvm", "--watch", "--help"])
         .assert()
         .success();
 }
 
 // ============================================================================
-// Sprint 34: mvmctl flake check
+// Plan 40: `mvmctl validate` (renamed from `flake check`)
 // ============================================================================
 
 #[test]
-fn test_flake_check_help_exits_ok() {
+fn test_validate_help_exits_ok() {
     mvm()
-        .args(["flake", "check", "--help"])
+        .args(["validate", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("flake"));
 }
 
 #[test]
-fn test_flake_top_level_help_lists_check() {
-    mvm()
-        .args(["flake", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("check"));
-}
-
-#[test]
-fn test_flake_help_lists_in_top_level() {
+fn test_validate_listed_in_top_level_help() {
     mvm()
         .args(["--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("flake"));
+        .stdout(predicate::str::contains("validate"));
+}
+
+#[test]
+fn test_flake_verb_removed() {
+    // Plan 40: `flake check` was renamed to `validate`.
+    mvm()
+        .args(["flake", "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
+}
+
+// ============================================================================
+// Plan 40: `mvmctl catalog` (replaces `mvmctl image *`)
+// ============================================================================
+
+#[test]
+fn test_catalog_help_exits_ok() {
+    mvm()
+        .args(["catalog", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("info"))
+        .stdout(predicate::str::contains("search"));
+}
+
+#[test]
+fn test_image_verb_removed() {
+    mvm()
+        .args(["image", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
+}
+
+#[test]
+fn test_security_verb_removed() {
+    // Plan 40: `security` was folded into `doctor`.
+    mvm()
+        .args(["security", "status"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 // ============================================================================

@@ -72,14 +72,14 @@ Firecracker microVMs are headless workloads with no SSH access -- they communica
 Build a microVM image and run it in one command:
 
 ```bash
-mvmctl run --flake github:org/app --profile minimal --cpus 2 --memory 1024
+mvmctl up --flake github:org/app --profile minimal --cpus 2 --memory 1024
 ```
 
 Or build separately:
 
 ```bash
 mvmctl build --flake . --profile minimal --role worker
-mvmctl start
+mvmctl up
 ```
 
 The `--profile` selects a NixOS configuration profile and `--role` selects the VM role (worker, gateway, builder). These map to Nix flake attributes.
@@ -102,7 +102,7 @@ Then:
 
 ```bash
 mvmctl build .
-mvmctl start
+mvmctl up
 ```
 
 ## 6. Manifests (Reusable Base Images)
@@ -177,7 +177,7 @@ The installed binary is available when you `mvmctl shell` into Lima, useful for 
 Pass host directories into the Firecracker microVM:
 
 ```bash
-mvmctl run --flake . --profile minimal \
+mvmctl up --flake . --profile minimal \
     --volume ./data:/data:1024 \
     --cpus 2 --memory 1024
 ```
@@ -201,17 +201,17 @@ mvmctl doctor    # Check system dependencies and configuration
 
 ## Troubleshooting
 
-**`Lima VM 'mvm' does not exist`**: Run `mvmctl setup` or `mvmctl dev` (which auto-bootstraps).
+**`Lima VM 'mvm' does not exist`**: Run `mvmctl bootstrap` or `mvmctl dev` (which auto-bootstraps).
 
 **`limactl not found`**: Run `mvmctl bootstrap` to install Lima via Homebrew, or install manually with `brew install lima`.
 
-**Firecracker not installed**: Run `mvmctl setup` to install Firecracker inside the Lima VM.
+**Firecracker not installed**: Run `mvmctl bootstrap` to install Firecracker inside the Lima VM.
 
 **Can't access project files inside microVM**: The Firecracker microVM has an isolated filesystem. Use `mvmctl shell` to access the Lima VM where your home directory is mounted, or pass volumes with `--volume`.
 
 **Lima VM is slow**: Adjust resources: `mvmctl destroy && mvmctl dev --lima-cpus 8 --lima-mem 16`.
 
-**Rootfs corrupted**: Rebuild without destroying the Lima VM: `mvmctl setup --recreate`.
+**Rootfs corrupted**: Re-run `mvmctl bootstrap` (idempotent — repaves any corrupted rootfs).
 
 ## Next Steps
 

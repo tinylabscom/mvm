@@ -42,12 +42,8 @@ description: Complete command reference for mvmctl.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl bootstrap` | Full setup from scratch: Homebrew deps (macOS), Lima, Firecracker, kernel, rootfs |
+| `mvmctl bootstrap` | Full setup from scratch: Homebrew deps (macOS), Lima, Firecracker, kernel, rootfs (idempotent — safe to re-run) |
 | `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
-| `mvmctl setup` | Create Lima VM and install Firecracker assets (requires limactl) |
-| `mvmctl setup --recreate` | Stop microVM, rebuild rootfs from upstream squashfs |
-| `mvmctl setup --force` | Re-run all setup steps even if already complete |
-| `mvmctl setup --lima-cpus N --lima-mem N` | Configure Lima VM resources (defaults: 8 CPUs, 16 GiB) |
 | `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. Uses Apple Container on macOS 26+, Lima otherwise. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
@@ -57,7 +53,7 @@ description: Complete command reference for mvmctl.
 | `mvmctl dev shell` | Open a shell in the running Lima VM |
 | `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
 | `mvmctl dev status` | Show dev environment status (Lima VM, Firecracker, Nix versions) |
-| `mvmctl doctor` | Run system diagnostics and dependency checks |
+| `mvmctl doctor` | Run diagnostics + dependency checks + security posture (folded in from the dropped `mvmctl security` verb) |
 | `mvmctl doctor --json` | Output diagnostics as JSON |
 | `mvmctl update` | Check for and install mvmctl updates |
 | `mvmctl update --check` | Only check for updates, don't install |
@@ -87,9 +83,10 @@ description: Complete command reference for mvmctl.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl init [DIR]` | Scaffold `mvm.toml` + `flake.nix` (+ NixOS config) in `DIR` (default: cwd) |
-| `mvmctl init [DIR] --preset <preset>` | Preset: `minimal`, `http`, `postgres`, `worker`, `python` (default: `minimal`) |
-| `mvmctl init [DIR] --prompt "<text>"` | Generate scaffold from a natural-language prompt. In `auto` mode (default) probes for a local OpenAI-compatible endpoint on loopback (Ollama @ `:11434`, LocalAI @ `:8080`) before falling through to OpenAI. Override with `MVM_TEMPLATE_PROVIDER=openai\|local\|heuristic`; skip probe with `MVM_TEMPLATE_NO_LOCAL_PROBE=1` |
+| `mvmctl init <DIR>` | Scaffold `mvm.toml` + `flake.nix` (+ NixOS config) in `DIR` (required) |
+| `mvmctl init <DIR> --preset <preset>` | Preset: `minimal`, `http`, `postgres`, `worker`, `python` (default: `minimal`) |
+| `mvmctl init <DIR> --catalog <name>` | Scaffold from a bundled catalog entry (run `mvmctl catalog list` to browse). Mutually exclusive with `--preset`/`--prompt` |
+| `mvmctl init <DIR> --prompt "<text>"` | Generate scaffold from a natural-language prompt. In `auto` mode (default) probes for a local OpenAI-compatible endpoint on loopback (Ollama @ `:11434`, LocalAI @ `:8080`) before falling through to OpenAI. Override with `MVM_TEMPLATE_PROVIDER=openai\|local\|heuristic`; skip probe with `MVM_TEMPLATE_NO_LOCAL_PROBE=1` |
 
 ### Building (top-level)
 
@@ -104,7 +101,7 @@ description: Complete command reference for mvmctl.
 
 ### Running (top-level — already manifest-aware)
 
-`mvmctl up [PATH]`, `mvmctl run [PATH]`, `mvmctl exec [PATH] -- <cmd>` all accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-exec) sections for full flag lists.
+`mvmctl up [PATH]` and `mvmctl exec [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-exec) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
 
 ### Inspection / registry (`mvmctl manifest *`)
 
@@ -141,9 +138,11 @@ description: Complete command reference for mvmctl.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl flake check` | Validate a Nix flake before building (current directory) |
-| `mvmctl flake check --flake <ref>` | Validate a specific flake path or reference |
-| `mvmctl flake check --json` | Output structured JSON instead of human-readable output |
+| `mvmctl validate` | Validate a Nix flake before building (current directory) |
+| `mvmctl validate --flake <ref>` | Validate a specific flake path or reference |
+| `mvmctl validate --json` | Output structured JSON instead of human-readable output |
+
+> Plan 40 renamed this verb from `mvmctl flake check` to `mvmctl validate`.
 
 ## Networks
 
@@ -156,12 +155,14 @@ description: Complete command reference for mvmctl.
 
 ## Image Catalog
 
+> Plan 40 renamed the `mvmctl image *` namespace to `mvmctl catalog *` (a metadata-only browser) and folded "build from catalog" into `mvmctl init <DIR> --catalog <name>`.
+
 | Command | Description |
 |---------|-------------|
-| `mvmctl image list` | List available images in the bundled catalog (alias: `ls`) |
-| `mvmctl image search <query>` | Search images by name, description, or tag |
-| `mvmctl image fetch <name>` | Build an image from the catalog (creates template + runs Nix build) |
-| `mvmctl image info <name>` | Show catalog entry details (JSON) |
+| `mvmctl catalog list` | List bundled catalog entries |
+| `mvmctl catalog search <query>` | Search entries by name, description, or tag |
+| `mvmctl catalog info <name>` | Show catalog entry details (JSON) |
+| `mvmctl init <DIR> --catalog <name>` | Scaffold a project from a catalog entry |
 
 ## Console
 
@@ -269,8 +270,7 @@ When an image-taking command is invoked without `--flake` or `--template`,
 This applies to:
 
 - `mvmctl exec -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
-- `mvmctl up` / `mvmctl run` / `mvmctl start` — boots a long-running microVM
-  with the same image
+- `mvmctl up` — boots a long-running microVM with the same image
 
 The image is built from `nix/default-microvm/` on first use and cached at
 `~/.cache/mvm/default-microvm/` (kernel + rootfs). Nix is required to build
@@ -287,25 +287,14 @@ it; pass `--template` or `--flake` if Nix isn't available on your host.
 
 ## Security
 
-| Command | Description |
-|---------|-------------|
-| `mvmctl security status` | Show security posture evaluation (vsock auth, seccomp, no-SSH, etc.) |
-| `mvmctl security status --json` | Output posture report as JSON |
-
-## Setup
-
-| Command | Description |
-|---------|-------------|
-| `mvmctl init` | First-time setup wizard (deps, Lima VM, default network, XDG dirs) |
-| `mvmctl init --non-interactive` | Run setup with defaults, no prompts |
-| `mvmctl init --lima-cpus N --lima-mem N` | Configure Lima VM resources |
+> Plan 40 dropped the standalone `mvmctl security status` verb. Posture checks now live inside `mvmctl doctor`.
 
 ## Utilities
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `mvmctl shell-init` | Print shell configuration (completions + dev aliases) to stdout |
+| `mvmctl shell-init --emit-completions <shell>` | Emit just the shell-completion script (replaces the dropped `mvmctl completions <shell>`) |
 | `mvmctl metrics` | Show runtime metrics (Prometheus text format) |
 | `mvmctl metrics --json` | Show runtime metrics as JSON |
 | `mvmctl uninstall` | Remove Lima VM, Firecracker, and all mvm state (confirmation required) |

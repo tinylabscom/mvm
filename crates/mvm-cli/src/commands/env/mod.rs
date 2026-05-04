@@ -7,7 +7,6 @@
 pub(super) mod apple_container;
 pub(super) mod bootstrap;
 pub(super) mod cleanup;
-pub(super) mod completions;
 pub(super) mod dev;
 pub(super) mod doctor;
 pub(super) mod init;

@@ -11,7 +11,7 @@ const lines = [
   { text: "  Building rootfs via Nix...", delay: 3400, dim: true },
   { text: "  rootfs: 48.2 MB (squashfs)", delay: 4000, accent: true },
   { text: "", delay: 4400 },
-  { text: "$ mvmctl run --flake . --cpus 2", delay: 4800 },
+  { text: "$ mvmctl up --flake . --cpus 2", delay: 4800 },
   { text: "  Booted in 1.2s. Health: OK", delay: 5400, accent: true },
 ];
 

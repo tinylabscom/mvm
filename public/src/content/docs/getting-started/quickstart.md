@@ -86,12 +86,13 @@ mvmctl up --template base-worker
 
 ## 5. Image Catalog
 
-Browse and build images without writing Nix flakes yourself:
+Browse the bundled catalog and scaffold from a curated entry:
 
 ```bash
-mvmctl image list           # Browse available images
-mvmctl image fetch minimal  # Build from catalog (creates template + Nix build)
-mvmctl up --template minimal
+mvmctl catalog list                       # Browse available entries
+mvmctl init my-app --catalog minimal      # Scaffold from a catalog entry
+mvmctl build my-app                       # Build the manifest
+mvmctl up my-app                          # Boot the VM
 ```
 
 ## 6. Interactive Console
@@ -134,9 +135,8 @@ mvmctl network list
 ## 9. Diagnostics & Security
 
 ```bash
-mvmctl doctor           # Check system dependencies, available backends
+mvmctl doctor           # Deps, available backends, and security posture (one report)
 mvmctl logs vm1         # View guest console logs
-mvmctl security status  # Security posture evaluation
 mvmctl cache info       # Cache directory disk usage
 ```
 

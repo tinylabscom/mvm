@@ -2,7 +2,7 @@
 # Load completions for the current shell (bash or zsh)
 if command -v mvmctl >/dev/null 2>&1; then
     _mvm_shell="$(basename "${SHELL:-bash}")"
-    eval "$(mvmctl completions "$_mvm_shell" 2>/dev/null)"
+    eval "$(mvmctl shell-init --emit-completions "$_mvm_shell" 2>/dev/null)"
     unset _mvm_shell
 fi
 

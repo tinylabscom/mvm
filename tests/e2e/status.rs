@@ -21,31 +21,21 @@ fn status_on_clean_system_produces_meaningful_output() {
     );
 }
 
-/// `status --help` (alias for ls) should always succeed.
+/// Plan 40 dropped the `ps`/`status` aliases on `ls`.
 #[test]
-fn status_help_always_succeeds() {
-    mvmctl().args(["status", "--help"]).assert().success();
+fn ps_alias_is_unrecognized() {
+    mvmctl()
+        .args(["ps", "--help"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
-/// `ps` alias should behave identically to `ls`.
 #[test]
-fn ps_alias_behaves_like_status() {
-    let ps_code = mvmctl()
-        .arg("ps")
+fn status_alias_is_unrecognized() {
+    mvmctl()
+        .args(["status", "--help"])
         .assert()
-        .get_output()
-        .status
-        .code()
-        .unwrap_or(-1);
-    let ls_code = mvmctl()
-        .arg("ls")
-        .assert()
-        .get_output()
-        .status
-        .code()
-        .unwrap_or(-1);
-    assert_eq!(
-        ps_code, ls_code,
-        "ps alias should exit with same code as ls"
-    );
+        .failure()
+        .code(2);
 }

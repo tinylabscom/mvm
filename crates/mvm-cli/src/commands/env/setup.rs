@@ -1,97 +1,17 @@
-//! `mvmctl setup` and related rootfs/security helpers.
+//! Setup helpers used by `bootstrap`. Plan 40 dropped the standalone
+//! `mvmctl setup` verb — `bootstrap` runs the full flow idempotently,
+//! so the separate subcommand was redundant. The helpers below
+//! (`run_setup_steps`, `setup_security_baseline`) remain and are
+//! imported by `bootstrap.rs`.
 
 use anyhow::Result;
-use clap::Args as ClapArgs;
 
 use crate::bootstrap;
 use crate::ui;
 
-use mvm_core::user_config::MvmConfig;
 use mvm_runtime::config;
 use mvm_runtime::shell;
-use mvm_runtime::vm::{firecracker, lima, microvm};
-
-use super::Cli;
-
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct Args {
-    /// Delete the existing rootfs and rebuild it from scratch
-    #[arg(long)]
-    pub recreate: bool,
-    /// Re-run all setup steps even if already complete
-    #[arg(long)]
-    pub force: bool,
-    /// Number of vCPUs for the Lima VM
-    #[arg(long, default_value = "8")]
-    pub lima_cpus: u32,
-    /// Memory (GiB) for the Lima VM
-    #[arg(long, default_value = "16")]
-    pub lima_mem: u32,
-}
-
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
-    // CLI flag wins; otherwise fall back to per-user config defaults.
-    let effective_cpus = if args.lima_cpus == 8 {
-        cfg.lima_cpus
-    } else {
-        args.lima_cpus
-    };
-    let effective_mem = if args.lima_mem == 16 {
-        cfg.lima_mem_gib
-    } else {
-        args.lima_mem
-    };
-
-    if args.recreate {
-        recreate_rootfs()?;
-        ui::success("\nRootfs recreated! Run 'mvmctl start' or 'mvmctl dev' to launch.");
-        return Ok(());
-    }
-
-    if !bootstrap::is_lima_required() {
-        // Native Linux — just install FC directly
-        run_setup_steps(args.force, effective_cpus, effective_mem)?;
-        ui::success("\nSetup complete! Run 'mvmctl start' to launch a microVM.");
-        return Ok(());
-    }
-
-    which::which("limactl").map_err(|_| {
-        anyhow::anyhow!(
-            "'limactl' not found. Install Lima first: brew install lima\n\
-             Or run 'mvmctl bootstrap' for full automatic setup."
-        )
-    })?;
-
-    run_setup_steps(args.force, effective_cpus, effective_mem)?;
-
-    ui::success("\nSetup complete! Run 'mvmctl start' to launch a microVM.");
-    Ok(())
-}
-
-/// Stop the running microVM and rebuild the rootfs from the upstream squashfs.
-pub(super) fn recreate_rootfs() -> Result<()> {
-    if bootstrap::is_lima_required() {
-        lima::require_running()?;
-    }
-
-    // Stop Firecracker if running
-    if firecracker::is_running()? {
-        ui::info("Stopping running microVM...");
-        microvm::stop()?;
-    }
-
-    ui::info("Removing existing rootfs...");
-    shell::run_in_vm(&format!(
-        "rm -f {dir}/ubuntu-*.ext4",
-        dir = config::MICROVM_DIR,
-    ))?;
-
-    ui::info("Rebuilding rootfs...");
-    firecracker::prepare_rootfs()?;
-    firecracker::write_state()?;
-
-    Ok(())
-}
+use mvm_runtime::vm::{firecracker, lima};
 
 pub(super) fn run_setup_steps(force: bool, lima_cpus: u32, lima_mem: u32) -> Result<()> {
     let total = 5;

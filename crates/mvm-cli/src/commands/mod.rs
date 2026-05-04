@@ -1,4 +1,5 @@
 mod build;
+mod catalog;
 mod env;
 mod manifest;
 mod ops;
@@ -40,8 +41,6 @@ pub(in crate::commands) struct Cli {
 pub(in crate::commands) enum Commands {
     /// Full environment setup from scratch
     Bootstrap(env::bootstrap::Args),
-    /// Create Lima VM, install Firecracker, download kernel/rootfs (requires limactl)
-    Setup(env::setup::Args),
     /// Manage the Lima development environment (up, down, shell, status)
     Dev(env::dev::Args),
     /// Remove old dev-build artifacts and run Nix garbage collection
@@ -51,8 +50,7 @@ pub(in crate::commands) enum Commands {
     /// Forward a port from a running microVM to localhost
     Forward(vm::forward::Args),
     /// List running VMs
-    #[command(alias = "ls", alias = "status")]
-    Ps(vm::ps::Args),
+    Ls(vm::ps::Args),
     /// Check for and install the latest version of mvmctl
     Update(env::update::Args),
     /// System diagnostics and dependency checks
@@ -61,17 +59,14 @@ pub(in crate::commands) enum Commands {
     Manifest(manifest::Args),
     /// Build a microVM image from a Mvmfile.toml config or Nix flake
     Build(build::build::Args),
-    /// Build and run a VM from a Nix flake, a template, or the bundled default image.
+    /// Build and run a VM from a Nix flake, a manifest path, or the bundled default image.
     ///
     /// If neither `--flake` nor `--template` is supplied, the bundled
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
     /// cached at `~/.cache/mvm/default-microvm/`).
-    #[command(alias = "start", alias = "run")]
     Up(vm::up::Args),
     /// Stop microVMs (from mvm.toml, by name, or all)
     Down(vm::down::Args),
-    /// Generate shell completions
-    Completions(env::completions::Args),
     /// Print shell configuration (completions + dev aliases) to stdout
     ShellInit(env::shell_init::Args),
     /// Show runtime metrics (Prometheus text format by default)
@@ -82,22 +77,20 @@ pub(in crate::commands) enum Commands {
     Uninstall(env::uninstall::Args),
     /// View the local audit log (~/.mvm/log/audit.jsonl)
     Audit(ops::audit::Args),
-    /// Validate a Nix flake before building
-    Flake(build::flake::Args),
+    /// Validate a Nix flake before building (runs `nix flake check`)
+    Validate(build::validate::Args),
     /// Show filesystem changes in a running VM (files created/modified/deleted since boot)
     Diff(vm::diff::Args),
     /// Manage named dev networks
     Network(ops::network::Args),
-    /// Browse and fetch images from the Nix-based image catalog
-    Image(build::image::Args),
+    /// Browse the bundled image catalog
+    Catalog(catalog::Args),
     /// Interactive console (PTY-over-vsock) to a running VM
     Console(vm::console::Args),
     /// Manage the XDG cache directory (~/.cache/mvm)
     Cache(ops::cache::Args),
-    /// First-time setup wizard — installs deps, creates Lima VM, sets up default network
+    /// Scaffold a project (`mvm.toml` + `flake.nix`). Use `mvmctl bootstrap` for first-time environment setup.
     Init(env::init::Args),
-    /// Show security posture and status
-    Security(ops::security::Args),
     /// Boot a transient microVM, run a single command, and tear down (dev-mode only).
     ///
     /// Inspired by cco — same one-command UX, but with a Firecracker microVM as the sandbox.
@@ -191,32 +184,29 @@ pub fn run() -> Result<()> {
 
     let result = match cli.command.clone() {
         Commands::Bootstrap(a) => env::bootstrap::run(&cli, a, &cfg),
-        Commands::Setup(a) => env::setup::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Cleanup(a) => env::cleanup::run(&cli, a, &cfg),
         Commands::Logs(a) => vm::logs::run(&cli, a, &cfg),
         Commands::Forward(a) => vm::forward::run(&cli, a, &cfg),
-        Commands::Ps(a) => vm::ps::run(&cli, a, &cfg),
+        Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Build(a) => build::build::run(&cli, a, &cfg),
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),
-        Commands::Completions(a) => env::completions::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
         Commands::Metrics(a) => ops::metrics::run(&cli, a, &cfg),
         Commands::Config(a) => ops::config::run(&cli, a, &cfg),
         Commands::Uninstall(a) => env::uninstall::run(&cli, a, &cfg),
         Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
-        Commands::Flake(a) => build::flake::run(&cli, a, &cfg),
+        Commands::Validate(a) => build::validate::run(&cli, a, &cfg),
         Commands::Diff(a) => vm::diff::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
-        Commands::Image(a) => build::image::run(&cli, a, &cfg),
+        Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
-        Commands::Security(a) => ops::security::run(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
         Commands::Mcp(a) => ops::mcp::run(&cli, a, &cfg),
     };
