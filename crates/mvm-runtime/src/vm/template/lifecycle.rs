@@ -417,6 +417,61 @@ pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
     }
 }
 
+/// Verify a slot's artifacts against its `checksums.json`. Returns
+/// `Ok(())` if every recorded file matches; an error otherwise listing
+/// which file mismatched. The checksums file is written by
+/// `template_push_slot` (slice 8b) and is also produced inline by
+/// `template_build_from_manifest` once push lands; until then a slot
+/// without a `checksums.json` errors with a hint.
+///
+/// `revision` selects a specific revision; `None` resolves the slot's
+/// `current` symlink.
+#[instrument(skip_all, fields(slot_hash = slot_hash, revision = ?revision))]
+pub fn template_verify_slot(slot_hash: &str, revision: Option<&str>) -> Result<()> {
+    let rev = match revision {
+        Some(r) => r.to_string(),
+        None => current_revision_id_for_slot(slot_hash)?,
+    };
+    let rev_dir = std::path::PathBuf::from(slot_revision_dir(slot_hash, &rev));
+    let sums_path = rev_dir.join("checksums.json");
+    let sums_bytes = std::fs::read(&sums_path).with_context(|| {
+        format!(
+            "Missing {} — checksums are written by `mvmctl manifest push` (slice 8b not yet shipped). Run `mvmctl build --force` to repopulate the slot, then verify will work after push lands.",
+            sums_path.display()
+        )
+    })?;
+    let checksums: Checksums = serde_json::from_slice(&sums_bytes)
+        .with_context(|| format!("Corrupt {}", sums_path.display()))?;
+
+    let mut mismatches = Vec::new();
+    for (name, expected_hex) in &checksums.files {
+        let path = rev_dir.join(name);
+        if !path.exists() {
+            mismatches.push(format!("{}: missing", name));
+            continue;
+        }
+        let actual = sha256_hex(&path)?;
+        if &actual != expected_hex {
+            mismatches.push(format!(
+                "{}: expected {}, got {}",
+                name,
+                &expected_hex[..expected_hex.len().min(12)],
+                &actual[..actual.len().min(12)]
+            ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        anyhow::bail!(
+            "Slot {} revision {} failed verification:\n  - {}",
+            slot_hash,
+            rev,
+            mismatches.join("\n  - ")
+        );
+    }
+    Ok(())
+}
+
 /// Cleanup pass — remove slots whose source manifest file is missing
 /// on disk (e.g. the user `rm`'d their project directory or moved it
 /// elsewhere, leaving the slot dangling under `~/.mvm/templates/`).

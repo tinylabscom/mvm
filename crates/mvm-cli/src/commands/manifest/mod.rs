@@ -17,6 +17,7 @@ mod info;
 mod ls;
 mod prune;
 mod rm;
+mod verify;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -37,6 +38,9 @@ pub(in crate::commands) enum ManifestAction {
     Rm(rm::Args),
     /// Cleanup orphaned slots (slots whose source manifest file is gone)
     Prune(prune::Args),
+    /// Verify a slot's artifacts against its checksums (and, post plan
+    /// 36, cosign signatures)
+    Verify(verify::Args),
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -45,5 +49,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         ManifestAction::Info(a) => info::run(cli, a, cfg),
         ManifestAction::Rm(a) => rm::run(cli, a, cfg),
         ManifestAction::Prune(a) => prune::run(cli, a, cfg),
+        ManifestAction::Verify(a) => verify::run(cli, a, cfg),
     }
 }
