@@ -17,6 +17,13 @@ keys
 !crates/mvm-cli/src/commands/build/
 !crates/mvm-cli/src/commands/build/**
 
+# Same workaround for the `env/` directory holding `mvmctl env *`-style
+# subcommands. Some global gitignores blanket-ignore `env/`; this
+# negation re-includes the in-repo path so contributors don't have to
+# pass `git add -f` every time they touch a file under it.
+!crates/mvm-cli/src/commands/env/
+!crates/mvm-cli/src/commands/env/**
+
 # Worktree-local dev env (use .envrc.example as template)
 /.envrc
 /.mvm-test/

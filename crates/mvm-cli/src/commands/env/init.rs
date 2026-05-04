@@ -13,18 +13,68 @@ use super::setup::run_setup_steps;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// Skip interactive prompts, use defaults
+    /// Project directory to scaffold (`mvm.toml` + `flake.nix`). When
+    /// supplied — or when `--preset` / `--prompt` is passed — `init`
+    /// runs in **project-scaffold** mode (plan 38). When omitted and
+    /// no scaffold flags, runs the **first-time environment wizard**
+    /// (today's behaviour: Lima VM, Firecracker, dev network).
+    #[arg(value_name = "DIR")]
+    pub dir: Option<String>,
+    /// Scaffold preset: `minimal` (default), `http`, `postgres`,
+    /// `worker`, `python`. Triggers project-scaffold mode.
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// Natural-language description of the workload. Triggers
+    /// project-scaffold mode and routes through the LLM/heuristic
+    /// planner (Ollama, OpenAI, or built-in heuristics — see
+    /// `MVM_TEMPLATE_PROVIDER`).
+    #[arg(long)]
+    pub prompt: Option<String>,
+    /// Skip interactive prompts, use defaults (env-wizard mode)
     #[arg(long)]
     pub non_interactive: bool,
-    /// Number of vCPUs for the Lima VM
+    /// Number of vCPUs for the Lima VM (env-wizard mode)
     #[arg(long, default_value = "8")]
     pub lima_cpus: u32,
-    /// Memory (GiB) for the Lima VM
+    /// Memory (GiB) for the Lima VM (env-wizard mode)
     #[arg(long, default_value = "16")]
     pub lima_mem: u32,
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
+    // Plan 38 dispatch: positional [DIR] or scaffold flags ⇒ project
+    // scaffold. Bare invocation ⇒ env wizard (existing behaviour).
+    let scaffold_mode = args.dir.is_some() || args.preset.is_some() || args.prompt.is_some();
+    if scaffold_mode {
+        return run_scaffold(cli, args, cfg);
+    }
+    run_env_wizard(cli, args, cfg)
+}
+
+/// Project-scaffold mode (plan 38): write an `mvm.toml` + `flake.nix`
+/// in the target directory. Delegates to the existing scaffolding
+/// implementation in `template_cmd::init`.
+fn run_scaffold(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+    let dir = args.dir.as_deref().unwrap_or(".");
+    // Project-scaffold is always local (writes files to the host
+    // working tree); the legacy `--vm` mode of `template init` is
+    // gone in plan 38.
+    crate::template_cmd::init(
+        // The legacy `init` signature took `name, local, base_dir,
+        // preset, prompt`. We pass `dir` as both name (defaults to
+        // `dirname` of dir) and base_dir; template_cmd::init walks
+        // both correctly.
+        dir,
+        true,
+        ".",
+        args.preset.as_deref(),
+        args.prompt.as_deref(),
+    )
+}
+
+/// Original first-time environment-setup wizard. Unchanged from
+/// pre-plan-38 behaviour.
+fn run_env_wizard(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     use mvm_core::dev_network::{DevNetwork, network_path, networks_dir};
 
     ui::info("Welcome to mvmctl! Running first-time setup...\n");

@@ -1248,10 +1248,17 @@ fn test_init_defaults() {
             non_interactive,
             lima_cpus,
             lima_mem,
+            dir,
+            preset,
+            prompt,
         }) => {
+            // Bare `mvmctl init` ⇒ env-wizard mode (dir/preset/prompt all None).
             assert!(!non_interactive);
             assert_eq!(lima_cpus, 8);
             assert_eq!(lima_mem, 16);
+            assert!(dir.is_none());
+            assert!(preset.is_none());
+            assert!(prompt.is_none());
         }
         _ => panic!("Expected Init command"),
     }
