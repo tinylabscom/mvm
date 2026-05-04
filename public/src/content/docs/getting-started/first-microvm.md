@@ -28,9 +28,24 @@ MicroVMs are **headless workloads** with no SSH access -- they communicate via v
 On Linux with `/dev/kvm`, the Lima layer is skipped entirely -- Firecracker runs directly. On macOS 26+, Apple Virtualization.framework is used instead of Lima + Firecracker. If neither is available, Docker serves as a universal fallback.
 :::
 
+## Scaffold a project
+
+The fastest path is `mvmctl init`, which writes both a `mvm.toml` (sizing/profile) and a `flake.nix` (rootfs/kernel content) for you:
+
+```bash
+mvmctl init hello                    # creates ./hello/
+cd hello
+$EDITOR mvm.toml                      # tweak vcpus / mem if you like
+$EDITOR flake.nix                     # add your services
+```
+
+The rest of this guide writes the flake by hand to show how `mkGuest` works underneath.
+
+> The plan-38 manifest model is currently rolling out. If you see references to `mvmctl template create/build/...` in older docs, those still work for one release but the new flow above is preferred. See the [Manifests guide](/guides/manifests/) for details.
+
 ## Write a Flake
 
-Create a `flake.nix` in your project:
+Create a `flake.nix` in your project (or edit the one `mvmctl init` produced):
 
 ```nix
 {
@@ -66,15 +81,24 @@ Create a `flake.nix` in your project:
 
 ## Build and Run
 
-```bash
-# Build the image
-mvmctl build --flake .
+With a `mvm.toml` next to `flake.nix`:
 
-# Boot a VM (auto-selects best backend)
-mvmctl up --flake . --cpus 2 --memory 1024
+```bash
+# Build (manifest discovered from cwd)
+mvmctl build
+
+# Boot (auto-selects best backend)
+mvmctl up
 
 # Or run in background with port forwarding
-mvmctl up --flake . -d -p 8080:8080
+mvmctl up -d -p 8080:8080
+```
+
+Without a `mvm.toml` (just a flake), pass `--flake` explicitly — that legacy path still works:
+
+```bash
+mvmctl build --flake .
+mvmctl up --flake . --cpus 2 --memory 1024
 ```
 
 ## Check Status
@@ -112,5 +136,6 @@ mvmctl down hello
 ## Next Steps
 
 - [Writing Nix Flakes](/guides/nix-flakes/) -- the full `mkGuest` API
-- [Templates](/guides/templates/) -- build once, reuse everywhere
+- [Manifests](/guides/manifests/) -- the `mvm.toml` user model (init → build → up)
+- [Templates (legacy)](/guides/templates/) -- the older name-keyed flow, still supported for one release
 - [Config & Secrets](/guides/config-secrets/) -- inject files at boot

@@ -79,33 +79,65 @@ description: Complete command reference for mvmctl.
 | `mvmctl cleanup --keep <N>` | Keep the N newest build revisions |
 | `mvmctl cleanup --verbose` | Print each cached build path that gets removed |
 
-## Templates
+## Manifests
+
+> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model** (currently rolling out across slices 5-7 on `feat/manifest-driven-template-dx-claude`). The user-facing primitive is now an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. The legacy `mvmctl template <verb>` commands continue to work as a hidden alias for one release; they're listed [in their own section below](#templates-legacy-deprecated).
+
+### Scaffolding (top-level)
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl template init <name> --local` | Scaffold a new template directory with flake.nix |
-| `mvmctl template init <name> --vm` | Scaffold inside the Lima VM (overrides --local) |
-| `mvmctl template init <name> --preset <preset>` | Scaffold preset: minimal, http, postgres, worker, python (default: minimal) |
-| `mvmctl template init <name> --prompt "<text>" --local` | Generate a local scaffold from a natural-language prompt. In `auto` mode (default) probes for a local OpenAI-compatible endpoint on loopback (Ollama @ `:11434`, LocalAI @ `:8080`) before falling through to OpenAI. Override the order with `MVM_TEMPLATE_PROVIDER=openai\|local\|heuristic`; skip the probe with `MVM_TEMPLATE_NO_LOCAL_PROBE=1`. The probe issues a brief loopback TCP connect on each invocation, visible to local processes via `netstat` |
-| `mvmctl template init <name> --dir <path>` | Base directory for local init (default: current dir) |
-| `mvmctl template create <name>` | Create a single template definition |
-| `mvmctl template create <name> --data-disk SIZE` | Create template with a data disk (10G, 512M, or plain MB; 0 = none) |
-| `mvmctl template create-multi <base>` | Create templates for multiple roles (`--roles worker,gateway`) |
-| `mvmctl template build <name>` | Build a template (runs nix build in Lima) |
-| `mvmctl template build <name> --force` | Rebuild even if cached |
-| `mvmctl template build <name> --snapshot` | Build, boot, wait for healthy, and capture a Firecracker snapshot |
-| `mvmctl template build <name> --update-hash` | Recompute the Nix fixed-output derivation hash |
-| `mvmctl template build <name> --config <toml>` | Build multiple variants from a template config TOML |
-| `mvmctl template push <name>` | Push to S3-compatible registry |
-| `mvmctl template push <name> --revision <hash>` | Push a specific revision |
-| `mvmctl template pull <name>` | Pull from registry |
-| `mvmctl template pull <name> --revision <hash>` | Pull a specific revision |
-| `mvmctl template verify <name>` | Verify template checksums |
-| `mvmctl template verify <name> --revision <hash>` | Verify a specific revision |
-| `mvmctl template list` | List all templates (`--json` for JSON) |
-| `mvmctl template info <name>` | Show template details, current revision, artifact sizes, and snapshot status (`--json` for JSON) |
-| `mvmctl template edit <name>` | Edit template configuration (--cpus, --mem, --flake, --profile, --role, --data-disk) |
-| `mvmctl template delete <name>` | Delete a template (`--force` to skip confirmation) |
+| `mvmctl init [DIR]` | Scaffold `mvm.toml` + `flake.nix` (+ NixOS config) in `DIR` (default: cwd) |
+| `mvmctl init [DIR] --preset <preset>` | Preset: `minimal`, `http`, `postgres`, `worker`, `python` (default: `minimal`) |
+| `mvmctl init [DIR] --prompt "<text>"` | Generate scaffold from a natural-language prompt. In `auto` mode (default) probes for a local OpenAI-compatible endpoint on loopback (Ollama @ `:11434`, LocalAI @ `:8080`) before falling through to OpenAI. Override with `MVM_TEMPLATE_PROVIDER=openai\|local\|heuristic`; skip probe with `MVM_TEMPLATE_NO_LOCAL_PROBE=1` |
+
+### Building (top-level)
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl build [PATH]` | Build the manifest at `PATH` (file or directory; default: cwd walk-up). Persists artifacts to a slot keyed by `sha256(canonical_manifest_path)`. Subsumes today's `mvmctl build --flake .` and the legacy `Mvmfile.toml` flow into one verb |
+| `mvmctl build [PATH] --force` | Rebuild even if the cache hits |
+| `mvmctl build [PATH] --snapshot` | After build, boot, wait for healthy, and capture a Firecracker snapshot (Firecracker backend only) |
+| `mvmctl build [PATH] --update-hash` | Recompute the Nix fixed-output derivation hash |
+| `mvmctl build [PATH] --vcpus N --mem SIZE --data-disk SIZE` | CLI overrides for resource sizing; persisted to the slot record |
+| `mvmctl build [PATH] --json` | Stream structured build events |
+
+### Running (top-level — already manifest-aware)
+
+`mvmctl up [PATH]`, `mvmctl run [PATH]`, `mvmctl exec [PATH] -- <cmd>` all accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-exec) sections for full flag lists.
+
+### Inspection / registry (`mvmctl manifest *`)
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl manifest ls [--json]` | List built slots — manifest path, last-built timestamp, optional `name` |
+| `mvmctl manifest ls --orphans` | Slots whose source manifest file is missing on disk |
+| `mvmctl manifest ls --legacy` | Pre-refactor name-keyed slots (migration aid) |
+| `mvmctl manifest info [PATH] [--json]` | Print manifest, slot path, current revision, snapshot info, provenance |
+| `mvmctl manifest rm [PATH] [--force]` | Remove the slot from the registry |
+| `mvmctl manifest rm [PATH] --manifest-file` | Also delete the source `mvm.toml` (off by default) |
+| `mvmctl manifest push [PATH] [--revision <hash>]` | Publish a slot to the configured S3/OCI remote |
+| `mvmctl manifest pull <NAME-OR-HASH>` | Fetch a slot from the remote |
+| `mvmctl manifest verify [PATH] [--check-signature]` | Verify checksums and (post plan 36) cosign signatures |
+| `mvmctl manifest prune --orphans` | Remove slots whose source manifest is missing |
+| `mvmctl manifest prune --legacy` | Remove pre-refactor name-keyed slots |
+
+### Templates (legacy, deprecated)
+
+> **Deprecated.** These commands continue to work for one release as a hidden alias, then they're removed. New code should use the `init` / `build` / `manifest *` surface above. See the [migration section of the Manifests guide](/guides/manifests/#migration-from-the-old-template-flow).
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl template init <name>` → `mvmctl init <name>` | Scaffold |
+| `mvmctl template create <name> --flake … --cpus N --mem SIZE` | **Removed.** Use `mvmctl init` then edit `mvm.toml` |
+| `mvmctl template create-multi <base> --roles a,b` | **Removed.** One manifest per directory; multiple directories for variants |
+| `mvmctl template build <name>` → `mvmctl build <PATH>` | Build |
+| `mvmctl template build <name> --config <toml>` | **Removed.** The TOML *is* `mvm.toml` |
+| `mvmctl template list` → `mvmctl manifest ls` | List |
+| `mvmctl template info <name>` → `mvmctl manifest info <PATH>` | Info |
+| `mvmctl template edit <name>` | **Removed.** Open `mvm.toml` in `$EDITOR` directly |
+| `mvmctl template delete <name>` → `mvmctl manifest rm <PATH>` | Remove |
+| `mvmctl template push/pull/verify <name>` → `mvmctl manifest push/pull/verify <PATH>` | Registry ops |
 
 ## Configuration
 

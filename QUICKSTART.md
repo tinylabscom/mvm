@@ -105,33 +105,45 @@ mvmctl build .
 mvmctl start
 ```
 
-## 6. Templates (Reusable Base Images)
+## 6. Manifests (Reusable Base Images)
 
-Build a base image once and share it across machines:
+> The `mvmctl init` / `mvmctl build` / `mvmctl manifest *` surface below is the **plan-38 model** (rolling out across slices 5-7). The legacy `mvmctl template <verb>` commands continue to work as a hidden alias for one release. See [Manifests](public/src/content/docs/guides/manifests.md) for the full guide.
+
+Scaffold a project, edit its `mvm.toml`, build, share:
 
 ```bash
-# Create a template
-mvmctl template create base-worker \
-    --flake github:org/app \
-    --profile minimal \
-    --role worker \
-    --cpus 2 --mem 1024
+# Scaffold mvm.toml + flake.nix
+mvmctl init base-worker
+$EDITOR base-worker/mvm.toml      # set flake, profile, vcpus, mem
 
-# Build it (runs nix build inside Lima)
-mvmctl template build base-worker
+# Build (runs nix build, persists artifacts)
+mvmctl build base-worker
 
 # Share via S3-compatible registry
-mvmctl template push base-worker
-mvmctl template pull base-worker    # On another machine
-mvmctl template verify base-worker  # Verify checksums
+mvmctl manifest push base-worker
+mvmctl manifest pull base-worker    # on another machine
+mvmctl manifest verify base-worker  # checksums + signatures
 ```
 
-List and inspect templates:
+List and inspect built projects:
 
 ```bash
-mvmctl template list
-mvmctl template info base-worker
+mvmctl manifest ls
+mvmctl manifest info base-worker
 ```
+
+A minimal `mvm.toml`:
+
+```toml
+flake = "."
+profile = "default"
+vcpus = 2
+mem = "1024M"
+data_disk = "0"
+name = "base-worker"   # optional; display + S3 channel hint
+```
+
+That's the entire schema — build inputs (flake/profile) plus dev sizing (vcpus/mem/data_disk). What's *inside* the microVM (services, packages, NixOS config) lives in `flake.nix`. Multi-VM topology and runtime networking are `mvmd`'s job, not the manifest's.
 
 ## 7. Lima Shell (Development Access)
 

@@ -9,16 +9,19 @@
   # mvmctl's existing per-service secrets plumbing — so the secret never
   # enters the Nix store.
   #
-  # Build:
-  #   mvmctl template create claude-code-vm \
-  #     --flake ./nix/images/examples/llm-agent \
-  #     --profile minimal --role agent --cpus 2 --mem 1024
-  #   mvmctl template build claude-code-vm
+  # Build (plan-38 manifest model — preferred):
+  #   # Optional: scaffold an mvm.toml in this directory. Already shipped.
+  #   #   mvmctl init nix/images/examples/llm-agent
+  #   mvmctl build nix/images/examples/llm-agent
   #
   # Run with the project mounted at /workspace and the API key injected:
-  #   mvmctl up --template claude-code-vm \
+  #   mvmctl up nix/images/examples/llm-agent \
   #     --add-dir "$PWD:/workspace:rw" \
   #     --secret-file "$HOME/.config/mvm/secrets/anthropic:claude-code/anthropic-api-key"
+  #
+  # Legacy `mvmctl template create/build/up --template …` continues to
+  # work as a hidden alias for one release; new code should use the
+  # commands above. See specs/plans/38-manifest-driven-template-dx.md.
   #
   # The agent service follows ADR-002 §W2:
   #   - per-service uid auto-derived (NOT uid 0; NOT the guest agent's

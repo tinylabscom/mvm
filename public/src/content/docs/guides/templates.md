@@ -1,6 +1,14 @@
 ---
-title: Templates
-description: Build reusable microVM images and share them via a registry.
+title: Templates (legacy)
+description: Build reusable microVM images and share them via a registry. Superseded by the manifest model.
+---
+
+> **Heads up — this guide is the pre-plan-38 model.** The current/preferred surface is documented in [Manifests](./manifests.md). The user-facing primitive is now an `mvm.toml` file in your project, not a named template registered with `mvmctl template create`. Today's `mvmctl template <verb>` commands continue to work as a hidden alias for one release, then they're removed.
+>
+> **TL;DR migration:** `mvmctl template create NAME --flake . --cpus 4 --mem 2G && mvmctl template build NAME && mvmctl up --template NAME` becomes `mvmctl init NAME && $EDITOR NAME/mvm.toml && mvmctl build NAME && mvmctl up NAME`. See the [migration section](./manifests.md#migration-from-the-old-template-flow) of the new guide.
+
+The rest of this page describes how the old name-keyed flow works; keep reading if you're maintaining an existing project that hasn't migrated yet.
+
 ---
 
 Templates are reusable microVM images built from Nix flakes. Build once, run anywhere. Share via an S3-compatible registry. Template snapshots (`--snapshot`) are available on the Firecracker backend only — Apple Virtualization, microvm.nix, and Docker do not support snapshots.
