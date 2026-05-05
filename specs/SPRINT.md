@@ -481,14 +481,31 @@ Waves 4–6 are post-44 follow-ups; the sprint can close on Waves 0–3.
 - **Model selection, prompt engineering, cost optimization, federated
   learning** (plan 37 Addendum H — application concerns, not runtime).
 
-## Sprint 45 — Function-call entrypoints (proposed)
+## Sprint 45 — Function-call entrypoints (in flight — substrate shipped, live smoke open)
 
 Master plan: [`plans/41-function-call-entrypoints.md`](plans/41-function-call-entrypoints.md)
 (mvm side, six workstreams). Comprehensive design rationale + 16
 security mitigations: [`plans/41-function-entrypoints-design.md`](plans/41-function-entrypoints-design.md).
 Architecture decision: [`adrs/007-function-call-entrypoints.md`](adrs/007-function-call-entrypoints.md).
-Cross-repo: decorationer (mvmforge) `specs/adrs/0009-function-entrypoints.md`
-+ `specs/plans/0003-function-entrypoint-runtime.md`.
+Cross-repo: decorationer (mvmforge) `specs/adrs/0009-function-entrypoints.md`,
+`specs/plans/0003-function-entrypoint-runtime.md`,
+`specs/plans/0004-network-deny-default.md`.
+
+### Status (2026-05-05)
+
+mvm-side W1–W5 shipped to `main` in PRs #66–#71 (with #72 replacing
+auto-closed #68 — see "Stack-merge artifacts" below). W6 (network
+deny-default for function workloads) is captured cross-repo: the IR
+shape lives in decorationer plan 0004, and the mvm-side TAP-skip glue
+is mechanical once mvmforge plumbs the IR field. decorationer plan
+0003 phase 1 (function-entrypoint IR variant + `Format` closed enum)
+shipped as decorationer #3.
+
+The live-KVM smoke fixture (`mkGuest extraFiles` + the `echo-fn` example
+flake + `tests/smoke_invoke.rs` gated on `MVM_LIVE_SMOKE=1`) is **PR #73,
+not yet run** — the substrate compiles and skips cleanly on incapable
+hosts; the actual boot+invoke against a Linux/KVM (or macOS 26+ Apple
+Container) host hasn't happened yet. That's the load-bearing open item.
 
 ### Why this sprint
 
@@ -519,34 +536,87 @@ image-build time; only call-payload bytes (stdin) are runtime data.
 
 Six workstreams, each independently shippable.
 
-- **W1 — Wire protocol additions.** Add
+- **W1 — Wire protocol additions.**  ✅ shipped — PR #67. Adds
   `GuestRequest::RunEntrypoint` + `GuestResponse::EntrypointEvent`
   (streaming-shaped, buffered v1) + `RunEntrypointError` enum.
-  `#[serde(deny_unknown_fields)]`; fuzz targets extended.
-- **W2 — Agent handler.** Boot-time `/etc/mvm/entrypoint`
-  resolution with `realpath` + verity-partition assertion +
-  held-fd caching for `fexecve`. Per-call mutex (single in-flight
-  call per VM). Per-call TMPDIR managed agent-side (robust to
-  wrapper crashes). `RLIMIT_CORE = 0` parent-side. Caps + timeouts
-  enforced with kill-on-breach + session-poison signal.
-- **W3 — `mvmctl invoke` CLI.** New verb distinct from `exec`;
-  reuses session-VM primitives in `crates/mvm-cli/src/exec.rs`.
-  `--fresh` boots transient; default reuses warm session;
-  `--reset` flag wired but no-op until session-pool plan lands.
-- **W4 — Snapshot integrity (HMAC).** `~/.mvm/snapshot.key`
-  generated at first run (mode 0600). `snapshot_create` /
-  `run_from_snapshot` HMAC-verified; tamper / version-mismatch
-  rejected. Atomic write-then-rename.
-- **W5 — CI gates + doctor.** Combined
-  `prod-agent-runentry-contract` lane (one binary, asserts
-  `do_exec` symbol absent AND `RunEntrypoint` symbol present —
-  same artifact that ships). Doctor verifies entrypoint contract
-  live (vsock query) and offline (mount-and-inspect a built rootfs).
-- **W6 — Network: deny-default for function workloads.**
-  Function-entrypoint workloads default `network.mode = "none"`
-  (no TAP, no DNS, no default route, no bridge MAC learning).
-  Existing workload kinds keep their current default. Validation
-  rejects wildcard egress and secret-shaped schema fields.
+  `#[serde(deny_unknown_fields)]`; fuzz targets extended; agent
+  stub arm in place.
+- **W2 — Agent handler.**  ✅ shipped — PR #72 (recreated from
+  auto-closed #68). New `crates/mvm-guest/src/entrypoint.rs`
+  module: `EntrypointPolicy::production().validate()` reads
+  `/etc/mvm/entrypoint`, `realpath`s, asserts mode/uid/prefix,
+  holds fd; `execute()` spawns with `process_group(0)`,
+  `RLIMIT_CORE=0`, `env_clear()`, drains stdout/stderr concurrently
+  into capped buffers, kills on cap breach or timeout via SIGTERM
+  → grace → SIGKILL escalation. `handle_run_entrypoint` in the
+  agent serializes per-VM via static `Mutex`, creates per-call
+  TMPDIR mode 0700 with RAII cleanup, writes `Stdout`/`Stderr`
+  events streaming + returns terminal `Exit`/`Error`.
+- **W3 — `mvmctl invoke` CLI.**  ✅ shipped — PR #69. New
+  top-level verb. New `mvm_guest::vsock::send_run_entrypoint`
+  streaming consumer (frame loop until `is_terminal()`). Boots
+  transient VM via `boot_session_vm`, dispatches, tears down
+  always. `--fresh`/`--reset` flags wired (informational in v1
+  until session-pool plan lands). Exit-code mapping: wrapper's
+  own code on `Exit`, 124 on timeout, 137 on `WrapperCrashed`,
+  1 for everything else (Busy / PayloadCap / EntrypointInvalid
+  / InternalError) with a warn-line to stderr.
+- **W4 — Snapshot integrity (HMAC).**  ✅ shipped — PR #70. New
+  `mvm-security/src/snapshot_hmac.rs`: `~/.mvm/snapshot.key`
+  lazy-init mode 0600, HMAC-SHA256 over length-prefixed
+  envelope (`be_u32(schema_version) || be_u64(vmstate_len) ||
+  vmstate_bytes || be_u64(mem_len) || mem_bytes ||
+  be_u32(version_len) || version_bytes`) — splice-resistance
+  asserted by regression test. Atomic seal via `<file>.tmp` +
+  fsync + rename; constant-time tag comparison on verify;
+  fast-fail size check before streaming. Wired into
+  `template/lifecycle.rs::seal_snapshot_artifacts` (post Firecracker
+  create) and `microvm.rs::restore_from_template_snapshot` (before
+  any Firecracker spawn). Migration: missing sidecar → warn +
+  proceed by default; `MVM_SNAPSHOT_HMAC_STRICT=1` flips to hard
+  error; `MVM_ALLOW_STALE_SNAPSHOT=1` accepts version-mismatch.
+- **W5 — CI gates + doctor.**  ✅ shipped — PR #71. Combined
+  `prod-agent-runentry-contract` lane (renamed from
+  `prod-agent-no-exec`) — ONE build, ONE step, BOTH assertions:
+  `do_exec` symbol ABSENT and `handle_run_entrypoint` symbol
+  PRESENT on the same shipping binary. New `mvmctl doctor`
+  probes: snapshot HMAC key (mode 0600, length); snapshot dirs
+  (walk `~/.mvm/templates/*/artifacts/*/snapshot/` and report
+  the first looser-than-0700 dir). New vsock verb
+  `EntrypointStatus` for live-VM probing (prod-safe, no inputs;
+  reports validated path + ok-flag).
+- **W6 — Network: deny-default for function workloads.**  🟡
+  cross-repo, IR side captured. Function-entrypoint workloads
+  default `network.mode = "none"`. The IR shape (default
+  derivation from `entrypoint.kind`, wildcard-egress rejection,
+  granular grants in v2) is captured in decorationer plan 0004
+  (decorationer #2 merged). mvm-side glue is mechanical: when
+  mvmforge ships the IR change, mvm honours `mode = "none"` by
+  skipping TAP allocation. **Open** — needs the mvmforge IR
+  emit + an mvm-side regression test that asserts a `mode =
+  "none"` workload truly has no TAP.
+
+### Substrate validation (live smoke)
+
+PR #73 adds the substrate-validation infrastructure:
+
+- `mkGuest` `extraFiles` parameter — bakes arbitrary files into
+  the rootfs at build time, owned root, with declared octal mode.
+  `extraFiles ? {}` default keeps backward compat for every
+  existing caller. The eventual mvmforge `mkPythonFunctionService`
+  / `mkNodeFunctionService` factories will use this to bake
+  `/etc/mvm/entrypoint` plus the wrapper.
+- `nix/images/examples/echo-fn/` — minimal `mkGuest` invocation
+  baking a wrapper at `/usr/lib/mvm/wrappers/echo` (`#!/bin/sh\nexec cat\n`)
+  plus the marker. No language runtime; just exercises the
+  substrate path.
+- `tests/smoke_invoke.rs` — two `MVM_LIVE_SMOKE=1`-gated tests
+  (round-trip + zero-stdin). Skip cleanly without the env var
+  with an `eprintln!` diagnostic.
+
+The substrate (compile, clippy, gated-skip behaviour) is verified;
+the actual boot+invoke against a capable host is the open
+load-bearing item.
 
 ### Cornerstones
 
@@ -578,19 +648,80 @@ By sprint close, the project should be able to claim:
 
 1. *A constrained `RunEntrypoint` vsock verb runs the image's baked
    entrypoint program with stdin piped and stdout/stderr captured;
-   `do_exec` remains dev-only.* (W1, W2, W5)
+   `do_exec` remains dev-only.* (W1, W2, W5) — **substrate shipped
+   #67/#72/#71; live-KVM exercise pending #73 run.**
 2. *`mvmctl invoke` is the prod-safe call surface; `mvmctl exec`
-   stays dev-only.* (W3)
+   stays dev-only.* (W3) — **shipped #69; live-KVM exercise pending.**
 3. *Firecracker snapshots are HMAC-verified at restore; tampering
-   refuses resume.* (W4)
+   refuses resume.* (W4) — **shipped #70; tamper regression covered
+   by unit tests; live-KVM exercise pending.**
 4. *Function-entrypoint workloads default to no network; explicit
-   IR grants are required for any reachability.* (W6)
+   IR grants are required for any reachability.* (W6) — **IR side
+   captured (decorationer plan 0004); mvm-side TAP-skip pending the
+   mvmforge IR emit.**
 5. *Default logs do not contain stdin/stdout/stderr content.* (W2,
-   W3)
+   W3) — **shipped — agent + mvmctl log metadata only.**
 6. *Cross-repo cutover with mvmforge: a Python or TS function
    workload booted from a `mvmforge up` artifact accepts
    `mvmctl invoke <vm> --stdin <args>` and returns stdout encoded
-   per the IR-declared format.* (Phase 5 integration test)
+   per the IR-declared format.* (Phase 5 integration test) —
+   **blocked on decorationer plan 0003 phases 2–4 (decorator body
+   preservation, host SDK call site, Nix factories).**
+
+### Shipped (PRs landed on `main`)
+
+| PR | Workstream | Content |
+| --- | --- | --- |
+| [#66](https://github.com/tinylabscom/mvm/pull/66) | Docs | ADR-007, plan 41, plan 41-design (16 mitigations), Sprint 45 entry |
+| [#67](https://github.com/tinylabscom/mvm/pull/67) | W1 | Wire types: `RunEntrypoint`, `EntrypointEvent`, `RunEntrypointError`; fuzz target |
+| [#72](https://github.com/tinylabscom/mvm/pull/72) | W2 | Agent handler + `entrypoint.rs` module + per-call hygiene + concurrency mutex (recreated from auto-closed #68) |
+| [#69](https://github.com/tinylabscom/mvm/pull/69) | W3 | `mvmctl invoke` CLI + `send_run_entrypoint` streaming consumer |
+| [#70](https://github.com/tinylabscom/mvm/pull/70) | W4 | Snapshot HMAC integrity (seal + verify wired into create/restore paths) |
+| [#71](https://github.com/tinylabscom/mvm/pull/71) | W5 | Combined symbol-contract CI lane + doctor probes + `EntrypointStatus` verb |
+
+Cross-repo (decorationer):
+
+| PR | Content |
+| --- | --- |
+| [decorationer #1](https://github.com/tinylabscom/decorationer/pull/1) | ADR-0009 + plan 0003 (function entrypoint runtime — six-phase) |
+| [decorationer #2](https://github.com/tinylabscom/decorationer/pull/2) | Plan 0004 (network deny-default for function workloads — IR side of W6) |
+| [decorationer #3](https://github.com/tinylabscom/decorationer/pull/3) | Plan 0003 phase 1 — `Entrypoint::Function` IR variant + `Format` closed enum + new `function-app` corpus entry (byte-identical Python ↔ TS) |
+
+### Deferred — concrete follow-ups
+
+| Item | Plan | Why deferred | Estimated size |
+|---|---|---|---|
+| **Live-KVM smoke run** ([PR #73](https://github.com/tinylabscom/mvm/pull/73)) | Plan 41 W3 / W5 acceptance | Substrate compiles, clippy-clean, gated-skip works on macOS Darwin 25 host. Boot+invoke needs native Linux/KVM or macOS 26+ Apple Container — neither available in the dev session that wrote it. PR description names three plausible failure modes (`EntrypointInvalid` from chown/uid in fakeroot, vsock missing on host, `mvmctl template build --flake <path>` argv shape) so the human running it knows where to look. | ½ day on a capable host |
+| **W6 mvm-side TAP-skip** | Plan 41 W6 + decorationer plan 0004 | mvmforge needs to ship the IR change first (decorationer plan 0003 phase 1 is in, but phase 2–4 SDK + Nix factory work hasn't started). Once the IR carries `entrypoint.kind = "function"` with the deny-default network mode, mvm honours it by skipping TAP allocation. | ~1 day after mvmforge ships |
+| **Decorationer plan 0003 phase 2 — Python SDK** | decorationer plan 0003 | Decorator preserves function body in bundled source; emitter writes new IR; bundler ships function source; host call site shells out to `mvmctl invoke`. Blocks live-KVM smoke against a real Python wrapper. | ~2 days |
+| **Decorationer plan 0003 phase 3 — TypeScript SDK** | decorationer plan 0003 | Mirror Phase 2 surface. | ~2 days |
+| **Decorationer plan 0003 phase 4 — Nix factories** | decorationer plan 0003 | `mkPythonFunctionService` / `mkNodeFunctionService` emitting hardened wrappers (mode=prod with sanitized error envelope, `PR_SET_DUMPABLE=0`, no payload logging) at `/etc/mvm/entrypoint` via mvm's `extraFiles` (already in mvm #73). | ~3 days |
+| **Session pool management** | follow-up plan (none yet) | Pre-baked invariant: *single-tenant for VM lifetime*. v1 reuses `boot_session_vm` / `dispatch_in_session` / `tear_down_session_vm` primitives directly. Sizing / eviction / per-tenant isolation / idle reaper are real but separable from the substrate. | ~1 sprint |
+| **Streaming chunked output** | follow-up plan (none yet) | v1 wire is streaming-shaped but buffered up to 1 MiB per stream. Lifting the cap means real chunked emission from the agent and a streaming consumer in `send_run_entrypoint`. | ~1 week |
+| **Schema-bound payloads (v2 of W3)** | decorationer plan 0003 | Derive JSON Schema from type hints (Python `pydantic` / TS `zod`). Wrapper validates inbound bytes before user code runs. | ~1 week |
+
+### Stack-merge artifacts
+
+The merge cascade left two cosmetic artifacts in the history that
+are worth knowing about if you go grepping:
+
+1. **PR #68 → #72**. When I merged #67 with `--delete-branch`, GitHub
+   auto-closed #68 because its base branch (`feat/runentrypoint-wire-protocol`)
+   was deleted. I rebased the same commits onto current main and
+   re-PR'd as #72. W2's commit footer reads `(#72)`, not `(#68)`. #68
+   shows on GitHub as **closed-not-merged** with identical content
+   to the commit `26bae51` that did land.
+2. **Source branches don't survive in commit metadata.** Every
+   `feat/*` branch I created (W1 wire, W2 handler, W3 invoke, W4
+   snapshot, W5 doctor) was deleted on merge. The squashed commits
+   on `main` carry the PR# in the subject line, but the original
+   pre-rebase commit DAGs (separate W2-rebase commits etc.) are
+   gone from the remote. `git log` looks tidy; `git log --all
+   --grep=runentrypoint` finds only the squashed forms.
+
+Both are normal squash-merge consequences; documented here so the
+next person to audit the timeline doesn't re-discover them as
+suspicious.
 
 ### Non-goals (named explicitly)
 
