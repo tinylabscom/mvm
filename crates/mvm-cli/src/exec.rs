@@ -893,7 +893,7 @@ pub fn tear_down_session_vm(vm: SessionVm) {
     }
 }
 
-fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
+pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
         if mvm_apple_container::vsock_connect(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {

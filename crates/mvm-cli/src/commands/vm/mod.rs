@@ -5,6 +5,7 @@ pub(super) mod diff;
 pub(super) mod down;
 pub(super) mod exec;
 pub(super) mod forward;
+pub(super) mod invoke;
 pub(super) mod logs;
 pub(super) mod ps;
 pub(super) mod up;

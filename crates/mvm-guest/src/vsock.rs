@@ -779,6 +779,48 @@ pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<Guest
     serde_json::from_slice(&buf).with_context(|| "Failed to deserialize response")
 }
 
+/// Send a `RunEntrypoint` request and consume the streaming
+/// `EntrypointEvent` response. ADR-007 / plan 41 W3.
+///
+/// `on_event` is invoked for each non-terminal event (`Stdout` /
+/// `Stderr` chunk) as it arrives — callers can stream output to their
+/// own stdout/stderr without buffering. Returns the terminal event
+/// (`Exit` or `Error`) for the caller to inspect.
+///
+/// The wire format is the same length-prefixed JSON envelope as every
+/// other vsock verb. v1 emits exactly three frames per call: one
+/// `Stdout`, one `Stderr`, and one terminal event. v2 may chunk
+/// progressively without changing this consumer — termination is
+/// detected via [`EntrypointEvent::is_terminal`], not frame count.
+pub fn send_run_entrypoint<F>(
+    stream: &mut UnixStream,
+    stdin: Vec<u8>,
+    timeout_secs: u64,
+    mut on_event: F,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+{
+    let req = GuestRequest::RunEntrypoint {
+        stdin,
+        timeout_secs,
+    };
+    write_frame(stream, &req)?;
+
+    loop {
+        let resp: GuestResponse = read_frame(stream)?;
+        let event = match resp {
+            GuestResponse::EntrypointEvent(e) => e,
+            GuestResponse::Error { message } => bail!("guest agent error: {message}"),
+            other => bail!("expected EntrypointEvent during RunEntrypoint stream, got {other:?}"),
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
 // ============================================================================
 // High-level API
 // ============================================================================
@@ -1985,6 +2027,181 @@ mod tests {
             read_authenticated_frame(&mut host_stream, &guest_vk, session_id, 0).unwrap();
         assert!(matches!(resp, GuestResponse::Pong));
         assert_eq!(seq, 1);
+    }
+
+    // -------------------------------------------------------------------
+    // ADR-007 / plan 41 W3 — send_run_entrypoint streaming consumer
+    // -------------------------------------------------------------------
+
+    fn write_event_frame(stream: &mut UnixStream, event: &EntrypointEvent) {
+        write_frame(stream, &GuestResponse::EntrypointEvent(event.clone())).unwrap();
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_collects_events_until_terminal() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest side: read the request, emit Stdout, Stderr, Exit.
+        let guest_handle = std::thread::spawn(move || {
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            assert!(matches!(
+                req,
+                GuestRequest::RunEntrypoint {
+                    timeout_secs: 30,
+                    ..
+                }
+            ));
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"out".to_vec(),
+                },
+            );
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stderr {
+                    chunk: b"err".to_vec(),
+                },
+            );
+            write_event_frame(&mut guest, &EntrypointEvent::Exit { code: 0 });
+        });
+
+        let mut received: Vec<EntrypointEvent> = Vec::new();
+        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, |evt| {
+            received.push(evt.clone())
+        })
+        .expect("send_run_entrypoint");
+
+        guest_handle.join().unwrap();
+
+        assert_eq!(received.len(), 2);
+        assert!(matches!(
+            received[0],
+            EntrypointEvent::Stdout { ref chunk } if chunk == b"out"
+        ));
+        assert!(matches!(
+            received[1],
+            EntrypointEvent::Stderr { ref chunk } if chunk == b"err"
+        ));
+        assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_terminates_on_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest side: emit one Stdout chunk, then a terminal Error.
+        // The handler must observe the Stdout but stop reading after
+        // Error.
+        let guest_handle = std::thread::spawn(move || {
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"partial".to_vec(),
+                },
+            );
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Error {
+                    kind: RunEntrypointError::Timeout,
+                    message: "killed at 30s".into(),
+                },
+            );
+            // Write a bogus extra frame after the terminal — the
+            // consumer must not read it.
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"should-not-be-read".to_vec(),
+                },
+            );
+        });
+
+        let mut received: Vec<EntrypointEvent> = Vec::new();
+        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, |evt| {
+            received.push(evt.clone())
+        })
+        .expect("send_run_entrypoint");
+
+        guest_handle.join().unwrap();
+
+        assert_eq!(received.len(), 1);
+        assert!(matches!(
+            received[0],
+            EntrypointEvent::Stdout { ref chunk } if chunk == b"partial"
+        ));
+        assert!(matches!(
+            terminal,
+            EntrypointEvent::Error {
+                kind: RunEntrypointError::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_rejects_unexpected_response() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest writes a Pong instead of an EntrypointEvent.
+        let guest_handle = std::thread::spawn(move || {
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(&mut guest, &GuestResponse::Pong).unwrap();
+        });
+
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, |_| {});
+        guest_handle.join().unwrap();
+
+        let err = result.expect_err("should reject Pong");
+        assert!(
+            err.to_string().contains("expected EntrypointEvent"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_surfaces_guest_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest writes a generic Error (not an EntrypointEvent::Error).
+        // This shouldn't normally happen for RunEntrypoint, but the
+        // host-side consumer should map it to a clear Result error.
+        let guest_handle = std::thread::spawn(move || {
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::Error {
+                    message: "agent panicked before dispatch".into(),
+                },
+            )
+            .unwrap();
+        });
+
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, |_| {});
+        guest_handle.join().unwrap();
+
+        let err = result.expect_err("should surface guest error");
+        assert!(
+            err.to_string().contains("agent panicked"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
