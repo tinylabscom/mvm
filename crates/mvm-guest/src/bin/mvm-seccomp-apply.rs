@@ -97,6 +97,8 @@ fn main() {
 /// failures are explicit, not catastrophic.
 #[cfg(target_os = "linux")]
 fn apply_filter(tier: SeccompTier) -> anyhow::Result<()> {
+    set_no_new_privs()?;
+
     let allowed = tier.syscalls();
     let mut rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> =
         std::collections::BTreeMap::new();
@@ -123,6 +125,30 @@ fn apply_filter(tier: SeccompTier) -> anyhow::Result<()> {
     let program: BpfProgram = filter.try_into()?;
     seccompiler::apply_filter(&program)?;
     Ok(())
+}
+
+/// Set PR_SET_NO_NEW_PRIVS on the current process. Defense-in-depth:
+/// the kernel requires NNP for an unprivileged process to install a
+/// seccomp filter, and the launch wrapper already passes
+/// `setpriv --no-new-privs`. Owning the call here means a future
+/// caller that forgets the setpriv flag still gets the filter
+/// installed instead of a late EACCES from `seccomp(2)`. The bit is
+/// idempotent — setting it when already set is a no-op.
+#[cfg(target_os = "linux")]
+fn set_no_new_privs() -> anyhow::Result<()> {
+    // SAFETY: prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) takes only scalar
+    // args and has no preconditions on process state. The kernel
+    // returns 0 on success and -1 with errno on failure; we surface
+    // the errno via std::io::Error::last_os_error.
+    let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "prctl(PR_SET_NO_NEW_PRIVS) failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
 }
 
 /// Map a syscall name to its number on this target. The list is

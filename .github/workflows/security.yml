@@ -98,6 +98,38 @@ jobs:
       - name: Build prod agent and assert symbol contract
         run: ./scripts/check-prod-agent-no-exec.sh
 
+  # ── Lane 2b: Seccomp tier functional denial (ADR-002 §W2.4) ───────
+  # Tier-structure unit tests in `mvm-security` cover cumulative-subset
+  # and serde shapes; they don't exercise the BPF program at runtime.
+  # This lane spawns `mvm-seccomp-apply <tier> -- syscall-probe` on
+  # Linux and asserts:
+  #   • unrestricted / network → socket(AF_INET) succeeds
+  #   • standard               → socket(AF_INET) returns EPERM
+  # Catches regressions where a syscall list passes structural tests
+  # but fails to translate to a working seccomp filter (e.g., wrong
+  # syscall number, missing arch coverage, NNP not set).
+  seccomp-functional:
+    name: Seccomp tier functional denial (ADR-002 §W2.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-seccomp-fn-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-seccomp-fn-
+
+      - name: Run seccomp functional tests
+        run: cargo test -p mvm-guest --test seccomp_apply
+
   # ── Lane 3: Reproducibility ────────────────────────────────────────
   # ADR-002 §W5.3 — two clean builds must produce byte-identical
   # binaries. Catches build-time non-determinism that could mask
