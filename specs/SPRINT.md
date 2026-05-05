@@ -73,8 +73,13 @@ landed with regression tests; `cargo test --workspace` and
       Linux dance. Boot regression confirmed: `mount` reports
       `(ro,relatime)`, `echo … >> /etc/passwd` returns EROFS.
 - [x] **W2.3** Service launch line is now
-      `${utilLinux}/bin/setpriv --reuid=… --regid=… --clear-groups --groups=…,900 --bounding-set=-all --no-new-privs --inh-caps=-all -- /bin/sh -c '…'`.
+      `${utilLinux}/bin/setpriv --reuid=… --regid=… --groups=…,900 --bounding-set=-all --no-new-privs --inh-caps=-all -- /bin/sh -c '…'`.
       `pkgs.util-linux` is in the production closure unconditionally.
+      (Initially shipped with `--clear-groups --groups=…`; that combo is
+      mutually exclusive in util-linux setpriv and crashlooped every
+      service on the W3 verity-boot regression. Plan 35 §C1.2 dropped
+      `--clear-groups` — `--groups=` already replaces the supplementary
+      set wholesale, so the security claim is unchanged.)
 - [x] **W2.4** Service launch is wrapped with
       `${guestAgentPkg}/bin/mvm-seccomp-apply <tier> --` (new shim
       binary in `crates/mvm-guest/src/bin/mvm-seccomp-apply.rs`,
@@ -159,13 +164,15 @@ landed with regression tests; `cargo test --workspace` and
       agent binds *no* TCP listeners — vsock binds only — so there is
       no `0.0.0.0` surface to defend.
 - [x] **W4.5** Guest agent now launches as uid 901 (`mvm-agent`) via
-      `setpriv --reuid=901 --regid=901 --clear-groups --groups=901,900
+      `setpriv --reuid=901 --regid=901 --groups=901,900
       --bounding-set=-all --no-new-privs --inh-caps=-all`.
       `nix/minimal-init/lib/04-etc-and-users.sh.in` provisions the
       `mvm-agent` user before `/etc` is bind-mounted read-only;
       `default.nix::guestAgentBlock` chgrps
       `/etc/mvm/{integrations,probes}.d/` to the shared service group
       so the dropped-privilege agent can still read its drop-ins.
+      (Initially shipped with `--clear-groups`; dropped under plan 35
+      §C1.2 — see W2.3 for the rationale.)
 
 ### W5 — Supply chain  ✅ shipped — 2026-04-30  [`plans/29-w5-supply-chain.md`](plans/29-w5-supply-chain.md)
 
