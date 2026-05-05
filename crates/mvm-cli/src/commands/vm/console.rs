@@ -1,17 +1,41 @@
 //! `mvmctl console` — interactive console (PTY-over-vsock) and one-shot exec
 //! via the guest agent.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::microvm;
+use mvm_runtime::vsock_transport::{
+    AppleContainerTransport, FirecrackerTransport, VsockProxyTransport, VsockTransport,
+};
 
 use super::super::env::apple_container::dev_vsock_proxy_path;
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
+
+/// Pick the right vsock transport for `name`. Priority:
+/// 1. In-process Apple Container (zero-copy `VZVirtioSocketDevice` stream).
+/// 2. Dev-mode mode-0700 proxy socket (cross-process daemon dispatch).
+/// 3. Firecracker UDS multiplexer (fleet/production path).
+///
+/// The Apple Container probe consumes one stream and drops it; the
+/// returned `Arc<dyn VsockTransport>` is then used for every real
+/// connection (control + data + resize). Cloning the Arc lets the
+/// SIGWINCH handler thread reuse the same dispatch.
+fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
+    if mvm_apple_container::vsock_connect(name, mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        return Ok(Arc::new(AppleContainerTransport::new(name)));
+    }
+    let proxy = dev_vsock_proxy_path();
+    if std::path::Path::new(&proxy).exists() {
+        return Ok(Arc::new(VsockProxyTransport::new(proxy)));
+    }
+    Ok(Arc::new(FirecrackerTransport::for_vm(name)?))
+}
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -29,27 +53,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
 
     if let Some(cmd) = command {
-        // One-shot command execution — detect backend for both Firecracker and Apple Container
-        let resp = if let Ok(mut stream) =
-            mvm_apple_container::vsock_connect(name, mvm_guest::vsock::GUEST_AGENT_PORT)
-        {
-            mvm_guest::vsock::send_request(
-                &mut stream,
-                &mvm_guest::vsock::GuestRequest::Exec {
-                    command: cmd.to_string(),
-                    stdin: None,
-                    timeout_secs: Some(30),
-                },
-            )?
-        } else {
-            let instance_dir = microvm::resolve_running_vm_dir(name)?;
-            mvm_guest::vsock::exec_at(
-                &mvm_guest::vsock::vsock_uds_path(&instance_dir),
-                cmd,
-                None,
-                30,
-            )?
-        };
+        let transport = pick_console_transport(name)?;
+        let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+        let resp = mvm_guest::vsock::send_request(
+            &mut stream,
+            &mvm_guest::vsock::GuestRequest::Exec {
+                command: cmd.to_string(),
+                stdin: None,
+                timeout_secs: Some(30),
+            },
+        )?;
         match resp {
             mvm_guest::vsock::GuestResponse::ExecResult {
                 exit_code,
@@ -80,81 +93,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 /// Open an interactive PTY console to a running VM.
 ///
-/// Backend type for console connections.
-enum ConsoleBackend {
-    AppleContainer(String),
-    /// Connect via the daemon's vsock proxy Unix socket.
-    VsockProxy(String),
-    Firecracker(String),
-}
-
-/// Connect to a vsock port via the daemon's Unix socket proxy.
-pub(in crate::commands) fn vsock_proxy_connect(
-    proxy_path: &str,
-    port: u32,
-) -> Result<std::os::unix::net::UnixStream> {
-    use std::io::Write;
-    let mut stream = std::os::unix::net::UnixStream::connect(proxy_path)
-        .with_context(|| format!("Failed to connect to vsock proxy at {proxy_path}"))?;
-    stream.write_all(&port.to_le_bytes())?;
-    Ok(stream)
-}
-
-/// Open an interactive PTY console to a running VM.
-///
 /// Supports Firecracker (via UDS vsock), Apple Container (via direct vsock),
 /// and vsock proxy (via daemon Unix socket for cross-process access).
 pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
-    // Get terminal size
     let (cols, rows) = get_terminal_size();
 
-    // Send ConsoleOpen request via the control channel
     ui::info(&format!(
         "Opening console to VM {:?} ({}x{})...",
         name, cols, rows
     ));
 
-    // Determine backend: try in-process Apple Container, then vsock proxy, then Firecracker UDS
-    let backend =
-        if mvm_apple_container::vsock_connect(name, mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
-            ConsoleBackend::AppleContainer(name.to_string())
-        } else if std::path::Path::new(&dev_vsock_proxy_path()).exists() {
-            ConsoleBackend::VsockProxy(dev_vsock_proxy_path())
-        } else {
-            let instance_dir = microvm::resolve_running_vm_dir(name)?;
-            ConsoleBackend::Firecracker(instance_dir)
-        };
+    let transport = pick_console_transport(name)?;
 
-    // Send ConsoleOpen on the control channel
-    let (resp, connect_data) = match &backend {
-        ConsoleBackend::AppleContainer(vm_id) => {
-            let mut stream =
-                mvm_apple_container::vsock_connect(vm_id, mvm_guest::vsock::GUEST_AGENT_PORT)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let resp = mvm_guest::vsock::send_request(
-                &mut stream,
-                &mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows },
-            )?;
-            (resp, backend)
-        }
-        ConsoleBackend::VsockProxy(proxy_path) => {
-            let mut stream = vsock_proxy_connect(proxy_path, mvm_guest::vsock::GUEST_AGENT_PORT)?;
-            let resp = mvm_guest::vsock::send_request(
-                &mut stream,
-                &mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows },
-            )?;
-            (resp, backend)
-        }
-        ConsoleBackend::Firecracker(instance_dir) => {
-            let uds = mvm_guest::vsock::vsock_uds_path(instance_dir);
-            let mut stream = mvm_guest::vsock::connect_to(&uds, 10)?;
-            let resp = mvm_guest::vsock::send_request(
-                &mut stream,
-                &mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows },
-            )?;
-            (resp, backend)
-        }
-    };
+    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let resp = mvm_guest::vsock::send_request(
+        &mut stream,
+        &mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows },
+    )?;
 
     let (session_id, data_port) = match resp {
         mvm_guest::vsock::GuestResponse::ConsoleOpened {
@@ -174,23 +129,12 @@ pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
         session_id, data_port
     ));
 
-    // Small delay to let the guest agent bind the data port
+    // Small delay to let the guest agent bind the data port.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Connect to the data port for raw I/O
-    let data_stream = match &connect_data {
-        ConsoleBackend::AppleContainer(vm_id) => {
-            mvm_apple_container::vsock_connect(vm_id, data_port)
-                .map_err(|e| anyhow::anyhow!("Failed to connect to console data port: {e}"))?
-        }
-        ConsoleBackend::VsockProxy(proxy_path) => vsock_proxy_connect(proxy_path, data_port)?,
-        ConsoleBackend::Firecracker(instance_dir) => {
-            // Firecracker vsock multiplexes all ports on the same UDS
-            let uds = mvm_guest::vsock::vsock_uds_path(instance_dir);
-            mvm_guest::vsock::connect_to(&uds, 10)
-                .context("Failed to connect to console data port")?
-        }
-    };
+    let data_stream = transport
+        .connect(data_port)
+        .context("Failed to connect to console data port")?;
 
     mvm_core::audit::emit(
         mvm_core::audit::LocalAuditKind::ConsoleSessionStart,
@@ -199,7 +143,7 @@ pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
     );
 
     // Set up SIGWINCH handler to forward terminal resizes
-    let resize_sender = setup_sigwinch_handler(&connect_data, session_id);
+    let resize_sender = setup_sigwinch_handler(transport.clone(), session_id);
 
     // Enter raw terminal mode and suppress the Ctrl-C handler so that
     // Ctrl+C is forwarded as a raw byte (\x03) to the guest shell
@@ -234,17 +178,10 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
 ///
 /// Returns a sender that keeps the background thread alive. Drop it to stop.
 fn setup_sigwinch_handler(
-    backend: &ConsoleBackend,
+    transport: Arc<dyn VsockTransport>,
     session_id: u32,
 ) -> Option<std::sync::mpsc::Sender<()>> {
     use std::sync::atomic::Ordering;
-
-    // Clone backend info for the resize thread
-    let backend_info = match backend {
-        ConsoleBackend::AppleContainer(vm_id) => ConsoleBackend::AppleContainer(vm_id.clone()),
-        ConsoleBackend::VsockProxy(path) => ConsoleBackend::VsockProxy(path.clone()),
-        ConsoleBackend::Firecracker(dir) => ConsoleBackend::Firecracker(dir.clone()),
-    };
 
     let (tx, rx) = std::sync::mpsc::channel::<()>();
 
@@ -272,55 +209,21 @@ fn setup_sigwinch_handler(
 
             let (cols, rows) = get_terminal_size();
 
-            // Send ConsoleResize via the control channel (best-effort)
-            let _ = match &backend_info {
-                ConsoleBackend::AppleContainer(vm_id) => {
-                    mvm_apple_container::vsock_connect(vm_id, mvm_guest::vsock::GUEST_AGENT_PORT)
-                        .ok()
-                        .and_then(|mut stream| {
-                            mvm_guest::vsock::send_request(
-                                &mut stream,
-                                &mvm_guest::vsock::GuestRequest::ConsoleResize {
-                                    session_id,
-                                    cols,
-                                    rows,
-                                },
-                            )
-                            .ok()
-                        })
-                }
-                ConsoleBackend::VsockProxy(proxy_path) => {
-                    vsock_proxy_connect(proxy_path, mvm_guest::vsock::GUEST_AGENT_PORT)
-                        .ok()
-                        .and_then(|mut stream| {
-                            mvm_guest::vsock::send_request(
-                                &mut stream,
-                                &mvm_guest::vsock::GuestRequest::ConsoleResize {
-                                    session_id,
-                                    cols,
-                                    rows,
-                                },
-                            )
-                            .ok()
-                        })
-                }
-                ConsoleBackend::Firecracker(instance_dir) => {
-                    let uds = mvm_guest::vsock::vsock_uds_path(instance_dir);
-                    mvm_guest::vsock::connect_to(&uds, 5)
-                        .ok()
-                        .and_then(|mut stream| {
-                            mvm_guest::vsock::send_request(
-                                &mut stream,
-                                &mvm_guest::vsock::GuestRequest::ConsoleResize {
-                                    session_id,
-                                    cols,
-                                    rows,
-                                },
-                            )
-                            .ok()
-                        })
-                }
-            };
+            // Send ConsoleResize via the control channel (best-effort).
+            let _ = transport
+                .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                .ok()
+                .and_then(|mut stream| {
+                    mvm_guest::vsock::send_request(
+                        &mut stream,
+                        &mvm_guest::vsock::GuestRequest::ConsoleResize {
+                            session_id,
+                            cols,
+                            rows,
+                        },
+                    )
+                    .ok()
+                });
         }
     });
 

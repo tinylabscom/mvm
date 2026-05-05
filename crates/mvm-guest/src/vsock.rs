@@ -649,7 +649,7 @@ fn is_timeout_error(err: &std::io::Error) -> bool {
 }
 
 /// Single attempt to connect and perform the Firecracker CONNECT handshake.
-fn try_connect_once(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
+fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
 
     // Pre-flight: verify the socket file exists and is actually a socket.
@@ -671,7 +671,7 @@ fn try_connect_once(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     stream.set_write_timeout(Some(timeout))?;
 
     let mut stream = stream;
-    writeln!(stream, "CONNECT {}", GUEST_AGENT_PORT).with_context(|| "Failed to send CONNECT")?;
+    writeln!(stream, "CONNECT {}", port).with_context(|| "Failed to send CONNECT")?;
     stream.flush()?;
 
     // Read response line: "OK <port>\n"
@@ -700,21 +700,27 @@ fn try_connect_once(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     Ok(stream)
 }
 
-/// Connect to the guest vsock agent via a direct UDS path, with retries.
+/// Connect to a specific vsock port via the Firecracker UDS multiplexer.
 ///
-/// Firecracker exposes guest vsock as a Unix domain socket. The connect protocol:
-/// 1. Open Unix stream to the given UDS path
-/// 2. Write `CONNECT <port>\n`
-/// 3. Read `OK <port>\n`
-/// 4. Then use length-prefixed JSON frames
+/// The Firecracker vsock device exposes a single host-side UDS for
+/// host→guest connections; the destination port is selected by the
+/// `CONNECT <port>\n` handshake line, not by the UDS path. This entry
+/// point lets the caller pick that port — needed for things like the
+/// console data port, which is allocated by the agent at runtime.
+///
+/// Connect protocol:
+/// 1. Open Unix stream to the given UDS path.
+/// 2. Write `CONNECT <port>\n`.
+/// 3. Read `OK <port>\n`.
+/// 4. Then exchange length-prefixed JSON frames.
 ///
 /// Retries up to [`CONNECT_RETRIES`] times on timeout errors, skipping retries
 /// for definitive failures (connection refused, socket not found).
-pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
+pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let mut last_err = None;
 
     for attempt in 1..=CONNECT_RETRIES {
-        match try_connect_once(uds_path, timeout_secs) {
+        match try_connect_once(uds_path, port, timeout_secs) {
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 let is_timeout = e.to_string().contains("did not respond within");
@@ -735,10 +741,19 @@ pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
 
     Err(last_err.unwrap_or_else(|| {
         anyhow::anyhow!(
-            "Failed to connect to guest agent after {} attempts",
+            "Failed to connect to guest agent on port {} after {} attempts",
+            port,
             CONNECT_RETRIES
         )
     }))
+}
+
+/// Connect to the guest agent control port ([`GUEST_AGENT_PORT`]) via
+/// a direct UDS path. Backward-compatible thin wrapper over
+/// [`connect_to_port`] that all existing callers (control-plane RPCs,
+/// health probes, integration queries) target.
+pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
+    connect_to_port(uds_path, GUEST_AGENT_PORT, timeout_secs)
 }
 
 /// Connect to the guest vsock agent via the fleet-mode instance directory convention.
@@ -1765,7 +1780,7 @@ mod tests {
 
     #[test]
     fn test_try_connect_once_nonexistent_path() {
-        let result = try_connect_once("/nonexistent/v.sock", 1);
+        let result = try_connect_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(

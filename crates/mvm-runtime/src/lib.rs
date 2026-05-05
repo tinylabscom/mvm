@@ -7,6 +7,7 @@ pub mod linux_env;
 pub mod security;
 pub mod shell;
 pub mod ui;
+pub mod vsock_transport;
 
 pub mod vm;
 
