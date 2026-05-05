@@ -155,9 +155,11 @@ fn read_stdin_payload(spec: Option<&str>) -> Result<Vec<u8>> {
 /// `124` for timeout (matching `timeout(1)`), `137` for SIGKILL
 /// (8+9), `1` for everything else.
 fn dispatch(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i32> {
-    let mut stream =
-        mvm_apple_container::vsock_connect(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT)
-            .map_err(|e| anyhow::anyhow!("Connecting to guest agent on '{vm_name}': {e}"))?;
+    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
+        .with_context(|| format!("Picking transport for guest agent on '{vm_name}'"))?;
+    let mut stream = transport
+        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        .with_context(|| format!("Connecting to guest agent on '{vm_name}'"))?;
 
     let terminal = mvm_guest::vsock::send_run_entrypoint(
         &mut stream,

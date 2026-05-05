@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use mvm_core::vm_backend::{VmId, VmStartConfig, VmVolume};
 use mvm_runtime::vm::backend::AnyBackend;
-use mvm_runtime::vm::microvm;
+use mvm_runtime::vsock_transport;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -896,14 +896,15 @@ pub fn tear_down_session_vm(vm: SessionVm) {
 pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
-        if mvm_apple_container::vsock_connect(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        // Re-pick the transport on each iteration: a Firecracker VM
+        // that's still booting may not show up in
+        // resolve_running_vm_dir until the daemon registers it.
+        if let Ok(transport) = vsock_transport::for_vm(vm_name)
+            && transport
+                .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                .is_ok()
+        {
             return true;
-        }
-        if let Ok(instance_dir) = microvm::resolve_running_vm_dir(vm_name) {
-            let uds = mvm_guest::vsock::vsock_uds_path(&instance_dir);
-            if mvm_guest::vsock::ping_at(&uds).unwrap_or(false) {
-                return true;
-            }
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -915,24 +916,15 @@ fn send_request(
     command: &str,
     timeout_secs: u64,
 ) -> Result<mvm_guest::vsock::GuestResponse> {
-    if let Ok(mut stream) =
-        mvm_apple_container::vsock_connect(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT)
-    {
-        return mvm_guest::vsock::send_request(
-            &mut stream,
-            &mvm_guest::vsock::GuestRequest::Exec {
-                command: command.to_string(),
-                stdin: None,
-                timeout_secs: Some(timeout_secs),
-            },
-        );
-    }
-    let instance_dir = microvm::resolve_running_vm_dir(vm_name)?;
-    mvm_guest::vsock::exec_at(
-        &mvm_guest::vsock::vsock_uds_path(&instance_dir),
-        command,
-        None,
-        timeout_secs,
+    let transport = vsock_transport::for_vm(vm_name)?;
+    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    mvm_guest::vsock::send_request(
+        &mut stream,
+        &mvm_guest::vsock::GuestRequest::Exec {
+            command: command.to_string(),
+            stdin: None,
+            timeout_secs: Some(timeout_secs),
+        },
     )
 }
 

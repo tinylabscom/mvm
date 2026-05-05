@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result};
 
-use super::super::vm::console::{console_interactive, vsock_proxy_connect};
+use mvm_runtime::vsock_transport::{VsockProxyTransport, VsockTransport};
+
+use super::super::vm::console::console_interactive;
 use crate::ui;
 
 // ============================================================================
@@ -132,7 +134,9 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
             );
         }
         if std::path::Path::new(&proxy_path).exists()
-            && vsock_proxy_connect(&proxy_path, mvm_guest::vsock::GUEST_AGENT_PORT).is_ok()
+            && VsockProxyTransport::new(proxy_path.clone())
+                .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                .is_ok()
         {
             break;
         }
