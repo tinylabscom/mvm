@@ -19,14 +19,21 @@
 use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::fd::{FromRawFd, RawFd};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mvm_guest::entrypoint::{
+    CallCaps, CallOutcome, EntrypointPolicy, PayloadCapStream, ValidatedEntrypoint, execute,
+};
 use mvm_guest::integrations::{
     self, IntegrationEntry, IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
 };
 use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
-use mvm_guest::vsock::{FsChange, FsChangeKind, GUEST_AGENT_PORT, GuestRequest, GuestResponse};
+use mvm_guest::vsock::{
+    EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT, GuestRequest, GuestResponse,
+    RunEntrypointError,
+};
 use serde::Deserialize;
 
 // ============================================================================
@@ -749,6 +756,205 @@ fn do_exec(command: &str, stdin_data: Option<&str>, _timeout_secs: u64) -> Guest
     }
 }
 
+// ============================================================================
+// RunEntrypoint handler — ADR-007 / plan 41 W2.
+//
+// Boot-time validates `/etc/mvm/entrypoint`, holds the resolved fd open in a
+// `OnceLock` for the agent's lifetime, and serializes per-VM concurrency
+// through a mutex. Each call gets its own TMPDIR (mode 0700, removed on
+// drop) so transient state never leaks between calls.
+//
+// The handler writes Stdout and Stderr events directly to the vsock stream
+// and returns the terminal Exit/Error event for the caller's
+// `write_response` to send. Net-effect for v1: three vsock frames per call
+// (one Stdout, one Stderr, one terminal). v2 may chunk progressively
+// without changing the wire shape — the host already reads frames in a
+// loop until `is_terminal()`.
+// ============================================================================
+
+/// Validation result captured once at boot. The held `ValidatedEntrypoint`
+/// keeps an open file handle to the wrapper binary so spawn-time uses
+/// `/proc/self/fd/<n>` (Linux) instead of re-resolving the path, defeating
+/// any TOCTOU between validation and spawn.
+static VALIDATED_ENTRYPOINT: OnceLock<Result<ValidatedEntrypoint, String>> = OnceLock::new();
+
+/// One in-flight `RunEntrypoint` per VM (M12). Concurrent callers get
+/// `EntrypointEvent::Error { kind: Busy }` immediately; pool growth is the
+/// host-side concurrency lever.
+static RUN_ENTRYPOINT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Validate `/etc/mvm/entrypoint` at agent boot. The result is stashed in
+/// `VALIDATED_ENTRYPOINT`. On failure, log a single line — the agent stays
+/// up; only `RunEntrypoint` requests fail with `EntrypointInvalid`.
+fn init_entrypoint_validation() {
+    let result = EntrypointPolicy::production()
+        .validate()
+        .map_err(|e| e.to_string());
+    match &result {
+        Ok(v) => eprintln!(
+            "mvm-guest-agent: entrypoint validated at {} (held open for fexecve)",
+            v.resolved.display()
+        ),
+        Err(msg) => eprintln!(
+            "mvm-guest-agent: entrypoint validation failed at boot: {msg}; \
+             RunEntrypoint requests will return EntrypointInvalid"
+        ),
+    }
+    let _ = VALIDATED_ENTRYPOINT.set(result);
+}
+
+/// Generate a per-call TMPDIR path under /tmp. The mutex guarantees only
+/// one in-flight call per VM, so a name collision is exceedingly unlikely
+/// — but use pid + nanos anyway to survive any post-crash leftovers.
+fn make_call_tmpdir() -> std::io::Result<CallTmpdir> {
+    use std::os::unix::fs::DirBuilderExt;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let path = PathBuf::from(format!("/tmp/mvm-call-{pid}-{nanos:x}"));
+    std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+    Ok(CallTmpdir { path })
+}
+
+/// RAII wrapper that removes the TMPDIR on drop. The cleanup runs from the
+/// agent — robust to wrapper crashes, kills, and any panic on the agent's
+/// own side. ADR-007 / plan 41 M14.
+struct CallTmpdir {
+    path: PathBuf,
+}
+
+impl CallTmpdir {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CallTmpdir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            eprintln!(
+                "mvm-guest-agent: TMPDIR cleanup failed for {}: {e}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+/// Wrap an `EntrypointEvent` in a `GuestResponse` for vsock framing.
+fn evt(e: EntrypointEvent) -> GuestResponse {
+    GuestResponse::EntrypointEvent(e)
+}
+
+/// Handle a `RunEntrypoint` request. Writes streaming events directly via
+/// `write_response` and returns the terminal event for the dispatcher to
+/// send through the existing `match` arm pattern.
+fn handle_run_entrypoint(
+    file: &mut std::fs::File,
+    stdin: Vec<u8>,
+    timeout_secs: u64,
+) -> GuestResponse {
+    let _guard = match RUN_ENTRYPOINT_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::Busy,
+                message: "another RunEntrypoint call is in flight".into(),
+            });
+        }
+    };
+
+    let entrypoint = match VALIDATED_ENTRYPOINT.get() {
+        Some(Ok(e)) => e,
+        Some(Err(msg)) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: msg.clone(),
+            });
+        }
+        None => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: "entrypoint validation never ran".into(),
+            });
+        }
+    };
+
+    let tmpdir = match make_call_tmpdir() {
+        Ok(t) => t,
+        Err(e) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::InternalError,
+                message: format!("create per-call TMPDIR: {e}"),
+            });
+        }
+    };
+
+    let outcome = execute(
+        entrypoint,
+        tmpdir.path(),
+        &stdin,
+        Duration::from_secs(timeout_secs),
+        CallCaps::v1(),
+    );
+
+    // tmpdir drops at end of scope (or on early-return below) and runs
+    // its `Drop` cleanup.
+    match outcome {
+        CallOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => {
+            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
+            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            evt(EntrypointEvent::Exit { code })
+        }
+        CallOutcome::Timeout { stdout, stderr } => {
+            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
+            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::Timeout,
+                message: format!("wrapper exceeded {timeout_secs}s timeout"),
+            })
+        }
+        CallOutcome::PayloadCap {
+            stream,
+            stdout,
+            stderr,
+        } => {
+            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
+            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            let stream_name = match stream {
+                PayloadCapStream::Stdin => "stdin",
+                PayloadCapStream::Stdout => "stdout",
+                PayloadCapStream::Stderr => "stderr",
+            };
+            evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::PayloadCap,
+                message: format!("{stream_name} exceeded its cap"),
+            })
+        }
+        CallOutcome::SpawnFailed { message } => evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::InternalError,
+            message,
+        }),
+        CallOutcome::WrapperCrashed {
+            signal,
+            stdout,
+            stderr,
+        } => {
+            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
+            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::WrapperCrashed,
+                message: format!("wrapper exited via signal {signal}"),
+            })
+        }
+    }
+}
+
 /// Collect filesystem changes by walking the overlay upper directory.
 ///
 /// When the rootfs is mounted read-only with an overlay (squashfs + tmpfs),
@@ -921,17 +1127,10 @@ fn handle_client(
             message: "exec not available: guest agent built without dev-shell feature".to_string(),
         },
 
-        // W1 wire-protocol scaffold. The handler lands in W2; for now,
-        // returning a terminal `Error` event keeps the host's read loop
-        // honest (`is_terminal()` is true) and matches the wire shape
-        // ADR-007 / plan 41 specifies.
-        GuestRequest::RunEntrypoint { .. } => {
-            use mvm_guest::vsock::{EntrypointEvent, RunEntrypointError};
-            GuestResponse::EntrypointEvent(EntrypointEvent::Error {
-                kind: RunEntrypointError::InternalError,
-                message: "RunEntrypoint handler not implemented yet (plan 41 W2)".to_string(),
-            })
-        }
+        GuestRequest::RunEntrypoint {
+            stdin,
+            timeout_secs,
+        } => handle_run_entrypoint(&mut file, stdin, timeout_secs),
 
         GuestRequest::FsDiff => {
             // Walk the overlay upper dir to find changes since boot.
@@ -1133,6 +1332,10 @@ fn main() {
         "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
         cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
     );
+
+    // ADR-007 / plan 41 W2: validate `/etc/mvm/entrypoint` once at boot.
+    // Failures are non-fatal — only `RunEntrypoint` requests degrade.
+    init_entrypoint_validation();
 
     // SAFETY: libc call, arguments are constant values.
     let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
