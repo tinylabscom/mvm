@@ -35,6 +35,7 @@ pub mod artifact;
 pub mod audit;
 pub mod audit_dedup;
 pub mod backend;
+pub mod circuit_breaker;
 pub mod destination;
 pub mod egress;
 pub mod injection_guard;
@@ -53,6 +54,10 @@ pub use artifact::{ArtifactCollector, ArtifactError, NoopArtifactCollector};
 pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
 pub use backend::{BackendError, BackendLauncher, NoopBackendLauncher};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitState, Clock as CircuitBreakerClock,
+    InspectorReporter, SystemClock as CircuitBreakerSystemClock,
+};
 pub use destination::DestinationPolicy;
 pub use egress::{EgressDecision, EgressError, EgressProxy, NoopEgressProxy};
 pub use injection_guard::{InjectionGuard, InjectionRule, RuleFamily};

@@ -27,6 +27,7 @@ use mvm_policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
 use crate::artifact::{ArtifactCollector, NoopArtifactCollector};
 use crate::audit::{AuditSigner, NoopAuditSigner};
 use crate::backend::{BackendError, BackendLauncher, NoopBackendLauncher};
+use crate::circuit_breaker::{CircuitBreaker, InspectorReporter};
 use crate::destination::DestinationPolicy;
 use crate::egress::{EgressProxy, NoopEgressProxy};
 use crate::injection_guard::InjectionGuard;
@@ -109,6 +110,13 @@ pub struct Supervisor {
     /// concurrent admission paths. `std::sync::Mutex` is sufficient:
     /// no `await` inside the locked region.
     pub nonce_store: Arc<Mutex<NonceStore>>,
+    /// False-positive circuit-breaker reporter (Plan 37 Addendum E1).
+    /// `None` means the L7 egress chain runs without breakers — the
+    /// fail-closed default for production until an operator opts in
+    /// via [`Supervisor::with_circuit_breakers`]. When `Some`, every
+    /// inspector built by [`Supervisor::with_l7_egress`] is wrapped
+    /// in a [`CircuitBreaker`] that consults this reporter.
+    pub circuit_breakers: Option<Arc<InspectorReporter>>,
 }
 
 impl Default for Supervisor {
@@ -127,6 +135,7 @@ impl Default for Supervisor {
             state: PlanStateMachine::new(),
             clock: Arc::new(SystemClock),
             nonce_store: Arc::new(Mutex::new(NonceStore::new())),
+            circuit_breakers: None,
         }
     }
 }
@@ -372,7 +381,7 @@ impl Supervisor {
             ));
         }
 
-        let chain = build_inspector_chain(policy);
+        let chain = build_inspector_chain(policy, self.circuit_breakers.clone());
         let body_cap = if policy.body_cap_bytes == 0 {
             DEFAULT_BODY_CAP_BYTES
         } else {
@@ -392,6 +401,22 @@ impl Supervisor {
         );
         self.egress = Arc::new(proxy);
         Ok(self)
+    }
+
+    /// Wire the false-positive circuit breakers (Plan 37 Addendum E1).
+    /// When set, every inspector built by [`Supervisor::with_l7_egress`]
+    /// is wrapped in a [`CircuitBreaker`] that consults this reporter
+    /// on each `inspect()` call and downgrades `Deny` → `Transform`
+    /// when the breaker for that inspector's name is open.
+    ///
+    /// Order matters: call `with_circuit_breakers` **before**
+    /// `with_l7_egress` (the egress builder reads `self.circuit_breakers`
+    /// at chain-build time). Calling it after has no effect on an
+    /// already-built chain — the inspectors live inside the
+    /// `Arc<dyn EgressProxy>` and aren't reachable for re-wrapping.
+    pub fn with_circuit_breakers(mut self, reporter: Arc<InspectorReporter>) -> Self {
+        self.circuit_breakers = Some(reporter);
+        self
     }
 
     /// Wire the tool gate slot from a workload's [`ToolPolicy`].
@@ -418,8 +443,23 @@ impl Supervisor {
 /// `policy.disabled_inspectors` filters out by name — empty == every
 /// inspector enabled. The named inspectors must match
 /// `Inspector::name()` strings exactly.
-fn build_inspector_chain(policy: &EgressPolicy) -> InspectorChain {
+///
+/// When `breakers` is `Some`, each inspector is wrapped in a
+/// [`CircuitBreaker`] that shares the supplied
+/// [`InspectorReporter`]. The chain length is unchanged — wrappers
+/// preserve the wrapped inspector's `name()` so audit binding stays
+/// intact. (Plan 37 Addendum E1.)
+fn build_inspector_chain(
+    policy: &EgressPolicy,
+    breakers: Option<Arc<InspectorReporter>>,
+) -> InspectorChain {
     let disabled = |name: &'static str| policy.disabled_inspectors.iter().any(|d| d == name);
+    let wrap = |inner: Box<dyn Inspector>| -> Box<dyn Inspector> {
+        match &breakers {
+            Some(r) => Box::new(CircuitBreaker::new(inner, r.clone())),
+            None => inner,
+        }
+    };
     let mut chain = InspectorChain::new();
     if !disabled("destination_policy") {
         let dp = DestinationPolicy::new(
@@ -428,19 +468,19 @@ fn build_inspector_chain(policy: &EgressPolicy) -> InspectorChain {
                 .iter()
                 .map(|(host, port)| (host.as_str(), *port)),
         );
-        chain.push(Box::new(dp) as Box<dyn Inspector>);
+        chain.push(wrap(Box::new(dp) as Box<dyn Inspector>));
     }
     if !disabled("ssrf_guard") {
-        chain.push(Box::new(SsrfGuard::new()));
+        chain.push(wrap(Box::new(SsrfGuard::new())));
     }
     if !disabled("secrets_scanner") {
-        chain.push(Box::new(SecretsScanner::with_default_rules()));
+        chain.push(wrap(Box::new(SecretsScanner::with_default_rules())));
     }
     if !disabled("injection_guard") {
-        chain.push(Box::new(InjectionGuard::with_default_rules()));
+        chain.push(wrap(Box::new(InjectionGuard::with_default_rules())));
     }
     if !disabled("pii_redactor") {
-        chain.push(Box::new(PiiRedactor::with_default_rules()));
+        chain.push(wrap(Box::new(PiiRedactor::with_default_rules())));
     }
     chain
 }
@@ -1112,7 +1152,7 @@ mod tests {
         let mut policy = dev_egress_policy(false);
         policy.disabled_inspectors =
             vec!["secrets_scanner".to_string(), "pii_redactor".to_string()];
-        let chain = build_inspector_chain(&policy);
+        let chain = build_inspector_chain(&policy, None);
         // 5 default inspectors minus 2 disabled = 3.
         assert_eq!(chain.len(), 3);
     }
@@ -1120,7 +1160,7 @@ mod tests {
     #[test]
     fn build_inspector_chain_full_default() {
         let policy = dev_egress_policy(false);
-        let chain = build_inspector_chain(&policy);
+        let chain = build_inspector_chain(&policy, None);
         // All 5 inspectors present.
         assert_eq!(chain.len(), 5);
     }
@@ -1162,5 +1202,104 @@ mod tests {
             let v = s.tool_gate.check(name).await.expect("ok");
             assert!(matches!(v, crate::ToolDecision::Deny { .. }));
         }
+    }
+
+    // ---- Plan 37 Addendum E1 — circuit-breaker wiring ----
+
+    #[test]
+    fn build_inspector_chain_without_breakers_has_raw_inspectors() {
+        // Sanity: when no reporter is wired the chain is unchanged.
+        let policy = dev_egress_policy(false);
+        let chain = build_inspector_chain(&policy, None);
+        assert_eq!(chain.len(), 5);
+    }
+
+    #[test]
+    fn build_inspector_chain_with_breakers_preserves_length_and_names() {
+        // Wrapping must be invisible to the chain interface — same
+        // count, same names — so audit binding (which keys on
+        // Inspector::name) stays intact.
+        let reporter = Arc::new(crate::circuit_breaker::InspectorReporter::new(
+            crate::circuit_breaker::CircuitBreakerConfig::default(),
+        ));
+        let policy = dev_egress_policy(false);
+        let chain = build_inspector_chain(&policy, Some(reporter));
+        assert_eq!(chain.len(), 5);
+        let dbg = format!("{chain:?}");
+        for name in [
+            "destination_policy",
+            "ssrf_guard",
+            "secrets_scanner",
+            "injection_guard",
+            "pii_redactor",
+        ] {
+            assert!(
+                dbg.contains(name),
+                "expected wrapped chain to expose {name}, got {dbg}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_breaker_downgrades_destination_deny_when_tripped() {
+        // End-to-end through the supervisor: trip the destination_policy
+        // breaker, then ask the egress slot to inspect a host that the
+        // policy would normally deny. The deny should downgrade to a
+        // (still-flagged) Allow because the breaker is open.
+        let policy = dev_egress_policy(false);
+        let resolver = Arc::new(WiringResolver(IpAddr::from([104, 18, 32, 10])));
+        let audit = Arc::new(CapturingEgressAuditSink::new());
+        let reporter = Arc::new(crate::circuit_breaker::InspectorReporter::new(
+            crate::circuit_breaker::CircuitBreakerConfig {
+                trip_threshold: 2,
+                trip_window: std::time::Duration::from_secs(60),
+                auto_reset_after: None,
+            },
+        ));
+        // Trip destination_policy before wiring the egress slot — the
+        // wrapper consults the same Arc<InspectorReporter> at call
+        // time, so order between "trip" and "wire" doesn't matter, but
+        // it does need to be set before with_l7_egress so the chain is
+        // built with breakers in place.
+        reporter.report_false_positive("destination_policy");
+        reporter.report_false_positive("destination_policy");
+        assert!(reporter.is_tripped("destination_policy"));
+
+        let s = Supervisor::default()
+            .with_circuit_breakers(reporter.clone())
+            .with_l7_egress(
+                &policy,
+                Variant::Dev,
+                resolver,
+                audit.clone() as Arc<dyn EgressAuditSink>,
+            )
+            .expect("wire ok");
+
+        // The legacy `EgressProxy::inspect(host, path)` runs the
+        // chain. Because destination_policy's breaker is open, the
+        // verdict is the chain's downstream "Allow" rather than the
+        // `Deny` destination_policy would have produced.
+        let dec = s.egress.inspect("evil.com", "/").await.expect("inspect ok");
+        assert!(matches!(dec, crate::EgressDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn supervisor_without_breakers_still_denies_disallowed_destination() {
+        // Control case for the previous test — same supervisor minus
+        // the breaker — to make sure the deny path is genuinely the
+        // thing the breaker is masking.
+        let policy = dev_egress_policy(false);
+        let resolver = Arc::new(WiringResolver(IpAddr::from([104, 18, 32, 10])));
+        let audit = Arc::new(CapturingEgressAuditSink::new());
+        let s = Supervisor::default()
+            .with_l7_egress(
+                &policy,
+                Variant::Dev,
+                resolver,
+                audit.clone() as Arc<dyn EgressAuditSink>,
+            )
+            .expect("wire ok");
+        let dec = s.egress.inspect("evil.com", "/").await.expect("inspect ok");
+        assert!(matches!(dec, crate::EgressDecision::Deny { .. }));
     }
 }
