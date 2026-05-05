@@ -11,8 +11,9 @@
 #   1. Skip entirely if the staged set is empty.
 #   2. Run cargo fmt --all if any Rust files are staged (auto-fixes,
 #      re-stages). Cargo fmt works on the macOS host.
-#   3. Run nix fmt --check on the nix/ dir if any *.nix files are
-#      staged AND the nix CLI is available. Otherwise skip.
+#   3. For every staged *.nix file, run `nix fmt` from inside that
+#      file's directory (auto-fixes, re-stages) — IF the nix CLI is
+#      available. Otherwise skip silently.
 #
 # What this hook deliberately does NOT do:
 #   - cargo check / cargo build / cargo clippy / cargo test — the
@@ -59,10 +60,68 @@ if [ "$has_rust" -eq 1 ]; then
 fi
 
 if [ "$has_nix" -eq 1 ] && command -v nix >/dev/null 2>&1; then
-    echo "pre-commit: nix fmt --check ./nix"
-    if ! nix --extra-experimental-features 'nix-command flakes' fmt -- --check ./nix; then
-        echo "  nix fmt detected drift. Run 'nix fmt ./nix' to auto-format."
-        exit 1
+    # Format only staged .nix files (mirrors `cargo fmt --all` + re-stage).
+    #
+    # Two design choices, each addressing a real bug we hit:
+    #
+    #   (1) Per-file scope, not `nix fmt ./nix`. The previous hook ran
+    #       `nix --extra-experimental-features … fmt -- --check ./nix`
+    #       from the worktree root, which has no `flake.nix` at the
+    #       top level (the flake lives at `nix/flake.nix`). `nix fmt`
+    #       walks *up from CWD* looking for a flake — not from the
+    #       path argument — so it errored "not part of a flake"
+    #       before ever checking a file. On contributors with `nix`
+    #       on PATH that broke every commit touching a `.nix` file;
+    #       on contributors without, the `command -v nix` guard
+    #       above silently skipped the entire block. Either way the
+    #       hook wasn't doing what its name promised.
+    #
+    #   (2) Canonical formatter from `<repo>/nix/flake.nix`,
+    #       regardless of where the staged file lives. Sibling
+    #       flakes (`nix/dev/`, `nix/images/*/`, both
+    #       `*/template_scaffold/`) don't define a `formatter`
+    #       output — they're consumers of `nix/`'s lib, not
+    #       independent build trees. `nix fmt` walks up to the
+    #       nearest `flake.nix` and stops, so files inside any of
+    #       those sibling roots resolve to a flake that has no
+    #       formatter and the command fails. Hard-coding the
+    #       formatter's flake root to `<repo>/nix` ducks the issue:
+    #       `cd <repo>/nix` first, then point `nix fmt` at the
+    #       absolute path of the file to format. The discovery
+    #       walk now stops at the right flake.
+    nix_files="$(printf '%s\n' "$staged" | grep -E '\.nix$' || true)"
+    if [ -n "$nix_files" ]; then
+        repo_root="$(git rev-parse --show-toplevel)"
+        flake_root="$repo_root/nix"
+        if [ ! -f "$flake_root/flake.nix" ]; then
+            echo "pre-commit: skipping nix fmt — no flake at $flake_root/flake.nix"
+        else
+            echo "pre-commit: nix fmt (staged .nix files, formatter from nix/)"
+            fmt_failed=0
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                # File deleted in this commit — nothing to format.
+                [ ! -f "$f" ] && continue
+                if ! (cd "$flake_root" && \
+                      nix --extra-experimental-features 'nix-command flakes' \
+                          fmt -- "$repo_root/$f" >/dev/null 2>&1); then
+                    echo "  nix fmt failed on $f"
+                    fmt_failed=1
+                fi
+            done <<< "$nix_files"
+            if [ "$fmt_failed" -eq 1 ]; then
+                exit 1
+            fi
+            # Re-stage any file the formatter touched.
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                [ ! -f "$f" ] && continue
+                if ! git diff --quiet --exit-code -- "$f"; then
+                    echo "  re-staging $f"
+                    git add -- "$f"
+                fi
+            done <<< "$nix_files"
+        fi
     fi
 fi
 
