@@ -34,6 +34,14 @@ path = "src/bin/mvm-seccomp-apply.rs"
 name = "mvm-verity-init"
 path = "src/bin/mvm-verity-init.rs"
 
+# Test-only probe used by `tests/seccomp_apply.rs` to verify that
+# tier allowlists actually deny what they claim (ADR-002 §W2.4). Not
+# selected by `nix/packages/mvm-guest-agent.nix`, so it never ships
+# in the guest closure.
+[[bin]]
+name = "syscall-probe"
+path = "src/bin/syscall-probe.rs"
+
 [features]
 dev-shell = []
 
