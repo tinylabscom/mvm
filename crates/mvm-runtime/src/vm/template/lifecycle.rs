@@ -1770,21 +1770,44 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     {
         Ok(_) => Ok(()),
         Err(VerifyError::VersionMismatch { sealed, current }) => {
-            // Without --allow-stale-snapshot we hard-refuse; with the
-            // env var we already accepted above.
+            audit_snapshot_integrity_failure(
+                snap_dir,
+                &format!("variant=version_mismatch sealed={sealed} current={current}"),
+            );
             anyhow::bail!(
                 "snapshot at {snap_dir} was sealed by mvmctl '{sealed}' but \
                  current is '{current}'. Set MVM_ALLOW_STALE_SNAPSHOT=1 to override."
             )
         }
-        Err(VerifyError::TagMismatch) => anyhow::bail!(
-            "snapshot at {snap_dir} failed HMAC verification — files have been \
-             tampered or the host key changed. Refusing to resume."
-        ),
-        Err(other) => Err(anyhow::anyhow!(
-            "snapshot at {snap_dir} integrity check failed: {other}"
-        )),
+        Err(VerifyError::TagMismatch) => {
+            audit_snapshot_integrity_failure(snap_dir, "variant=tag_mismatch");
+            anyhow::bail!(
+                "snapshot at {snap_dir} failed HMAC verification — files have been \
+                 tampered or the host key changed. Refusing to resume."
+            )
+        }
+        Err(other) => {
+            audit_snapshot_integrity_failure(snap_dir, &format!("variant=other detail={other}"));
+            Err(anyhow::anyhow!(
+                "snapshot at {snap_dir} integrity check failed: {other}"
+            ))
+        }
     }
+}
+
+/// Emit a `SnapshotIntegrityFailed` local audit event.
+///
+/// `snap_dir` lands in `vm_name` so an operator scanning the audit log
+/// can correlate the failure with the specific template snapshot
+/// directory; `detail` carries the variant string distinguishing
+/// tamper (`tag_mismatch`) from version drift (`version_mismatch`)
+/// from lower-level I/O / encoding failures (`other`).
+fn audit_snapshot_integrity_failure(snap_dir: &str, detail: &str) {
+    mvm_core::audit::emit(
+        mvm_core::audit::LocalAuditKind::SnapshotIntegrityFailed,
+        Some(snap_dir),
+        Some(detail),
+    );
 }
 
 #[cfg(test)]

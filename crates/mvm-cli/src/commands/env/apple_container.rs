@@ -1468,6 +1468,11 @@ pub fn cmd_dev_import_image(
 /// counter set discoverable in one place. mvmd plan 23's
 /// reconciliation loop will alert on attack-shaped spikes
 /// (sig_invalid, digest_mismatch, revoked).
+///
+/// Security-relevant outcomes (everything except `network`, which is
+/// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
+/// so `mvmctl audit tail` shows the rejection. The counter is the
+/// alerting channel; the audit line is the forensics channel.
 fn bump_verify_outcome(outcome: &str) {
     let m = mvm_core::observability::metrics::global();
     let counter = match outcome {
@@ -1485,6 +1490,16 @@ fn bump_verify_outcome(outcome: &str) {
         }
     };
     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if outcome != "network" {
+        let mvmctl_version = env!("CARGO_PKG_VERSION");
+        mvm_core::audit::emit(
+            mvm_core::audit::LocalAuditKind::ImageVerifyFailed,
+            None,
+            Some(&format!(
+                "outcome={outcome} mvmctl_version={mvmctl_version}"
+            )),
+        );
+    }
 }
 
 /// HEAD-probe a URL. Returns Ok(true) when the resource is reachable

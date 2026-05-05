@@ -112,6 +112,25 @@ pub enum LocalAuditKind {
     /// new fingerprints + the list of VMs whose per-VM leaves were
     /// re-signed. Plan 34 §"Files (summary)".
     EgressCaRotated,
+    // --- Lifecycle integrity events ---
+    /// `mvmctl build` failed before producing a slot/revision. Paired
+    /// with the existing `TemplateBuild` success kind so every build
+    /// attempt — success or failure — leaves a single audit line.
+    TemplateBuildError,
+    /// Snapshot integrity verification failed at resume time. Covers
+    /// HMAC tag mismatch (tampered bytes or rotated host key), version
+    /// mismatch under strict mode, and lower-level I/O / encoding
+    /// failures from `mvm_security::snapshot_hmac::verify`. ADR-007 /
+    /// plan 41 W4 — refusing to resume a tampered snapshot is a
+    /// security signal and must be auditable.
+    SnapshotIntegrityFailed,
+    /// Pre-flight verification of a downloaded dev image manifest
+    /// failed: cosign signature invalid, manifest version pin off,
+    /// `not_after` past, or the published version is on the signed
+    /// revocation list. Plan 36 / ADR 005 — every refusal is an
+    /// auditable event so an operator can correlate "image rejected
+    /// at 14:03" with their CDN logs.
+    ImageVerifyFailed,
 }
 
 /// A single local audit log entry.
@@ -191,9 +210,17 @@ impl LocalAuditLog {
 /// Errors are logged via `tracing::warn!` and never propagated — audit
 /// failures must not block the operation being logged.
 pub fn emit(kind: LocalAuditKind, vm_name: Option<&str>, detail: Option<&str>) {
+    emit_to(&PathBuf::from(default_audit_log()), kind, vm_name, detail);
+}
+
+/// Emit a local audit event to an explicit path (best-effort).
+///
+/// Same contract as [`emit`] but the destination is supplied by the
+/// caller. Used by tests so emission can be observed without mutating
+/// `MVM_STATE_DIR` (which serializes badly across the test runner).
+pub fn emit_to(path: &Path, kind: LocalAuditKind, vm_name: Option<&str>, detail: Option<&str>) {
     let event = LocalAuditEvent::now(kind, vm_name.map(str::to_owned), detail.map(str::to_owned));
-    let path = PathBuf::from(default_audit_log());
-    match LocalAuditLog::open(&path).and_then(|log| log.append(&event)) {
+    match LocalAuditLog::open(path).and_then(|log| log.append(&event)) {
         Ok(()) => {}
         Err(e) => tracing::warn!("audit log write failed: {e}"),
     }
@@ -491,11 +518,51 @@ mod tests {
             LocalAuditKind::WorkloadSleep,
             // Plan 34 / ADR-006 egress L7.
             LocalAuditKind::EgressCaRotated,
+            // Lifecycle integrity gap-fillers.
+            LocalAuditKind::TemplateBuildError,
+            LocalAuditKind::SnapshotIntegrityFailed,
+            LocalAuditKind::ImageVerifyFailed,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
             assert!(!json.is_empty());
         }
+    }
+
+    #[test]
+    fn lifecycle_gap_kinds_use_snake_case_on_the_wire() {
+        // Pin the casing for the new gap-fillers exactly like the B21
+        // and egress kinds — the audit log is a stable parsed format
+        // for downstream tools (`mvmctl audit`, log shippers).
+        let kinds_and_strings = [
+            (LocalAuditKind::TemplateBuildError, "template_build_error"),
+            (
+                LocalAuditKind::SnapshotIntegrityFailed,
+                "snapshot_integrity_failed",
+            ),
+            (LocalAuditKind::ImageVerifyFailed, "image_verify_failed"),
+        ];
+        for (kind, expected) in kinds_and_strings {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
+
+    #[test]
+    fn emit_to_writes_a_single_jsonl_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.jsonl");
+        emit_to(
+            &path,
+            LocalAuditKind::SnapshotIntegrityFailed,
+            Some("vm-x"),
+            Some("variant=tag_mismatch"),
+        );
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1, "exactly one line per emit");
+        assert!(contents.contains("snapshot_integrity_failed"));
+        assert!(contents.contains("vm-x"));
+        assert!(contents.contains("tag_mismatch"));
     }
 
     #[test]

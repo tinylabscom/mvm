@@ -186,9 +186,17 @@ fn build_manifest(
                     .with_error(&format!("{:#}", e))
                     .emit();
             }
+            audit_build_error("manifest", &persisted.manifest_path, &e);
             return Err(e);
         }
     };
+
+    audit_build_ok(
+        "manifest",
+        &persisted.manifest_path,
+        &persisted.manifest_hash,
+        &revision.revision_hash,
+    );
 
     if json {
         #[derive(Serialize)]
@@ -224,7 +232,14 @@ fn build_manifest(
 }
 
 fn build_mvmfile(path: &str, output: Option<&str>) -> Result<()> {
-    let elf_path = image::build(path, output)?;
+    let elf_path = match image::build(path, output) {
+        Ok(p) => p,
+        Err(e) => {
+            audit_build_error("mvmfile", path, &e);
+            return Err(e);
+        }
+    };
+    audit_build_ok("mvmfile", path, "", &elf_path);
     ui::success(&format!("\nImage ready: {}", elf_path));
     ui::info(&format!("Run with: mvmctl start {}", elf_path));
     Ok(())
@@ -273,9 +288,11 @@ fn build_flake(flake_ref: &str, profile: Option<&str>, watch: bool, json: bool) 
                         .with_error(&format!("{:#}", e))
                         .emit();
                 }
+                audit_build_error("flake", &resolved, &e);
                 return Err(e);
             }
         };
+        audit_build_ok("flake", &resolved, "", &result.revision_hash);
         if let Err(e) = mvm_build::dev_build::ensure_guest_agent_if_needed(env, &result) {
             ui::warn(&format!(
                 "Could not verify guest agent ({}). If built with mkGuest, the agent is already included.",
@@ -348,4 +365,39 @@ fn build_flake(flake_ref: &str, profile: Option<&str>, watch: bool, json: bool) 
             }
         }
     }
+}
+
+/// Emit a `TemplateBuild` audit line for a successful build.
+///
+/// `mode` is one of `manifest` / `flake` / `mvmfile` so the audit log
+/// distinguishes the build-graph entry path; the artifact identifier
+/// (revision hash for nix builds, ELF path for mvmfile) lands in the
+/// detail string so a reader can correlate without parsing JSON.
+fn audit_build_ok(mode: &str, source: &str, slot_hash: &str, artifact: &str) {
+    let detail = if slot_hash.is_empty() {
+        format!("mode={mode} source={source} artifact={artifact}")
+    } else {
+        format!("mode={mode} source={source} slot_hash={slot_hash} artifact={artifact}")
+    };
+    mvm_core::audit::emit(
+        mvm_core::audit::LocalAuditKind::TemplateBuild,
+        None,
+        Some(&detail),
+    );
+}
+
+/// Emit a `TemplateBuildError` audit line for a failed build.
+///
+/// Records the same `mode`/`source` shape as the success path so an
+/// operator scanning the log sees a paired success/failure pattern.
+/// Only the first line of the error chain lands in the detail to keep
+/// the audit record bounded.
+fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
+    let head = err.to_string();
+    let head = head.lines().next().unwrap_or("").trim();
+    mvm_core::audit::emit(
+        mvm_core::audit::LocalAuditKind::TemplateBuildError,
+        None,
+        Some(&format!("mode={mode} source={source} error={head}")),
+    );
 }
