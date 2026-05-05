@@ -50,3 +50,9 @@ ln -s @busybox@/bin/sh ./files/bin/sh
 
 @nixBlock@
 @cacertBlock@
+
+# Optional caller-supplied extra files (mkGuest's `extraFiles` arg).
+# Empty by default; populated by the function-entrypoint substrate
+# (ADR-007 / plan 41) to bake `/etc/mvm/entrypoint` plus its wrapper
+# under `/usr/lib/mvm/wrappers/`.
+@extraFilesBlock@
