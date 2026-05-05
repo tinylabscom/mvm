@@ -63,23 +63,27 @@ Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C0.
 '(paperclip|openclaw)'` returns nothing and `nix flake check`
 on the remaining examples passes.
 
-### C1 — Init-script defects exposed by W3 live boot  🟡
+### C1 — Init-script defects exposed by W3 live boot  🟢 implemented
 
 Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C1.
-Single PR, two one-line fixes.
+Single PR, both fixes.
 
-- [ ] **C1.1** `/etc/nsswitch.conf` bind-mount source-deletion
-      bug. `04-etc-and-users.sh.in` symlink dance leaves the
-      staging file in inconsistent state for one of the three
-      promoted bind-mounts. Fix: drop intermediate symlinks,
-      write content directly to `/run/mvm-etc/*`, bind on top
-      of empty `/etc/*` targets.
-- [ ] **C1.2** `setpriv` `--clear-groups --groups=…` mutually
+- [x] **C1.1** `/etc/nsswitch.conf` bind-mount source-deletion bug.
+      Dropped the `/etc/{passwd,group,nsswitch.conf}` →
+      `/run/mvm-etc/*` symlinks; `04-etc-and-users.sh.in` and
+      `default.nix::{mkUserBlock,mkServiceUserBlock}` now write
+      directly to `/run/mvm-etc/*` (numeric chown for
+      `/home/${serviceGroup}` since `/etc/group` isn't bind-mounted
+      yet). Bind targets `/etc/{passwd,group,nsswitch.conf}` are
+      baked into the rootfs by `nix/lib/rootfs-templates/populate.sh.in`
+      so the bind has stable targets even on a verity-mounted (RO)
+      `/etc`. Sanity-check loop after the bind warns to console on
+      any missing mountpoint.
+- [x] **C1.2** `setpriv` `--clear-groups --groups=…` mutually
       exclusive flag conflict in `mkServiceBlock` non-explicit
-      branch and `guestAgentBlock`. Fix: drop `--clear-groups`
-      (`--groups=` already replaces the supplementary group
-      set; the combination was redundant + ambiguous to
-      util-linux's setpriv).
+      branch and `guestAgentBlock`. Dropped `--clear-groups` from
+      both — `--groups=` already replaces the supplementary group
+      set wholesale, so the security claim is unchanged.
 
 **Done when**: a fresh Lima boot of a verity-enabled template
 shows no `mount: failed` or `setpriv: mutually exclusive` lines

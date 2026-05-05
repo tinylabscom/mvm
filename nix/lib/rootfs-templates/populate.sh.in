@@ -24,6 +24,15 @@ mkdir -p ./files/nix-host
 chmod 0755 ./files/etc/mvm
 chmod 0750 ./files/etc/mvm/integrations.d ./files/etc/mvm/probes.d
 
+# Bind-mount targets for /etc/{passwd,group,nsswitch.conf}. The init's
+# `04-etc-and-users.sh.in` writes content to /run/mvm-etc/* (tmpfs) at boot
+# and `mount --bind`s it on top of these paths. The targets must exist
+# before the bind step — `touch /etc/<f>` at boot is unreliable on a
+# verity-mounted rootfs (writes silently fail), so bake empty placeholders
+# here. The bind-then-remount-RO at boot delivers both content and mode.
+touch ./files/etc/passwd ./files/etc/group ./files/etc/nsswitch.conf
+chmod 0644 ./files/etc/passwd ./files/etc/group ./files/etc/nsswitch.conf
+
 # Variant marker: "prod" or "dev". The dev sibling flake (nix/dev/) passes
 # variant="dev" alongside the dev guest agent; production stays "prod". Read
 # this file inside the running microVM to self-identify (e.g. `mvmctl

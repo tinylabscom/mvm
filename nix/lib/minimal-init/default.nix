@@ -90,13 +90,19 @@ let
       group = entry.config.group or name;
       home = entry.config.home or "/home/${name}";
     in ''
-      grep -q "^${group}:" /etc/group || echo '${group}:x:${uid}:' >> /etc/group
-      grep -q "^${name}:" /etc/passwd || echo '${name}:x:${uid}:${uid}:${name}:${home}:${bb}/bin/sh' >> /etc/passwd
+      # User blocks write to /run/mvm-etc/{passwd,group} (the staging
+      # tmpfs); the bind-mount onto /etc/* runs after every block has
+      # appended its entries (see lib/04-etc-and-users.sh.in). The
+      # group's gid matches its uid since `${group}:x:${uid}:` is the
+      # entry we emit, so a numeric chown of `${uid}:${uid}` resolves
+      # without needing a name-resolving /etc to be live yet.
+      grep -q "^${group}:" /run/mvm-etc/group || echo '${group}:x:${uid}:' >> /run/mvm-etc/group
+      grep -q "^${name}:" /run/mvm-etc/passwd || echo '${name}:x:${uid}:${uid}:${name}:${home}:${bb}/bin/sh' >> /run/mvm-etc/passwd
       mkdir -p ${home}
-      chown ${name}:${group} ${home}
+      chown ${uid}:${uid} ${home}
       # Add to service group so the user can read /mnt/secrets (0440 root:${serviceGroup}).
-      sed -i 's/^${serviceGroup}:x:900:.*$/&,${name}/' /etc/group
-      sed -i 's/^${serviceGroup}:x:900:,/${serviceGroup}:x:900:/' /etc/group
+      sed -i 's/^${serviceGroup}:x:900:.*$/&,${name}/' /run/mvm-etc/group
+      sed -i 's/^${serviceGroup}:x:900:,/${serviceGroup}:x:900:/' /run/mvm-etc/group
     '';
   explicitUserBlocks = lib.concatStringsSep "\n" (map mkUserBlock usersWithUids);
   # Combined: explicit user-set users first, then auto-derived
@@ -179,20 +185,22 @@ let
   ;
 
   # Per-service /etc entries. Joined into `userBlocks` alongside the
-  # caller's explicit `users.*` entries.
+  # caller's explicit `users.*` entries. Writes target /run/mvm-etc/*
+  # (staging) — the bind-mount onto /etc/* runs after every block has
+  # appended; see lib/04-etc-and-users.sh.in.
   mkServiceUserBlock = name: svc:
     let id = serviceIdentity name svc; in
     if id.explicit then ""
     else ''
       # Auto-derived service identity for ${name} (ADR-002 §W2.1)
-      grep -q "^${id.user}:" /etc/group || echo '${id.user}:x:${toString id.gid}:' >> /etc/group
-      grep -q "^${id.user}:" /etc/passwd || echo '${id.user}:x:${toString id.uid}:${toString id.gid}:${id.user}:/var/empty:${bb}/bin/sh' >> /etc/passwd
+      grep -q "^${id.user}:" /run/mvm-etc/group || echo '${id.user}:x:${toString id.gid}:' >> /run/mvm-etc/group
+      grep -q "^${id.user}:" /run/mvm-etc/passwd || echo '${id.user}:x:${toString id.uid}:${toString id.gid}:${id.user}:/var/empty:${bb}/bin/sh' >> /run/mvm-etc/passwd
       # Add to ${serviceGroup} so this user can read shared secrets at
       # /mnt/secrets (mode 0440 root:${serviceGroup}). Per-service
       # secrets at /run/mvm-secrets/${name}/ are mode 0400 owned by
       # this uid directly — they don't go through the group.
-      sed -i 's/^${serviceGroup}:x:900:.*$/&,${id.user}/' /etc/group
-      sed -i 's/^${serviceGroup}:x:900:,/${serviceGroup}:x:900:/' /etc/group
+      sed -i 's/^${serviceGroup}:x:900:.*$/&,${id.user}/' /run/mvm-etc/group
+      sed -i 's/^${serviceGroup}:x:900:,/${serviceGroup}:x:900:/' /run/mvm-etc/group
     '';
 
   serviceUserBlocks = lib.concatStringsSep "\n" (
@@ -238,16 +246,20 @@ let
   # The launch line. Layers from outside in:
   #
   #   mvm-seccomp-apply <tier> -- \
-  #     setpriv --reuid=<uid> --regid=<gid> --clear-groups \
+  #     setpriv --reuid=<uid> --regid=<gid> \
   #             --groups=<gid>,900 --bounding-set=-all --no-new-privs \
   #             --inh-caps=-all -- \
   #         /bin/sh -c '<command>'
   #
   # `--groups` retains membership in `serviceGroup` (gid 900) so
-  # legacy shared-secret reads still work. Capabilities are dropped
-  # *before* the command runs; the bounding set is empty so a
-  # setuid root binary the command might invoke gets uid 0 with
-  # zero capabilities — meaningless escalation.
+  # legacy shared-secret reads still work. `--groups` already replaces
+  # the supplementary group set wholesale — combining it with
+  # `--clear-groups` is rejected by util-linux setpriv as "mutually
+  # exclusive", which is what crashlooped every service on the W3
+  # verity-boot regression. Keep `--groups` alone.
+  # Capabilities are dropped *before* the command runs; the bounding
+  # set is empty so a setuid root binary the command might invoke
+  # gets uid 0 with zero capabilities — meaningless escalation.
   mkServiceBlock = name: svc:
     let
       preStart = svc.preStart or "";
@@ -278,7 +290,7 @@ let
         if id.explicit then
           "${utilLinux}/bin/setpriv --reuid=${id.user} --regid=${id.user} --init-groups --bounding-set=-all --no-new-privs --inh-caps=-all"
         else
-          "${utilLinux}/bin/setpriv --reuid=${toString id.uid} --regid=${toString id.gid} --clear-groups --groups=${toString id.gid},900 --bounding-set=-all --no-new-privs --inh-caps=-all"
+          "${utilLinux}/bin/setpriv --reuid=${toString id.uid} --regid=${toString id.gid} --groups=${toString id.gid},900 --bounding-set=-all --no-new-privs --inh-caps=-all"
       ;
       # The seccomp shim. `mvm-seccomp-apply` ships in the guest agent's
       # closure, so we look it up via guestAgentPkg's bin dir. When
@@ -382,8 +394,12 @@ let
       trap 'RUNNING=0; kill "$CMD_PID" 2>/dev/null' TERM
       while [ "$RUNNING" = "1" ]; do
         echo "[init] starting mvm-guest-agent (uid 901, mvm-agent)..." > /dev/console
+        # `--groups=901,900` already replaces the supplementary group
+        # set; combining with `--clear-groups` is rejected by setpriv
+        # as mutually exclusive (regressed the agent on every W3
+        # verity boot). ADR-002 §W4.5.
         ${utilLinux}/bin/setpriv \
-          --reuid=901 --regid=901 --clear-groups --groups=901,900 \
+          --reuid=901 --regid=901 --groups=901,900 \
           --bounding-set=-all --no-new-privs --inh-caps=-all \
           -- ${guestAgentPkg}/bin/mvm-guest-agent > /dev/console 2>&1 &
         CMD_PID=$!
