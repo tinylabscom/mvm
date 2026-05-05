@@ -99,6 +99,15 @@ pub(in crate::commands) enum Commands {
     /// `mvmctl exec` flags. Alternatively, pass `--launch-plan ./launch.json` to invoke an
     /// mvmforge-emitted entrypoint instead of an inline argv.
     Exec(vm::exec::Args),
+    /// Boot a microVM and call its baked entrypoint (production-safe).
+    ///
+    /// Distinct from `mvmctl exec` (dev-only, arbitrary shell). `invoke` dispatches the
+    /// `RunEntrypoint` vsock verb, which the guest agent serves only by spawning the
+    /// program named in `/etc/mvm/entrypoint`. No shell, no argv override, no env
+    /// injection beyond what the wrapper template defined at image build time. Stdin
+    /// from `--stdin <PATH>` (or `-` for mvmctl's own stdin); stdout/stderr stream back
+    /// to mvmctl's own streams. ADR-007 / plan 41.
+    Invoke(vm::invoke::Args),
     /// Speak Model Context Protocol — exposes mvmctl as a sandbox surface for LLM clients.
     ///
     /// Single parameterized `run` tool whose `env` parameter selects from `mvmctl template list`.
@@ -208,6 +217,7 @@ pub fn run() -> Result<()> {
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
+        Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
         Commands::Mcp(a) => ops::mcp::run(&cli, a, &cfg),
     };
 
