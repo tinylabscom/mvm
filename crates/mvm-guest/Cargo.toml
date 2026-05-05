@@ -54,3 +54,6 @@ tracing.workspace = true
 # the dep so `cargo check` on a Mac doesn't try to build it.
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

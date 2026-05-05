@@ -3,6 +3,7 @@
 
 pub mod builder_agent;
 pub mod console;
+pub mod entrypoint;
 pub mod integrations;
 pub mod probes;
 pub mod vsock;
