@@ -15,6 +15,7 @@ membership, network interfaces, firewall rules, systemd units,
 | [`permissions/`](permissions/) | One-shot privilege grants — `/dev/kvm` access, group membership. | Once per host, manually, with explicit sudo. |
 | [`networking/`](networking/) | Bridge / TAP / iptables setup if not done by mvmctl. | Strict-mode pre-condition; otherwise mvmctl handles inline. |
 | [`systemd/`](systemd/) | mvm systemd unit installation (Linux production hosts). | When deploying mvm as a managed service. |
+| [`hetzner/`](hetzner/) | Cloud-init for a Hetzner test box (Linux+KVM) running the full workspace suite. | Per-PR or ad hoc, when Lima on macOS isn't enough (live Firecracker, longer fuzz). |
 
 Every script in `ops/` MUST have a header listing:
 - What host state it changes
