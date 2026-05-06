@@ -280,6 +280,38 @@ cargo clippy --workspace -- -D warnings  # Lint (0 warnings required)
 
 See [Development Guide](public/src/content/docs/contributing/development.md) for contributor guidelines, CI/CD, and release process.
 
+### Running the suite on real Linux+KVM (Hetzner)
+
+Lima on macOS can't run live Firecracker microVMs (no nested KVM). For
+the full suite — workspace clippy on x86\_64-linux, the seccomp
+functional probes, longer `cargo fuzz` runs, and live-KVM smokes —
+spin up a Hetzner Cloud test box with the cloud-init scaffolding in
+[`ops/hetzner/`](ops/hetzner/):
+
+```bash
+hcloud server create \
+  --name mvm-test-1 \
+  --type ccx23 \
+  --image ubuntu-24.04 \
+  --location nbg1 \
+  --ssh-key <your-key-name> \
+  --user-data-from-file ops/hetzner/cloud-init.yaml
+
+ssh root@<server-ip> 'cloud-init status --wait'
+ssh root@<server-ip>
+su - mvm
+bash ~/warm-cache.sh        # one-time: cargo fetch + workspace build
+bash ~/run-tests.sh         # full suite, stops at first failure
+```
+
+Pick a CCX (x86\_64) or CAX (ARM) instance — those expose `/dev/kvm`.
+CPX/CX (shared CPU) don't. See [`ops/hetzner/README.md`](ops/hetzner/README.md)
+for instance sizing, what `run-tests.sh` covers, and how to keep the
+pinned Firecracker / cargo-audit allow-list in sync with the workspace.
+
+Tear down with `hcloud server delete mvm-test-1` — boxes are
+ephemeral by design.
+
 ## Documentation
 
 - [Quick Start](QUICKSTART.md)
