@@ -43,7 +43,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let slot_hash = canonical_key_for_path(&canonical)?;
     tmpl::template_delete_slot(&slot_hash, args.force)?;
 
-    if args.manifest_file && canonical.exists() {
+    let manifest_file_deleted = args.manifest_file && canonical.exists();
+    if manifest_file_deleted {
         std::fs::remove_file(&canonical)
             .with_context(|| format!("Failed to delete manifest file {}", canonical.display()))?;
         println!(
@@ -54,6 +55,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     } else {
         println!("Removed slot {}", slot_hash);
     }
+
+    mvm_core::audit::emit(
+        mvm_core::audit::LocalAuditKind::SlotRemove,
+        Some(&slot_hash),
+        Some(&format!(
+            "manifest_path={} manifest_file_deleted={manifest_file_deleted}",
+            canonical.display()
+        )),
+    );
 
     Ok(())
 }
