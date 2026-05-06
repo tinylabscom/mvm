@@ -1,0 +1,235 @@
+#cloud-config
+# Hetzner Cloud first-boot config for an mvm test box.
+#
+# Provisions a Linux host that can run the full mvm workspace test
+# suite — including the live-KVM smokes that Lima on macOS can't
+# (`mvmctl console <fc-vm>`, real `nix build` of microVM images, the
+# seccomp functional probes, and `cargo fuzz`).
+#
+# Where this lives in the test pyramid:
+#   • macOS host:          per-crate cargo test / clippy (fast feedback)
+#   • Lima (aarch64-linux): workspace clippy + Linux-gated tests (CI parity)
+#   • Hetzner (this box):  live-KVM Firecracker, longer fuzz, real perf
+#
+# Tested against Hetzner CCX23 (x86_64, 4 dedicated vCPU, 16 GB RAM,
+# /dev/kvm exposed) running Ubuntu 24.04 LTS. CAX (ARM) instances
+# work too — the runcmd block detects architecture at boot.
+#
+# Pinned Firecracker version follows `crates/mvm-core/src/config.rs::
+# FC_VERSION_DEFAULT`. Bump there first, then here, so the dev-host
+# Lima install and the Hetzner box stay in lockstep.
+#
+# Idempotency: cloud-init only runs runcmd on first boot. Re-running
+# is the operator's job; everything below is written so a manual
+# `bash /var/lib/cloud/instance/scripts/runcmd` (or this file's logic)
+# replays cleanly. Each step is gated on "is this already done?".
+
+package_update: true
+# Skip a full distro upgrade — saves ~3 min on every fresh box and
+# we don't want kernel updates in the middle of provisioning. Run
+# `apt full-upgrade` later by hand if you want one.
+package_upgrade: false
+
+packages:
+  # Build essentials for cargo + native deps.
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - cmake
+  - clang
+  - llvm
+  - lld
+  # Source / network / tooling.
+  - curl
+  - git
+  - jq
+  - tmux
+  - htop
+  # Firecracker + KVM prerequisites.
+  - qemu-utils       # qemu-img for image manipulation
+  - cpu-checker      # kvm-ok
+  - bridge-utils     # brctl for tap setup
+  - iptables
+  # Nix install needs xz; cargo-fuzz wants protobuf-compiler.
+  - xz-utils
+  - protobuf-compiler
+  # Convenient diagnostics.
+  - strace
+  - ltrace
+  - lsof
+
+users:
+  # Created in addition to the cloud's default `root`. Hetzner injects
+  # SSH keys it knows about onto root by default; we propagate them
+  # to `mvm` via `ssh_import_id` below if the operator passes a
+  # GitHub username, otherwise the operator can `cp /root/.ssh
+  # /home/mvm/` post-boot. Most operators just `ssh root@<ip>`
+  # initially and `su - mvm` from there.
+  - name: mvm
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [sudo, kvm]
+    # `lock_passwd: true` is the cloud-init default for new users;
+    # making it explicit here documents the intent: mvm has no
+    # password login, only SSH (or sudo from root).
+    lock_passwd: true
+
+write_files:
+  # Sysctl tweaks for the boxed dev experience: more inotify watches
+  # (rust-analyzer / cargo eat them), generous fd limits.
+  - path: /etc/sysctl.d/99-mvm.conf
+    content: |
+      fs.inotify.max_user_watches = 524288
+      fs.inotify.max_user_instances = 8192
+      net.ipv4.ip_forward = 1
+    permissions: '0644'
+
+  # Login banner so an SSH-er sees what this box is for.
+  - path: /etc/motd
+    content: |
+      ┌──────────────────────────────────────────────────────────┐
+      │ mvm Hetzner test box                                     │
+      ├──────────────────────────────────────────────────────────┤
+      │ Switch to the test user:    su - mvm                     │
+      │ Repo:                       ~mvm/mvm                     │
+      │ Run the full suite:         bash ~mvm/run-tests.sh       │
+      │ KVM check:                  ls -la /dev/kvm && kvm-ok    │
+      │ Firecracker version:        firecracker --version        │
+      └──────────────────────────────────────────────────────────┘
+    permissions: '0644'
+
+  # Drop-in env file the test runner sources. Edit on the box if
+  # you want to point cargo at a different mirror, set MVM_FC_VERSION,
+  # etc.
+  - path: /home/mvm/.mvm-test.env
+    owner: mvm:mvm
+    permissions: '0644'
+    content: |
+      export MVM_NO_LEGACY_BANNER=1
+      export CARGO_INCREMENTAL=0
+      export RUST_BACKTRACE=1
+
+  # `run-tests.sh` is checked in at `ops/hetzner/run-tests.sh` and
+  # symlinked into ~mvm at the end of runcmd, after the repo is
+  # cloned. Keeping it in-repo lets dependabot / lints / shfmt
+  # touch it the same way they touch any other shell script.
+
+  # Pre-warm helper — run once after first boot. Sources Nix +
+  # rustup so a `cargo fetch` resolves cleanly, then primes the
+  # workspace target/ so subsequent test runs are fast.
+  - path: /home/mvm/warm-cache.sh
+    owner: mvm:mvm
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      # shellcheck source=/dev/null
+      source "$HOME/.cargo/env"
+      cd "$HOME/mvm"
+      cargo fetch
+      cargo build --workspace --all-targets
+
+# ----------------------------------------------------------------------
+# runcmd runs *once* at first boot, in order, as root. Each block is
+# guarded so re-running the file (`cloud-init clean && reboot` or by
+# hand) doesn't re-do completed work.
+# ----------------------------------------------------------------------
+runcmd:
+  # Apply sysctl tweaks immediately (also persisted via /etc/sysctl.d).
+  - sysctl --system
+
+  # Verify KVM is actually available before going further. If this
+  # fails on a Hetzner CX/CPX (shared CPU) box, recreate as CCX (x86)
+  # or CAX (ARM) — only those expose /dev/kvm.
+  - |
+    if [ ! -e /dev/kvm ]; then
+      echo "::error:: /dev/kvm missing — pick a CCX (x86) or CAX (ARM) instance, not CX/CPX." >&2
+      exit 1
+    fi
+  - kvm-ok || true   # informational; some kernels don't ship kvm-ok packages
+  - groupadd -f kvm
+  - chown root:kvm /dev/kvm
+  - chmod 0660 /dev/kvm
+  - usermod -aG kvm mvm
+
+  # Install rustup as the mvm user (rustup refuses to install
+  # alongside an existing system rust without --no-modify-path; doing
+  # it as a non-root user sidesteps the question entirely).
+  - |
+    if ! sudo -u mvm test -x /home/mvm/.cargo/bin/cargo; then
+      sudo -u mvm bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal'
+      sudo -u mvm bash -c 'source $HOME/.cargo/env && rustup component add clippy rustfmt'
+      sudo -u mvm bash -c 'source $HOME/.cargo/env && rustup install nightly'
+    fi
+
+  # Install Nix (multi-user / daemon mode). The mvm Nix flakes need
+  # this for `mvmctl build` and the verified-boot artifacts.
+  - |
+    if ! command -v nix >/dev/null; then
+      curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+        sh -s -- install linux --no-confirm --init systemd
+      # The Nix daemon profile script needs to be sourced into mvm's
+      # shell — append to .bashrc so future logins find `nix`.
+      echo 'if [ -e /etc/profile.d/nix.sh ]; then . /etc/profile.d/nix.sh; fi' \
+        >> /home/mvm/.bashrc
+    fi
+
+  # Install Firecracker. Version pinned to match
+  # `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. If you bump
+  # that constant, bump FC_VERSION here.
+  - |
+    FC_VERSION="v1.14.1"
+    ARCH=$(uname -m)   # x86_64 or aarch64
+    if ! command -v firecracker >/dev/null \
+       || ! firecracker --version 2>&1 | grep -q "$FC_VERSION"; then
+      cd /tmp
+      curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" -o fc.tgz
+      tar -xzf fc.tgz
+      install -m 0755 "release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH}" /usr/local/bin/firecracker
+      if [ -f "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}" ]; then
+        install -m 0755 "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}" /usr/local/bin/jailer
+      fi
+      rm -rf fc.tgz "release-${FC_VERSION}-${ARCH}"
+    fi
+    firecracker --version
+
+  # Cargo tools used by the test suite. Pinned; install only if
+  # missing so reruns are cheap.
+  - |
+    sudo -u mvm bash -c '
+      source $HOME/.cargo/env
+      for tool in cargo-fuzz cargo-deny cargo-audit; do
+        if ! command -v "$tool" >/dev/null; then
+          cargo install --locked "$tool"
+        fi
+      done
+    '
+
+  # Clone the repo into the mvm user's home. Public, so HTTPS clone
+  # works without credentials. If you need to test a branch, ssh in
+  # and `git fetch origin <branch> && git checkout <branch>`.
+  - |
+    if [ ! -d /home/mvm/mvm ]; then
+      sudo -u mvm git clone https://github.com/tinylabscom/mvm.git /home/mvm/mvm
+    fi
+
+  # Symlink the in-repo run-tests.sh into ~mvm so the MOTD path
+  # works without copying the file (and updates flow with `git pull`).
+  - sudo -u mvm ln -sf /home/mvm/mvm/ops/hetzner/run-tests.sh /home/mvm/run-tests.sh
+
+  # Make sure warm-cache.sh / .mvm-test.env / the symlink all belong
+  # to mvm — write_files runs before user creation in older
+  # cloud-init versions, so chown defensively.
+  - chown -R mvm:mvm /home/mvm
+
+  # Final marker — `cloud-init status --wait` blocks on this.
+  - touch /var/lib/mvm-bootstrap-done
+
+# Persist the host across reboots (cloud-init's default), but signal
+# bootcmd that we don't want a re-run on every boot.
+final_message: |
+  mvm Hetzner test box ready in $UPTIME seconds.
+  Next steps (as root):
+    su - mvm
+    bash ~/warm-cache.sh   # one-time: prewarm cargo target
+    bash ~/run-tests.sh    # full suite
