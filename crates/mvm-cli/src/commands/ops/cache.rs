@@ -65,11 +65,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     );
                 } else {
                     match mvm_runtime::vm::template::lifecycle::template_prune_orphan_slots() {
-                        Ok((count, _)) if count > 0 => {
-                            ui::success(&format!("Pruned {count} orphaned build(s)."));
-                        }
-                        Ok(_) => {
-                            ui::info("No orphaned builds.");
+                        Ok((count, _)) => {
+                            mvm_core::audit::emit(
+                                mvm_core::audit::LocalAuditKind::SlotPrune,
+                                None,
+                                Some(&format!("source=cache_prune count={count}")),
+                            );
+                            if count > 0 {
+                                ui::success(&format!("Pruned {count} orphaned build(s)."));
+                            } else {
+                                ui::info("No orphaned builds.");
+                            }
                         }
                         Err(e) => {
                             ui::warn(&format!("Orphan-build prune failed: {e}"));
@@ -81,6 +87,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             let path = std::path::Path::new(&cache_dir);
             if !path.exists() {
                 ui::info("Cache directory does not exist. Nothing to prune.");
+                if !dry_run {
+                    mvm_core::audit::emit(
+                        mvm_core::audit::LocalAuditKind::CachePrune,
+                        None,
+                        Some("removed=0 freed_bytes=0 cache_dir=missing"),
+                    );
+                }
                 return Ok(());
             }
 
@@ -124,6 +137,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     removed,
                     human_bytes(freed)
                 ));
+            }
+            // Plan 37 §6: every state-changing CLI verb emits one
+            // audit record. We only mutate disk on the non-dry-run
+            // path; dry-run reads only and stays out of the log.
+            if !dry_run {
+                mvm_core::audit::emit(
+                    mvm_core::audit::LocalAuditKind::CachePrune,
+                    None,
+                    Some(&format!("removed={removed} freed_bytes={freed}")),
+                );
             }
             Ok(())
         }

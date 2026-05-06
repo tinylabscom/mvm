@@ -13,11 +13,13 @@ mvm-core.workspace = true
 mvm-plan.workspace = true
 mvm-policy.workspace = true
 async-trait = "0.1"
+base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror = "1"
 # Wave 2.6: L7EgressProxy uses tokio::net::lookup_host for the
 # production DnsResolver impl. Tests use only `macros + rt`, the
@@ -28,4 +30,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }

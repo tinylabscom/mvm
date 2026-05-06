@@ -131,6 +131,21 @@ pub enum LocalAuditKind {
     /// auditable event so an operator can correlate "image rejected
     /// at 14:03" with their CDN logs.
     ImageVerifyFailed,
+    // --- Registry / cache mutations (Plan 37 §6 invariant fillers) ---
+    /// `mvmctl cache prune` removed temporary files / empty subdirs
+    /// from `~/.cache/mvm`. Pure read-only `cache info` is not
+    /// audited; the prune verb is, because it deletes host bytes.
+    CachePrune,
+    /// `mvmctl manifest rm` deleted a registry slot
+    /// (`~/.mvm/templates/<slot_hash>/`). Optionally also deleted the
+    /// source `mvm.toml` when `--manifest-file` is passed.
+    SlotRemove,
+    /// Orphan-slot sweep deleted one or more slots whose source
+    /// `mvm.toml` no longer exists on disk. Emitted by both
+    /// `mvmctl manifest prune --orphans` and
+    /// `mvmctl cache prune --orphan-builds`. The detail field carries
+    /// the count and (for small sweeps) the truncated slot hashes.
+    SlotPrune,
 }
 
 /// A single local audit log entry.
@@ -522,6 +537,10 @@ mod tests {
             LocalAuditKind::TemplateBuildError,
             LocalAuditKind::SnapshotIntegrityFailed,
             LocalAuditKind::ImageVerifyFailed,
+            // Registry / cache mutations.
+            LocalAuditKind::CachePrune,
+            LocalAuditKind::SlotRemove,
+            LocalAuditKind::SlotPrune,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
@@ -541,6 +560,9 @@ mod tests {
                 "snapshot_integrity_failed",
             ),
             (LocalAuditKind::ImageVerifyFailed, "image_verify_failed"),
+            (LocalAuditKind::CachePrune, "cache_prune"),
+            (LocalAuditKind::SlotRemove, "slot_remove"),
+            (LocalAuditKind::SlotPrune, "slot_prune"),
         ];
         for (kind, expected) in kinds_and_strings {
             let json = serde_json::to_string(&kind).unwrap();

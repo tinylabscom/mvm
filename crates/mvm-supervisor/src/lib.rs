@@ -34,6 +34,7 @@
 pub mod artifact;
 pub mod audit;
 pub mod audit_dedup;
+pub mod audit_file;
 pub mod backend;
 pub mod circuit_breaker;
 pub mod destination;
@@ -53,6 +54,7 @@ pub mod tool_gate;
 pub use artifact::{ArtifactCollector, ArtifactError, NoopArtifactCollector};
 pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
+pub use audit_file::{FileAuditSigner, SignedEnvelope, VerifyError, verify_audit_chain};
 pub use backend::{BackendError, BackendLauncher, NoopBackendLauncher};
 pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitState, Clock as CircuitBreakerClock,
