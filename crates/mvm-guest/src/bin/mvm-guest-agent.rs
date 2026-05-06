@@ -850,6 +850,17 @@ fn evt(e: EntrypointEvent) -> GuestResponse {
 /// Handle a `RunEntrypoint` request. Writes streaming events directly via
 /// `write_response` and returns the terminal event for the dispatcher to
 /// send through the existing `match` arm pattern.
+///
+/// `#[inline(never)]` is load-bearing for the W5 symbol-contract gate.
+/// LTO inlines functions called from a single site (line ~1133), which
+/// would erase the `mvm_guest_agent::handle_run_entrypoint` symbol from
+/// `nm` output even though the handler is logically compiled in. The
+/// gate (`scripts/check-prod-agent-no-exec.sh`, ADR-007 §W5) requires
+/// the symbol to be present as positive evidence that the W2 handler
+/// is wired up. Without `inline(never)` the gate fails on every prod
+/// build. Cost: one extra call boundary in a slow-path RPC handler —
+/// imperceptible.
+#[inline(never)]
 fn handle_run_entrypoint(
     file: &mut std::fs::File,
     stdin: Vec<u8>,

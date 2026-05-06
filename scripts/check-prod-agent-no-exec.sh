@@ -33,11 +33,22 @@ echo "==> building mvm-guest-agent (production: no dev-shell feature, profile=$P
 # --no-default-features and explicit feature list both omit dev-shell, but
 # the crate has no default features today so --no-default-features is the
 # defensive choice — adding a default later won't silently arm the gate.
+#
+# `profile.release.strip = "none"` override: the workspace's release
+# profile sets `strip = true`, which removes ALL symbols from the
+# binary. Without this override every `nm`-based check below would
+# trivially "succeed" on the negative gate (do_exec absent because
+# everything is stripped) and "fail" on the positive gate
+# (handle_run_entrypoint absent for the same reason). The override
+# only affects this verification build under `target/release/`; the
+# shipping artifact built by callers without this script still gets
+# stripped per the workspace profile.
 cargo build \
     -p mvm-guest \
     --bin mvm-guest-agent \
     --profile "$PROFILE" \
-    --no-default-features
+    --no-default-features \
+    --config 'profile.release.strip="none"'
 
 case "$PROFILE" in
     dev) PROFILE_DIR="debug" ;;
