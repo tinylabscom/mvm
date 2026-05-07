@@ -337,6 +337,75 @@
                 }
               );
 
+              # Plan 45: every guest gets a self-doc file at
+              # `/.mvm/llm.txt` so an in-VM LLM agent can self-orient
+              # without needing host-side context. Templated with
+              # build-time vars exposed via mkGuest's args. Caller can
+              # override by providing their own `/.mvm/llm.txt` entry
+              # in `extraFiles` (caller-wins via attrset merge below).
+              mvmGuestLlmTxt = ''
+                # mvm guest
+
+                This filesystem is a microVM rootfs built with mvm's `mkGuest`.
+                See https://github.com/tinylabscom/mvm for the substrate source.
+
+                ## Identity
+
+                - agent_version: ${guestAgent.version or "unknown"}
+                - variant: ${variant}
+                - verified_boot: ${if verifiedBoot then "true" else "false"}
+                - hostname: ${hostname}
+                - role: ${role}
+
+                ## RPC entry points (vsock CID 3)
+
+                - guest agent on port 52
+                - protocol: JSON-framed `GuestRequest` envelopes
+                - verb families: fs (read/write/list/stat/mkdir/remove/move),
+                  proc (dev-only), share (mount/unmount virtio-fs)
+                - frame size cap: 256 KiB per record
+
+                ## Function-call entrypoints (ADR-007)
+
+                - wrapper at `/etc/mvm/entrypoint` reads `[args, kwargs]` from
+                  stdin, dispatches the IR-declared `module:function`, writes
+                  the encoded return on stdout
+                - per-call hygiene: fresh subprocess per call, env baseline,
+                  FD reset, per-call TMPDIR, cleanup
+                - max stdin: 16 MiB
+                - format enum: `json` or `msgpack` (closed; code-executing
+                  serializers forbidden)
+
+                ## Checkpoint semantics
+
+                - `mvmctl pause <vm>` captures vmstate.bin + mem.bin under
+                  the host's `~/.mvm/instances/<vm>/snapshot/`, sealed via
+                  HMAC with epoch-bound replay defense
+                - `mvmctl resume <vm>` verifies the sidecar, loads the
+                  Firecracker snapshot, and re-invokes `PostRestore` to
+                  remount drives
+                - on dm-thin-backed instances (ADR-008), snapshots are
+                  chained CoW thin volumes (cheap incremental state)
+
+                ## Where to find more
+
+                - `/etc/mvm/variant` - prod or dev marker
+                - ADR-002: microVM security posture
+                - ADR-007: function-call entrypoints
+              '';
+
+              # Library defaults. Caller-supplied `extraFiles` wins on
+              # path collision (Nix's `//` is shallow merge — right
+              # operand overrides matching keys on the left).
+              defaultExtraFiles = {
+                "/.mvm/llm.txt" = {
+                  content = mvmGuestLlmTxt;
+                  mode = "0644";
+                };
+              };
+
+              extraFilesEffective = defaultExtraFiles // extraFiles;
+
               # Render the optional `extraFiles` map into a populate
               # block. Each entry stages content via `pkgs.writeText`
               # (so binary-safe) and copies it into the populate
@@ -356,7 +425,7 @@
                     chmod ${modeOctal} "./files${path}"
                     chown 0:0 "./files${path}"
                   ''
-                ) extraFiles
+                ) extraFilesEffective
               );
 
               populateCommands = renderTemplate ./lib/rootfs-templates/populate.sh.in {
@@ -791,6 +860,29 @@
           # runs when a sibling flake calls it (and those flakes target
           # Linux systems explicitly).
           lib.mkGuest = mkGuestFn;
+
+          # ── Per-language function-service factories (ADR-010 / plan 48) ─
+          #
+          # Bake a function-call workload into a `mkGuest`-compatible
+          # `{ extraFiles, servicePackages, service }` triple. mvmforge
+          # generates flake.nix files that consume these factories when
+          # the IR declares `Entrypoint::Function` (mvmforge ADR-0009).
+          #
+          # The factory functions accept `pkgs` as their first attr, so
+          # mvmforge's generated flake.rs passes the local pkgs alongside
+          # the per-workload args (workloadId, module, function, format,
+          # appPkg, optional sourcePath). See
+          # `nix/lib/factories/README.md` and the binding contract at
+          # `mvmforge/specs/contracts/mvm-mkfunctionservice.md`.
+          #
+          # Wrapper hardening lives inline in each factory's `runnerScript`
+          # today; a follow-up PR will swap for the audited Rust
+          # `mvmforge-runtime` binary baked at
+          # `/usr/lib/mvm/wrappers/runner` and reading config from
+          # `/etc/mvm/wrapper.json` (see `nix/wrappers/`).
+          lib.mkPythonFunctionService = import ./lib/factories/mkPythonFunctionService.nix;
+          lib.mkNodeFunctionService = import ./lib/factories/mkNodeFunctionService.nix;
+          lib.mkWasmFunctionService = import ./lib/factories/mkWasmFunctionService.nix;
 
           # ── packages ──────────────────────────────────────────────────
           packages = {
