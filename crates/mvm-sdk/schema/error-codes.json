@@ -1,0 +1,241 @@
+{
+  "version": "0.1",
+  "policy": "Append-only within an IR major version. Renaming or removing a code requires a superseding ADR and an IR MAJOR bump. See ADR-0004.",
+  "codes": {
+    "E_UNSUPPORTED_MAJOR": {
+      "description": "IR schema MAJOR is not in the host's supported set.",
+      "applicable_fields": ["schema_version"]
+    },
+    "E_MINOR_TOO_HIGH": {
+      "description": "IR schema MINOR exceeds the host's known minor within a supported MAJOR.",
+      "applicable_fields": ["schema_version"]
+    },
+    "E_MALFORMED_VERSION": {
+      "description": "schema_version is not a valid MAJOR.MINOR string.",
+      "applicable_fields": ["schema_version"]
+    },
+    "E_UNKNOWN_FIELD": {
+      "description": "IR contains a field not declared in the host's known schema.",
+      "applicable_fields": ["*"]
+    },
+    "E_MALFORMED_MANIFEST": {
+      "description": "IR manifest could not be parsed as a valid Workload document (invalid JSON, missing required field, wrong type, or I/O error reading the file).",
+      "applicable_fields": ["*"]
+    },
+    "E_EMPTY_APPS": {
+      "description": "Workload must declare at least one app.",
+      "applicable_fields": ["apps"]
+    },
+    "E_MULTI_APP_DEFERRED": {
+      "description": "Multi-app workloads are not supported in v0.",
+      "applicable_fields": ["apps"]
+    },
+    "E_SOURCE_KIND_DEFERRED": {
+      "description": "Source.kind names a variant reserved but not implemented in v0 (nix_derivation, oci_image).",
+      "applicable_fields": ["apps[*].source.kind"]
+    },
+    "E_SECRETS_NOT_IMPLEMENTED": {
+      "description": "SecretRef is not supported in v0; the secrets subsystem awaits a dedicated ADR.",
+      "applicable_fields": ["apps[*].env.*", "apps[*].entrypoint.env.*"]
+    },
+    "E_PERSIST_DEFERRED": {
+      "description": "Volume.persist = true is not supported in v0.",
+      "applicable_fields": ["volumes[*].persist"]
+    },
+    "E_NETWORK_PORTS_WITH_NONE": {
+      "description": "When network.mode is \"none\", ports must be empty.",
+      "applicable_fields": ["apps[*].network.ports"]
+    },
+    "E_COMPILE_OUTPUT_EXISTS_NOT_DIR": {
+      "description": "The --out path supplied to `mvmforge compile` exists but is not a directory.",
+      "applicable_fields": []
+    },
+    "E_COMPILE_STAGING_FAILED": {
+      "description": "Atomic staging of the artifact directory failed (cross-filesystem rename, permission, or I/O error).",
+      "applicable_fields": []
+    },
+    "E_COMPILE_ARCHIVE_FAILED": {
+      "description": "`mvmforge compile --out path.tar.gz` failed to write the deterministic gzipped tar artifact (per ADR-0012). Underlying cause is in the error detail (typically I/O, permission, or disk-full).",
+      "applicable_fields": []
+    },
+    "E_NO_PRIMARY_ENTRYPOINT": {
+      "description": "Multi-function app (ADR-0014 Phase 2) has no entrypoint marked `primary = true`. Exactly one is required so `mvmctl invoke <id>` (no `--fn` selector) has a default to dispatch.",
+      "applicable_fields": ["apps[*].entrypoints"]
+    },
+    "E_MULTIPLE_PRIMARY_ENTRYPOINTS": {
+      "description": "Multi-function app has more than one entrypoint marked `primary = true`. Exactly one is allowed.",
+      "applicable_fields": ["apps[*].entrypoints"]
+    },
+    "E_DUPLICATE_ENTRYPOINT_FUNCTION": {
+      "description": "Two `entrypoints[]` entries declare the same `(module, function)` pair — function names must be unique within an app.",
+      "applicable_fields": ["apps[*].entrypoints"]
+    },
+    "E_FUNCTION_NOT_FOUND": {
+      "description": "An Entrypoint::Function declared `module:function` that does not resolve to a top-level function in the bundled source. ADR-0015 Phase 2: tree-sitter inspects the source after reachability scoping and rejects typos at compile time. Methods on classes and nested functions are not importable as `module.function` and will trip this check.",
+      "applicable_fields": ["apps[*].entrypoints[*].function"]
+    },
+    "E_FUNCTION_SCHEMA_MISMATCH": {
+      "description": "The function declared in `Entrypoint::Function` exists, but its parameter names don't accommodate every name listed in `args_schema.required`. ADR-0015 Phase 2.5: tree-sitter extracts the function's declared parameter names and cross-checks them against the schema's required-property list at compile time. Functions accepting `**kwargs` (Python) or rest params (JS/TS) bypass the check because the runtime can absorb arbitrary names.",
+      "applicable_fields": ["apps[*].entrypoints[*].args_schema"]
+    },
+    "E_MVM_NOT_FOUND": {
+      "description": "The mvm binary could not be located via MVMFORGE_MVM_BIN or PATH.",
+      "applicable_fields": []
+    },
+    "E_SOURCE_PATH_NOT_FOUND": {
+      "description": "app.source.path does not exist on the compile host.",
+      "applicable_fields": ["apps[*].source.path"]
+    },
+    "E_SOURCE_PATH_NOT_DIR": {
+      "description": "app.source.path exists but is not a directory.",
+      "applicable_fields": ["apps[*].source.path"]
+    },
+    "E_SOURCE_COPY_FAILED": {
+      "description": "I/O failure copying source files into staging (permission, disk full, etc.).",
+      "applicable_fields": ["apps[*].source.path"]
+    },
+    "E_SOURCE_GLOB_INVALID": {
+      "description": "An entry in app.source.include or app.source.exclude is not a valid glob.",
+      "applicable_fields": ["apps[*].source.include", "apps[*].source.exclude"]
+    },
+    "E_SOURCE_OUT_OF_TREE_SYMLINK": {
+      "description": "A symlink in the source tree resolves to a target outside app.source.path.",
+      "applicable_fields": ["apps[*].source.path"]
+    },
+    "E_MVM_VERSION_TOO_OLD": {
+      "description": "The mvmctl binary's reported version is below the host's required minimum (per ADR-0005 §7).",
+      "applicable_fields": []
+    },
+    "E_NETWORK_WILDCARD": {
+      "description": "A function-entrypoint workload declared an over-broad network grant (e.g. network.mode = \"host\"). Per ADR-0009, function workloads must use deny-default networking; broad grants require an explicit superseding ADR.",
+      "applicable_fields": ["apps[*].network.mode"]
+    },
+    "E_INVALID_ID": {
+      "description": "An identifier (workload.id or apps[*].name) does not match the allowed pattern ^[a-z][a-z0-9-]{0,62}$. The pattern protects argv-passing to the substrate and other downstream tooling that treats identifiers as positional arguments.",
+      "applicable_fields": ["id", "apps[*].name"]
+    },
+    "E_UNPINNED_DEPS": {
+      "description": "A dependency lockfile was supplied but contains entries without integrity hashes. ADR-0009 requires hash-pinning for every runtime dep so the rootfs build can verify what it installs.",
+      "applicable_fields": ["apps[*].dependencies.lockfile"]
+    },
+    "E_LOCKFILE_NOT_FOUND": {
+      "description": "The lockfile path declared by apps[*].dependencies.lockfile could not be found on disk relative to apps[*].source.path.",
+      "applicable_fields": ["apps[*].dependencies.lockfile"]
+    },
+    "E_DEPS_REQUIRED_FOR_FUNCTION_WORKLOAD": {
+      "description": "Function-entrypoint workloads must declare apps[*].dependencies. Use mv.python_deps(...) / mv.node_deps(...) to point at a hash-pinned lockfile, or mv.no_deps() if the workload only needs the language stdlib.",
+      "applicable_fields": ["apps[*].dependencies"]
+    },
+    "E_SECRET_IN_SCHEMA": {
+      "description": "A field name in a function's args_schema or return_schema matches the secret pattern (token/password/secret/api_key/credential/bearer/private_key/auth_token). ADR-0009 forbids passing secrets through function args; use the /run/mvm-secrets/<svc>/ mechanism instead.",
+      "applicable_fields": [
+        "apps[*].entrypoint.args_schema",
+        "apps[*].entrypoint.return_schema"
+      ]
+    },
+    "E_FUNCTION_NETWORK_HOST_FORBIDDEN": {
+      "description": "Function-call workloads may not declare network.mode = \"host\". ADR-0009 / plan-0003 phase 4: function workloads default to deny-default networking; declaring host mode is forbidden. Use \"none\" (default for function workloads) or \"bridge\".",
+      "applicable_fields": ["apps[*].network.mode"]
+    },
+    "E_UNSUPPORTED_LANGUAGE": {
+      "description": "A function-entrypoint workload declared apps[*].entrypoint.language = <X> where <X> is not in mvmforge's supported-language allowlist. Per ADR-0010 §4, the language field is open-string in IR but validated host-side; adding a language requires a per-language Nix factory + corpus entry in mvmforge.",
+      "applicable_fields": ["apps[*].entrypoint.language"]
+    },
+    "E_INVALID_CONCURRENCY_POOL_SIZE": {
+      "description": "apps[*].entrypoint.concurrency.warm_process.pool_size must be in [1, 64]. ADR-0011 caps pool size at 64 to match mvm's substrate sanity limit; values outside this range are rejected at validation time.",
+      "applicable_fields": ["apps[*].entrypoint.concurrency.pool_size"]
+    },
+    "E_INVALID_CONCURRENCY_MAX_CALLS_PER_WORKER": {
+      "description": "apps[*].entrypoint.concurrency.warm_process.max_calls_per_worker must be >= 100. ADR-0011: smaller values defeat the warm-tier benefit because per-call recycling cost dominates dispatch savings.",
+      "applicable_fields": ["apps[*].entrypoint.concurrency.max_calls_per_worker"]
+    },
+    "E_INVALID_CONCURRENCY_MAX_RSS_MB": {
+      "description": "apps[*].entrypoint.concurrency.warm_process.max_rss_mb must not exceed apps[*].resources.memory_mb. ADR-0011: a worker can't exceed the VM's total memory budget.",
+      "applicable_fields": ["apps[*].entrypoint.concurrency.max_rss_mb"]
+    },
+    "E_UNSUPPORTED_CONCURRENCY_IN_PROCESS_MODE": {
+      "description": "apps[*].entrypoint.concurrency.warm_process.in_process = \"concurrent\" is reserved and not implemented in v0.2. Use \"serial\" — a follow-up ADR will lift this restriction.",
+      "applicable_fields": ["apps[*].entrypoint.concurrency.in_process"]
+    },
+    "E_UNSUPPORTED_CONCURRENCY_FOR_LANGUAGE": {
+      "description": "apps[*].entrypoint.concurrency is not supported when apps[*].entrypoint.language is wasm. Warm-process is Python/Node only in v0.2; ADR-0011 may add wasm support in a follow-up.",
+      "applicable_fields": ["apps[*].entrypoint.concurrency"]
+    },
+    "E_ADDON_LOCKFILE_MISSING": {
+      "description": "An addon-use is declared in the workload IR but no matching entry exists in mvmforge.lock. ADR-0018: every addon-use must be locked before compile. Run `mvmforge addon lock` to populate the lockfile.",
+      "applicable_fields": ["apps[*].addons[*]"]
+    },
+    "E_ADDON_LOCKFILE_SIGNATURE_INVALID": {
+      "description": "A lockfile entry's per-entry signature does not validate against the registry's sigstore-keyless trust root, or the git-commit signature on the lockfile blob does not match an allowed identity. ADR-0018 §Lockfile integrity: lockfile authenticity = registry sigs + signed git commit.",
+      "applicable_fields": ["apps[*].addons[*]"]
+    },
+    "E_ADDON_SHA_MISMATCH": {
+      "description": "An addon-use's sha256 in the IR does not match the resolved sha256 in mvmforge.lock for the same (name, alias). ADR-0018: lockfile is authoritative; the IR follows.",
+      "applicable_fields": ["apps[*].addons[*].sha256"]
+    },
+    "E_ADDON_SIGNATURE_INVALID": {
+      "description": "A registry-fetched addon artifact's sigstore-keyless signature does not validate (cert chain, OIDC identity policy, or Rekor inclusion proof). ADR-0018: no \"warn and proceed\" mode — verification failure blocks consumer boot.",
+      "applicable_fields": ["apps[*].addons[*]"]
+    },
+    "E_ADDON_PARAM_INVALID": {
+      "description": "An addon-use passes a param that does not match the addon manifest's [[addon.params]] declaration (unknown name or wrong type). ADR-0018 §Addon manifest schema source of truth.",
+      "applicable_fields": ["apps[*].addons[*].params"]
+    },
+    "E_ADDON_ENV_COLLISION": {
+      "description": "Two addon-uses contribute env vars with the same name (after alias-prefix expansion), or an addon's contributed env var collides with App.env. ADR-0018: silent overrides not allowed.",
+      "applicable_fields": ["apps[*].addons[*]", "apps[*].env"]
+    },
+    "E_ADDON_REGISTRY_UNREACHABLE": {
+      "description": "mvmforge addon lock or addon::resolve_and_validate could not reach the configured registry (network error, DNS failure, TLS error, or 5xx response). ADR-0018: registry I/O lives in mvmforge, never in mvmforge compile (which is hermetic).",
+      "applicable_fields": ["apps[*].addons[*].ref"]
+    },
+    "E_ADDON_LOCAL_PATH_DRIFT": {
+      "description": "A local-path addon's directory has been modified since `mvmforge addon lock` recorded its content_sha256. Re-run lock to refresh, or revert the changes. ADR-0018 §Local-path addons.",
+      "applicable_fields": ["apps[*].addons[*]"]
+    },
+    "E_ADDON_LOCAL_PATH_IN_PUBLISH": {
+      "description": "A workload that contains a local-path addon-use cannot be published as an addon. ADR-0018 §Local-path addons: local addons are author-side only; publish requires every dependency to come from a registry.",
+      "applicable_fields": ["apps[*].addons[*].ref"]
+    },
+    "E_ADDON_NIX_PARSE_ERROR": {
+      "description": "An addon's hand-authored Nix body fails to parse under tree-sitter-nix. ADR-0018 + ADR-0017: addon Nix is validated at publish time. Error includes line/column.",
+      "applicable_fields": ["addon.toml"]
+    },
+    "E_ADDON_EGRESS_VIOLATION": {
+      "description": "An addon-instance microVM attempted egress to a host:port not in the manifest's [addon].egress_allowlist. ADR-0018: deny-default; emitted by mvmd at runtime.",
+      "applicable_fields": ["addon-instance"]
+    },
+    "E_ADDON_QUOTA_EXCEEDED": {
+      "description": "A workload declares more addons than the per-tenant quota allows, or the workload's compile-time soft cap (max_addons_per_workload, default 16) is exceeded. ADR-0018.",
+      "applicable_fields": ["apps[*].addons"]
+    },
+    "E_ADDON_TYPOSQUAT_BLOCKED": {
+      "description": "The registry refused to resolve an addon name that is Levenshtein-close to a reserved or popular name (e.g. `postgress` vs `postgres`). ADR-0018 §Typosquatting mitigation.",
+      "applicable_fields": ["apps[*].addons[*].name"]
+    },
+    "E_ADDON_TENANT_NAMESPACE_DENIED": {
+      "description": "A consumer attempted to resolve an addon from a tenant namespace it is not authorized to access. ADR-0018 §Tenant isolation in registry; emitted by registry-side authorization checks.",
+      "applicable_fields": ["apps[*].addons[*].ref"]
+    },
+    "E_ADDON_REPRODUCIBILITY_FAILED": {
+      "description": "`mvmforge addon verify <ref>` rebuilt the addon from source and got a different sha256 than the registry-published artifact. ADR-0018: reproducible-build verification is foundational; mismatch indicates either the registry artifact was tampered with or the local toolchain diverged from the publishing toolchain.",
+      "applicable_fields": ["addon.tar.gz"]
+    },
+    "E_ADDON_ROOTHASH_MISMATCH": {
+      "description": "An addon-instance's verity-protected rootfs failed integrity verification at boot. ADR-0007 + ADR-0018: rootfs.roothash is part of the signed payload; mvmd refuses to boot on mismatch.",
+      "applicable_fields": ["addon-instance"]
+    },
+    "E_ADDON_TIER_NOT_IMPLEMENTED": {
+      "description": "An addon-use declares tier = \"in_vm\" but in-VM addon support is reserved (specs/plans/0012-in-vm-addon-tier.md). ADR-0018 v1 ships only tier = \"separate\".",
+      "applicable_fields": ["apps[*].addons[*].tier"]
+    },
+    "E_ADDON_SECCOMP_PROFILE_DENIED": {
+      "description": "An addon's manifest declares [security].seccomp_profile = \"permissive\" in the official namespace, which is forbidden. ADR-0018: official addons must use strict (default) or moderate; permissive is rejected at publish.",
+      "applicable_fields": ["addon.toml"]
+    },
+    "E_ADDON_NOT_FOUND": {
+      "description": "An addon-use references a (name, version) pair that the registry does not have. May include a `did_you_mean` hint when a Levenshtein-close name exists.",
+      "applicable_fields": ["apps[*].addons[*].ref"]
+    }
+  }
+}

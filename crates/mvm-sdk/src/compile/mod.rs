@@ -19,16 +19,44 @@
 //! - [`data`] — tiny helper for parsing curated word lists (used by
 //!   [`reachability`] to load the language-extension lists).
 //!
-//! Phases 2b–2c add the rest of the pipeline: dep validation, function
-//! presence checks, flake renderer, launch.json builder, top-level
-//! orchestrator, and the `mvmctl compile` CLI verb.
+//! Phase 2b adds the orchestration layer:
+//!
+//! - [`deps`] — host-level dependency-lockfile validation (hash-pin
+//!   heuristics for `uv.lock`, `requirements.txt`, `pnpm-lock.yaml`,
+//!   `package-lock.json`, `yarn.lock`).
+//! - [`func_describe`] — tree-sitter function-presence check for
+//!   function-entrypoint workloads.
+//! - [`flake`] — renderer for the generated `flake.nix`.
+//! - [`launch`] — builder for `launch.json` (a sidecar the generated
+//!   flake reads at evaluation time; an inlining rewrite is planned
+//!   but deferred).
+//! - [`mvm_pin`] — pinned mvm flake input baked into every generated
+//!   `flake.nix`. Override via `MVM_FLAKE_URL`.
+//! - [`compile`] — top-level orchestrator that ties everything
+//!   together.
+//! - [`explain`] — diagnostic surface for `mvmctl compile --explain`.
+//!
+//! Phase 2c wires `mvmctl compile <entry>` as the CLI verb.
 
 pub mod archive;
 pub(crate) mod data;
+pub mod deps;
+pub mod explain;
+pub mod flake;
+pub mod func_describe;
+pub mod launch;
+pub mod mvm_pin;
+pub mod orchestrator;
 pub mod reachability;
 pub mod source;
 
 pub use archive::{ArchiveError, archive_dir};
+pub use deps::{DepsError, validate_lockfiles};
+pub use flake::build_flake_nix;
+pub use func_describe::{FuncDescribeError, describe_function, resolve_module_path};
+pub use launch::{ARTIFACT_FORMAT_VERSION, FLAKE_ATTRIBUTE, TOOLCHAIN_VERSION, build_launch_json};
+pub use mvm_pin::{default_mvm_flake_url, resolved_mvm_flake_url};
+pub use orchestrator::{CompileError, compile, compile_archive, is_archive_output};
 pub use reachability::{
     Language, NODE_EXTS, PYTHON_EXTS, ReachabilityError, detect_language, discover_node_reachable,
     discover_python_reachable,
