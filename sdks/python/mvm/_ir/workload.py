@@ -37,16 +37,6 @@ class AddonTier(Enum):
     in_vm = 'in_vm'
 
 
-@dataclass
-class AddonUse:
-    name: str
-    ref: AddonRef
-    sha256: str
-    tier: AddonTier
-    alias: Optional[str] = None
-    params: Optional[Dict[str, Any]] = None
-
-
 class Kind2(Enum):
     warm_process = 'warm_process'
 
@@ -101,30 +91,61 @@ class Format2(Enum):
 Format = Union[Format1, Format2]
 
 
+class Kind10(Enum):
+    shell = 'shell'
+
+
+@dataclass
+class HookCmd1:
+    kind: Kind10
+    line: str
+
+
+class Kind11(Enum):
+    argv = 'argv'
+
+
+@dataclass
+class HookCmd2:
+    argv: List[str]
+    kind: Kind11
+
+
+HookCmd = Union[HookCmd1, HookCmd2]
+
+
+@dataclass
+class Hooks:
+    after_start: Optional[List[HookCmd]] = None
+    before_build: Optional[List[HookCmd]] = None
+    before_start: Optional[List[HookCmd]] = None
+    before_stop: Optional[List[HookCmd]] = None
+
+
 @dataclass
 class HostPort:
     host: str
     port: int
 
 
-class Kind10(Enum):
+class Kind12(Enum):
     nix_packages = 'nix_packages'
 
 
 @dataclass
 class Image1:
-    kind: Kind10
+    kind: Kind12
     packages: List[str]
 
 
-class Kind11(Enum):
+class Kind13(Enum):
     oci_base = 'oci_base'
 
 
 @dataclass
 class Image2:
     digest: str
-    kind: Kind11
+    kind: Kind13
     reference: str
 
 
@@ -152,65 +173,65 @@ class MountMode(Enum):
     rw = 'rw'
 
 
-class Kind12(Enum):
+class Kind14(Enum):
     volume = 'volume'
 
 
 @dataclass
 class MountSource1:
-    kind: Kind12
+    kind: Kind14
     name: str
 
 
-class Kind13(Enum):
+class Kind15(Enum):
     host_path = 'host_path'
 
 
 @dataclass
 class MountSource2:
-    kind: Kind13
+    kind: Kind15
     path: str
 
 
-class Kind14(Enum):
+class Kind16(Enum):
     tmpfs = 'tmpfs'
 
 
 @dataclass
 class MountSource3:
-    kind: Kind14
+    kind: Kind16
     size_mb: int
 
 
 MountSource = Union[MountSource1, MountSource2, MountSource3]
 
 
-class Kind15(Enum):
+class Kind17(Enum):
     none = 'none'
 
 
 @dataclass
 class NetworkDns1:
-    kind: Kind15
+    kind: Kind17
 
 
-class Kind16(Enum):
+class Kind18(Enum):
     system = 'system'
 
 
 @dataclass
 class NetworkDns2:
-    kind: Kind16
+    kind: Kind18
 
 
-class Kind17(Enum):
+class Kind19(Enum):
     resolver = 'resolver'
 
 
 @dataclass
 class NetworkDns3:
     host: str
-    kind: Kind17
+    kind: Kind19
     port: int
 
 
@@ -266,23 +287,23 @@ class Resources:
     rootfs_size_mb: int
 
 
-class Kind18(Enum):
+class Kind20(Enum):
     env = 'env'
 
 
 @dataclass
 class SecretMount1:
-    kind: Kind18
+    kind: Kind20
     var: str
 
 
-class Kind19(Enum):
+class Kind21(Enum):
     file = 'file'
 
 
 @dataclass
 class SecretMount2:
-    kind: Kind19
+    kind: Kind21
     path: str
 
 
@@ -295,36 +316,36 @@ class SecretRef:
     name: str
 
 
-class Kind20(Enum):
+class Kind22(Enum):
     local_path = 'local_path'
 
 
 @dataclass
 class Source1:
-    kind: Kind20
+    kind: Kind22
     path: str
     exclude: Optional[List[str]] = field(default_factory=lambda: [])
     include: Optional[List[str]] = field(default_factory=lambda: ['**'])
 
 
-class Kind21(Enum):
+class Kind23(Enum):
     nix_derivation = 'nix_derivation'
 
 
 @dataclass
 class Source2:
     expr: str
-    kind: Kind21
+    kind: Kind23
 
 
-class Kind22(Enum):
+class Kind24(Enum):
     oci_image = 'oci_image'
 
 
 @dataclass
 class Source3:
     digest: str
-    kind: Kind22
+    kind: Kind24
     reference: str
 
 
@@ -347,6 +368,17 @@ class Volume:
     name: str
     persist: bool
     size_mb: int
+
+
+@dataclass
+class AddonUse:
+    name: str
+    ref: AddonRef
+    sha256: str
+    tier: AddonTier
+    alias: Optional[str] = None
+    hooks: Optional[Hooks] = None
+    params: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -448,6 +480,7 @@ class App:
     addons: Optional[List[AddonUse]] = None
     dependencies: Optional[Dependencies] = None
     env: Optional[Dict[str, EnvValue]] = field(default_factory=lambda: {})
+    hooks: Optional[Hooks] = None
     mounts: Optional[List[Mount]] = field(default_factory=lambda: [])
     network: Optional[Network] = None
     threat_tier: Optional[ThreatTier] = None

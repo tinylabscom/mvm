@@ -6,6 +6,20 @@
  */
 
 /**
+ * One command in a hook phase.
+ *
+ * Two variants, internally tagged on `kind` — matches the rest of the IR's enum conventions (`Source`, `Image`, `MountSource`, …) so the JSON Schema and SDK generators handle the discriminant uniformly.
+ */
+export type HookCmd =
+  | {
+      kind: "shell";
+      line: string;
+    }
+  | {
+      argv: string[];
+      kind: "argv";
+    };
+/**
  * Resolution kind for an addon — registry-published or local-path.
  */
 export type AddonRef =
@@ -258,6 +272,10 @@ export interface App {
   env?: {
     [k: string]: EnvValue;
   };
+  /**
+   * Lifecycle hooks (SDK port Phase 1a — IR field reserved; consumers in Phase 10). Each phase is a `Vec<HookCmd>`; the compiler unions addon hooks (in attachment order) before the app's hooks. `Hooks::is_empty()` skip-serializes the field so v0 IR documents that don't carry `hooks` remain byte-identical.
+   */
+  hooks?: Hooks;
   image: Image;
   mounts?: Mount[];
   name: string;
@@ -280,6 +298,10 @@ export interface AddonUse {
    */
   alias?: string | null;
   /**
+   * Hooks bundled by this addon (SDK port Phase 1a — IR field reserved; consumers in Phase 10). The compiler concatenates each addon's hook vecs in attachment order, then appends the consuming app's own hooks. Empty `Hooks` is the default and is skip-serialized so v0 addon-use entries stay byte-identical.
+   */
+  hooks?: Hooks;
+  /**
    * Bare addon name (matches the manifest's `[addon].name`). Pattern `^[a-z][a-z0-9-]{1,63}$`. Reserved names (`core`, `mvm`, `mvm`, `mvmd`) blocked at the registry side.
    */
   name: string;
@@ -301,6 +323,17 @@ export interface AddonUse {
    * Composition tier — currently only `Separate` (a separate addon-microVM bridged via the mesh). `InVm` is reserved by `specs/plans/0012-in-vm-addon-tier.md` and rejected by `validate.rs` until that plan lands.
    */
   tier: AddonTier;
+}
+/**
+ * Per-phase lifecycle command lists for an `App` or an `AddonUse`.
+ *
+ * Each phase is a `Vec<HookCmd>` — always. The "empty vec means no hook" rule plus the `skip_serializing_if = "Vec::is_empty"` field attribute on every phase keeps IR documents that don't use hooks byte-identical to v0 fixtures: the JSON object simply omits the `hooks` key when every phase is empty.
+ */
+export interface Hooks {
+  after_start?: HookCmd[];
+  before_build?: HookCmd[];
+  before_start?: HookCmd[];
+  before_stop?: HookCmd[];
 }
 export interface SecretRef {
   mount: SecretMount;

@@ -56,6 +56,11 @@ __all__ = [
     "func",
     "local_path",
     "nix_packages",
+    "python_image",
+    "node_image",
+    "hook",
+    "secret",
+    "literal",
     "entrypoint",
     "entrypoint_function",
     "resources",
@@ -165,6 +170,10 @@ def app(
     depends_on: list[WorkloadRef] | None = None,
     addons: list[_ir.AddonUse] | None = None,
     threat_tier: _ir.ThreatTier | str | None = None,
+    before_build: str | list[str] | _ir.HookCmd | list[_ir.HookCmd] | None = None,
+    before_start: str | list[str] | _ir.HookCmd | list[_ir.HookCmd] | None = None,
+    after_start: str | list[str] | _ir.HookCmd | list[_ir.HookCmd] | None = None,
+    before_stop: str | list[str] | _ir.HookCmd | list[_ir.HookCmd] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register an app in the current workload. Used as a decorator.
 
@@ -224,6 +233,19 @@ def app(
         resolved_threat_tier = _resolve_union_member(_ir.ThreatTier, threat_tier)
     else:
         resolved_threat_tier = threat_tier
+    resolved_hooks: _ir.Hooks | None = None
+    bb = _resolve_hook_kwarg(before_build, "before_build")
+    bs = _resolve_hook_kwarg(before_start, "before_start")
+    af = _resolve_hook_kwarg(after_start, "after_start")
+    bp = _resolve_hook_kwarg(before_stop, "before_stop")
+    if any(phase is not None for phase in (bb, bs, af, bp)):
+        resolved_hooks = _ir.Hooks(
+            before_build=bb,
+            before_start=bs,
+            after_start=af,
+            before_stop=bp,
+        )
+
     record = _ir.App(
         entrypoints=resolved_entrypoints,
         image=image,
@@ -236,6 +258,7 @@ def app(
         dependencies=dependencies,
         addons=list(addons) if addons else None,
         threat_tier=resolved_threat_tier,
+        hooks=resolved_hooks,
     )
     _state["apps"].append(record)
 
@@ -287,6 +310,138 @@ def nix_packages(packages: list[str]) -> _ir.Image1:
     return _ir.Image1(
         kind=_kind_value(_ir.Image1, "nix_packages"),
         packages=list(packages),
+    )
+
+
+def python_image(
+    *,
+    python: str = "3.12",
+    packages: list[str] | None = None,
+) -> _ir.Image1:
+    """Convenience over :func:`nix_packages` — start with the Python
+    interpreter at the requested minor version (``python3.12`` → nix
+    attribute ``python312``) and add any extra system packages.
+
+    Mirrors the ``mvm.python_image`` helper recognized by the host-side
+    static decorator parser (Phase 4) so the same call site validates
+    under both the in-process SDK and the AST-walking compiler.
+    """
+    pkgs = [f"python{python.replace('.', '')}"]
+    pkgs.extend(packages or [])
+    return nix_packages(pkgs)
+
+
+def node_image(
+    *,
+    node: str = "22",
+    packages: list[str] | None = None,
+) -> _ir.Image1:
+    """Convenience over :func:`nix_packages` — start with the Node.js
+    interpreter at the requested major version (``node="22"`` → nix
+    attribute ``nodejs_22``) and add any extra system packages.
+    """
+    pkgs = [f"nodejs_{node}"]
+    pkgs.extend(packages or [])
+    return nix_packages(pkgs)
+
+
+def hook(cmd: str | list[str]) -> _ir.HookCmd:
+    """Build a lifecycle-hook command.
+
+    Pass a string for a shell line (``mvm.hook("echo hi")``) or a list
+    of strings for an exec-style argv (``mvm.hook(["python", "-m",
+    "migrate"])``). The result slots into ``before_build`` /
+    ``before_start`` / ``after_start`` / ``before_stop`` kwargs on
+    :func:`app`. The host-side parser (Phase 4) recognizes the same
+    surface so a literal ``mvm.hook(...)`` call site round-trips
+    cleanly through both routes.
+    """
+    if isinstance(cmd, str):
+        return _ir.HookCmd1(
+            kind=_kind_value(_ir.HookCmd1, "shell"),
+            line=cmd,
+        )
+    if isinstance(cmd, list) and all(isinstance(s, str) for s in cmd):
+        return _ir.HookCmd2(
+            argv=list(cmd),
+            kind=_kind_value(_ir.HookCmd2, "argv"),
+        )
+    raise TypeError(
+        f"mvm.hook expects a string (shell) or list[str] (argv); got {type(cmd).__name__}"
+    )
+
+
+def literal(value: str) -> _ir.EnvValue1:
+    """Wrap a string as an explicit literal env value. Equivalent to
+    passing the string directly in an ``env={...}`` mapping — the
+    wrapper exists for parity with :func:`secret` and for callers that
+    want to be unambiguous.
+    """
+    return _ir.EnvValue1(
+        kind=_kind_value(_ir.EnvValue1, "literal"),
+        value=value,
+    )
+
+
+def secret(name: str, *, var: str | None = None) -> _ir.EnvValue2:
+    """Reference a named secret from the host keystore. ``var`` is the
+    env-var name inside the guest; defaults to ``name`` itself when
+    omitted. The supervisor's ``KeystoreReleaser`` resolves the value
+    at admission time — the SDK only declares the reference.
+    """
+    return _ir.EnvValue2(
+        kind=_kind_value(_ir.EnvValue2, "secret_ref"),
+        ref=_ir.SecretRef(
+            mount=_ir.SecretMount1(
+                kind=_kind_value(_ir.SecretMount1, "env"),
+                var=var if var is not None else name,
+            ),
+            name=name,
+        ),
+    )
+
+
+def _resolve_hook_kwarg(
+    raw: str | list[str] | _ir.HookCmd | list[_ir.HookCmd] | None,
+    phase: str,
+) -> list[_ir.HookCmd] | None:
+    """Normalize the four hook-kwargs into the IR's ``Hooks.<phase>``
+    shape. Accepts:
+
+    - ``None`` → no commands for this phase.
+    - A string → single Shell command.
+    - A flat list of strings → single Argv command (one argv-style
+      invocation; mirrors the host-side parser rule).
+    - A single :class:`HookCmd` (from :func:`hook`) → length-1 list.
+    - A list of :class:`HookCmd` → passed through as-is. Bare strings
+      inside the list are lowered to Shell commands so users can mix
+      shorthand with explicit :func:`hook` calls.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return [hook(raw)]
+    if isinstance(raw, list):
+        if all(isinstance(s, str) for s in raw):
+            return [hook(list(raw))]
+        out: list[_ir.HookCmd] = []
+        for item in raw:
+            if isinstance(item, str):
+                out.append(hook(item))
+            elif isinstance(item, list):
+                out.append(hook(item))
+            elif isinstance(item, (_ir.HookCmd1, _ir.HookCmd2)):
+                out.append(item)
+            else:
+                raise TypeError(
+                    f"app({phase}=...): list elements must be str, list[str], or mvm.hook(...); "
+                    f"got {type(item).__name__}"
+                )
+        return out
+    if isinstance(raw, (_ir.HookCmd1, _ir.HookCmd2)):
+        return [raw]
+    raise TypeError(
+        f"app({phase}=...): expected str, list, or mvm.hook(...); got {type(raw).__name__}"
     )
 
 
