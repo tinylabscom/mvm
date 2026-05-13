@@ -24,6 +24,10 @@ mvm-mcp.workspace = true
 mvm-plan.workspace = true
 mvm-policy.workspace = true
 mvm-supervisor.workspace = true
+# SDK port Phase 2c — `mvmctl compile` reads the Workload IR and routes
+# it through the compile pipeline.
+mvm-ir.workspace = true
+mvm-sdk.workspace = true
 anyhow.workspace = true
 # Plan 60 Phase 7a Slice D — `mvmctl audit verify-cert` decodes
 # base64 destruction-cert signatures + pubkeys.
