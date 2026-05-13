@@ -42,6 +42,13 @@
 //! }
 //! ```
 
+/// Author-side machinery for composable attested addons. Ported from
+/// `mvmforge-addon`. Exposes `addon::{manifest, lockfile, validator,
+/// registry, archive, sbom, verify}` plus re-exports the consumer-side
+/// IR shapes (`AddonUse`, `AddonRef`, `AddonTier`, `ThreatTier`) for
+/// one-stop authoring.
+pub mod addon;
+
 use mvm_ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, Image, Mount, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PythonTool, Resources, Source, Volume,

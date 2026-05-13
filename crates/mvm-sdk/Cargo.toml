@@ -1,6 +1,6 @@
 [package]
 name = "mvm-sdk"
-description = "Build-time Rust SDK for mvm — declare workloads, emit canonical IR. Ported from mvmforge-sdk per plan 60 Phase 5."
+description = "Build-time Rust SDK for mvm — declare workloads, emit canonical IR, manage addons. Ported from mvmforge-sdk + mvmforge-addon (SDK port plan)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,23 @@ mvm-ir = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
+
+# Addon module deps (SDK port Phase 1b).
+flate2 = { workspace = true }
+hex = { workspace = true }
+schemars = "0.8"
+sha2 = { workspace = true }
+tar = { workspace = true }
+toml = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[bin]]
+name = "emit_addon_schema"
+path = "src/bin/emit_addon_schema.rs"
 
 [lints]
 workspace = true

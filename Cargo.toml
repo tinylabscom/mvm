@@ -146,6 +146,18 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"
 
+# Addon machinery (mvm-sdk addon module, SDK port Phase 1b — ported
+# from mvmforge-addon). flate2 + tar drive the deterministic tarball
+# format; hex pairs with sha2 for the canonical hex digests in the IR;
+# tree-sitter + tree-sitter-nix back the Nix-body validator. Pinned at
+# the same versions mvmforge-addon used so we inherit its CVE / API
+# story without re-evaluation.
+flate2 = "1"
+hex = "0.4"
+tar = "0.4"
+tree-sitter = "0.26.8"
+tree-sitter-nix = "0.0.2"
+
 # Internal crates.
 #
 # DRIFT-001 (Plan 31 Track A): the four crates that participate in the
