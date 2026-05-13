@@ -15,8 +15,12 @@
 //! extension without language-specific branches.
 
 pub mod python;
+pub mod typescript;
+mod value;
 
 pub use python::parse_python;
+pub use typescript::parse_typescript;
+pub use value::HELPER_ALLOWLIST;
 
 use std::path::PathBuf;
 

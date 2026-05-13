@@ -34,7 +34,7 @@ use clap::{Args as ClapArgs, ValueEnum};
 use mvm_core::user_config::MvmConfig;
 use mvm_ir::Workload;
 use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
-use mvm_sdk::decorator::parse_python;
+use mvm_sdk::decorator::{parse_python, parse_typescript};
 
 use super::Cli;
 
@@ -167,12 +167,32 @@ fn load_workload(args: &Args) -> Result<Workload> {
                 .with_context(|| format!("parsing @mvm.app decorator in {}", path.display()))?;
             Ok(workload)
         }
-        WorkloadSource::RuntimeScript(path) => bail!(
-            "runtime-script entry not yet supported (script = {}). \
-             Lands in SDK-port Phase 7 (record-mode lowering). \
-             For now, emit the IR JSON yourself and pass it via --from-ir.",
-            path.display()
-        ),
+        WorkloadSource::RuntimeScript(path) => {
+            // .ts / .tsx / .mts / .cts → decorator parser (mvm.app({...})(fn)).
+            // .js / .mjs / .cjs → runtime record-mode (Sandbox-shaped),
+            // which is still Phase 7. Discriminate by extension.
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "ts" | "tsx" | "mts" | "cts") {
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("reading decorator script {}", path.display()))?;
+                let (workload, _manifest) = parse_typescript(&bytes, &path)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .with_context(|| {
+                        format!(
+                            "parsing mvm.app({{...}})(fn) decorator in {}",
+                            path.display()
+                        )
+                    })?;
+                Ok(workload)
+            } else {
+                bail!(
+                    "runtime-script entry not yet supported (script = {}). \
+                     Lands in SDK-port Phase 7 (record-mode lowering). \
+                     For now, emit the IR JSON yourself and pass it via --from-ir.",
+                    path.display()
+                )
+            }
+        }
     }
 }
 
