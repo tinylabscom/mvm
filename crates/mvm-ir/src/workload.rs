@@ -1,4 +1,5 @@
 use crate::addon::{AddonUse, ThreatTier};
+use crate::hooks::Hooks;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -68,6 +69,13 @@ pub struct App {
     /// hermetic boundary preserved).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addons: Vec<AddonUse>,
+    /// Lifecycle hooks (SDK port Phase 1a — IR field reserved; consumers
+    /// in Phase 10). Each phase is a `Vec<HookCmd>`; the compiler unions
+    /// addon hooks (in attachment order) before the app's hooks.
+    /// `Hooks::is_empty()` skip-serializes the field so v0 IR
+    /// documents that don't carry `hooks` remain byte-identical.
+    #[serde(default, skip_serializing_if = "Hooks::is_empty")]
+    pub hooks: Hooks,
 }
 
 impl App {

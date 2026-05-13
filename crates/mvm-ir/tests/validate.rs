@@ -31,6 +31,7 @@ fn base_app() -> App {
         dependencies: None,
         threat_tier: Default::default(),
         addons: vec![],
+        hooks: Default::default(),
     }
 }
 

@@ -241,6 +241,7 @@ impl AppBuilder {
             dependencies: self.dependencies,
             threat_tier: Default::default(),
             addons: vec![],
+            hooks: Default::default(),
         })
     }
 }

@@ -9,6 +9,7 @@
 //! (manifest schema `addon.toml`, registry API, lockfile) live in
 //! `crates/mvm-sdk-addon`.
 
+use crate::hooks::Hooks;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -57,6 +58,13 @@ pub struct AddonUse {
     /// `addon::resolve_and_validate` time).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
+    /// Hooks bundled by this addon (SDK port Phase 1a — IR field
+    /// reserved; consumers in Phase 10). The compiler concatenates each
+    /// addon's hook vecs in attachment order, then appends the
+    /// consuming app's own hooks. Empty `Hooks` is the default and is
+    /// skip-serialized so v0 addon-use entries stay byte-identical.
+    #[serde(default, skip_serializing_if = "Hooks::is_empty")]
+    pub hooks: Hooks,
 }
 
 /// Addon composition tier.

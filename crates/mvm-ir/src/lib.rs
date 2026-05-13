@@ -14,6 +14,7 @@ mod canonicalize;
 mod data;
 mod error_codes;
 mod hash;
+mod hooks;
 mod validate;
 mod version;
 mod workload;
@@ -22,6 +23,7 @@ pub use addon::{AddonRef, AddonTier, AddonUse, ThreatTier};
 pub use canonicalize::canonicalize;
 pub use error_codes::ErrorCode;
 pub use hash::ir_hash;
+pub use hooks::{HookCmd, Hooks};
 pub use validate::{ValidationError, validate};
 pub use version::{IR_MAJOR, IR_MINOR, VersionError, validate_schema_version};
 pub use workload::{
