@@ -1,0 +1,34 @@
+{
+  "name": "mvm-sdk",
+  "version": "0.14.0",
+  "description": "TypeScript SDK for declaring mvm microVM workloads. SDK port Phase 6 — mirror of the Python SDK at sdks/python/.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tinylabscom/mvm.git",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://github.com/tinylabscom/mvm",
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "vitest": "2.1.4"
+  }
+}
