@@ -158,6 +158,16 @@ tar = "0.4"
 tree-sitter = "0.26.8"
 tree-sitter-nix = "0.0.2"
 
+# Compile pipeline (mvm-sdk compile module, SDK port Phase 2 — ported
+# from mvmforge). globset drives source-bundling include/exclude
+# patterns; the three tree-sitter language grammars feed the static
+# AST walker that scopes function-entrypoint workloads to reachable
+# code. Pinned at mvmforge's versions to inherit its CVE story.
+globset = "0.4"
+tree-sitter-python = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+
 # Internal crates.
 #
 # DRIFT-001 (Plan 31 Track A): the four crates that participate in the

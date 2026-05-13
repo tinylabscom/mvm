@@ -1,0 +1,6 @@
+# File extensions for Python source files that get pruned by the
+# bundler reachability scoping. Other extensions (configs, lockfiles,
+# data files, etc.) pass through unchanged. Lines starting with `#`
+# and blank lines are ignored.
+
+py

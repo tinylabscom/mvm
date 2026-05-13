@@ -1,0 +1,11 @@
+# File extensions for Node/TypeScript source files that get pruned
+# by the bundler reachability scoping. Other extensions pass through
+# unchanged. Lines starting with `#` and blank lines are ignored.
+
+ts
+tsx
+mts
+cts
+js
+mjs
+cjs

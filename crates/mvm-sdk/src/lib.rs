@@ -49,6 +49,14 @@
 /// one-stop authoring.
 pub mod addon;
 
+/// Compile pipeline — Workload IR to staged build artifacts. Ported
+/// from `mvmforge/src/{archive,source,reachability,...}.rs`. Phase 2a
+/// exposes the source-bundling primitives (`archive_dir`,
+/// `copy_source`, `rehash`, `discover_python_reachable`,
+/// `discover_node_reachable`, `detect_language`); Phases 2b–2c add
+/// the rest.
+pub mod compile;
+
 use mvm_ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, Image, Mount, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PythonTool, Resources, Source, Volume,
