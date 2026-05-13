@@ -50,6 +50,12 @@
 , appPkg
 , sourcePath ? "/app"
 , concurrency ? null
+, # Pre-merged per-phase hook command lists (SDK port Phase 10a). The
+  # caller passes the launch.hooks JSON object verbatim; each phase
+  # is `{ kind = "shell"; line = …; }` or `{ kind = "argv"; argv = […]; }`
+  # entries. Empty / absent phases are no-ops. Defaults to all-empty
+  # so workloads without `@mvm.app(before_start=…)` need no change.
+  hooks ? { before_build = [ ]; before_start = [ ]; after_start = [ ]; before_stop = [ ]; }
 ,
 }:
 
@@ -91,6 +97,46 @@ let
     working_dir = sourcePath;
     mode = "prod";
   };
+
+  # Lifecycle hooks (SDK port Phase 10b). Each phase is rendered into
+  # a shell script under `/etc/mvm/hooks/<phase>.sh`. The script
+  # iterates the per-phase command list — `kind = "shell"` lines run
+  # via `${pkgs.runtimeShell} -c <line>`; `kind = "argv"` lines run
+  # the argv directly via `${pkgs.coreutils}/bin/env --` so paths
+  # aren't word-split. The script exits non-zero on the first
+  # failing command; consumers (init bootScript, readiness watchdog,
+  # shutdown hook) decide how to react.
+  #
+  # We emit a script even for an empty phase (no commands) so
+  # consumers can `test -x /etc/mvm/hooks/<phase>.sh && exec …` on
+  # one stable path — no branch on existence. The empty-phase script
+  # is a no-op (`exit 0`).
+  renderHookCmd = cmd:
+    if cmd.kind or "shell" == "argv" then
+      "${pkgs.coreutils}/bin/env -- " + (builtins.concatStringsSep " "
+        (map (a: pkgs.lib.escapeShellArg a) cmd.argv))
+    else
+      "${pkgs.runtimeShell} -c " + (pkgs.lib.escapeShellArg cmd.line);
+
+  hookScriptFor = phase: cmds:
+    let
+      lines = map renderHookCmd cmds;
+      body =
+        if cmds == [ ]
+        then ":"
+        else builtins.concatStringsSep "\n" lines;
+    in
+    pkgs.writeShellScript "${workloadId}-hook-${phase}" ''
+      set -eu
+      ${body}
+    '';
+
+  hookScripts = {
+    before_build = hookScriptFor "before-build" (hooks.before_build or [ ]);
+    before_start = hookScriptFor "before-start" (hooks.before_start or [ ]);
+    after_start = hookScriptFor "after-start" (hooks.after_start or [ ]);
+    before_stop = hookScriptFor "before-stop" (hooks.before_stop or [ ]);
+  };
 in
 {
   extraFiles = {
@@ -109,6 +155,29 @@ in
     "/etc/mvm/runtime.json" = {
       content = runtimeJson;
       mode = "0644";
+    };
+    # Lifecycle hook scripts (SDK port Phase 10b). The bootScript
+    # invokes `before_start.sh` before exec'ing PID 1's idle loop;
+    # `after_start.sh` is the readiness probe a future watchdog will
+    # poll; `before_stop.sh` runs at shutdown when wired by the agent;
+    # `before_build.sh` is rendered for parity but runs in the builder
+    # VM, which is mid-transition (Plan 72) — the builder consumer
+    # lands in Phase 10c.
+    "/etc/mvm/hooks/before_build.sh" = {
+      content = hookScripts.before_build;
+      mode = "0755";
+    };
+    "/etc/mvm/hooks/before_start.sh" = {
+      content = hookScripts.before_start;
+      mode = "0755";
+    };
+    "/etc/mvm/hooks/after_start.sh" = {
+      content = hookScripts.after_start;
+      mode = "0755";
+    };
+    "/etc/mvm/hooks/before_stop.sh" = {
+      content = hookScripts.before_stop;
+      mode = "0755";
     };
   };
 

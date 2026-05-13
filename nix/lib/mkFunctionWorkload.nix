@@ -106,24 +106,43 @@ let
 
   workingDir = primary.working_dir or "/app";
 
+  # SDK port Phase 10b. `launch.json` carries pre-merged hooks (addons
+  # before app); the JSON sidecar is loaded via `irFile` here so the
+  # field flows in unchanged. Default to four empty phases so legacy
+  # IR documents without `hooks` keep evaluating.
+  hooks = ir.hooks or {
+    before_build = [ ];
+    before_start = [ ];
+    after_start = [ ];
+    before_stop = [ ];
+  };
+
   factory = mkFunctionServiceImpl {
     inherit pkgs appPkg;
     language = primary.language;
     workloadId = ir.id;
     inherit (primary) module function format;
     sourcePath = workingDir;
+    inherit hooks;
   };
 
-  # Boot script: stage the user's source tree at `working_dir`, then
+  # Boot script: stage the user's source tree at `working_dir`, run
+  # the `before_start` hook (no-op when no commands declared), then
   # idle. The agent dispatches per call over vsock (RunEntrypoint), so
   # PID 1 doesn't need to *run* the workload — only keep the VM alive.
   # `_workingDirOnly` is a defensive guard: `dirname /` is `/`, but
   # `dirname /app` is `/`. We never want to recursively chmod above the
   # symlink target, so the parent we mkdir is the immediate parent only.
+  #
+  # `before_start.sh` runs after the appPkg symlink so user hook
+  # commands see the bundled source already mounted at workingDir.
+  # Failure of `before_start` aborts boot — the user explicitly
+  # declared the command must succeed.
   bootScript = pkgs.writeShellScript "${ir.id}-boot" ''
     set -eu
     mkdir -p "$(${pkgs.coreutils}/bin/dirname ${lib.escapeShellArg workingDir})"
     ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${lib.escapeShellArg workingDir}
+    /etc/mvm/hooks/before_start.sh
     exec ${pkgs.coreutils}/bin/sleep infinity
   '';
 in
