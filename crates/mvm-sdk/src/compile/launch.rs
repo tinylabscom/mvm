@@ -4,8 +4,9 @@
 //! run. It carries the IR's effective fields plus toolchain/IR provenance so
 //! `mvm` can fail fast on configuration errors before evaluating the flake.
 
+use crate::compile::hooks::merge_hooks;
 use crate::compile::source::SourcePlan;
-use mvm_ir::{Workload, canonicalize, ir_hash};
+use mvm_ir::{Hooks, Workload, canonicalize, ir_hash};
 use serde::Serialize;
 
 /// Bumped from `"1.0"` to `"1.1"` at addon GA (ADR-0018). The
@@ -58,6 +59,12 @@ struct LaunchPlan<'a> {
     /// (or name-resolved) `*.mesh.local` host names mvmd will set up
     /// for the consumer's in-guest DNS resolver.
     mesh: serde_json::Value,
+    /// Per-phase lifecycle command lists — addons first (in
+    /// attachment order), then the app's own commands. Pre-merged so
+    /// the Nix factory consuming launch.json can iterate flat vecs
+    /// without re-merging at flake-evaluation time. Empty phases
+    /// serialize as empty arrays.
+    hooks: serde_json::Value,
 }
 
 pub fn build_launch_json(
@@ -77,6 +84,11 @@ pub fn build_launch_json(
             format!("{host}.mesh.local")
         })
         .collect();
+    // Merge per-phase hook commands: addons (in attachment order),
+    // then the app. The Nix factory reads `launch.hooks.<phase>` as
+    // a flat array.
+    let addon_hooks: Vec<&Hooks> = app.addons.iter().map(|a| &a.hooks).collect();
+    let merged_hooks = merge_hooks(&app.hooks, &addon_hooks);
     let plan = LaunchPlan {
         artifact_format_version: ARTIFACT_FORMAT_VERSION,
         flake_attribute: FLAKE_ATTRIBUTE,
@@ -98,6 +110,7 @@ pub fn build_launch_json(
             "enabled": mesh_enabled,
             "expected_peers": expected_peers,
         }),
+        hooks: serde_json::to_value(&merged_hooks)?,
     };
     canonicalize(&plan)
 }
