@@ -57,6 +57,13 @@ pub mod addon;
 /// the rest.
 pub mod compile;
 
+/// Static decorator parser — extracts `@mvm.app(...)` kwargs from a
+/// user's Python source file and lowers them to a `Workload` IR. Pure
+/// tree-sitter; never imports the user's code. Closed `mvm.*` helper
+/// allowlist; non-literal kwargs rejected. TypeScript parser is a
+/// follow-up.
+pub mod decorator;
+
 use mvm_ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, Image, Mount, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PythonTool, Resources, Source, Volume,

@@ -34,6 +34,7 @@ use clap::{Args as ClapArgs, ValueEnum};
 use mvm_core::user_config::MvmConfig;
 use mvm_ir::Workload;
 use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
+use mvm_sdk::decorator::parse_python;
 
 use super::Cli;
 
@@ -158,13 +159,14 @@ fn load_workload(args: &Args) -> Result<Workload> {
                 serde_json::from_slice(&buf).context("parsing IR JSON from stdin")?;
             Ok(workload)
         }
-        WorkloadSource::DecoratorScript(path) => bail!(
-            "decorator-script entry not yet supported (script = {}). \
-             Lands in SDK-port Phase 4 (@mvm.app static parser). \
-             For now, emit the IR JSON yourself (mvm-sdk builder + \
-             serde_json) and pass it via --from-ir.",
-            path.display()
-        ),
+        WorkloadSource::DecoratorScript(path) => {
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("reading decorator script {}", path.display()))?;
+            let (workload, _manifest) = parse_python(&bytes, &path)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .with_context(|| format!("parsing @mvm.app decorator in {}", path.display()))?;
+            Ok(workload)
+        }
         WorkloadSource::RuntimeScript(path) => bail!(
             "runtime-script entry not yet supported (script = {}). \
              Lands in SDK-port Phase 7 (record-mode lowering). \

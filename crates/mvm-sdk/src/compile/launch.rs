@@ -16,7 +16,7 @@ pub const ARTIFACT_FORMAT_VERSION: &str = "1.1";
 pub const TOOLCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Stable launch-plan attribute path consumed from the generated flake.
-pub const FLAKE_ATTRIBUTE: &str = "mvmforge.workload";
+pub const FLAKE_ATTRIBUTE: &str = "mvm.workload";
 
 #[derive(Serialize)]
 struct LaunchPlan<'a> {
@@ -167,7 +167,7 @@ mod tests {
         let s = build_launch_json(&sample(), &src).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["artifact_format_version"], "1.1");
-        assert_eq!(v["flake_attribute"], "mvmforge.workload");
+        assert_eq!(v["flake_attribute"], "mvm.workload");
         assert_eq!(v["flake_path"], ".");
         assert_eq!(v["ir_schema_version"], "0.1");
         assert_eq!(v["workload_id"], "hello");
