@@ -5,6 +5,7 @@
 #[allow(clippy::module_inception)]
 pub(super) mod build;
 pub(super) mod compile;
+pub(super) mod deploy;
 pub(super) mod validate;
 
 pub(super) use super::{Cli, shared};

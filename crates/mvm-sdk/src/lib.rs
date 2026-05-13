@@ -64,6 +64,13 @@ pub mod compile;
 /// follow-up.
 pub mod decorator;
 
+/// Deploy-bundle assembly + shipping (`mvmctl deploy`). Builds the
+/// single signed `.tar.gz` (compile output + embedded `mvmd-spec.json`)
+/// described in mvmd ADR-0020 and ships it via `MvmdClient::ship`.
+/// v1 ships the stub end of the contract; the real HTTP transport
+/// lands with mvmd Plan 48 Phase 1090.
+pub mod deploy;
+
 use mvm_ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, Image, Mount, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PythonTool, Resources, Source, Volume,

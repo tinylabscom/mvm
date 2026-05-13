@@ -152,6 +152,7 @@ impl Commands {
             Commands::Storage(_) => "storage",
             Commands::Build(_) => "build",
             Commands::Compile(_) => "compile",
+            Commands::Deploy(_) => "deploy",
             Commands::Up(_) => "up",
             Commands::Down(_) => "down",
             Commands::ShellInit(_) => "shell-init",
