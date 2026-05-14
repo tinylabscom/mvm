@@ -6,6 +6,7 @@ pub mod console;
 pub mod entrypoint;
 pub mod fs_rpc;
 pub mod integrations;
+pub mod lifecycle_hooks;
 pub mod probes;
 pub mod runtime_config;
 pub mod volume;
