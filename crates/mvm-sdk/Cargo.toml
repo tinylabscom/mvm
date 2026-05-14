@@ -13,6 +13,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
 
+# Phase 7 — runtime record mode encodes `Sandbox.files.write` bytes
+# as base64 in the recording JSON so the lowering can re-emit them
+# as a `before_start` shell hook.
+base64 = { workspace = true }
+
 # Addon module deps (SDK port Phase 1b).
 flate2 = { workspace = true }
 hex = { workspace = true }

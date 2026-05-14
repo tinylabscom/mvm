@@ -71,6 +71,13 @@ pub mod decorator;
 /// lands with mvmd Plan 48 Phase 1090.
 pub mod deploy;
 
+/// Runtime record-mode core — recording shape + lowering. SDK port
+/// Phase 7. The host SDKs (Python, TypeScript) build a
+/// `RuntimeRecording` from imperative `Sandbox` calls; this module
+/// lowers it into the same `Workload` IR the decorator path
+/// produces, so the flake renderer is shared.
+pub mod runtime;
+
 use mvm_ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, Image, Mount, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PythonTool, Resources, Source, Volume,

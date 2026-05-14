@@ -4348,6 +4348,7 @@ dependencies = [
 name = "mvm-sdk"
 version = "0.14.0"
 dependencies = [
+ "base64 0.22.1",
  "flate2",
  "globset",
  "hex",
