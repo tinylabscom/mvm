@@ -41,6 +41,7 @@
 pub mod archive;
 pub(crate) mod data;
 pub mod deps;
+pub mod deps_audit;
 pub mod explain;
 pub mod flake;
 pub mod func_describe;
