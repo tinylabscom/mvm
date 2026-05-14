@@ -37,6 +37,10 @@ tempfile.workspace = true
 # Heavy microsandbox support is opt-in for lean default builds.
 default = []
 backends-microsandbox = ["dep:microsandbox"]
+# Plan 71 W1 — libkrun-backed builder VM. Skeleton only; the launch
+# path lands with W4 + W5. Flag stays off by default until W5 flips
+# the polarity and cuts microsandbox loose.
+backends-builder-vm-libkrun = []
 
 [lints]
 workspace = true

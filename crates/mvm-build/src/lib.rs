@@ -3,6 +3,8 @@ pub mod backend;
 pub mod builder_vm;
 pub mod cache;
 pub mod firecracker;
+#[cfg(feature = "backends-builder-vm-libkrun")]
+pub mod libkrun_builder;
 pub mod template_reuse;
 
 pub mod nix;
