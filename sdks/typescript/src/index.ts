@@ -52,11 +52,12 @@ import type {
 // "mvm-sdk"` directly rather than reaching into the `ir/` sub-path.
 export * from "./ir/workload.js";
 
-// Sandbox record-mode SDK (Phase 7c). Imperative companion to
+// Sandbox record-mode SDK (Phase 7c + 7f). Imperative companion to
 // the static `mvm.app({...})` decorator above.
 export {
   DEFAULT_TTL_SECONDS,
   MVM_SDK_MODE_ENV,
+  MVM_SDK_OUT_PATH_ENV,
   RecordingNotActiveError,
   Sandbox,
   SandboxCommands,
@@ -64,6 +65,7 @@ export {
   SandboxModeError,
   currentRecording,
   emitRecordingJson,
+  flushRecordingToOutPath,
   resetRecording,
 } from "./_sandbox.js";
 export type {

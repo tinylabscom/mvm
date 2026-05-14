@@ -84,6 +84,12 @@ export const DEFAULT_TTL_SECONDS = 1800;
 
 export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
 
+/** When set in the environment, the SDK writes the wire-shape
+ *  recording JSON to this path on process exit. The CLI's Phase 7f
+ *  auto-exec path uses this to capture the recording without
+ *  parsing stdout (which the user's own script may write to). */
+export const MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH";
+
 let recording: RuntimeRecordingWire | null = null;
 
 /** Clear the in-flight recording. Tests use this between runs;
@@ -109,6 +115,49 @@ export function emitRecordingJson(): string {
     );
   }
   return JSON.stringify(recording);
+}
+
+/** `process.on('exit')` handler counterpart to the Python SDK's
+ *  `atexit` hook. When `MVM_SDK_OUT_PATH` is set and a recording
+ *  is active, write the wire-shape JSON to that path before the
+ *  process exits. The CLI's Phase 7f auto-exec path consumes the
+ *  file post-exec.
+ *
+ *  No-op when the env var isn't set (the script was run directly
+ *  by a user, not auto-exec'd) or no recording was built (the
+ *  script imported `mvm` but never called `Sandbox.create`).
+ *  Errors are surfaced on stderr but don't rethrow — the script
+ *  has already finished by then.
+ *
+ *  `exit` only fires on clean exits; uncaught exceptions take a
+ *  different path and won't flush. The CLI checks the result
+ *  file's existence post-spawn, so a missing file fails closed. */
+export function flushRecordingToOutPath(): void {
+  const outPath =
+    typeof process !== "undefined" ? process.env[MVM_SDK_OUT_PATH_ENV] : undefined;
+  if (!outPath) {
+    return;
+  }
+  if (recording === null) {
+    // File-missing = "no Sandbox.create() ran" is the signal the
+    // CLI relies on; skipping the write preserves that.
+    return;
+  }
+  try {
+    // Node only — the auto-exec path runs in Node, so we can
+    // safely require it dynamically without bundling a polyfill.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs: typeof import("node:fs") = require("node:fs");
+    fs.writeFileSync(outPath, JSON.stringify(recording));
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`mvm-sdk: failed to write recording to ${outPath}: ${String(err)}`);
+  }
+}
+
+// Auto-register on import so user scripts don't have to.
+if (typeof process !== "undefined" && typeof process.on === "function") {
+  process.on("exit", flushRecordingToOutPath);
 }
 
 // ────────────────────────────────────────────────────────────────────

@@ -191,9 +191,10 @@ fn load_workload(args: &Args) -> Result<Workload> {
             }
         }
         WorkloadSource::RuntimeScript(path) => {
-            // .ts / .tsx / .mts / .cts → decorator parser (mvm.app({...})(fn)).
-            // .js / .mjs / .cjs → runtime record-mode (Sandbox-shaped) —
-            // see `--from-recording` (auto-exec is Phase 7e).
+            // .ts / .tsx / .mts / .cts → first try the decorator parser
+            // (mvm.app({...})(fn)); on NoDecoratedFunction, auto-exec
+            // via tsx / bun / deno.
+            // .js / .mjs / .cjs → Sandbox-shaped only; auto-exec via node.
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if matches!(ext, "ts" | "tsx" | "mts" | "cts") {
                 let bytes = std::fs::read(&path)
@@ -201,7 +202,7 @@ fn load_workload(args: &Args) -> Result<Workload> {
                 match parse_typescript(&bytes, &path) {
                     Ok((workload, _manifest)) => Ok(workload),
                     Err(ParseError::NoDecoratedFunction { .. }) => {
-                        bail!(no_decorator_runtime_message(&path));
+                        auto_exec_record_script(&path, ScriptLanguage::TypeScript)
                     }
                     Err(e) => Err(anyhow::anyhow!("{e}")).with_context(|| {
                         format!(
@@ -210,6 +211,8 @@ fn load_workload(args: &Args) -> Result<Workload> {
                         )
                     }),
                 }
+            } else if matches!(ext, "js" | "mjs" | "cjs") {
+                auto_exec_record_script(&path, ScriptLanguage::Node)
             } else {
                 bail!(no_decorator_runtime_message(&path))
             }
@@ -227,12 +230,17 @@ fn load_recording(path: &Path) -> Result<Workload> {
         .with_context(|| format!("lowering runtime recording from {}", path.display()))
 }
 
-/// Languages the auto-exec path supports. Phase 7e ships Python
-/// only; TypeScript / Node lands when `tsx` or `node --import tsx`
-/// setup is sorted out on a follow-up.
+/// Languages the auto-exec path supports.
 #[derive(Debug, Clone, Copy)]
 enum ScriptLanguage {
+    /// Python via `python3` (or `python`); Phase 7e.
     Python,
+    /// Plain JavaScript via `node`; Phase 7f.
+    Node,
+    /// TypeScript via `tsx`, `bun`, or `deno`. The `node` binary
+    /// alone can't run `.ts` files in mvm's supported Node range,
+    /// so the CLI insists on a TS-aware runner. Phase 7f.
+    TypeScript,
 }
 
 /// Phase 7e — run `<interpreter> <script>` on the host with
@@ -256,11 +264,21 @@ fn auto_exec_record_script(script: &Path, lang: ScriptLanguage) -> Result<Worklo
     let out_path = tmp.path().to_path_buf();
 
     eprintln!(
-        "running {} on the host with MVM_SDK_MODE=record (Phase 7e auto-exec)",
+        "running {} on the host with MVM_SDK_MODE=record (Phase 7e/7f auto-exec)",
         script.display()
     );
 
-    let status = Command::new(&interpreter)
+    let mut cmd = Command::new(&interpreter);
+    // Deno's default sandbox refuses fs writes; the SDK's atexit
+    // hook needs to write the recording, so opt out explicitly.
+    let basename = interpreter
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if basename.starts_with("deno") {
+        cmd.arg("run").arg("--allow-all");
+    }
+    let status = cmd
         .arg(script)
         .env("MVM_SDK_MODE", "record")
         .env("MVM_SDK_OUT_PATH", &out_path)
@@ -293,16 +311,16 @@ fn auto_exec_record_script(script: &Path, lang: ScriptLanguage) -> Result<Worklo
     load_recording(&out_path)
 }
 
-/// Resolve which interpreter to spawn for a given language. Honors
-/// `MVM_PYTHON` (then `python3`, then `python`) for the Python path
-/// so users with non-standard interpreter layouts can override.
+/// Resolve which interpreter to spawn for a given language. Each
+/// language has a discrete env-var override (`MVM_PYTHON`, `MVM_NODE`,
+/// `MVM_TSX`) so users with non-standard layouts can pin a binary
+/// explicitly. The fallback search order is best-effort but explicit
+/// in the error message when nothing is found.
 fn resolve_interpreter(lang: ScriptLanguage) -> Result<PathBuf> {
     match lang {
         ScriptLanguage::Python => {
-            if let Ok(explicit) = std::env::var("MVM_PYTHON")
-                && !explicit.is_empty()
-            {
-                return Ok(PathBuf::from(explicit));
+            if let Some(p) = env_override("MVM_PYTHON") {
+                return Ok(p);
             }
             for candidate in ["python3", "python"] {
                 if let Ok(found) = which::which(candidate) {
@@ -314,6 +332,40 @@ fn resolve_interpreter(lang: ScriptLanguage) -> Result<PathBuf> {
                  Install Python 3.10+ or set `MVM_PYTHON=<path>` and re-run."
             )
         }
+        ScriptLanguage::Node => {
+            if let Some(p) = env_override("MVM_NODE") {
+                return Ok(p);
+            }
+            if let Ok(found) = which::which("node") {
+                return Ok(found);
+            }
+            bail!(
+                "no Node.js interpreter found on PATH (tried `node`). \
+                 Install Node 20+ or set `MVM_NODE=<path>` and re-run."
+            )
+        }
+        ScriptLanguage::TypeScript => {
+            if let Some(p) = env_override("MVM_TSX") {
+                return Ok(p);
+            }
+            for candidate in ["tsx", "bun", "deno"] {
+                if let Ok(found) = which::which(candidate) {
+                    return Ok(found);
+                }
+            }
+            bail!(
+                "no TypeScript runner found on PATH (tried `tsx`, `bun`, `deno`). \
+                 Install one (e.g. `npm install -g tsx`) or set `MVM_TSX=<path>` \
+                 and re-run."
+            )
+        }
+    }
+}
+
+fn env_override(name: &str) -> Option<PathBuf> {
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => Some(PathBuf::from(v)),
+        _ => None,
     }
 }
 

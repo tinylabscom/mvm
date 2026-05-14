@@ -230,3 +230,64 @@ describe("emitRecordingJson", () => {
     expect(mvm.currentRecording()).toBeNull();
   });
 });
+
+// ── Phase 7f — MVM_SDK_OUT_PATH exit flusher ─────────────────────────
+
+describe("flushRecordingToOutPath", () => {
+  // Use os.tmpdir + a random name; vitest doesn't ship a per-test
+  // tmpdir helper out of the box. Cleanup runs in afterEach.
+  const tmpFiles: string[] = [];
+  const tmpFile = (): string => {
+    const fs = require("node:fs");
+    const os = require("node:os");
+    const path = require("node:path");
+    const p = path.join(os.tmpdir(), `mvm-rec-${Date.now()}-${Math.random()}.json`);
+    tmpFiles.push(p);
+    return p;
+  };
+
+  afterEach(() => {
+    const fs = require("node:fs");
+    for (const p of tmpFiles) {
+      try {
+        fs.rmSync(p, { force: true });
+      } catch {
+        // ignore
+      }
+    }
+    tmpFiles.length = 0;
+    delete process.env.MVM_SDK_OUT_PATH;
+  });
+
+  it("writes the recording to MVM_SDK_OUT_PATH on flush", () => {
+    const out = tmpFile();
+    process.env.MVM_SDK_OUT_PATH = out;
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb.commands.start(["python", "run.py"]);
+    mvm.flushRecordingToOutPath();
+    const fs = require("node:fs");
+    expect(fs.existsSync(out)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(out, "utf-8"));
+    expect(parsed.workload_id).toBe("python-3.12");
+    expect(parsed.ops[0].kind).toBe("command_start");
+  });
+
+  it("is a no-op when MVM_SDK_OUT_PATH is unset", () => {
+    const out = tmpFile();
+    // Don't set the env var.
+    mvm.Sandbox.create("python-3.12");
+    mvm.flushRecordingToOutPath();
+    const fs = require("node:fs");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+
+  it("is a no-op when no Sandbox was created", () => {
+    const out = tmpFile();
+    process.env.MVM_SDK_OUT_PATH = out;
+    // Don't call Sandbox.create — the CLI's existence check uses
+    // file-missing as the "no Sandbox" signal.
+    mvm.flushRecordingToOutPath();
+    const fs = require("node:fs");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+});
