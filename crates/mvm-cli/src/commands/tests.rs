@@ -8,6 +8,7 @@ use clap::Parser;
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::build::build;
+use super::build::compile;
 use super::catalog;
 use super::env::{cleanup, init, uninstall};
 use super::ops::{audit, cache, config, metrics};
@@ -1671,5 +1672,74 @@ fn test_up_no_supervisor_flag_parses() {
     match cli.command {
         Commands::Up(up::Args { no_supervisor, .. }) => assert!(no_supervisor),
         _ => panic!("Expected Up command"),
+    }
+}
+
+// ---- SDK-port Phase 7d — `mvmctl compile --from-recording` ----
+
+#[test]
+fn test_compile_from_recording_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "compile",
+        "--from-recording",
+        "/tmp/rec.json",
+        "--out",
+        "/tmp/out",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Compile(compile::Args {
+            from_recording,
+            from_ir,
+            entry,
+            ..
+        }) => {
+            assert_eq!(
+                from_recording.as_deref().map(|p| p.to_string_lossy().into_owned()),
+                Some("/tmp/rec.json".to_string())
+            );
+            assert!(from_ir.is_none());
+            assert!(entry.is_none());
+        }
+        _ => panic!("Expected Compile command"),
+    }
+}
+
+#[test]
+fn test_compile_from_recording_conflicts_with_from_ir() {
+    // --from-ir and --from-recording are mutually exclusive at the
+    // clap level; pin that so a future refactor can't accidentally
+    // accept both.
+    let err = Cli::try_parse_from([
+        "mvmctl",
+        "compile",
+        "--from-recording",
+        "/tmp/rec.json",
+        "--from-ir",
+        "/tmp/ir.json",
+    ])
+    .expect_err("clap must reject the combo");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("from-ir") || msg.contains("from-recording") || msg.contains("cannot be used"),
+        "expected a clap mutual-exclusion error, got: {msg}"
+    );
+}
+
+#[test]
+fn test_compile_default_no_from_flags_leaves_them_none() {
+    let cli = Cli::try_parse_from(["mvmctl", "compile", "--from-ir", "/tmp/ir.json"])
+        .expect("parse");
+    match cli.command {
+        Commands::Compile(compile::Args {
+            from_ir,
+            from_recording,
+            ..
+        }) => {
+            assert!(from_ir.is_some());
+            assert!(from_recording.is_none());
+        }
+        _ => panic!("Expected Compile command"),
     }
 }

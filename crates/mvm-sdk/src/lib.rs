@@ -78,6 +78,11 @@ pub mod deploy;
 /// produces, so the flake renderer is shared.
 pub mod runtime;
 
+pub use runtime::{
+    KNOWN_BASE_IMAGES, LowerError, RecordedOp, RuntimeRecording, SandboxCreate, compile_recording,
+    resolve_base_image,
+};
+
 use mvm_ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, Image, Mount, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PythonTool, Resources, Source, Volume,

@@ -34,7 +34,8 @@ use clap::{Args as ClapArgs, ValueEnum};
 use mvm_core::user_config::MvmConfig;
 use mvm_ir::Workload;
 use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
-use mvm_sdk::decorator::{parse_python, parse_typescript};
+use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
+use mvm_sdk::runtime::{RuntimeRecording, compile_recording};
 
 use super::Cli;
 
@@ -49,6 +50,14 @@ pub(in crate::commands) struct Args {
     /// positional entry).
     #[arg(long = "from-ir", value_name = "PATH")]
     pub from_ir: Option<PathBuf>,
+
+    /// Read a runtime recording JSON (the wire shape emitted by the
+    /// Python / TypeScript SDK's `mvm.emitRecordingJson()` /
+    /// `mvm.emit_recording_json()`) from this path and lower it into
+    /// a Workload before compile. Mutually exclusive with `--from-ir`
+    /// and the positional entry.
+    #[arg(long = "from-recording", value_name = "PATH", conflicts_with = "from_ir")]
+    pub from_recording: Option<PathBuf>,
 
     /// Output path. Directory by default; ending in `.tar.gz`/`.tgz`
     /// produces a deterministic archive.
@@ -159,51 +168,96 @@ fn load_workload(args: &Args) -> Result<Workload> {
                 serde_json::from_slice(&buf).context("parsing IR JSON from stdin")?;
             Ok(workload)
         }
+        WorkloadSource::RecordingPath(path) => load_recording(&path),
         WorkloadSource::DecoratorScript(path) => {
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("reading decorator script {}", path.display()))?;
-            let (workload, _manifest) = parse_python(&bytes, &path)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-                .with_context(|| format!("parsing @mvm.app decorator in {}", path.display()))?;
-            Ok(workload)
+            match parse_python(&bytes, &path) {
+                Ok((workload, _manifest)) => Ok(workload),
+                Err(ParseError::NoDecoratedFunction { .. }) => {
+                    // No `@mvm.app` decorator: this is likely a
+                    // Sandbox-shaped record-mode script. Phase 7d
+                    // ships the explicit `--from-recording` path
+                    // (CLI auto-exec of the user's Python script
+                    // is the Phase 7e follow-up); point the user
+                    // at it with an actionable message.
+                    bail!(no_decorator_runtime_message(&path));
+                }
+                Err(e) => Err(anyhow::anyhow!("{e}")).with_context(|| {
+                    format!("parsing @mvm.app decorator in {}", path.display())
+                }),
+            }
         }
         WorkloadSource::RuntimeScript(path) => {
             // .ts / .tsx / .mts / .cts → decorator parser (mvm.app({...})(fn)).
-            // .js / .mjs / .cjs → runtime record-mode (Sandbox-shaped),
-            // which is still Phase 7. Discriminate by extension.
+            // .js / .mjs / .cjs → runtime record-mode (Sandbox-shaped) —
+            // see `--from-recording` (auto-exec is Phase 7e).
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if matches!(ext, "ts" | "tsx" | "mts" | "cts") {
                 let bytes = std::fs::read(&path)
                     .with_context(|| format!("reading decorator script {}", path.display()))?;
-                let (workload, _manifest) = parse_typescript(&bytes, &path)
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .with_context(|| {
+                match parse_typescript(&bytes, &path) {
+                    Ok((workload, _manifest)) => Ok(workload),
+                    Err(ParseError::NoDecoratedFunction { .. }) => {
+                        bail!(no_decorator_runtime_message(&path));
+                    }
+                    Err(e) => Err(anyhow::anyhow!("{e}")).with_context(|| {
                         format!(
                             "parsing mvm.app({{...}})(fn) decorator in {}",
                             path.display()
                         )
-                    })?;
-                Ok(workload)
+                    }),
+                }
             } else {
-                bail!(
-                    "runtime-script entry not yet supported (script = {}). \
-                     Lands in SDK-port Phase 7 (record-mode lowering). \
-                     For now, emit the IR JSON yourself and pass it via --from-ir.",
-                    path.display()
-                )
+                bail!(no_decorator_runtime_message(&path))
             }
         }
     }
 }
 
+fn load_recording(path: &Path) -> Result<Workload> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading runtime recording from {}", path.display()))?;
+    let recording: RuntimeRecording = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing runtime recording JSON from {}", path.display()))?;
+    compile_recording(&recording)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("lowering runtime recording from {}", path.display()))
+}
+
+/// Diagnostic the runtime-script + decorator-without-app paths share:
+/// they both bottom out in "auto-execution of Sandbox-shaped scripts
+/// is Phase 7e; for now, emit the recording manually and pass
+/// `--from-recording`."
+fn no_decorator_runtime_message(path: &Path) -> String {
+    format!(
+        "no `@mvm.app(...)` decorator found in {script}, and automatic execution of \
+         Sandbox-shaped record-mode scripts on the host is not yet wired (lands in \
+         SDK-port Phase 7e after Plan 71 unblocks live transport). For now: \
+         run the script with `MVM_SDK_MODE=record` yourself, capture the JSON output \
+         of `mvm.emit_recording_json()` (Python) / `mvm.emitRecordingJson()` \
+         (TypeScript), and pass it via `--from-recording <path>`.",
+        script = path.display()
+    )
+}
+
 enum WorkloadSource {
     IrJsonPath(PathBuf),
     IrJsonStdin,
+    RecordingPath(PathBuf),
     DecoratorScript(PathBuf),
     RuntimeScript(PathBuf),
 }
 
 fn workload_source(args: &Args) -> Result<WorkloadSource> {
+    if let Some(p) = &args.from_recording {
+        if args.entry.as_deref().is_some_and(|s| !s.is_empty()) {
+            bail!(
+                "--from-recording and the positional entry are mutually exclusive — pass one or the other."
+            );
+        }
+        return Ok(WorkloadSource::RecordingPath(p.clone()));
+    }
     if let Some(p) = &args.from_ir {
         if args.entry.as_deref().is_some_and(|s| !s.is_empty()) {
             bail!(
@@ -214,7 +268,7 @@ fn workload_source(args: &Args) -> Result<WorkloadSource> {
     }
     match args.entry.as_deref() {
         None => bail!(
-            "missing entry: pass a script path, an IR JSON path, `-` for stdin, or use `--from-ir <path>`."
+            "missing entry: pass a script path, an IR JSON path, `-` for stdin, or use `--from-ir <path>` / `--from-recording <path>`."
         ),
         Some("-") => Ok(WorkloadSource::IrJsonStdin),
         Some(s) => {
@@ -226,7 +280,8 @@ fn workload_source(args: &Args) -> Result<WorkloadSource> {
                 | Some("cjs") => Ok(WorkloadSource::RuntimeScript(p)),
                 _ => bail!(
                     "could not infer entry kind from extension on {}; pass `--from-ir <path>` \
-                     for IR JSON, or use a known script extension (`.py`, `.ts`, ...).",
+                     for IR JSON, `--from-recording <path>` for a runtime recording, \
+                     or use a known script extension (`.py`, `.ts`, ...).",
                     p.display()
                 ),
             }
@@ -236,10 +291,11 @@ fn workload_source(args: &Args) -> Result<WorkloadSource> {
 
 fn resolve_manifest_dir(args: &Args) -> Result<PathBuf> {
     // `manifest_dir` is the base for resolving `app.source.path`. For an
-    // IR-JSON path, default to the file's containing directory. For
-    // stdin, default to cwd. Decorator/runtime scripts (when wired)
-    // resolve relative to the script's directory.
-    let basis: PathBuf = if let Some(p) = &args.from_ir {
+    // IR-JSON / recording path, default to the file's containing
+    // directory. For stdin, default to cwd. Decorator/runtime scripts
+    // (when wired) resolve relative to the script's directory.
+    let from_path = args.from_ir.as_ref().or(args.from_recording.as_ref());
+    let basis: PathBuf = if let Some(p) = from_path {
         p.parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
