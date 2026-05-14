@@ -24,6 +24,11 @@ members = [
     # plan 60 Phase 5 Slice C — in-guest entrypoint runner for
     # function-call workloads, ported from mvmforge-runtime.
     "crates/mvm-runner",
+    # plan 71 W3 — tiny in-guest init for the libkrun builder VM.
+    # Lib crate is cross-platform (helpers are testable on macOS);
+    # the binary's real body is Linux-only and ships via mkGuest's
+    # buildPackages.mvm-builder-init.
+    "crates/mvm-builder-init",
     "xtask",
 ]
 # cargo-fuzz crates have to be excluded from the main workspace because

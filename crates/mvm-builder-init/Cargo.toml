@@ -1,0 +1,28 @@
+[package]
+name = "mvm-builder-init"
+description = "Tiny in-guest init for the libkrun-backed builder VM. Mounts essentials, manages the persistent /nix store, runs the job, writes /job/result, powers off. Plan 71 W3."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "mvm_builder_init"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mvm-builder-init"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

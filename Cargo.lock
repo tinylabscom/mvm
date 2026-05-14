@@ -4166,6 +4166,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-builder-init"
+version = "0.14.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mvm-cli"
 version = "0.14.0"
 dependencies = [
