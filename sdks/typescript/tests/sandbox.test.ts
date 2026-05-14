@@ -1,0 +1,232 @@
+/**
+ * Tests for the Sandbox record-mode SDK. SDK port Phase 7c.
+ * Mirrors `sdks/python/tests/test_sandbox.py`.
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import * as mvm from "../src/index.js";
+
+beforeEach(() => {
+  mvm.resetRecording();
+  delete process.env.MVM_SDK_MODE;
+});
+
+afterEach(() => {
+  mvm.resetRecording();
+  delete process.env.MVM_SDK_MODE;
+});
+
+// ── basic recording shape ────────────────────────────────────────────
+
+describe("Sandbox.create", () => {
+  it("records the template and default TTL", () => {
+    mvm.Sandbox.create("python-3.12");
+    const rec = mvm.currentRecording()!;
+    expect(rec.create.template).toBe("python-3.12");
+    expect(rec.create.ttl_seconds).toBe(mvm.DEFAULT_TTL_SECONDS);
+    expect(rec.ops).toEqual([]);
+  });
+
+  it("defaults workloadId to template", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(sb.workloadId).toBe("python-3.12");
+  });
+
+  it("respects workloadId override", () => {
+    const sb = mvm.Sandbox.create("python-3.12", { workloadId: "etl-job" });
+    expect(sb.workloadId).toBe("etl-job");
+    expect(mvm.currentRecording()!.workload_id).toBe("etl-job");
+  });
+
+  it("rejects empty template", () => {
+    expect(() => mvm.Sandbox.create("")).toThrow(TypeError);
+  });
+
+  it("enforces one-sandbox-per-script", () => {
+    mvm.Sandbox.create("python-3.12");
+    expect(() => mvm.Sandbox.create("node-22")).toThrow(/already active/);
+  });
+});
+
+// ── commands.start ──────────────────────────────────────────────────
+
+describe("Sandbox.commands.start", () => {
+  it("appends a command_start op", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb.commands.start(["python", "run.py"]);
+    expect(mvm.currentRecording()!.ops).toEqual([
+      { kind: "command_start", argv: ["python", "run.py"], env: {} },
+    ]);
+  });
+
+  it("encodes env with secret refs", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb.commands.start(["python", "run.py"], {
+      env: { MODE: "prod", API_KEY: mvm.secret("api-key") },
+    });
+    const op = mvm.currentRecording()!.ops[0] as Extract<
+      mvm.RecordedOpWire,
+      { kind: "command_start" }
+    >;
+    expect(op.env.MODE).toEqual({ kind: "literal", value: "prod" });
+    expect(op.env.API_KEY).toMatchObject({ kind: "secret_ref" });
+  });
+
+  it("rejects non-array argv", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.commands.start("python run.py" as never)).toThrow(TypeError);
+  });
+
+  it("rejects empty argv", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.commands.start([])).toThrow(RangeError);
+  });
+});
+
+// ── files.write ────────────────────────────────────────────────────
+
+describe("Sandbox.files.write", () => {
+  it("base64-encodes bytes", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb.files.write("/app/config.json", new TextEncoder().encode('{"x":1}'));
+    const op = mvm.currentRecording()!.ops[0] as Extract<
+      mvm.RecordedOpWire,
+      { kind: "files_write" }
+    >;
+    expect(op.path).toBe("/app/config.json");
+    expect(Buffer.from(op.bytes_b64, "base64").toString("utf-8")).toBe('{"x":1}');
+  });
+
+  it("utf-8 encodes string content", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb.files.write("/app/note.txt", "héllo");
+    const op = mvm.currentRecording()!.ops[0] as Extract<
+      mvm.RecordedOpWire,
+      { kind: "files_write" }
+    >;
+    expect(Buffer.from(op.bytes_b64, "base64").toString("utf-8")).toBe("héllo");
+  });
+
+  it("rejects non-bytes non-str content", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.files.write("/app/x", 123 as never)).toThrow(TypeError);
+  });
+
+  it("rejects empty path", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    expect(() => sb.files.write("", new Uint8Array())).toThrow(TypeError);
+  });
+});
+
+// ── kill / dispose ───────────────────────────────────────────────────
+
+describe("Sandbox.kill / dispose", () => {
+  it("kill appends a kill op", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb.kill();
+    expect(mvm.currentRecording()!.ops).toEqual([{ kind: "kill" }]);
+  });
+
+  it("Symbol.dispose appends a kill op", () => {
+    const sb = mvm.Sandbox.create("python-3.12");
+    sb[Symbol.dispose]();
+    expect(mvm.currentRecording()!.ops).toEqual([{ kind: "kill" }]);
+  });
+});
+
+// ── modes ────────────────────────────────────────────────────────────
+
+describe("MVM_SDK_MODE", () => {
+  it("live mode throws until Plan 71 unblocks", () => {
+    process.env.MVM_SDK_MODE = "live";
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/Plan 71/);
+  });
+
+  it("plan mode throws until Plan 71 unblocks", () => {
+    process.env.MVM_SDK_MODE = "plan";
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/Plan 71/);
+  });
+
+  it("invalid mode throws with actionable message", () => {
+    process.env.MVM_SDK_MODE = "garbage";
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/invalid/);
+  });
+});
+
+// ── TTL parsing ──────────────────────────────────────────────────────
+
+describe("ttl parsing", () => {
+  it("accepts integer seconds", () => {
+    mvm.Sandbox.create("python-3.12", { ttl: 120 });
+    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(120);
+  });
+
+  it("accepts 30m", () => {
+    mvm.Sandbox.create("python-3.12", { ttl: "30m" });
+    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(1800);
+  });
+
+  it("accepts 1h", () => {
+    mvm.Sandbox.create("python-3.12", { ttl: "1h" });
+    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(3600);
+  });
+
+  it("accepts bare integer string", () => {
+    mvm.Sandbox.create("python-3.12", { ttl: "3600" });
+    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(3600);
+  });
+
+  it("rejects unparseable", () => {
+    expect(() => mvm.Sandbox.create("python-3.12", { ttl: "forever" })).toThrow(/unrecognized/);
+  });
+
+  it("rejects zero", () => {
+    expect(() => mvm.Sandbox.create("python-3.12", { ttl: 0 })).toThrow(RangeError);
+  });
+});
+
+// ── flow-through ─────────────────────────────────────────────────────
+
+describe("create kwargs", () => {
+  it("resources flow through", () => {
+    mvm.Sandbox.create("python-3.12", {
+      resources: mvm.resources({ cpu_cores: 2, memory_mb: 512, rootfs_size_mb: 1024 }),
+    });
+    const rsr = mvm.currentRecording()!.create.resources!;
+    expect(rsr.cpu_cores).toBe(2);
+    expect(rsr.memory_mb).toBe(512);
+    expect(rsr.rootfs_size_mb).toBe(1024);
+  });
+
+  it("includes flow through", () => {
+    mvm.Sandbox.create("python-3.12", { include: ["src", "lib"] });
+    expect(mvm.currentRecording()!.create.include).toEqual(["src", "lib"]);
+  });
+});
+
+// ── emit + reset ─────────────────────────────────────────────────────
+
+describe("emitRecordingJson", () => {
+  it("produces a wire-compatible document", () => {
+    const sb = mvm.Sandbox.create("python-3.12", { include: ["src"] });
+    sb.commands.start(["python", "run.py"], { env: { X: "1" } });
+    sb.files.write("/app/cfg", new TextEncoder().encode("data"));
+    const parsed = JSON.parse(mvm.emitRecordingJson());
+    expect(Object.keys(parsed).sort()).toEqual(["create", "ops", "workload_id"]);
+    expect(parsed.ops.map((o: { kind: string }) => o.kind)).toEqual([
+      "command_start",
+      "files_write",
+    ]);
+  });
+
+  it("throws when inactive", () => {
+    expect(() => mvm.emitRecordingJson()).toThrow(mvm.RecordingNotActiveError);
+  });
+
+  it("resetRecording clears state", () => {
+    mvm.Sandbox.create("python-3.12");
+    expect(mvm.currentRecording()).not.toBeNull();
+    mvm.resetRecording();
+    expect(mvm.currentRecording()).toBeNull();
+  });
+});

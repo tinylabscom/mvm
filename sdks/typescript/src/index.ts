@@ -52,6 +52,28 @@ import type {
 // "mvm-sdk"` directly rather than reaching into the `ir/` sub-path.
 export * from "./ir/workload.js";
 
+// Sandbox record-mode SDK (Phase 7c). Imperative companion to
+// the static `mvm.app({...})` decorator above.
+export {
+  DEFAULT_TTL_SECONDS,
+  MVM_SDK_MODE_ENV,
+  RecordingNotActiveError,
+  Sandbox,
+  SandboxCommands,
+  SandboxFiles,
+  SandboxModeError,
+  currentRecording,
+  emitRecordingJson,
+  resetRecording,
+} from "./_sandbox.js";
+export type {
+  RecordedOpWire,
+  RuntimeRecordingWire,
+  SandboxCommandsStartOptions,
+  SandboxCreateOptions,
+  SandboxCreateWire,
+} from "./_sandbox.js";
+
 // ────────────────────────────────────────────────────────────────────
 // Module state
 // ────────────────────────────────────────────────────────────────────
