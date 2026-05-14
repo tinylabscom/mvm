@@ -44,12 +44,14 @@ closed at the Rust boundary)::
 
 from __future__ import annotations
 
+import atexit
 import base64
 import dataclasses
 import enum
 import json
 import os
 import re
+import sys
 from typing import Any
 
 from mvm import _ir
@@ -67,6 +69,12 @@ __all__ = [
 
 
 MVM_SDK_MODE_ENV = "MVM_SDK_MODE"
+
+#: When set in the environment, the SDK writes the wire-shape
+#: recording JSON to this path on process exit. The CLI's Phase 7e
+#: auto-exec path uses this to capture the recording without
+#: parsing stdout (which the user's own script may write to).
+MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH"
 
 #: Plan ``Considerations to fold in or defer`` — every
 #: ``Sandbox.create()`` sets a default 30-minute TTL so the
@@ -121,6 +129,39 @@ def emit_recording_json() -> str:
             "called before any Sandbox method"
         )
     return json.dumps(_recording, separators=(",", ":"), sort_keys=True)
+
+
+def _flush_recording_to_out_path() -> None:
+    """`atexit` handler — when ``MVM_SDK_OUT_PATH`` is set and a
+    recording is active, write the wire-shape JSON to that path so
+    the CLI's auto-exec path can pick it up after the script
+    exits.
+
+    No-op when the env var isn't set (the script was run directly
+    by a user, not auto-exec'd) or no recording was built (the
+    script imported ``mvm`` but never called ``Sandbox.create``).
+    Errors are surfaced on stderr but don't raise — the user's
+    script has already finished and a print is the most we can
+    usefully do here."""
+    out_path = os.environ.get(MVM_SDK_OUT_PATH_ENV)
+    if not out_path:
+        return
+    if _recording is None:
+        # The CLI distinguishes "no recording emitted" from "file
+        # missing" by checking the file's existence: skipping the
+        # write keeps that signal clear.
+        return
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(_recording, f, separators=(",", ":"), sort_keys=True)
+    except OSError as exc:
+        print(
+            f"mvm-sdk: failed to write recording to {out_path}: {exc}",
+            file=sys.stderr,
+        )
+
+
+atexit.register(_flush_recording_to_out_path)
 
 
 # ────────────────────────────────────────────────────────────────────

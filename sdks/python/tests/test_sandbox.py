@@ -237,3 +237,48 @@ def test_reset_recording_clears_state() -> None:
     assert mvm.current_recording_dict() is not None
     mvm.reset_recording()
     assert mvm.current_recording_dict() is None
+
+
+# ── Phase 7e — MVM_SDK_OUT_PATH atexit flusher ──────────────────────
+
+
+def test_flush_recording_writes_to_out_path(tmp_path) -> None:
+    from mvm._sandbox import _flush_recording_to_out_path
+
+    out = tmp_path / "rec.json"
+    os.environ["MVM_SDK_OUT_PATH"] = str(out)
+    try:
+        sb = mvm.Sandbox.create("python-3.12")
+        sb.commands.start(["python", "run.py"])
+        _flush_recording_to_out_path()
+        assert out.exists()
+        parsed = json.loads(out.read_text())
+        assert parsed["workload_id"] == "python-3.12"
+        assert parsed["ops"][0]["kind"] == "command_start"
+    finally:
+        os.environ.pop("MVM_SDK_OUT_PATH", None)
+
+
+def test_flush_recording_noop_when_out_path_unset(tmp_path) -> None:
+    from mvm._sandbox import _flush_recording_to_out_path
+
+    out = tmp_path / "rec.json"
+    # Don't set MVM_SDK_OUT_PATH — the flush should be a no-op.
+    mvm.Sandbox.create("python-3.12")
+    _flush_recording_to_out_path()
+    assert not out.exists()
+
+
+def test_flush_recording_noop_when_no_sandbox_created(tmp_path) -> None:
+    from mvm._sandbox import _flush_recording_to_out_path
+
+    out = tmp_path / "rec.json"
+    os.environ["MVM_SDK_OUT_PATH"] = str(out)
+    try:
+        # No Sandbox.create — file existence is the CLI's signal
+        # that the script genuinely produced a recording, so a
+        # missing file is the correct behavior.
+        _flush_recording_to_out_path()
+        assert not out.exists()
+    finally:
+        os.environ.pop("MVM_SDK_OUT_PATH", None)

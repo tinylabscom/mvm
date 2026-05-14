@@ -27,6 +27,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
@@ -175,13 +176,14 @@ fn load_workload(args: &Args) -> Result<Workload> {
             match parse_python(&bytes, &path) {
                 Ok((workload, _manifest)) => Ok(workload),
                 Err(ParseError::NoDecoratedFunction { .. }) => {
-                    // No `@mvm.app` decorator: this is likely a
-                    // Sandbox-shaped record-mode script. Phase 7d
-                    // ships the explicit `--from-recording` path
-                    // (CLI auto-exec of the user's Python script
-                    // is the Phase 7e follow-up); point the user
-                    // at it with an actionable message.
-                    bail!(no_decorator_runtime_message(&path));
+                    // Phase 7e — no `@mvm.app`, so the script is
+                    // record-mode. Auto-exec it on the host with
+                    // `MVM_SDK_MODE=record` + `MVM_SDK_OUT_PATH`
+                    // pointed at a tempfile; the SDK's atexit hook
+                    // writes the recording there before the process
+                    // exits, and we lower it the same way
+                    // `--from-recording` does.
+                    auto_exec_record_script(&path, ScriptLanguage::Python)
                 }
                 Err(e) => Err(anyhow::anyhow!("{e}")).with_context(|| {
                     format!("parsing @mvm.app decorator in {}", path.display())
@@ -223,6 +225,96 @@ fn load_recording(path: &Path) -> Result<Workload> {
     compile_recording(&recording)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("lowering runtime recording from {}", path.display()))
+}
+
+/// Languages the auto-exec path supports. Phase 7e ships Python
+/// only; TypeScript / Node lands when `tsx` or `node --import tsx`
+/// setup is sorted out on a follow-up.
+#[derive(Debug, Clone, Copy)]
+enum ScriptLanguage {
+    Python,
+}
+
+/// Phase 7e — run `<interpreter> <script>` on the host with
+/// `MVM_SDK_MODE=record` and `MVM_SDK_OUT_PATH=<tempfile>`, then
+/// load the recording the SDK's atexit hook wrote and lower it
+/// to a Workload.
+///
+/// **Security**: this *runs the user's script on the host*. Per
+/// S2 in the SDK plan, this is a deliberate departure from the
+/// decorator path's "never executes user code on the host" rule;
+/// `mvmctl compile <Sandbox-script>` is opt-in for that posture.
+/// Users who don't want it can use the `@mvm.app` decorator path
+/// instead (which the decorator parser handles statically).
+fn auto_exec_record_script(script: &Path, lang: ScriptLanguage) -> Result<Workload> {
+    let interpreter = resolve_interpreter(lang)?;
+    let tmp = tempfile::Builder::new()
+        .prefix("mvm-recording-")
+        .suffix(".json")
+        .tempfile()
+        .context("creating tempfile for runtime recording capture")?;
+    let out_path = tmp.path().to_path_buf();
+
+    eprintln!(
+        "running {} on the host with MVM_SDK_MODE=record (Phase 7e auto-exec)",
+        script.display()
+    );
+
+    let status = Command::new(&interpreter)
+        .arg(script)
+        .env("MVM_SDK_MODE", "record")
+        .env("MVM_SDK_OUT_PATH", &out_path)
+        .status()
+        .with_context(|| {
+            format!(
+                "spawning {} to run record-mode script {}",
+                interpreter.display(),
+                script.display()
+            )
+        })?;
+    if !status.success() {
+        bail!(
+            "record-mode script {} exited with {:?} (no Workload emitted). \
+             Re-run it under {} with MVM_SDK_MODE=record to see the error.",
+            script.display(),
+            status.code(),
+            interpreter.display()
+        );
+    }
+    if !out_path.exists() {
+        bail!(
+            "record-mode script {} did not emit a recording. Confirm the \
+             script imports `mvm` and calls `Sandbox.create(...)`; the SDK's \
+             atexit hook writes the recording to MVM_SDK_OUT_PATH on process \
+             exit, which only fires when a Sandbox was constructed.",
+            script.display()
+        );
+    }
+    load_recording(&out_path)
+}
+
+/// Resolve which interpreter to spawn for a given language. Honors
+/// `MVM_PYTHON` (then `python3`, then `python`) for the Python path
+/// so users with non-standard interpreter layouts can override.
+fn resolve_interpreter(lang: ScriptLanguage) -> Result<PathBuf> {
+    match lang {
+        ScriptLanguage::Python => {
+            if let Ok(explicit) = std::env::var("MVM_PYTHON")
+                && !explicit.is_empty()
+            {
+                return Ok(PathBuf::from(explicit));
+            }
+            for candidate in ["python3", "python"] {
+                if let Ok(found) = which::which(candidate) {
+                    return Ok(found);
+                }
+            }
+            bail!(
+                "no Python interpreter found on PATH (tried `python3`, `python`). \
+                 Install Python 3.10+ or set `MVM_PYTHON=<path>` and re-run."
+            )
+        }
+    }
 }
 
 /// Diagnostic the runtime-script + decorator-without-app paths share:
