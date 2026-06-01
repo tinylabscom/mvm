@@ -24,8 +24,6 @@ const linkGroups = [
     links: [
       { label: "Architecture", href: "/architecture/overview/" },
       { label: "Nix and OCI", href: "/guides/nix-and-oci/" },
-      { label: "Agent Sandbox", href: "/tutorials/agent-sandbox/" },
-      { label: "Audit and Receipts", href: "/guides/audit-and-receipts/" },
       { label: "Threat model", href: "/security/threat-model/" },
       { label: "Security claims", href: "/security/claim-ledger/" },
     ],
