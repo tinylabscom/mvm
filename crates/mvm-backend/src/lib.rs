@@ -38,6 +38,7 @@ pub mod audit_substrate;
 pub mod backend;
 pub mod ch_runtime;
 pub mod cloud_hypervisor;
+pub mod compat;
 pub mod docker;
 pub mod firecracker;
 pub mod handle_registry;
