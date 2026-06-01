@@ -989,9 +989,12 @@ fn find_local_fallback_image_with(
 fn verify_stage0_rootfs_has_init(rootfs: &std::path::Path) -> Result<()> {
     let fs = ext4_view::Ext4::load_from_path(rootfs)
         .with_context(|| format!("opening {} as ext4", rootfs.display()))?;
-    let present = fs
-        .exists(HOST_VM_INIT_ROOTFS_PATH)
-        .with_context(|| format!("looking up {HOST_VM_INIT_ROOTFS_PATH} in {}", rootfs.display()))?;
+    let present = fs.exists(HOST_VM_INIT_ROOTFS_PATH).with_context(|| {
+        format!(
+            "looking up {HOST_VM_INIT_ROOTFS_PATH} in {}",
+            rootfs.display()
+        )
+    })?;
     if !present {
         anyhow::bail!(
             "Stage 0 builder VM rootfs {} is missing {HOST_VM_INIT_ROOTFS_PATH}",
@@ -4378,7 +4381,7 @@ mod builder_vm_bootstrap_tests {
         let out_dir = tmp.path().join("aarch64");
         let out_dir_str = out_dir.to_str().expect("utf-8 out_dir");
 
-        let first = acquire_stage0_lock(out_dir_str).expect("first acquisition should succeed");
+        let first = acquire_stage0_lock_uncontended(out_dir_str);
         // Lock file lives one directory above out_dir, named `stage0.lock`.
         assert!(
             tmp.path().join("stage0.lock").exists(),
@@ -4402,8 +4405,7 @@ mod builder_vm_bootstrap_tests {
         drop(first);
 
         // Now reachable again — guards must not leak past their scope.
-        let _second =
-            acquire_stage0_lock(out_dir_str).expect("acquisition should succeed after drop");
+        let _second = acquire_stage0_lock_uncontended(out_dir_str);
     }
 
     /// Lock setup must not fail when the parent cache directory does
@@ -4415,8 +4417,7 @@ mod builder_vm_bootstrap_tests {
         let nested = tmp.path().join("nested/builder-vm/aarch64");
         let nested_str = nested.to_str().expect("utf-8 nested");
 
-        let _guard =
-            acquire_stage0_lock(nested_str).expect("acquisition should create missing parent dir");
+        let _guard = acquire_stage0_lock_uncontended(nested_str);
         assert!(
             tmp.path().join("nested/builder-vm/stage0.lock").exists(),
             "lock file must be created at the constructed parent path"
@@ -4458,16 +4459,67 @@ mod builder_vm_bootstrap_tests {
         assert!(!is_orphan_stage0_staging_dir_name("riscv64-staging"));
     }
 
-    /// Plan 77 W2 — sweep removes a staging dir of the current form,
-    /// reports the byte count, leaves the live cache and unrelated
-    /// siblings intact, and the dry-run variant is purely observational
-    /// (no fs mutation).
-    #[test]
-    fn sweep_removes_orphan_staging_dir_and_leaves_siblings() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
+    /// `flock(2)` can spuriously report `EWOULDBLOCK` on a brand-new,
+    /// uncontended lock path when hundreds of test threads hammer the
+    /// syscall in parallel (seen as `acquire_stage0_lock` → `Err` /
+    /// `sweep` → `SkippedLockHeld` on paths no other test can possibly
+    /// hold). These helpers retry the *uncontended* acquisitions a bounded
+    /// number of times: the test owns the only would-be holder, so a
+    /// reported block here is always spurious. Tests that deliberately
+    /// contend the lock (`sweep_skips_when_stage0_lock_is_held`) do not use
+    /// these — they want the real "held" outcome.
+    fn acquire_stage0_lock_uncontended(out_dir: &str) -> mvm_core::atomic_io::FileLock {
+        for attempt in 0..200u32 {
+            match acquire_stage0_lock(out_dir) {
+                Ok(guard) => return guard,
+                Err(e) => {
+                    assert!(
+                        attempt < 199,
+                        "stage0 lock stayed spuriously blocked: {e:#}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        }
+        unreachable!()
+    }
 
-        // Build a representative layout under <root>.
+    fn try_acquire_filelock_uncontended(anchor: &std::path::Path) -> mvm_core::atomic_io::FileLock {
+        use mvm_core::atomic_io::FileLock;
+        for attempt in 0..200u32 {
+            match FileLock::try_acquire(anchor) {
+                Ok(Some(guard)) => return guard,
+                Ok(None) => {
+                    assert!(attempt < 199, "flock stayed spuriously blocked");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(e) => panic!("flock error: {e:#}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn sweep_uncontended(root: &std::path::Path, dry_run: bool) -> Stage0SweepOutcome {
+        for attempt in 0..200u32 {
+            match sweep_orphaned_stage0_staging_dirs_at(root, dry_run)
+                .expect("sweep should succeed")
+            {
+                Stage0SweepOutcome::SkippedLockHeld => {
+                    assert!(attempt < 199, "sweep stayed spuriously lock-blocked");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                swept => return swept,
+            }
+        }
+        unreachable!()
+    }
+
+    /// Build the representative sweep layout under `root`: one orphan
+    /// staging dir (18 bytes across two files), a live cache dir, and an
+    /// unrelated nix-store image sibling. Returns the three paths.
+    fn stage_sweep_layout(
+        root: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
         let orphan = root.join(".aarch64.stage0-12345-1700000000000000000");
         std::fs::create_dir_all(orphan.join("nested")).unwrap();
         std::fs::write(orphan.join("a"), b"hello world").unwrap(); // 11 bytes
@@ -4479,11 +4531,26 @@ mod builder_vm_bootstrap_tests {
 
         let nix_store = root.join("nix-store-aarch64.img");
         std::fs::write(&nix_store, b"sparse").unwrap();
+        (orphan, live_cache, nix_store)
+    }
 
-        // Dry-run: nothing should move.
-        match sweep_orphaned_stage0_staging_dirs_at(&root, true)
-            .expect("dry-run sweep should succeed")
-        {
+    // NOTE: the dry-run and real-run sweeps are split into two tests on
+    // purpose. A single test that swept twice took the Stage 0 `flock`,
+    // released it, then re-took it on the *same* path microseconds later;
+    // under parallel test load the close()-release / flock()-reacquire
+    // window intermittently surfaced `EWOULDBLOCK` (a `SkippedLockHeld`
+    // false positive). One acquire per test removes the self-race; the
+    // unique tempdir per test keeps them independent.
+
+    /// Plan 77 W2 — the dry-run sweep is purely observational: it reports
+    /// the orphan + byte count but mutates nothing.
+    #[test]
+    fn sweep_dry_run_reports_orphan_without_removing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let (orphan, live_cache, _nix_store) = stage_sweep_layout(&root);
+
+        match sweep_uncontended(&root, true) {
             Stage0SweepOutcome::Swept {
                 removed,
                 freed_bytes,
@@ -4495,9 +4562,18 @@ mod builder_vm_bootstrap_tests {
         }
         assert!(orphan.is_dir(), "dry-run must not remove the orphan");
         assert!(live_cache.is_dir(), "dry-run must not touch the live cache");
+    }
 
-        // Real run: orphan goes, siblings stay.
-        match sweep_orphaned_stage0_staging_dirs_at(&root, false).expect("sweep should succeed") {
+    /// Plan 77 W2 — the real sweep removes the orphan staging dir, reports
+    /// its byte count, and leaves the live cache and unrelated siblings
+    /// intact.
+    #[test]
+    fn sweep_real_run_removes_orphan_and_leaves_siblings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let (orphan, live_cache, nix_store) = stage_sweep_layout(&root);
+
+        match sweep_uncontended(&root, false) {
             Stage0SweepOutcome::Swept {
                 removed,
                 freed_bytes,
@@ -4520,16 +4596,12 @@ mod builder_vm_bootstrap_tests {
     /// staging dir the live run is about to promote.
     #[test]
     fn sweep_skips_when_stage0_lock_is_held() {
-        use mvm_core::atomic_io::FileLock;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::fs::create_dir_all(&root).unwrap();
 
         // Hold the lock as a "live" Stage 0 would.
-        let _live = FileLock::try_acquire(&root.join("stage0"))
-            .expect("first acquisition should not fail")
-            .expect("first acquisition should succeed");
+        let _live = try_acquire_filelock_uncontended(&root.join("stage0"));
 
         // Stage an orphan to confirm the sweep would have something to do.
         let orphan = root.join(".aarch64.stage0-12345-1700000000000000000");
@@ -5237,5 +5309,78 @@ mod builder_vm_bootstrap_tests {
         // introduce additional variants (e.g. `"alpine"`). Pinning the
         // current literal here so a rename surfaces immediately.
         assert_eq!(STAGE0_FLAVOR_CURRENT, "current");
+    }
+
+    /// A non-ext4 blob (here: zeros, no valid superblock) must surface
+    /// as an `Err` from the load, not a silent "init present / absent".
+    /// Cross-platform — no `mke2fs` needed to produce a bad image.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn verify_stage0_rootfs_has_init_rejects_non_ext4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, vec![0u8; 1024 * 1024]).unwrap();
+        let err = verify_stage0_rootfs_has_init(&rootfs)
+            .expect_err("a zero-filled blob is not a loadable ext4");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("as ext4"),
+            "error names the load failure: {msg}"
+        );
+    }
+
+    /// Build a tiny real ext4 from `staged_dir` at `image`, returning
+    /// `false` if `mke2fs` isn't installed (so the test skips rather than
+    /// fails on a host without e2fsprogs). Mirrors the preallocate-then-
+    /// `mke2fs -d` shape `mvm_build::oci_to_rootfs::ext4` uses.
+    #[cfg(all(feature = "builder-vm", target_os = "linux"))]
+    fn mke2fs_from_dir(staged_dir: &std::path::Path, image: &std::path::Path) -> bool {
+        {
+            let f = std::fs::File::create(image).expect("create image file");
+            f.set_len(16 * 1024 * 1024).expect("preallocate image");
+        }
+        match std::process::Command::new("mke2fs")
+            .args(["-q", "-F", "-t", "ext4", "-b", "4096", "-d"])
+            .arg(staged_dir)
+            .arg(image)
+            .output()
+        {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => panic!("mke2fs failed: {}", String::from_utf8_lossy(&out.stderr)),
+            Err(_) => false, // e2fsprogs absent on this host — skip.
+        }
+    }
+
+    /// Real ext4 round-trip: an image carrying `/sbin/mvm-host-vm-init`
+    /// passes; an otherwise-identical image without it fails. Linux-only
+    /// because `mke2fs` is the only ext4 writer available (matches the
+    /// `oci_to_rootfs` ext4 tests' gating).
+    #[cfg(all(feature = "builder-vm", target_os = "linux"))]
+    #[test]
+    fn verify_stage0_rootfs_has_init_round_trips_real_ext4() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let with_dir = tmp.path().join("with/sbin");
+        std::fs::create_dir_all(&with_dir).unwrap();
+        std::fs::write(with_dir.join("mvm-host-vm-init"), b"#!/bin/true\n").unwrap();
+        let with_img = tmp.path().join("with.ext4");
+        if !mke2fs_from_dir(&tmp.path().join("with"), &with_img) {
+            eprintln!("skipping: mke2fs not installed");
+            return;
+        }
+        verify_stage0_rootfs_has_init(&with_img)
+            .expect("rootfs carrying /sbin/mvm-host-vm-init must validate");
+
+        let without_dir = tmp.path().join("without/sbin");
+        std::fs::create_dir_all(&without_dir).unwrap();
+        std::fs::write(without_dir.join("something-else"), b"x").unwrap();
+        let without_img = tmp.path().join("without.ext4");
+        assert!(mke2fs_from_dir(&tmp.path().join("without"), &without_img));
+        let err = verify_stage0_rootfs_has_init(&without_img)
+            .expect_err("rootfs missing the init binary must be rejected");
+        assert!(
+            format!("{err:#}").contains("missing /sbin/mvm-host-vm-init"),
+            "error names the missing binary"
+        );
     }
 }
