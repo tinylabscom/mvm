@@ -20,18 +20,12 @@ pub(super) const DEV_VM_NAME: &str = "mvm-dev";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
-/// Heuristic needle for `rootfs_contains_builder_init`. We used to scan
-/// for the contiguous bytes `/sbin/mvm-host-vm-init`, but ext4 stores
-/// each path component as a separate dirent — `sbin` and
-/// `mvm-host-vm-init` are never adjacent in the raw image — so a
-/// freshly-built rootfs that *has* the binary at `/sbin/mvm-host-vm-init`
-/// would fail the check. The basename `mvm-host-vm-init` is what
-/// actually appears in the dirent (one of the file's `/etc/.../...`
-/// references is the embedded debug strings inside the Rust binary
-/// itself). The dev-prebuilt seed image case continues to work because
-/// the basename appears there too. False-positive risk is negligible:
-/// nothing else in the rootfs is named exactly `mvm-host-vm-init`.
-const HOST_VM_INIT_PATH: &[u8] = b"mvm-host-vm-init";
+/// Absolute path the builder-VM rootfs must carry for the steady-state
+/// VM to boot (`init=/sbin/mvm-host-vm-init` on the kernel cmdline).
+/// `verify_stage0_rootfs_has_init` looks this inode up directly via a
+/// read-only ext4 walk after Stage 0 builds the image.
+#[cfg(feature = "builder-vm")]
+const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 
 /// Check if the Apple Container dev VM is running *and* reachable
 /// cross-process via the vsock proxy socket.
@@ -981,35 +975,30 @@ fn find_local_fallback_image_with(
     Some((dir.join("vmlinux"), dir.join("rootfs.ext4"), label))
 }
 
-fn rootfs_contains_builder_init(rootfs: &std::path::Path) -> Result<bool> {
-    file_contains_bytes(rootfs, HOST_VM_INIT_PATH)
-        .with_context(|| format!("scanning {} for /sbin/mvm-host-vm-init", rootfs.display()))
-}
-
-fn file_contains_bytes(path: &std::path::Path, needle: &[u8]) -> Result<bool> {
-    if needle.is_empty() {
-        return Ok(true);
+/// Verify the freshly-built Stage 0 rootfs actually carries
+/// `/sbin/mvm-host-vm-init` by walking the ext4 image read-only and
+/// looking the inode up by path — no mount, no root, no
+/// raw-byte substring scan. Catches a builder-VM flake that built but
+/// failed to install the init binary, before the artifacts are promoted
+/// into the cache (where the next boot would `init=` into a missing
+/// binary and panic).
+///
+/// A malformed / non-ext4 image surfaces as an `Err` (load failure)
+/// rather than a false negative.
+#[cfg(feature = "builder-vm")]
+fn verify_stage0_rootfs_has_init(rootfs: &std::path::Path) -> Result<()> {
+    let fs = ext4_view::Ext4::load_from_path(rootfs)
+        .with_context(|| format!("opening {} as ext4", rootfs.display()))?;
+    let present = fs
+        .exists(HOST_VM_INIT_ROOTFS_PATH)
+        .with_context(|| format!("looking up {HOST_VM_INIT_ROOTFS_PATH} in {}", rootfs.display()))?;
+    if !present {
+        anyhow::bail!(
+            "Stage 0 builder VM rootfs {} is missing {HOST_VM_INIT_ROOTFS_PATH}",
+            rootfs.display()
+        );
     }
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut carry = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = std::io::Read::read(&mut file, &mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if n == 0 {
-            return Ok(false);
-        }
-        let mut window = Vec::with_capacity(carry.len() + n);
-        window.extend_from_slice(&carry);
-        window.extend_from_slice(&buf[..n]);
-        if window.windows(needle.len()).any(|w| w == needle) {
-            return Ok(true);
-        }
-        let keep = needle.len().saturating_sub(1).min(window.len());
-        carry.clear();
-        carry.extend_from_slice(&window[window.len() - keep..]);
-    }
+    Ok(())
 }
 
 /// Sanity-check that a `(vmlinux, rootfs.ext4)` pair looks like a real
@@ -2235,6 +2224,11 @@ fn run_stage0_root_dir(
             )
         })?;
 
+    // Refuse to promote a rootfs the steady-state VM can't boot: walk the
+    // freshly-built ext4 and confirm the `init=` target is present.
+    verify_stage0_rootfs_has_init(&staging_dir.join("rootfs.ext4"))
+        .map_err(|e| (Stage0FailureStage::Validate, e))?;
+
     write_builder_vm_source_fingerprint(staging_dir, source_fingerprint)
         .map_err(|e| (Stage0FailureStage::Validate, e))?;
     write_builder_vm_artifact_digest_manifest(staging_dir)
@@ -2408,21 +2402,18 @@ fn unique_builder_vm_stage0_staging_dir(final_dir: &std::path::Path) -> Result<s
     Ok(parent.join(format!(".{name}.stage0-{}-{nonce}", std::process::id())))
 }
 
+/// Structural validation of a cached `(vmlinux, rootfs.ext4)` pair —
+/// size floor + ext4 superblock magic. Cheap and host-agnostic; used by
+/// the cache-readiness and promotion paths. The deeper "does the rootfs
+/// actually contain the init binary" check is `verify_stage0_rootfs_has_init`,
+/// run once at build time (it needs to parse the full ext4 tree).
 fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Result<()> {
-    let rootfs = dir.join("rootfs.ext4");
-    validate_dev_image_artifacts(dir.join("vmlinux"), &rootfs).with_context(|| {
+    validate_dev_image_artifacts(dir.join("vmlinux"), dir.join("rootfs.ext4")).with_context(|| {
         format!(
             "validating Stage 0 builder VM artifacts in {}",
             dir.display()
         )
-    })?;
-    if !rootfs_contains_builder_init(&rootfs)? {
-        anyhow::bail!(
-            "Stage 0 builder VM artifact {} is missing /sbin/mvm-host-vm-init",
-            rootfs.display()
-        );
-    }
-    Ok(())
+    })
 }
 
 /// Plan 77 W2 — outcome of [`sweep_orphaned_stage0_staging_dirs`]:
@@ -2946,6 +2937,16 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
         hasher.update(bin.name.as_bytes());
         hasher.update(b"\0");
         hasher.update(bin.sha256_hex.as_bytes());
+    }
+
+    // Layer 5: the shared Nix library the flake imports. The builder-vm
+    // flake pulls in `nix/lib` (mkGuest, the workspace filter, the
+    // host-binaries manifest), so a change there — e.g. a new rootfs
+    // mount-point dir — changes the built image. Hashing only the flake
+    // dir misses it, which silently reuses a stale image.
+    let nix_lib = workspace_root.join("nix").join("lib");
+    if nix_lib.is_dir() {
+        hash_dir_recursive(&mut hasher, "nix/lib", &nix_lib)?;
     }
 
     Ok(format!("{:x}", hasher.finalize()))
@@ -3624,15 +3625,16 @@ mod dev_status_image_tests {
     }
 
     fn write_valid_builder_cache_artifacts(dir: &std::path::Path) {
+        // Satisfies `validate_builder_vm_stage0_artifacts` (size floor +
+        // ext4 magic). The deeper inode check lives in
+        // `verify_stage0_rootfs_has_init`, exercised against a real ext4
+        // image by `verify_stage0_rootfs_has_init_*` below.
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
         std::fs::create_dir_all(dir).expect("mkdir artifact dir");
         std::fs::write(dir.join("vmlinux"), vec![0x7f; 1024 * 1024 + 1]).expect("write kernel");
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let init_offset = rootfs.len() - HOST_VM_INIT_PATH.len() - 1;
-        rootfs[init_offset..init_offset + HOST_VM_INIT_PATH.len()]
-            .copy_from_slice(HOST_VM_INIT_PATH);
         std::fs::write(dir.join("rootfs.ext4"), rootfs).expect("write rootfs");
     }
 
@@ -3808,9 +3810,6 @@ mod dev_status_image_tests {
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let init_offset = rootfs.len() - HOST_VM_INIT_PATH.len() - 1;
-        rootfs[init_offset..init_offset + HOST_VM_INIT_PATH.len()]
-            .copy_from_slice(HOST_VM_INIT_PATH);
         std::fs::write(dir.join("rootfs.ext4"), rootfs).unwrap();
     }
 
@@ -4351,9 +4350,6 @@ mod builder_vm_bootstrap_tests {
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let init_offset = rootfs.len() - HOST_VM_INIT_PATH.len() - 1;
-        rootfs[init_offset..init_offset + HOST_VM_INIT_PATH.len()]
-            .copy_from_slice(HOST_VM_INIT_PATH);
         std::fs::write(dir.join("rootfs.ext4"), rootfs).expect("write rootfs");
     }
 

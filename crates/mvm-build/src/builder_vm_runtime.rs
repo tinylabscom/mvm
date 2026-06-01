@@ -256,6 +256,26 @@ fi
 # virtio-fs may map the uid such that chmod is a no-op.
 chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 [ -f /out/vmlinux ] && chmod 0644 /out/vmlinux 2>/dev/null || true
+
+# W6.2 — emit the mvm-meta.json sidecar next to the rootfs. The runtime
+# admission path refuses to boot a rootfs without it (it certifies the
+# overlay-aware contract), and the host has no nix, so we eval the
+# flake's `passthru.mvm` (the ArtifactManifest) here in the guest.
+# mkGuest puts it on the rootfs derivation; an image that wraps the
+# rootfs (the builder-vm `dev`/`default` attrs are a runCommand around
+# it) surfaces it one level down under `passthru.rootfs`. Try the direct
+# attr first, then the wrapped one.
+if nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure \
+      > /out/mvm-meta.json 2> /job/sidecar-direct.log; then
+    echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.mvm)" >&2
+elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure \
+      > /out/mvm-meta.json 2> /job/sidecar-rootfs.log; then
+    echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.rootfs.passthru.mvm)" >&2
+else
+    echo "mvm-builder-vm: WARNING could not emit mvm-meta.json; the runtime will refuse to boot this rootfs:" >&2
+    cat /job/sidecar-direct.log /job/sidecar-rootfs.log >&2 || true
+    rm -f /out/mvm-meta.json
+fi
 "#,
         flake_ref = shell_single_quote_escape(flake_ref),
         attr_path = shell_single_quote_escape(attr_path),
