@@ -29,15 +29,27 @@ env:
 # The dedicated `apple` job below catches Darwin regressions before
 # any artifact ships.
 #
-# Per PR push the lanes are:
+# Per feature-branch push the lanes are (ADR-038):
 #
-#   lint  → fmt + clippy + xtask policy checks (one runner)
-#   test  → cargo build + cargo test
-#   mcp-server-smoke  → MCP JSON-RPC roundtrip
-#   nix-flake-check   → nix flake check across every flake
+#   lint             → fmt + clippy + xtask policy checks (one runner)
+#   test             → cargo build + cargo test
+#   mcp-server-smoke → MCP JSON-RPC roundtrip
+#   nix-flake-check  → nix flake check across every flake
+#   security-gates   → consolidated fast claim checks (claims 9/11/14):
+#                      sealed-prod allowlist + app-deps-audit + the OCI
+#                      adversarial/digest/manifest/prod/repro/ext4 tests,
+#                      folded into ONE runner instead of ~8
 #
-# Four core jobs total. The collapses below are deliberate; reverting
-# any of them costs runner minutes for marginal feedback.
+# Five lanes per PR. EVERYTHING ELSE is gated to `main` + release tags at
+# the JOB level (`if: github.ref == 'refs/heads/main' || startsWith(
+# github.ref, 'refs/tags/v')`): the macOS lanes (apple, libkrun, vz), the
+# KVM lanes (ch, workload-spawn), the nix builder-vm image build, the
+# Landlock/seccomp jailer-lite property tests, e2e, and the per-claim OCI
+# jobs (which `security-gates` covers per-PR, so they don't double-run;
+# `security-gates` is itself skipped on main+tags). Five lanes instead of
+# ~22 per PR, while preserving per-PR claim coverage (ADR-002) and full
+# coverage at merge + release. The collapses below are deliberate;
+# reverting any of them costs runner minutes for marginal feedback.
 #
 # Removed at various points:
 #   • The standalone `check` job — `clippy --all-targets` runs `cargo
@@ -219,6 +231,7 @@ jobs:
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
   e2e:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: E2E Tests
     runs-on: ubuntu-latest
     needs: test
@@ -272,6 +285,7 @@ jobs:
   # No untrusted GitHub event input flows into any step — all
   # `run:` commands below are static literals.
   sealed-prod-allowlist:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: Sealed-prod vsock allowlist (plan 76 Phase 1)
     runs-on: ubuntu-latest
     steps:
@@ -319,6 +333,7 @@ jobs:
   #
   # Runtime: a few seconds. PR-time, every push.
   jailer-lite-property:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: jailer-lite property tests (seccomp + Landlock) (Plan 113 §Task 9)
     runs-on: ubuntu-24.04
     steps:
@@ -466,6 +481,7 @@ jobs:
   # Both are documented as manual smoke in
   # `examples/python/hello-app-with-deps/README.md`.
   app-deps-audit:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: app-deps-audit (ADR-047 claim 9 / Plan 73 Followup D)
     runs-on: ubuntu-latest
     steps:
@@ -546,6 +562,7 @@ jobs:
   # builder-VM image is bandwidth-heavy (~1-2 GB of substitutes on
   # cold cache).
   builder-vm-image-linux:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: Builder VM image build (Linux, Plan 100 W2)
     runs-on: ubuntu-latest
     steps:
@@ -562,11 +579,11 @@ jobs:
               - 'crates/mvm-host-vm-init/**'
 
       - name: Install Nix
-        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.builder_vm == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Build builder-vm image
-        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.builder_vm == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `--no-link` avoids the gc-root file; `--print-out-paths`
         # gives us the store path to inspect afterward. The four
         # outputs the flake commits to (per `flake.nix` line 14):
@@ -596,7 +613,7 @@ jobs:
           ls -la "$STORE_PATH/"
 
       - name: Assert all four outputs exist
-        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.builder_vm == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `nix build` returns 0 even when a non-fatal post-build hook
         # squelches an output. Pin the contract by asserting every
         # file the flake commits to is actually on disk. A future
@@ -615,7 +632,7 @@ jobs:
           echo "All four builder-vm outputs present."
 
       - name: SHA-256 + size for visibility
-        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.builder_vm == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Diff-grade visibility — a kernel-config change should show
         # up as a different vmlinux hash, surfacing in the CI log
         # without requiring downstream debugging.
@@ -684,6 +701,7 @@ jobs:
   # processes, so `krun_start_enter` can't actually create a guest.
   # The lane catches everything before that boundary.
   libkrun-macos:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: libkrun (macOS Apple Silicon)
     runs-on: macos-latest
     steps:
@@ -703,13 +721,13 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
 
       - name: Install libkrun
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `libkrun` ships from Sergio Lopez's `slp/krun` Homebrew tap
         # (not core homebrew). The bottle puts `libkrun.h` +
         # `libkrun.dylib` under `/opt/homebrew/{include,lib}` on Apple
@@ -720,7 +738,7 @@ jobs:
           brew install libkrun
 
       - name: Cache cargo
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -731,26 +749,26 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-libkrun-
 
       - name: Default-feature workspace build (no libkrun-sys)
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Sanity: the fallback path (no libkrun-sys) keeps compiling.
         # Mirrors how every other workspace consumer that touches
         # mvm-libkrun builds.
         run: cargo build -p mvm-libkrun -p mvm-backend
 
       - name: Build mvm-libkrun with libkrun-sys (lib + bin + examples)
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo build -p mvm-libkrun --features libkrun-sys --all-targets
 
       - name: Test mvm-libkrun with libkrun-sys
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo test -p mvm-libkrun --features libkrun-sys
 
       - name: Test mvm-backend (libkrun module)
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo test -p mvm-backend libkrun
 
       - name: Clippy mvm-libkrun --features libkrun-sys --all-targets
-        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.libkrun == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo clippy -p mvm-libkrun --features libkrun-sys --all-targets -- -D warnings
 
   # ── Lane: Vz / Virtualization.framework (macOS, paths-gated) ──
@@ -759,6 +777,7 @@ jobs:
   # macos-latest. No untrusted inputs are interpolated into run:
   # blocks — only matrix.runner, steps.filter.outputs.vz, runner.os.
   vz-macos:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: Vz / Virtualization.framework (${{ matrix.runner }})
     strategy:
       fail-fast: false
@@ -794,13 +813,13 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
 
       - name: Cache cargo
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -814,15 +833,15 @@ jobs:
       # crates/mvm-vz-supervisor/tools/build.sh (swift build + codesign).
       # GHA macOS runners ship Xcode and a Swift toolchain by default.
       - name: Build the Swift supervisor + Rust crates
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo build -p mvm-vz -p mvm-backend
 
       - name: Test mvm-vz (config + path resolution + MAC validation)
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo test -p mvm-vz
 
       - name: Test mvm-backend (Vz module)
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo test -p mvm-backend vz
 
       # Plan 98 Phase 3 §3.2 — Vz builder driver unit tests on macOS.
@@ -834,7 +853,7 @@ jobs:
       # only inside a real boot (which only the macos-26 self-hosted
       # lane can do today).
       - name: Test mvm-build Vz driver (vz_builder + persistent)
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo test -p mvm-build --features builder-vm vz_builder
 
       # Plan 98 Phase 3 §3.2 — env-var path on macOS. Construction-only
@@ -844,13 +863,13 @@ jobs:
       # dispatch (Slice 2B) and `apple_container::build_image_via_libkrun`
       # both consume.
       - name: Test mvm-build selection layer with MVM_BUILDER_BACKEND=vz
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         env:
           MVM_BUILDER_BACKEND: vz
         run: cargo test -p mvm-build --features builder-vm builder_backend_select
 
       - name: Clippy mvm-vz + mvm-backend vz module
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo clippy -p mvm-vz -p mvm-backend --all-targets -- -D warnings
 
       # Plan 98 Phase 3 §3.4 — assert auto-detect picks Vz on
@@ -862,13 +881,13 @@ jobs:
       # (catches a regression where someone "fixes" macOS-26 by
       # promoting Vz to default on any macOS).
       - name: Assert auto-detect on macos-latest picks libkrun (pre-26)
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: |
           cargo test -p mvm-build --features builder-vm --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
       - name: Verify supervisor binary has the virtualization entitlement
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Plan 97 Phase A — mvm-vz-supervisor must carry
         # com.apple.security.virtualization after the build. Catches
         # a regression in tools/build.sh codesigning.
@@ -880,7 +899,7 @@ jobs:
             || { echo 'supervisor missing com.apple.security.virtualization entitlement' >&2; exit 1; }
 
       - name: Smoke — empty stdin / unknown field rejection
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # The supervisor's strict-keys decoder (ADR-002 claim 5
         # foundation) must reject unknown fields with exit 2.
         run: |
@@ -943,13 +962,13 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
 
       - name: Cache cargo
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -960,21 +979,21 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-vz-macos26-
 
       - name: Build the Swift supervisor + Rust crates
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo build -p mvm-vz -p mvm-backend
 
       - name: Test mvm-vz + mvm-backend vz module
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: |
           cargo test -p mvm-vz
           cargo test -p mvm-backend vz
 
       - name: Clippy mvm-vz + mvm-backend vz module
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo clippy -p mvm-vz -p mvm-backend --all-targets -- -D warnings
 
       - name: Apple Container coexistence smoke
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.vz == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # macOS 26 ships the system `container` binary (the Apple
         # Container backend's entrypoint). Assert both backends are
         # visible from `mvmctl doctor` without colliding on the
@@ -1083,6 +1102,7 @@ jobs:
   # `hashFiles(...)`). No user-controlled inputs like pr-title or
   # head_ref reach a shell.
   ch-linux:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: cloud-hypervisor (Linux x86_64)
     runs-on: ubuntu-latest
     steps:
@@ -1104,19 +1124,19 @@ jobs:
               - 'specs/plans/72-builder-vm-via-libkrun.md'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@stable
 
       # Plan 115 / ADR-065 — mvm-cli's build.rs needs zigbuild.
-      - if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+      - if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: ./.github/actions/install-zigbuild
 
       - name: Install Nix
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Install cloud-hypervisor
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Pin to a known release — auto-tracking `latest` is how this
         # lane would surprise-break on an unrelated CH cut.
         env:
@@ -1130,7 +1150,7 @@ jobs:
           cloud-hypervisor --version
 
       - name: Grant /dev/kvm access for the job
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # ubuntu-latest's /dev/kvm is root:kvm 0660 by default and the
         # runner user isn't in the kvm group, so CH would get EACCES
         # from hv_vm_create. `sudo chmod 666` is the canonical GHA fix;
@@ -1146,7 +1166,7 @@ jobs:
           ls -la /dev/kvm
 
       - name: Cache cargo
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1157,7 +1177,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-ch-
 
       - name: Build dev image via host Nix
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Mirrors release.yml's dev-image job for x86_64 — this is the
         # load-bearing existence proof that the artifact pipeline can
         # be produced by CI directly. Output gets staged at
@@ -1191,11 +1211,11 @@ jobs:
           ls -la ci-artifacts/
 
       - name: Build ch-bootcheck example
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: cargo build --example ch-bootcheck -p mvm-backend
 
       - name: Run ch-bootcheck
-        if: steps.filter.outputs.ch == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.ch == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Outcome legend (mirrored in the example's --help):
         #   0  — PASS (VMM viable; kernel booted or reached userspace)
         #   1  — strict-mode partial (gate not flipped here)
@@ -1220,6 +1240,7 @@ jobs:
   # *nesting* (L2, the no-ptrace trust uplift) is Plan 107 A4.5's
   # live-KVM smoke on a nested-KVM runner — not this lane.
   workload-spawn-smoke-linux:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: Workload spawn smoke (Plan 107 A2.4)
     runs-on: ubuntu-latest
     steps:
@@ -1234,11 +1255,11 @@ jobs:
               - 'crates/mvm-host-vm-init/**'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.spawn == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install firecracker
-        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.spawn == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Pin to a known release — auto-tracking `latest` is how this
         # lane would surprise-break on an unrelated Firecracker cut.
         # Installed at /usr/bin/firecracker to match
@@ -1255,7 +1276,7 @@ jobs:
           /usr/bin/firecracker --version
 
       - name: Grant /dev/kvm access for the job
-        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.spawn == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # ubuntu-latest's /dev/kvm is root:kvm 0660 and the runner user
         # isn't in the kvm group, so firecracker would get EACCES.
         # `sudo chmod 666` is the canonical GHA fix; the runner is
@@ -1270,7 +1291,7 @@ jobs:
           ls -la /dev/kvm
 
       - name: Cache cargo
-        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.spawn == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1281,7 +1302,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-spawn-
 
       - name: Fetch Firecracker CI kernel + build rootfs
-        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.spawn == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # The mvm Firecracker path uses the upstream Firecracker-CI
         # kernel (`crates/mvm-backend/src/firecracker.rs` downloads
         # `firecracker-ci/<ver>/x86_64/vmlinux-5.10.*` from S3), NOT the
@@ -1318,7 +1339,7 @@ jobs:
           ls -la ci-artifacts/
 
       - name: Run workload spawn smoke
-        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.spawn == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # MVM_FC_BOOT_SMOKE gates the otherwise-inert
         # `workload::tests::live_firecracker_boot_smoke` test; the env
         # vars point it at the freshly built workload artifacts. The
@@ -1353,6 +1374,7 @@ jobs:
   # ratifications.
 
   oci-layer-unpack-adversarial:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: oci-layer-unpack-adversarial (Plan 85 §AC4)
     runs-on: ubuntu-latest
     steps:
@@ -1372,15 +1394,15 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install system build deps
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
       - name: Cache cargo
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1391,7 +1413,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-oci-adversarial-
 
       - name: Adversarial fixture suite for layer unpack
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `oci_unpack_attacks` carries the documented-CVE corpus —
         # path traversal, hardlink chains, device-node sneak-ins,
         # symlink escapes, per-entry / per-layer size caps, null-byte
@@ -1399,6 +1421,7 @@ jobs:
         run: cargo test --test oci_unpack_attacks -p mvm-build -- --include-ignored
 
   oci-digest-mismatch-reject:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: oci-digest-mismatch-reject (Plan 85 §AC4)
     runs-on: ubuntu-latest
     steps:
@@ -1416,15 +1439,15 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install system build deps
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
       - name: Cache cargo
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1435,7 +1458,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-oci-digest-
 
       - name: Layer + blob digest-mismatch rejection
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `hermetic_registry::layer_fetch_rejects_tampered_blob_*`
         # exercises the streaming verifier against a deliberately
         # tampered blob; sibling tests cover cap-exceeded and
@@ -1443,6 +1466,7 @@ jobs:
         run: cargo test --test hermetic_registry -p mvm-oci rejects
 
   oci-malformed-manifest:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: oci-malformed-manifest (Plan 85 §AC4)
     runs-on: ubuntu-latest
     steps:
@@ -1458,15 +1482,15 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install system build deps
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
       - name: Cache cargo
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1477,7 +1501,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-oci-manifest-
 
       - name: Malformed manifest / digest rejection
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Inline `manifest::tests` cover MalformedDigest paths
         # (missing algorithm prefix, wrong hex length, wrong charset).
         # Reference parser tests cover the same on the ref side.
@@ -1488,6 +1512,7 @@ jobs:
         run: "cargo test -p mvm-oci -- manifest:: reference::"
 
   oci-mutable-tag-prod-reject:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: oci-mutable-tag-prod-reject (Plan 85 §AC2/AC4)
     runs-on: ubuntu-latest
     steps:
@@ -1504,19 +1529,19 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
 
       # Plan 115 / ADR-065 — mvm-cli's build.rs needs zigbuild.
-      - if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+      - if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: ./.github/actions/install-zigbuild
 
       - name: Install system build deps
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
       - name: Cache cargo
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1527,7 +1552,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-oci-prod-
 
       - name: --prod refuses mutable tags before network
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Plan 85 acceptance criterion 2: `--prod` on a mutable
         # reference must refuse *before* any pull. Tests live in
         # `crates/mvm-cli/src/commands/image.rs` and assert the
@@ -1538,6 +1563,7 @@ jobs:
         run: cargo test -p mvm-cli -- prod_pull_requires_digest_pin prod_run_image_requires_digest_pin
 
   oci-reproducibility:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: oci-reproducibility (Plan 85 §R2)
     runs-on: ubuntu-latest
     steps:
@@ -1554,18 +1580,18 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install system build deps
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `mke2fs` (from `e2fsprogs`, default-installed on
         # ubuntu-latest) is required by the ext4 reproducibility
         # assertion in `oci_ext4_materialization`.
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld e2fsprogs
 
       - name: Cache cargo
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1576,13 +1602,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-oci-repro-
 
       - name: Two-unpack reproducibility
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Unpack the same layer set into two clean staging dirs and
         # assert byte-identical content modulo inode metadata.
         run: cargo test -p mvm-oci reproducibility_two_unpacks_match_modulo_inode
 
       - name: Byte-identical ext4 materialization
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # ADR-051's per-version cache hinges on byte-identical ext4
         # output across two materialize_to_ext4 runs over byte-
         # identical input. Linux-gated via `#![cfg(target_os = "linux")]`
@@ -1591,6 +1617,7 @@ jobs:
         run: cargo test --test oci_ext4_materialization -p mvm-build materialize_is_byte_deterministic
 
   oci-image-runner-smoke:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: oci-image-runner-smoke (Plan 85 §Phase B)
     runs-on: ubuntu-latest
     steps:
@@ -1608,22 +1635,22 @@ jobs:
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: dtolnay/rust-toolchain@nightly
 
       # Plan 115 / ADR-065 — mvm-cli's build.rs needs zigbuild.
-      - if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+      - if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: ./.github/actions/install-zigbuild
 
       - name: Install system build deps
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # `e2fsprogs` provides `mke2fs`; the test no-ops with a
         # printed skip if `mke2fs` isn't on `$PATH`, so the install
         # is what turns the lane from skip-only into a real gate.
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld e2fsprogs
 
       - name: Cache cargo
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/cache@v5
         with:
           path: |
@@ -1634,7 +1661,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-oci-smoke-
 
       - name: Phase B ext4 materialization smoke
-        if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
+        if: steps.filter.outputs.oci == 'true' || (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         # Phase B smoke: unpack a small fixture layer set into a
         # staging tree, materialize to ext4 via mke2fs -d, assert
         # the resulting image is mountable + carries the expected
@@ -1644,3 +1671,58 @@ jobs:
         # runners cannot provide (no nested KVM). The boot half is
         # tracked separately in the self-hosted Vz/libkrun lanes.
         run: cargo test --test oci_ext4_materialization -p mvm-build
+
+  # ── Lane: security-gates (consolidated, per-PR) ──
+  # ADR-038: the fast ubuntu cargo/script claim checks (claims 9/11/14)
+  # fold into ONE per-PR runner instead of ~8 separate ones. The
+  # individual jobs above still run on main + release tags (this job is
+  # skipped there), so there is no duplication and per-PR claim coverage
+  # (ADR-002) is preserved. Landlock/seccomp claims 1/2 (jailer-lite)
+  # need a Landlock-capable kernel + passt, so they stay on main+tags.
+  security-gates:
+    name: Security claim gates (consolidated, per-PR)
+    if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install system build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld e2fsprogs jq
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-security-gates-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-security-gates-
+
+      - name: Sealed-prod vsock allowlist (plan 76)
+        run: ./scripts/check-sealed-prod-allowlist.sh
+
+      - name: app-deps-audit (ADR-047 claim 11)
+        run: ./scripts/test-app-deps-ci-gate.sh
+
+      - name: OCI layer-unpack adversarial (claim 14)
+        run: cargo test --test oci_unpack_attacks -p mvm-build -- --include-ignored
+
+      - name: OCI digest-mismatch rejection
+        run: cargo test --test hermetic_registry -p mvm-oci rejects
+
+      - name: OCI malformed-manifest rejection
+        run: "cargo test -p mvm-oci -- manifest:: reference::"
+
+      - name: OCI --prod mutable-tag rejection
+        run: cargo test -p mvm-cli -- prod_pull_requires_digest_pin prod_run_image_requires_digest_pin
+
+      - name: OCI reproducibility + byte-identical ext4 materialization
+        run: |
+          cargo test -p mvm-oci reproducibility_two_unpacks_match_modulo_inode
+          cargo test --test oci_ext4_materialization -p mvm-build

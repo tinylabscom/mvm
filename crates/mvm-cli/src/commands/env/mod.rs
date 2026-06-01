@@ -5,6 +5,7 @@
 //! shell init, default network).
 
 pub(super) mod apple_container;
+pub(super) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(super) mod cleanup;
 pub(super) mod dev;

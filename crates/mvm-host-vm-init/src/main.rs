@@ -1916,10 +1916,12 @@ mod linux {
             let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
             ifr.ifr_name = name;
 
-            // libc 0.2.182 narrowed ioctl's request type from c_ulong
-            // to c_int (Ioctl); SIOCGIFFLAGS / SIOCSIFFLAGS are
-            // declared u64 (their kernel ABI value), so cast explicitly.
-            if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::c_int, &mut ifr) } < 0 {
+            // libc 0.2.182's ioctl request parameter is the per-target
+            // `Ioctl` alias — `c_ulong` (u64) on linux-gnu, `c_int`
+            // (i32) on musl. Cast the SIOC* request to `libc::Ioctl` so
+            // this compiles on both the musl host-bin deployment target
+            // and a native-gnu `cargo build --all-targets` (CI).
+            if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::Ioctl, &mut ifr) } < 0 {
                 return Err(format!(
                     "SIOCGIFFLAGS {iface}: {}",
                     std::io::Error::last_os_error()
@@ -1934,7 +1936,7 @@ mod linux {
                 let flags = ifr.ifr_ifru.ifru_flags;
                 ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short);
             }
-            if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::c_int, &ifr) } < 0 {
+            if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::Ioctl, &ifr) } < 0 {
                 return Err(format!(
                     "SIOCSIFFLAGS {iface} IFF_UP: {}",
                     std::io::Error::last_os_error()

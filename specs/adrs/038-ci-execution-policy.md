@@ -56,6 +56,16 @@ ADR-013 dropped Lima from mvm's dependency surface, so the heavy-check path is h
 
 A single `just ci` target reproduces what the on-push CI does, so devs can sanity-check before pushing. Phase 0 ships a stub; Phase 1 fills it out.
 
+### In-`ci.yml` job gating (per-PR lane set)
+
+The trigger split above ("push runs CI; release runs everything else") is also enforced **inside `ci.yml` at the job level**, because everything lives in one workflow. `ci.yml` had drifted to spawn ~22 jobs per push (many gated only at the *step* level, so the runner still spun up + checked out + ran a paths-filter before skipping). The gate is now at the **job** level:
+
+- **Per feature-branch push — five lanes:** `lint`, `test`, `mcp-server-smoke`, `nix-flake-check`, and `security-gates`.
+- **`security-gates`** consolidates the fast ubuntu cargo/script claim checks (claims 9/11/14 — sealed-prod allowlist, app-deps-audit, and the OCI adversarial/digest/manifest/prod/reproducibility/ext4 tests) into **one** runner instead of ~8. It runs only on feature branches (`if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')`).
+- **Everything else** — the macOS lanes (`apple`, `libkrun-macos`, `vz-macos`), KVM lanes (`ch-linux`, `workload-spawn-smoke-linux`), the nix `builder-vm-image-linux` build, `jailer-lite-property` (claims 1/2 — needs a Landlock-capable kernel + passt), `e2e`, and the per-claim OCI jobs — carries `if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')`. The per-claim OCI jobs are skipped on feature branches (covered by `security-gates`) and run individually on main + tags (where `security-gates` is skipped), so there is no duplication.
+
+Net: a feature-branch push runs **5 lanes instead of ~22**. Per-PR claim coverage (ADR-002) is preserved for claims 9/11/14 via `security-gates`; claims 1/2 (seccomp/Landlock) move to main + release because they require kernel features the hosted ubuntu PR runner can't guarantee. Full coverage still runs at merge-to-main and at release tags.
+
 ## Consequences
 
 **Positive**:

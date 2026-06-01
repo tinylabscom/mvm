@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use mvm::vsock_transport::{VsockProxyTransport, VsockTransport};
 
 use super::super::vm::console::console_interactive;
+use super::artifact_verify::{
+    bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
+};
 use crate::ui;
 
 // ============================================================================
@@ -989,9 +992,12 @@ fn find_local_fallback_image_with(
 fn verify_stage0_rootfs_has_init(rootfs: &std::path::Path) -> Result<()> {
     let fs = ext4_view::Ext4::load_from_path(rootfs)
         .with_context(|| format!("opening {} as ext4", rootfs.display()))?;
-    let present = fs
-        .exists(HOST_VM_INIT_ROOTFS_PATH)
-        .with_context(|| format!("looking up {HOST_VM_INIT_ROOTFS_PATH} in {}", rootfs.display()))?;
+    let present = fs.exists(HOST_VM_INIT_ROOTFS_PATH).with_context(|| {
+        format!(
+            "looking up {HOST_VM_INIT_ROOTFS_PATH} in {}",
+            rootfs.display()
+        )
+    })?;
     if !present {
         anyhow::bail!(
             "Stage 0 builder VM rootfs {} is missing {HOST_VM_INIT_ROOTFS_PATH}",
@@ -1690,206 +1696,6 @@ pub fn cmd_dev_import_image(
     Ok(())
 }
 
-/// Bump the dev_image_verify_<outcome> counter. Plan 36 §Layer 4 step 11.
-///
-/// Caller passes the outcome name; centralising the lookup keeps the
-/// counter set discoverable in one place. mvmd plan 23's
-/// reconciliation loop will alert on attack-shaped spikes
-/// (sig_invalid, digest_mismatch, revoked).
-///
-/// Security-relevant outcomes (everything except `network`, which is
-/// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
-/// so `mvmctl audit tail` shows the rejection. The counter is the
-/// alerting channel; the audit line is the forensics channel.
-fn bump_verify_outcome(outcome: &str) {
-    let m = mvm_core::observability::metrics::global();
-    let counter = match outcome {
-        "sig_invalid" => &m.dev_image_verify_sig_invalid,
-        "digest_mismatch" => &m.dev_image_verify_digest_mismatch,
-        "version_skew" => &m.dev_image_verify_version_skew,
-        "revoked" => &m.dev_image_verify_revoked,
-        "expired" => &m.dev_image_verify_expired,
-        "network" => &m.dev_image_verify_network,
-        // Defensive: an unknown outcome is itself a bug worth surfacing
-        // — log a warning rather than silently swallowing the metric.
-        _ => {
-            tracing::warn!("bump_verify_outcome: unknown outcome '{outcome}'");
-            return;
-        }
-    };
-    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if outcome != "network" {
-        let mvmctl_version = env!("CARGO_PKG_VERSION");
-        mvm_core::audit_emit!(
-            ImageVerifyFailed,
-            "outcome={outcome} mvmctl_version={mvmctl_version}"
-        );
-    }
-}
-
-/// HEAD-probe a URL. Returns Ok(true) when the resource is reachable
-/// (HTTP 2xx), Ok(false) on 404, Err for transient failures.
-fn url_exists(url: &str) -> Result<bool> {
-    let output = std::process::Command::new("curl")
-        .args(["-fSI", "-o", "/dev/null", "-w", "%{http_code}", url])
-        .output()
-        .context("Failed to run curl HEAD probe")?;
-    let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    match code.as_str() {
-        "200" | "302" => Ok(true),
-        "404" => Ok(false),
-        _ => {
-            // Other status (5xx, network error, redirect chain failure)
-            // — don't silently fall through to the unsigned path.
-            anyhow::bail!(
-                "HEAD probe of {url} returned status {code}; refusing to guess \
-                 whether the signed manifest is missing or transiently unavailable. \
-                 Retry, or investigate."
-            )
-        }
-    }
-}
-
-/// Download the per-release `sha256sum`-format checksum file and parse it
-/// into a `name -> hex-digest` map for the artifacts we plan to download.
-///
-/// The checksum file is the trust anchor for ADR-002 §W5.1. It is fetched
-/// from the same GitHub release URL as the artifacts, over TLS. Anyone
-/// who can swap the artifact can also swap the checksum file, so the
-/// real defence is end-to-end signing (cosign on the .tar.gz / SBOM
-/// today, on the checksum file itself in a future iteration). What we
-/// gain *now* is detection of mid-flight corruption and operator-error
-/// substitution at the URL level — both of which are ruled out by a
-/// matching hash.
-///
-/// Returns only entries for the artifacts in `wanted`; missing names
-/// short-circuit to a clear error.
-fn fetch_expected_hashes(
-    checksums_url: &str,
-    wanted: &[&str],
-) -> Result<std::collections::HashMap<String, String>> {
-    let tmp = tempfile::NamedTempFile::new().context("Failed to create temp file")?;
-    let tmp_path = tmp.path().to_string_lossy().to_string();
-    download_file(checksums_url, &tmp_path).with_context(|| {
-        format!(
-            "Failed to download checksum manifest from {checksums_url}.\n\
-             ADR-002 §W5.1 requires a hash-verified download; refusing to\n\
-             proceed without the checksum file. To bypass for an emergency\n\
-             rotation, set MVM_SKIP_HASH_VERIFY=1."
-        )
-    })?;
-    let body = std::fs::read_to_string(&tmp_path)
-        .with_context(|| format!("Failed to read checksum file at {tmp_path}"))?;
-
-    let mut map = std::collections::HashMap::new();
-    for line in body.lines() {
-        // `sha256sum` output: `<64-hex>  <filename>`. Two-space gap is
-        // canonical; a single space marks "text mode" but we accept
-        // either rather than be picky about emitter conventions.
-        let mut iter = line.splitn(2, char::is_whitespace);
-        let Some(hash) = iter.next() else { continue };
-        let Some(rest) = iter.next() else { continue };
-        let name = rest.trim().trim_start_matches('*').to_string();
-        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            map.insert(name, hash.to_ascii_lowercase());
-        }
-    }
-
-    for w in wanted {
-        if !map.contains_key(*w) {
-            anyhow::bail!(
-                "Checksum manifest at {checksums_url} did not include\n\
-                 an entry for '{w}'. Refusing to download an unverifiable\n\
-                 artifact. ADR-002 §W5.1."
-            );
-        }
-    }
-    Ok(map)
-}
-
-/// Stream `path` through SHA-256 and compare to `expected` (lowercase
-/// hex). On mismatch, delete the file and bail with a clear message.
-/// On `MVM_SKIP_HASH_VERIFY=1`, log a warning and accept — the env-var
-/// is the documented escape hatch for emergency-rotation scenarios per
-/// plan 29.
-fn verify_artifact_hash(path: &str, name: &str, expected: Option<&String>) -> Result<()> {
-    if std::env::var_os("MVM_SKIP_HASH_VERIFY").is_some() {
-        tracing::warn!(
-            "MVM_SKIP_HASH_VERIFY set — skipping integrity check on {name}. \
-             ADR-002 §W5.1 documents this as an emergency-rotation escape hatch."
-        );
-        return Ok(());
-    }
-    let Some(expected) = expected else {
-        // fetch_expected_hashes already enforced presence, but defend
-        // against a refactor that decouples the steps.
-        anyhow::bail!("internal: no expected hash recorded for {name}");
-    };
-
-    use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open downloaded artifact at {path}"))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .with_context(|| format!("Failed to hash downloaded artifact at {path}"))?;
-    let actual = format!("{:x}", hasher.finalize());
-
-    if actual != *expected {
-        let _ = std::fs::remove_file(path);
-        bump_verify_outcome("digest_mismatch");
-        anyhow::bail!(
-            "Integrity check failed for {name}.\n\
-             expected sha256: {expected}\n\
-             actual   sha256: {actual}\n\
-             \n\
-             The downloaded artifact does not match the published checksum.\n\
-             Refusing to use it. Possible causes:\n\
-             - mid-flight corruption (retry the download);\n\
-             - mirror/CDN cache poisoning (open an issue);\n\
-             - the release was re-uploaded and the manifest is stale.\n\
-             ADR-002 §W5.1."
-        );
-    }
-    ui::info(&format!("  ✓ verified {name} sha256={}", &actual[..12]));
-    Ok(())
-}
-
-/// Download a file from a URL using curl.
-fn download_file(url: &str, dest: &str) -> Result<()> {
-    let status = std::process::Command::new("curl")
-        .args(["-fSL", "--progress-bar", "-o", dest, url])
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .context("Failed to run curl")?;
-
-    if !status.success() {
-        // Clean up partial download
-        let _ = std::fs::remove_file(dest);
-        anyhow::bail!(
-            "Download failed. Pre-built images for v{version} may not yet be\n\
-             published — release tags are pushed before the artifact-build\n\
-             matrix completes, so a 404 here often just means the build is\n\
-             still in flight. Check the release page or retry in a few\n\
-             minutes:\n\
-             \n\
-             \x20   https://github.com/tinylabscom/mvm/releases/tag/v{version}\n\
-             \n\
-             To build locally instead, set up a Nix Linux builder:\n\
-             \n\
-             \x20 Option 1 — Temporary (run in another terminal):\n\
-             \x20   nix run 'nixpkgs#darwin.linux-builder'\n\
-             \n\
-             \x20 Option 2 — Permanent (add to /etc/nix/nix.conf):\n\
-             \x20   builders = ssh-ng://builder@linux-builder aarch64-linux /etc/nix/builder_ed25519 4 1 kvm,big-parallel - -\n\
-             \x20   builders-use-substitutes = true",
-            version = env!("CARGO_PKG_VERSION")
-        );
-    }
-    Ok(())
-}
-
 /// Locate the builder-VM flake at `nix/images/builder-vm/flake.nix`.
 ///
 /// Plan 115 / ADR-065: the consolidated flake produces both the
@@ -2095,8 +1901,6 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     out_dir: &str,
     source_fingerprint: &str,
 ) -> Result<()> {
-    use mvm_build::libkrun_builder::BuilderVmImage;
-
     let _stage0_guard = acquire_stage0_lock(out_dir)?;
 
     // Plan 93 Phase 3: time each host-visible Stage 0 step and print a
@@ -2166,11 +1970,11 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
             .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
-    let image = BuilderVmImage::new_root_dir(root_dir.clone(), "/init");
     let result = run_stage0_root_dir(
         &staging_dir,
         &workspace_root,
-        image,
+        &root_dir,
+        "/init",
         &host_bin_dir,
         source_fingerprint,
     );
@@ -2209,14 +2013,29 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
 fn run_stage0_root_dir(
     staging_dir: &std::path::Path,
     workspace_root: &std::path::Path,
-    image: mvm_build::libkrun_builder::BuilderVmImage,
+    guest_root_dir: &std::path::Path,
+    entry_path: &str,
     host_bin_dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
+    use mvm_build::builder_vm::BuilderVm;
     use mvm_build::libkrun_builder::LibkrunBuilderVm;
 
-    LibkrunBuilderVm::default()
-        .run_stage0(image, workspace_root, staging_dir, host_bin_dir)
+    // ADR-068: dispatch Stage 0 through the `BuilderVm` trait, the same
+    // seam `run_build` uses. Only the libkrun backend implements
+    // `run_stage0` today, so bind it concretely here rather than routing
+    // through the libkrun/Vz builder-backend selector — that keeps macOS
+    // 26+ (Vz-default) hosts bootstrapping via libkrun until a Vz Stage 0
+    // lands (ADR-068 §"Backend gaps").
+    let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+    backend
+        .run_stage0(
+            guest_root_dir,
+            entry_path,
+            workspace_root,
+            staging_dir,
+            host_bin_dir,
+        )
         .map_err(|e| {
             (
                 Stage0FailureStage::Build,
@@ -4099,134 +3918,6 @@ mod reap_orphans_tests {
 }
 
 #[cfg(test)]
-mod hash_verify_tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
-    use std::sync::Mutex;
-
-    /// Cargo test runs tests in parallel within a single binary. Two
-    /// of these tests touch `MVM_SKIP_HASH_VERIFY` (the global env-var
-    /// escape hatch from ADR-002 §W5.1), so they have to be serialised
-    /// against each other and against any other test that hashes a
-    /// real artifact. Static mutex held for the test's lifetime.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Compute the canonical lowercase-hex SHA-256 of a byte slice. Tests
-    /// use this to derive matching expected values without rebuilding
-    /// the production hash path.
-    fn hex_sha256(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
-    }
-
-    #[test]
-    fn verify_hash_accepts_matching_artifact() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("artifact");
-        let bytes = b"hello world\n";
-        std::fs::write(&path, bytes).unwrap();
-        let expected = hex_sha256(bytes);
-        let result = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&expected));
-        assert!(
-            result.is_ok(),
-            "matching hash should be accepted: {result:?}"
-        );
-        // File must still exist on success.
-        assert!(
-            path.exists(),
-            "verified file must not be deleted on success"
-        );
-    }
-
-    #[test]
-    fn verify_hash_rejects_mismatched_artifact_and_deletes() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("artifact");
-        std::fs::write(&path, b"actual contents").unwrap();
-        let expected = hex_sha256(b"different contents");
-        let err = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&expected))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Integrity check failed"),
-            "expected integrity-check error, got: {err}"
-        );
-        assert!(
-            !path.exists(),
-            "tampered file must be deleted to prevent reuse"
-        );
-    }
-
-    #[test]
-    fn verify_hash_skip_env_var_bypasses_check() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // Ensure the file exists even though we'll set a "wrong" hash.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("artifact");
-        std::fs::write(&path, b"contents").unwrap();
-        let wrong = hex_sha256(b"definitely not the contents");
-
-        // SAFETY: ENV_LOCK serialises every test that touches this env
-        // var, so no concurrent reader observes a half-set value. The
-        // unsafe block is only required by edition-2024's set_var /
-        // remove_var signatures; behaviour is unchanged.
-        unsafe {
-            std::env::set_var("MVM_SKIP_HASH_VERIFY", "1");
-        }
-        let result = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&wrong));
-        unsafe {
-            std::env::remove_var("MVM_SKIP_HASH_VERIFY");
-        }
-        assert!(result.is_ok(), "skip-env should bypass check: {result:?}");
-    }
-
-    #[test]
-    fn fetch_expected_hashes_parses_sha256sum_format() {
-        // Run a tiny in-process HTTP server? Overkill — the function
-        // takes a URL and shells out to curl. Instead, we test the
-        // parser by exercising it directly via a file:// URL: curl
-        // accepts file:// and just copies the bytes.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("checksums.txt");
-        let mut f = std::fs::File::create(&manifest_path).unwrap();
-        // Two-space gap is canonical sha256sum output. Mix in a leading
-        // '*' on one line (binary mode) to confirm we strip it.
-        writeln!(f, "{}  dev-vmlinux-x86_64", "a".repeat(64)).unwrap();
-        writeln!(f, "{} *dev-rootfs-x86_64.ext4", "b".repeat(64)).unwrap();
-        writeln!(f, "garbage line that is not a hash").unwrap();
-        drop(f);
-
-        let url = format!("file://{}", manifest_path.display());
-        let map = fetch_expected_hashes(&url, &["dev-vmlinux-x86_64", "dev-rootfs-x86_64.ext4"])
-            .expect("manifest should parse");
-        assert_eq!(map.get("dev-vmlinux-x86_64").unwrap(), &"a".repeat(64));
-        assert_eq!(map.get("dev-rootfs-x86_64.ext4").unwrap(), &"b".repeat(64));
-    }
-
-    #[test]
-    fn fetch_expected_hashes_errors_when_artifact_missing_from_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("checksums.txt");
-        std::fs::write(
-            &manifest_path,
-            format!("{}  some-other-file\n", "c".repeat(64)),
-        )
-        .unwrap();
-
-        let url = format!("file://{}", manifest_path.display());
-        let err = fetch_expected_hashes(&url, &["dev-vmlinux-x86_64"])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("did not include") && err.contains("dev-vmlinux-x86_64"),
-            "expected missing-entry error, got: {err}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod builder_vm_bootstrap_tests {
     //! Plan 72 W5 — `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
     use super::*;
@@ -4378,7 +4069,7 @@ mod builder_vm_bootstrap_tests {
         let out_dir = tmp.path().join("aarch64");
         let out_dir_str = out_dir.to_str().expect("utf-8 out_dir");
 
-        let first = acquire_stage0_lock(out_dir_str).expect("first acquisition should succeed");
+        let first = acquire_stage0_lock_uncontended(out_dir_str);
         // Lock file lives one directory above out_dir, named `stage0.lock`.
         assert!(
             tmp.path().join("stage0.lock").exists(),
@@ -4402,8 +4093,7 @@ mod builder_vm_bootstrap_tests {
         drop(first);
 
         // Now reachable again — guards must not leak past their scope.
-        let _second =
-            acquire_stage0_lock(out_dir_str).expect("acquisition should succeed after drop");
+        let _second = acquire_stage0_lock_uncontended(out_dir_str);
     }
 
     /// Lock setup must not fail when the parent cache directory does
@@ -4415,8 +4105,7 @@ mod builder_vm_bootstrap_tests {
         let nested = tmp.path().join("nested/builder-vm/aarch64");
         let nested_str = nested.to_str().expect("utf-8 nested");
 
-        let _guard =
-            acquire_stage0_lock(nested_str).expect("acquisition should create missing parent dir");
+        let _guard = acquire_stage0_lock_uncontended(nested_str);
         assert!(
             tmp.path().join("nested/builder-vm/stage0.lock").exists(),
             "lock file must be created at the constructed parent path"
@@ -4458,16 +4147,67 @@ mod builder_vm_bootstrap_tests {
         assert!(!is_orphan_stage0_staging_dir_name("riscv64-staging"));
     }
 
-    /// Plan 77 W2 — sweep removes a staging dir of the current form,
-    /// reports the byte count, leaves the live cache and unrelated
-    /// siblings intact, and the dry-run variant is purely observational
-    /// (no fs mutation).
-    #[test]
-    fn sweep_removes_orphan_staging_dir_and_leaves_siblings() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
+    /// `flock(2)` can spuriously report `EWOULDBLOCK` on a brand-new,
+    /// uncontended lock path when hundreds of test threads hammer the
+    /// syscall in parallel (seen as `acquire_stage0_lock` → `Err` /
+    /// `sweep` → `SkippedLockHeld` on paths no other test can possibly
+    /// hold). These helpers retry the *uncontended* acquisitions a bounded
+    /// number of times: the test owns the only would-be holder, so a
+    /// reported block here is always spurious. Tests that deliberately
+    /// contend the lock (`sweep_skips_when_stage0_lock_is_held`) do not use
+    /// these — they want the real "held" outcome.
+    fn acquire_stage0_lock_uncontended(out_dir: &str) -> mvm_core::atomic_io::FileLock {
+        for attempt in 0..200u32 {
+            match acquire_stage0_lock(out_dir) {
+                Ok(guard) => return guard,
+                Err(e) => {
+                    assert!(
+                        attempt < 199,
+                        "stage0 lock stayed spuriously blocked: {e:#}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        }
+        unreachable!()
+    }
 
-        // Build a representative layout under <root>.
+    fn try_acquire_filelock_uncontended(anchor: &std::path::Path) -> mvm_core::atomic_io::FileLock {
+        use mvm_core::atomic_io::FileLock;
+        for attempt in 0..200u32 {
+            match FileLock::try_acquire(anchor) {
+                Ok(Some(guard)) => return guard,
+                Ok(None) => {
+                    assert!(attempt < 199, "flock stayed spuriously blocked");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(e) => panic!("flock error: {e:#}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn sweep_uncontended(root: &std::path::Path, dry_run: bool) -> Stage0SweepOutcome {
+        for attempt in 0..200u32 {
+            match sweep_orphaned_stage0_staging_dirs_at(root, dry_run)
+                .expect("sweep should succeed")
+            {
+                Stage0SweepOutcome::SkippedLockHeld => {
+                    assert!(attempt < 199, "sweep stayed spuriously lock-blocked");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                swept => return swept,
+            }
+        }
+        unreachable!()
+    }
+
+    /// Build the representative sweep layout under `root`: one orphan
+    /// staging dir (18 bytes across two files), a live cache dir, and an
+    /// unrelated nix-store image sibling. Returns the three paths.
+    fn stage_sweep_layout(
+        root: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
         let orphan = root.join(".aarch64.stage0-12345-1700000000000000000");
         std::fs::create_dir_all(orphan.join("nested")).unwrap();
         std::fs::write(orphan.join("a"), b"hello world").unwrap(); // 11 bytes
@@ -4479,11 +4219,26 @@ mod builder_vm_bootstrap_tests {
 
         let nix_store = root.join("nix-store-aarch64.img");
         std::fs::write(&nix_store, b"sparse").unwrap();
+        (orphan, live_cache, nix_store)
+    }
 
-        // Dry-run: nothing should move.
-        match sweep_orphaned_stage0_staging_dirs_at(&root, true)
-            .expect("dry-run sweep should succeed")
-        {
+    // NOTE: the dry-run and real-run sweeps are split into two tests on
+    // purpose. A single test that swept twice took the Stage 0 `flock`,
+    // released it, then re-took it on the *same* path microseconds later;
+    // under parallel test load the close()-release / flock()-reacquire
+    // window intermittently surfaced `EWOULDBLOCK` (a `SkippedLockHeld`
+    // false positive). One acquire per test removes the self-race; the
+    // unique tempdir per test keeps them independent.
+
+    /// Plan 77 W2 — the dry-run sweep is purely observational: it reports
+    /// the orphan + byte count but mutates nothing.
+    #[test]
+    fn sweep_dry_run_reports_orphan_without_removing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let (orphan, live_cache, _nix_store) = stage_sweep_layout(&root);
+
+        match sweep_uncontended(&root, true) {
             Stage0SweepOutcome::Swept {
                 removed,
                 freed_bytes,
@@ -4495,9 +4250,18 @@ mod builder_vm_bootstrap_tests {
         }
         assert!(orphan.is_dir(), "dry-run must not remove the orphan");
         assert!(live_cache.is_dir(), "dry-run must not touch the live cache");
+    }
 
-        // Real run: orphan goes, siblings stay.
-        match sweep_orphaned_stage0_staging_dirs_at(&root, false).expect("sweep should succeed") {
+    /// Plan 77 W2 — the real sweep removes the orphan staging dir, reports
+    /// its byte count, and leaves the live cache and unrelated siblings
+    /// intact.
+    #[test]
+    fn sweep_real_run_removes_orphan_and_leaves_siblings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let (orphan, live_cache, nix_store) = stage_sweep_layout(&root);
+
+        match sweep_uncontended(&root, false) {
             Stage0SweepOutcome::Swept {
                 removed,
                 freed_bytes,
@@ -4520,16 +4284,12 @@ mod builder_vm_bootstrap_tests {
     /// staging dir the live run is about to promote.
     #[test]
     fn sweep_skips_when_stage0_lock_is_held() {
-        use mvm_core::atomic_io::FileLock;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::fs::create_dir_all(&root).unwrap();
 
         // Hold the lock as a "live" Stage 0 would.
-        let _live = FileLock::try_acquire(&root.join("stage0"))
-            .expect("first acquisition should not fail")
-            .expect("first acquisition should succeed");
+        let _live = try_acquire_filelock_uncontended(&root.join("stage0"));
 
         // Stage an orphan to confirm the sweep would have something to do.
         let orphan = root.join(".aarch64.stage0-12345-1700000000000000000");
@@ -5237,5 +4997,78 @@ mod builder_vm_bootstrap_tests {
         // introduce additional variants (e.g. `"alpine"`). Pinning the
         // current literal here so a rename surfaces immediately.
         assert_eq!(STAGE0_FLAVOR_CURRENT, "current");
+    }
+
+    /// A non-ext4 blob (here: zeros, no valid superblock) must surface
+    /// as an `Err` from the load, not a silent "init present / absent".
+    /// Cross-platform — no `mke2fs` needed to produce a bad image.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn verify_stage0_rootfs_has_init_rejects_non_ext4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, vec![0u8; 1024 * 1024]).unwrap();
+        let err = verify_stage0_rootfs_has_init(&rootfs)
+            .expect_err("a zero-filled blob is not a loadable ext4");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("as ext4"),
+            "error names the load failure: {msg}"
+        );
+    }
+
+    /// Build a tiny real ext4 from `staged_dir` at `image`, returning
+    /// `false` if `mke2fs` isn't installed (so the test skips rather than
+    /// fails on a host without e2fsprogs). Mirrors the preallocate-then-
+    /// `mke2fs -d` shape `mvm_build::oci_to_rootfs::ext4` uses.
+    #[cfg(all(feature = "builder-vm", target_os = "linux"))]
+    fn mke2fs_from_dir(staged_dir: &std::path::Path, image: &std::path::Path) -> bool {
+        {
+            let f = std::fs::File::create(image).expect("create image file");
+            f.set_len(16 * 1024 * 1024).expect("preallocate image");
+        }
+        match std::process::Command::new("mke2fs")
+            .args(["-q", "-F", "-t", "ext4", "-b", "4096", "-d"])
+            .arg(staged_dir)
+            .arg(image)
+            .output()
+        {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => panic!("mke2fs failed: {}", String::from_utf8_lossy(&out.stderr)),
+            Err(_) => false, // e2fsprogs absent on this host — skip.
+        }
+    }
+
+    /// Real ext4 round-trip: an image carrying `/sbin/mvm-host-vm-init`
+    /// passes; an otherwise-identical image without it fails. Linux-only
+    /// because `mke2fs` is the only ext4 writer available (matches the
+    /// `oci_to_rootfs` ext4 tests' gating).
+    #[cfg(all(feature = "builder-vm", target_os = "linux"))]
+    #[test]
+    fn verify_stage0_rootfs_has_init_round_trips_real_ext4() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let with_dir = tmp.path().join("with/sbin");
+        std::fs::create_dir_all(&with_dir).unwrap();
+        std::fs::write(with_dir.join("mvm-host-vm-init"), b"#!/bin/true\n").unwrap();
+        let with_img = tmp.path().join("with.ext4");
+        if !mke2fs_from_dir(&tmp.path().join("with"), &with_img) {
+            eprintln!("skipping: mke2fs not installed");
+            return;
+        }
+        verify_stage0_rootfs_has_init(&with_img)
+            .expect("rootfs carrying /sbin/mvm-host-vm-init must validate");
+
+        let without_dir = tmp.path().join("without/sbin");
+        std::fs::create_dir_all(&without_dir).unwrap();
+        std::fs::write(without_dir.join("something-else"), b"x").unwrap();
+        let without_img = tmp.path().join("without.ext4");
+        assert!(mke2fs_from_dir(&tmp.path().join("without"), &without_img));
+        let err = verify_stage0_rootfs_has_init(&without_img)
+            .expect_err("rootfs missing the init binary must be rejected");
+        assert!(
+            format!("{err:#}").contains("missing /sbin/mvm-host-vm-init"),
+            "error names the missing binary"
+        );
     }
 }
