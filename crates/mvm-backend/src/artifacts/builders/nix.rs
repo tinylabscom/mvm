@@ -85,7 +85,8 @@ impl MicrovmArtifactBuilder for NixMicrovmBuilder<'_> {
             _ => format!("packages.{nix_system}.default"),
         };
         let job = BuilderJob::Flake {
-            flake_ref,
+            // Clone so `flake_ref` is still available for Provenance below.
+            flake_ref: flake_ref.clone(),
             attr_path: attr_path.clone(),
         };
 
@@ -116,11 +117,15 @@ impl MicrovmArtifactBuilder for NixMicrovmBuilder<'_> {
             }
         };
 
-        // Kernel path: the builder VM returns `Option<PathBuf>`. When `None`,
-        // the rootfs embeds the kernel (initramfs-only flake); we treat it as
-        // a no-kernel artifact by substituting the rootfs path as the kernel
-        // path and `KernelFormat::Raw`. Real flake builds emit a kernel.
-        let kernel_path: PathBuf = kernel_path.unwrap_or_else(|| rootfs_path.clone());
+        // `kernel_path` must be present — every flake build we accept must emit
+        // a kernel alongside the rootfs. A `None` here means the builder returned
+        // an incomplete image; reject it rather than silently boot the rootfs as
+        // a kernel, which would produce a corrupt MicrovmArtifact.
+        let kernel_path: PathBuf = kernel_path.ok_or_else(|| {
+            ArtifactError::Io(std::io::Error::other(
+                "flake produced no kernel artifact (kernel_path is None)",
+            ))
+        })?;
 
         // ── Step 3: hash + format inference ──────────────────────────────────
         let kernel_hash = hash_file(&kernel_path)?;
@@ -190,7 +195,7 @@ impl MicrovmArtifactBuilder for NixMicrovmBuilder<'_> {
             },
             config_path: None,
             provenance: Some(Provenance {
-                flake_ref: Some(attr_path),
+                flake_ref: Some(flake_ref),
                 lock_hash,
             }),
             builder_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -441,6 +446,15 @@ mod tests {
             manifest.validation.is_some(),
             "manifest must carry a ValidationReport"
         );
+
+        // Provenance.flake_ref must be the actual flake reference from the spec,
+        // not the attr_path (regression check for the Fix-1 bug).
+        let provenance = manifest.provenance.expect("manifest must have provenance");
+        assert_eq!(
+            provenance.flake_ref.as_deref(),
+            Some("git+file:///work"),
+            "flake_ref must record the flake ref, not the attr_path"
+        );
     }
 
     /// arm64 Image magic sniff: a file with the arm64 magic at offset 56
@@ -476,16 +490,17 @@ mod tests {
         assert_eq!(sniff_kernel_format(&zst), KernelFormat::ImageZstd);
     }
 
-    /// When no kernel is returned by the builder (initramfs-only flake),
-    /// the builder falls back to using the rootfs path and `KernelFormat::Elf`.
+    /// When no kernel is returned by the builder, `build_microvm` must return
+    /// `Err` — silently booting the rootfs as the kernel would produce a
+    /// corrupt artifact.
     #[test]
-    fn build_microvm_handles_no_kernel_path() {
+    fn build_microvm_errors_when_no_kernel_path() {
         let tmp = tempfile::tempdir().unwrap();
         let (rootfs_path, _) = write_file(tmp.path(), "rootfs.ext4", &[0u8; 32]);
 
         let mock_vm = ScriptedBuilderVm {
             rootfs_path: rootfs_path.clone(),
-            kernel_path: None, // no kernel from builder
+            kernel_path: None, // builder emits no kernel
             revision_hash: "nk123".to_string(),
             lock_hash: None,
         };
@@ -500,13 +515,16 @@ mod tests {
         };
 
         let spec = fc_x86_spec("git+file:///work", "packages.x86_64-linux.default");
-        // Should succeed (fallback to rootfs path as kernel path)
         let result = builder.build_microvm(&spec);
-        // We just assert it doesn't panic/err on the fallback path; format
-        // will be Elf (rootfs bytes sniff as neither ELF nor arm64 Image).
-        assert!(result.is_ok(), "fallback kernel-path must not error");
-        let artifact = result.unwrap();
-        assert_eq!(artifact.kernel.path, rootfs_path);
+        assert!(
+            result.is_err(),
+            "missing kernel must be an error, not a silent fallback"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("kernel_path is None"),
+            "error message must mention kernel_path is None, got: {err_msg}"
+        );
     }
 
     /// `id` is a UUID v4 (non-nil, non-max).
