@@ -12,6 +12,10 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "mvm",
+      // Explicit .ico so the browser's automatic /favicon.ico probe is
+      // served as a static asset instead of falling through to Starlight's
+      // catch-all [...slug] route (which logs a getStaticPaths WARN in dev).
+      favicon: "/favicon.ico",
       logo: {
         light: "./src/assets/logo-light.svg",
         dark: "./src/assets/logo-dark.svg",
