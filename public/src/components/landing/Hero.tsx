@@ -26,12 +26,12 @@ function TerminalAnimation() {
   }, []);
 
   return (
-    <div className="w-full overflow-hidden rounded-xl border border-edge/60 bg-[#0a0e14] shadow-2xl shadow-black/40">
-      <div className="flex items-center gap-2 border-b border-edge/40 px-4 py-3">
-        <span className="h-3 w-3 rounded-full bg-[#ff5f57]/80" />
-        <span className="h-3 w-3 rounded-full bg-[#febc2e]/80" />
-        <span className="h-3 w-3 rounded-full bg-[#28c840]/80" />
-        <span className="ml-3 text-xs text-label/60">terminal</span>
+    <div className="w-full overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/30">
+      <div className="flex items-center gap-2 border-b border-code-border bg-code-header px-4 py-3">
+        <span className="h-3 w-3 rounded-full bg-dot-close/80" />
+        <span className="h-3 w-3 rounded-full bg-dot-minimize/80" />
+        <span className="h-3 w-3 rounded-full bg-dot-expand/80" />
+        <span className="ml-3 text-xs text-code-text/55">terminal</span>
       </div>
       <div className="p-5 font-mono text-[13px] leading-relaxed sm:p-6">
         {lines.slice(0, visibleLines).map((line, i) => (
@@ -39,10 +39,10 @@ function TerminalAnimation() {
             key={i}
             className={`${
               line.accent
-                ? "text-green"
+                ? "text-code-success"
                 : line.dim
-                  ? "text-label/60"
-                  : "text-heading"
+                  ? "text-code-text/55"
+                  : "text-code-text"
             } ${line.text === "" ? "h-3" : ""}`}
           >
             {line.text}
