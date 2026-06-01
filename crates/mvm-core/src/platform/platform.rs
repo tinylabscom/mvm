@@ -1,6 +1,28 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+/// Canonical libkrun shared-library search paths, ordered "most-likely first"
+/// so probes short-circuit on the typical developer install.
+///
+/// Single source of truth shared by [`Platform::has_libkrun`] and
+/// `mvm_libkrun::install_paths()`. Keeping both sides in sync is
+/// structurally guaranteed: `install_paths()` is derived from this const, so
+/// the two lists cannot drift.
+#[cfg(target_os = "macos")]
+pub const LIBKRUN_LIB_PATHS: &[&str] = &[
+    "/opt/homebrew/lib/libkrun.dylib", // Apple Silicon Homebrew
+    "/usr/local/lib/libkrun.dylib",    // manual / Intel Homebrew installs
+];
+#[cfg(target_os = "linux")]
+pub const LIBKRUN_LIB_PATHS: &[&str] = &[
+    "/usr/lib/x86_64-linux-gnu/libkrun.so",
+    "/usr/lib/aarch64-linux-gnu/libkrun.so",
+    "/usr/lib64/libkrun.so",
+    "/usr/local/lib/libkrun.so",
+];
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub const LIBKRUN_LIB_PATHS: &[&str] = &[];
+
 /// The execution environment for running workloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -109,33 +131,9 @@ impl Platform {
         if matches!(self, Platform::MacOS) {
             return false;
         }
-        // Filesystem probe of standard libkrun install paths. Mirrors
-        // `mvm_libkrun::is_available()` — kept here to avoid a dep cycle
-        // (mvm-core ← mvm-libkrun; adding the reverse closes the cycle).
-        #[cfg(target_os = "macos")]
-        {
-            [
-                "/opt/homebrew/lib/libkrun.dylib",
-                "/usr/local/lib/libkrun.dylib",
-            ]
-            .iter()
-            .any(|p| Path::new(p).exists())
-        }
-        #[cfg(target_os = "linux")]
-        {
-            [
-                "/usr/lib/x86_64-linux-gnu/libkrun.so",
-                "/usr/lib/aarch64-linux-gnu/libkrun.so",
-                "/usr/lib64/libkrun.so",
-                "/usr/local/lib/libkrun.so",
-            ]
-            .iter()
-            .any(|p| Path::new(p).exists())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            false
-        }
+        // Filesystem probe — delegates to the canonical path list so
+        // this probe and mvm_libkrun::install_paths() can never drift.
+        LIBKRUN_LIB_PATHS.iter().any(|p| Path::new(p).exists())
     }
 
     /// Whether Cloud Hypervisor is installed on this host.

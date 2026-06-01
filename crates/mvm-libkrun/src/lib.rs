@@ -166,27 +166,12 @@ pub const fn install_hint() -> &'static str {
 /// Standard filesystem locations checked by [`is_available`]. Order is
 /// "most likely first" so the predicate short-circuits on the typical
 /// developer install.
+///
+/// Derived from `mvm_core::platform::LIBKRUN_LIB_PATHS` — the canonical
+/// source of truth. Both sides are structurally identical; use the const
+/// directly when a slice suffices, this function when a `Vec` is needed.
 pub fn install_paths() -> Vec<&'static str> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![
-            "/opt/homebrew/lib/libkrun.dylib", // Apple Silicon Homebrew
-            "/usr/local/lib/libkrun.dylib",    // manual installs
-        ]
-    }
-    #[cfg(target_os = "linux")]
-    {
-        vec![
-            "/usr/lib/x86_64-linux-gnu/libkrun.so",
-            "/usr/lib/aarch64-linux-gnu/libkrun.so",
-            "/usr/lib64/libkrun.so",
-            "/usr/local/lib/libkrun.so",
-        ]
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Vec::new()
-    }
+    mvm_core::platform::LIBKRUN_LIB_PATHS.to_vec()
 }
 
 /// Extra block device to attach to the guest alongside the rootfs.
@@ -2196,6 +2181,27 @@ mod tests {
                 );
             }
             other => panic!("expected Error::Io with Tsi message, got {other:?}"),
+        }
+    }
+
+    /// Assert that `install_paths()` is correctly wired to
+    /// `mvm_core::platform::LIBKRUN_LIB_PATHS` — same entry count and
+    /// matching first entry. Catches any future refactor that breaks the
+    /// delegation without altering the public function signature.
+    #[test]
+    fn install_paths_matches_core_const() {
+        let paths = install_paths();
+        let canonical = mvm_core::platform::LIBKRUN_LIB_PATHS;
+        assert_eq!(
+            paths.len(),
+            canonical.len(),
+            "install_paths() entry count differs from LIBKRUN_LIB_PATHS"
+        );
+        if !canonical.is_empty() {
+            assert_eq!(
+                paths[0], canonical[0],
+                "install_paths()[0] differs from LIBKRUN_LIB_PATHS[0]"
+            );
         }
     }
 }
