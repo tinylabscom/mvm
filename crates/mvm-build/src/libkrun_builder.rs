@@ -340,13 +340,24 @@ impl LibkrunBuilderVm {
         image: BuilderVmImage,
         workspace_dir: &std::path::Path,
         artifact_out: &std::path::Path,
+        host_bin_dir: &std::path::Path,
     ) -> Result<(), BuilderVmError> {
         ensure_utf8_path(workspace_dir, "workspace_dir")?;
         ensure_utf8_path(artifact_out, "artifact_out")?;
+        ensure_utf8_path(host_bin_dir, "host_bin_dir")?;
         if !workspace_dir.is_dir() {
             return Err(BuilderVmError::ExtractionFailed(format!(
                 "Stage 0 workspace_dir must be an existing directory: {}",
                 workspace_dir.display()
+            )));
+        }
+        // The builder-vm flake installs the pre-cross-compiled host-vm
+        // binaries from this dir rather than building them with the guest's
+        // nix (ADR-065); the Stage 0 nix build aborts without it.
+        if !host_bin_dir.is_dir() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "Stage 0 host_bin_dir must be an existing directory: {}",
+                host_bin_dir.display()
             )));
         }
         std::fs::create_dir_all(artifact_out).map_err(|e| {
@@ -381,7 +392,10 @@ impl LibkrunBuilderVm {
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
             .add_virtio_fs("work", path_to_str(workspace_dir, "workspace_dir")?)
-            .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?);
+            .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
+            // /mvm-bins inside the guest — init.sh sets MVM_HOST_BIN_DIR to
+            // it so the flake picks up the pre-built host-vm binaries.
+            .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?);
 
         krun = apply_networking_mode(krun, &vm_state_dir)?;
 

@@ -1,4 +1,6 @@
 /target
+# Swift Package Manager build output (mvm-providers/swift, mvm-vz-supervisor).
+**/.build/
 .playwright-mcp/
 .claude
 **/node_modules

@@ -52,6 +52,14 @@
 
 - [ ] **Step 1:** Quickstart leads with the `Sandbox` one-call DX (120/125) — `pip install mvm; Sandbox.create(image=…); sb.exec(...)`. `contributing/development.md` reflects the 17-crate layout + the new test tiers (128). `troubleshooting.md` matches the new backends/errors (ADR-053 taxonomy). Positioning leads with the security spine (the gap-analysis differentiators), DX as the floor, and the **local-first** framing — runs on your machine, data never leaves it, no per-minute billing, free + open (the mvm-standalone story; mvmd is the cloud/fleet layer). mvm-vs-mvmd *is* local-vs-cloud.
 - [ ] **Step 2:** No competitor names anywhere (repo policy). Commit.
+- [ ] **Step 3 (ADR-060/065 carryover — terminology rename):** Replace the legacy "dev VM" phrase with "interactive builder VM" wherever it describes `mvmctl dev up` / `dev shell` / `dev down` / `dev status`. Code-side copy is already done; the surfaces that still need the rename are `public/src/content/docs/reference/cli-commands.md`, `public/src/content/docs/guides/troubleshooting.md`, and any `getting-started/`/`first-microvm` doc that still uses the old phrase (`rg -l 'dev VM|dev-vm' public/src/content/docs/`). Add a one-paragraph glossary entry in `reference/architecture.md` (or wherever the unified-image story lands) cross-referencing ADR-060 + ADR-065 so future search hits the single-builder-image story.
+
+### Task C3: security-posture docs — trust-zones table + disclosure runbook
+
+The trust-zone model exists in ADR-002 §"Trust layers (Matryoshka model)" + the public `security/matryoshka.md`, but not as an actionable table; `SECURITY.md` exists at the repo root with no triage runbook behind it.
+
+- [ ] **Step 1:** In `public/src/content/docs/security/threat-model.md`, add a zone-transition table — for each adjacent pair (guest↔supervisor, supervisor↔runtime, runtime↔host) the enforcement boundary + the mitigating claim, plus a per-platform (Linux/macOS) attack→mitigation row set. Source it from ADR-002 §matryoshka (link, don't restate); the "workload runs in the zone with no powers" framing matches brief §0b. Commit.
+- [ ] **Step 2:** Write `specs/runbooks/security-disclosure.md` (intake → triage → fix → coordinated disclosure) and link it from the root `SECURITY.md` + `contributing/development.md`. Flag enabling GitHub Private Vulnerability Reporting on the repo as a one-time org-ops action (a checklist line — not auto-done here). Commit.
 
 ## Phase D — the docs-drift gate
 
@@ -68,6 +76,7 @@
 - [ ] The audit work-list exists; every doc is tagged generated/prose with its fix.
 - [ ] `reference/cli-commands.md` is **generated** from clap (matches the ≤15 nested tree); the SDK reference is generated from `xtask gen-sdk --docs`.
 - [ ] The Nix/build guide is `mkGuest`-based; the quickstart leads with `Sandbox`; the contributor/troubleshooting/positioning pages match the rewrite; no competitor names.
+- [ ] Security-posture docs land: a trust-zone/blast-radius table in `security/threat-model.md` (sourced from ADR-002 §matryoshka) + `specs/runbooks/security-disclosure.md` linked from `SECURITY.md`.
 - [ ] `xtask check-docs` enforces three properties (generated no-drift, examples compile/run, referenced commands exist) and is a **required** CI check.
 - [ ] `cargo test --workspace` + the docs site build + clippy + fmt green.
 
@@ -78,7 +87,7 @@
 
 ## Self-review
 
-- **Coverage:** generated reference (CLI B1, SDK B2), prose rewrite (C1/C2), the enforcing gate (D1), the audit (A1). The split (generate what drifts, gate what doesn't) is the durable answer to "docs match functionality."
+- **Coverage:** generated reference (CLI B1, SDK B2), prose rewrite (C1/C2), security-posture docs (C3), the enforcing gate (D1), the audit (A1). The split (generate what drifts, gate what doesn't) is the durable answer to "docs match functionality."
 - **Grounding:** names the real doc files (`public/src/content/docs/...`), ties each doc to the plan that changed its behavior, and reuses 124's `gen-sdk` + the clap tree as the sources of truth.
 - **Honesty:** the gate runs examples, not just lints prose — a doc can't claim a behavior the code doesn't have. No competitor names (repo policy) is an explicit acceptance item.
 - **Voice:** comments/notes mark the non-obvious (why generate vs hand-write, why run the examples rather than trust them), not the mechanics.

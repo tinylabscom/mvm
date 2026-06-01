@@ -27,7 +27,7 @@ builtins.path {
       base = baseNameOf path;
     in
     !(builtins.elem base [
-      # Build artifacts (Rust / Node / Astro / Nix outputs).
+      # Build artifacts (Rust / Node / Astro / Swift / Nix outputs).
       "target"
       "result"
       "node_modules"
@@ -35,6 +35,10 @@ builtins.path {
       ".cargo"
       "dist"
       ".astro"
+      # Swift Package Manager output. mvm-providers/swift and
+      # mvm-vz-supervisor each carry a multi-GB .build; leaving it in
+      # OOMs the Stage 0 guest while it unpacks the staged workspace.
+      ".build"
       "dev-prebuilt"
       # Test / generated outputs.
       ".mvm-test"

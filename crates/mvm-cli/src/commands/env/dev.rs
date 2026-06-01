@@ -77,29 +77,35 @@ impl DevVmBackend {
 /// real runtime; tests for hermetic coverage) agree on this single
 /// source of truth.
 ///
-/// Selection order (Plan 98 Slice 2B):
-///   1. Builder-backend override prefers Vz **and** Vz is available
-///      on this host → `DevBackend::Vz`. This catches both the
-///      `--builder vz` flag (folded into the env at startup by
-///      `commands::run`) and the bare `MVM_BUILDER_BACKEND=vz`
-///      env-var path. Vz on macOS 13-25 stays opt-in only —
-///      auto-detect won't pick it because the deployment baseline is
-///      macOS 26+.
-///   2. macOS 26+ Apple Silicon with Apple Containers → AppleContainer.
-///   3. macOS with libkrun → Libkrun (legacy fallback).
-///   4. Linux with KVM → LinuxKvm.
-///   5. Otherwise → Unsupported.
+/// Selection order:
+///   1. Builder override prefers Vz **and** Vz is available → `Vz`.
+///      Catches both `--builder vz` (folded into the env at startup by
+///      `commands::run`) and a bare `MVM_BUILDER_BACKEND=vz`. Vz on
+///      macOS 13-25 stays opt-in — auto-detect won't pick it because
+///      the deployment baseline is macOS 26+.
+///   2. Builder override *explicitly* prefers libkrun **and** libkrun
+///      is available on macOS → `Libkrun`. The symmetric counterpart
+///      to rule 1: an operator who asks for libkrun gets the dev VM on
+///      libkrun even on a macOS 26+ box where Apple Container would
+///      otherwise win rule 3.
+///   3. macOS 26+ Apple Silicon with Apple Containers → AppleContainer.
+///   4. macOS with libkrun → Libkrun (legacy fallback).
+///   5. Linux with KVM → LinuxKvm.
+///   6. Otherwise → Unsupported.
 ///
-/// Apple Container still wins over Libkrun on the auto-detect path
-/// (rule 2 vs 3) per the CLAUDE.md "Dev mode" rationale: AC is the
-/// documented Stage 0 boundary AND the build boundary
-/// `RuntimeBuildEnv::shell_exec_visible` routes through. Picking
-/// Libkrun-the-dev-backend while `LinuxEnv` is `AppleContainerEnv`
-/// leaves the dev VM under one runtime and the build boundary under
-/// another, neither one starting the other.
+/// On the *auto-detect* path (no explicit override) Apple Container
+/// still wins over Libkrun (rule 3 vs 4) per the CLAUDE.md "Dev mode"
+/// rationale: AC is the documented Stage 0 boundary AND the build
+/// boundary `RuntimeBuildEnv::shell_exec_visible` routes through.
+/// Splitting the dev VM (Libkrun) from the build boundary
+/// (`AppleContainerEnv`) would leave each under a runtime the other
+/// never starts. An explicit `prefers_libkrun` is the one signal that
+/// overrides this — because it also moves the build boundary onto
+/// libkrun, keeping both halves on the same VMM.
 fn select_dev_backend(
     plat: Platform,
     prefers_vz: bool,
+    prefers_libkrun: bool,
     has_vz: bool,
     has_apple_containers: bool,
     has_libkrun: bool,
@@ -109,7 +115,14 @@ fn select_dev_backend(
     if prefers_vz && has_vz {
         return DevBackend::Vz;
     }
-    // 2-5. Standard auto-detect tree.
+    // 2. Explicit libkrun override on macOS — run the dev VM on libkrun
+    //    even where Apple Container would win auto-detect, so the dev VM
+    //    rides the same VMM the build path uses. This is the path that's
+    //    wired end-to-end today.
+    if prefers_libkrun && has_libkrun && matches!(plat, Platform::MacOS) {
+        return DevBackend::Libkrun;
+    }
+    // 3-6. Standard auto-detect tree.
     if has_apple_containers {
         DevBackend::AppleContainer
     } else if matches!(plat, Platform::MacOS) && has_libkrun {
@@ -133,11 +146,31 @@ fn builder_prefers_vz() -> bool {
     false
 }
 
+// True only when the operator *explicitly* asked for libkrun: the
+// `--builder libkrun` flag (folded into the env at startup) or a bare
+// `MVM_BUILDER_BACKEND=libkrun`. We read the explicit env override here
+// rather than `resolve_choice()` on purpose — libkrun is also the silent
+// auto-detect fallback on every macOS box that isn't 26+ Apple Silicon,
+// so keying off the resolved choice would drag all of them off the
+// Apple Container default. Only an explicit ask should do that.
+#[cfg(feature = "builder-vm")]
+fn builder_prefers_libkrun() -> bool {
+    use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_env_override};
+
+    matches!(resolve_env_override(), Some(BuilderBackendChoice::Libkrun))
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn builder_prefers_libkrun() -> bool {
+    false
+}
+
 fn current_backend() -> DevBackend {
     let plat = platform::current();
     select_dev_backend(
         plat,
         builder_prefers_vz(),
+        builder_prefers_libkrun(),
         plat.has_vz(),
         plat.has_apple_containers(),
         plat.has_libkrun(),
@@ -742,6 +775,7 @@ mod tests {
             select_dev_backend(
                 Platform::MacOS,
                 /* prefers_vz */ true,
+                /* prefers_libkrun */ false,
                 /* has_vz */ true,
                 /* has_apple_containers */ false,
                 /* has_libkrun */ true,
@@ -757,7 +791,7 @@ mod tests {
         // user explicitly chose Vz. AC is rule 2; the Vz override is
         // rule 1, so the override should win even on macOS 26+.
         assert_eq!(
-            select_dev_backend(Platform::MacOS, true, true, true, true, false,),
+            select_dev_backend(Platform::MacOS, true, false, true, true, true, false,),
             DevBackend::Vz,
         );
     }
@@ -772,6 +806,7 @@ mod tests {
             select_dev_backend(
                 Platform::LinuxNative,
                 true,
+                /* prefers_libkrun */ false,
                 /* has_vz */ false,
                 false,
                 false,
@@ -783,16 +818,57 @@ mod tests {
 
     #[test]
     fn builder_libkrun_picks_apple_containers_when_available() {
-        // Auto-detect tree: AC wins over libkrun on macOS 26+ even
-        // though both are present (CLAUDE.md "Dev mode" rationale).
+        // Auto-detect tree (no explicit override): AC wins over libkrun
+        // on macOS 26+ even though both are present (CLAUDE.md "Dev mode"
+        // rationale). The regression guard that auto-detect libkrun does
+        // *not* divert off AC — only an explicit ask does (next test).
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
                 /* prefers_vz */ false,
+                /* prefers_libkrun */ false,
                 true,
                 true,
                 true,
                 false,
+            ),
+            DevBackend::AppleContainer,
+        );
+    }
+
+    #[test]
+    fn explicit_libkrun_overrides_apple_containers() {
+        // The symmetric counterpart to the Vz override: an operator who
+        // sets MVM_BUILDER_BACKEND=libkrun on a macOS 26+ box (AC present)
+        // gets the dev VM on libkrun, not Apple Container.
+        assert_eq!(
+            select_dev_backend(
+                Platform::MacOS,
+                /* prefers_vz */ false,
+                /* prefers_libkrun */ true,
+                /* has_vz */ true,
+                /* has_apple_containers */ true,
+                /* has_libkrun */ true,
+                /* has_kvm */ false,
+            ),
+            DevBackend::Libkrun,
+        );
+    }
+
+    #[test]
+    fn explicit_libkrun_without_libkrun_falls_through() {
+        // Defend in depth (mirrors the Vz fall-through): if libkrun was
+        // asked for but isn't actually installed, don't return a Libkrun
+        // backend that can't run — fall through to the auto-detect tree.
+        assert_eq!(
+            select_dev_backend(
+                Platform::MacOS,
+                /* prefers_vz */ false,
+                /* prefers_libkrun */ true,
+                /* has_vz */ false,
+                /* has_apple_containers */ true,
+                /* has_libkrun */ false,
+                /* has_kvm */ false,
             ),
             DevBackend::AppleContainer,
         );
@@ -805,6 +881,7 @@ mod tests {
             select_dev_backend(
                 Platform::MacOS,
                 /* prefers_vz */ false,
+                /* prefers_libkrun */ false,
                 true,
                 false,
                 true,
@@ -820,6 +897,7 @@ mod tests {
             select_dev_backend(
                 Platform::LinuxNative,
                 /* prefers_vz */ false,
+                /* prefers_libkrun */ false,
                 false,
                 false,
                 false,
@@ -837,6 +915,7 @@ mod tests {
             select_dev_backend(
                 Platform::MacOS,
                 /* prefers_vz */ false,
+                /* prefers_libkrun */ false,
                 false,
                 false,
                 false,

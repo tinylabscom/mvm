@@ -81,6 +81,11 @@ The survey flagged erofs (smaller) vs squashfs (faster) for the read-only root. 
 
 - [ ] Drop the `microvm.nix` dependency from `flake.nix` entirely once the slim path is the only one (a CHANGELOG + ADR-013 supersession note).
 - [ ] Per-workload base-image caching (the COW shared-base from 123 B3) over the slim base.
+- [ ] **Own the guest kernel** instead of riding libkrunfw's bundled image. Today `mvm-libkrun::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata`; pin/build our own tiny kernel (composes with Task A3) so the boot artifact isn't tied to whatever libkrunfw ships.
+- [ ] **Multi-arch image build** — produce `aarch64` *and* `x86_64` rootfs+kernel from the one flake, so a build host can target either guest arch.
+- [ ] **Image-fingerprint cache** — fingerprint the build inputs (flake lock + the dep manifest, e.g. `requirements.txt` / `package.json`) and reuse a cached rootfs / dep-volume layer when the fingerprint is unchanged, instead of rebuilding. Reuses the app-dep volume hash from ADR-047.
+- [ ] **Faster `nix build`** — measure `nix-fast-build` (and parallel evaluation) against the builder VM's serial `nix build`; adopt only if the numbers (plan 127 harness) justify the extra moving part.
+- [ ] **Quiet the gvproxy teardown logs** — the `gvproxy.sock-krun.sock … use of closed network connection` errors are a benign teardown race (the VM closes the unixgram peer before gvproxy notices). Lower gvproxy's log level or filter that line so `dev up` output isn't alarming. (Surfaced during plan 120's libkrun demo.)
 
 ## Self-review
 

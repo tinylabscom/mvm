@@ -76,8 +76,9 @@ EOF
 # kernel exposes them as virtio devices but the in-VM init does
 # not mount them — the guest has to do it. Tags match the
 # `add_virtio_fs(tag, ...)` calls in `LibkrunBuilderVm::run_stage0`.
-mountpoint -q /work || mount -t virtiofs work /work
-mountpoint -q /out  || mount -t virtiofs out  /out
+mountpoint -q /work     || mount -t virtiofs work     /work
+mountpoint -q /out      || mount -t virtiofs out      /out
+mountpoint -q /mvm-bins || mount -t virtiofs mvm-bins /mvm-bins
 if ! mountpoint -q /work; then
   echo "stage0-init: /work mount failed; aborting." >&2
   exit 64
@@ -85,6 +86,14 @@ fi
 if ! mountpoint -q /out; then
   echo "stage0-init: /out mount failed; aborting." >&2
   exit 65
+fi
+# The builder-vm flake installs the pre-cross-compiled host-vm binaries
+# (mvm-builder-init, mvm-egress-proxy) from /mvm-bins instead of building
+# them with the guest's nix (ADR-065). Without this mount the build aborts
+# with "MVM_HOST_BIN_DIR is not set".
+if ! mountpoint -q /mvm-bins; then
+  echo "stage0-init: /mvm-bins mount failed; aborting." >&2
+  exit 66
 fi
 
 # libkrun's set_root mode backs the guest root with virtio-fs
@@ -157,6 +166,10 @@ mkdir -p "$HOME"
 # `/`, tripping over /dev/btrfs-control + friends). The flake
 # checks this env under `--impure` (already set below).
 export MVM_WORKSPACE_PATH=/work
+
+# Point the flake at the mounted host-vm binaries (see the /mvm-bins
+# mount above). The flake reads this under --impure.
+export MVM_HOST_BIN_DIR=/mvm-bins
 
 ARCH="$(uname -m)"
 FLAKE_REF="path:/work/nix/images/builder-vm#packages.${ARCH}-linux.default"

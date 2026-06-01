@@ -60,6 +60,7 @@ ADR-066 §6. The builder/dev VM bakes the agent (via mkGuest) but PID 1 (`mvm-ho
 
 - [ ] **Step 1:** Failing test — `mvm-host-vm-init` startup spawns `mvm-guest-agent` under setpriv to the agent uid (assert the child is launched + reachable on vsock 5252 in a gated boot test). The dev/builder tier runs the `dev-shell` agent (with `do_exec` — a dev-tier VM, ADR-002 tier matrix).
 - [ ] **Step 2:** Fork it alongside the builder protocol + the PTY console; the agent and the build path coexist (mkGuest's workload `/init` already does both). Commit.
+- [ ] **Step 3 (B1 follow-up — ADR-060 carryover):** `mvm-cli`'s `builder-vm` cargo feature gates `ensure_interactive_builder_vm_image()` and therefore `mvmctl dev up`. Confirm the feature stays in the default feature set after the universal-agent rework — `cargo metadata --format-version=1 | jq '.packages[]|select(.name=="mvm-cli")|.features.default'` should still list it. If a slim-feature release build ever drops it, document the consequence (no `mvmctl dev up`) in CLAUDE.md "Host dependencies" and add a fail-closed message in the `cfg(not(feature = "builder-vm"))` arm of `crates/mvm-cli/src/commands/env/apple_container.rs`. Cross-references Plan 126 feature-gate inventory.
 
 ### Task B2: `xtask check-guest-agent-in-all-images`
 

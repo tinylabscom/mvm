@@ -74,7 +74,7 @@ The decorator `.py` path **is wired** — `crates/mvm-cli/src/commands/build/com
 
 **Files:** Create `crates/mvm-cli/tests/compile_hello_app.rs` (CLI integration tests live in `crates/mvm-cli/tests/` per CLAUDE.md). Modify `crates/mvm-cli/src/commands/build/compile.rs:1–26`.
 
-- [ ] **Step 1: Write the failing CLI test.**
+- [x] **Step 1: Write the failing CLI test.**
 
   ```rust
   // Plan 120 Task 2: the decorator `.py` path lowers statically (no host exec).
@@ -95,12 +95,12 @@ The decorator `.py` path **is wired** — `crates/mvm-cli/src/commands/build/com
   }
   ```
 
-- [ ] **Step 2: Run it.** `cargo test -p mvm-cli --test compile_hello_app -- --nocapture`
+- [x] **Step 2: Run it.** `cargo test -p mvm-cli --test compile_hello_app -- --nocapture`
   Expected: PASS — `compile.rs:181` already lowers `app.py` via `parse_python`. **If** it instead bails `not-yet-implemented`, that is the gap to close: in `compile.rs::run` wire the `.py` arm to `parse_python(&bytes, &path)? -> App -> Workload -> compile(&workload, out, manifest_dir)` using the symbols already imported at `compile.rs:36`. Re-run to green.
 
-- [ ] **Step 3: Correct the stale docstring** at `crates/mvm-cli/src/commands/build/compile.rs:8–18` — state that the `.py`/`.ts` decorator entry is parsed statically (via `parse_python`/`parse_typescript`) into the Workload IR and lowered; drop the "lands with Phase 4 / v1 only handles the IR-JSON path / rejected with a `not-yet-implemented` pointer" sentences. Keep the `--from-ir`, `--from-recording`, `--out`, `--mode`, `--dev`/`--prod` flag descriptions.
+- [x] **Step 3: Correct the stale docstring** at `crates/mvm-cli/src/commands/build/compile.rs:8–18` — state that the `.py`/`.ts` decorator entry is parsed statically (via `parse_python`/`parse_typescript`) into the Workload IR and lowered; drop the "lands with Phase 4 / v1 only handles the IR-JSON path / rejected with a `not-yet-implemented` pointer" sentences. Keep the `--from-ir`, `--from-recording`, `--out`, `--mode`, `--dev`/`--prod` flag descriptions.
 
-- [ ] **Step 4: Run the test again** (`cargo test -p mvm-cli --test compile_hello_app`) → PASS, then `cargo fmt --all -- --check`.
+- [x] **Step 4: Run the test again** (`cargo test -p mvm-cli --test compile_hello_app`) → PASS, then `cargo fmt --all -- --check`.
 
 - [ ] **Step 5: Commit.**
   ```bash
@@ -114,7 +114,7 @@ One gated test driving the whole spine with the **verified** verbs: `mvmctl dev 
 
 **Files:** Create `crates/mvm-cli/tests/core_demo_e2e.rs`.
 
-- [ ] **Step 1: Write the failing E2E (gated; default-skips).**
+- [x] **Step 1: Write the failing E2E (gated; default-skips).**
 
   ```rust
   // Plan 120 core-demo E2E: dev up -> compile the hello-app -> up (build+boot) ->

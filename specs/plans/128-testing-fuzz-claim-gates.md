@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make "all 14 claims stay CI-gated" *true* — it isn't today. Rebuild the testing pyramid (fast-default host/mock tier + gated-slow live-KVM/E2E tier, drop none), re-home the fuzz targets after the crate moves, **build the gates that are missing or broken** (claim 4's script, the claim 12/13 gate, plus the new gates 124/126/127/130 defer here), and re-verify the §8 claim→gate map end to end.
+**Goal:** Make "every security claim stays CI-gated" *true* — it isn't today. Rebuild the testing pyramid (fast-default host/mock tier + gated-slow live-KVM/E2E tier, drop none), re-home the fuzz targets after the crate moves, **build the gates that are missing or broken** (claim 4's script, the claim 12/13 gate, **promote the supervisor jailer to a numbered claim** (§C4), plus the new gates 124/126/127/130 defer here), and re-verify the §8 claim→gate map end to end.
 
 **Architecture:** This is the plan that wires every deferred CI gate. ADR-066 §8 (verified 2026-05-31) found the hard truth: claim 4's `scripts/check-prod-agent-no-exec.sh` is **missing/untracked** yet called by `security.yml`+`Justfile` (latent — `security.yml` runs on release tags only, so PR CI looks green); claims 12 & 13 have **no gate at all** (the cited tests + the three `check-handler-*` lints + `fuzz_service_call` don't exist); claims 8/9/10 ride the generic `ci.yml::test` with no dedicated job. The testing tiers use `MockBackend`/`ExampleBackend` (ADR-045) for the hermetic fast path and `MVM_E2E_SMOKE`-gated live lanes for the slow path.
 
@@ -49,6 +49,14 @@ The §8 note said "build against the `host.audit.v1` reality (the dropped `host.
 - [ ] **Step 1:** Failing tests — (claim 12) a broker/service call is denied unless bound to a signed `ExecutionPlan.services` binding; (claim 13 / 129) no raw secret value reaches the guest, substitution fires only for bound destinations, and **the audit chain carries no secret bytes**. These are 129's leak-gate tests; this plan wires them as a dedicated CI job.
 - [ ] **Step 2:** Implement the `xtask`/test gate + the `ci.yml` job. If the three `check-handler-*` lints (cited in CLAUDE.md but absent) are still wanted, build them here against the real handler registry; otherwise drop the CLAUDE.md over-claim. Commit.
 
+### Task C2.1: stage0 audit + cache-prune contract for the unified builder image (ADR-060/065 carryover)
+
+ADR-065's single canonical `nix/images/builder-vm/` rootfs is now the substrate for both interactive `mvmctl dev up` and submitted builder jobs. The pre-existing stage0 audit + cache-prune contract (CLAUDE.md "Security model" + memory entry `project_stage0_audit_and_cache_prune_contract`) was written for a single lifecycle; verify it holds under the dual-lifecycle unified image as a Plan-128-style claim gate (chain integrity + lifecycle correctness).
+
+- [ ] **Step 1:** Failing integration test in `crates/mvm-cli/tests/` driving the sequence `mvmctl dev up` → submit a synthetic builder job → `mvmctl cache prune`. Assertions: (a) `stage0_*` events fire once per phase transition per lifecycle — no duplicates, no skips, no cross-talk between the interactive lock and the build-job lock; (b) `cache prune` respects the interactive-mode lock and does not delete the in-use builder-VM artifact; (c) pre-`Stage0Boot` failures still are *not* audited (matches the existing contract — failures before lifecycle entry stay silent by design).
+- [ ] **Step 2:** Extend `mvmctl audit verify` to validate the chain across both lifecycles in one invocation (today it walks them separately if at all). Surface the cross-lifecycle verdict on `mvmctl doctor`'s posture line so a chain drift is observable without diving into the audit log.
+- [ ] **Step 3:** Wire the integration test as a CI lane that runs on every PR touching `crates/mvm-cli/src/commands/env/`, `crates/mvm-build/src/`, or `nix/images/builder-vm/`. The lane fails closed on any drift in the assertions above. Commit.
+
 ### Task C3: wire the gates the other plans deferred here
 
 - [ ] **Step 1:** `check-guest-agent-in-all-images` (124 B2) → `ci.yml`.
@@ -57,11 +65,18 @@ The §8 note said "build against the `host.audit.v1` reality (the dropped `host.
 - [ ] **Step 4:** the `xtask budget` job (127 C1) → `ci.yml` as **informational** (warns, never fails — ADR-066 §7).
 - [ ] **Step 5:** the docs-drift gate (130) → `ci.yml`. Commit each as it lands.
 
+### Task C4: promote the supervisor jailer to a numbered claim
+
+`mvm-jailer-lite` (Landlock + seccomp on Linux; `sandbox-exec` on macOS) is built and property-tested (`crates/mvm-jailer-lite/tests/{landlock,seccomp}_property.rs`), applied by `mvm-hostd` (121 D1) and the secrets signer (129) — but it is **not an enumerated claim**, so nothing CI-gates the guarantee that the host-side processes run confined. Promote it. (`claim 11` already names the sealed app-deps volume, so this takes the next free number.)
+
+- [ ] **Step 1:** Failing test — an escape gate: spawn a process under `mvm-jailer-lite` confinement and assert a write outside the allowed Landlock ruleset, and a syscall outside the seccomp allow-set, are denied (on macOS, the `sandbox-exec` profile blocks the equivalent). Extend the existing property tests with this adversarial case if not already covered; the gate fails if confinement is absent or misconfigured.
+- [ ] **Step 2:** Add the new claim row to ADR-002's claim table (host-side supervisor/broker/signer processes are OS-sandboxed; cite `mvm-jailer-lite` + the escape test), surface the active jailer status on the `mvmctl doctor` posture line (`mvm-security/src/posture.rs`), and wire the escape gate into `ci.yml` as a required PR check. Commit.
+
 ## Phase D — re-verify the §8 claim→gate map
 
-### Task D1: all 14 claims, each with a live gate
+### Task D1: every claim, each with a live gate
 
-- [ ] **Step 1:** Walk the ADR-066 §8 table row by row; for each claim, point to the **passing** gate (job + assertion). Fix the stale "127"→"128" refs. The previously-aspirational rows (4, 12, 13) now point to C1/C2.
+- [ ] **Step 1:** Walk the ADR-066 §8 table row by row; for each claim, point to the **passing** gate (job + assertion). Fix the stale "127"→"128" refs. The previously-aspirational rows (4, 12, 13) now point to C1/C2; the new jailer row points to C4.
 - [ ] **Step 2:** Add `xtask check-doc-claims` coverage so a claim without a live gate **fails the build** (no more "looks green because the lane is release-only"). Update the security-model section of `CLAUDE.md` to the verified reality. Commit.
 
 ## Acceptance
@@ -69,6 +84,7 @@ The §8 note said "build against the `host.audit.v1` reality (the dropped `host.
 - [ ] Fast-default `cargo nextest run --workspace` is hermetic + green with no libkrun; slow lanes are `MVM_E2E_SMOKE`/KVM-gated, opt-in.
 - [ ] Every fuzz target builds + smokes in its post-121 home; the vsock fuzz targets exercise the new hand-rolled codec.
 - [ ] `check-prod-agent-no-exec.sh` exists, is tracked, runs on every PR (claim 4 un-latented); the claim 12/13 gate exists and asserts 129's invariants.
+- [ ] The supervisor jailer is a numbered ADR-002 claim with an escape-style CI gate (write/syscall outside the ruleset denied) + a `doctor` posture line.
 - [ ] `check-guest-agent-in-all-images`, the SDK no-drift check, the extended `check-forbidden-deps`, the budget job, and the docs-drift gate are all wired into `ci.yml`.
 - [ ] Every row of the §8 claim→gate map points to a passing gate; `check-doc-claims` fails on a gateless claim; the stale "127" refs fixed; `CLAUDE.md` security section matches reality.
 - [ ] `cargo test --workspace` + clippy + fmt green; no new dependency.
@@ -80,7 +96,7 @@ The §8 note said "build against the `host.audit.v1` reality (the dropped `host.
 
 ## Self-review
 
-- **Spec coverage (brief 128):** two-tier pyramid (Phase A), fuzz re-homing (Phase B), restore claim 4 + build claims 12/13 (Phase C1/C2), wire the deferred gates (C3), re-verify the §8 map (Phase D). All present.
+- **Spec coverage (brief 128):** two-tier pyramid (Phase A), fuzz re-homing (Phase B), restore claim 4 + build claims 12/13 (Phase C1/C2), promote the jailer to a numbered claim (C4), wire the deferred gates (C3), re-verify the §8 map (Phase D). All present.
 - **Honesty:** this plan's premise is the §8 finding that the "14 claims gated" statement is currently false; it makes it true and adds `check-doc-claims` so it can't silently lapse again. Claim 12/13 gates target 129's real design, not the dropped broker handler.
 - **Sequencing:** runs last in Stage D — it verifies the others; it does not invent behavior, it gates behavior they built.
 - **Voice:** comments mark the non-obvious (why the slow tier is opt-in, why the claim-4 lane must move off release-tag-only, why the fuzz target must follow the codec), not the mechanics.
