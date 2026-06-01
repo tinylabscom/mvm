@@ -2935,6 +2935,19 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
         hash_dir_recursive(&mut hasher, &format!("crates/{crate_name}/src"), &src_dir)?;
     }
 
+    // Layer 4: the embedded host-binary identity. These bytes are what
+    // actually get baked into the rootfs, so their SHA captures anything
+    // the crate-src hash above can miss — chiefly the cross-compile
+    // toolchain (a gnu→musl target switch produces different binaries
+    // from identical source). Without this a toolchain change would
+    // silently reuse a stale cached image.
+    for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
+        hasher.update(b"host-bin\0");
+        hasher.update(bin.name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(bin.sha256_hex.as_bytes());
+    }
+
     Ok(format!("{:x}", hasher.finalize()))
 }
 

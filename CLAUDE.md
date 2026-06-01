@@ -33,8 +33,8 @@ package manager (or build passt from source — see ADR-055 references).
 For source-checkout contributors only: zig + cargo-zigbuild are needed
 at `cargo build`-of-mvmctl time so `crates/mvm-cli/build.rs` can
 cross-compile the embedded host-vm binaries (`mvm-host-vm-init`,
-`mvm-egress-proxy`) for aarch64-unknown-linux-gnu. See
-Plan 115 / ADR-065.
+`mvm-egress-proxy`) as static `aarch64-unknown-linux-musl` (the
+builder VM rootfs has no dynamic loader). See Plan 115 / ADR-065.
 
 ```sh
 brew install zig

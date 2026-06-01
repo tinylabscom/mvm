@@ -520,6 +520,13 @@ opt-level = 3
 # Pinned cross-compile toolchain for the embedded host-vm binaries
 # baked into mvmctl. Bump in lockstep across this file and CI to keep
 # the embedded payload reproducible (Plan 115 / ADR-065 claim 11).
+#
+# musl, not gnu: these binaries run as PID 1 / early services inside the
+# builder VM, whose minimal NixOS-derived rootfs ships no FHS dynamic
+# loader (/lib/ld-linux-aarch64.so.1). A static musl build has no
+# interpreter dependency, so it boots in any rootfs — the same reason
+# mkGuest static-links its own /init. Both binaries are libc-only (no
+# TLS/ring/openssl), so the musl build is unencumbered.
 zig = "0.13.0"
 cargo-zigbuild = "0.20.0"
-target = "aarch64-unknown-linux-gnu.2.17"
+target = "aarch64-unknown-linux-musl"

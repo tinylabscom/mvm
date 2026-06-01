@@ -2,7 +2,8 @@ name: Install zig + cargo-zigbuild
 description: |
   Plan 115 / ADR-065 — install the pinned cross-compile toolchain that
   mvm-cli's build.rs needs to embed the host-vm binaries
-  (mvm-host-vm-init, mvm-egress-proxy) for aarch64-unknown-linux-gnu.
+  (mvm-host-vm-init, mvm-egress-proxy) for aarch64-unknown-linux-musl
+  (static; the builder VM rootfs has no FHS dynamic loader).
   Versions are pinned in [workspace.metadata.mvm.toolchain] in the root
   Cargo.toml; keep this action in lockstep.
 
@@ -31,6 +32,6 @@ runs:
       shell: bash
       run: cargo install cargo-zigbuild --version 0.20.0 --locked
 
-    - name: Add aarch64-unknown-linux-gnu target
+    - name: Add aarch64-unknown-linux-musl target
       shell: bash
-      run: rustup target add aarch64-unknown-linux-gnu
+      run: rustup target add aarch64-unknown-linux-musl

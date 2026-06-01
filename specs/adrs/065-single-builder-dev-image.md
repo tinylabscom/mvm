@@ -79,7 +79,7 @@ the underlying shape instead.
      during `cargo build` of mvm-cli.** For each entry in a Rust
      manifest constant (`crates/mvm-cli/src/host_binaries/
      manifest.rs`), the build script invokes `cargo zigbuild --target
-     aarch64-unknown-linux-gnu --release -p <cargo_package>` (or
+     aarch64-unknown-linux-musl --release -p <cargo_package>` (or
      plain `cargo build` when the build host *is* aarch64-linux) and
      writes the binary to `$OUT_DIR/mvm-host-bins/<name>`. The paths
      are baked into mvmctl as `include_bytes!` byte arrays plus a
@@ -154,10 +154,18 @@ embedding choice in §Decision doesn't change the tool.)
    state with the contributor's normal `cargo build`. Editing
    `mvm-builder-init` source triggers an incremental cross-compile
    inside `build.rs`, not a full rebuild.
-3. **Explicit glibc version pinning.** `--target aarch64-unknown-linux-
-   gnu.2.17` lets us pin the glibc version to match what the rootfs
-   ships, avoiding the "binary requires newer glibc than the rootfs
-   has" foot-gun.
+3. **Static musl, so no rootfs loader needed.** The pinned target is
+   `aarch64-unknown-linux-musl` (static; see
+   `[workspace.metadata.mvm.toolchain]`). The builder VM's minimal
+   NixOS-derived rootfs ships no FHS dynamic loader
+   (`/lib/ld-linux-aarch64.so.1`), so a glibc-dynamic init binary
+   panics the guest with `Requested init … failed (error -2)` (ENOENT
+   on the interpreter). A static binary has no interpreter dependency —
+   it runs as PID 1 in any rootfs, the same reason mkGuest static-links
+   its own `/init`. This supersedes the earlier glibc-version-pinning
+   approach (`gnu.2.17`), which only worked if the rootfs carried a
+   matching loader. Both host binaries are libc-only (no `ring` /
+   `openssl-sys` / TLS), so the musl build is unencumbered.
 
 Alternatives considered:
 
