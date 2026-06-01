@@ -86,6 +86,7 @@ The survey flagged erofs (smaller) vs squashfs (faster) for the read-only root. 
 - [ ] **Image-fingerprint cache** — fingerprint the build inputs (flake lock + the dep manifest, e.g. `requirements.txt` / `package.json`) and reuse a cached rootfs / dep-volume layer when the fingerprint is unchanged, instead of rebuilding. Reuses the app-dep volume hash from ADR-047.
 - [ ] **Faster `nix build`** — measure `nix-fast-build` (and parallel evaluation) against the builder VM's serial `nix build`; adopt only if the numbers (plan 127 harness) justify the extra moving part.
 - [ ] **Quiet the gvproxy teardown logs** — the `gvproxy.sock-krun.sock … use of closed network connection` errors are a benign teardown race (the VM closes the unixgram peer before gvproxy notices). Lower gvproxy's log level or filter that line so `dev up` output isn't alarming. (Surfaced during plan 120's libkrun demo.)
+- [ ] **Fewer helper binaries in the staged rootfs** — stage the transient guest helpers as the single multi-call `mvm-guest-helpers` binary (124 deferred follow-up / 121) instead of N separate files, trimming the `mkfs.ext4 -d` tree + closure with no privilege change. The resident agent + runner stay separate (ADR-066 §3 "surface vs blast radius").
 
 ## Self-review
 

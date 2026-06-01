@@ -117,6 +117,7 @@ ADR-066 §"survey" — deliver the signed-plan-derived runtime config to the gue
 
 - [ ] Apply the same lean treatment to `mvm-builder-agent` if it shares the heavy deps.
 - [ ] `no_std` the agent core (a stretch once tokio/serde_json are gone).
+- [ ] Fold the transient guest boot helpers (`mvm-guest-netinit`, `mvm-seccomp-apply`) into one multi-call binary — naturally `mvm-guest-helpers` (121) extended busybox-style (`mvm-guest-helpers netinit|seccomp-apply|…`). Cuts rootfs file count + per-binary closure with **no** privilege change: each invocation is still a fresh short-lived process that does its uid-0 setup and exits. The resident `mvm-guest-agent` and the entrypoint `mvm-runner` stay separate — merging either re-privileges the resident surface or reintroduces exec (claim 4). Build-unit, not process, consolidation (ADR-066 §3 "surface vs blast radius").
 
 ## Self-review
 
