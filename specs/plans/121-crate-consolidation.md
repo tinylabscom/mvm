@@ -219,7 +219,7 @@ ADR-066 §1 lines 35-36: builder-VM-only Linux tools become `[[bin]]`s of `mvm-b
 **Files:** move both crates' `src/` → `crates/mvm-build/src/bin/`; `crates/mvm-build/Cargo.toml` (two cfg-gated `[[bin]]`s); `crates/mvm-cli/build.rs` (the cross-compile target package names); root `Cargo.toml`; verify `xtask check-mvm-host-binaries-sync`.
 
 - [ ] **Step 1:** `git mv crates/mvm-host-vm-init/src/main.rs crates/mvm-build/src/bin/mvm-host-vm-init.rs` (+ egress-proxy); add cfg-gated `[[bin]]` stanzas (`#[cfg(target_os="linux")]`-style inert body off-Linux); `git rm -r` both old crates; drop from root members.
-- [ ] **Step 2:** Update `crates/mvm-cli/build.rs` so the embedded-binary cross-compile points at the `mvm-build` package's bins (names unchanged: `mvm-host-vm-init`, `mvm-egress-proxy`).
+- [ ] **Step 2:** Update `crates/mvm-cli/build.rs` so the embedded-binary cross-compile points at the `mvm-build` package's bins (names unchanged: `mvm-host-vm-init`, `mvm-egress-proxy`). **Name-regression guard:** the live path is already fully `mvm-host-vm-init` (crate dir, package, `nix/lib/mvm-host-binaries.nix` install path, and the `init=/sbin/mvm-host-vm-init` cmdline all agree); the legacy `mvm-builder-init` name must not reappear here — only historical plan docs still cite it, and `check-mvm-host-binaries-sync` (Step 3) is the gate that fails if the fold reintroduces it.
 - [ ] **Step 3:** `cargo build --workspace && cargo run -p xtask -- check-mvm-host-binaries-sync` → green (this lint asserts the embedded host-binary set matches reality — it MUST pass).
 - [ ] **Step 4:** Commit: `git commit -m "refactor(build): move host-vm-init + egress-proxy into mvm-build [[bin]]s (ADR-065)"`.
 
