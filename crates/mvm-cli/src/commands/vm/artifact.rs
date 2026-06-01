@@ -13,6 +13,7 @@ use mvm_build::packed_artifact::{
     ArtifactProfile, PackInputs, SecurityPosture, inspect_unverified, pack as pack_artifact,
     verify as verify_artifact,
 };
+use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -68,8 +69,8 @@ pub(in crate::commands) struct PackArgs {
     /// Output path for the produced `.mvm` archive.
     #[arg(long)]
     pub out: PathBuf,
-    /// Target architecture string. Free-form; matches what the
-    /// rootfs builder emits (e.g. `aarch64-linux`).
+    /// Target architecture (`aarch64` or `x86_64`; `arm64`/`amd64`
+    /// aliases accepted). Parsed via `GuestArch::from_str`.
     #[arg(long)]
     pub target_arch: String,
     /// Image profile baked into the artifact's security posture.
@@ -190,6 +191,11 @@ fn run_pack(args: PackArgs) -> Result<()> {
     // wire `--key <path>` for offline signing keys.
     let signer = host_signer::load_or_init().context("load host signer")?;
 
+    let target_arch: GuestArch = args
+        .target_arch
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--target-arch: {e}"))?;
+
     let inputs = PackInputs {
         kernel: &args.kernel,
         rootfs: &args.rootfs,
@@ -197,7 +203,7 @@ fn run_pack(args: PackArgs) -> Result<()> {
         verity: args.verity.as_deref(),
         roothash: args.roothash.as_deref(),
         initrd: args.initrd.as_deref(),
-        target_arch: args.target_arch,
+        target_arch,
         build_provenance: args.build_provenance,
         security: SecurityPosture {
             profile: args.profile.into(),

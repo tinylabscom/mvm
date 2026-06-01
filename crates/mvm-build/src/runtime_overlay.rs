@@ -56,54 +56,9 @@
 //! I/O + string parsing; only [`build_overlay_with_nix`] gates
 //! on Linux.
 
+use mvm_core::arch::GuestArch;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-
-/// Host architecture that an mvm runtime overlay is built for.
-/// The overlay is arch-specific because it contains a Linux
-/// binary (`mvm-guest-agent`) compiled for a specific arch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Arch {
-    Aarch64,
-    X86_64,
-}
-
-impl Arch {
-    /// The host arch the current binary was built for.
-    /// Compile-time; mvmctl isn't a cross-arch process.
-    pub const fn host() -> Self {
-        #[cfg(target_arch = "aarch64")]
-        {
-            Arch::Aarch64
-        }
-        #[cfg(target_arch = "x86_64")]
-        {
-            Arch::X86_64
-        }
-        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-        {
-            // The match is exhaustive on the two arches mvm
-            // actually targets; an unsupported arch would fail
-            // to build long before reaching this branch. Picking
-            // Aarch64 as a stub keeps the function `const`-able
-            // for tests that pin a specific arch explicitly.
-            Arch::Aarch64
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Arch::Aarch64 => "aarch64",
-            Arch::X86_64 => "x86_64",
-        }
-    }
-}
-
-impl std::fmt::Display for Arch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum RuntimeOverlayError {
@@ -207,18 +162,18 @@ pub struct RuntimeOverlayLayout {
     pub sidecar: PathBuf,
     pub roothash_file: PathBuf,
     pub version_file: PathBuf,
-    pub arch: Arch,
+    pub arch: GuestArch,
     pub version: String,
 }
 
 impl RuntimeOverlayLayout {
     /// Compute the canonical layout for `(version, arch)` under
     /// `cache_root`. Performs no I/O — pure path construction.
-    pub fn under(cache_root: &Path, version: &str, arch: Arch) -> Self {
+    pub fn under(cache_root: &Path, version: &str, arch: GuestArch) -> Self {
         let artifact_dir = cache_root
             .join("runtime-overlay")
             .join(version)
-            .join(arch.as_str());
+            .join(arch.to_string());
         Self {
             overlay_ext4: artifact_dir.join("overlay.ext4"),
             sidecar: artifact_dir.join("overlay.verity"),
@@ -243,7 +198,7 @@ pub struct RuntimeOverlayArtifact {
     /// `mvm-verity-init` reads from the kernel cmdline as
     /// `mvm.runtime_roothash=<hex>`.
     pub roothash: String,
-    pub arch: Arch,
+    pub arch: GuestArch,
     pub version: String,
 }
 
@@ -269,7 +224,7 @@ impl RuntimeOverlayResolver {
     /// Compute the cache layout for `arch` without doing any
     /// I/O. Useful for callers that need to know where an
     /// artifact *would* live (e.g. download orchestrators).
-    pub fn layout(&self, arch: Arch) -> RuntimeOverlayLayout {
+    pub fn layout(&self, arch: GuestArch) -> RuntimeOverlayLayout {
         RuntimeOverlayLayout::under(&self.cache_root, &self.expected_version, arch)
     }
 
@@ -284,7 +239,7 @@ impl RuntimeOverlayResolver {
     /// fallback. Plan 74 §Risks R13: the agent must come from a
     /// trusted overlay or the W3 verity claim is silently
     /// weakened.
-    pub fn resolve(&self, arch: Arch) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    pub fn resolve(&self, arch: GuestArch) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
         let layout = self.layout(arch);
         check_exists(
             &layout.overlay_ext4,
@@ -336,7 +291,7 @@ fn check_exists(
     path: &Path,
     artifact_dir: &Path,
     version: &str,
-    arch: Arch,
+    arch: GuestArch,
 ) -> Result<(), RuntimeOverlayError> {
     if !path.is_file() {
         return Err(RuntimeOverlayError::ArtifactIncomplete {
@@ -407,7 +362,7 @@ pub struct OverlayBuildSpec {
     pub workspace_root: PathBuf,
     /// Which target arch to build for. Maps to the Nix
     /// `system` attribute on the flake's `packages` output.
-    pub arch: Arch,
+    pub arch: GuestArch,
     /// Where the resulting result-symlink should live. Typically
     /// a tempdir or a staging location under
     /// `~/.cache/mvm/runtime-overlay/<version>/<arch>/.work/` —
@@ -420,7 +375,7 @@ pub struct OverlayBuildSpec {
 
 impl OverlayBuildSpec {
     /// Construct a spec for the given (workspace, arch, out_link).
-    pub fn new(workspace_root: PathBuf, arch: Arch, out_link: PathBuf) -> Self {
+    pub fn new(workspace_root: PathBuf, arch: GuestArch, out_link: PathBuf) -> Self {
         Self {
             workspace_root,
             arch,
@@ -433,10 +388,7 @@ impl OverlayBuildSpec {
     /// The runtime-overlay flake exposes outputs at
     /// `packages.<system>.default` for these two systems.
     pub fn system(&self) -> &'static str {
-        match self.arch {
-            Arch::Aarch64 => "aarch64-linux",
-            Arch::X86_64 => "x86_64-linux",
-        }
+        self.arch.nix_system()
     }
 
     /// Absolute path to the flake directory (the dir containing
@@ -726,12 +678,12 @@ fn all_required_files_present(layout: &RuntimeOverlayLayout) -> bool {
         && layout.version_file.is_file()
 }
 
-fn staging_dir_name(arch: Arch) -> String {
+fn staging_dir_name(arch: GuestArch) -> String {
     // PID alone is enough to disambiguate per-process; if two
     // installs in the same process race, the second one wins on
     // the post-staging rename, which is the same semantics as
     // calling install_overlay_into_cache(overwrite=true) twice.
-    format!("{}.tmp.{}", arch.as_str(), std::process::id())
+    format!("{}.tmp.{}", arch, std::process::id())
 }
 
 fn install_file_with_perms(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
@@ -794,8 +746,8 @@ impl RuntimeOverlayArtifactNames {
     /// the combined release-asset pool — they get renamed back to
     /// canonical names (`overlay.{ext4,verity,roothash}`,
     /// `VERSION`) when installed into the cache.
-    pub fn for_arch(arch: Arch) -> Self {
-        let a = arch.as_str();
+    pub fn for_arch(arch: GuestArch) -> Self {
+        let a = arch.to_string();
         Self {
             ext4: format!("runtime-overlay-{a}.ext4"),
             verity: format!("runtime-overlay-{a}.verity"),
@@ -832,7 +784,7 @@ pub fn release_base_url(version: &str) -> String {
 /// can hand it straight to the backend.
 pub fn download_runtime_overlay(
     version: &str,
-    arch: Arch,
+    arch: GuestArch,
     cache_root: &Path,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     let names = RuntimeOverlayArtifactNames::for_arch(arch);
@@ -1059,13 +1011,13 @@ mod tests {
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    fn make_cache(version: &str, arch: Arch, with_files: &[(&str, &[u8])]) -> TempDir {
+    fn make_cache(version: &str, arch: GuestArch, with_files: &[(&str, &[u8])]) -> TempDir {
         let tmp = TempDir::new().unwrap();
         let artifact_dir = tmp
             .path()
             .join("runtime-overlay")
             .join(version)
-            .join(arch.as_str());
+            .join(arch.to_string());
         std::fs::create_dir_all(&artifact_dir).unwrap();
         for (name, contents) in with_files {
             std::fs::write(artifact_dir.join(name), contents).unwrap();
@@ -1073,7 +1025,7 @@ mod tests {
         tmp
     }
 
-    fn complete_cache(version: &str, arch: Arch) -> TempDir {
+    fn complete_cache(version: &str, arch: GuestArch) -> TempDir {
         make_cache(
             version,
             arch,
@@ -1087,23 +1039,23 @@ mod tests {
     }
 
     #[test]
-    fn arch_as_str_matches_kernel_naming() {
-        assert_eq!(Arch::Aarch64.as_str(), "aarch64");
-        assert_eq!(Arch::X86_64.as_str(), "x86_64");
+    fn arch_display_matches_kernel_naming() {
+        assert_eq!(GuestArch::Aarch64.to_string(), "aarch64");
+        assert_eq!(GuestArch::X86_64.to_string(), "x86_64");
     }
 
     #[test]
     fn arch_host_returns_one_of_the_supported_arches() {
         // The const fn must compile and produce a value; the
         // exact value depends on the test binary's target arch.
-        let host = Arch::host();
-        assert!(matches!(host, Arch::Aarch64 | Arch::X86_64));
+        let host = GuestArch::host();
+        assert!(matches!(host, GuestArch::Aarch64 | GuestArch::X86_64));
     }
 
     #[test]
     fn layout_under_uses_canonical_directory_layout() {
         let root = Path::new("/cache");
-        let layout = RuntimeOverlayLayout::under(root, "0.14.0", Arch::Aarch64);
+        let layout = RuntimeOverlayLayout::under(root, "0.14.0", GuestArch::Aarch64);
         assert_eq!(
             layout.artifact_dir,
             PathBuf::from("/cache/runtime-overlay/0.14.0/aarch64")
@@ -1124,18 +1076,18 @@ mod tests {
             layout.version_file,
             PathBuf::from("/cache/runtime-overlay/0.14.0/aarch64/VERSION")
         );
-        assert_eq!(layout.arch, Arch::Aarch64);
+        assert_eq!(layout.arch, GuestArch::Aarch64);
         assert_eq!(layout.version, "0.14.0");
     }
 
     #[test]
     fn resolve_returns_artifact_when_all_files_present_and_version_matches() {
-        let cache = complete_cache("0.14.0", Arch::Aarch64);
+        let cache = complete_cache("0.14.0", GuestArch::Aarch64);
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let artifact = resolver.resolve(Arch::Aarch64).expect("resolve");
+        let artifact = resolver.resolve(GuestArch::Aarch64).expect("resolve");
 
         assert_eq!(artifact.version, "0.14.0");
-        assert_eq!(artifact.arch, Arch::Aarch64);
+        assert_eq!(artifact.arch, GuestArch::Aarch64);
         assert_eq!(artifact.roothash, FAKE_ROOTHASH);
         assert!(artifact.overlay_ext4.ends_with("overlay.ext4"));
         assert!(artifact.sidecar.ends_with("overlay.verity"));
@@ -1146,7 +1098,7 @@ mod tests {
     fn resolve_fails_when_overlay_ext4_missing() {
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
@@ -1154,7 +1106,7 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         match err {
             RuntimeOverlayError::ArtifactIncomplete { missing, .. } => {
                 assert!(missing.ends_with("overlay.ext4"), "missing={missing:?}");
@@ -1167,7 +1119,7 @@ mod tests {
     fn resolve_fails_when_sidecar_missing() {
         let cache = make_cache(
             "0.14.0",
-            Arch::X86_64,
+            GuestArch::X86_64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
@@ -1175,7 +1127,7 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve(Arch::X86_64).unwrap_err();
+        let err = resolver.resolve(GuestArch::X86_64).unwrap_err();
         assert!(
             matches!(err, RuntimeOverlayError::ArtifactIncomplete { .. }),
             "{err:?}"
@@ -1192,7 +1144,7 @@ mod tests {
         // bytes. Fail closed.
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.verity", b"sidecar"),
@@ -1202,7 +1154,7 @@ mod tests {
         );
         let resolver =
             RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".to_string());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         match err {
             RuntimeOverlayError::VersionMismatch { expected, found } => {
                 assert_eq!(expected, "0.14.0");
@@ -1220,10 +1172,10 @@ mod tests {
         // `ArtifactIncomplete` (the *expected* artifact_dir
         // doesn't exist), not `VersionMismatch`. Distinct from
         // the VERSION-file disagreement above.
-        let cache = complete_cache("0.13.99", Arch::Aarch64);
+        let cache = complete_cache("0.13.99", GuestArch::Aarch64);
         let resolver =
             RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".to_string());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         assert!(
             matches!(err, RuntimeOverlayError::ArtifactIncomplete { .. }),
             "{err:?}"
@@ -1234,7 +1186,7 @@ mod tests {
     fn resolve_fails_on_malformed_roothash_wrong_length() {
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.verity", b"sidecar"),
@@ -1243,7 +1195,7 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         assert!(
             matches!(err, RuntimeOverlayError::InvalidRoothash { .. }),
             "{err:?}"
@@ -1256,7 +1208,7 @@ mod tests {
         assert_eq!(upper.len(), 64);
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.verity", b"sidecar"),
@@ -1265,7 +1217,7 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         assert!(
             matches!(err, RuntimeOverlayError::InvalidRoothash { .. }),
             "{err:?}"
@@ -1276,7 +1228,7 @@ mod tests {
     fn resolve_fails_on_empty_version_file() {
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.verity", b"sidecar"),
@@ -1285,7 +1237,7 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         assert!(
             matches!(err, RuntimeOverlayError::InvalidVersionFile { .. }),
             "{err:?}"
@@ -1296,7 +1248,7 @@ mod tests {
     fn resolve_fails_on_whitespace_inside_version_file() {
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.verity", b"sidecar"),
@@ -1305,7 +1257,7 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve(Arch::Aarch64).unwrap_err();
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
         assert!(
             matches!(err, RuntimeOverlayError::InvalidVersionFile { .. }),
             "{err:?}"
@@ -1316,7 +1268,7 @@ mod tests {
     fn resolve_tolerates_roothash_without_trailing_newline() {
         let cache = make_cache(
             "0.14.0",
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             &[
                 ("overlay.ext4", b"ext4"),
                 ("overlay.verity", b"sidecar"),
@@ -1325,24 +1277,24 @@ mod tests {
             ],
         );
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let artifact = resolver.resolve(Arch::Aarch64).expect("resolve");
+        let artifact = resolver.resolve(GuestArch::Aarch64).expect("resolve");
         assert_eq!(artifact.roothash, FAKE_ROOTHASH);
     }
 
     #[test]
     fn layout_via_resolver_matches_under_helper() {
         let resolver = RuntimeOverlayResolver::new(PathBuf::from("/cache"), "0.14.0".to_string());
-        let direct = RuntimeOverlayLayout::under(Path::new("/cache"), "0.14.0", Arch::Aarch64);
-        let via_resolver = resolver.layout(Arch::Aarch64);
+        let direct = RuntimeOverlayLayout::under(Path::new("/cache"), "0.14.0", GuestArch::Aarch64);
+        let via_resolver = resolver.layout(GuestArch::Aarch64);
         assert_eq!(direct, via_resolver);
     }
 
     #[test]
     fn resolve_works_for_x86_64_arch_too() {
-        let cache = complete_cache("0.14.0", Arch::X86_64);
+        let cache = complete_cache("0.14.0", GuestArch::X86_64);
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let artifact = resolver.resolve(Arch::X86_64).expect("resolve");
-        assert_eq!(artifact.arch, Arch::X86_64);
+        let artifact = resolver.resolve(GuestArch::X86_64).expect("resolve");
+        assert_eq!(artifact.arch, GuestArch::X86_64);
         assert!(artifact.overlay_ext4.to_string_lossy().contains("x86_64"));
     }
 
@@ -1354,14 +1306,14 @@ mod tests {
     fn build_spec_system_maps_arch_to_nix_system_string() {
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             PathBuf::from("/tmp/result"),
         );
         assert_eq!(spec.system(), "aarch64-linux");
 
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::X86_64,
+            GuestArch::X86_64,
             PathBuf::from("/tmp/result"),
         );
         assert_eq!(spec.system(), "x86_64-linux");
@@ -1371,7 +1323,7 @@ mod tests {
     fn build_spec_flake_path_points_at_runtime_overlay_dir() {
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             PathBuf::from("/tmp/result"),
         );
         assert_eq!(
@@ -1384,7 +1336,7 @@ mod tests {
     fn build_spec_flake_reference_pins_path_uri_and_system_default() {
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::X86_64,
+            GuestArch::X86_64,
             PathBuf::from("/tmp/result"),
         );
         // Pinned to the workspace-local path so we don't fetch
@@ -1400,7 +1352,7 @@ mod tests {
     fn build_spec_argv_defaults_to_path_lookup_nix_and_includes_required_flags() {
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             PathBuf::from("/tmp/result"),
         );
         let argv = spec.argv();
@@ -1432,7 +1384,7 @@ mod tests {
     fn build_spec_argv_respects_nix_binary_override() {
         let spec = OverlayBuildSpec {
             workspace_root: PathBuf::from("/workspace"),
-            arch: Arch::Aarch64,
+            arch: GuestArch::Aarch64,
             out_link: PathBuf::from("/tmp/result"),
             nix_binary: Some(PathBuf::from("/custom/nix-stub")),
         };
@@ -1448,7 +1400,7 @@ mod tests {
         // runs inside the libkrun-builder VM sandbox.
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             PathBuf::from("/tmp/result"),
         );
         let env = spec.env();
@@ -1462,7 +1414,7 @@ mod tests {
     fn build_overlay_with_nix_returns_host_unsupported_on_non_linux() {
         let spec = OverlayBuildSpec::new(
             PathBuf::from("/workspace"),
-            Arch::Aarch64,
+            GuestArch::Aarch64,
             PathBuf::from("/tmp/result"),
         );
         let err = build_overlay_with_nix(&spec).unwrap_err();
@@ -1486,7 +1438,7 @@ mod tests {
     /// the same level. Returns `(tempdir_keep_alive, artifact)`.
     fn make_source_artifact(
         version: &str,
-        arch: Arch,
+        arch: GuestArch,
         roothash: &str,
     ) -> (TempDir, RuntimeOverlayArtifact) {
         let tmp = TempDir::new().unwrap();
@@ -1513,7 +1465,7 @@ mod tests {
 
     #[test]
     fn install_copies_all_four_files_into_canonical_cache_layout() {
-        let (_keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         let installed =
@@ -1536,7 +1488,7 @@ mod tests {
             expected_dir.join("overlay.roothash")
         );
         assert_eq!(installed.version, "0.14.0");
-        assert_eq!(installed.arch, Arch::Aarch64);
+        assert_eq!(installed.arch, GuestArch::Aarch64);
 
         // Content matches the source verbatim.
         assert_eq!(
@@ -1558,7 +1510,7 @@ mod tests {
         // End-to-end: install → resolve must succeed. Closes the
         // producer → cache → consumer loop in a unit test (real
         // build pipeline is W1.4b.3a's Linux integration test).
-        let (_keep, source) = make_source_artifact("0.14.0", Arch::X86_64, FAKE_ROOTHASH);
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::X86_64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
@@ -1566,9 +1518,9 @@ mod tests {
 
         let resolver =
             RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".to_string());
-        let resolved = resolver.resolve(Arch::X86_64).expect("resolve");
+        let resolved = resolver.resolve(GuestArch::X86_64).expect("resolve");
         assert_eq!(resolved.version, "0.14.0");
-        assert_eq!(resolved.arch, Arch::X86_64);
+        assert_eq!(resolved.arch, GuestArch::X86_64);
         assert_eq!(resolved.roothash, FAKE_ROOTHASH);
     }
 
@@ -1576,7 +1528,7 @@ mod tests {
     fn install_is_idempotent_under_default_options() {
         // Second install with overwrite=false short-circuits and
         // returns the cache-view artifact without re-copying.
-        let (_keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         let first = install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
@@ -1599,7 +1551,7 @@ mod tests {
 
     #[test]
     fn install_overwrite_replaces_existing_cache_content() {
-        let (keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
@@ -1624,7 +1576,7 @@ mod tests {
 
     #[test]
     fn install_fails_when_source_overlay_ext4_missing() {
-        let (keep, mut source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (keep, mut source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         // Remove the source file but keep the artifact metadata
         // — simulates a half-built artifact handed to the
         // installer.
@@ -1643,7 +1595,7 @@ mod tests {
 
     #[test]
     fn install_fails_when_source_version_file_missing() {
-        let (keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let source_dir = source.overlay_ext4.parent().unwrap();
         std::fs::remove_file(source_dir.join("VERSION")).unwrap();
 
@@ -1666,7 +1618,7 @@ mod tests {
     fn install_creates_intermediate_directories() {
         // Cache root is fresh — no `runtime-overlay/<version>/<arch>/`
         // structure exists. The installer must mkdir -p the path.
-        let (_keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
@@ -1679,8 +1631,8 @@ mod tests {
 
     #[test]
     fn install_separates_arches_within_the_same_version() {
-        let (_keep_a, source_a) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
-        let (_keep_b, source_b) = make_source_artifact("0.14.0", Arch::X86_64, FAKE_ROOTHASH);
+        let (_keep_a, source_a) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
+        let (_keep_b, source_b) = make_source_artifact("0.14.0", GuestArch::X86_64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         install_overlay_into_cache(&source_a, cache.path(), &InstallOptions::default())
@@ -1704,8 +1656,8 @@ mod tests {
 
     #[test]
     fn install_separates_versions_within_the_same_arch() {
-        let (_keep_a, source_a) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
-        let (_keep_b, source_b) = make_source_artifact("0.15.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (_keep_a, source_a) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
+        let (_keep_b, source_b) = make_source_artifact("0.15.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
         install_overlay_into_cache(&source_a, cache.path(), &InstallOptions::default())
@@ -1731,7 +1683,7 @@ mod tests {
     #[test]
     fn install_chmods_files_to_0644() {
         use std::os::unix::fs::PermissionsExt;
-        let (_keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
 
         // Make source files read-only (0444) to simulate
         // Nix-store paths. The installer must override to 0644
@@ -1759,11 +1711,11 @@ mod tests {
     fn install_cleans_up_stale_staging_dir_from_a_previous_crash() {
         // Pre-create a staging dir that the next install will
         // collide with. The installer must remove it and proceed.
-        let (_keep, source) = make_source_artifact("0.14.0", Arch::Aarch64, FAKE_ROOTHASH);
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
         let parent = cache.path().join("runtime-overlay/0.14.0");
         std::fs::create_dir_all(&parent).unwrap();
-        let staging = parent.join(staging_dir_name(Arch::Aarch64));
+        let staging = parent.join(staging_dir_name(GuestArch::Aarch64));
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("garbage"), b"left over from a crash").unwrap();
 
@@ -1795,7 +1747,7 @@ mod tests {
     /// both sides honest.
     #[test]
     fn artifact_names_match_release_yml_naming_aarch64() {
-        let names = RuntimeOverlayArtifactNames::for_arch(Arch::Aarch64);
+        let names = RuntimeOverlayArtifactNames::for_arch(GuestArch::Aarch64);
         assert_eq!(names.ext4, "runtime-overlay-aarch64.ext4");
         assert_eq!(names.verity, "runtime-overlay-aarch64.verity");
         assert_eq!(names.roothash, "runtime-overlay-aarch64.roothash");
@@ -1808,7 +1760,7 @@ mod tests {
 
     #[test]
     fn artifact_names_match_release_yml_naming_x86_64() {
-        let names = RuntimeOverlayArtifactNames::for_arch(Arch::X86_64);
+        let names = RuntimeOverlayArtifactNames::for_arch(GuestArch::X86_64);
         assert_eq!(names.ext4, "runtime-overlay-x86_64.ext4");
         assert_eq!(names.verity, "runtime-overlay-x86_64.verity");
         assert_eq!(names.roothash, "runtime-overlay-x86_64.roothash");
@@ -2017,14 +1969,14 @@ short  bar.ext4
         }
 
         let cache = TempDir::new().unwrap();
-        let result = download_runtime_overlay("9.9.9", Arch::Aarch64, cache.path());
+        let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
 
         unsafe {
             std::env::remove_var("MVM_OVERLAY_BASE_URL");
         }
 
         let installed = result.expect("download + install must succeed against fixture");
-        assert_eq!(installed.arch, Arch::Aarch64);
+        assert_eq!(installed.arch, GuestArch::Aarch64);
         assert_eq!(installed.version, "9.9.9");
         assert_eq!(
             installed.roothash,
@@ -2089,7 +2041,7 @@ short  bar.ext4
             std::env::set_var("MVM_OVERLAY_BASE_URL", &base_url);
         }
         let cache = TempDir::new().unwrap();
-        let result = download_runtime_overlay("9.9.9", Arch::Aarch64, cache.path());
+        let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
         unsafe {
             std::env::remove_var("MVM_OVERLAY_BASE_URL");
         }
@@ -2131,7 +2083,7 @@ short  bar.ext4
             std::env::set_var("MVM_OVERLAY_BASE_URL", &base_url);
         }
         let cache = TempDir::new().unwrap();
-        let result = download_runtime_overlay("9.9.9", Arch::Aarch64, cache.path());
+        let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
         unsafe {
             std::env::remove_var("MVM_OVERLAY_BASE_URL");
         }
