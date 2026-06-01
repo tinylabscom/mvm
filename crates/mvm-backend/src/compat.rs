@@ -50,7 +50,7 @@ pub enum MicrovmBackend {
     Vfkit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootfsFormat {
     Ext4,
@@ -59,7 +59,7 @@ pub enum RootfsFormat {
     Raw,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkingModel {
     Tap,
@@ -124,20 +124,27 @@ static FIRECRACKER: BackendCompat = BackendCompat {
 
 // Libkrun: source — crates/mvm-libkrun/src/sys.rs to_krun_format() +
 // crates/mvm-backend/src/libkrun.rs DEFAULT_CMDLINE.
-// Both arches; libkrun bundles its own kernel so ELF/ImageGz/ImageZstd work
-// (the compressed variants map to KRUN_KERNEL_FORMAT_* FFI constants); Raw
-// also has a constant but is undocumented for the builder path. Uncompressed
-// Image and Pe have no KRUN_KERNEL_FORMAT constant — only the bundled kernel
-// is actually used today (Plan 86 / CLAUDE.md builder-vm note), but accepting
-// ImageGz/ImageZstd keeps the compat model honest about what the FFI supports.
+// Both arches; libkrun bundles its own kernel so ELF/ImageGz/ImageBz2/ImageZstd/PeGz
+// work (each maps to a KRUN_KERNEL_FORMAT_* FFI constant in to_krun_format()).
+// Raw also has a constant but is undocumented for the builder path and intentionally
+// excluded here. Uncompressed Image and Pe have no KRUN_KERNEL_FORMAT constant
+// (to_krun_format returns Err for both) — excluded. Only the bundled kernel is
+// used today (Plan 86 / CLAUDE.md builder-vm note), but the full accepted-format
+// list reflects the actual FFI surface.
 // gvproxy on macOS (CLAUDE.md host-deps); passt on Linux — model as Gvproxy
 // (the macOS default) since mvm's libkrun path is primarily macOS today.
 static LIBKRUN: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Libkrun,
     guest_arches: &[X86_64, Aarch64],
     kernel_formats: &[
-        (X86_64, &[K::Elf, K::ImageGz, K::ImageZstd]),
-        (Aarch64, &[K::Elf, K::ImageGz, K::ImageZstd]),
+        (
+            X86_64,
+            &[K::Elf, K::ImageGz, K::ImageBz2, K::ImageZstd, K::PeGz],
+        ),
+        (
+            Aarch64,
+            &[K::Elf, K::ImageGz, K::ImageBz2, K::ImageZstd, K::PeGz],
+        ),
     ],
     rootfs_formats: &[R::Ext4],
     required_boot_args: &["console=hvc0"],
@@ -337,7 +344,9 @@ mod tests {
         assert!(kernel_format_ok(c, X86_64, KernelFormat::ImageGz));
         assert!(kernel_format_ok(c, Aarch64, KernelFormat::ImageGz));
         assert!(kernel_format_ok(c, X86_64, KernelFormat::ImageZstd));
-        // Uncompressed Image has no KRUN_KERNEL_FORMAT constant — rejected.
+        assert!(kernel_format_ok(c, X86_64, KernelFormat::ImageBz2));
+        assert!(kernel_format_ok(c, X86_64, KernelFormat::PeGz));
+        // Uncompressed Image/Pe have no KRUN_KERNEL_FORMAT constant — rejected.
         assert!(!kernel_format_ok(c, X86_64, KernelFormat::Image));
         assert!(!kernel_format_ok(c, Aarch64, KernelFormat::Image));
     }
