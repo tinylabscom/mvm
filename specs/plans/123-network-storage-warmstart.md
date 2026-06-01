@@ -156,6 +156,7 @@ AC's `cmd_dev_apple_container` boots a container, not a VM under our kernel, so 
 - [ ] Cloud-Hypervisor snapshot parity (if CH stays a backend).
 - [ ] Soften the gap-analysis "live-memory resume" line to the per-backend matrix (Firecracker + Vz live-memory; libkrun disk-only).
 - [ ] The diff-snapshot fast-resume on Vz (UFFD-equivalent) — VZ's save/restore is coarse; a faster macOS path is its own investigation.
+- [ ] A `compressed-ephemeral` StorageProvider impl — in-process userspace scratch (page-table + zero/same-byte dedup + optional compression + memory cap), the one bounded piece of Plan 132's programmable-storage substrate that fits this trait without the transform-chain machinery. The rest (typed block vocabulary, composable transforms, userspace block device) stays in Plan 132.
 
 ## Self-review
 

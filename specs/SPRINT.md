@@ -34,6 +34,10 @@ plan 25 sequences the work into six independently-shippable workstreams.
 | MSRV             | 1.85                     |
 | Binary           | `mvmctl`                 |
 
+## Planning updates
+
+- [x] Added [`plans/132-programmable-storage-io.md`](plans/132-programmable-storage-io.md), a security-first plan for typed block request contracts, declared storage transforms, compressed ephemeral volumes, plan-bound storage policy, guest storage status, and a gated Linux-only userspace block-device spike.
+
 ## Dependency Reduction Roadmap (analysis checkpoint: 2026-05-26)
 
 **Objective:** reduce Rust dependency count, shrink binary/build
