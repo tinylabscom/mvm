@@ -701,7 +701,7 @@ pub(in crate::commands) struct Args {
     /// Volume (host_dir:/guest/path or host:/guest/path:size). Repeatable
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
-    /// Hypervisor backend (firecracker, qemu, apple-container, docker). Default: auto-detect
+    /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, docker, vz). Default: auto-detect per host
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
     /// Port mapping (format: HOST:GUEST or PORT). Repeatable
@@ -1186,17 +1186,22 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
     }
     // Auto-select backend when no explicit hypervisor is specified.
-    // Priority: KVM (Firecracker direct) → Apple Container → Lima + Firecracker
+    // Mirrors AnyBackend::auto_select()'s priority so the CLI default
+    // matches the rest of the codebase: native KVM → Apple Container
+    // (macOS 26+) → libkrun (typical macOS 13-25 contributor box with
+    // the slp/krun Homebrew tap) → Docker (Tier 3 fallback).
     let effective_hypervisor = if hypervisor == "firecracker" {
         let plat = mvm_core::platform::current();
         if plat.has_kvm() {
-            "firecracker" // native KVM — best option
+            "firecracker" // native KVM — production Tier 1
         } else if plat.has_apple_containers() {
-            "apple-container" // macOS 26+ — no Lima
+            "apple-container" // macOS 26+ Apple Silicon
+        } else if plat.has_libkrun() {
+            "libkrun" // macOS 13-25 with libkrun installed
         } else if plat.has_docker() {
-            "docker" // universal fallback
+            "docker" // universal Tier 3 fallback (banner emitted)
         } else {
-            "firecracker" // Lima fallback
+            "firecracker" // surfaces a clear "not available" error
         }
     } else {
         hypervisor

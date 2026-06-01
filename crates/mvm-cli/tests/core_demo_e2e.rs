@@ -4,8 +4,13 @@
 //!
 //! Gated on `MVM_E2E_SMOKE=1` because it needs libkrun + the builder VM
 //! and runs for minutes; the default (ungated) run skips and passes.
-//! On macOS the workload backend must be libkrun, so the demo runs with
-//! `MVM_BUILDER_BACKEND=libkrun` set in the environment.
+//!
+//! On macOS the workload microVM runs via libkrun (vsock-capable; the
+//! path the guest agent answers on). `--hypervisor libkrun` is passed
+//! explicitly so the test doesn't depend on `up`'s per-host auto-select
+//! preferring libkrun over apple-container on macOS 26+ (which is a
+//! deliberate apple-container priority for general use; the demo wants
+//! the vsock path).
 //!
 //! `up` waits for the guest agent (`wait_for_guest_agent` → vsock Ping)
 //! and only prints `Guest agent not reachable.` on failure — so `up`
@@ -21,6 +26,18 @@ fn mvmctl(args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("spawn mvmctl")
+}
+
+/// On macOS the workload microVM must run via libkrun (vsock-capable).
+/// On Linux the host's native Firecracker is correct. The E2E threads
+/// `--hypervisor` through so it doesn't rely on `up`'s host-specific
+/// auto-select choosing the same backend the test assumes.
+fn workload_hypervisor() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libkrun"
+    } else {
+        "firecracker"
+    }
 }
 
 #[test]
@@ -48,7 +65,13 @@ fn core_demo_dev_compile_up_ping() {
 
     // 3) build + boot the workload microVM; `up` waits for the agent.
     //    Exit 0 with no "not reachable" line == the agent answered.
-    let up = mvmctl(&["up", "--flake", out.path().to_str().unwrap()]);
+    let up = mvmctl(&[
+        "up",
+        "--hypervisor",
+        workload_hypervisor(),
+        "--flake",
+        out.path().to_str().unwrap(),
+    ]);
     let log = String::from_utf8_lossy(&up.stderr);
     assert!(up.status.success(), "up failed: {log}");
     assert!(
