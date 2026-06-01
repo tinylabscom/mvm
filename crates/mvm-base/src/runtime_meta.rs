@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn from_sidecar_present_uses_recorded_value() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = mvm_build::builder_vm::ArtifactManifest {
+        let sidecar = mvm_build::builder_vm::GuestSidecar {
             name: "sealed-vm".to_string(),
             accessible: false,
             sealed: true,
