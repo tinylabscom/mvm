@@ -21,11 +21,18 @@ use std::process::Command;
 
 fn mvmctl(args: &[&str]) -> std::process::Output {
     #[allow(deprecated)]
-    Command::cargo_bin("mvmctl")
-        .expect("locate mvmctl")
-        .args(args)
-        .output()
-        .expect("spawn mvmctl")
+    let mut cmd = Command::cargo_bin("mvmctl").expect("locate mvmctl");
+    cmd.args(args);
+    // The E2E pins the builder backend to libkrun on macOS so the
+    // test doesn't depend on the Swift mvm-vz-supervisor having been
+    // built. Plan 98's auto-select would otherwise pick Vz on macOS
+    // 26+ Apple Silicon and bail with "mvm-vz-supervisor binary not
+    // found." The pin is per-child so it doesn't leak into other
+    // tests running in the same cargo invocation.
+    if cfg!(target_os = "macos") {
+        cmd.env("MVM_BUILDER_BACKEND", "libkrun");
+    }
+    cmd.output().expect("spawn mvmctl")
 }
 
 /// On macOS the workload microVM must run via libkrun (vsock-capable).
