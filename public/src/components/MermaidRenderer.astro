@@ -7,8 +7,10 @@
   };
 
   const renderMermaidBlocks = async () => {
-    const codeBlocks = Array.from(document.querySelectorAll("pre > code.language-mermaid"));
-    if (codeBlocks.length === 0) return;
+    const mermaidBlocks = Array.from(
+      document.querySelectorAll("pre > code.language-mermaid, pre[data-language='mermaid']"),
+    );
+    if (mermaidBlocks.length === 0) return;
 
     const { default: mermaid } = await import("mermaid");
 
@@ -18,12 +20,24 @@
       theme: currentTheme(),
     });
 
-    const diagrams = codeBlocks.map((codeBlock, index) => {
+    const diagramSource = (block) => {
+      const pre = block.matches("pre") ? block : block.closest("pre");
+      const copyButton = pre?.parentElement?.querySelector("button[data-code]");
+      const source = copyButton?.getAttribute("data-code") ?? block.textContent ?? "";
+
+      return source.replace(/\u007f/g, "\n");
+    };
+
+    const diagrams = mermaidBlocks.map((block, index) => {
       const diagram = document.createElement("div");
       diagram.className = "mermaid";
       diagram.id = `mermaid-${index}`;
-      diagram.textContent = codeBlock.textContent ?? "";
-      codeBlock.parentElement?.replaceWith(diagram);
+      diagram.textContent = diagramSource(block);
+
+      const pre = block.matches("pre") ? block : block.closest("pre");
+      const container = pre?.closest(".expressive-code") ?? pre ?? block;
+      container.replaceWith(diagram);
+
       return diagram;
     });
 
