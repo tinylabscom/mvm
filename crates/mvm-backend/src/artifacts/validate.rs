@@ -106,12 +106,12 @@ impl ArtifactValidator for StaticValidator {
                 };
                 (ok, detail)
             }
-            (Err(e), _) | (_, Err(e)) => {
-                // I/O error computing a hash — record as a failed check rather
-                // than propagating; the file was present (check 1 passed for it)
-                // so this is most likely a permission or corruption issue.
-                (false, format!("hash I/O error: {e}"))
+            (Err(e1), Err(e2)) => {
+                // Both hash reads failed — name both so a single pass surfaces all I/O issues.
+                (false, format!("hash I/O error: kernel: {e1}; rootfs: {e2}"))
             }
+            (Err(e), _) => (false, format!("hash I/O error: kernel: {e}")),
+            (_, Err(e)) => (false, format!("hash I/O error: rootfs: {e}")),
         };
         checks.push(ValidationCheck {
             name: "hash_match".to_string(),
@@ -306,6 +306,7 @@ mod tests {
                 format: RootfsFormat::Ext4,
                 hash: rootfs_hash,
                 size_bytes: rootfs_content.len() as u64,
+                read_only: true,
             },
             // Firecracker's required_boot_args: ["console=ttyS0", "reboot=k", "panic=1"]
             boot_args: vec![
@@ -400,6 +401,7 @@ mod tests {
                 format: RootfsFormat::Ext4,
                 hash: "ddeeff".to_string(),
                 size_bytes: 0,
+                read_only: true,
             },
             boot_args: vec![
                 "console=ttyS0".to_string(),
@@ -440,6 +442,7 @@ mod tests {
                 format: RootfsFormat::Ext4,
                 hash: "wrong_hash_rootfs".to_string(),
                 size_bytes: 0,
+                read_only: true,
             },
             boot_args: vec![
                 "console=ttyS0".to_string(),
@@ -479,6 +482,7 @@ mod tests {
                 format: RootfsFormat::Ext4,
                 hash: rootfs_hash,
                 size_bytes: 0,
+                read_only: true,
             },
             // Missing "reboot=k" and "panic=1"
             boot_args: vec!["console=ttyS0".to_string()],
@@ -567,6 +571,7 @@ mod tests {
                     format: RootfsFormat::Ext4,
                     hash: rootfs_hash,
                     size_bytes: size,
+                    read_only: true,
                 },
                 boot_args: vec![
                     "console=ttyS0".to_string(),
@@ -589,6 +594,16 @@ mod tests {
             "ext4 with /sbin/init must pass init check: {}",
             init_check.detail
         );
+        // The positive path: all 7 checks green => report.ok.
+        assert!(
+            report_with.ok,
+            "fully-valid artifact must produce report.ok == true; failing checks: {:?}",
+            report_with
+                .checks
+                .iter()
+                .filter(|c| !c.ok)
+                .collect::<Vec<_>>()
+        );
 
         // Without /sbin/init — init check must fail
         let report_without = StaticValidator
@@ -608,5 +623,85 @@ mod tests {
             "detail must name the missing path: {}",
             init_check_fail.detail
         );
+    }
+
+    /// All 7 checks green: `report.ok == true` on a fully-valid `MicrovmArtifact`.
+    ///
+    /// Requires a real ext4 (check 7 — init presence) so this is Linux-only.
+    /// Keep the mke2fs-absent early-return skip.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn all_seven_checks_green_report_ok() {
+        use crate::compat::MicrovmBackend;
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Build a real ext4 carrying /sbin/init.
+        let rootfs_staged = tmp.path().join("rootfs_staged");
+        let sbin = rootfs_staged.join("sbin");
+        std::fs::create_dir_all(&sbin).unwrap();
+        std::fs::write(sbin.join("init"), b"#!/bin/sh\nexec /bin/sh\n").unwrap();
+        let rootfs_img = tmp.path().join("rootfs.ext4");
+        if !mke2fs_from_dir(&rootfs_staged, &rootfs_img) {
+            eprintln!("skipping all_seven_checks_green_report_ok: mke2fs not installed");
+            return;
+        }
+
+        // Write a stub kernel file.
+        let kernel_path = tmp.path().join("vmlinux");
+        let kernel_bytes = b"ELF\x7f stub kernel";
+        std::fs::write(&kernel_path, kernel_bytes).unwrap();
+
+        // Compute real SHA-256 hashes for both files.
+        let kernel_hash = {
+            let mut h = Sha256::new();
+            h.update(kernel_bytes);
+            format!("{:x}", h.finalize())
+        };
+        let rootfs_hash = {
+            let content = std::fs::read(&rootfs_img).unwrap();
+            let mut h = Sha256::new();
+            h.update(&content);
+            format!("{:x}", h.finalize())
+        };
+        let rootfs_size = std::fs::metadata(&rootfs_img).unwrap().len();
+
+        // Read required_boot_args from the compat table — no hardcoding.
+        let fc_compat = crate::compat::compat(MicrovmBackend::Firecracker);
+        let boot_args: Vec<String> = fc_compat
+            .required_boot_args
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let artifact = MicrovmArtifact {
+            id: "positive-test".to_string(),
+            arch: GuestArch::X86_64,
+            backend: MicrovmBackend::Firecracker,
+            kernel: KernelArtifact {
+                path: kernel_path,
+                format: KernelFormat::Elf,
+                hash: kernel_hash,
+                version: None,
+            },
+            rootfs: RootfsArtifact {
+                path: rootfs_img,
+                format: RootfsFormat::Ext4,
+                hash: rootfs_hash,
+                size_bytes: rootfs_size,
+                read_only: true,
+            },
+            boot_args,
+            config_path: None,
+        };
+
+        let report = StaticValidator.validate(&artifact).unwrap();
+
+        // Every check must pass.
+        for c in &report.checks {
+            assert!(c.ok, "check {:?} failed unexpectedly: {}", c.name, c.detail);
+        }
+        assert!(report.ok, "report.ok must be true when all 7 checks pass");
+        assert_eq!(report.checks.len(), 7, "expected exactly 7 checks");
     }
 }

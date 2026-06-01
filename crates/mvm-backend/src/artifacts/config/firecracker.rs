@@ -58,8 +58,11 @@ struct VsockDevice {
 /// `vsock` is always populated here with defaults so the file can be used
 /// verbatim; callers that don't need vsock can clear the field before
 /// passing to the API socket.
+///
+/// Named `FcConfigFile` (not `FirecrackerConfig`) to avoid shadowing the
+/// public `crate::backend::FirecrackerConfig` type.
 #[derive(Debug, Serialize, Deserialize)]
-struct FirecrackerConfig {
+struct FcConfigFile {
     #[serde(rename = "boot-source")]
     boot_source: BootSource,
     drives: Vec<Drive>,
@@ -117,15 +120,15 @@ impl BackendConfigWriter for FirecrackerConfigWriter {
     }
 }
 
-/// Build the `FirecrackerConfig` value from `artifact`.
+/// Build the `FcConfigFile` value from `artifact`.
 ///
 /// Extracted so the snapshot test can inspect the JSON without writing a file.
-fn build_config(artifact: &MicrovmArtifact, artifact_dir: &std::path::Path) -> FirecrackerConfig {
+fn build_config(artifact: &MicrovmArtifact, artifact_dir: &std::path::Path) -> FcConfigFile {
     let boot_args = artifact.boot_args.join(" ");
 
     let vsock_uds = artifact_dir.join("v.sock");
 
-    FirecrackerConfig {
+    FcConfigFile {
         boot_source: BootSource {
             kernel_image_path: artifact.kernel.path.display().to_string(),
             boot_args,
@@ -134,12 +137,10 @@ fn build_config(artifact: &MicrovmArtifact, artifact_dir: &std::path::Path) -> F
             drive_id: "rootfs".to_string(),
             path_on_host: artifact.rootfs.path.display().to_string(),
             is_root_device: true,
-            // Rootfs is read-only by default — mirrors the verity posture
-            // (claim 3 / ADR-002 W3) where verified boot requires the rootfs
-            // to be opened read-only so the dm-verity Merkle check holds.
-            // Callers that need a writable rootfs (dev/sandbox mode) set
-            // `is_read_only: false` after reading the config.
-            is_read_only: true,
+            // Derived from the artifact: verified-boot/prod sets read_only=true
+            // (ADR-002 W3 — dm-verity requires RO so the Merkle check holds);
+            // dev/sandbox may set read_only=false for writable overlay mounts.
+            is_read_only: artifact.rootfs.read_only,
         }],
         machine_config: MachineConfig {
             vcpu_count: DEFAULT_VCPU_COUNT,
@@ -199,6 +200,7 @@ mod tests {
                 format: RootfsFormat::Ext4,
                 hash: "cafebabe".to_string(),
                 size_bytes: 1_073_741_824,
+                read_only: true,
             },
             boot_args: vec![
                 "console=ttyS0".to_string(),

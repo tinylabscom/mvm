@@ -32,6 +32,12 @@ pub struct RootfsArtifact {
     pub hash: String,
     /// Size of the image file in bytes.
     pub size_bytes: u64,
+    /// Whether the drive must be opened read-only by the backend.
+    ///
+    /// Verified-boot / prod path sets `true` (ADR-002 W3 — dm-verity requires
+    /// the rootfs is opened RO so the Merkle check holds). Dev/sandbox mode
+    /// may set `false` to allow in-guest writes.
+    pub read_only: bool,
 }
 
 /// A complete set of artifacts that can boot a microVM.
