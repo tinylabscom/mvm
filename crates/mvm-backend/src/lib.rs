@@ -34,6 +34,7 @@
 //!                     (consumes us directly)
 
 pub mod apple_container;
+pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
 pub mod ch_runtime;
