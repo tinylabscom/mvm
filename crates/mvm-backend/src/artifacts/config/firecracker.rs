@@ -177,6 +177,7 @@ mod tests {
     use crate::compat::RootfsFormat;
     use mvm_core::arch::GuestArch;
     use mvm_core::kernel_format::KernelFormat;
+    use uuid::Uuid;
 
     fn fixture_artifact(dir: &std::path::Path) -> MicrovmArtifact {
         // Write stub files so paths exist (validator may check, writer does not)
@@ -186,7 +187,7 @@ mod tests {
         std::fs::write(&rootfs, b"stub").unwrap();
 
         MicrovmArtifact {
-            id: "aaaabbbb-cccc-dddd-eeee-ffffffffffff".to_string(),
+            id: Uuid::parse_str("aaaabbbb-cccc-dddd-eeee-ffffffffffff").unwrap(),
             arch: GuestArch::X86_64,
             backend: MicrovmBackend::Firecracker,
             kernel: KernelArtifact {

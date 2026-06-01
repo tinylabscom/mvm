@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use mvm_core::arch::GuestArch;
 use mvm_core::kernel_format::KernelFormat;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::compat::{MicrovmBackend, RootfsFormat};
 
@@ -48,8 +49,8 @@ pub struct RootfsArtifact {
 /// been written by a `BackendConfigWriter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MicrovmArtifact {
-    /// Stable identifier for this artifact set (UUID v4).
-    pub id: String,
+    /// Stable UUID v4 for this artifact set. Matches `ArtifactManifest.artifact_id`.
+    pub id: Uuid,
     pub arch: GuestArch,
     pub backend: MicrovmBackend,
     pub kernel: KernelArtifact,

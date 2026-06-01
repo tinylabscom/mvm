@@ -12,11 +12,13 @@
 //!   / `mvm-meta.json`).
 
 pub mod artifact;
+pub mod builders;
 pub mod config;
 pub mod manifest;
 pub mod spec;
 pub mod traits;
 pub mod validate;
 
+pub use builders::NixMicrovmBuilder;
 pub use config::FirecrackerConfigWriter;
 pub use validate::StaticValidator;

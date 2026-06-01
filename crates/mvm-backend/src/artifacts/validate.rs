@@ -261,6 +261,7 @@ mod tests {
     use crate::compat::{MicrovmBackend, RootfsFormat};
     use mvm_core::arch::GuestArch;
     use mvm_core::kernel_format::KernelFormat;
+    use uuid::Uuid;
     /// Write `content` to a temp file and return the path + its SHA-256 hex.
     fn write_temp(
         dir: &std::path::Path,
@@ -292,7 +293,7 @@ mod tests {
         let (rootfs_path, rootfs_hash) = write_temp(dir, "rootfs.ext4", rootfs_content);
 
         MicrovmArtifact {
-            id: "test-artifact-id".to_string(),
+            id: Uuid::nil(),
             arch: GuestArch::X86_64,
             backend: MicrovmBackend::Firecracker,
             kernel: KernelArtifact {
@@ -387,7 +388,7 @@ mod tests {
     #[test]
     fn missing_files_fail_check_not_err() {
         let artifact = MicrovmArtifact {
-            id: "no-files".to_string(),
+            id: Uuid::nil(),
             arch: GuestArch::X86_64,
             backend: MicrovmBackend::Firecracker,
             kernel: KernelArtifact {
@@ -428,7 +429,7 @@ mod tests {
         let (kernel_path, _) = write_temp(tmp.path(), "vmlinux", b"real kernel bytes");
         let (rootfs_path, _) = write_temp(tmp.path(), "rootfs.ext4", b"real rootfs bytes");
         let artifact = MicrovmArtifact {
-            id: "hash-mismatch".to_string(),
+            id: Uuid::nil(),
             arch: GuestArch::X86_64,
             backend: MicrovmBackend::Firecracker,
             kernel: KernelArtifact {
@@ -468,7 +469,7 @@ mod tests {
         let (kernel_path, kernel_hash) = write_temp(tmp.path(), "vmlinux", b"elf stub");
         let (rootfs_path, rootfs_hash) = write_temp(tmp.path(), "rootfs.ext4", b"ext4 stub");
         let artifact = MicrovmArtifact {
-            id: "missing-args".to_string(),
+            id: Uuid::nil(),
             arch: GuestArch::X86_64,
             backend: MicrovmBackend::Firecracker,
             kernel: KernelArtifact {
@@ -557,7 +558,7 @@ mod tests {
             };
             let size = std::fs::metadata(&rootfs).unwrap().len();
             MicrovmArtifact {
-                id: "linux-ext4-test".to_string(),
+                id: Uuid::nil(),
                 arch: GuestArch::X86_64,
                 backend: MicrovmBackend::Firecracker,
                 kernel: KernelArtifact {
@@ -675,7 +676,7 @@ mod tests {
             .collect();
 
         let artifact = MicrovmArtifact {
-            id: "positive-test".to_string(),
+            id: Uuid::nil(),
             arch: GuestArch::X86_64,
             backend: MicrovmBackend::Firecracker,
             kernel: KernelArtifact {
