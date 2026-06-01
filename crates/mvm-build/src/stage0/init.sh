@@ -88,7 +88,7 @@ if ! mountpoint -q /out; then
   exit 65
 fi
 # The builder-vm flake installs the pre-cross-compiled host-vm binaries
-# (mvm-builder-init, mvm-egress-proxy) from /mvm-bins instead of building
+# (mvm-host-vm-init, mvm-egress-proxy) from /mvm-bins instead of building
 # them with the guest's nix (ADR-065). Without this mount the build aborts
 # with "MVM_HOST_BIN_DIR is not set".
 if ! mountpoint -q /mvm-bins; then

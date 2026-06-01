@@ -174,7 +174,7 @@
         bashInteractive
         coreutils
         # `pkgsStatic.busybox` for the lightweight utilities that
-        # mvm-builder-init spawns by absolute path — chiefly
+        # mvm-host-vm-init spawns by absolute path — chiefly
         # `/sbin/udhcpc` (busybox applet) for DHCP on the builder
         # VM's eth0. Without busybox in `packages`, mkGuest's
         # symlink loop (nix/lib/mk-guest.nix:770-788) skips it
@@ -239,10 +239,12 @@
       # - `ro` — root is read-only; writes go to the persistent
       #   /nix-store virtio-blk at /dev/vdb (Plan 72 W4 wires it).
       # - `rootfstype=ext4` — skip filesystem auto-detection.
-      # - `init=/sbin/mvm-builder-init` — Plan 72 W3 / Plan 107 A1b
-      #   binary as PID 1. Cargo package is `mvm-host-vm-init`; the
-      #   install path is `/sbin/mvm-builder-init` (T2 manifest).
-      builderCmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-builder-init";
+      # - `init=/sbin/mvm-host-vm-init` — the `mvm-host-vm-init` binary
+      #   as PID 1. Its install path (`/sbin/mvm-host-vm-init`) must
+      #   match the manifest in nix/lib/mvm-host-binaries.nix; the
+      #   binary is statically linked, so no dynamic loader is needed in
+      #   this rootfs.
+      builderCmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init";
 
       # Extra packages for the interactive (dev) builder VM image.
       # Added on top of `builderPackages` when `interactive = true`.
@@ -261,7 +263,7 @@
       # the full builder-VM image or the Stage 0 seed.
       # Plan 92 — `specs/plans/92-minimal-builder-vm-kernel.md`.
       #
-      # ADR-065 / Plan 115: host binaries (mvm-builder-init,
+      # ADR-065 / Plan 115: host binaries (mvm-host-vm-init,
       # mvm-egress-proxy) are no longer built from source here.
       # They come in from `hostBinExtraFiles` (keyed by install_path)
       # and are read from MVM_HOST_BIN_DIR at eval time.
@@ -274,8 +276,8 @@
         (libFor { inherit system; }).mkGuest {
           name = "mvm-builder-vm";
           # Skip the addon-dns bake. The builder VM's PID 1 is
-          # `mvm-builder-init` (set via `extraFiles` + the
-          # `init=/sbin/mvm-builder-init` kernel cmdline), so
+          # `mvm-host-vm-init` (set via `extraFiles` + the
+          # `init=/sbin/mvm-host-vm-init` kernel cmdline), so
           # mkGuest's initScript-side addon-dns activation block
           # never runs and the binary would just sit unused at
           # /usr/local/bin/mvm-addon-dns. The win is in Stage 0:
@@ -284,7 +286,7 @@
           # the tmpfs-bound build into OOM territory.
           bakeAddonDns = false;
           # mkGuest requires an entrypoint declaration. At runtime
-          # the kernel cmdline sets `init=/sbin/mvm-builder-init`,
+          # the kernel cmdline sets `init=/sbin/mvm-host-vm-init`,
           # so mkGuest's entrypoint is vestigial — but we still
           # need to declare one to satisfy the type contract.
           entrypoint.shell = "/bin/sh";
@@ -321,7 +323,7 @@
           # Slim custom kernel — see `./kernel/default.nix`.
           # `pkgs.linuxManualConfig` over `make tinyconfig` + a
           # narrow `enables` list. `CONFIG_MODULES=n` so the kernel
-          # has only what `mvm-builder-init` actually uses built-in
+          # has only what `mvm-host-vm-init` actually uses built-in
           # — no driver modules tree to ship.
           # Plan 92 — `specs/plans/92-minimal-builder-vm-kernel.md`.
           kernelPkg = import ./kernel { inherit pkgs; };
