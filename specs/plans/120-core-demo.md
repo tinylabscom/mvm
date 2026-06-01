@@ -102,11 +102,7 @@ The decorator `.py` path **is wired** — `crates/mvm-cli/src/commands/build/com
 
 - [x] **Step 4: Run the test again** (`cargo test -p mvm-cli --test compile_hello_app`) → PASS, then `cargo fmt --all -- --check`.
 
-- [ ] **Step 5: Commit.**
-  ```bash
-  git -C /Users/auser/work/tinylabs/mvmco/mvm add -A
-  git -C /Users/auser/work/tinylabs/mvmco/mvm commit -m "test(mvm-cli): lock mvmctl compile <app.py> decorator lowering; fix stale v1 docstring"
-  ```
+- [x] **Step 5: Commit.** Landed in `705b7889` (core-demo CLI spine + fold ADR-060 carryover into plans 122-130).
 
 ## Task 3: The boot→ping E2E (`core_demo_e2e.rs`) — the regression guard
 
@@ -157,21 +153,17 @@ One gated test driving the whole spine with the **verified** verbs: `mvmctl dev 
   ```
   *(On macOS the workload backend must be libkrun, not the `--backend` firecracker default — Task 4 wires that selection. The assertion contract is fixed: `up` boots and the agent answers.)*
 
-- [ ] **Step 2: Run it gated** on a libkrun host: `MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture`. First run surfaces the real gaps (Task 4). The default (ungated) run skips and passes — confirm with `cargo test -p mvm-cli --test core_demo_e2e` (prints the skip line, exits 0).
+- [x] **Step 2: Run it gated** on a libkrun host. Default-skip behavior confirmed (`cargo test -p mvm-cli --test core_demo_e2e` exits 0 with the skip line). The gated run (`MVM_E2E_SMOKE=1 ...`) requires Task 4's iterate-to-green loop to fully pass; the lane added in Step 3 keeps it observable.
 
-- [ ] **Step 3: Add the lane to CI** as a manual/opt-in job (not every PR — it needs a libkrun runner), mirroring how `dev_up_smoke` is gated. Document it in `public/src/content/docs/contributing/development.md`.
+- [x] **Step 3: Add the lane to CI** — `.github/workflows/ci.yml::core-demo-e2e` (gated on `MACOS_LIBKRUN_AVAILABLE` repo variable + self-hosted runner labelled `[self-hosted, macOS, ARM64, libkrun]`). Documented in `public/src/content/docs/contributing/development.md` §"Gated E2E: the core-demo regression guard". `continue-on-error: true` keeps a flaky boot from gating PRs (matches the `vz-macos-26` opt-in pattern).
 
-- [ ] **Step 4: Commit.**
-  ```bash
-  git -C /Users/auser/work/tinylabs/mvmco/mvm add -A
-  git -C /Users/auser/work/tinylabs/mvmco/mvm commit -m "test(mvm-cli): core-demo boot->ping E2E (MVM_E2E_SMOKE-gated)"
-  ```
+- [x] **Step 4: Commit.** Test file + docstring fix landed in `705b7889`; CI lane + docs + the `--hypervisor` thread land alongside the Task 4 §1 follow-up commits.
 
 ## Task 4: Close whatever the E2E surfaces, until it is green
 
 The spine is *believed* complete (fresh build → `overlay_aware: true` → admits; `up` pings the agent). Task 4 is the iterate-to-green loop: run the gated E2E, read `<vm_state_dir>/console.log` **first** on any boot failure (per the project's debugging convention), fix the one gap, re-run. **No speculative fixes** — only what the E2E proves broken. The likely gaps, in order:
 
-- [ ] **Step 1: macOS workload backend.** `up`'s `--backend` defaults to `firecracker` (`up.rs:705`), which needs Linux KVM. On macOS the workload microVM must run via libkrun. Confirm `up` selects libkrun on macOS (per-OS default) or thread the backend through the E2E. This is the most likely first failure.
+- [x] **Step 1: macOS workload backend.** Closed two ways. (a) `up.rs:1188` auto-select now includes a `libkrun` rung between `apple-container` and `docker`, matching `AnyBackend::auto_select()`'s established ladder — macOS 13-25 boxes with libkrun installed no longer fall through to the firecracker default that can't boot. (b) The E2E threads `--hypervisor` explicitly through `mvmctl up` based on `cfg!(target_os)`: libkrun on macOS, firecracker on Linux. Landed in `bfb10b1d`. A secondary cross-compile gap surfaced en route — `libc 0.2.182` narrowed `ioctl(_, request, _)` from `c_ulong` to `c_int`, breaking `mvm-host-vm-init`'s SIOCGIFFLAGS/SIOCSIFFLAGS call sites the build.rs cross-compiles for aarch64-linux-gnu; fixed in `eceba7cd`.
 - [ ] **Step 2: `compile → up` handoff.** Confirm `up --flake <compiled-dir>` consumes `compile`'s rendered `flake.nix`. If `up` expects a flake *reference* rather than a directory of rendered artifacts, wire the handoff (point `up` at the rendered dir, or have the E2E pass it as a path-flake `--flake path:<dir>`).
 - [ ] **Step 3: teardown.** Confirm `dev down` stops the builder; if `up` leaves a workload VM running, stop it (the `mvmctl` stop/kill verb) in the test's teardown so repeated runs stay idempotent.
 - [ ] **Step 4: Repeat** until `MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e` is green on a macOS/libkrun host. Each fix is its own red→green→commit cycle.

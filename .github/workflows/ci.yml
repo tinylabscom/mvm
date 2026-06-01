@@ -83,8 +83,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
 
       # Plan 115 / ADR-065 — mvm-cli's build.rs cross-compiles
-      # mvm-host-vm-init + mvm-egress-proxy for aarch64-unknown-linux-gnu
-      # via cargo-zigbuild and embeds the binaries via include_bytes!.
+      # mvm-host-vm-init + mvm-egress-proxy for aarch64-unknown-linux-musl
+      # (static) via cargo-zigbuild and embeds the binaries via include_bytes!.
       # Pinned versions live in [workspace.metadata.mvm.toolchain] in
       # the root Cargo.toml; the composite action keeps the install
       # step in lockstep.
@@ -985,6 +985,76 @@ jobs:
           grep -q '"vz"' doctor.json || { echo 'doctor did not report vz' >&2; exit 1; }
           grep -q 'apple-container\|apple_container' doctor.json \
             || echo 'note: apple-container probe not yet wired; continuing'
+
+  # ── Lane: core-demo E2E (dev up → compile → up → vsock ping) ──
+  #
+  # Plan 120 §Task 3. The regression guard for the whole core-demo
+  # spine: `mvmctl dev up` boots the persistent builder VM → `mvmctl
+  # compile examples/python/hello-app/app.py` lowers the @mvm.app
+  # decorator to flake.nix + launch.json → `mvmctl up --hypervisor
+  # libkrun --flake <dir>` builds + boots the workload microVM → the
+  # guest agent answers Ping over vsock.
+  #
+  # The lane requires libkrun + libkrunfw + gvproxy installed on the
+  # runner host plus enough disk + RAM for the persistent builder VM.
+  # GHA-hosted macOS runners do NOT have libkrun and do NOT allow
+  # nested HVF, so this lane targets a self-hosted Apple Silicon box
+  # labelled `[self-hosted, macOS, ARM64, libkrun]` and is gated on
+  # the `MACOS_LIBKRUN_AVAILABLE` repo variable. Without that gate,
+  # the job would queue forever waiting for a runner that doesn't
+  # exist, blocking branch protection.
+  #
+  # Wiring a runner:
+  #   1. Set repo variable `MACOS_LIBKRUN_AVAILABLE=true`.
+  #   2. Register a self-hosted runner with labels `macOS`, `ARM64`,
+  #      `libkrun`. Install the slp/krun Homebrew tap (libkrun +
+  #      libkrunfw + gvproxy) on that box.
+  #   3. The lane will then run on push / PR to the protected branches.
+  #
+  # `continue-on-error: true` keeps a flaky boot (network blip, stale
+  # builder state, kernel oops during workload boot) from gating PRs;
+  # the lane is observational until the demo's perf baseline is wired.
+  # Locally, contributors run the same gated test with
+  #   `MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture`.
+  core-demo-e2e:
+    name: Core demo E2E (dev up → compile → up → ping) — opt-in, self-hosted
+    if: ${{ vars.MACOS_LIBKRUN_AVAILABLE == 'true' }}
+    runs-on: [self-hosted, macOS, ARM64, libkrun]
+    continue-on-error: true
+    env:
+      MVM_E2E_SMOKE: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-core-demo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-core-demo-e2e-
+
+      - name: Verify Homebrew prerequisites
+        run: |
+          missing=()
+          for pkg in libkrun libkrunfw gvproxy; do
+            brew list "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::missing Homebrew packages: ${missing[*]} — install with:"
+            echo "::error::  brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy"
+            exit 1
+          fi
+
+      - name: Run core-demo E2E
+        run: |
+          cargo test -p mvm-cli --test core_demo_e2e core_demo_dev_compile_up_ping \
+            -- --nocapture
 
   # ── Lane: cloud-hypervisor (Linux x86_64, paths-gated) ──
   #
