@@ -30,10 +30,13 @@ use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(feature = "libkrun-sys")]
 mod sys;
 
+// `KernelFormat` lives in `mvm-core` so all backends share one canonical type.
+// Re-export it unconditionally (no feature gate) so callers that build
+// `KrunContext` configurations without enabling `libkrun-sys` can still name it.
+pub use mvm_core::kernel_format::KernelFormat;
+
 #[cfg(feature = "libkrun-sys")]
-pub use sys::{
-    BundledKernel, KernelFormat, LogLevel, extract_bundled_kernel, init_log, set_log_level,
-};
+pub use sys::{BundledKernel, LogLevel, extract_bundled_kernel, init_log, set_log_level};
 
 // Plan 87 / ADR-055 — passt-backed virtio-net. The supervisor owns the
 // passt child process and exposes the socket fd `KrunContext::Passt`
@@ -1023,7 +1026,7 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         let initramfs_path = ctx.initramfs_path.as_deref().map(Path::new);
         krun.set_kernel(
             Path::new(kernel_path),
-            sys::KernelFormat::Raw,
+            KernelFormat::Raw,
             initramfs_path,
             ctx.kernel_cmdline.as_deref(),
         )?;

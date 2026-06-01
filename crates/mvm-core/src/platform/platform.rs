@@ -109,7 +109,33 @@ impl Platform {
         if matches!(self, Platform::MacOS) {
             return false;
         }
-        mvm_libkrun::is_available()
+        // Filesystem probe of standard libkrun install paths. Mirrors
+        // `mvm_libkrun::is_available()` — kept here to avoid a dep cycle
+        // (mvm-core ← mvm-libkrun; adding the reverse closes the cycle).
+        #[cfg(target_os = "macos")]
+        {
+            [
+                "/opt/homebrew/lib/libkrun.dylib",
+                "/usr/local/lib/libkrun.dylib",
+            ]
+            .iter()
+            .any(|p| Path::new(p).exists())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            [
+                "/usr/lib/x86_64-linux-gnu/libkrun.so",
+                "/usr/lib/aarch64-linux-gnu/libkrun.so",
+                "/usr/lib64/libkrun.so",
+                "/usr/local/lib/libkrun.so",
+            ]
+            .iter()
+            .any(|p| Path::new(p).exists())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            false
+        }
     }
 
     /// Whether Cloud Hypervisor is installed on this host.
@@ -469,15 +495,18 @@ mod tests {
     }
 
     #[test]
-    fn test_has_libkrun_consistent_with_libkrun_crate() {
-        // On supported libkrun platforms, has_libkrun() agrees with
-        // the libkrun crate's authoritative is_available() probe.
+    fn test_has_libkrun_returns_bool_without_panic() {
+        // Probe is a filesystem check — result depends on host install state.
+        // Asserts it doesn't panic and returns false on unsupported platforms.
         let plat = current();
-        if matches!(plat, Platform::LinuxNative | Platform::MacOS) {
-            assert_eq!(plat.has_libkrun(), mvm_libkrun::is_available());
-        } else {
-            assert!(!plat.has_libkrun());
+        let result = plat.has_libkrun();
+        if matches!(
+            plat,
+            Platform::Windows | Platform::Wsl2 | Platform::LinuxNoKvm
+        ) {
+            assert!(!result, "has_libkrun must be false on {plat:?}");
         }
+        // On macOS / LinuxNative: depends on whether libkrun is installed.
     }
 
     #[test]

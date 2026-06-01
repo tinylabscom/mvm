@@ -3472,7 +3472,6 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "ipnet",
- "mvm-libkrun",
  "mvm-providers",
  "rand 0.8.6",
  "regex",
@@ -3599,6 +3598,7 @@ version = "0.14.0"
 dependencies = [
  "bindgen",
  "libc",
+ "mvm-core",
  "mvm-guest",
  "mvm-providers",
  "serde",
