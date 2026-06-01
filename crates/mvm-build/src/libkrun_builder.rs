@@ -324,18 +324,20 @@ impl LibkrunBuilderVm {
         self
     }
 
-    /// Boot a Stage 0 bootstrap VM that runs a self-contained init
-    /// script — no `/job/cmd.sh` staging, no `/job/result` parsing,
-    /// no `/nix-store` virtio-blk. The guest is expected to be a
-    /// `BuilderVmImage::RootDir` whose `/init` reads `/work` and
+    /// libkrun-side Stage 0 boot. Drives a self-contained `RootDir`
+    /// guest — no `/job/cmd.sh` staging, no `/job/result` parsing, no
+    /// `/nix-store` virtio-blk. The guest's `/init` reads `/work` and
     /// writes the steady-state builder VM artifacts to `/out`, then
     /// powers off cleanly.
     ///
-    /// On success, the caller still needs to validate that the
-    /// expected artifacts (`vmlinux`, `rootfs.ext4`) landed in
-    /// `artifact_out`; this function only asserts that the
-    /// supervisor exited 0.
-    pub fn run_stage0(
+    /// On success the caller still validates that the expected artifacts
+    /// (`vmlinux`, `rootfs.ext4`) landed in `artifact_out`; this only
+    /// asserts the supervisor exited 0.
+    ///
+    /// Private impl behind `<Self as BuilderVm>::run_stage0`, which
+    /// adapts the backend-agnostic `(root_dir, entry)` trait signature
+    /// to libkrun's `BuilderVmImage`. ADR-068.
+    fn run_stage0_impl(
         &self,
         image: BuilderVmImage,
         workspace_dir: &std::path::Path,
@@ -685,6 +687,20 @@ pub(crate) fn ensure_utf8_path(p: &std::path::Path, field: &str) -> Result<(), B
 }
 
 impl BuilderVm for LibkrunBuilderVm {
+    /// ADR-068: adapt the backend-agnostic `(root_dir, entry)` Stage 0
+    /// contract to libkrun's `BuilderVmImage::RootDir` and run it.
+    fn run_stage0(
+        &self,
+        guest_root_dir: &std::path::Path,
+        entry_path: &str,
+        workspace_dir: &std::path::Path,
+        artifact_out: &std::path::Path,
+        host_bin_dir: &std::path::Path,
+    ) -> Result<(), BuilderVmError> {
+        let image = BuilderVmImage::new_root_dir(guest_root_dir.to_path_buf(), entry_path);
+        self.run_stage0_impl(image, workspace_dir, artifact_out, host_bin_dir)
+    }
+
     fn run_build(
         &self,
         job: &BuilderJob,

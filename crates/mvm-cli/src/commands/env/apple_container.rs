@@ -2098,8 +2098,6 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     out_dir: &str,
     source_fingerprint: &str,
 ) -> Result<()> {
-    use mvm_build::libkrun_builder::BuilderVmImage;
-
     let _stage0_guard = acquire_stage0_lock(out_dir)?;
 
     // Plan 93 Phase 3: time each host-visible Stage 0 step and print a
@@ -2169,11 +2167,11 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
             .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
-    let image = BuilderVmImage::new_root_dir(root_dir.clone(), "/init");
     let result = run_stage0_root_dir(
         &staging_dir,
         &workspace_root,
-        image,
+        &root_dir,
+        "/init",
         &host_bin_dir,
         source_fingerprint,
     );
@@ -2212,14 +2210,29 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
 fn run_stage0_root_dir(
     staging_dir: &std::path::Path,
     workspace_root: &std::path::Path,
-    image: mvm_build::libkrun_builder::BuilderVmImage,
+    guest_root_dir: &std::path::Path,
+    entry_path: &str,
     host_bin_dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
+    use mvm_build::builder_vm::BuilderVm;
     use mvm_build::libkrun_builder::LibkrunBuilderVm;
 
-    LibkrunBuilderVm::default()
-        .run_stage0(image, workspace_root, staging_dir, host_bin_dir)
+    // ADR-068: dispatch Stage 0 through the `BuilderVm` trait, the same
+    // seam `run_build` uses. Only the libkrun backend implements
+    // `run_stage0` today, so bind it concretely here rather than routing
+    // through the libkrun/Vz builder-backend selector — that keeps macOS
+    // 26+ (Vz-default) hosts bootstrapping via libkrun until a Vz Stage 0
+    // lands (ADR-068 §"Backend gaps").
+    let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+    backend
+        .run_stage0(
+            guest_root_dir,
+            entry_path,
+            workspace_root,
+            staging_dir,
+            host_bin_dir,
+        )
         .map_err(|e| {
             (
                 Stage0FailureStage::Build,
