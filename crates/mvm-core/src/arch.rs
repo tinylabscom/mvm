@@ -21,6 +21,12 @@ impl GuestArch {
         }
     }
     /// The host's arch at compile time. Replaces `host_system_linux()`.
+    ///
+    /// Assumption: mvm only supports `x86_64` and `aarch64` hosts. A
+    /// non-`x86_64` host is treated as `aarch64` *by design* — if a
+    /// third arch (RISC-V, s390x, …) is ever supported, add a variant
+    /// and a matching `cfg` arm here, or this silently returns the
+    /// wrong answer.
     pub const fn host() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
@@ -40,9 +46,11 @@ pub struct UnknownArch(pub String);
 impl FromStr for GuestArch {
     type Err = UnknownArch;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Accept bare arch or `<arch>-linux`.
-        let base = s.split('-').next().unwrap_or(s).trim().to_ascii_lowercase();
+        // Trim the whole input first, then take the arch token before
+        // any `-` (so `<arch>-linux` Nix systems parse too).
+        let base = s.trim().split('-').next().unwrap_or(s).to_ascii_lowercase();
         match base.as_str() {
+            // `x64` is the shorthand some Docker/Windows toolchains emit.
             "x86_64" | "amd64" | "x64" => Ok(GuestArch::X86_64),
             "aarch64" | "arm64" => Ok(GuestArch::Aarch64),
             _ => Err(UnknownArch(s.to_string())),
@@ -69,6 +77,28 @@ mod tests {
         assert_eq!("aarch64".parse::<GuestArch>().unwrap(), GuestArch::Aarch64);
         assert_eq!("arm64".parse::<GuestArch>().unwrap(), GuestArch::Aarch64);
         assert!("riscv64".parse::<GuestArch>().is_err());
+    }
+    #[test]
+    fn nix_system_suffixed_inputs_parse() {
+        assert_eq!(
+            "x86_64-linux".parse::<GuestArch>().unwrap(),
+            GuestArch::X86_64
+        );
+        assert_eq!(
+            "aarch64-linux".parse::<GuestArch>().unwrap(),
+            GuestArch::Aarch64
+        );
+    }
+    #[test]
+    fn surrounding_whitespace_is_tolerated() {
+        assert_eq!(
+            "  aarch64 ".parse::<GuestArch>().unwrap(),
+            GuestArch::Aarch64
+        );
+        assert_eq!(
+            " x86_64-linux\n".parse::<GuestArch>().unwrap(),
+            GuestArch::X86_64
+        );
     }
     #[test]
     fn nix_system_strings() {
