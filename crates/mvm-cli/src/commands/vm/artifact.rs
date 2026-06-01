@@ -542,6 +542,13 @@ fn manifest_to_artifact(
         // Required boot args come from the compat table for this backend; the
         // manifest doesn't re-store them. Pull them so the validator's check 6
         // (required_boot_args present in boot_args) can compare correctly.
+        //
+        // Tautology note: because boot_args is reconstructed from the same
+        // compat table that check 6 consults, check 6 always passes at this
+        // call site — the set we fill in is exactly the set being checked.
+        // Check 6 becomes meaningful only when boot_args is recorded in the
+        // manifest from the real cmdline at build time (the compat-seeded
+        // path is then absent and the manifest carries the actual args used).
         boot_args: mvm_backend::compat::compat(m.backend)
             .required_boot_args
             .iter()
