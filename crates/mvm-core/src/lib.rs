@@ -1,6 +1,7 @@
 // mvm-core: Pure types, IDs, config, utilities
 // No internal mvm dependencies — this is the foundation crate.
 
+pub mod arch;
 pub mod build_env;
 pub mod catalog;
 pub mod config;
