@@ -3322,6 +3322,7 @@ name = "mvm-backend"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "ext4-view",
  "libc",
  "mvm-base",
  "mvm-build",

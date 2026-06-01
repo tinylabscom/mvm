@@ -60,6 +60,7 @@ which.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ext4-view.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
