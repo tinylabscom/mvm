@@ -1894,7 +1894,10 @@ mod linux {
             let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
             ifr.ifr_name = name;
 
-            if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) } < 0 {
+            // libc 0.2.182 narrowed ioctl's request type from c_ulong
+            // to c_int (Ioctl); SIOCGIFFLAGS / SIOCSIFFLAGS are
+            // declared u64 (their kernel ABI value), so cast explicitly.
+            if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::c_int, &mut ifr) } < 0 {
                 return Err(format!(
                     "SIOCGIFFLAGS {iface}: {}",
                     std::io::Error::last_os_error()
@@ -1909,7 +1912,7 @@ mod linux {
                 let flags = ifr.ifr_ifru.ifru_flags;
                 ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short);
             }
-            if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) } < 0 {
+            if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::c_int, &ifr) } < 0 {
                 return Err(format!(
                     "SIOCSIFFLAGS {iface} IFF_UP: {}",
                     std::io::Error::last_os_error()
