@@ -373,7 +373,7 @@ impl VendorBlobReport {
 /// Alpine's minirootfs already includes /proc, /sys, /dev, /tmp,
 /// /run, /etc, /bin, /sbin, /usr, /var — we add /work and /out
 /// for the virtio-fs mounts and /nix because Nix expects it.
-const ROOT_DIR_EXTRA_STUBS: &[&str] = &["work", "out", "nix"];
+const ROOT_DIR_EXTRA_STUBS: &[&str] = &["work", "out", "nix", "mvm-bins"];
 
 /// Materialize a Stage 0 guest root at `dest` from the embedded
 /// init script and the cached Alpine minirootfs tarball. The

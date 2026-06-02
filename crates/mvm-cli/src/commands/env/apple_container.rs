@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use mvm::vsock_transport::{VsockProxyTransport, VsockTransport};
 
 use super::super::vm::console::console_interactive;
+use super::artifact_verify::{
+    bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
+};
 use crate::ui;
 
 // ============================================================================
@@ -20,18 +23,12 @@ pub(super) const DEV_VM_NAME: &str = "mvm-dev";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
-/// Heuristic needle for `rootfs_contains_builder_init`. We used to scan
-/// for the contiguous bytes `/sbin/mvm-host-vm-init`, but ext4 stores
-/// each path component as a separate dirent — `sbin` and
-/// `mvm-host-vm-init` are never adjacent in the raw image — so a
-/// freshly-built rootfs that *has* the binary at `/sbin/mvm-host-vm-init`
-/// would fail the check. The basename `mvm-host-vm-init` is what
-/// actually appears in the dirent (one of the file's `/etc/.../...`
-/// references is the embedded debug strings inside the Rust binary
-/// itself). The dev-prebuilt seed image case continues to work because
-/// the basename appears there too. False-positive risk is negligible:
-/// nothing else in the rootfs is named exactly `mvm-host-vm-init`.
-const HOST_VM_INIT_PATH: &[u8] = b"mvm-host-vm-init";
+/// Absolute path the builder-VM rootfs must carry for the steady-state
+/// VM to boot (`init=/sbin/mvm-host-vm-init` on the kernel cmdline).
+/// `verify_stage0_rootfs_has_init` looks this inode up directly via a
+/// read-only ext4 walk after Stage 0 builds the image.
+#[cfg(feature = "builder-vm")]
+const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 
 /// Check if the Apple Container dev VM is running *and* reachable
 /// cross-process via the vsock proxy socket.
@@ -792,10 +789,39 @@ pub(super) fn ensure_dev_image() -> Result<(String, String)> {
     // source checkout; when present, `build_image_via_libkrun` is
     // invoked against the `dev` attr of the consolidated flake.
     #[cfg(feature = "builder-vm")]
-    if find_builder_vm_flake().is_ok() {
+    if let Ok(flake_dir) = find_builder_vm_flake() {
         let out_dir = format!("{}/dev/current", mvm_core::config::mvm_data_dir());
-        prepare_dev_image_out_dir(&out_dir)?;
+        let out_path = std::path::Path::new(&out_dir);
 
+        // Fix A — fast-path: when the dev-image source fingerprint matches
+        // the cached artifacts, the image the builder VM would produce is
+        // byte-identical to what's on disk, so boot it without spinning a
+        // builder VM. Without this, every `dev up` in a source checkout
+        // re-enters nix to rebuild the custom kernel + full crate closure
+        // (minutes) even when nothing changed. Same trust model as the
+        // Layer-1 and published-prebuilt fast paths: fingerprint match ⇒
+        // identical nix derivation ⇒ identical output. `prepare_dev_image_out_dir`
+        // (which clears the dir) runs only on the rebuild path below, so a
+        // hit never destroys the cache it's about to return.
+        if let Ok(fingerprint) = builder_vm_source_fingerprint(&flake_dir) {
+            let status = builder_vm_source_cache_status(out_path, &fingerprint);
+            if status.is_ready() {
+                ui::success(&format!(
+                    "Dev image cache hit (fingerprint {}); skipping builder VM.",
+                    stage0_fingerprint_prefix(&fingerprint),
+                ));
+                return Ok((
+                    format!("{out_dir}/vmlinux"),
+                    format!("{out_dir}/rootfs.ext4"),
+                ));
+            }
+            ui::progress(&format!(
+                "Dev image cache decision: {}",
+                status.reason_code()
+            ));
+        }
+
+        prepare_dev_image_out_dir(&out_dir)?;
         return build_image_via_libkrun(&out_dir);
     }
 
@@ -981,35 +1007,33 @@ fn find_local_fallback_image_with(
     Some((dir.join("vmlinux"), dir.join("rootfs.ext4"), label))
 }
 
-fn rootfs_contains_builder_init(rootfs: &std::path::Path) -> Result<bool> {
-    file_contains_bytes(rootfs, HOST_VM_INIT_PATH)
-        .with_context(|| format!("scanning {} for /sbin/mvm-host-vm-init", rootfs.display()))
-}
-
-fn file_contains_bytes(path: &std::path::Path, needle: &[u8]) -> Result<bool> {
-    if needle.is_empty() {
-        return Ok(true);
+/// Verify the freshly-built Stage 0 rootfs actually carries
+/// `/sbin/mvm-host-vm-init` by walking the ext4 image read-only and
+/// looking the inode up by path — no mount, no root, no
+/// raw-byte substring scan. Catches a builder-VM flake that built but
+/// failed to install the init binary, before the artifacts are promoted
+/// into the cache (where the next boot would `init=` into a missing
+/// binary and panic).
+///
+/// A malformed / non-ext4 image surfaces as an `Err` (load failure)
+/// rather than a false negative.
+#[cfg(feature = "builder-vm")]
+fn verify_stage0_rootfs_has_init(rootfs: &std::path::Path) -> Result<()> {
+    let fs = ext4_view::Ext4::load_from_path(rootfs)
+        .with_context(|| format!("opening {} as ext4", rootfs.display()))?;
+    let present = fs.exists(HOST_VM_INIT_ROOTFS_PATH).with_context(|| {
+        format!(
+            "looking up {HOST_VM_INIT_ROOTFS_PATH} in {}",
+            rootfs.display()
+        )
+    })?;
+    if !present {
+        anyhow::bail!(
+            "Stage 0 builder VM rootfs {} is missing {HOST_VM_INIT_ROOTFS_PATH}",
+            rootfs.display()
+        );
     }
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut carry = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = std::io::Read::read(&mut file, &mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if n == 0 {
-            return Ok(false);
-        }
-        let mut window = Vec::with_capacity(carry.len() + n);
-        window.extend_from_slice(&carry);
-        window.extend_from_slice(&buf[..n]);
-        if window.windows(needle.len()).any(|w| w == needle) {
-            return Ok(true);
-        }
-        let keep = needle.len().saturating_sub(1).min(window.len());
-        carry.clear();
-        carry.extend_from_slice(&window[window.len() - keep..]);
-    }
+    Ok(())
 }
 
 /// Sanity-check that a `(vmlinux, rootfs.ext4)` pair looks like a real
@@ -1701,206 +1725,6 @@ pub fn cmd_dev_import_image(
     Ok(())
 }
 
-/// Bump the dev_image_verify_<outcome> counter. Plan 36 §Layer 4 step 11.
-///
-/// Caller passes the outcome name; centralising the lookup keeps the
-/// counter set discoverable in one place. mvmd plan 23's
-/// reconciliation loop will alert on attack-shaped spikes
-/// (sig_invalid, digest_mismatch, revoked).
-///
-/// Security-relevant outcomes (everything except `network`, which is
-/// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
-/// so `mvmctl audit tail` shows the rejection. The counter is the
-/// alerting channel; the audit line is the forensics channel.
-fn bump_verify_outcome(outcome: &str) {
-    let m = mvm_core::observability::metrics::global();
-    let counter = match outcome {
-        "sig_invalid" => &m.dev_image_verify_sig_invalid,
-        "digest_mismatch" => &m.dev_image_verify_digest_mismatch,
-        "version_skew" => &m.dev_image_verify_version_skew,
-        "revoked" => &m.dev_image_verify_revoked,
-        "expired" => &m.dev_image_verify_expired,
-        "network" => &m.dev_image_verify_network,
-        // Defensive: an unknown outcome is itself a bug worth surfacing
-        // — log a warning rather than silently swallowing the metric.
-        _ => {
-            tracing::warn!("bump_verify_outcome: unknown outcome '{outcome}'");
-            return;
-        }
-    };
-    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if outcome != "network" {
-        let mvmctl_version = env!("CARGO_PKG_VERSION");
-        mvm_core::audit_emit!(
-            ImageVerifyFailed,
-            "outcome={outcome} mvmctl_version={mvmctl_version}"
-        );
-    }
-}
-
-/// HEAD-probe a URL. Returns Ok(true) when the resource is reachable
-/// (HTTP 2xx), Ok(false) on 404, Err for transient failures.
-fn url_exists(url: &str) -> Result<bool> {
-    let output = std::process::Command::new("curl")
-        .args(["-fSI", "-o", "/dev/null", "-w", "%{http_code}", url])
-        .output()
-        .context("Failed to run curl HEAD probe")?;
-    let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    match code.as_str() {
-        "200" | "302" => Ok(true),
-        "404" => Ok(false),
-        _ => {
-            // Other status (5xx, network error, redirect chain failure)
-            // — don't silently fall through to the unsigned path.
-            anyhow::bail!(
-                "HEAD probe of {url} returned status {code}; refusing to guess \
-                 whether the signed manifest is missing or transiently unavailable. \
-                 Retry, or investigate."
-            )
-        }
-    }
-}
-
-/// Download the per-release `sha256sum`-format checksum file and parse it
-/// into a `name -> hex-digest` map for the artifacts we plan to download.
-///
-/// The checksum file is the trust anchor for ADR-002 §W5.1. It is fetched
-/// from the same GitHub release URL as the artifacts, over TLS. Anyone
-/// who can swap the artifact can also swap the checksum file, so the
-/// real defence is end-to-end signing (cosign on the .tar.gz / SBOM
-/// today, on the checksum file itself in a future iteration). What we
-/// gain *now* is detection of mid-flight corruption and operator-error
-/// substitution at the URL level — both of which are ruled out by a
-/// matching hash.
-///
-/// Returns only entries for the artifacts in `wanted`; missing names
-/// short-circuit to a clear error.
-fn fetch_expected_hashes(
-    checksums_url: &str,
-    wanted: &[&str],
-) -> Result<std::collections::HashMap<String, String>> {
-    let tmp = tempfile::NamedTempFile::new().context("Failed to create temp file")?;
-    let tmp_path = tmp.path().to_string_lossy().to_string();
-    download_file(checksums_url, &tmp_path).with_context(|| {
-        format!(
-            "Failed to download checksum manifest from {checksums_url}.\n\
-             ADR-002 §W5.1 requires a hash-verified download; refusing to\n\
-             proceed without the checksum file. To bypass for an emergency\n\
-             rotation, set MVM_SKIP_HASH_VERIFY=1."
-        )
-    })?;
-    let body = std::fs::read_to_string(&tmp_path)
-        .with_context(|| format!("Failed to read checksum file at {tmp_path}"))?;
-
-    let mut map = std::collections::HashMap::new();
-    for line in body.lines() {
-        // `sha256sum` output: `<64-hex>  <filename>`. Two-space gap is
-        // canonical; a single space marks "text mode" but we accept
-        // either rather than be picky about emitter conventions.
-        let mut iter = line.splitn(2, char::is_whitespace);
-        let Some(hash) = iter.next() else { continue };
-        let Some(rest) = iter.next() else { continue };
-        let name = rest.trim().trim_start_matches('*').to_string();
-        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            map.insert(name, hash.to_ascii_lowercase());
-        }
-    }
-
-    for w in wanted {
-        if !map.contains_key(*w) {
-            anyhow::bail!(
-                "Checksum manifest at {checksums_url} did not include\n\
-                 an entry for '{w}'. Refusing to download an unverifiable\n\
-                 artifact. ADR-002 §W5.1."
-            );
-        }
-    }
-    Ok(map)
-}
-
-/// Stream `path` through SHA-256 and compare to `expected` (lowercase
-/// hex). On mismatch, delete the file and bail with a clear message.
-/// On `MVM_SKIP_HASH_VERIFY=1`, log a warning and accept — the env-var
-/// is the documented escape hatch for emergency-rotation scenarios per
-/// plan 29.
-fn verify_artifact_hash(path: &str, name: &str, expected: Option<&String>) -> Result<()> {
-    if std::env::var_os("MVM_SKIP_HASH_VERIFY").is_some() {
-        tracing::warn!(
-            "MVM_SKIP_HASH_VERIFY set — skipping integrity check on {name}. \
-             ADR-002 §W5.1 documents this as an emergency-rotation escape hatch."
-        );
-        return Ok(());
-    }
-    let Some(expected) = expected else {
-        // fetch_expected_hashes already enforced presence, but defend
-        // against a refactor that decouples the steps.
-        anyhow::bail!("internal: no expected hash recorded for {name}");
-    };
-
-    use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open downloaded artifact at {path}"))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .with_context(|| format!("Failed to hash downloaded artifact at {path}"))?;
-    let actual = format!("{:x}", hasher.finalize());
-
-    if actual != *expected {
-        let _ = std::fs::remove_file(path);
-        bump_verify_outcome("digest_mismatch");
-        anyhow::bail!(
-            "Integrity check failed for {name}.\n\
-             expected sha256: {expected}\n\
-             actual   sha256: {actual}\n\
-             \n\
-             The downloaded artifact does not match the published checksum.\n\
-             Refusing to use it. Possible causes:\n\
-             - mid-flight corruption (retry the download);\n\
-             - mirror/CDN cache poisoning (open an issue);\n\
-             - the release was re-uploaded and the manifest is stale.\n\
-             ADR-002 §W5.1."
-        );
-    }
-    ui::info(&format!("  ✓ verified {name} sha256={}", &actual[..12]));
-    Ok(())
-}
-
-/// Download a file from a URL using curl.
-fn download_file(url: &str, dest: &str) -> Result<()> {
-    let status = std::process::Command::new("curl")
-        .args(["-fSL", "--progress-bar", "-o", dest, url])
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .context("Failed to run curl")?;
-
-    if !status.success() {
-        // Clean up partial download
-        let _ = std::fs::remove_file(dest);
-        anyhow::bail!(
-            "Download failed. Pre-built images for v{version} may not yet be\n\
-             published — release tags are pushed before the artifact-build\n\
-             matrix completes, so a 404 here often just means the build is\n\
-             still in flight. Check the release page or retry in a few\n\
-             minutes:\n\
-             \n\
-             \x20   https://github.com/tinylabscom/mvm/releases/tag/v{version}\n\
-             \n\
-             To build locally instead, set up a Nix Linux builder:\n\
-             \n\
-             \x20 Option 1 — Temporary (run in another terminal):\n\
-             \x20   nix run 'nixpkgs#darwin.linux-builder'\n\
-             \n\
-             \x20 Option 2 — Permanent (add to /etc/nix/nix.conf):\n\
-             \x20   builders = ssh-ng://builder@linux-builder aarch64-linux /etc/nix/builder_ed25519 4 1 kvm,big-parallel - -\n\
-             \x20   builders-use-substitutes = true",
-            version = env!("CARGO_PKG_VERSION")
-        );
-    }
-    Ok(())
-}
-
 /// Locate the builder-VM flake at `nix/images/builder-vm/flake.nix`.
 ///
 /// Plan 115 / ADR-065: the consolidated flake produces both the
@@ -2106,8 +1930,6 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     out_dir: &str,
     source_fingerprint: &str,
 ) -> Result<()> {
-    use mvm_build::libkrun_builder::BuilderVmImage;
-
     let _stage0_guard = acquire_stage0_lock(out_dir)?;
 
     // Plan 93 Phase 3: time each host-visible Stage 0 step and print a
@@ -2169,8 +1991,22 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         flavor = STAGE0_FLAVOR_CURRENT,
     );
 
-    let image = BuilderVmImage::new_root_dir(root_dir.clone(), "/init");
-    let result = run_stage0_root_dir(&staging_dir, &workspace_root, image, source_fingerprint);
+    // ADR-065: extract the embedded host-vm binaries so the Stage 0 nix
+    // build can install them from /mvm-bins instead of building them with
+    // the guest's nix. Same cache dir the steady-state job path uses.
+    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
+    let host_bin_dir =
+        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
+            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+
+    let result = run_stage0_root_dir(
+        &staging_dir,
+        &workspace_root,
+        &root_dir,
+        "/init",
+        &host_bin_dir,
+        source_fingerprint,
+    );
     let duration_ms = started.elapsed().as_millis() as u64;
 
     match result {
@@ -2206,13 +2042,29 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
 fn run_stage0_root_dir(
     staging_dir: &std::path::Path,
     workspace_root: &std::path::Path,
-    image: mvm_build::libkrun_builder::BuilderVmImage,
+    guest_root_dir: &std::path::Path,
+    entry_path: &str,
+    host_bin_dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
+    use mvm_build::builder_vm::BuilderVm;
     use mvm_build::libkrun_builder::LibkrunBuilderVm;
 
-    LibkrunBuilderVm::default()
-        .run_stage0(image, workspace_root, staging_dir)
+    // ADR-068: dispatch Stage 0 through the `BuilderVm` trait, the same
+    // seam `run_build` uses. Only the libkrun backend implements
+    // `run_stage0` today, so bind it concretely here rather than routing
+    // through the libkrun/Vz builder-backend selector — that keeps macOS
+    // 26+ (Vz-default) hosts bootstrapping via libkrun until a Vz Stage 0
+    // lands (ADR-068 §"Backend gaps").
+    let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+    backend
+        .run_stage0(
+            guest_root_dir,
+            entry_path,
+            workspace_root,
+            staging_dir,
+            host_bin_dir,
+        )
         .map_err(|e| {
             (
                 Stage0FailureStage::Build,
@@ -2220,11 +2072,12 @@ fn run_stage0_root_dir(
             )
         })?;
 
-    write_builder_vm_source_fingerprint(staging_dir, source_fingerprint)
+    // Refuse to promote a rootfs the steady-state VM can't boot: walk the
+    // freshly-built ext4 and confirm the `init=` target is present.
+    verify_stage0_rootfs_has_init(&staging_dir.join("rootfs.ext4"))
         .map_err(|e| (Stage0FailureStage::Validate, e))?;
-    write_builder_vm_artifact_digest_manifest(staging_dir)
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-    write_builder_vm_source_cache_provenance(staging_dir, source_fingerprint)
+
+    write_builder_vm_cache_sidecars(staging_dir, source_fingerprint)
         .map_err(|e| (Stage0FailureStage::Validate, e))?;
 
     Ok(())
@@ -2393,21 +2246,18 @@ fn unique_builder_vm_stage0_staging_dir(final_dir: &std::path::Path) -> Result<s
     Ok(parent.join(format!(".{name}.stage0-{}-{nonce}", std::process::id())))
 }
 
+/// Structural validation of a cached `(vmlinux, rootfs.ext4)` pair —
+/// size floor + ext4 superblock magic. Cheap and host-agnostic; used by
+/// the cache-readiness and promotion paths. The deeper "does the rootfs
+/// actually contain the init binary" check is `verify_stage0_rootfs_has_init`,
+/// run once at build time (it needs to parse the full ext4 tree).
 fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Result<()> {
-    let rootfs = dir.join("rootfs.ext4");
-    validate_dev_image_artifacts(dir.join("vmlinux"), &rootfs).with_context(|| {
+    validate_dev_image_artifacts(dir.join("vmlinux"), dir.join("rootfs.ext4")).with_context(|| {
         format!(
             "validating Stage 0 builder VM artifacts in {}",
             dir.display()
         )
-    })?;
-    if !rootfs_contains_builder_init(&rootfs)? {
-        anyhow::bail!(
-            "Stage 0 builder VM artifact {} is missing /sbin/mvm-host-vm-init",
-            rootfs.display()
-        );
-    }
-    Ok(())
+    })
 }
 
 /// Plan 77 W2 — outcome of [`sweep_orphaned_stage0_staging_dirs`]:
@@ -2920,6 +2770,29 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
         hash_dir_recursive(&mut hasher, &format!("crates/{crate_name}/src"), &src_dir)?;
     }
 
+    // Layer 4: the embedded host-binary identity. These bytes are what
+    // actually get baked into the rootfs, so their SHA captures anything
+    // the crate-src hash above can miss — chiefly the cross-compile
+    // toolchain (a gnu→musl target switch produces different binaries
+    // from identical source). Without this a toolchain change would
+    // silently reuse a stale cached image.
+    for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
+        hasher.update(b"host-bin\0");
+        hasher.update(bin.name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(bin.sha256_hex.as_bytes());
+    }
+
+    // Layer 5: the shared Nix library the flake imports. The builder-vm
+    // flake pulls in `nix/lib` (mkGuest, the workspace filter, the
+    // host-binaries manifest), so a change there — e.g. a new rootfs
+    // mount-point dir — changes the built image. Hashing only the flake
+    // dir misses it, which silently reuses a stale image.
+    let nix_lib = workspace_root.join("nix").join("lib");
+    if nix_lib.is_dir() {
+        hash_dir_recursive(&mut hasher, "nix/lib", &nix_lib)?;
+    }
+
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -3207,6 +3080,19 @@ fn write_builder_vm_source_cache_provenance(
         .with_context(|| format!("writing builder VM provenance in {}", dir.display()))
 }
 
+/// Write the full cache-sidecar set — source fingerprint, artifact-digest
+/// manifest, and provenance — that [`builder_vm_source_cache_status`] reads
+/// back to decide a hit. Shared by Stage 0 promotion and the dev-image
+/// fast-path (Fix A) so both write the identical format; the order matters
+/// only in that the digest manifest must be written after the artifacts are
+/// final.
+#[cfg(any(feature = "builder-vm", test))]
+fn write_builder_vm_cache_sidecars(dir: &std::path::Path, source_fingerprint: &str) -> Result<()> {
+    write_builder_vm_source_fingerprint(dir, source_fingerprint)?;
+    write_builder_vm_artifact_digest_manifest(dir)?;
+    write_builder_vm_source_cache_provenance(dir, source_fingerprint)
+}
+
 #[cfg(any(feature = "builder-vm", test))]
 fn promote_builder_vm_stage0_cache(
     staging_dir: &std::path::Path,
@@ -3442,6 +3328,9 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
         host_nix_store: None,
         artifact_out: std::path::PathBuf::from(out_dir),
         host_bin_dir,
+        // The dev-image build already builds the in-repo builder-vm flake
+        // with the workspace mounted at /work; no user-flake override.
+        staged_user_flake: None,
     };
 
     // Plan 97 Phase C: `MVM_BUILDER_BACKEND=vz` flips the dispatch
@@ -3465,6 +3354,24 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     if !std::path::Path::new(&rootfs).exists() {
         anyhow::bail!("{backend_name} builder VM exited cleanly but did not produce {rootfs}");
     }
+
+    // Fix A — persist the source fingerprint + artifact-digest + provenance
+    // sidecars so the next `dev up` fast-paths past the builder VM entirely
+    // (see the cache check in `ensure_dev_image`). Best-effort: a failed
+    // sidecar write must not fail an otherwise-good build — the next run
+    // just rebuilds. The fingerprint is recomputed here from the same flake
+    // dir the build read, so a fingerprint match later means an identical
+    // nix derivation, hence an identical image.
+    if let Ok(flake_dir) = find_builder_vm_flake()
+        && let Ok(fingerprint) = builder_vm_source_fingerprint(&flake_dir)
+        && let Err(e) = write_builder_vm_cache_sidecars(std::path::Path::new(out_dir), &fingerprint)
+    {
+        ui::warn(&format!(
+            "Dev image built, but writing cache sidecars failed ({e}); \
+             next `dev up` will rebuild instead of fast-pathing."
+        ));
+    }
+
     Ok((kernel, rootfs))
 }
 
@@ -3596,15 +3503,16 @@ mod dev_status_image_tests {
     }
 
     fn write_valid_builder_cache_artifacts(dir: &std::path::Path) {
+        // Satisfies `validate_builder_vm_stage0_artifacts` (size floor +
+        // ext4 magic). The deeper inode check lives in
+        // `verify_stage0_rootfs_has_init`, exercised against a real ext4
+        // image by `verify_stage0_rootfs_has_init_*` below.
         const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
         std::fs::create_dir_all(dir).expect("mkdir artifact dir");
         std::fs::write(dir.join("vmlinux"), vec![0x7f; 1024 * 1024 + 1]).expect("write kernel");
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let init_offset = rootfs.len() - HOST_VM_INIT_PATH.len() - 1;
-        rootfs[init_offset..init_offset + HOST_VM_INIT_PATH.len()]
-            .copy_from_slice(HOST_VM_INIT_PATH);
         std::fs::write(dir.join("rootfs.ext4"), rootfs).expect("write rootfs");
     }
 
@@ -3780,9 +3688,6 @@ mod dev_status_image_tests {
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let init_offset = rootfs.len() - HOST_VM_INIT_PATH.len() - 1;
-        rootfs[init_offset..init_offset + HOST_VM_INIT_PATH.len()]
-            .copy_from_slice(HOST_VM_INIT_PATH);
         std::fs::write(dir.join("rootfs.ext4"), rootfs).unwrap();
     }
 
@@ -4072,134 +3977,6 @@ mod reap_orphans_tests {
 }
 
 #[cfg(test)]
-mod hash_verify_tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
-    use std::sync::Mutex;
-
-    /// Cargo test runs tests in parallel within a single binary. Two
-    /// of these tests touch `MVM_SKIP_HASH_VERIFY` (the global env-var
-    /// escape hatch from ADR-002 §W5.1), so they have to be serialised
-    /// against each other and against any other test that hashes a
-    /// real artifact. Static mutex held for the test's lifetime.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Compute the canonical lowercase-hex SHA-256 of a byte slice. Tests
-    /// use this to derive matching expected values without rebuilding
-    /// the production hash path.
-    fn hex_sha256(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
-    }
-
-    #[test]
-    fn verify_hash_accepts_matching_artifact() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("artifact");
-        let bytes = b"hello world\n";
-        std::fs::write(&path, bytes).unwrap();
-        let expected = hex_sha256(bytes);
-        let result = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&expected));
-        assert!(
-            result.is_ok(),
-            "matching hash should be accepted: {result:?}"
-        );
-        // File must still exist on success.
-        assert!(
-            path.exists(),
-            "verified file must not be deleted on success"
-        );
-    }
-
-    #[test]
-    fn verify_hash_rejects_mismatched_artifact_and_deletes() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("artifact");
-        std::fs::write(&path, b"actual contents").unwrap();
-        let expected = hex_sha256(b"different contents");
-        let err = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&expected))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Integrity check failed"),
-            "expected integrity-check error, got: {err}"
-        );
-        assert!(
-            !path.exists(),
-            "tampered file must be deleted to prevent reuse"
-        );
-    }
-
-    #[test]
-    fn verify_hash_skip_env_var_bypasses_check() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // Ensure the file exists even though we'll set a "wrong" hash.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("artifact");
-        std::fs::write(&path, b"contents").unwrap();
-        let wrong = hex_sha256(b"definitely not the contents");
-
-        // SAFETY: ENV_LOCK serialises every test that touches this env
-        // var, so no concurrent reader observes a half-set value. The
-        // unsafe block is only required by edition-2024's set_var /
-        // remove_var signatures; behaviour is unchanged.
-        unsafe {
-            std::env::set_var("MVM_SKIP_HASH_VERIFY", "1");
-        }
-        let result = verify_artifact_hash(path.to_str().unwrap(), "artifact", Some(&wrong));
-        unsafe {
-            std::env::remove_var("MVM_SKIP_HASH_VERIFY");
-        }
-        assert!(result.is_ok(), "skip-env should bypass check: {result:?}");
-    }
-
-    #[test]
-    fn fetch_expected_hashes_parses_sha256sum_format() {
-        // Run a tiny in-process HTTP server? Overkill — the function
-        // takes a URL and shells out to curl. Instead, we test the
-        // parser by exercising it directly via a file:// URL: curl
-        // accepts file:// and just copies the bytes.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("checksums.txt");
-        let mut f = std::fs::File::create(&manifest_path).unwrap();
-        // Two-space gap is canonical sha256sum output. Mix in a leading
-        // '*' on one line (binary mode) to confirm we strip it.
-        writeln!(f, "{}  dev-vmlinux-x86_64", "a".repeat(64)).unwrap();
-        writeln!(f, "{} *dev-rootfs-x86_64.ext4", "b".repeat(64)).unwrap();
-        writeln!(f, "garbage line that is not a hash").unwrap();
-        drop(f);
-
-        let url = format!("file://{}", manifest_path.display());
-        let map = fetch_expected_hashes(&url, &["dev-vmlinux-x86_64", "dev-rootfs-x86_64.ext4"])
-            .expect("manifest should parse");
-        assert_eq!(map.get("dev-vmlinux-x86_64").unwrap(), &"a".repeat(64));
-        assert_eq!(map.get("dev-rootfs-x86_64.ext4").unwrap(), &"b".repeat(64));
-    }
-
-    #[test]
-    fn fetch_expected_hashes_errors_when_artifact_missing_from_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("checksums.txt");
-        std::fs::write(
-            &manifest_path,
-            format!("{}  some-other-file\n", "c".repeat(64)),
-        )
-        .unwrap();
-
-        let url = format!("file://{}", manifest_path.display());
-        let err = fetch_expected_hashes(&url, &["dev-vmlinux-x86_64"])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("did not include") && err.contains("dev-vmlinux-x86_64"),
-            "expected missing-entry error, got: {err}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod builder_vm_bootstrap_tests {
     //! Plan 72 W5 — `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
     use super::*;
@@ -4323,9 +4100,6 @@ mod builder_vm_bootstrap_tests {
         let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
-        let init_offset = rootfs.len() - HOST_VM_INIT_PATH.len() - 1;
-        rootfs[init_offset..init_offset + HOST_VM_INIT_PATH.len()]
-            .copy_from_slice(HOST_VM_INIT_PATH);
         std::fs::write(dir.join("rootfs.ext4"), rootfs).expect("write rootfs");
     }
 
@@ -4354,7 +4128,7 @@ mod builder_vm_bootstrap_tests {
         let out_dir = tmp.path().join("aarch64");
         let out_dir_str = out_dir.to_str().expect("utf-8 out_dir");
 
-        let first = acquire_stage0_lock(out_dir_str).expect("first acquisition should succeed");
+        let first = acquire_stage0_lock_uncontended(out_dir_str);
         // Lock file lives one directory above out_dir, named `stage0.lock`.
         assert!(
             tmp.path().join("stage0.lock").exists(),
@@ -4378,8 +4152,7 @@ mod builder_vm_bootstrap_tests {
         drop(first);
 
         // Now reachable again — guards must not leak past their scope.
-        let _second =
-            acquire_stage0_lock(out_dir_str).expect("acquisition should succeed after drop");
+        let _second = acquire_stage0_lock_uncontended(out_dir_str);
     }
 
     /// Lock setup must not fail when the parent cache directory does
@@ -4391,8 +4164,7 @@ mod builder_vm_bootstrap_tests {
         let nested = tmp.path().join("nested/builder-vm/aarch64");
         let nested_str = nested.to_str().expect("utf-8 nested");
 
-        let _guard =
-            acquire_stage0_lock(nested_str).expect("acquisition should create missing parent dir");
+        let _guard = acquire_stage0_lock_uncontended(nested_str);
         assert!(
             tmp.path().join("nested/builder-vm/stage0.lock").exists(),
             "lock file must be created at the constructed parent path"
@@ -4434,16 +4206,67 @@ mod builder_vm_bootstrap_tests {
         assert!(!is_orphan_stage0_staging_dir_name("riscv64-staging"));
     }
 
-    /// Plan 77 W2 — sweep removes a staging dir of the current form,
-    /// reports the byte count, leaves the live cache and unrelated
-    /// siblings intact, and the dry-run variant is purely observational
-    /// (no fs mutation).
-    #[test]
-    fn sweep_removes_orphan_staging_dir_and_leaves_siblings() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
+    /// `flock(2)` can spuriously report `EWOULDBLOCK` on a brand-new,
+    /// uncontended lock path when hundreds of test threads hammer the
+    /// syscall in parallel (seen as `acquire_stage0_lock` → `Err` /
+    /// `sweep` → `SkippedLockHeld` on paths no other test can possibly
+    /// hold). These helpers retry the *uncontended* acquisitions a bounded
+    /// number of times: the test owns the only would-be holder, so a
+    /// reported block here is always spurious. Tests that deliberately
+    /// contend the lock (`sweep_skips_when_stage0_lock_is_held`) do not use
+    /// these — they want the real "held" outcome.
+    fn acquire_stage0_lock_uncontended(out_dir: &str) -> mvm_core::atomic_io::FileLock {
+        for attempt in 0..200u32 {
+            match acquire_stage0_lock(out_dir) {
+                Ok(guard) => return guard,
+                Err(e) => {
+                    assert!(
+                        attempt < 199,
+                        "stage0 lock stayed spuriously blocked: {e:#}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        }
+        unreachable!()
+    }
 
-        // Build a representative layout under <root>.
+    fn try_acquire_filelock_uncontended(anchor: &std::path::Path) -> mvm_core::atomic_io::FileLock {
+        use mvm_core::atomic_io::FileLock;
+        for attempt in 0..200u32 {
+            match FileLock::try_acquire(anchor) {
+                Ok(Some(guard)) => return guard,
+                Ok(None) => {
+                    assert!(attempt < 199, "flock stayed spuriously blocked");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(e) => panic!("flock error: {e:#}"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn sweep_uncontended(root: &std::path::Path, dry_run: bool) -> Stage0SweepOutcome {
+        for attempt in 0..200u32 {
+            match sweep_orphaned_stage0_staging_dirs_at(root, dry_run)
+                .expect("sweep should succeed")
+            {
+                Stage0SweepOutcome::SkippedLockHeld => {
+                    assert!(attempt < 199, "sweep stayed spuriously lock-blocked");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                swept => return swept,
+            }
+        }
+        unreachable!()
+    }
+
+    /// Build the representative sweep layout under `root`: one orphan
+    /// staging dir (18 bytes across two files), a live cache dir, and an
+    /// unrelated nix-store image sibling. Returns the three paths.
+    fn stage_sweep_layout(
+        root: &std::path::Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
         let orphan = root.join(".aarch64.stage0-12345-1700000000000000000");
         std::fs::create_dir_all(orphan.join("nested")).unwrap();
         std::fs::write(orphan.join("a"), b"hello world").unwrap(); // 11 bytes
@@ -4455,11 +4278,26 @@ mod builder_vm_bootstrap_tests {
 
         let nix_store = root.join("nix-store-aarch64.img");
         std::fs::write(&nix_store, b"sparse").unwrap();
+        (orphan, live_cache, nix_store)
+    }
 
-        // Dry-run: nothing should move.
-        match sweep_orphaned_stage0_staging_dirs_at(&root, true)
-            .expect("dry-run sweep should succeed")
-        {
+    // NOTE: the dry-run and real-run sweeps are split into two tests on
+    // purpose. A single test that swept twice took the Stage 0 `flock`,
+    // released it, then re-took it on the *same* path microseconds later;
+    // under parallel test load the close()-release / flock()-reacquire
+    // window intermittently surfaced `EWOULDBLOCK` (a `SkippedLockHeld`
+    // false positive). One acquire per test removes the self-race; the
+    // unique tempdir per test keeps them independent.
+
+    /// Plan 77 W2 — the dry-run sweep is purely observational: it reports
+    /// the orphan + byte count but mutates nothing.
+    #[test]
+    fn sweep_dry_run_reports_orphan_without_removing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let (orphan, live_cache, _nix_store) = stage_sweep_layout(&root);
+
+        match sweep_uncontended(&root, true) {
             Stage0SweepOutcome::Swept {
                 removed,
                 freed_bytes,
@@ -4471,9 +4309,18 @@ mod builder_vm_bootstrap_tests {
         }
         assert!(orphan.is_dir(), "dry-run must not remove the orphan");
         assert!(live_cache.is_dir(), "dry-run must not touch the live cache");
+    }
 
-        // Real run: orphan goes, siblings stay.
-        match sweep_orphaned_stage0_staging_dirs_at(&root, false).expect("sweep should succeed") {
+    /// Plan 77 W2 — the real sweep removes the orphan staging dir, reports
+    /// its byte count, and leaves the live cache and unrelated siblings
+    /// intact.
+    #[test]
+    fn sweep_real_run_removes_orphan_and_leaves_siblings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let (orphan, live_cache, nix_store) = stage_sweep_layout(&root);
+
+        match sweep_uncontended(&root, false) {
             Stage0SweepOutcome::Swept {
                 removed,
                 freed_bytes,
@@ -4496,16 +4343,12 @@ mod builder_vm_bootstrap_tests {
     /// staging dir the live run is about to promote.
     #[test]
     fn sweep_skips_when_stage0_lock_is_held() {
-        use mvm_core::atomic_io::FileLock;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::fs::create_dir_all(&root).unwrap();
 
         // Hold the lock as a "live" Stage 0 would.
-        let _live = FileLock::try_acquire(&root.join("stage0"))
-            .expect("first acquisition should not fail")
-            .expect("first acquisition should succeed");
+        let _live = try_acquire_filelock_uncontended(&root.join("stage0"));
 
         // Stage an orphan to confirm the sweep would have something to do.
         let orphan = root.join(".aarch64.stage0-12345-1700000000000000000");
@@ -5055,6 +4898,30 @@ mod builder_vm_bootstrap_tests {
         );
     }
 
+    // Fix A — `build_image_via_libkrun` writes the same fingerprint +
+    // artifact-digest + provenance sidecars the Layer-1 cache uses, so the
+    // next `dev up` fast-paths past the builder VM. Round-trip: a sidecar
+    // write for a fingerprint reads back as a hit for that fingerprint and a
+    // miss for any other — which is exactly the gate `ensure_dev_image`
+    // consults before deciding to rebuild.
+    #[test]
+    fn dev_image_cache_sidecars_enable_hit_and_reject_changed_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("dev").join("current");
+        write_valid_builder_vm_artifacts(&out);
+
+        write_builder_vm_cache_sidecars(&out, "devfp").expect("write sidecars");
+        assert!(
+            builder_vm_source_cache_status(&out, "devfp").is_ready(),
+            "matching fingerprint must be a cache hit"
+        );
+        assert_eq!(
+            builder_vm_source_cache_status(&out, "changed").reason_code(),
+            "fingerprint_mismatch",
+            "a changed source fingerprint must miss so the dev image rebuilds"
+        );
+    }
+
     #[test]
     fn builder_vm_source_cache_provenance_omits_local_paths_and_artifact_digests() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -5213,5 +5080,78 @@ mod builder_vm_bootstrap_tests {
         // introduce additional variants (e.g. `"alpine"`). Pinning the
         // current literal here so a rename surfaces immediately.
         assert_eq!(STAGE0_FLAVOR_CURRENT, "current");
+    }
+
+    /// A non-ext4 blob (here: zeros, no valid superblock) must surface
+    /// as an `Err` from the load, not a silent "init present / absent".
+    /// Cross-platform — no `mke2fs` needed to produce a bad image.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn verify_stage0_rootfs_has_init_rejects_non_ext4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, vec![0u8; 1024 * 1024]).unwrap();
+        let err = verify_stage0_rootfs_has_init(&rootfs)
+            .expect_err("a zero-filled blob is not a loadable ext4");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("as ext4"),
+            "error names the load failure: {msg}"
+        );
+    }
+
+    /// Build a tiny real ext4 from `staged_dir` at `image`, returning
+    /// `false` if `mke2fs` isn't installed (so the test skips rather than
+    /// fails on a host without e2fsprogs). Mirrors the preallocate-then-
+    /// `mke2fs -d` shape `mvm_build::oci_to_rootfs::ext4` uses.
+    #[cfg(all(feature = "builder-vm", target_os = "linux"))]
+    fn mke2fs_from_dir(staged_dir: &std::path::Path, image: &std::path::Path) -> bool {
+        {
+            let f = std::fs::File::create(image).expect("create image file");
+            f.set_len(16 * 1024 * 1024).expect("preallocate image");
+        }
+        match std::process::Command::new("mke2fs")
+            .args(["-q", "-F", "-t", "ext4", "-b", "4096", "-d"])
+            .arg(staged_dir)
+            .arg(image)
+            .output()
+        {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => panic!("mke2fs failed: {}", String::from_utf8_lossy(&out.stderr)),
+            Err(_) => false, // e2fsprogs absent on this host — skip.
+        }
+    }
+
+    /// Real ext4 round-trip: an image carrying `/sbin/mvm-host-vm-init`
+    /// passes; an otherwise-identical image without it fails. Linux-only
+    /// because `mke2fs` is the only ext4 writer available (matches the
+    /// `oci_to_rootfs` ext4 tests' gating).
+    #[cfg(all(feature = "builder-vm", target_os = "linux"))]
+    #[test]
+    fn verify_stage0_rootfs_has_init_round_trips_real_ext4() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let with_dir = tmp.path().join("with/sbin");
+        std::fs::create_dir_all(&with_dir).unwrap();
+        std::fs::write(with_dir.join("mvm-host-vm-init"), b"#!/bin/true\n").unwrap();
+        let with_img = tmp.path().join("with.ext4");
+        if !mke2fs_from_dir(&tmp.path().join("with"), &with_img) {
+            eprintln!("skipping: mke2fs not installed");
+            return;
+        }
+        verify_stage0_rootfs_has_init(&with_img)
+            .expect("rootfs carrying /sbin/mvm-host-vm-init must validate");
+
+        let without_dir = tmp.path().join("without/sbin");
+        std::fs::create_dir_all(&without_dir).unwrap();
+        std::fs::write(without_dir.join("something-else"), b"x").unwrap();
+        let without_img = tmp.path().join("without.ext4");
+        assert!(mke2fs_from_dir(&tmp.path().join("without"), &without_img));
+        let err = verify_stage0_rootfs_has_init(&without_img)
+            .expect_err("rootfs missing the init binary must be rejected");
+        assert!(
+            format!("{err:#}").contains("missing /sbin/mvm-host-vm-init"),
+            "error names the missing binary"
+        );
     }
 }

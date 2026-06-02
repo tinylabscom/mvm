@@ -65,6 +65,7 @@ import re
 import secrets
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from mvm import _ir
@@ -73,6 +74,7 @@ from mvm._dsl import literal as _literal_value
 __all__ = [
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
+    "ExecResult",
     "RecordingNotActiveError",
     "Sandbox",
     "SandboxDevOnly",
@@ -82,6 +84,20 @@ __all__ = [
     "emit_recording_json",
     "reset_recording",
 ]
+
+
+@dataclass(frozen=True)
+class ExecResult:
+    """Result of a one-shot ``Sandbox.exec(...)`` call.
+
+    ``exit_code`` is the child's exit code (0 on success). ``stdout``
+    and ``stderr`` are captured strings — exec is a one-shot that
+    *captures* the streams rather than forwarding them, which is the
+    distinction from ``commands.start`` + ``proc wait``."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
 
 
 MVM_SDK_MODE_ENV = "MVM_SDK_MODE"
@@ -618,6 +634,115 @@ class _LiveTransport:
         shell += ["--", *argv]
         self._run_shell(shell)
 
+    def commands_exec(
+        self,
+        argv: list[str],
+        env: dict[str, Any] | None,
+        *,
+        timeout: float | None = None,
+        cwd: str | None = None,
+    ) -> ExecResult:
+        """One-shot exec: shell ``mvmctl proc start ... -- argv`` to
+        obtain a ``pid_token``, then ``mvmctl proc wait <pid_token>``
+        to capture stdout/stderr/exit. Refuses with
+        :class:`SandboxDevOnly` when the resolved template is prod
+        (matches ``commands_start``'s policy — ADR-002 §W4.3, claim
+        4)."""
+        if self.build_mode != "dev":
+            raise SandboxDevOnly(
+                f"`exec` requires a dev-mode template; resolved template "
+                f"build_mode={self.build_mode!r}. ADR-002 §W4.3 (security claim 4) "
+                f"strips the agent's `do_exec` handler in prod builds — re-build the "
+                f"template with `mvmctl template build --dev <name>`, or use "
+                f"`files.write` to stage inputs into the running VM instead.",
+                argv=["proc", "start", self.vm_id, *argv],
+            )
+
+        # 1) `proc start` → pid_token on stdout.
+        start_shell: list[str] = [self.mvm_cli_bin, "proc", "start", self.vm_id]
+        if env:
+            for key, value in env.items():
+                if isinstance(value, str):
+                    start_shell += ["-e", f"{key}={value}"]
+                elif isinstance(value, dict) and value.get("kind") == "literal":
+                    start_shell += ["-e", f"{key}={value['value']}"]
+                else:
+                    raise SandboxLiveError(
+                        f"`exec` env {key!r} carries a non-literal value; live mode "
+                        f"only forwards literal env vars (secrets must be injected via "
+                        f"the host keystore + `--secret` on `mvmctl up`).",
+                        argv=start_shell,
+                    )
+        if cwd is not None:
+            start_shell += ["--cwd", cwd]
+        start_shell += ["--", *argv]
+        try:
+            start_result = subprocess.run(
+                start_shell,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                argv=start_shell,
+            ) from exc
+        if start_result.returncode != 0:
+            raise SandboxLiveError(
+                f"`mvmctl proc start` failed with exit code {start_result.returncode}",
+                argv=start_shell,
+                exit_code=start_result.returncode,
+                stderr=start_result.stderr,
+            )
+        pid_token = start_result.stdout.strip()
+        if not pid_token:
+            raise SandboxLiveError(
+                "`mvmctl proc start` produced no pid_token on stdout",
+                argv=start_shell,
+                stderr=start_result.stderr,
+            )
+
+        # 2) `proc wait <token>` → captured stdout/stderr/exit.
+        wait_shell: list[str] = [
+            self.mvm_cli_bin,
+            "proc",
+            "wait",
+            self.vm_id,
+            pid_token,
+        ]
+        if timeout is not None:
+            wait_shell += ["--timeout", str(int(timeout))]
+        try:
+            # The +5s slack on subprocess.run's timeout is so the
+            # agent's pgroup-kill (on `--timeout` overrun) has time
+            # to land before subprocess.run gives up. Should never
+            # actually trip — agent enforces first.
+            wait_result = subprocess.run(
+                wait_shell,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout + 5 if timeout is not None else None,
+            )
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                argv=wait_shell,
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise SandboxLiveError(
+                f"`mvmctl proc wait` did not return within "
+                f"{timeout + 5 if timeout is not None else 'no'} seconds",
+                argv=wait_shell,
+            ) from exc
+
+        return ExecResult(
+            exit_code=wait_result.returncode,
+            stdout=wait_result.stdout,
+            stderr=wait_result.stderr,
+        )
+
     def files_write(self, path: str, data: bytes) -> None:
         """Shell ``mvmctl fs write <vm> <path>`` with the file
         bytes piped through stdin. The mvmctl verb accepts stdin
@@ -774,8 +899,9 @@ class Sandbox:
     @classmethod
     def create(
         cls,
-        template: str,
+        template: str | None = None,
         *,
+        image: str | None = None,
         workload_id: str | None = None,
         env: dict[str, Any] | None = None,
         include: list[str] | None = None,
@@ -792,9 +918,18 @@ class Sandbox:
         shape preserves them verbatim. In live mode unknown
         templates fail when ``mvmctl up --manifest <template>``
         rejects them — that failure surfaces as
-        :class:`SandboxLiveError` here. ``workload_id`` defaults to
-        the template (the CLI overrides with the script's basename
-        when invoked via ``mvmctl compile``)."""
+        :class:`SandboxLiveError` here.
+
+        Plan 120 §Task 5 — ``image=<name>`` is the friendlier
+        keyword alias for ``template=<name>``, matching the
+        ``docker run <image>`` / ``podman run <image>`` shape the
+        demo's five-line snippet uses. Exactly one of ``template``
+        (positional or keyword) or ``image`` (keyword) must be
+        provided.
+
+        ``workload_id`` defaults to the resolved template (the CLI
+        overrides with the script's basename when invoked via
+        ``mvmctl compile``)."""
         mode = _resolve_mode()  # raises if MVM_SDK_MODE is invalid
         global _recording
         if _recording is not None or _live_sandbox_active():
@@ -805,16 +940,27 @@ class Sandbox:
                 "one app per workload' decision, a script may "
                 "construct at most one Sandbox."
             )
-        if not isinstance(template, str) or not template:
-            raise ValueError("template must be a non-empty str")
+        if template is None and image is None:
+            raise ValueError(
+                "Sandbox.create requires `template` (positional) or `image` (keyword)"
+            )
+        if template is not None and image is not None:
+            raise ValueError(
+                "Sandbox.create accepts `template` OR `image`, not both"
+            )
+        resolved_template = template if template is not None else image
+        if not isinstance(resolved_template, str) or not resolved_template:
+            raise ValueError(
+                "template/image must be a non-empty str"
+            )
         ttl_seconds = _parse_ttl(ttl)
         if ttl_seconds is None:
             ttl_seconds = DEFAULT_TTL_SECONDS
-        wid = workload_id or template
+        wid = workload_id or resolved_template
 
         if mode == "live":
             live = _LiveTransport.for_template(
-                template=template,
+                template=resolved_template,
                 workload_id=wid,
                 ttl_seconds=ttl_seconds,
             )
@@ -824,7 +970,7 @@ class Sandbox:
 
         # record mode (existing path).
         create_dict: dict[str, Any] = {
-            "template": template,
+            "template": resolved_template,
             "env": _encode_env_map(env),
             "include": list(include) if include else [],
             "tags": dict(tags) if tags else {},
@@ -853,6 +999,46 @@ class Sandbox:
     @property
     def files(self) -> _Files:
         return self._files
+
+    def exec(
+        self,
+        *argv: str,
+        timeout: float | None = None,
+        cwd: str | None = None,
+        env: dict[str, Any] | None = None,
+    ) -> ExecResult:
+        """One-shot: run ``argv`` inside the sandbox, collect
+        stdout/stderr/exit, return :class:`ExecResult`.
+
+        Convenience over ``commands.start`` + the underlying
+        ``mvmctl proc wait`` round-trip. Refuses with
+        :class:`SandboxDevOnly` when the resolved template is prod
+        (ADR-002 §W4.3, claim 4) — no silent fallback.
+
+        Live mode only: in record mode the call raises
+        :class:`SandboxModeError` because the recording's lowering
+        doesn't materialise return values (use ``commands.start``
+        to append an op for later execution).
+
+        Example::
+
+            with Sandbox.create(image="python:slim") as sb:
+                r = sb.exec("python", "-c", "print(2 + 2)")
+                assert r.exit_code == 0
+                assert r.stdout.strip() == "4"
+        """
+        if not argv:
+            raise ValueError("exec requires at least one argv element")
+        if not all(isinstance(a, str) for a in argv):
+            raise TypeError("exec argv must all be str")
+        if self._live is None:
+            raise SandboxModeError(
+                "`Sandbox.exec` is a live-mode operation; under "
+                "MVM_SDK_MODE=record use `commands.start(argv)` to "
+                "append an op (return values are materialised when "
+                "the recording is lowered, not at call time)."
+            )
+        return self._live.commands_exec(list(argv), env, timeout=timeout, cwd=cwd)
 
     def kill(self) -> None:
         """Issue a ``kill`` against the active transport.

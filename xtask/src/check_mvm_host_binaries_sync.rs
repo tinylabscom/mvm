@@ -151,15 +151,15 @@ mod tests {
     #[test]
     fn extract_quoted_after_basic() {
         assert_eq!(
-            extract_quoted_after(r#"        name: "mvm-builder-init","#, "name:"),
-            Some("mvm-builder-init".to_string())
+            extract_quoted_after(r#"        name: "mvm-host-vm-init","#, "name:"),
+            Some("mvm-host-vm-init".to_string())
         );
         assert_eq!(
             extract_quoted_after(
-                r#"    install_path: "/sbin/mvm-builder-init","#,
+                r#"    install_path: "/sbin/mvm-host-vm-init","#,
                 "install_path:"
             ),
-            Some("/sbin/mvm-builder-init".to_string())
+            Some("/sbin/mvm-host-vm-init".to_string())
         );
         assert_eq!(extract_quoted_after("no key here", "name:"), None);
     }

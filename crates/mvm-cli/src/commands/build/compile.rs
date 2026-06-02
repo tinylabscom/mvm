@@ -1,21 +1,23 @@
 //! `mvmctl compile` — Workload IR to staged build artifacts.
 //!
-//! v1 surface accepts a pre-rendered IR JSON (via `--from-ir <path>`
-//! or `-` for stdin) and renders `flake.nix`, `launch.json`, and the
-//! bundled source tree into `--out <dir>`. Output ending in `.tar.gz`
-//! or `.tgz` is written as a deterministic archive instead.
+//! Renders `flake.nix`, `launch.json`, and the bundled source tree
+//! into `--out <dir>` (or a deterministic `.tar.gz`/`.tgz` archive when
+//! the output path ends that way) from one of three sources:
 //!
-//! Decorator-script entry (parse `app.py` / `app.ts` to derive the
-//! IR) lands with Phase 4 of the SDK port; runtime record-mode (parse
-//! a `Sandbox`-shaped script) lands with Phase 7. v1 only handles the
-//! IR-JSON path so the compile pipeline has an end-to-end smoke test
-//! independent of the parser.
+//! - A `.py` / `.ts` script carrying an `@mvm.app(...)` decorator: the
+//!   parser walks the AST statically to derive the IR. The host never
+//!   imports or runs the script.
+//! - A pre-rendered IR JSON (`--from-ir <path>`, or `-` for stdin).
+//! - A runtime recording (`--from-recording <path>`).
 //!
-//! Flag shapes follow the approved plan:
+//! A `.py`/`.ts`/`.js` script with no decorator is treated as a
+//! `Sandbox`-shaped record-mode script and auto-executed to capture its
+//! recording (see `auto_exec_record_script`).
 //!
-//! - `<entry>` — positional. A `.json` path, `-` for stdin, or a
-//!   `.py` / `.ts` script (rejected with a `not-yet-implemented`
-//!   pointer to Phase 4/7 until those land).
+//! Flags:
+//!
+//! - `<entry>` — positional. A `.json` IR path, `-` for stdin, or a
+//!   `.py` / `.ts` / `.js` script.
 //! - `--from-ir <path>` — explicit IR-JSON path (alternative to the
 //!   positional).
 //! - `--out <path>` — output directory (or `.tar.gz`/`.tgz` archive).

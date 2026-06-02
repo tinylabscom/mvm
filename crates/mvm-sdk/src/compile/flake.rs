@@ -70,33 +70,34 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
       # flake fails at evaluation with a helpful error pointing at the
       # missing symbol — fix the pin upstream rather than papering over
       # it on the mvm side.
+      # The substrate exposes a single generic `mkFunctionService` that
+      # dispatches on `language` via its registry (nix/lib/factories/
+      # languages/) — not the per-language `mk<Lang>FunctionService` names
+      # ADR-0010 originally sketched. Pass `language` straight through;
+      # `mkFunctionService` validates it against the registry and throws
+      # for unknown languages.
       buildFactoryService = system: pkgs: appPkg:
         if !isFunction then null
         else
           let
-            factoryArgs = {{
-              inherit pkgs appPkg;
-              workloadId = launch.workload_id;
-              module = launch.entrypoint.module;
-              function = launch.entrypoint.function;
-              format = launch.entrypoint.format;
-              sourcePath = launch.entrypoint.working_dir;
-              # ADR-0011 warm-process tier. Skip-serialized in IR when
-              # absent, so `or null` falls through to cold tier.
-              concurrency = launch.entrypoint.concurrency or null;
-            }};
-            langCap =
-              if launch.entrypoint.language == "python" then "Python"
-              else if launch.entrypoint.language == "node" then "Node"
-              else if launch.entrypoint.language == "wasm" then "Wasm"
-              else throw "mvmforge: unsupported language '${{launch.entrypoint.language}}' — update mvm_ir::SUPPORTED_LANGUAGES and ship the matching factory in mvm (ADR-0010 §3, §4)";
-            symbolName = "mk${{langCap}}FunctionService";
             mvmLib = mvm.lib.${{system}};
-            factory =
-              if mvmLib ? ${{symbolName}}
-              then mvmLib.${{symbolName}}
-              else throw "mvmforge: pinned mvm revision does not expose `mvm.lib.${{system}}.${{symbolName}}` (per ADR-0010 §3 / specs/contracts/mvm-mkfunctionservice.md). Bump `MVM_REV` in crates/mvmforge/src/mvm_pin.rs to a revision that ships the upstream factories, or override via MVM_FLAKE_URL.";
-          in factory factoryArgs;
+          in
+          if mvmLib ? mkFunctionService
+          then mvmLib.mkFunctionService {{
+            inherit pkgs appPkg;
+            language = launch.entrypoint.language;
+            workloadId = launch.workload_id;
+            module = launch.entrypoint.module;
+            function = launch.entrypoint.function;
+            format = launch.entrypoint.format;
+            sourcePath = launch.entrypoint.working_dir;
+            # ADR-0011 warm-process tier. Skip-serialized in IR when
+            # absent, so `or null` falls through to cold tier.
+            concurrency = launch.entrypoint.concurrency or null;
+            # SDK port Phase 10b — pre-merged per-phase hook lists.
+            hooks = launch.hooks or {{ before_build = [ ]; before_start = [ ]; after_start = [ ]; before_stop = [ ]; }};
+          }}
+          else throw "mvmforge: pinned mvm revision does not expose `mvm.lib.${{system}}.mkFunctionService` (per ADR-0010 §3 / specs/contracts/mvm-mkfunctionservice.md). Bump `MVM_REV` in crates/mvm-sdk/src/compile/mvm_pin.rs to a revision that ships the upstream factory, or override via MVM_FLAKE_URL.";
     in {{
       packages = eachSystem (system:
         let
@@ -106,26 +107,44 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
             if launch.image.kind == "nix_packages"
             then map (name: pkgs.${{name}}) launch.image.packages
             else throw "mvmforge: unsupported image.kind '${{launch.image.kind}}'";
-          mergedEnv = launch.env // launch.entrypoint.env;
           factoryService = buildFactoryService system pkgs appPkg;
+          # Single canonical lowering: `entrypoint.command = [ bootScript ]`
+          # — the same one nix/lib/mkFunctionWorkload.nix uses. We do NOT
+          # use the multi-service entrypoint form, which mk-guest.nix leaves
+          # as a recovery-shell stub (W5.2 unwired) so the workload would
+          # never actually run. The bootScript stages the user source at
+          # working_dir, then either idles (function — the agent dispatches
+          # each call over vsock `RunEntrypoint`) or execs the long-running
+          # command. (Workload env follows mkFunctionWorkload: function env
+          # is wired by the factory wrapper, not the idle entrypoint; the
+          # old per-service `env` was inert under the stub.)
+          funcBootScript = pkgs.writeShellScript "${{launch.workload_id}}-boot" ''
+            set -eu
+            ${{buildPreStart pkgs appPkg}}
+            /etc/mvm/hooks/before_start.sh
+            exec ${{pkgs.coreutils}}/bin/sleep infinity
+          '';
+          cmdBootScript = pkgs.writeShellScript "${{launch.workload_id}}-boot" ''
+            set -eu
+            ${{buildPreStart pkgs appPkg}}
+            exec ${{buildEntrypoint pkgs}}
+          '';
           mkGuestArgs =
             if isFunction
             then {{
               name = launch.workload_id;
-              hostname = launch.workload_id;
               packages = [ appPkg ] ++ imagePackages ++ factoryService.servicePackages;
-              services.${{launch.workload_id}} = factoryService.service // {{ env = mergedEnv; }};
+              # uid 0: the bootScript symlinks into working_dir (root-owned);
+              # the per-call wrapper drops privs internally (ADR-002 W2.3).
+              uids.entrypoint = 0;
+              entrypoint.command = [ "${{funcBootScript}}" ];
               extraFiles = factoryService.extraFiles;
             }}
             else {{
               name = launch.workload_id;
-              hostname = launch.workload_id;
               packages = [ appPkg ] ++ imagePackages;
-              services.${{launch.workload_id}} = {{
-                command = buildEntrypoint pkgs;
-                preStart = buildPreStart pkgs appPkg;
-                env = mergedEnv;
-              }};
+              uids.entrypoint = 0;
+              entrypoint.command = [ "${{cmdBootScript}}" ];
             }};
         in {{
           default = mvm.lib.${{system}}.mkGuest mkGuestArgs;
@@ -207,7 +226,13 @@ mod tests {
     fn flake_uses_mkguest_attribute() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(s.contains("mvm.lib.${system}.mkGuest"));
-        assert!(s.contains("services.${launch.workload_id}"));
+        // Single canonical lowering: `entrypoint.command = [ bootScript ]`.
+        // mk-guest.nix's multi-service entrypoint form is a recovery-shell
+        // stub (W5.2), so we never emit it; and never a top-level
+        // `services`/`hostname` arg, which mkGuest rejects.
+        assert!(s.contains("entrypoint.command = [ "));
+        assert!(!s.contains("entrypoint.services"));
+        assert!(!s.contains("hostname = launch.workload_id"));
     }
 
     #[test]
@@ -240,26 +265,25 @@ mod tests {
 
     #[test]
     fn flake_dispatches_to_factory_for_function_workloads() {
-        // The factory dispatch is keyed off `launch.entrypoint.kind`
-        // and `launch.entrypoint.language`. Per ADR-0010 §3 (Option A,
-        // amended 2026-05-06), the rendered flake dispatches through
-        // `mvm.lib.<system>.mk<Lang>FunctionService` directly — no
-        // local fallback. The artifact never bundles internal-toolchain
-        // Nix files.
+        // The factory dispatch is keyed off `launch.entrypoint.kind`.
+        // The substrate exposes a single generic
+        // `mvm.lib.<system>.mkFunctionService` that dispatches on the
+        // `language` arg via its own registry — no local fallback, no
+        // per-language symbol. The artifact never bundles
+        // internal-toolchain Nix files.
         let s = build_flake_nix(&sample()).unwrap();
         assert!(
             !s.contains("/nix/factories/"),
             "rendered flake must not reference any local factory copy"
         );
         assert!(s.contains("mvm.lib."));
-        assert!(s.contains("mkPythonFunctionService") || s.contains("mk${langCap}FunctionService"));
+        assert!(s.contains("mkFunctionService"));
+        // Language flows through as an arg, not a symbol-name switch.
+        assert!(s.contains("language = launch.entrypoint.language"));
         // Missing-symbol path produces a helpful Nix `throw` rather
         // than silently falling through.
         assert!(s.contains("does not expose"));
         assert!(s.contains("launch.entrypoint.kind == \"function\""));
-        assert!(s.contains("launch.entrypoint.language == \"python\""));
-        assert!(s.contains("launch.entrypoint.language == \"node\""));
-        assert!(s.contains("launch.entrypoint.language == \"wasm\""));
     }
 
     #[test]
@@ -269,7 +293,11 @@ mod tests {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(s.contains("factoryService.servicePackages"));
         assert!(s.contains("factoryService.extraFiles"));
-        assert!(s.contains("factoryService.service"));
+        // Function workloads idle on the bootScript while the agent
+        // dispatches each call; the bootScript runs the before_start hook
+        // then `sleep infinity` (was the factory `service` no-op).
+        assert!(s.contains("sleep infinity"));
+        assert!(s.contains("before_start.sh"));
     }
 
     #[test]

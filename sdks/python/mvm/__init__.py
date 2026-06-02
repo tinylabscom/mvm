@@ -65,6 +65,7 @@ from mvm._dsl import (
 from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
     MVM_CLI_BIN_ENV,
+    ExecResult,
     RecordingNotActiveError,
     Sandbox,
     SandboxDevOnly,
@@ -90,6 +91,7 @@ __all__ = [
     "MVM_CLI_BIN_ENV",
     "SCHEMA_VERSION",
     "EmittingContextError",
+    "ExecResult",
     "MsgpackUnavailable",
     "MvmTransportError",
     "NoVmIntrospectionError",

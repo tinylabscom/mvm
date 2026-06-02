@@ -73,6 +73,14 @@ pub struct BuilderMounts {
     /// `/mvm-bins` inside the builder VM and exposed via
     /// `MVM_HOST_BIN_DIR=/mvm-bins` to the flake's `cmd.sh`.
     pub host_bin_dir: PathBuf,
+    /// Plan 120 / ADR-046 source-checkout invariant. When `Some`, the
+    /// build runs in "local-mvm override" mode: `flake_src` (mounted at
+    /// `/work`) is the **mvm workspace**, this user flake is staged into
+    /// the job dir, and `cmd.sh` builds it with `--override-input mvm
+    /// path:/work/nix` so the workload resolves `mvm` from the in-repo
+    /// checkout rather than GitHub. `None` keeps the legacy behavior:
+    /// `flake_src` is the user flake and `mvm` resolves from its lock.
+    pub staged_user_flake: Option<PathBuf>,
 }
 
 /// What the builder is asked to produce.
@@ -300,6 +308,47 @@ pub trait BuilderVm {
         job: &BuilderJob,
         mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError>;
+
+    /// Stage 0 bootstrap (Plan 91 / ADR-068). Boot a self-contained
+    /// `RootDir` guest whose `entry_path` init reads `workspace_dir`
+    /// (mounted `/work`), installs Nix, builds the steady-state builder
+    /// VM kernel + `rootfs.ext4` into `artifact_out` (mounted `/out`)
+    /// using the embedded host-vm binaries from `host_bin_dir` (mounted
+    /// `/mvm-bins`), then powers off cleanly. On `Ok`, the caller
+    /// validates + promotes the artifacts; this only asserts the
+    /// supervisor exited 0.
+    ///
+    /// Lives on the trait — rather than as a libkrun-inherent method —
+    /// so the orchestration dispatches Stage 0 through `&dyn BuilderVm`,
+    /// the same seam `run_build` uses. The default impl is a *fail-closed
+    /// gap*: Stage 0 is implemented for the libkrun backend only today.
+    /// Vz and Firecracker Stage 0 are tracked in ADR-068 §"Backend gaps"
+    /// — a backend without an impl returns a clear error rather than
+    /// silently doing nothing.
+    fn run_stage0(
+        &self,
+        guest_root_dir: &Path,
+        entry_path: &str,
+        workspace_dir: &Path,
+        artifact_out: &Path,
+        host_bin_dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        let _ = (
+            guest_root_dir,
+            entry_path,
+            workspace_dir,
+            artifact_out,
+            host_bin_dir,
+        );
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "stage0-bootstrap".to_string(),
+            reason: "Stage 0 builder-VM bootstrap is implemented for the libkrun \
+                     backend only; Vz and Firecracker Stage 0 are tracked in \
+                     ADR-068 §\"Backend gaps\". Bootstrap with the libkrun builder \
+                     backend."
+                .to_string(),
+        })
+    }
 
     /// Tear down any persistent state (warm builder pool entries,
     /// pulled images older than N days, etc.). No-op for stateless
@@ -860,6 +909,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: PathBuf::from("/tmp/out"),
             host_bin_dir: PathBuf::from("/tmp/host-bins"),
+            staged_user_flake: None,
         };
         let err = stub.run_build(&job, &mounts).expect_err("stub returns err");
         assert!(matches!(err, BuilderVmError::NotYetImplemented));
@@ -879,6 +929,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: PathBuf::from("/tmp/out"),
             host_bin_dir: PathBuf::from("/tmp/host-bins"),
+            staged_user_flake: None,
         };
         let err = stub.run_build(&job, &mounts).expect_err("stub returns err");
         assert!(matches!(err, BuilderVmError::NotYetImplemented));
@@ -888,6 +939,32 @@ mod tests {
     fn cleanup_default_is_ok() {
         // Stateless implementations get a free no-op cleanup.
         assert!(StubBuilderVm.cleanup().is_ok());
+    }
+
+    #[test]
+    fn run_stage0_default_is_a_documented_backend_gap() {
+        // ADR-068: backends without a Stage 0 impl (Stub, and Vz until a
+        // future slice) inherit the trait default — a fail-closed error
+        // that names the gap and the recovery path, never a silent no-op
+        // or a todo!() panic.
+        let stub = StubBuilderVm;
+        let err = stub
+            .run_stage0(
+                Path::new("/tmp/root"),
+                "/init",
+                Path::new("/tmp/work"),
+                Path::new("/tmp/out"),
+                Path::new("/tmp/mvm-bins"),
+            )
+            .expect_err("default Stage 0 impl must fail closed");
+        match err {
+            BuilderVmError::VmmUnavailable { requested, reason } => {
+                assert_eq!(requested, "stage0-bootstrap");
+                assert!(reason.contains("libkrun"), "names the supported backend");
+                assert!(reason.contains("ADR-068"), "points at the tracking ADR");
+            }
+            other => panic!("unexpected error variant: {other}"),
+        }
     }
 
     #[test]

@@ -27,6 +27,9 @@ mvm-supervisor.workspace = true
 mvm-ir.workspace = true
 mvm-sdk.workspace = true
 anyhow.workspace = true
+# Real ext4 inode lookup for the Stage 0 post-build check (replaces the
+# old raw-byte substring scan over rootfs.ext4).
+ext4-view.workspace = true
 # Plan 60 Phase 7a Slice D — `mvmctl audit verify-cert` decodes
 # base64 destruction-cert signatures + pubkeys.
 base64.workspace = true

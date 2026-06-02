@@ -1,14 +1,14 @@
 //! Vsock helpers for talking to the in-guest agent.
 //!
-//! Routes through `mvm::vsock_transport::AppleContainerTransport`
-//! intentionally — these helpers serve `mvmctl up` flows that today
-//! only target the Apple Container backend (Firecracker `up` uses a
-//! different code path). If/when a Firecracker `up` lands, swap to
-//! `vsock_transport::for_vm`.
+//! Routes through the canonical `mvm::vsock_transport::for_vm`
+//! dispatcher — the same selector `invoke`/`exec`/`readiness` use. It
+//! probes the live backend (apple-container → libkrun → firecracker)
+//! per VM. The previous hardcoded `AppleContainerTransport` left the
+//! libkrun `up` path unable to ever reach its agent.
 
 use anyhow::Result;
 
-use mvm::vsock_transport::{AppleContainerTransport, VsockTransport};
+use mvm::vsock_transport;
 
 /// Wait for the guest agent to complete the ADR-053 / plan 74 W1
 /// protocol hello over vsock. Returns true once the agent has
@@ -18,7 +18,6 @@ use mvm::vsock_transport::{AppleContainerTransport, VsockTransport};
 /// probe keeps polling until the deadline.
 pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let transport = AppleContainerTransport::new(vm_id);
 
     // Plan 93 Phase 2 Lever 2: adaptive backoff instead of a fixed
     // 500 ms poll. A guest that binds in ~80 ms used to wait up to a
@@ -29,9 +28,14 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
     // connect→`negotiate_protocol` ordering (and the
     // ProtocolHello/Ack contract) is untouched; no RPC is issued before
     // negotiation succeeds.
+    //
+    // Resolve the transport each iteration via `for_vm`: it selects the
+    // live backend by connecting to the agent port, so a still-booting
+    // guest simply fails this attempt and we retry on the next tick.
     let mut attempt: u32 = 0;
     while std::time::Instant::now() < deadline {
-        if let Ok(mut s) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        if let Ok(transport) = vsock_transport::for_vm(vm_id)
+            && let Ok(mut s) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             && mvm_guest::vsock::negotiate_protocol(
                 &mut s,
                 vec![mvm_guest::vsock::GuestCapability::Ping],
@@ -48,7 +52,7 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
 
 /// Tell the guest agent to start a vsock→TCP forwarder for the given port.
 pub fn request_port_forward(vm_id: &str, guest_port: u16) -> Result<u32> {
-    let transport = AppleContainerTransport::new(vm_id);
+    let transport = vsock_transport::for_vm(vm_id)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
     mvm_guest::vsock::start_port_forward_on(&mut stream, guest_port)
 }

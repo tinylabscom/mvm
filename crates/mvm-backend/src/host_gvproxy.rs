@@ -108,6 +108,26 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
     };
     let ssh_port = ssh_port_for(scratch_dir);
 
+    // NEVER inherit the parent's stderr. gvproxy is detached and
+    // re-parented to init; an inherited stderr write end keeps the
+    // parent's stderr pipe open for gvproxy's whole lifetime, so any
+    // ancestor reading it to EOF (a test driving `mvmctl` via
+    // `Command::output()`) hangs forever. Capture pre-listener errors
+    // (port-in-use, etc. — emitted before `-log-file` opens) to a file
+    // instead, preserving the operator visibility the old inherit gave.
+    let stdio_log_path = scratch_dir.join("host-gvproxy-stdio.log");
+    let stdio_log = std::fs::File::create(&stdio_log_path).map_err(|e| {
+        anyhow!(
+            "create gvproxy stdio capture {}: {e}",
+            stdio_log_path.display()
+        )
+    })?;
+    let stdio_log_err = stdio_log.try_clone().map_err(|e| {
+        anyhow!(
+            "clone gvproxy stdio capture {}: {e}",
+            stdio_log_path.display()
+        )
+    })?;
     let mut cmd = Command::new(&gvproxy_bin);
     cmd.arg("-listen-vfkit")
         .arg(listen_url)
@@ -115,12 +135,8 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
         .arg(OsString::from(&log_path))
         .arg("-ssh-port")
         .arg(ssh_port.to_string())
-        // Inherit stderr so listen-time errors (port already in
-        // use, etc.) are visible to the operator — `-log-file`
-        // only writes after gvproxy is past arg-parse + listener
-        // setup.
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .stdout(Stdio::from(stdio_log))
+        .stderr(Stdio::from(stdio_log_err));
 
     let mut child = cmd
         .spawn()

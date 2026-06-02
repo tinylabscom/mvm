@@ -51,7 +51,7 @@ use mvm_libkrun::{
     BridgeFds, LogLevel, SupervisorConfig, init_log, run_supervisor, run_supervisor_with_bridge,
     set_log_level,
 };
-use mvm_plan::ExecutionPlan;
+use mvm_plan::{ExecutionPlan, SignedExecutionPlan};
 use mvm_policy::PolicyBundle;
 use mvm_supervisor::audit::AuditSigner;
 use mvm_supervisor::audit_file::FileAuditSigner;
@@ -176,8 +176,18 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
 
     // Deserialize the JSON-Value-carrier into typed values. The
     // round-trip cost is trivial vs the bridge's IO budget.
-    let plan: ExecutionPlan =
-        serde_json::from_value(plan_value).context("decode cfg.plan into ExecutionPlan")?;
+    // cfg.plan carries the SignedExecutionPlan envelope the host admitted +
+    // signed (plan_admission.rs serializes `admitted.signed`), not a bare
+    // ExecutionPlan. Decode the envelope and read the inner plan from its
+    // payload. The host already verified the signature + G4 window/nonce at
+    // admit time and spawns this supervisor over a private channel, so under
+    // ADR-002 (host is trusted) we extract rather than re-verify here.
+    // Defense-in-depth re-verify via `mvm_plan::verify_plan` with the host
+    // signer pubkey is a follow-up.
+    let signed: SignedExecutionPlan =
+        serde_json::from_value(plan_value).context("decode cfg.plan into SignedExecutionPlan")?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+        .context("decode ExecutionPlan from signed plan payload")?;
     let bundle: Option<PolicyBundle> = match bundle_value {
         Some(v) => Some(serde_json::from_value(v).context("decode cfg.bundle into PolicyBundle")?),
         None => None,

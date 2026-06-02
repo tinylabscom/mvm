@@ -260,10 +260,43 @@ fn stage0_cache_report(
     let builder = cache_root.join("builder-vm");
     if builder.is_dir() {
         lines.push(format!(
-            "Builder VM cache: {} ({})",
+            "Builder VM cache: {} ({} on disk)",
             builder.display(),
             human_bytes(dir_size(&builder))
         ));
+        // Persistent Nix store images are SPARSE — a large logical cap
+        // (DEFAULT_NIX_STORE_MIB, 64 GiB) over a small real footprint,
+        // GC'd in-VM when allocated blocks cross 20 GiB. Surface both so
+        // the cap never reads as real disk usage.
+        if let Ok(entries) = std::fs::read_dir(&builder) {
+            let mut imgs: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && p.file_name()
+                            .map(|n| {
+                                let n = n.to_string_lossy();
+                                n.starts_with("nix-store-") && n.ends_with(".img")
+                            })
+                            .unwrap_or(false)
+                })
+                .collect();
+            imgs.sort();
+            for p in imgs {
+                if let Ok(m) = std::fs::metadata(&p) {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "  {name}: {} on disk / {} cap (sparse)",
+                        human_bytes(file_allocated_bytes(&m)),
+                        human_bytes(m.len())
+                    ));
+                }
+            }
+        }
         if let Ok(entries) = std::fs::read_dir(&builder) {
             // Per-arch artifact dirs only — skip `vms/` (per-VM scratch)
             // and dotfiles. Sorted for stable output.
@@ -291,8 +324,8 @@ fn stage0_cache_report(
                         .map(human_age_secs)
                         .unwrap_or_else(|| "?".to_string());
                     lines.push(format!(
-                        "  {name}/rootfs.ext4: {age} old ({})",
-                        human_bytes(m.len())
+                        "  {name}/rootfs.ext4: {age} old ({} on disk)",
+                        human_bytes(file_allocated_bytes(&m))
                     ));
                 }
                 if let Ok(s) = std::fs::read_to_string(p.join(".mvm-source.sha256")) {
@@ -306,13 +339,35 @@ fn stage0_cache_report(
     lines
 }
 
-/// Recursively calculate directory size in bytes.
+/// Real on-disk footprint of a file (allocated blocks), not its
+/// apparent length. The builder VM's persistent `nix-store-<arch>.img`
+/// is SPARSE: it advertises a large logical cap (`DEFAULT_NIX_STORE_MIB`,
+/// 64 GiB) but consumes only the blocks actually written. `len()` would
+/// report that cap as if it were real disk — which is exactly what makes
+/// an `ls -l` look alarming. Block count × 512 is the truth `du` shows.
+#[cfg(unix)]
+fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    meta.blocks().saturating_mul(512)
+}
+#[cfg(not(unix))]
+fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
+    meta.len()
+}
+
+/// Recursively calculate directory size in bytes — by *allocated* blocks,
+/// so sparse images count their real footprint, not their logical cap.
 fn dir_size(path: &std::path::Path) -> u64 {
     walkdir(path)
         .unwrap_or_default()
         .iter()
         .filter(|e| e.path().is_file())
-        .map(|e| e.path().metadata().map(|m| m.len()).unwrap_or(0))
+        .map(|e| {
+            e.path()
+                .metadata()
+                .map(|m| file_allocated_bytes(&m))
+                .unwrap_or(0)
+        })
         .sum()
 }
 
@@ -366,6 +421,42 @@ mod tests {
         assert!(!joined.contains("abcd1234deadbeef"));
         // `vms/` is not reported as an arch dir.
         assert!(!joined.contains("vms/rootfs.ext4"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stage0_cache_report_shows_sparse_nix_store_real_footprint() {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let builder = root.join("builder-vm");
+        std::fs::create_dir_all(&builder).unwrap();
+
+        // Sparse image: 64 GiB apparent cap, but only a few bytes written
+        // (one block allocated). set_len creates a hole, not real blocks.
+        let img = builder.join("nix-store-aarch64.img");
+        let f = std::fs::File::create(&img).unwrap();
+        f.set_len(64 * 1024 * 1024 * 1024).unwrap();
+        drop(f);
+
+        let m = std::fs::metadata(&img).unwrap();
+        let allocated = m.blocks().saturating_mul(512);
+        assert!(
+            allocated < m.len(),
+            "fixture must be sparse: allocated {allocated} should be << apparent {}",
+            m.len()
+        );
+
+        let joined = stage0_cache_report(root, &root.join("stage0"), &[]).join("\n");
+        assert!(
+            joined.contains("nix-store-aarch64.img:") && joined.contains("cap (sparse)"),
+            "report must surface the sparse nix-store image: {joined}"
+        );
+        // The 64 GiB apparent cap must NOT be what the dir-size line reports.
+        assert!(
+            !joined.contains("Builder VM cache:") || !joined.contains("64.0 GB"),
+            "builder cache disk usage must reflect allocated blocks, not the cap: {joined}"
+        );
     }
 
     #[test]

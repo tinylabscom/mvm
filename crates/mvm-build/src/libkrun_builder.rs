@@ -324,29 +324,42 @@ impl LibkrunBuilderVm {
         self
     }
 
-    /// Boot a Stage 0 bootstrap VM that runs a self-contained init
-    /// script — no `/job/cmd.sh` staging, no `/job/result` parsing,
-    /// no `/nix-store` virtio-blk. The guest is expected to be a
-    /// `BuilderVmImage::RootDir` whose `/init` reads `/work` and
+    /// libkrun-side Stage 0 boot. Drives a self-contained `RootDir`
+    /// guest — no `/job/cmd.sh` staging, no `/job/result` parsing, no
+    /// `/nix-store` virtio-blk. The guest's `/init` reads `/work` and
     /// writes the steady-state builder VM artifacts to `/out`, then
     /// powers off cleanly.
     ///
-    /// On success, the caller still needs to validate that the
-    /// expected artifacts (`vmlinux`, `rootfs.ext4`) landed in
-    /// `artifact_out`; this function only asserts that the
-    /// supervisor exited 0.
-    pub fn run_stage0(
+    /// On success the caller still validates that the expected artifacts
+    /// (`vmlinux`, `rootfs.ext4`) landed in `artifact_out`; this only
+    /// asserts the supervisor exited 0.
+    ///
+    /// Private impl behind `<Self as BuilderVm>::run_stage0`, which
+    /// adapts the backend-agnostic `(root_dir, entry)` trait signature
+    /// to libkrun's `BuilderVmImage`. ADR-068.
+    fn run_stage0_impl(
         &self,
         image: BuilderVmImage,
         workspace_dir: &std::path::Path,
         artifact_out: &std::path::Path,
+        host_bin_dir: &std::path::Path,
     ) -> Result<(), BuilderVmError> {
         ensure_utf8_path(workspace_dir, "workspace_dir")?;
         ensure_utf8_path(artifact_out, "artifact_out")?;
+        ensure_utf8_path(host_bin_dir, "host_bin_dir")?;
         if !workspace_dir.is_dir() {
             return Err(BuilderVmError::ExtractionFailed(format!(
                 "Stage 0 workspace_dir must be an existing directory: {}",
                 workspace_dir.display()
+            )));
+        }
+        // The builder-vm flake installs the pre-cross-compiled host-vm
+        // binaries from this dir rather than building them with the guest's
+        // nix (ADR-065); the Stage 0 nix build aborts without it.
+        if !host_bin_dir.is_dir() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "Stage 0 host_bin_dir must be an existing directory: {}",
+                host_bin_dir.display()
             )));
         }
         std::fs::create_dir_all(artifact_out).map_err(|e| {
@@ -381,7 +394,10 @@ impl LibkrunBuilderVm {
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
             .add_virtio_fs("work", path_to_str(workspace_dir, "workspace_dir")?)
-            .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?);
+            .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
+            // /mvm-bins inside the guest — init.sh sets MVM_HOST_BIN_DIR to
+            // it so the flake picks up the pre-built host-vm binaries.
+            .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?);
 
         krun = apply_networking_mode(krun, &vm_state_dir)?;
 
@@ -671,6 +687,20 @@ pub(crate) fn ensure_utf8_path(p: &std::path::Path, field: &str) -> Result<(), B
 }
 
 impl BuilderVm for LibkrunBuilderVm {
+    /// ADR-068: adapt the backend-agnostic `(root_dir, entry)` Stage 0
+    /// contract to libkrun's `BuilderVmImage::RootDir` and run it.
+    fn run_stage0(
+        &self,
+        guest_root_dir: &std::path::Path,
+        entry_path: &str,
+        workspace_dir: &std::path::Path,
+        artifact_out: &std::path::Path,
+        host_bin_dir: &std::path::Path,
+    ) -> Result<(), BuilderVmError> {
+        let image = BuilderVmImage::new_root_dir(guest_root_dir.to_path_buf(), entry_path);
+        self.run_stage0_impl(image, workspace_dir, artifact_out, host_bin_dir)
+    }
+
     fn run_build(
         &self,
         job: &BuilderJob,
@@ -722,7 +752,18 @@ impl BuilderVm for LibkrunBuilderVm {
         //    B.2) dispatches based on which file it sees.
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
-        stage_job_dir(&job_dir, job)?;
+        stage_job_dir(
+            &job_dir,
+            job,
+            mounts.staged_user_flake.as_deref(),
+            // Override mode (staged_user_flake = Some) mounts the workspace
+            // at /work as `flake_src`; stage its filtered cargo tree so the
+            // build can pin `mvm/mvm-workspace` to it.
+            mounts
+                .staged_user_flake
+                .as_ref()
+                .map(|_| mounts.flake_src.as_path()),
+        )?;
         // Same announcement as the single-shot path — see the
         // identical block in `LibkrunBuilderVm::run_build`.
         tracing::info!(
@@ -1318,12 +1359,25 @@ fn spawn_supervisor_and_wait(
     // (callers that opted out of console capture), behavior is
     // unchanged — plain wait, plain exit code.
     let console_log = cfg.krun.console_output_path.as_deref().map(PathBuf::from);
-    match wait_with_panic_detector_until(
+    let outcome = wait_with_panic_detector_until(
         &mut child,
         console_log.as_deref(),
         DEFAULT_PANIC_POLL_INTERVAL,
         Some(timeout),
-    ) {
+    );
+
+    // The supervisor has now exited on every arm below — clean guest
+    // poweroff (libkrun's internal `exit()`), or panic/timeout where we
+    // SIGKILL'd it above. None of those run `GvproxyHandle::Drop` (no
+    // unwind) or the supervisor's SIGTERM handler (SIGKILL is uncatchable,
+    // exit() skips it), so the per-VM gvproxy is left "waiting for clients"
+    // and reparented to launchd. Reap it here: we (the spawning host) have
+    // observed the supervisor exit, so this is the one place teardown is
+    // guaranteed regardless of how libkrun terminated. See
+    // `gvproxy::reap_by_pid_file` (idempotent; no-op if already gone).
+    mvm_libkrun::gvproxy::reap_by_pid_file(vm_state_dir);
+
+    match outcome {
         Ok(WaitOutcome::Clean(code)) => Ok(code),
         Ok(WaitOutcome::KernelPanic {
             panic_line,
@@ -2026,6 +2080,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: out,
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         }
     }
 
@@ -2121,6 +2176,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .validate_mounts(&mounts)
@@ -2141,6 +2197,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .validate_mounts(&mounts)
@@ -2182,6 +2239,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: std::env::temp_dir().join("mvm-plan72-w1-utf8-test-out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .validate_mounts(&mounts)
@@ -2295,7 +2353,7 @@ mod tests {
         let spec_path = scratch.path().join("spec.json");
         let spec_body = br#"{"language":"python","lockfile_relative_path":"uv.lock","source_mount":"/work","gate":"dev"}"#;
         std::fs::write(&spec_path, spec_body).unwrap();
-        stage_job_dir(&job_dir, &BuilderJob::Install { spec_path }).expect("stage ok");
+        stage_job_dir(&job_dir, &BuilderJob::Install { spec_path }, None, None).expect("stage ok");
         let dst = job_dir.join(INSTALL_SPEC_FILENAME);
         assert!(dst.is_file(), "install_spec.json must be staged at {dst:?}");
         let on_disk = std::fs::read(&dst).unwrap();
@@ -2324,6 +2382,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .run_build(&ok_job(), &mounts)
@@ -2386,7 +2445,7 @@ mod tests {
             flake_ref: "path:/work/nix/images/foo".to_string(),
             attr_path: "packages.x86_64-linux.default".to_string(),
         };
-        stage_job_dir(&job_dir, &job).unwrap();
+        stage_job_dir(&job_dir, &job, None, None).unwrap();
         let cmd = std::fs::read_to_string(job_dir.join("cmd.sh")).unwrap();
         assert!(cmd.contains("FLAKE_REF='path:/work/nix/images/foo'"));
         assert!(cmd.contains("ATTR_PATH='packages.x86_64-linux.default'"));
@@ -2398,6 +2457,86 @@ mod tests {
         assert!(cmd.contains("auto-optimise-store = true"));
         assert!(cmd.contains("XDG_CACHE_HOME=/nix-store/.cache"));
         assert!(cmd.contains("printf '%s\\n' \"$NIX_OUT\" > /job/store-path"));
+        // Legacy (no-override) mode never injects an mvm override.
+        assert!(!cmd.contains("--override-input mvm"));
+    }
+
+    #[test]
+    fn stage_job_dir_override_stages_user_flake_and_overrides_mvm() {
+        // Plan 120 / ADR-046: source-checkout override mode stages the user
+        // flake into the job dir and pins `mvm` to the local checkout
+        // mounted at /work, so the workload builds against in-repo nix
+        // rather than GitHub.
+        let scratch = TempDir::new().unwrap();
+        let job_dir = scratch.path().join("job-ovr");
+        let user_flake = scratch.path().join("hello-app");
+        std::fs::create_dir_all(user_flake.join("src")).unwrap();
+        std::fs::write(user_flake.join("flake.nix"), "{ inputs.mvm.url = \"x\"; }").unwrap();
+        std::fs::write(user_flake.join("launch.json"), "{}").unwrap();
+        std::fs::write(user_flake.join("src/app.py"), "x").unwrap();
+
+        // A stand-in mvm workspace: members + a build artifact and a
+        // non-allowlisted top-level dir that must be pruned from the
+        // staged snapshot.
+        let workspace = scratch.path().join("mvm-ws");
+        std::fs::create_dir_all(workspace.join("crates/mvm-guest/src")).unwrap();
+        std::fs::create_dir_all(workspace.join("crates/mvm-guest/target/debug")).unwrap();
+        std::fs::create_dir_all(workspace.join("public")).unwrap();
+        std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
+        std::fs::write(workspace.join("crates/mvm-guest/Cargo.toml"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-guest/src/lib.rs"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-guest/target/debug/junk"), "x").unwrap();
+        std::fs::write(workspace.join("public/index.html"), "x").unwrap();
+
+        let job = BuilderJob::Flake {
+            flake_ref: "/work".to_string(), // ignored in override mode
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        };
+        stage_job_dir(
+            &job_dir,
+            &job,
+            Some(user_flake.as_path()),
+            Some(workspace.as_path()),
+        )
+        .unwrap();
+
+        // User flake copied beside cmd.sh, including the src tree.
+        assert!(job_dir.join("workload/flake.nix").exists());
+        assert!(job_dir.join("workload/src/app.py").exists());
+
+        // Filtered mvm-workspace snapshot: members copied, build artifacts
+        // and non-allowlisted top-level dirs pruned.
+        assert!(job_dir.join("mvm-src/Cargo.lock").exists());
+        assert!(job_dir.join("mvm-src/crates/mvm-guest/src/lib.rs").exists());
+        assert!(
+            !job_dir.join("mvm-src/crates/mvm-guest/target").exists(),
+            "target/ must be pruned from the staged snapshot"
+        );
+        assert!(
+            !job_dir.join("mvm-src/public").exists(),
+            "non-allowlisted top-level dirs must not be staged"
+        );
+
+        let cmd = std::fs::read_to_string(job_dir.join("cmd.sh")).unwrap();
+        // Builds the staged workload resolved relative to the script dir.
+        assert!(cmd.contains(r#"FLAKE_REF="$(cd "$(dirname "$0")" && pwd)/workload""#));
+        // Resolves the filtered workspace snapshot beside the script too.
+        assert!(cmd.contains(r#"MVM_SRC="$(cd "$(dirname "$0")" && pwd)/mvm-src""#));
+        // Pins mvm to the local checkout and mvm-workspace to the snapshot.
+        assert!(cmd.contains("--override-input mvm path:/work/nix"));
+        assert!(cmd.contains(r#"--override-input mvm/mvm-workspace "path:$MVM_SRC""#));
+        assert!(cmd.contains("ATTR_PATH='packages.aarch64-linux.default'"));
+        // The overrides ride both the build and the metadata eval.
+        assert_eq!(
+            cmd.matches("--override-input mvm path:/work/nix").count(),
+            3
+        );
+        assert_eq!(
+            cmd.matches(r#"--override-input mvm/mvm-workspace "path:$MVM_SRC""#)
+                .count(),
+            3
+        );
     }
 
     #[test]

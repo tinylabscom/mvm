@@ -99,8 +99,10 @@ fn extract_quoted_after(line: &str, key: &str) -> Option<String> {
     Some(rest[q1..q1 + q2].to_string())
 }
 
-/// Strip the glibc version suffix from a target triple.
-/// e.g. `aarch64-unknown-linux-gnu.2.17` → `aarch64-unknown-linux-gnu`
+/// Strip the optional glibc version suffix from a target triple to get
+/// the rustup target name / `target/<triple>` output dir.
+/// e.g. `aarch64-unknown-linux-gnu.2.17` → `aarch64-unknown-linux-gnu`;
+/// a suffix-less triple like `aarch64-unknown-linux-musl` is unchanged.
 fn strip_glibc(t: &str) -> &str {
     t.split('.').next().unwrap()
 }

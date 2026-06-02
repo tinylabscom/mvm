@@ -522,6 +522,34 @@ fn persistent_dispatch_disabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Plan 120 / ADR-046: resolve the in-repo mvm workspace to build a user
+/// flake against, or `None` to keep the flake's own `mvm` pin.
+///
+/// Returns the workspace root only when **both** hold:
+///   (a) mvmctl was compiled from a source checkout whose `nix/flake.nix`
+///       still exists on disk (walk up from the compile-time manifest dir,
+///       the same source-checkout signal the CLI's `find_builder_vm_flake`
+///       uses), and
+///   (b) the user flake pins `mvm` to GitHub — so `--override-input mvm`
+///       has an input to replace and we're genuinely swapping a remote
+///       fetch for the local checkout.
+#[cfg(feature = "builder-vm")]
+fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = loop {
+        if dir.join("nix/flake.nix").is_file() {
+            break dir;
+        }
+        if !dir.pop() {
+            return None;
+        }
+    };
+    let flake_nix = std::fs::read_to_string(user_flake.join("flake.nix")).ok()?;
+    flake_nix
+        .contains("github:tinylabscom/mvm")
+        .then_some(workspace)
+}
+
 #[cfg(feature = "builder-vm")]
 fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm>(
     env: &dyn ShellEnvironment,
@@ -540,13 +568,31 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm>(
     };
     let _ = mode;
 
-    let flake_src = std::path::PathBuf::from(if flake_ref == "." {
+    let user_flake = std::path::PathBuf::from(if flake_ref == "." {
         std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string())
     } else {
         flake_ref.to_string()
     });
+
+    // Plan 120 / ADR-046 source-checkout invariant: a compiled flake pins
+    // `mvm` to GitHub for portability, but when mvmctl runs from a source
+    // checkout we must build the workload against the in-repo nix flake so
+    // a contributor's changes are exercised without a release round-trip.
+    // In that case mount the workspace at /work and stage the user flake
+    // into the job dir; `cmd.sh` overrides `mvm` to `path:/work/nix`.
+    // Otherwise keep the legacy layout: the user flake is `/work`.
+    let (flake_src, staged_user_flake) = match local_mvm_workspace(&user_flake) {
+        Some(workspace) => {
+            env.log_info(
+                "Source checkout: building workload against the in-repo mvm flake \
+                 (--override-input mvm path:/work/nix).",
+            );
+            (workspace, Some(user_flake))
+        }
+        None => (user_flake, None),
+    };
 
     let job = BuilderJob::Flake {
         flake_ref: GUEST_WORK_DIR.to_string(),
@@ -566,6 +612,7 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm>(
         host_nix_store: None,
         artifact_out: std::path::PathBuf::from(&staging),
         host_bin_dir: host_bins_tmp.path().to_path_buf(),
+        staged_user_flake,
     };
 
     let artifacts = builder

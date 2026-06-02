@@ -322,6 +322,9 @@ impl<T: BuilderVm> InstallDriver for T {
             host_nix_store: None,
             artifact_out: artifact_out.to_path_buf(),
             host_bin_dir: _host_bins_tmp.path().to_path_buf(),
+            // App-dep installs stage an install spec, not a user flake; no
+            // mvm override applies.
+            staged_user_flake: None,
         };
         self.run_build(&job, &mounts)
     }

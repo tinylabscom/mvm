@@ -130,7 +130,9 @@ fn main() -> ExitCode {
 
 #[cfg(any(target_os = "linux", test))]
 fn virtiofs_tag_is_read_only(tag: &str) -> bool {
-    tag == "work"
+    // `work` is the user's source; `mvm-bins` is the embedded host
+    // binaries. Both are inputs the guest must not write back.
+    tag == "work" || tag == "mvm-bins"
 }
 
 /// Bytes from the start of the ext4 superblock that the host-side
@@ -290,8 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn virtiofs_tag_policy_keeps_only_workspace_read_only() {
+    fn virtiofs_tag_policy_marks_input_shares_read_only() {
         assert!(virtiofs_tag_is_read_only("work"));
+        assert!(virtiofs_tag_is_read_only("mvm-bins"));
         assert!(!virtiofs_tag_is_read_only("out"));
         assert!(!virtiofs_tag_is_read_only("job"));
     }
@@ -442,12 +445,23 @@ mod linux {
     /// out after the VM powers off.
     const OUT_DIR: &str = "/out";
 
-    /// Three virtio-fs tags that match the host-side
+    /// Pre-cross-compiled host-vm binaries (ADR-065). `cmd.sh` exports
+    /// `MVM_HOST_BIN_DIR=/mvm-bins` so the builder-vm flake installs
+    /// them from here instead of building them with the guest's nix —
+    /// the flake eval reads `/mvm-bins/<bin>`, so this must be mounted
+    /// before the build runs or the eval fails "path does not exist".
+    const HOST_BIN_DIR: &str = "/mvm-bins";
+
+    /// virtio-fs tags that match the host-side
     /// `KrunContext::add_virtio_fs` declarations in
     /// `LibkrunBuilderVm::run_build`. Order doesn't matter; the
-    /// guest mounts each by tag.
-    const VIRTIOFS_MOUNTS: &[(&str, &str)] =
-        &[("work", WORK_DIR), ("out", OUT_DIR), ("job", JOB_DIR)];
+    /// guest mounts each by tag. `mvm-bins` is read-only (inputs).
+    const VIRTIOFS_MOUNTS: &[(&str, &str)] = &[
+        ("work", WORK_DIR),
+        ("out", OUT_DIR),
+        ("job", JOB_DIR),
+        ("mvm-bins", HOST_BIN_DIR),
+    ];
 
     /// Max stderr lines we capture into `/job/result`. Keeps
     /// the result file small; the host-side supervisor still
@@ -1639,6 +1653,14 @@ mod linux {
         // boot path; we replicate it here for the mvm-host-vm-init
         // path (Plan 86).
         mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
+        // `/dev/shm` (tmpfs) is required by libfaketime's `sem_open`:
+        // `make-ext4-fs.nix` runs `mkfs.ext4` under faketime for
+        // deterministic timestamps, and faketime opens a POSIX named
+        // semaphore (which lives under /dev/shm). devtmpfs doesn't create
+        // it, so without this the dev-image's `ext4-fs.img` derivation
+        // dies with "faketime: sem_open: No such file or directory".
+        let _ = std::fs::create_dir_all("/dev/shm");
+        mount_fs_idempotent("tmpfs", "/dev/shm", "tmpfs")?;
         // `/dev/pts` is required by nix's build-sandbox setup: it
         // calls `posix_openpt` which opens `/dev/ptmx`, and that
         // requires devpts to be mounted at `/dev/pts`. Without it
@@ -1894,7 +1916,12 @@ mod linux {
             let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
             ifr.ifr_name = name;
 
-            if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) } < 0 {
+            // libc 0.2.182's ioctl request parameter is the per-target
+            // `Ioctl` alias — `c_ulong` (u64) on linux-gnu, `c_int`
+            // (i32) on musl. Cast the SIOC* request to `libc::Ioctl` so
+            // this compiles on both the musl host-bin deployment target
+            // and a native-gnu `cargo build --all-targets` (CI).
+            if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::Ioctl, &mut ifr) } < 0 {
                 return Err(format!(
                     "SIOCGIFFLAGS {iface}: {}",
                     std::io::Error::last_os_error()
@@ -1909,7 +1936,7 @@ mod linux {
                 let flags = ifr.ifr_ifru.ifru_flags;
                 ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short);
             }
-            if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) } < 0 {
+            if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::Ioctl, &ifr) } < 0 {
                 return Err(format!(
                     "SIOCSIFFLAGS {iface} IFF_UP: {}",
                     std::io::Error::last_os_error()
@@ -2565,6 +2592,7 @@ mod linux {
             use nix::mount::MsFlags;
 
             assert!(virtiofs_mount_flags("work").contains(MsFlags::MS_RDONLY));
+            assert!(virtiofs_mount_flags("mvm-bins").contains(MsFlags::MS_RDONLY));
             assert_eq!(virtiofs_mount_flags("out"), MsFlags::empty());
             assert_eq!(virtiofs_mount_flags("job"), MsFlags::empty());
         }

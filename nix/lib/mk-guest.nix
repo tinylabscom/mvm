@@ -576,10 +576,10 @@ let
     mkdir -p "$out"
 
     # Standard FHS dirs the kernel + init expect. `/nix-store`,
-    # `/job`, `/out`, `/work` are mount points the libkrun builder
-    # VM (Plan 72 W3) needs pre-created — rootfs boots `ro` so
-    # `mvm-host-vm-init` can't `mkdir` them at runtime.
-    mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work}
+    # `/job`, `/out`, `/work`, `/mvm-bins` are mount points the libkrun
+    # builder VM (Plan 72 W3 / ADR-065) needs pre-created — rootfs boots
+    # `ro` so `mvm-host-vm-init` can't `mkdir` them at runtime.
+    mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins}
     chmod 1777 "$out/tmp"
     chmod 0755 "$out/run"
 

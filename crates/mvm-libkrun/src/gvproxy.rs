@@ -35,7 +35,24 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
+
+/// File name of gvproxy's PID sidecar under the per-VM scratch dir.
+/// Lets [`reap_by_pid_file`] (and `mvmctl cache prune`) reap a gvproxy
+/// the in-process [`GvproxyHandle::drop`] missed — which is the common
+/// case on the libkrun lane, where `krun_start_enter` calls `exit()`
+/// on guest shutdown and the stack never unwinds (so Drop never runs).
+pub const PID_FILE_NAME: &str = "gvproxy.pid";
+
+/// PID of the gvproxy this process most recently spawned, or 0 if
+/// none. Set by [`spawn`], cleared by [`GvproxyHandle::drop`]. Read by
+/// the libkrun supervisor's `SIGTERM` handler (an `extern "C"` signal
+/// handler that can't capture state) so it can SIGTERM gvproxy before
+/// `_exit` — otherwise `mvmctl stop` / `kill` orphans it. One gvproxy
+/// per supervisor process (one VM per supervisor), so a single slot is
+/// enough.
+pub static RUNNING_GVPROXY_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Grace period between SIGTERM and SIGKILL during shutdown. Matches
 /// the [`crate::passt::SHUTDOWN_GRACE`] knob so both backends behave
@@ -63,7 +80,13 @@ pub enum GvproxyError {
     /// Spawning the gvproxy child process failed.
     Spawn(io::Error),
     /// gvproxy exited before the listener socket appeared on disk.
-    EarlyExit { status: std::process::ExitStatus },
+    /// `stdio_log` is the capture file holding gvproxy's pre-listener
+    /// stdout/stderr (the reason it bailed lives there, not in
+    /// `-log-file`, which gvproxy opens only after arg-parse).
+    EarlyExit {
+        status: std::process::ExitStatus,
+        stdio_log: PathBuf,
+    },
     /// `SOCKET_READY_TIMEOUT` elapsed without gvproxy creating its
     /// listener socket. Typically a permission issue on the scratch
     /// dir or a fatal error gvproxy logged before listening.
@@ -79,9 +102,11 @@ impl std::fmt::Display for GvproxyError {
                 write!(f, "`gvproxy` binary not found on $PATH. {install_hint}")
             }
             GvproxyError::Spawn(e) => write!(f, "spawning gvproxy failed: {e}"),
-            GvproxyError::EarlyExit { status } => write!(
+            GvproxyError::EarlyExit { status, stdio_log } => write!(
                 f,
-                "gvproxy exited before its listener socket appeared (status: {status:?})"
+                "gvproxy exited before its listener socket appeared (status: {status:?}); \
+                 see {}",
+                stdio_log.display()
             ),
             GvproxyError::SocketTimeout { socket_path } => write!(
                 f,
@@ -147,6 +172,7 @@ fn ssh_port_for(scratch_dir: &Path) -> u16 {
 pub struct GvproxyHandle {
     child: Option<Child>,
     socket_path: PathBuf,
+    pid_path: PathBuf,
 }
 
 impl GvproxyHandle {
@@ -178,6 +204,14 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
 
     let socket_path = scratch_dir.join("gvproxy.sock");
     let log_path = scratch_dir.join("gvproxy.log");
+
+    // Reap a gvproxy leaked into this exact scratch dir by a prior run
+    // before we touch its socket/pid files. Persistent dirs (`dev` /
+    // named VMs) get reused, so a leaked daemon could still be bound
+    // here; ephemeral builder-VM dirs are timestamped so this is
+    // usually a no-op. Either way it keeps the socket pre-unlink below
+    // honest.
+    reap_by_pid_file(scratch_dir);
 
     // Remove a stale socket from a previous run before spawning —
     // gvproxy refuses to bind if the file exists.
@@ -212,6 +246,35 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
         s
     };
     let ssh_port = ssh_port_for(scratch_dir);
+
+    // NEVER inherit the spawner's stdout/stderr. gvproxy is a long-lived
+    // daemon; if it holds a write end of the parent's stdout/stderr pipe,
+    // any ancestor reading that pipe to EOF (e.g. a test driving `mvmctl`
+    // via `Command::output()`) blocks forever — gvproxy keeps the pipe
+    // open for the life of the VM (and beyond, since libkrun's exit() on
+    // guest shutdown skips `GvproxyHandle::Drop`, orphaning it). That fd
+    // inheritance is exactly what hung `core_demo_e2e`: `dev up`'s build
+    // VM powered down, mvmctl exited, but the orphaned gvproxy held the
+    // pipe so `output()` never saw EOF.
+    //
+    // Redirect both streams to a per-VM capture file instead. This still
+    // preserves the visibility that motivated the old `inherit()`:
+    // gvproxy's pre-listener failures (arg-parse, "bind: address already
+    // in use" on the SSH-forward port) go to stderr *before* `-log-file`
+    // is opened, so they'd be lost to /dev/null — the capture file keeps
+    // them on disk next to the listener log.
+    let stdio_log_path = scratch_dir.join("gvproxy-stdio.log");
+    let stdio_log = std::fs::File::create(&stdio_log_path).map_err(|e| GvproxyError::Io {
+        context: format!(
+            "creating gvproxy stdio capture {}",
+            stdio_log_path.display()
+        ),
+        source: e,
+    })?;
+    let stdio_log_err = stdio_log.try_clone().map_err(|e| GvproxyError::Io {
+        context: format!("cloning gvproxy stdio capture {}", stdio_log_path.display()),
+        source: e,
+    })?;
     let mut cmd = Command::new(&gvproxy_bin);
     cmd.arg("-listen-vfkit")
         .arg(listen_url)
@@ -219,18 +282,17 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
         .arg(OsString::from(&log_path))
         .arg("-ssh-port")
         .arg(ssh_port.to_string())
-        // Inherit stdout/stderr so gvproxy's startup-failure mode (e.g.
-        // "listen tcp 127.0.0.1:<port>: bind: address already in use" when
-        // another gvproxy still holds the SSH-forward port) is visible
-        // to the operator. `-log-file` only writes once gvproxy is past
-        // arg-parse and listener setup — pre-listen failures go to stderr
-        // only, so dropping them to /dev/null leaves the supervisor
-        // reporting a bare "exited before listener appeared" with no
-        // underlying reason.
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+        .stdout(std::process::Stdio::from(stdio_log))
+        .stderr(std::process::Stdio::from(stdio_log_err));
 
     let mut child = cmd.spawn().map_err(GvproxyError::Spawn)?;
+
+    // Record the pid before the poll loop: the SIGTERM handler reaps
+    // whatever `RUNNING_GVPROXY_PID` names, and `reap_by_pid_file`
+    // needs the sidecar even if we die mid-poll.
+    let pid_path = scratch_dir.join(PID_FILE_NAME);
+    RUNNING_GVPROXY_PID.store(child.id() as i32, Ordering::SeqCst);
+    let _ = std::fs::write(&pid_path, child.id().to_string());
 
     // Poll for the socket to appear, with a bounded budget. gvproxy
     // creates the file synchronously inside its main loop on startup,
@@ -244,16 +306,26 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
             return Ok(GvproxyHandle {
                 child: Some(child),
                 socket_path,
+                pid_path,
             });
         }
         if let Some(status) = child.try_wait().map_err(GvproxyError::Spawn)? {
-            return Err(GvproxyError::EarlyExit { status });
+            // gvproxy is gone; clear the records so a later reaper / the
+            // next spawn doesn't chase a dead (or recycled) pid.
+            RUNNING_GVPROXY_PID.store(0, Ordering::SeqCst);
+            let _ = std::fs::remove_file(&pid_path);
+            return Err(GvproxyError::EarlyExit {
+                status,
+                stdio_log: stdio_log_path,
+            });
         }
         if Instant::now() >= deadline {
             // Kill the still-running child before bailing — leaking it
             // would block whatever the caller does next.
             let _ = child.kill();
             let _ = child.wait();
+            RUNNING_GVPROXY_PID.store(0, Ordering::SeqCst);
+            let _ = std::fs::remove_file(&pid_path);
             return Err(GvproxyError::SocketTimeout { socket_path });
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -262,13 +334,20 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
 
 impl Drop for GvproxyHandle {
     fn drop(&mut self) {
+        // Clear the global slot first — whether or not the child is
+        // still alive, this handle is going away, so the SIGTERM
+        // handler must stop referencing its pid.
+        RUNNING_GVPROXY_PID.store(0, Ordering::SeqCst);
+
         let Some(mut child) = self.child.take() else {
+            let _ = std::fs::remove_file(&self.pid_path);
             return;
         };
 
         // Already-dead is fine.
         if matches!(child.try_wait(), Ok(Some(_))) {
             let _ = std::fs::remove_file(&self.socket_path);
+            let _ = std::fs::remove_file(&self.pid_path);
             return;
         }
 
@@ -299,7 +378,50 @@ impl Drop for GvproxyHandle {
         // path entry remains. Removing it explicitly keeps
         // `~/.cache/mvm/builder-vm/vms/<vm>/` tidy.
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.pid_path);
     }
+}
+
+/// SIGTERM (then SIGKILL) a gvproxy named by `<scratch_dir>/gvproxy.pid`,
+/// then remove the sidecar + listener socket. Idempotent: a missing
+/// or stale pid file, or an already-dead pid, is a clean no-op. This is
+/// the reaper for gvproxy daemons the in-process [`GvproxyHandle::drop`]
+/// never got to — the common libkrun case, where `krun_start_enter`
+/// `exit()`s on guest shutdown without unwinding. Called pre-spawn (to
+/// clear a dir's leftover) and by `mvmctl cache prune`.
+pub fn reap_by_pid_file(scratch_dir: &Path) {
+    let pid_path = scratch_dir.join(PID_FILE_NAME);
+    let pid: i32 = match std::fs::read_to_string(&pid_path) {
+        Ok(s) => match s.trim().parse() {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = std::fs::remove_file(&pid_path);
+                return;
+            }
+        },
+        Err(_) => return,
+    };
+
+    if pid_alive(pid) {
+        // SAFETY: pid probed alive; SIGTERM on a since-exited pid races
+        // to ESRCH, which is benign.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while pid_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if pid_alive(pid) {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+
+    let _ = std::fs::remove_file(&pid_path);
+    let _ = std::fs::remove_file(scratch_dir.join("gvproxy.sock"));
+}
+
+/// True if `pid` names a live process we can signal (`kill(pid, 0)`).
+fn pid_alive(pid: i32) -> bool {
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
 }
 
 #[cfg(test)]
@@ -345,8 +467,10 @@ mod tests {
         }
     }
 
-    /// Spawn gvproxy, verify the socket path exists, then drop the
-    /// handle. Skipped when gvproxy isn't installed.
+    /// Spawn gvproxy, verify the socket + pid sidecar + stdio capture
+    /// exist and the global pid slot is set, then drop the handle and
+    /// confirm everything is cleaned up. Skipped when gvproxy isn't
+    /// installed.
     #[test]
     fn spawn_then_drop_reaps_child() {
         let Some(_) = locate_gvproxy() else {
@@ -356,13 +480,89 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let handle = spawn(tmp.path()).expect("spawn gvproxy");
         let socket = handle.socket_path().to_path_buf();
+        let pid_file = tmp.path().join(PID_FILE_NAME);
         assert!(socket.exists(), "socket missing: {}", socket.display());
-        drop(handle);
-        // After Drop the socket file is cleaned up.
+        assert!(pid_file.exists(), "pid sidecar missing");
         assert!(
-            !socket.exists(),
-            "socket lingered after Drop: {}",
-            socket.display()
+            tmp.path().join("gvproxy-stdio.log").exists(),
+            "stdio capture file missing — stdout/stderr were not redirected to it"
         );
+        assert!(
+            RUNNING_GVPROXY_PID.load(Ordering::SeqCst) > 0,
+            "global gvproxy pid slot not set"
+        );
+        drop(handle);
+        // After Drop: socket + pid sidecar removed, global slot cleared.
+        assert!(!socket.exists(), "socket lingered after Drop");
+        assert!(!pid_file.exists(), "pid sidecar lingered after Drop");
+        assert_eq!(
+            RUNNING_GVPROXY_PID.load(Ordering::SeqCst),
+            0,
+            "global gvproxy pid slot not cleared on Drop"
+        );
+    }
+
+    /// `reap_by_pid_file` SIGTERMs the pid named in the sidecar and
+    /// removes the sidecar + socket. Uses a real `sleep` child as the
+    /// stand-in daemon — no gvproxy needed. Holds `ENV_LOCK` so the
+    /// PATH-mutating `spawn_without_gvproxy_*` test can't make our
+    /// `sleep` lookup miss.
+    #[test]
+    fn reap_by_pid_file_kills_live_pid_and_cleans_files() {
+        use std::os::unix::process::ExitStatusExt;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep stand-in");
+        let pid = child.id() as i32;
+        std::fs::write(tmp.path().join(PID_FILE_NAME), pid.to_string()).unwrap();
+        std::fs::write(tmp.path().join("gvproxy.sock"), b"").unwrap();
+        assert!(pid_alive(pid), "stand-in should be alive pre-reap");
+
+        reap_by_pid_file(tmp.path());
+
+        // We're the stand-in's parent, so a SIGTERM'd `sleep` lingers as
+        // a zombie (kill(pid,0) still succeeds) until we wait() — in
+        // production gvproxy is reparented to init, which auto-reaps.
+        // So prove the kill via the wait status, not a liveness poll.
+        let status = child.wait().expect("wait stand-in");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "stand-in was not SIGTERM'd by reap (status: {status:?})"
+        );
+        assert!(
+            !tmp.path().join(PID_FILE_NAME).exists(),
+            "pid file not removed"
+        );
+        assert!(
+            !tmp.path().join("gvproxy.sock").exists(),
+            "socket not removed"
+        );
+    }
+
+    /// Missing, unparseable, and dead-pid sidecars are all clean no-ops
+    /// (no panic, stale files swept).
+    #[test]
+    fn reap_by_pid_file_missing_or_stale_is_noop() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // Missing sidecar — must not panic.
+        reap_by_pid_file(tmp.path());
+
+        // Garbage sidecar — swept, no panic.
+        std::fs::write(tmp.path().join(PID_FILE_NAME), b"not-a-pid").unwrap();
+        reap_by_pid_file(tmp.path());
+        assert!(!tmp.path().join(PID_FILE_NAME).exists());
+
+        // Dead pid — swept. Spawn+reap a child to get a guaranteed-dead pid.
+        let mut throwaway = Command::new("sleep").arg("0").spawn().unwrap();
+        let dead = throwaway.id() as i32;
+        throwaway.wait().unwrap();
+        std::fs::write(tmp.path().join(PID_FILE_NAME), dead.to_string()).unwrap();
+        reap_by_pid_file(tmp.path());
+        assert!(!tmp.path().join(PID_FILE_NAME).exists());
     }
 }
