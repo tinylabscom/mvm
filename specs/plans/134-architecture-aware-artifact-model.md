@@ -432,13 +432,26 @@ fn manifest_roundtrips() {
 
 ## Success criteria (from the spec)
 
-- [ ] `GuestArch` is the single arch type; `runtime_overlay::Arch` + stringly `target_arch` migrated.
-- [ ] `KernelFormat` in `mvm-core`, covers `Image`/`Pe`, consumed by `mvm-libkrun`.
-- [ ] `MicrovmBackend` + `BackendCompat` matrix in `mvm-backend`; `compat()` lookup.
-- [ ] Build-level `ArtifactManifest` written; mkGuest sidecar renamed `GuestSidecar`.
-- [ ] `FirecrackerConfigWriter` generates config from a manifest.
-- [ ] `ArtifactValidator` enforces compat + init presence, stores a `ValidationReport`.
-- [ ] `mvmctl artifact inspect|validate|config` work over existing artifacts.
-- [ ] Tests cover arch parsing, compat checks, manifest handling, config generation.
-- [ ] Adding an arch/backend is a new row + variant — documented.
-- [ ] No new third-party dependencies in this slice.
+> **Status: IMPLEMENTED** on branch `feat/artifact-model-impl` (subagent-driven, each task spec+quality reviewed; final whole-branch review ✅). All criteria met; `cargo build/clippy/fmt/check-spec-numbers` green workspace-wide.
+
+- [x] `GuestArch` is the single arch type; `runtime_overlay::Arch` + stringly `target_arch` migrated.
+- [x] `KernelFormat` in `mvm-core`, covers `Image`/`Pe`, consumed by `mvm-libkrun`.
+- [x] `MicrovmBackend` + `BackendCompat` matrix in `mvm-backend`; `compat()` lookup.
+- [x] Build-level `ArtifactManifest` written; mkGuest sidecar renamed `GuestSidecar`.
+- [x] `FirecrackerConfigWriter` generates config from a manifest.
+- [x] `ArtifactValidator` enforces compat + init presence, stores a `ValidationReport`.
+- [x] `mvmctl artifact` model commands (`model-inspect|model-validate|model-config`) work over existing artifacts. (Namespaced `model-*` because the existing `mvmctl artifact pack|verify|inspect` for signed `.mvm` archives already owns `inspect`.)
+- [x] Tests cover arch parsing, compat checks, manifest handling, config generation.
+- [x] Adding an arch/backend is a new row + variant — documented (`public/src/content/docs/contributing/adding-an-arch-or-backend.md`).
+- [x] No new third-party dependencies in this slice (reused `uuid`, `ext4-view`, `sha2`, `thiserror`).
+
+### Bonus (unplanned, landed during A2)
+- [x] Inverted the `mvm-core → mvm-libkrun` dependency (a violation of mvm-core's "no runtime deps" rule) → `mvm-libkrun → mvm-core`; `mvm-core` is now a pure sink. libkrun install paths deduped into one `LIBKRUN_LIB_PATHS` const with a drift-guard test.
+
+## Deferred follow-ups (slice-1 review findings — own future slices)
+
+- [ ] **Persist `boot_args` in `ArtifactManifest`.** Today it isn't stored, so when the CLI reconstructs a `MicrovmArtifact` from a manifest it re-seeds `boot_args` from `compat()`, making `ArtifactValidator` check #6 (required-boot-args-present) a tautology on the manifest-driven path. Record real cmdline args at build time to make the check meaningful.
+- [ ] **Persist `RootfsArtifact.read_only` in the manifest** (`ManifestRootfs`). CLI reconstruction currently defaults it to `true` (ADR-002 W3); a writable dev/sandbox rootfs needs the real value round-tripped.
+- [ ] **Wire `mvmctl artifact model-build` fully** (currently a documented stub delegating to `mvmctl build`/`dev`).
+- [ ] **Reconcile the `artifact` CLI namespace** — the `model-*` prefix coexists with the `.mvm`-archive `pack|verify|inspect`; a cleaner unification (or rename) is a UX follow-up.
+- [ ] The deferred design slices remain: `arcbox_ext4` rootfs builder, QEMU + vfkit `BackendConfigWriter`s, dynamic boot smoke-tests, `microvm.nix` integration (see §"Out of scope").
