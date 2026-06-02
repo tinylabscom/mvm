@@ -1,11 +1,13 @@
 name: Deploy GitHub Pages
 
-# Deploy is operator-triggered. The previous `push: branches: [main]
-# paths: [public/**]` trigger was dropped in the ecosystem-wide CI
-# cost reduction (no push-to-branch triggers anywhere). After merging
-# a docs change, dispatch this workflow from the Actions tab to
-# publish.
+# Deploys happen when a GitHub Release is published, with manual
+# dispatch available for operator-triggered docs publishes. The
+# previous `push: branches: [main] paths: [public/**]` trigger was
+# dropped in the ecosystem-wide CI cost reduction (no push-to-branch
+# triggers anywhere).
 on:
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:

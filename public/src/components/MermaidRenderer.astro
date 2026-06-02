@@ -6,11 +6,27 @@
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "default" : "dark";
   };
 
+  const mermaidSourceFromPre = (pre) => {
+    const expressiveLines = Array.from(pre.querySelectorAll(".ec-line .code"));
+    if (expressiveLines.length > 0) {
+      return expressiveLines
+        .map((line) => line.textContent ?? "")
+        .join("\n")
+        .trim();
+    }
+
+    const code = pre.querySelector("code");
+    return (code?.textContent ?? pre.textContent ?? "").trim();
+  };
+
   const renderMermaidBlocks = async () => {
-    const mermaidBlocks = Array.from(
-      document.querySelectorAll("pre > code.language-mermaid, pre[data-language='mermaid']"),
-    );
-    if (mermaidBlocks.length === 0) return;
+    const mermaidPres = Array.from(
+      document.querySelectorAll(
+        'pre[data-language="mermaid"], pre > code.language-mermaid',
+      ),
+    ).map((node) => (node.tagName === "PRE" ? node : node.parentElement));
+
+    if (mermaidPres.length === 0) return;
 
     const { default: mermaid } = await import("mermaid");
 
@@ -20,24 +36,14 @@
       theme: currentTheme(),
     });
 
-    const diagramSource = (block) => {
-      const pre = block.matches("pre") ? block : block.closest("pre");
-      const copyButton = pre?.parentElement?.querySelector("button[data-code]");
-      const source = copyButton?.getAttribute("data-code") ?? block.textContent ?? "";
-
-      return source.replace(/\u007f/g, "\n");
-    };
-
-    const diagrams = mermaidBlocks.map((block, index) => {
+    const diagrams = mermaidPres.map((pre, index) => {
       const diagram = document.createElement("div");
       diagram.className = "mermaid";
       diagram.id = `mermaid-${index}`;
-      diagram.textContent = diagramSource(block);
+      diagram.textContent = mermaidSourceFromPre(pre);
 
-      const pre = block.matches("pre") ? block : block.closest("pre");
-      const container = pre?.closest(".expressive-code") ?? pre ?? block;
-      container.replaceWith(diagram);
-
+      const wrapper = pre.closest(".expressive-code");
+      (wrapper ?? pre).replaceWith(diagram);
       return diagram;
     });
 

@@ -93,6 +93,15 @@ builder-vm = ["mvm-build/builder-vm"]
 # libkrun headers. Builds that run the native libkrun path can enable it
 # on hosts where libkrunfw is installed.
 libkrun-sys = ["mvm-libkrun/libkrun-sys"]
+# Plan 93 PR-10a: opt-in lane for the `bench microvm-launch` live probe
+# test + its boot orchestration. Off by default so `cargo test
+# --workspace` on stock CI stays VM-free (hosted macOS runners lack
+# Hypervisor.framework nested virt for a libkrun guest). Enabled on a dev
+# host / self-hosted macOS runner with the slp/krun Homebrew trio
+# installed and an `mvm-libkrun-supervisor` available on the launch path.
+# Pure test/codegate marker — mvm-cli spawns the supervisor as a
+# subprocess and does not link libkrun itself.
+libkrun-live = []
 # Plan 77 W4: structural enforcement of the "no prebuilt builder VM artifact
 # until release" invariant (see AGENTS.md / CLAUDE.md). When off — the default
 # for every contributor build — `download_builder_vm_image` and its helpers

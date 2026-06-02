@@ -95,6 +95,41 @@ pub struct IterationTiming {
     pub total_ready_ms: f64,
 }
 
+/// Four host-monotonic instants captured during one boot. `start` is
+/// `LibkrunBackend::start` entry; `pid_seen` is when the supervisor
+/// PID file first appears; `connected` is the first successful vsock
+/// connect to the guest agent; `ready` is when the guest reports the
+/// control plane Ready.
+// Task 5 (live probe wiring) will construct BootMarks from the real
+// instants captured during the boot sequence.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct BootMarks {
+    pub start: std::time::Instant,
+    pub pid_seen: std::time::Instant,
+    pub connected: std::time::Instant,
+    pub ready: std::time::Instant,
+}
+
+impl BootMarks {
+    /// Collapse the marks into the four reported spans. All arithmetic
+    /// is `Instant`-difference so it can never go negative for marks
+    /// captured in order. Takes `self` by value (`BootMarks` is `Copy`).
+    // Task 5 (live probe wiring) is the first non-test caller.
+    #[allow(dead_code)]
+    pub fn to_timing(self) -> IterationTiming {
+        let ms = |a: std::time::Instant, b: std::time::Instant| {
+            b.saturating_duration_since(a).as_secs_f64() * 1000.0
+        };
+        IterationTiming {
+            start_to_pid_ms: ms(self.start, self.pid_seen),
+            pid_to_connect_ms: ms(self.pid_seen, self.connected),
+            handshake_ms: ms(self.connected, self.ready),
+            total_ready_ms: ms(self.start, self.ready),
+        }
+    }
+}
+
 /// Summary statistics for one phase across all measured iterations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct PhaseStats {
@@ -327,6 +362,11 @@ pub fn run_benchmark<P: LaunchProbe>(probe: &mut P, runs: u32, warmup: u32) -> R
 struct LibkrunProbe {
     os: String,
     arch: String,
+    // Per-iteration counter so each boot gets a unique VM name and the
+    // teardown of run N never races the cold start of run N+1. Only
+    // read on the `libkrun-live` path.
+    #[allow(dead_code)]
+    iter: u32,
 }
 
 impl LibkrunProbe {
@@ -334,35 +374,57 @@ impl LibkrunProbe {
         Ok(Self {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
+            iter: 0,
         })
     }
 }
 
 impl LaunchProbe for LibkrunProbe {
     fn measure_once(&mut self) -> Result<IterationTiming> {
-        // The measurement substrate (stats, schema, regression gate,
-        // orchestration) is implemented and unit-tested above. The
-        // only remaining piece is booting a real libkrun guest through
-        // `admit_plan_for_boot` and reading the host wall-clock spans +
-        // the guest `BootTimingReport`. Wiring that needs a working
-        // libkrun backend and is tracked in
-        // `specs/plans/93-fast-secure-dev-path-followups.md`.
-        bail!(
-            "bench microvm-launch: the live libkrun probe is not yet wired. The \
-             measurement substrate is complete; the remaining step is booting a \
-             guest through the signed-plan admission path and reading its boot \
-             timing. Tracked as a Plan 93 Phase 2 Lever 0 follow-up."
-        )
+        // Under `libkrun-live`, boot a real guest through the claim-8
+        // admission path and convert the captured marks to spans.
+        // Without the feature, fail honestly rather than fake a number —
+        // a stock binary cannot boot a libkrun guest.
+        #[cfg(feature = "libkrun-live")]
+        {
+            // Unique name per iteration so teardown of run N never races
+            // the cold start of run N+1.
+            self.iter += 1;
+            let name = format!("mvm-bench-{}", self.iter);
+            let marks = crate::commands::ops::bench_probe::boot_measure_once(&name)?;
+            Ok(marks.to_timing())
+        }
+        #[cfg(not(feature = "libkrun-live"))]
+        {
+            bail!(
+                "bench microvm-launch: this binary was built without the \
+                 `libkrun-live` feature, so it cannot boot a real guest. \
+                 Rebuild with `cargo build -p mvm-cli --features libkrun-live` \
+                 on a host where libkrun boots (the slp/krun Homebrew trio \
+                 installed). The measurement substrate is otherwise complete."
+            )
+        }
     }
 
     fn host_descriptor(&self) -> HostDescriptor {
+        // Hash the canonical kernel so the regression gate refuses to
+        // compare across a kernel swap (a faster/slower kernel must
+        // invalidate the baseline, not silently mis-compare). Resolved
+        // from the same default-microvm image the probe boots.
+        let kernel_sha256 = super::bench_probe::resolve_probe_image()
+            .ok()
+            .and_then(|img| {
+                mvm_security::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+            });
         HostDescriptor {
             os: self.os.clone(),
             arch: self.arch.clone(),
             hypervisor: "libkrun".to_string(),
             libkrun_version: None,
-            kernel_sha256: None,
-            cmdline: None,
+            kernel_sha256,
+            // The runtime libkrun cmdline (Apple Silicon HVF / virtio
+            // console), matching the backend's supervisor config.
+            cmdline: Some("console=hvc0 root=/dev/vda rw init=/init".to_string()),
         }
     }
 }
@@ -603,5 +665,84 @@ mod tests {
             calls: 0,
         };
         assert!(run_benchmark(&mut probe, 0, 0).is_err());
+    }
+
+    #[test]
+    fn spans_from_marks_are_non_negative_and_ordered() {
+        use std::time::Duration;
+        let t0 = std::time::Instant::now();
+        let marks = BootMarks {
+            start: t0,
+            pid_seen: t0 + Duration::from_millis(10),
+            connected: t0 + Duration::from_millis(25),
+            ready: t0 + Duration::from_millis(40),
+        };
+        let it = marks.to_timing();
+        approx(it.start_to_pid_ms, 10.0);
+        approx(it.pid_to_connect_ms, 15.0);
+        approx(it.handshake_ms, 15.0);
+        approx(it.total_ready_ms, 40.0);
+        assert!(it.total_ready_ms >= it.start_to_pid_ms);
+    }
+
+    /// Live boot of the canonical default-microvm image through the
+    /// real admission path. Gated behind `libkrun-live` so stock CI
+    /// (no Hypervisor.framework nested virt) skips it; runs on a dev
+    /// host / self-hosted macOS runner with the slp/krun trio + an
+    /// `mvm-libkrun-supervisor` on the launch path.
+    #[cfg(feature = "libkrun-live")]
+    #[test]
+    fn live_probe_returns_finite_ordered_spans() {
+        let mut probe = LibkrunProbe::new(&MicrovmLaunchArgs {
+            runs: 1,
+            warmup: 0,
+            hypervisor: "libkrun".to_string(),
+            out: None,
+            json: false,
+            baseline: None,
+            max_regression_pct: 10.0,
+        })
+        .unwrap();
+        let it = probe
+            .measure_once()
+            .expect("live boot should succeed on a libkrun host");
+        for v in [
+            it.start_to_pid_ms,
+            it.pid_to_connect_ms,
+            it.handshake_ms,
+            it.total_ready_ms,
+        ] {
+            assert!(
+                v.is_finite() && v >= 0.0,
+                "span must be finite and non-negative: {v}"
+            );
+        }
+        assert!(it.total_ready_ms >= it.start_to_pid_ms);
+    }
+
+    /// The libkrun probe must stamp the kernel sha into the
+    /// `HostDescriptor` so a kernel swap invalidates the baseline (a
+    /// `None` kernel sha would let a different kernel mis-compare as a
+    /// regression-free run). Needs the cached image present, not a
+    /// boot — gated under `libkrun-live` because it touches
+    /// `~/.cache/mvm`.
+    #[cfg(feature = "libkrun-live")]
+    #[test]
+    fn host_descriptor_is_populated() {
+        let probe = LibkrunProbe::new(&MicrovmLaunchArgs {
+            runs: 1,
+            warmup: 0,
+            hypervisor: "libkrun".to_string(),
+            out: None,
+            json: false,
+            baseline: None,
+            max_regression_pct: 10.0,
+        })
+        .unwrap();
+        let h = probe.host_descriptor();
+        assert!(
+            h.kernel_sha256.is_some(),
+            "kernel sha must be set so a kernel swap invalidates the baseline"
+        );
     }
 }

@@ -135,14 +135,6 @@ The wireable macOS live-memory path. Coarser than UFFD (a full save/restore), bu
 - [ ] **Step 1:** libkrun has no memory snapshot — warm-start is a fast re-boot from the overlay/rootfs disk snapshot (Phase B3). Implement that path; the capability stays `DiskOnly`; a request for live-memory returns the typed unsupported error with the recovery hint.
 - [ ] **Step 2:** `doctor` reports the per-backend warm-start capability + probes the Linux substrate (NBD module loaded, HugeTLB reservation). Failing test on the doctor lines. Commit.
 
-### Task C5: Apple Container interactive-mode contract (ADR-060/065 carryover)
-
-AC's `cmd_dev_apple_container` boots a container, not a VM under our kernel, so the `VmStartConfig.kernel_cmdline` override the libkrun and Vz dev paths use to swap `init=/sbin/mvm-host-vm-init` → `init=/init` does not apply. Today AC quietly inherits the build-mode init and there is no defined AC interactive-mode contract under ADR-065's unified-image model.
-
-- [ ] **Step 1:** Add an `apple_container` column to the per-backend matrix that C1–C4 populate (alongside warm-start capability + pause/resume). Mark `kernel_cmdline override`: N/A. Add a row labeled "interactive mode entrypoint" that records each backend's mechanism (libkrun = `kernel_cmdline init=/init`; Vz = same; AC = TBD per Step 2).
-- [ ] **Step 2:** Decide AC's interactive-mode shape and commit it to `crates/mvm-cli/src/commands/env/apple_container.rs`'s module docstring: either (a) generate a container image from the same `nix/images/builder-vm/` flake outputs with a different `ENTRYPOINT` so one rootfs serves both build and interactive use under AC, or (b) keep AC on a separate dev image until ADR-065 ships an AC story. Pick one — silent inheritance of the build-mode init is the failure mode this task closes.
-- [ ] **Step 3:** Failing test — `cmd_dev_apple_container` invoked on a host without the chosen interactive-mode wiring fails closed with the typed error from ADR-053, not a silent build-mode shell. Wire whichever path Step 2 chose. Commit.
-
 ## Acceptance
 
 - [ ] `mvm-network` exists (17th crate); `NetworkProvider` provisions gvproxy/passt/TAP behind the trait; ingress **and** egress default-deny; DNS + flow audit; the egress proxy carries the substitution + leak-scan seams (no-op until 129).
@@ -156,7 +148,6 @@ AC's `cmd_dev_apple_container` boots a container, not a VM under our kernel, so 
 - [ ] Cloud-Hypervisor snapshot parity (if CH stays a backend).
 - [ ] Soften the gap-analysis "live-memory resume" line to the per-backend matrix (Firecracker + Vz live-memory; libkrun disk-only).
 - [ ] The diff-snapshot fast-resume on Vz (UFFD-equivalent) — VZ's save/restore is coarse; a faster macOS path is its own investigation.
-- [ ] A `compressed-ephemeral` StorageProvider impl — in-process userspace scratch (page-table + zero/same-byte dedup + optional compression + memory cap), the one bounded piece of Plan 132's programmable-storage substrate that fits this trait without the transform-chain machinery. The rest (typed block vocabulary, composable transforms, userspace block device) stays in Plan 132.
 
 ## Self-review
 

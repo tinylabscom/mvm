@@ -171,19 +171,6 @@ Resuming two copies of one snapshot leaves both guests with identical CSPRNG sta
 
 - [ ] **Step 1:** Edit ADR-066 §5: replace the "Noise vsock + mTLS" paragraph with the trust-model reasoning from the design note above (authenticated cleartext on host-local channels; confidentiality only across untrusted boundaries). Record VMGenID reseed as a numbered claim candidate in the §7/claims area. Commit.
 
-### Task E1: gate the `VmStartConfig.kernel_cmdline` trust boundary (ADR-060/065 carryover)
-
-`kernel_cmdline: Option<String>` on `VmStartConfig` lets `mvmctl` flip the same rootfs between `init=/sbin/mvm-host-vm-init` (build mode) and `init=/init` (interactive). It can also rewrite the rootfs device (`root=`), disable security features (`audit=0`, `selinux=0`), and pass arbitrary other privileged kernel args. The field is structurally identical in trust shape to the boot-config + key-handling contracts this plan already owns, but no current spec documents it as host-trusted. Lock it down now while the type is small.
-
-**Files:**
-
-- Modify: `crates/mvm-core/src/protocol/vm_backend.rs` (doc-comment + in-file `mod tests`)
-- Modify: `crates/mvm-core/src/protocol/mod.rs` (or wherever wire-shape contracts are asserted)
-
-- [ ] **Step 1:** Extend the doc-comment on `kernel_cmdline` to state the trust boundary explicitly — host-trusted only; MUST NOT be sourced from an `ExecutionPlan`, vsock message, mvmd payload, or any other guest-controllable input. Mirror the §"Trust layers" framing from ADR-002 so the reader lands in the same model.
-- [ ] **Step 2:** Add a regression test in the same file asserting `VmStartConfig` is not part of any host↔guest or host↔mvmd wire type. Cheapest form: a compile-time `static_assertions::assert_not_impl_any!(VmStartConfig: serde::Deserialize)` (the crate is already a workspace dep — check `Cargo.lock`). Alternative: a runtime test that walks the `mvm_core::protocol` types deriving `Serialize` and asserts `kernel_cmdline` does not appear in their JSON output.
-- [ ] **Step 3:** If a future plan ever needs `VmStartConfig` to cross the wire (e.g. mvmd warm-handoff), the field must be lifted into a separate `HostOnlyOverrides` envelope that the wire variant cannot construct. Add that as a deferred follow-up in this plan rather than a speculative implementation now.
-
 ## Acceptance
 
 - [ ] One AEAD entry point (`mvm_core::crypto::aead`); both platforms have an at-rest volume path (LUKS2 Linux, per-file AES-256-GCM macOS).

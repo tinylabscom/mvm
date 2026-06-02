@@ -21,14 +21,6 @@
 - [ ] **Step 1:** Define the canonical commands: total = `cargo tree --workspace -e no-dev --prefix none | sort -u | wc -l`; per-crate = `cargo tree -p <c> -e no-dev`; default-vs-full-feature = with and without the optional features. Record the **735** baseline + the per-crate closures of the targets below.
 - [ ] **Step 2:** Commit a `docs/investigations/dep-baseline.md` with the method + the numbers. 127's dashboard reads from here. Every later task appends its delta.
 
-### Task A2: feature-gate audit for default-set membership (ADR-060 carryover)
-
-The dep-reduction work shifts which features are on/off by default. Before any pruning lands, capture which gated paths are advertised to users so we don't silently break them.
-
-- [ ] **Step 1:** Walk `crates/mvm-cli/Cargo.toml`, `crates/mvm-core/Cargo.toml`, and `crates/mvm-build/Cargo.toml`; for each `[features]` entry, record (a) whether it is in `default`, (b) what `cfg(feature = "…")` paths it gates, (c) whether any of those paths are referenced by `mvmctl --help`, `public/src/content/docs/reference/cli-commands.md`, or CLAUDE.md "Build and Run".
-- [ ] **Step 2:** Known case to confirm: `mvm-cli`'s `builder-vm` feature gates `ensure_interactive_builder_vm_image()` and `mvmctl dev up`. Assert it stays in `default = […]`. If a slim release profile is introduced in B1–B4 that drops it, the docs + the `cfg(not(feature = "builder-vm"))` branch must say so explicitly (see Plan 124 B1 follow-up).
-- [ ] **Step 3:** File the inventory at `docs/investigations/feature-inventory.md`; Phase D's forbidden-dep gate (Task D1) reads from here to flag accidental default-set changes in future PRs.
-
 ## Phase B — prune the heavy optional features
 
 ### Task B1: `sigstore` (~120–150) — relocate or drop `manifest-verify`
