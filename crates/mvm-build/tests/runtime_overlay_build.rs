@@ -21,8 +21,9 @@
 #![cfg(target_os = "linux")]
 
 use mvm_build::runtime_overlay::{
-    Arch, OverlayBuildSpec, RuntimeOverlayResolver, build_overlay_with_nix,
+    OverlayBuildSpec, RuntimeOverlayResolver, build_overlay_with_nix,
 };
+use mvm_core::arch::GuestArch;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -50,14 +51,14 @@ fn workspace_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-fn host_arch_or_skip_known() -> Option<Arch> {
+fn host_arch_or_skip_known() -> Option<GuestArch> {
     // The flake builds for both aarch64 and x86_64 Linux. The
     // host's arch is whichever this binary was compiled for —
     // and on Linux that matches one of the two flake systems.
     if cfg!(target_arch = "aarch64") {
-        Some(Arch::Aarch64)
+        Some(GuestArch::Aarch64)
     } else if cfg!(target_arch = "x86_64") {
-        Some(Arch::X86_64)
+        Some(GuestArch::X86_64)
     } else {
         eprintln!("runtime-overlay build test skipped: host arch is neither aarch64 nor x86_64");
         None

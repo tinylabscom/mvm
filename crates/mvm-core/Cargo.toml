@@ -18,7 +18,6 @@ chrono.workspace = true
 # the natural home since it already owns the wire-format types.
 ed25519-dalek.workspace = true
 mvm-providers.workspace = true
-mvm-libkrun.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

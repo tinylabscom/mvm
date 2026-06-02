@@ -167,12 +167,12 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
 
 /// Build a `VmRuntimeMeta` from the `mvm-meta.json` sidecar that
 /// the build pipeline emits next to a rootfs (W7.x.1
-/// `ArtifactManifest`). When the sidecar is absent or unreadable,
+/// `GuestSidecar`). When the sidecar is absent or unreadable,
 /// fall back to `accessible: true` to preserve backward-compatible
 /// behavior for pre-W7.x.1 artifacts. Failures only surface when
 /// the sidecar exists and is malformed.
 pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmRuntimeMeta> {
-    let sidecar = mvm_build::builder_vm::ArtifactManifest::read_from_dir(rootfs_dir)
+    let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(rootfs_dir)
         .with_context(|| format!("reading mvm-meta.json sidecar in {}", rootfs_dir.display()))?;
     let accessible = sidecar.map(|s| s.accessible).unwrap_or(true);
     Ok(VmRuntimeMeta {
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn from_sidecar_present_uses_recorded_value() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = mvm_build::builder_vm::ArtifactManifest {
+        let sidecar = mvm_build::builder_vm::GuestSidecar {
             name: "sealed-vm".to_string(),
             accessible: false,
             sealed: true,
