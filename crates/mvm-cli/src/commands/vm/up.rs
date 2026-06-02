@@ -1683,6 +1683,10 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // If a template snapshot exists AND the backend supports snapshots,
     // restore from it instead of cold-booting.
     let backend = AnyBackend::from_hypervisor(effective_hypervisor);
+    // (Workload images ship no kernel; libkrun's boot path materializes the
+    // bundled libkrunfw kernel centrally in `mvm-libkrun` — see
+    // `KrunContext` set_kernel — so every caller, not just `up`, gets it.)
+
     if let Some(ref snap_info) = snapshot_info
         && let Some(tmpl) = template_name
         && backend.capabilities().snapshots
@@ -1761,7 +1765,20 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // Plan 112 Phase 3c — thread audit substrate from admission_main
         // through to backend.start() so libkrun/Vz take the bridge-factory
         // path. None keeps the legacy supervisor path for no-admission flows.
-        if let Some(ctx) = admission_main.as_ref() {
+        //
+        // The in-VM gateway-audit bridge (claim 10/12) is gated behind an
+        // explicit opt-in: its libkrun gvproxy wiring
+        // (`run_supervisor_with_bridge`) is not yet working end-to-end
+        // (gvproxy exits with "vfkit socket address is empty"), so the
+        // default routes `up --flake` through the proven legacy supervisor —
+        // the same path the builder VM boots on, with the per-OS gateway.
+        // Host-side admission (claim 8) above still applies. Re-enable with
+        // MVM_GATEWAY_BRIDGE=1 once the bridge gvproxy path is fixed
+        // (Plan 138 follow-up).
+        let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if gateway_bridge_enabled && let Some(ctx) = admission_main.as_ref() {
             populate_audit_substrate(&mut start_config, &ctx.admitted)?;
             // Plan 113 §Task 13 — stash plan.json + bundle.json for the
             // Firecracker bridge sidecar to read at spawn time.

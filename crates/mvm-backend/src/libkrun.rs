@@ -81,6 +81,19 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         .with_cmdline(DEFAULT_CMDLINE)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+    // Plan 87/88 / ADR-058 — configure the per-OS virtio-net gateway
+    // (macOS → gvproxy, Linux → passt), the same default the builder VM
+    // uses. TSI was removed (Plan 102 W6.A): it bypasses virtio-net, so
+    // the admitted gateway-audit bridge refuses it (claim-10 no-bypass).
+    // KrunContext defaults to TSI, so an unconfigured workload would be
+    // rejected by `run_supervisor_with_bridge`. The supervisor spawns the
+    // gateway from this declared mode.
+    let scratch = state_dir.to_string_lossy().into_owned();
+    let krun = if cfg!(target_os = "macos") {
+        krun.with_gvproxy(mvm_libkrun::gvproxy::DEFAULT_GUEST_MAC, scratch)
+    } else {
+        krun.with_passt(mvm_libkrun::passt::DEFAULT_GUEST_MAC, scratch)
+    };
 
     // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
     // validation). When the producer threaded an AdmittedPlan in
@@ -201,9 +214,16 @@ impl VmBackend for LibkrunBackend {
             supervisor_path.display(),
         ));
 
+        // Capture the guest console (hvc0 → supervisor stdout) to a
+        // per-VM log so a boot failure / kernel panic is diagnosable
+        // (mirrors firecracker.log). Best-effort: fall back to null if
+        // the file can't be created.
+        let console_log = std::fs::File::create(state_dir.join("console.log"))
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
         let mut child = Command::new(&supervisor_path)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(console_log)
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| anyhow!("spawn {}: {e}", supervisor_path.display()))?;
