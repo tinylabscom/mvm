@@ -101,7 +101,11 @@ impl<'a> BuilderVmRuntime<'a> {
 /// share; libkrun and Vz both bind-mount the same host dir, so the
 /// helper doesn't need to know which VMM is on the other end.
 /// Migrated from `libkrun_builder.rs` in Plan 97 Phase C PR-B-migrate.
-pub fn stage_job_dir(job_dir: &Path, job: &BuilderJob) -> Result<(), BuilderVmError> {
+pub fn stage_job_dir(
+    job_dir: &Path,
+    job: &BuilderJob,
+    mvm_local_override: Option<&Path>,
+) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(job_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
     })?;
@@ -130,7 +134,30 @@ pub fn stage_job_dir(job_dir: &Path, job: &BuilderJob) -> Result<(), BuilderVmEr
         }
     };
 
-    let body = render_flake_cmd_sh(flake_ref, attr_path);
+    // Plan 120 / ADR-046 source-checkout invariant: when the caller
+    // stages a local user flake (`mvm_local_override = Some`), the
+    // workspace — not the user flake — is mounted at `/work`, and we
+    // copy the user flake into the job dir so it rides the existing
+    // `/job` virtio-fs share. The build then resolves `mvm` from the
+    // mounted local checkout (`path:/work/nix`) instead of GitHub, so a
+    // contributor's nix changes are exercised without a release
+    // round-trip. No new guest mount: `/work` + `/job` already exist.
+    let override_mvm = match mvm_local_override {
+        Some(user_flake) => {
+            let dst = job_dir.join(STAGED_WORKLOAD_SUBDIR);
+            copy_dir_recursive(user_flake, &dst).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "staging user flake {} -> {}: {e}",
+                    user_flake.display(),
+                    dst.display()
+                ))
+            })?;
+            true
+        }
+        None => false,
+    };
+
+    let body = render_flake_cmd_sh(flake_ref, attr_path, override_mvm);
 
     let cmd_path = job_dir.join("cmd.sh");
     std::fs::write(&cmd_path, body).map_err(|e| {
@@ -139,11 +166,49 @@ pub fn stage_job_dir(job_dir: &Path, job: &BuilderJob) -> Result<(), BuilderVmEr
     Ok(())
 }
 
+/// Job-dir subdirectory the user flake is staged into under
+/// source-checkout override mode; reachable in-guest at
+/// `/job/<relpath>/workload` (the job dir is the `/job` virtio-fs share).
+const STAGED_WORKLOAD_SUBDIR: &str = "workload";
+
+/// Copy a directory tree (used to stage the user flake into the job dir).
+/// Shallow recursion is fine — compiled flakes are `flake.nix` +
+/// `launch.json` + a small `src/` tree.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Render the `cmd.sh` body the in-guest `mvm-host-vm-init` runs
 /// for a [`BuilderJob::Flake`]. Inlined as a separate function so
 /// tests can assert the rendered output without touching the
 /// filesystem.
-fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str) -> String {
+fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> String {
+    // Source-checkout override mode: `/work` is the workspace and the
+    // user flake was staged into this job dir (reachable beside cmd.sh).
+    // Resolve it relative to the script so we don't need the job dir's
+    // guest relpath, and pin `mvm` to the mounted local checkout.
+    let (flake_ref_assign, override_flag) = if override_mvm {
+        (
+            format!("FLAKE_REF=\"$(cd \"$(dirname \"$0\")\" && pwd)/{STAGED_WORKLOAD_SUBDIR}\""),
+            " --override-input mvm path:/work/nix".to_string(),
+        )
+    } else {
+        (
+            format!("FLAKE_REF='{}'", shell_single_quote_escape(flake_ref)),
+            String::new(),
+        )
+    };
     format!(
         r#"#!/bin/sh
 # mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime (Plan 97
@@ -154,7 +219,7 @@ fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str) -> String {
 # handled by mvm-host-vm-init.
 set -eu
 
-FLAKE_REF='{flake_ref}'
+{flake_ref_assign}
 ATTR_PATH='{attr_path}'
 
 # Point HOME at writable tmpfs (`/tmp`) to satisfy code paths that
@@ -216,7 +281,7 @@ df -h /nix /tmp >&2 || true
 # cascades up). We tee stderr to /job/nix-build.log so the host
 # can read the actual root cause when a deep dependency fails.
 set +e
-nix build "${{FLAKE_REF}}#${{ATTR_PATH}}" \
+nix build "${{FLAKE_REF}}#${{ATTR_PATH}}"{override_flag} \
     --no-link --print-out-paths --no-write-lock-file --impure \
     --print-build-logs --keep-going \
     > /job/nix-stdout.log 2> /job/nix-stderr.log
@@ -265,10 +330,10 @@ chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 # rootfs (the builder-vm `dev`/`default` attrs are a runCommand around
 # it) surfaces it one level down under `passthru.rootfs`. Try the direct
 # attr first, then the wrapped one.
-if nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure \
+if nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag} \
       > /out/mvm-meta.json 2> /job/sidecar-direct.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.mvm)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure \
+elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure{override_flag} \
       > /out/mvm-meta.json 2> /job/sidecar-rootfs.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.rootfs.passthru.mvm)" >&2
 else
@@ -277,7 +342,8 @@ else
     rm -f /out/mvm-meta.json
 fi
 "#,
-        flake_ref = shell_single_quote_escape(flake_ref),
+        flake_ref_assign = flake_ref_assign,
+        override_flag = override_flag,
         attr_path = shell_single_quote_escape(attr_path),
     )
 }

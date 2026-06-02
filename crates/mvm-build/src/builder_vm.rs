@@ -73,6 +73,14 @@ pub struct BuilderMounts {
     /// `/mvm-bins` inside the builder VM and exposed via
     /// `MVM_HOST_BIN_DIR=/mvm-bins` to the flake's `cmd.sh`.
     pub host_bin_dir: PathBuf,
+    /// Plan 120 / ADR-046 source-checkout invariant. When `Some`, the
+    /// build runs in "local-mvm override" mode: `flake_src` (mounted at
+    /// `/work`) is the **mvm workspace**, this user flake is staged into
+    /// the job dir, and `cmd.sh` builds it with `--override-input mvm
+    /// path:/work/nix` so the workload resolves `mvm` from the in-repo
+    /// checkout rather than GitHub. `None` keeps the legacy behavior:
+    /// `flake_src` is the user flake and `mvm` resolves from its lock.
+    pub staged_user_flake: Option<PathBuf>,
 }
 
 /// What the builder is asked to produce.
@@ -901,6 +909,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: PathBuf::from("/tmp/out"),
             host_bin_dir: PathBuf::from("/tmp/host-bins"),
+            staged_user_flake: None,
         };
         let err = stub.run_build(&job, &mounts).expect_err("stub returns err");
         assert!(matches!(err, BuilderVmError::NotYetImplemented));
@@ -920,6 +929,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: PathBuf::from("/tmp/out"),
             host_bin_dir: PathBuf::from("/tmp/host-bins"),
+            staged_user_flake: None,
         };
         let err = stub.run_build(&job, &mounts).expect_err("stub returns err");
         assert!(matches!(err, BuilderVmError::NotYetImplemented));

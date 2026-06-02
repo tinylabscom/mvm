@@ -608,7 +608,7 @@ impl BuilderVm for VzBuilderVm {
         //    booted it.
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
-        stage_job_dir(&job_dir, job)?;
+        stage_job_dir(&job_dir, job, mounts.staged_user_flake.as_deref())?;
         tracing::info!(
             job_dir = %job_dir.display(),
             "Vz builder VM job dir staged (nix-stderr.log streams here as the build runs)"
@@ -1495,6 +1495,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = VzBuilderVm::new().validate_mounts(&mounts).unwrap_err();
         assert!(
@@ -1515,6 +1516,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = VzBuilderVm::new().validate_mounts(&mounts).unwrap_err();
         assert!(
@@ -1536,6 +1538,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: artifact_out.clone(),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         VzBuilderVm::new().validate_mounts(&mounts).unwrap();
         assert!(artifact_out.is_dir(), "artifact_out must be created");
@@ -1604,6 +1607,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let job = BuilderJob::Flake {
             flake_ref: "path:.".into(),
@@ -1646,6 +1650,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let job = BuilderJob::Flake {
             flake_ref: "path:.".into(),

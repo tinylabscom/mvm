@@ -3328,6 +3328,9 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
         host_nix_store: None,
         artifact_out: std::path::PathBuf::from(out_dir),
         host_bin_dir,
+        // The dev-image build already builds the in-repo builder-vm flake
+        // with the workspace mounted at /work; no user-flake override.
+        staged_user_flake: None,
     };
 
     // Plan 97 Phase C: `MVM_BUILDER_BACKEND=vz` flips the dispatch

@@ -752,7 +752,7 @@ impl BuilderVm for LibkrunBuilderVm {
         //    B.2) dispatches based on which file it sees.
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
-        stage_job_dir(&job_dir, job)?;
+        stage_job_dir(&job_dir, job, mounts.staged_user_flake.as_deref())?;
         // Same announcement as the single-shot path — see the
         // identical block in `LibkrunBuilderVm::run_build`.
         tracing::info!(
@@ -2056,6 +2056,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: out,
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         }
     }
 
@@ -2151,6 +2152,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .validate_mounts(&mounts)
@@ -2171,6 +2173,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .validate_mounts(&mounts)
@@ -2212,6 +2215,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: std::env::temp_dir().join("mvm-plan72-w1-utf8-test-out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .validate_mounts(&mounts)
@@ -2325,7 +2329,7 @@ mod tests {
         let spec_path = scratch.path().join("spec.json");
         let spec_body = br#"{"language":"python","lockfile_relative_path":"uv.lock","source_mount":"/work","gate":"dev"}"#;
         std::fs::write(&spec_path, spec_body).unwrap();
-        stage_job_dir(&job_dir, &BuilderJob::Install { spec_path }).expect("stage ok");
+        stage_job_dir(&job_dir, &BuilderJob::Install { spec_path }, None).expect("stage ok");
         let dst = job_dir.join(INSTALL_SPEC_FILENAME);
         assert!(dst.is_file(), "install_spec.json must be staged at {dst:?}");
         let on_disk = std::fs::read(&dst).unwrap();
@@ -2354,6 +2358,7 @@ mod tests {
             host_nix_store: None,
             artifact_out: scratch.path().join("out"),
             host_bin_dir: host_bins,
+            staged_user_flake: None,
         };
         let err = LibkrunBuilderVm::default()
             .run_build(&ok_job(), &mounts)
@@ -2416,7 +2421,7 @@ mod tests {
             flake_ref: "path:/work/nix/images/foo".to_string(),
             attr_path: "packages.x86_64-linux.default".to_string(),
         };
-        stage_job_dir(&job_dir, &job).unwrap();
+        stage_job_dir(&job_dir, &job, None).unwrap();
         let cmd = std::fs::read_to_string(job_dir.join("cmd.sh")).unwrap();
         assert!(cmd.contains("FLAKE_REF='path:/work/nix/images/foo'"));
         assert!(cmd.contains("ATTR_PATH='packages.x86_64-linux.default'"));
@@ -2428,6 +2433,45 @@ mod tests {
         assert!(cmd.contains("auto-optimise-store = true"));
         assert!(cmd.contains("XDG_CACHE_HOME=/nix-store/.cache"));
         assert!(cmd.contains("printf '%s\\n' \"$NIX_OUT\" > /job/store-path"));
+        // Legacy (no-override) mode never injects an mvm override.
+        assert!(!cmd.contains("--override-input mvm"));
+    }
+
+    #[test]
+    fn stage_job_dir_override_stages_user_flake_and_overrides_mvm() {
+        // Plan 120 / ADR-046: source-checkout override mode stages the user
+        // flake into the job dir and pins `mvm` to the local checkout
+        // mounted at /work, so the workload builds against in-repo nix
+        // rather than GitHub.
+        let scratch = TempDir::new().unwrap();
+        let job_dir = scratch.path().join("job-ovr");
+        let user_flake = scratch.path().join("hello-app");
+        std::fs::create_dir_all(user_flake.join("src")).unwrap();
+        std::fs::write(user_flake.join("flake.nix"), "{ inputs.mvm.url = \"x\"; }").unwrap();
+        std::fs::write(user_flake.join("launch.json"), "{}").unwrap();
+        std::fs::write(user_flake.join("src/app.py"), "x").unwrap();
+
+        let job = BuilderJob::Flake {
+            flake_ref: "/work".to_string(), // ignored in override mode
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        };
+        stage_job_dir(&job_dir, &job, Some(user_flake.as_path())).unwrap();
+
+        // User flake copied beside cmd.sh, including the src tree.
+        assert!(job_dir.join("workload/flake.nix").exists());
+        assert!(job_dir.join("workload/src/app.py").exists());
+
+        let cmd = std::fs::read_to_string(job_dir.join("cmd.sh")).unwrap();
+        // Builds the staged workload resolved relative to the script dir.
+        assert!(cmd.contains(r#"FLAKE_REF="$(cd "$(dirname "$0")" && pwd)/workload""#));
+        // Pins mvm to the local checkout mounted at /work.
+        assert!(cmd.contains("--override-input mvm path:/work/nix"));
+        assert!(cmd.contains("ATTR_PATH='packages.aarch64-linux.default'"));
+        // The override rides both the build and the metadata eval.
+        assert_eq!(
+            cmd.matches("--override-input mvm path:/work/nix").count(),
+            3
+        );
     }
 
     #[test]
