@@ -789,10 +789,39 @@ pub(super) fn ensure_dev_image() -> Result<(String, String)> {
     // source checkout; when present, `build_image_via_libkrun` is
     // invoked against the `dev` attr of the consolidated flake.
     #[cfg(feature = "builder-vm")]
-    if find_builder_vm_flake().is_ok() {
+    if let Ok(flake_dir) = find_builder_vm_flake() {
         let out_dir = format!("{}/dev/current", mvm_core::config::mvm_data_dir());
-        prepare_dev_image_out_dir(&out_dir)?;
+        let out_path = std::path::Path::new(&out_dir);
 
+        // Fix A — fast-path: when the dev-image source fingerprint matches
+        // the cached artifacts, the image the builder VM would produce is
+        // byte-identical to what's on disk, so boot it without spinning a
+        // builder VM. Without this, every `dev up` in a source checkout
+        // re-enters nix to rebuild the custom kernel + full crate closure
+        // (minutes) even when nothing changed. Same trust model as the
+        // Layer-1 and published-prebuilt fast paths: fingerprint match ⇒
+        // identical nix derivation ⇒ identical output. `prepare_dev_image_out_dir`
+        // (which clears the dir) runs only on the rebuild path below, so a
+        // hit never destroys the cache it's about to return.
+        if let Ok(fingerprint) = builder_vm_source_fingerprint(&flake_dir) {
+            let status = builder_vm_source_cache_status(out_path, &fingerprint);
+            if status.is_ready() {
+                ui::success(&format!(
+                    "Dev image cache hit (fingerprint {}); skipping builder VM.",
+                    stage0_fingerprint_prefix(&fingerprint),
+                ));
+                return Ok((
+                    format!("{out_dir}/vmlinux"),
+                    format!("{out_dir}/rootfs.ext4"),
+                ));
+            }
+            ui::progress(&format!(
+                "Dev image cache decision: {}",
+                status.reason_code()
+            ));
+        }
+
+        prepare_dev_image_out_dir(&out_dir)?;
         return build_image_via_libkrun(&out_dir);
     }
 
@@ -2048,11 +2077,7 @@ fn run_stage0_root_dir(
     verify_stage0_rootfs_has_init(&staging_dir.join("rootfs.ext4"))
         .map_err(|e| (Stage0FailureStage::Validate, e))?;
 
-    write_builder_vm_source_fingerprint(staging_dir, source_fingerprint)
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-    write_builder_vm_artifact_digest_manifest(staging_dir)
-        .map_err(|e| (Stage0FailureStage::Validate, e))?;
-    write_builder_vm_source_cache_provenance(staging_dir, source_fingerprint)
+    write_builder_vm_cache_sidecars(staging_dir, source_fingerprint)
         .map_err(|e| (Stage0FailureStage::Validate, e))?;
 
     Ok(())
@@ -3055,6 +3080,19 @@ fn write_builder_vm_source_cache_provenance(
         .with_context(|| format!("writing builder VM provenance in {}", dir.display()))
 }
 
+/// Write the full cache-sidecar set — source fingerprint, artifact-digest
+/// manifest, and provenance — that [`builder_vm_source_cache_status`] reads
+/// back to decide a hit. Shared by Stage 0 promotion and the dev-image
+/// fast-path (Fix A) so both write the identical format; the order matters
+/// only in that the digest manifest must be written after the artifacts are
+/// final.
+#[cfg(any(feature = "builder-vm", test))]
+fn write_builder_vm_cache_sidecars(dir: &std::path::Path, source_fingerprint: &str) -> Result<()> {
+    write_builder_vm_source_fingerprint(dir, source_fingerprint)?;
+    write_builder_vm_artifact_digest_manifest(dir)?;
+    write_builder_vm_source_cache_provenance(dir, source_fingerprint)
+}
+
 #[cfg(any(feature = "builder-vm", test))]
 fn promote_builder_vm_stage0_cache(
     staging_dir: &std::path::Path,
@@ -3313,6 +3351,24 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     if !std::path::Path::new(&rootfs).exists() {
         anyhow::bail!("{backend_name} builder VM exited cleanly but did not produce {rootfs}");
     }
+
+    // Fix A — persist the source fingerprint + artifact-digest + provenance
+    // sidecars so the next `dev up` fast-paths past the builder VM entirely
+    // (see the cache check in `ensure_dev_image`). Best-effort: a failed
+    // sidecar write must not fail an otherwise-good build — the next run
+    // just rebuilds. The fingerprint is recomputed here from the same flake
+    // dir the build read, so a fingerprint match later means an identical
+    // nix derivation, hence an identical image.
+    if let Ok(flake_dir) = find_builder_vm_flake()
+        && let Ok(fingerprint) = builder_vm_source_fingerprint(&flake_dir)
+        && let Err(e) = write_builder_vm_cache_sidecars(std::path::Path::new(out_dir), &fingerprint)
+    {
+        ui::warn(&format!(
+            "Dev image built, but writing cache sidecars failed ({e}); \
+             next `dev up` will rebuild instead of fast-pathing."
+        ));
+    }
+
     Ok((kernel, rootfs))
 }
 
@@ -4836,6 +4892,30 @@ mod builder_vm_bootstrap_tests {
         assert_eq!(
             builder_vm_source_cache_status(&cache, "fingerprint").reason_code(),
             "hit"
+        );
+    }
+
+    // Fix A — `build_image_via_libkrun` writes the same fingerprint +
+    // artifact-digest + provenance sidecars the Layer-1 cache uses, so the
+    // next `dev up` fast-paths past the builder VM. Round-trip: a sidecar
+    // write for a fingerprint reads back as a hit for that fingerprint and a
+    // miss for any other — which is exactly the gate `ensure_dev_image`
+    // consults before deciding to rebuild.
+    #[test]
+    fn dev_image_cache_sidecars_enable_hit_and_reject_changed_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("dev").join("current");
+        write_valid_builder_vm_artifacts(&out);
+
+        write_builder_vm_cache_sidecars(&out, "devfp").expect("write sidecars");
+        assert!(
+            builder_vm_source_cache_status(&out, "devfp").is_ready(),
+            "matching fingerprint must be a cache hit"
+        );
+        assert_eq!(
+            builder_vm_source_cache_status(&out, "changed").reason_code(),
+            "fingerprint_mismatch",
+            "a changed source fingerprint must miss so the dev image rebuilds"
         );
     }
 
