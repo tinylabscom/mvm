@@ -108,20 +108,22 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
             else throw "mvmforge: unsupported image.kind '${{launch.image.kind}}'";
           mergedEnv = launch.env // launch.entrypoint.env;
           factoryService = buildFactoryService system pkgs appPkg;
+          # mkGuest (nix/lib/mk-guest.nix) takes a required `entrypoint`
+          # whose multi-service form is `entrypoint.services.<name>`; it
+          # does not accept a top-level `services` or `hostname` arg.
           mkGuestArgs =
             if isFunction
             then {{
               name = launch.workload_id;
-              hostname = launch.workload_id;
               packages = [ appPkg ] ++ imagePackages ++ factoryService.servicePackages;
-              services.${{launch.workload_id}} = factoryService.service // {{ env = mergedEnv; }};
+              entrypoint.services.${{launch.workload_id}} =
+                factoryService.service // {{ env = mergedEnv; }};
               extraFiles = factoryService.extraFiles;
             }}
             else {{
               name = launch.workload_id;
-              hostname = launch.workload_id;
               packages = [ appPkg ] ++ imagePackages;
-              services.${{launch.workload_id}} = {{
+              entrypoint.services.${{launch.workload_id}} = {{
                 command = buildEntrypoint pkgs;
                 preStart = buildPreStart pkgs appPkg;
                 env = mergedEnv;
@@ -207,7 +209,11 @@ mod tests {
     fn flake_uses_mkguest_attribute() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(s.contains("mvm.lib.${system}.mkGuest"));
-        assert!(s.contains("services.${launch.workload_id}"));
+        // mkGuest requires the service under `entrypoint.services.<name>`
+        // (nix/lib/mk-guest.nix) — never a top-level `services` or
+        // `hostname` arg, which mkGuest rejects.
+        assert!(s.contains("entrypoint.services.${launch.workload_id}"));
+        assert!(!s.contains("hostname = launch.workload_id"));
     }
 
     #[test]
