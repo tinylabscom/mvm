@@ -608,7 +608,17 @@ impl BuilderVm for VzBuilderVm {
         //    booted it.
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
-        stage_job_dir(&job_dir, job, mounts.staged_user_flake.as_deref())?;
+        stage_job_dir(
+            &job_dir,
+            job,
+            mounts.staged_user_flake.as_deref(),
+            // Override mode mounts the workspace at /work as `flake_src`;
+            // stage its filtered cargo tree for the `mvm/mvm-workspace` pin.
+            mounts
+                .staged_user_flake
+                .as_ref()
+                .map(|_| mounts.flake_src.as_path()),
+        )?;
         tracing::info!(
             job_dir = %job_dir.display(),
             "Vz builder VM job dir staged (nix-stderr.log streams here as the build runs)"

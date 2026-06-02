@@ -752,7 +752,18 @@ impl BuilderVm for LibkrunBuilderVm {
         //    B.2) dispatches based on which file it sees.
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
-        stage_job_dir(&job_dir, job, mounts.staged_user_flake.as_deref())?;
+        stage_job_dir(
+            &job_dir,
+            job,
+            mounts.staged_user_flake.as_deref(),
+            // Override mode (staged_user_flake = Some) mounts the workspace
+            // at /work as `flake_src`; stage its filtered cargo tree so the
+            // build can pin `mvm/mvm-workspace` to it.
+            mounts
+                .staged_user_flake
+                .as_ref()
+                .map(|_| mounts.flake_src.as_path()),
+        )?;
         // Same announcement as the single-shot path — see the
         // identical block in `LibkrunBuilderVm::run_build`.
         tracing::info!(
@@ -2329,7 +2340,7 @@ mod tests {
         let spec_path = scratch.path().join("spec.json");
         let spec_body = br#"{"language":"python","lockfile_relative_path":"uv.lock","source_mount":"/work","gate":"dev"}"#;
         std::fs::write(&spec_path, spec_body).unwrap();
-        stage_job_dir(&job_dir, &BuilderJob::Install { spec_path }, None).expect("stage ok");
+        stage_job_dir(&job_dir, &BuilderJob::Install { spec_path }, None, None).expect("stage ok");
         let dst = job_dir.join(INSTALL_SPEC_FILENAME);
         assert!(dst.is_file(), "install_spec.json must be staged at {dst:?}");
         let on_disk = std::fs::read(&dst).unwrap();
@@ -2421,7 +2432,7 @@ mod tests {
             flake_ref: "path:/work/nix/images/foo".to_string(),
             attr_path: "packages.x86_64-linux.default".to_string(),
         };
-        stage_job_dir(&job_dir, &job, None).unwrap();
+        stage_job_dir(&job_dir, &job, None, None).unwrap();
         let cmd = std::fs::read_to_string(job_dir.join("cmd.sh")).unwrap();
         assert!(cmd.contains("FLAKE_REF='path:/work/nix/images/foo'"));
         assert!(cmd.contains("ATTR_PATH='packages.x86_64-linux.default'"));
@@ -2451,25 +2462,66 @@ mod tests {
         std::fs::write(user_flake.join("launch.json"), "{}").unwrap();
         std::fs::write(user_flake.join("src/app.py"), "x").unwrap();
 
+        // A stand-in mvm workspace: members + a build artifact and a
+        // non-allowlisted top-level dir that must be pruned from the
+        // staged snapshot.
+        let workspace = scratch.path().join("mvm-ws");
+        std::fs::create_dir_all(workspace.join("crates/mvm-guest/src")).unwrap();
+        std::fs::create_dir_all(workspace.join("crates/mvm-guest/target/debug")).unwrap();
+        std::fs::create_dir_all(workspace.join("public")).unwrap();
+        std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
+        std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
+        std::fs::write(workspace.join("crates/mvm-guest/Cargo.toml"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-guest/src/lib.rs"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-guest/target/debug/junk"), "x").unwrap();
+        std::fs::write(workspace.join("public/index.html"), "x").unwrap();
+
         let job = BuilderJob::Flake {
             flake_ref: "/work".to_string(), // ignored in override mode
             attr_path: "packages.aarch64-linux.default".to_string(),
         };
-        stage_job_dir(&job_dir, &job, Some(user_flake.as_path())).unwrap();
+        stage_job_dir(
+            &job_dir,
+            &job,
+            Some(user_flake.as_path()),
+            Some(workspace.as_path()),
+        )
+        .unwrap();
 
         // User flake copied beside cmd.sh, including the src tree.
         assert!(job_dir.join("workload/flake.nix").exists());
         assert!(job_dir.join("workload/src/app.py").exists());
 
+        // Filtered mvm-workspace snapshot: members copied, build artifacts
+        // and non-allowlisted top-level dirs pruned.
+        assert!(job_dir.join("mvm-src/Cargo.lock").exists());
+        assert!(job_dir.join("mvm-src/crates/mvm-guest/src/lib.rs").exists());
+        assert!(
+            !job_dir.join("mvm-src/crates/mvm-guest/target").exists(),
+            "target/ must be pruned from the staged snapshot"
+        );
+        assert!(
+            !job_dir.join("mvm-src/public").exists(),
+            "non-allowlisted top-level dirs must not be staged"
+        );
+
         let cmd = std::fs::read_to_string(job_dir.join("cmd.sh")).unwrap();
         // Builds the staged workload resolved relative to the script dir.
         assert!(cmd.contains(r#"FLAKE_REF="$(cd "$(dirname "$0")" && pwd)/workload""#));
-        // Pins mvm to the local checkout mounted at /work.
+        // Resolves the filtered workspace snapshot beside the script too.
+        assert!(cmd.contains(r#"MVM_SRC="$(cd "$(dirname "$0")" && pwd)/mvm-src""#));
+        // Pins mvm to the local checkout and mvm-workspace to the snapshot.
         assert!(cmd.contains("--override-input mvm path:/work/nix"));
+        assert!(cmd.contains(r#"--override-input mvm/mvm-workspace "path:$MVM_SRC""#));
         assert!(cmd.contains("ATTR_PATH='packages.aarch64-linux.default'"));
-        // The override rides both the build and the metadata eval.
+        // The overrides ride both the build and the metadata eval.
         assert_eq!(
             cmd.matches("--override-input mvm path:/work/nix").count(),
+            3
+        );
+        assert_eq!(
+            cmd.matches(r#"--override-input mvm/mvm-workspace "path:$MVM_SRC""#)
+                .count(),
             3
         );
     }
