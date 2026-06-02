@@ -43,7 +43,12 @@ const DOWN_BUDGET: Duration = Duration::from_secs(120);
 /// Outcome of one bounded `mvmctl` invocation.
 struct Step {
     success: bool,
-    stderr: String,
+    /// stdout + stderr concatenated. mvm's UI (`ui::info`/`ui::warn`)
+    /// writes to **stdout**, while build/runtime errors land on stderr,
+    /// so any assertion on mvm output must scan both — checking only one
+    /// stream silently misses the other (e.g. "Guest agent not
+    /// reachable." is a `ui::warn` on stdout).
+    output: String,
     timed_out: bool,
 }
 
@@ -106,9 +111,11 @@ fn mvmctl(args: &[&str], scratch: &std::path::Path, label: &str, budget: Duratio
         }
     };
 
+    let mut output = std::fs::read_to_string(&out_path).unwrap_or_default();
+    output.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
     Step {
         success: status.map(|s| s.success()).unwrap_or(false),
-        stderr: std::fs::read_to_string(&err_path).unwrap_or_default(),
+        output,
         timed_out,
     }
 }
@@ -260,10 +267,10 @@ fn core_demo_dev_compile_up_ping() {
     let dev_up = mvmctl(&["dev", "up"], &scratch, "dev-up", DEV_UP_BUDGET);
     assert!(
         !dev_up.timed_out,
-        "dev up timed out (>{DEV_UP_BUDGET:?}); stderr:\n{}",
-        dev_up.stderr
+        "dev up timed out (>{DEV_UP_BUDGET:?}); output:\n{}",
+        dev_up.output
     );
-    assert!(dev_up.success, "dev up failed: {}", dev_up.stderr);
+    assert!(dev_up.success, "dev up failed: {}", dev_up.output);
 
     // 2) lower the decorator app to flake.nix + launch.json.
     let c = mvmctl(
@@ -274,13 +281,19 @@ fn core_demo_dev_compile_up_ping() {
     );
     assert!(
         !c.timed_out,
-        "compile timed out (>{COMPILE_BUDGET:?}); stderr:\n{}",
-        c.stderr
+        "compile timed out (>{COMPILE_BUDGET:?}); output:\n{}",
+        c.output
     );
-    assert!(c.success, "compile failed: {}", c.stderr);
+    assert!(c.success, "compile failed: {}", c.output);
 
-    // 3) build + boot the workload microVM; `up` waits for the agent.
-    //    Exit 0 with no "not reachable" line == the agent answered.
+    // 3) build + boot the workload microVM; `up` waits for the agent
+    //    over vsock (`wait_for_guest_agent` → protocol Ping). The proof
+    //    is twofold and scans BOTH streams (`up.output`): the wait
+    //    actually ran ("Waiting for guest agent...") AND it succeeded
+    //    (no "Guest agent not reachable."). Checking only one of these
+    //    is how this test previously false-greened — `up` used to skip
+    //    the wait entirely on libkrun, and the warn line lands on
+    //    stdout, not stderr.
     let up = mvmctl(
         &[
             "up",
@@ -295,14 +308,19 @@ fn core_demo_dev_compile_up_ping() {
     );
     assert!(
         !up.timed_out,
-        "up timed out (>{UP_BUDGET:?}); stderr:\n{}",
-        up.stderr
+        "up timed out (>{UP_BUDGET:?}); output:\n{}",
+        up.output
     );
-    assert!(up.success, "up failed: {}", up.stderr);
+    assert!(up.success, "up failed: {}", up.output);
     assert!(
-        !up.stderr.contains("Guest agent not reachable"),
-        "agent never answered: {}",
-        up.stderr
+        up.output.contains("Waiting for guest agent"),
+        "up never waited for the guest agent (boot→ping not exercised): {}",
+        up.output
+    );
+    assert!(
+        !up.output.contains("Guest agent not reachable"),
+        "guest agent never answered the vsock ping: {}",
+        up.output
     );
 
     // 4) tear down the builder (best-effort, still bounded).
