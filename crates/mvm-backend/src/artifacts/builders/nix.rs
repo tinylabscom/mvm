@@ -95,6 +95,8 @@ impl MicrovmArtifactBuilder for NixMicrovmBuilder<'_> {
             host_nix_store: self.host_nix_store.clone(),
             artifact_out: self.artifact_out_dir.clone(),
             host_bin_dir: self.host_bin_dir.clone(),
+            // Standard flake build, not the local-mvm-workspace override path.
+            staged_user_flake: None,
         };
 
         // ── Step 2: run build ─────────────────────────────────────────────────
