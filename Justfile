@@ -70,6 +70,16 @@ test-ci:
 test-cargo:
     cargo test --workspace
 
+# Run the core-demo end-to-end smoke (libkrun builder + workload VM, minutes).
+# Builds the standalone supervisor bin first — `cargo test -p mvm-cli` won't,
+# and a stale supervisor reintroduces the gvproxy-orphan hang. `--features
+# libkrun-sys` is required: the bin is gated behind `required-features`, so a
+# plain `-p` build skips it. The test itself also rebuilds+pins the supervisor,
+# so raw `cargo test` is safe too; this is the fast path.
+e2e-core-demo:
+    cargo build -p mvm-libkrun-supervisor --features libkrun-sys
+    MVM_E2E_SMOKE=1 MVM_BUILDER_BACKEND=libkrun cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
+
 # ── Lint & Format ────────────────────────────────────────────────────────
 
 # Format all code

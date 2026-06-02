@@ -1020,6 +1020,16 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
             .kernel_path
             .as_ref()
             .expect("validate_boot_config guarantees kernel_path is set when root_dir is absent");
+        // A `mkGuest` workload image ships no kernel — boot libkrun's
+        // bundled libkrunfw kernel (TSI + vsock). When the declared kernel
+        // file is absent, materialize the bundled one at that path (idempotent;
+        // the `Raw` set_kernel below loads the file directly, so the bundled
+        // load/entry addrs aren't needed here). Builder / dev-shell images
+        // carry a real built kernel and skip this. Single source for every
+        // caller (up / invoke / run) so none re-implements the fallback.
+        if !Path::new(kernel_path).exists() {
+            sys::extract_bundled_kernel(Path::new(kernel_path))?;
+        }
         let initramfs_path = ctx.initramfs_path.as_deref().map(Path::new);
         krun.set_kernel(
             Path::new(kernel_path),
@@ -1040,6 +1050,12 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
     }
     for &port in &ctx.vsock_ports {
         let socket = ctx.vsock_socket_path(port);
+        // Defensive: a prior VM run (clean stop or crash) leaves this
+        // listener socket behind — the stop path doesn't unlink it —
+        // and add_vsock_port2(listen=true) binds here, failing EEXIST
+        // (rc -17) on the stale file. Pre-unlink, mirroring the gvproxy
+        // bridge socket above. Keeps `dev up` idempotent across runs.
+        let _ = std::fs::remove_file(&socket);
         krun.add_vsock_port2(port, &socket, /* listen = */ true)?;
     }
     if let Some(console_path) = &ctx.console_output_path {
@@ -1181,10 +1197,19 @@ pub fn start_enter(ctx: &KrunContext) -> Result<std::convert::Infallible, Error>
 #[cfg(feature = "libkrun-sys")]
 fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error> {
     extern "C" fn handle_sigterm(_sig: libc::c_int) {
-        // SAFETY: `_exit` is async-signal-safe per POSIX
-        // (signal-safety(7)). Status 143 = 128 + SIGTERM, the
-        // conventional shell convention for "killed by SIGTERM".
+        // Reap our gvproxy first, then exit. Without this, `mvmctl stop`
+        // / `kill -TERM` tears down the supervisor but orphans gvproxy
+        // (re-parented to init), which keeps holding any inherited fd
+        // and accumulates as a leaked daemon. `kill(2)` and the atomic
+        // load are async-signal-safe (signal-safety(7)); `_exit` is too.
+        // Status 143 = 128 + SIGTERM, the shell convention for "killed
+        // by SIGTERM".
+        let gvproxy_pid =
+            crate::gvproxy::RUNNING_GVPROXY_PID.load(std::sync::atomic::Ordering::SeqCst);
         unsafe {
+            if gvproxy_pid > 0 {
+                libc::kill(gvproxy_pid, libc::SIGTERM);
+            }
             libc::_exit(143);
         }
     }
