@@ -12,6 +12,15 @@
 
 ---
 
+## Status (2026-06-02, on `feat/artifact-model`)
+
+Tasks 1, 2, and 5 (the `exec` API) have landed; the E2E test + CI lane (`ci.yml::core-demo-e2e`) + contributor docs landed (Task 3). **Remaining:** drive the E2E green on a macOS/libkrun host (Task 4) and lead the quickstart with `Sandbox.exec` (Task 5 §4). Two additions this session:
+
+- **Workstream A — un-freeze hardening (✅ landed, commit `898b8507`).** `core_demo_e2e` repeatedly froze whole sessions: `Command::output()` waited on pipe EOF that an orphaned gvproxy held open (libkrun `exit()`s on guest poweroff, skipping `GvproxyHandle::Drop`). The test now (a) arms a watchdog thread that `exit(124)`s after a hard deadline (`MVM_E2E_DEADLINE_SECS`, default 2400s) and (b) bounds every `mvmctl` call — stdio redirected to files (no captured pipe), child in its own process group, SIGKILLed whole on a per-step budget. **Operating rule:** run the E2E only bounded + backgrounded (`gtimeout … just e2e-core-demo`), never as a foreground blocking call.
+- **Lima test-env `VmBackend` — Workstream C (queued, after libkrun green).** A second, hang-immune substrate: Firecracker over Lima `/dev/kvm`, selectable via `MVM_E2E_BACKEND=lima`. Reverses ADR-066 §177 "not built in this rewrite" → built-for-test (test/dev-tier, prod-refused). Tracked in `### deferred follow-ups`.
+
+---
+
 ## File structure
 
 - **Rename `ArtifactSidecar` → `ArtifactManifest`** (type only; the `mvm-meta.json` filename + `SIDECAR_FILENAME` const stay) across the 6 files that reference it:
@@ -70,6 +79,8 @@ Mechanical type rename; the existing round-trip + admit tests in `builder_vm.rs`
 
 ## Task 2: Lock `mvmctl compile <app.py>` (decorator lowering) + fix its stale docstring
 
+> **✅ LANDED.** `crates/mvm-cli/tests/compile_hello_app.rs` exists and passes (ungated); the stale `compile.rs` docstring is corrected (static AST parsing, no "v1 only handles IR JSON"). Steps below are the historical recipe.
+
 The decorator `.py` path **is wired** — `crates/mvm-cli/src/commands/build/compile.rs:181` matches `parse_python(&bytes, &path)` (symbols imported at `compile.rs:36–37`), and `--out <dir>` is a real flag (`compile.rs:68`). But the module docstring (`compile.rs:8–18`) still says "Decorator-script entry … lands with Phase 4 … `.py` … rejected with a `not-yet-implemented` pointer" and "v1 only handles the IR-JSON path." That is stale (Phase 4 landed). Lock the real behavior with a CLI test, then correct the docstring.
 
 **Files:** Create `crates/mvm-cli/tests/compile_hello_app.rs` (CLI integration tests live in `crates/mvm-cli/tests/` per CLAUDE.md). Modify `crates/mvm-cli/src/commands/build/compile.rs:1–26`.
@@ -109,6 +120,8 @@ The decorator `.py` path **is wired** — `crates/mvm-cli/src/commands/build/com
   ```
 
 ## Task 3: The boot→ping E2E (`core_demo_e2e.rs`) — the regression guard
+
+> **✅ test + CI lane + docs LANDED, and hardened against freezing (Workstream A, commit `898b8507`).** The test exists, is `MVM_E2E_SMOKE`-gated, default-skips, has the `ci.yml::core-demo-e2e` lane (self-hosted `[macOS, ARM64, libkrun]`, gated on `MACOS_LIBKRUN_AVAILABLE`) and is documented in `development.md` §"Gated E2E". **Remaining: prove it green — Task 4.**
 
 One gated test driving the whole spine with the **verified** verbs: `mvmctl dev up` (builder), `mvmctl compile <app.py> --out <dir>` (lower), `mvmctl up --flake <dir>` (build + boot + wait-for-agent), then teardown. `up` calls `wait_for_guest_agent(&vm, 30)` (`crates/mvm-cli/src/commands/shared/vsock.rs:19`, invoked at `up.rs:1366`) and prints `Waiting for guest agent...` (`up.rs:1364`) → `Guest agent not reachable.` (`up.rs:1385`) only on failure; so **`up` exiting 0 without that line is the boot→ping proof.** Modeled on `crates/mvm-cli/tests/dev_up_smoke.rs`.
 
@@ -169,6 +182,8 @@ One gated test driving the whole spine with the **verified** verbs: `mvmctl dev 
 
 ## Task 4: Close whatever the E2E surfaces, until it is green
 
+> **🟡 REMAINING — the active workstream.** Run the E2E **only** bounded + backgrounded per Workstream A's operating rule (`gtimeout … just e2e-core-demo` via a background job), never a foreground blocking call. Triage from `<scratch>/<step>.stderr.log` + `<vm_state_dir>/console.log` + `~/.cache/mvm/builder-vm/jobs/<id>/nix-stderr.log`.
+
 The spine is *believed* complete (fresh build → `overlay_aware: true` → admits; `up` pings the agent). Task 4 is the iterate-to-green loop: run the gated E2E, read `<vm_state_dir>/console.log` **first** on any boot failure (per the project's debugging convention), fix the one gap, re-run. **No speculative fixes** — only what the E2E proves broken. The likely gaps, in order:
 
 - [ ] **Step 1: macOS workload backend.** `up`'s `--backend` defaults to `firecracker` (`up.rs:705`), which needs Linux KVM. On macOS the workload microVM must run via libkrun. Confirm `up` selects libkrun on macOS (per-OS default) or thread the backend through the E2E. This is the most likely first failure.
@@ -178,6 +193,8 @@ The spine is *believed* complete (fresh build → `overlay_aware: true` → admi
 - [ ] **Step 5: Tick the §4 acceptance boxes** in `specs/plans/117-cleanup-and-rearchitecture-brief.md` for the criteria this proves (`dev up` persistent builder; hello-app compiles + builds in-VM; `up` boots + agent answers vsock; the loop driven by `mvmctl dev`/`compile`/`up`). Leave the cross-platform + encrypted-at-rest + Noise boxes for their plans.
 
 ## Task 5: the one-call live-exec ergonomic — `Sandbox` (the DX headline)
+
+> **✅ `exec` API LANDED (commit `c989fac7`).** `Sandbox.exec(*argv, timeout, cwd, env) -> ExecResult` is in `sdks/python/mvm/_sandbox.py` with the `SandboxDevOnly`/`SandboxModeError` guards; `sdks/python/tests/test_sandbox_exec.py` exists (gated). **Remaining: §4 — lead the quickstart/README with it (still shows the build/derive path).**
 
 The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) put the parity gap in one place: the imperative "boot a sandbox, exec against it" experience. mvm **already has the class** — `sdks/python/mvm/_sandbox.py` (`Sandbox.create(...)`, `sb.commands.start(...)`) with two modes (record → prod plan, live → dev) and the dev-tier guard `SandboxDevOnly` already in place. This task adds the dead-simple one-shot ergonomic on top and makes it the demo headline. **Extend `Sandbox`; do not add a new class** (and never name it `Box` — that's a competitor's term). Typed helpers / async / Node are plan 125.
 
@@ -205,14 +222,17 @@ The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) pu
 ## Acceptance (this plan is done when)
 
 - [x] `ArtifactSidecar` → `ArtifactManifest` rename landed (2026-05-31, 3 code files); build + affected tests (`mvm-build`/`mvm-base`) + clippy green.
-- [ ] `crates/mvm-cli/tests/compile_hello_app.rs` passes (decorator `app.py` lowers to `flake.nix` + `launch.json`); the stale `compile.rs` docstring is corrected.
-- [ ] `crates/mvm-cli/tests/core_demo_e2e.rs` exists, is `MVM_E2E_SMOKE`-gated, and is **green on a macOS/libkrun host** end-to-end (`dev up` → `compile` → `up` with the agent reachable).
-- [ ] The one-shot `Sandbox.exec(...)` returns stdout on a dev-tier sandbox and raises `SandboxDevOnly` in prod; the quickstart leads with it.
-- [ ] The proven §4 acceptance boxes are ticked in the brief.
+- [x] `crates/mvm-cli/tests/compile_hello_app.rs` passes (decorator `app.py` lowers to `flake.nix` + `launch.json`); the stale `compile.rs` docstring is corrected.
+- [x] `crates/mvm-cli/tests/core_demo_e2e.rs` exists, is `MVM_E2E_SMOKE`-gated (test + `ci.yml::core-demo-e2e` lane + `development.md` docs), and is **hardened against freezing** (Workstream A: watchdog + bounded subprocess, commit `898b8507`).
+- [ ] `core_demo_e2e` is **green on a macOS/libkrun host** end-to-end (`dev up` → `compile` → `up` with the agent reachable) — Task 4.
+- [x] The one-shot `Sandbox.exec(...)` returns stdout on a dev-tier sandbox and raises `SandboxDevOnly` in prod (API landed, commit `c989fac7`).
+- [ ] The quickstart/README leads with the five-line `Sandbox.exec` example (Task 5 §4).
+- [ ] The proven §4 acceptance boxes are ticked in the brief (pending Task 4 green).
 
 ### deferred follow-ups
 
-- [ ] Slim `mkGuest` build via `mkfs.ext4 -d` populate-at-format, off the heavy `microvm.nix` substrate (build-layer work — **plan 131**).
+- [ ] **Image-slimming track (owner-deferred 2026-06-02 — later track, not this plan).** The workload rootfs is already minimal by design (busybox PID-1, trimmed module closure, no pkg managers/docs/locales, agent on the ADR-051 overlay, release binaries `strip+lto`). Remaining levers, all planned-but-unstarted: **plan 131** (slim `mkfs.ext4 -d` build-layer / erofs-vs-squashfs), **plan 124** (lean guest-agent deps), **plan 126** (workspace dep reduction), **plan 127** (boot/size measurement harness). Plan 139 found the dev loop is ~99% in-VM build time, not boot/image size — so slimming is low-leverage for "feels fast" and should be **measurement-first** when picked up.
+- [ ] **Lima test-env `VmBackend` — Workstream C (queued, after libkrun green).** Implement Lima as a test/dev-tier, prod-refused `VmBackend` (ADR-066 §177) giving a real Linux `/dev/kvm` for the Firecracker E2E path (`MVM_E2E_BACKEND=lima`); reverses ADR-066 §177 "not built." Update ADR-066 §177 + AGENTS.md from "not built" → "built for test env."
 - [ ] Linux / Firecracker parity for this same E2E (own plan; `/dev/kvm` test backend).
 - [ ] Encrypt build artifacts at rest + upgrade vsock frames to Noise (plan 122) — completes §4's *full* acceptance.
 - [ ] The downloaded `default-microvm` admit blocker (manifest-less image) — separate from this fresh-build path; blocks the bench baseline.

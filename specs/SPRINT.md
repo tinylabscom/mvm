@@ -2434,6 +2434,39 @@ Phase 1 host cross-compile targets **`<arch>-unknown-linux-musl` static**, not g
 - Backward-compat shims (first version — hard cutover; stale caches blown away on upgrade).
 - Stage 0 architecture (Plan 91) and slim kernel (Plan 92/95) — depended on, not re-litigated.
 
+## Sprint 60 — Core demo green + un-freeze + Lima test-env (Stage C, in flight)  [`plans/120-core-demo.md`](plans/120-core-demo.md)
+
+Prove the #1 spine end-to-end on macOS/libkrun and lock it behind a regression guard: `mvmctl dev up` → `compile examples/python/hello-app/app.py` → `up --flake` (build in-VM, boot) → guest agent answers `Ping` over vsock. Work is on `feat/artifact-model` (the canonical, most-advanced Plan 120 line — has the gvproxy unhang fix `0ca06ee2`, workload-boot `5d81dc4e`, `Sandbox.exec` `c989fac7`).
+
+### W1 — Spine pieces  ✅ shipped
+- [x] `ArtifactSidecar` → `ArtifactManifest` rename (Plan 120 Task 1).
+- [x] `mvmctl compile <app.py>` decorator lowering locked + stale docstring fixed; `compile_hello_app.rs` (Task 2).
+- [x] `Sandbox.exec(*argv) -> ExecResult` API (dev-tier one-shot, `SandboxDevOnly`/`SandboxModeError` guards) + gated `test_sandbox_exec.py` (Task 5 API).
+- [x] `core_demo_e2e.rs` written, `MVM_E2E_SMOKE`-gated, + `ci.yml::core-demo-e2e` lane + `development.md` docs (Task 3).
+
+### W2 — Un-freeze hardening  ✅ shipped (commit `898b8507`)
+- [x] `core_demo_e2e` watchdog thread (`exit(124)` after `MVM_E2E_DEADLINE_SECS`, default 2400s) + every `mvmctl` call bounded (stdio→files, own process group SIGKILLed on a per-step budget). Kills the `Command::output()` pipe-EOF freeze that cost several sessions. **Operating rule:** run the E2E only bounded + backgrounded.
+
+### W3 — Drive the E2E green  🟡 in flight (Plan 120 Task 4)
+- [ ] `MVM_E2E_SMOKE=1 just e2e-core-demo` green on a macOS/libkrun host, end-to-end, run bounded + backgrounded; close each surface red→green→commit.
+- [ ] Lead the quickstart/README with the five-line `Sandbox.exec` example (Task 5 §4).
+- [ ] Tick the §4 acceptance boxes in [`plans/117-cleanup-and-rearchitecture-brief.md`](plans/117-cleanup-and-rearchitecture-brief.md).
+
+### W4 — Lima test-env `VmBackend`  🟡 queued (after W3 green)  [`adrs/066-target-architecture.md`](adrs/066-target-architecture.md) §177
+- [ ] Implement Lima as a test/dev-tier, prod-refused `VmBackend` (a virtual `/dev/kvm` for the Firecracker E2E path, `MVM_E2E_BACKEND=lima`) — a second, hang-immune substrate.
+- [ ] Flip ADR-066 §177 + AGENTS.md from "not built in this rewrite" → "built for test env" (owner-approved 2026-06-02).
+
+### Deferred — image-slimming track (owner-deferred 2026-06-02, later track)
+- [ ] Workload images are already minimal by design; remaining levers are planned-but-unstarted — Plan 131 (slim build-layer / erofs-vs-squashfs), Plan 124 (lean agent deps), Plan 126 (dep reduction), Plan 127 (boot/size harness). Plan 139 finding: dev loop is ~99% in-VM build time, so slimming is low-leverage and should be measurement-first.
+
+### Sprint 60 success criteria
+- [ ] The core demo is green end-to-end on macOS/libkrun behind the gated `core_demo_e2e`, and the test cannot freeze a session.
+- [ ] `cargo test --workspace` green; `cargo clippy --workspace -- -D warnings` clean; `cargo fmt --all -- --check` clean.
+
+### Non-goals (explicit)
+- Image slimming (deferred, above) and Linux/Firecracker E2E parity (own plan).
+- Encryption-at-rest + Noise vsock (Plan 122).
+
 ## Completed Sprints
 
 - [01-foundation.md](sprints/01-foundation.md)
