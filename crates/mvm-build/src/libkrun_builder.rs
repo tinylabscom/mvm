@@ -1359,12 +1359,25 @@ fn spawn_supervisor_and_wait(
     // (callers that opted out of console capture), behavior is
     // unchanged — plain wait, plain exit code.
     let console_log = cfg.krun.console_output_path.as_deref().map(PathBuf::from);
-    match wait_with_panic_detector_until(
+    let outcome = wait_with_panic_detector_until(
         &mut child,
         console_log.as_deref(),
         DEFAULT_PANIC_POLL_INTERVAL,
         Some(timeout),
-    ) {
+    );
+
+    // The supervisor has now exited on every arm below — clean guest
+    // poweroff (libkrun's internal `exit()`), or panic/timeout where we
+    // SIGKILL'd it above. None of those run `GvproxyHandle::Drop` (no
+    // unwind) or the supervisor's SIGTERM handler (SIGKILL is uncatchable,
+    // exit() skips it), so the per-VM gvproxy is left "waiting for clients"
+    // and reparented to launchd. Reap it here: we (the spawning host) have
+    // observed the supervisor exit, so this is the one place teardown is
+    // guaranteed regardless of how libkrun terminated. See
+    // `gvproxy::reap_by_pid_file` (idempotent; no-op if already gone).
+    mvm_libkrun::gvproxy::reap_by_pid_file(vm_state_dir);
+
+    match outcome {
         Ok(WaitOutcome::Clean(code)) => Ok(code),
         Ok(WaitOutcome::KernelPanic {
             panic_line,
