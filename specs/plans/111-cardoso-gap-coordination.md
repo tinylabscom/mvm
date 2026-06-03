@@ -93,6 +93,12 @@ coordination tracker rather than a parallel tracker.
 
 ### A — Default-deny egress: close Cardoso's three holes, sync CLAUDE.md
 
+> **Superseded by [Plan 142](142-network-no-bypass-egress-audit.md)** (refactor
+> sequence) — the egress-hole remainder (DNS / broker / vsock carve-out) plus the
+> libkrun implicit-vsock/TSI no-bypass audit are now owned there. The CLAUDE.md
+> 13-claim sync below already landed; the rest of this coordination tracker is
+> unaffected.
+
 Target: `specs/plans/34-egress-l7-proxy.md` (amend) +
 `specs/plans/79-*` (extend if needed) + `CLAUDE.md` (sync claim
 list).
