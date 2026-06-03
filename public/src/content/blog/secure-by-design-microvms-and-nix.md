@@ -101,9 +101,9 @@ The thing we were careful about is that none of this collapses into one big priv
 flowchart TB
   subgraph host["Host control plane"]
     User["CLI / SDK / tool caller"]
-    Runtime["Runtime supervisor"]
+    Runtime["mvm runtime"]
     Admission["Admission<br/>signs + verifies the plan"]
-    Backend["MicroVM backend<br/>Firecracker / Apple VZ / libkrun"]
+    Backend["MicroVM backend<br/>Firecracker / libkrun / Apple VZ / Apple Container"]
     Audit["Audit log + receipts"]
   end
 
@@ -128,9 +128,9 @@ flowchart TB
 Each box has one job:
 
 - **Builder VM** — Linux Nix evaluation, builds, and image assembly.
-- **Runtime supervisor** — admits launches, picks the backend, wires up guest communication, and writes down what happened.
+- **mvm runtime** — the host process you invoked (CLI or SDK). It drives the builder VM, runs admission inline, picks the backend, and writes down what happened. It isn't a long-lived supervisor daemon sitting above the stack — it's the command you ran.
 - **Admission** — binds artifact identity, resources, policy, a validity window, and replay handling into a signed execution plan before anything boots.
-- **MicroVM backend** — stands up the isolated boundary.
+- **MicroVM backend** — stands up the isolated boundary. Each VM gets its own supervisor process (for example `mvm-libkrun-supervisor`) that re-verifies the signed plan at boot and bridges the guest's audit events back to the host log.
 - **Guest agent** — the controlled in-guest work: running a process, touching the filesystem, reporting readiness, telemetry.
 - **Audit** — quietly records the decisions that mattered.
 
