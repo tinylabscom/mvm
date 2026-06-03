@@ -1,98 +1,174 @@
-# Follow-up: the function-service runner should be a nix-built artifact (per language)
+# Follow-up: make `mvmctl invoke` work on a function workload
 
-**Status:** proposed (2026-06-02). Companion to the `mkFunctionService`
-entrypoint-override fix (drop `/etc/mvm/entrypoint = runner` so PID 1 is
-the idle bootScript) — that unblocks Plan 120 Task 4 (boot→ping). This
-note covers the *remaining* layer needed for actual function **invocation**
-(`mvmctl invoke`), which the boot fix alone does not address.
+**Status:** spec (2026-06-02). Companion to the boot→ping fixes in this
+PR (#537). Those got the function workload to **boot and answer `Ping`**
+(Plan 120 Task 4). This note covers the *remaining* layer — actual
+function **invocation** (`mvmctl invoke` → vsock `RunEntrypoint`), which
+boot→ping does not exercise. Grounded in the live trace + the agent code
+(`crates/mvm-guest/src/entrypoint.rs`, `bin/mvm-guest-agent.rs`).
 
-## The remaining problem
+## What the boot→ping trace revealed
 
-`/usr/lib/mvm/wrappers/runner` is the wrapper the **agent** execs per
-`RunEntrypoint` call. It is currently baked by inlining a raw script:
+With the workload finally staying up, the agent logs at boot:
+
+```
+mvm-guest-agent: entrypoint validation failed at boot:
+  entrypoint marker contents not absolute: #!/bin/sh
+  /nix/store/…-greet-boot; RunEntrypoint requests will return EntrypointInvalid
+```
+
+So there are **two** independent invoke blockers, in priority order:
+
+### 1. (primary) `/etc/mvm/entrypoint` is overloaded — marker vs boot command
+
+`/etc/mvm/entrypoint` has two *incompatible* consumers:
+
+- **`/init`** (`nix/lib/mk-guest.nix`) **sources** it as PID 1's boot
+  command. For a function workload that's the idle `funcBootScript`
+  (`exec sleep infinity`) — a `#!/bin/sh` script.
+- **The agent** (`EntrypointPolicy::production()`,
+  `entrypoint.rs:43`) reads it as a **marker whose contents must be a
+  bare absolute path** to the per-call runner under
+  `/usr/lib/mvm/wrappers/`, then `RunEntrypoint` execs *that* per call.
+
+One file cannot be both a shell script and a bare path. The history
+proves the conflict is fundamental, not a bug:
+
+- **Before #537:** `mkFunctionService` wrote `/etc/mvm/entrypoint =
+  /usr/lib/mvm/wrappers/runner` (a bare path). The agent marker was
+  *valid* — but PID 1 became the one-shot runner → reboot.
+- **After #537:** `/etc/mvm/entrypoint` is the idle bootScript. PID 1 is
+  correct — but the agent marker is now a script → `NotAbsolute` →
+  `EntrypointInvalid`.
+
+The two requirements move in opposite directions on the same file. **They
+must be different files.**
+
+Note the agent's boot validation is **non-fatal** (`init_entrypoint_validation`,
+`mvm-guest-agent.rs:1440` — logs one line, agent stays up, only
+`RunEntrypoint` fails). Command (non-function) workloads never call
+`RunEntrypoint`, so they tolerate a missing/failed marker. The marker is
+therefore a *function-workload* concept.
+
+### 2. (secondary) the runner isn't executable in the rootfs
+
+`/usr/lib/mvm/wrappers/runner` is what the agent execs per call. It's
+baked by inlining the raw wrapper bytes:
 
 ```nix
 # nix/lib/factories/languages/python.nix
-runnerSource  = if concurrency == null then ../../../wrappers/python/oneshot.py
-                else ../../../wrappers/python/longrunning.py;
-runnerScript  = builtins.readFile runnerSource;   # ← verbatim string
+runnerScript = builtins.readFile ../../../wrappers/python/oneshot.py;
 # nix/lib/factories/mkFunctionService.nix
 "/usr/lib/mvm/wrappers/runner" = { content = lang.runnerScript; mode = "0755"; };
 ```
 
-`readFile` ships the script's bytes **unmodified**, so its shebang ships
-unmodified too. `nix/wrappers/python/oneshot.py` starts with
-`#!/usr/bin/env python3`; the busybox workload rootfs has **no
-`/usr/bin/env`**, so any direct exec of the runner fails `not found`.
-(`nix/wrappers/node/*.mjs` has the same shape; node infers ESM and the
-README expects `node /usr/lib/mvm/wrappers/runner`.) Two further breaks:
+`readFile` ships the bytes verbatim, so `oneshot.py`'s
+`#!/usr/bin/env python3` ships verbatim — and the busybox workload rootfs
+has **no `/usr/bin/env`**, so a direct exec fails `not found`. (Even once
+the marker points here, this is the next failure.)
 
-1. **Mode.** Declared `0755`, but a later read-only pass in the rootfs
-   build strips owner-write → the baked file is `555`, while the agent's
-   entrypoint policy requires `0o755` (`crates/mvm-guest/src/entrypoint.rs:48`)
-   → `RunEntrypoint` returns `EntrypointInvalid`.
-2. **PATH/deps.** Even with a working interpreter, the wrapper relies on
-   the guest's ambient `PATH` and on `python3`/libs being resolvable.
+## Design
 
-All three are exactly what nix builds solve by construction. The codebase
-already says so: `mkFunctionService.nix:15-18` documents the inlined
-wrappers as a **stopgap** "until [a] follow-up PR replaces the inlined
-script with the compiled `mvm-runner` binary."
+### Decouple the marker from the boot command (fixes blocker 1)
 
-## Proposal: nix owns the runner, dispatched by the language registry
+Keep `/etc/mvm/entrypoint` as PID 1's boot command (unchanged — `/init`
+keeps sourcing it). Give the agent its **own** marker file:
 
-The language registry (`nix/lib/factories/languages/<lang>.nix`) already
-returns `{ language, runnerScript, servicePackages }`. Change `runnerScript`
-from a **raw string** to a **nix-built artifact** (a store path), and have
-`mkFunctionService` install it via `source = <store path>` (which preserves
-nix's shebang + the store's `555` mode) instead of `content = <string>`.
+- New file `/etc/mvm/runner`, contents = `/usr/lib/mvm/wrappers/runner\n`
+  (a bare absolute path). Written only by `mkFunctionService` (only
+  function workloads have a runner).
+- `EntrypointPolicy::production().marker_path` → `/etc/mvm/runner`.
 
-Per language, in `nix/lib/factories/languages/`:
+Command workloads have no `/etc/mvm/runner`; the agent's marker read
+fails benignly (`ReadMarker`, already non-fatal) instead of the current
+misleading `NotAbsolute` on the boot script — strictly clearer.
 
-- **python.nix** — build the wrapper with `pkgs.writers.writePython3`
-  (or `makeWrapper`) so nix stamps `#!${pkgs.python3}/bin/python3` and puts
-  the runtime libs on `PYTHONPATH`:
-  ```nix
-  runner = pkgs.writers.writePython3 "mvm-runner"
-             { libraries = [ ]; flakeIgnore = [ ... ]; }
-             (builtins.readFile ../../../wrappers/python/${variant}.py);
-  ```
-- **node.nix** — `pkgs.writeShellApplication`/`makeWrapper` that execs
-  `${pkgs.nodejs}/bin/node <wrapper.mjs>` (the registry already pins
-  `servicePackages = [ pkgs.nodejs ]`).
-- Future languages add their own registry entry the same way — the
-  interpreter + builder live with the language, not in `mkFunctionService`.
+### Fix the runner shebang (fixes blocker 2) — shebang rewrite, not a full artifact
 
-Then `mkFunctionService.nix`:
+`oneshot.py` is **stdlib-only on the JSON path** (`msgpack`/`jsonschema`
+are lazy, best-effort imports — see `_decode_msgpack`, `_validate_against_schema`).
+`pkgs.python3` is already baked via the registry's `servicePackages`, so
+its store path is in the rootfs closure. The minimal correct fix is to
+stamp the nix interpreter into the shebang — no `writePython3`, no
+library plumbing:
+
 ```nix
-"/usr/lib/mvm/wrappers/runner" = { source = lang.runner; };   # was: content = lang.runnerScript;
+# nix/lib/factories/languages/python.nix
+runnerScript =
+  let raw = builtins.readFile runnerSource; in
+  builtins.replaceStrings
+    [ "#!/usr/bin/env python3" ] [ "#!${pkgs.python3}/bin/python3" ] raw;
 ```
-(`source` defaults to mode `0755` in mkGuest's extraFiles; nix's store
-file is `555`, which is the correct hardened mode for a read-only wrapper.)
 
-## Also: relax the agent's mode requirement to 0o555
+`mkFunctionService` keeps `content = lang.runnerScript; mode = "0755"`.
+`mkGuest`'s `install -m 0755` lands it at exactly 0755 in the rootfs
+(`mk-guest.nix:558`), owned root by the rootfs build.
 
-`crates/mvm-guest/src/entrypoint.rs:48` requires `required_mode: 0o755`.
-A nix-built wrapper (like the agent binary itself, mk-guest.nix:676
-"mode 0555 so the agent can't rewrite itself") is `0o555` — read-only is
-the *more* hardened mode. Change the policy to accept/require `0o555`
-(no owner-write) and update the `entrypoint.rs` unit tests
-(`test_policy(..., 0o755)` → `0o555`). This removes the 555-vs-755
-conflict at its source instead of forcing the wrapper writable.
+**Mode reconciliation is a non-issue** (correcting the earlier draft):
+`install -m 0755` *sets* the mode regardless of the nix store's `555`,
+so the baked runner is 0755 and already matches the agent's
+`required_mode: 0o755`. No agent-policy change, no `0o555` relaxation.
 
-## End state (the documented direction)
+#### Node
 
-The cleanest finish is the compiled, language-agnostic **`mvm-runner`**
-Rust binary baked at `/usr/lib/mvm/wrappers/runner` like the agent — no
-shebang, no interpreter, mode handled by nix, the per-language dispatch
-done in Rust. The `writePython3`/`makeWrapper` step above is the interim
-that makes `invoke` work today; the binary is the eventual replacement.
+`oneshot.mjs` is ESM and needs the `node` runtime — a shebang rewrite
+alone won't do (a shebang'd file with no `.mjs` extension loads as
+CommonJS and the ESM syntax fails). Install two files via the registry
+instead, keeping `mkFunctionService` language-generic by having the
+registry return a set of runner files rather than one string:
+
+```nix
+# node.nix contributes:
+#   /usr/lib/mvm/wrappers/runner.mjs  (content = the wrapper, mode 0644)
+#   /usr/lib/mvm/wrappers/runner      (content = "#!${runtimeShell}\n
+#                                       exec ${nodejs}/bin/node \
+#                                       /usr/lib/mvm/wrappers/runner.mjs \"$@\"",
+#                                       mode 0755)
+```
+
+The marker still points at `/usr/lib/mvm/wrappers/runner`; the shell shim
+is the executable the agent validates and execs. `${pkgs.nodejs}` is
+already in `servicePackages`, so its closure is in the rootfs.
+
+To support both shapes cleanly, change the registry contract from
+`runnerScript` (one string) to `runnerFiles` (a `{ "<rel-path>" = {
+content/source; mode }; }` attrset that `mkFunctionService` merges into
+`extraFiles` under `/usr/lib/mvm/wrappers/`). Python contributes one
+entry, node two.
+
+## Files to change
+
+- `crates/mvm-guest/src/entrypoint.rs` — `marker_path` →
+  `/etc/mvm/runner`; update `test_production_policy_constants` and the
+  module doc-comment. `required_mode` stays `0o755`.
+- `crates/mvm-guest/src/bin/mvm-guest-agent.rs`,
+  `crates/mvm-guest/src/vsock.rs` — comments naming `/etc/mvm/entrypoint`
+  as the marker → `/etc/mvm/runner`.
+- `nix/lib/factories/languages/{python,node}.nix` — fix the python
+  shebang; node contributes the shim + `.mjs`; switch the registry
+  contract to `runnerFiles`.
+- `nix/lib/factories/mkFunctionService.nix` — install `lang.runnerFiles`
+  under `/usr/lib/mvm/wrappers/`; add the `/etc/mvm/runner` marker
+  (`content = "/usr/lib/mvm/wrappers/runner\n"`).
 
 ## Acceptance
 
-- `mvmctl invoke hello-app --input name='ari'` returns `hello ari` against
-  a running function workload (the agent execs the runner, the runner
-  dispatches `greet`, returns the encoded string) — the part Plan 120
-  Task 4's boot→ping acceptance does **not** cover.
-- The runner's baked shebang resolves inside the rootfs (no `/usr/bin/env`
-  dependency); `RunEntrypoint` no longer returns `EntrypointInvalid`.
+- `mvmctl invoke hello-app --input name='ari'` returns `hello ari`
+  against a running function workload: agent boot logs `entrypoint
+  validated at /usr/lib/mvm/wrappers/runner`, `RunEntrypoint` execs the
+  runner, the runner dispatches `greet` and returns the encoded string.
+- The runner's baked shebang resolves inside the rootfs (no
+  `/usr/bin/env` dependency); `RunEntrypoint` no longer returns
+  `EntrypointInvalid`.
+- Boot→ping (Task 4) still green — `/etc/mvm/entrypoint` is untouched,
+  so PID 1 still idles.
+
+## Why not the compiled `mvm-runner` binary now
+
+`mkFunctionService.nix:15-18` documents the eventual end state: a
+compiled, language-agnostic `mvm-runner` Rust binary at
+`/usr/lib/mvm/wrappers/runner` (no shebang, no interpreter, dispatch in
+Rust). That's the clean finish, but it's a larger build-system change.
+The shebang rewrite + marker decouple above makes `invoke` work today
+against the existing audited wrappers; the binary is the later
+replacement, and the marker decoupling it needs is identical.
