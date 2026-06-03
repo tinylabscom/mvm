@@ -169,7 +169,46 @@ entry, node two.
 - Boot→ping (Task 4) still green — `/etc/mvm/entrypoint` is untouched,
   so PID 1 still idles.
 
-## The runner MUST be a binary, not a shebang script (fexecve finding)
+## Invoke bring-up status (live, 2026-06-03)
+
+Function `invoke` had never run E2E. Driving real `RunEntrypoint`s (via
+the `agent_invoke` example) against an `up --flake` VM, each fix peeled
+the next layer:
+
+1. ✅ **Marker decouple** — `/etc/mvm/runner`; agent finds the runner.
+2. ✅ **Mode 0555** — agent accepts it.
+3. ✅ **Shebang** — `#!${python3}`; nix interpreter launches.
+4. ✅ **CLOEXEC drop** (chosen over the compiled launcher; §below) — the
+   script runner now execs; python runs `oneshot.py`.
+5. ⛔ **SDK import (current frontier).** `oneshot.py` imports the user
+   module (`app`), whose top-level `import mvm` fails:
+   `ModuleNotFoundError: No module named 'mvm'`. The mvm Python SDK isn't
+   in the function rootfs.
+
+   **Good news that makes this the likely-last layer:** the SDK has zero
+   runtime deps (`pyproject` `dependencies = []`) and every module
+   `import mvm` pulls (`_dsl`/`_ir`/`_remote`/`_session`/`_sandbox`/
+   `_runtime`) is stdlib-only — so it imports cleanly under the bare
+   `python3` already in the rootfs. And `@mvm.app(...)` returns `fn`
+   unchanged (`_dsl.py:288`), so `getattr(module, "greet")` is the plain
+   function → `greet("ari")` → `"hello ari"`.
+
+   **Remaining work — bake the SDK into the function rootfs.** Design
+   choice (not yet made):
+   - **System-path bake (cleanest):** the mvm flake exposes the SDK as a
+     pure-python package; the factory adds it to the rootfs python env /
+     a `PYTHONPATH` the wrapper honors. Needs the SDK source reachable
+     from `nix/` (it lives at `sdks/python`, outside the flake root).
+   - **Bundle into `/app`:** `compile` stages `sdks/python/mvm` into the
+     source bundle (`orchestrator.rs` `src/`). Faithful + simple, but
+     per-app copy and must survive the Plan-0007 reachability prune.
+   - **Runtime shim:** a tiny baked `mvm` exposing just the decorator API
+     as runtime no-ops. Smallest, but duplicates the SDK surface.
+
+   After this, watch for further layers: the decorator's `_ir`
+   construction at import time, and the encoded-return round-trip.
+
+## The runner MUST be a binary, or drop CLOEXEC (fexecve finding)
 
 Live `RunEntrypoint` (via the `agent_invoke` example) got the agent to
 exec the runner — then failed:
