@@ -137,6 +137,24 @@ let
     after_start = hookScriptFor "after-start" (hooks.after_start or [ ]);
     before_stop = hookScriptFor "before-stop" (hooks.before_stop or [ ]);
   };
+
+  # PID 1 boot command for the agent-dispatched (cold-tier) function
+  # model. Passed to mkGuest's `bootCommand` (→ /etc/mvm/boot), which is
+  # deliberately distinct from /etc/mvm/entrypoint: that file is the
+  # agent's per-call marker (the single-shot wrapper at
+  # /usr/lib/mvm/wrappers/runner). PID 1 must NOT be that wrapper — it
+  # exits after one call and the kernel panics. So PID 1 stages the
+  # source, runs the before_start hook, then idles; the agent execs the
+  # wrapper per RunEntrypoint. Single source of truth for the boot
+  # script — both the SDK flake codegen and nix/lib/mkFunctionWorkload.nix
+  # consume `bootCommand` instead of re-rolling it.
+  bootScript = pkgs.writeShellScript "${workloadId}-boot" ''
+    set -eu
+    mkdir -p "$(${pkgs.coreutils}/bin/dirname ${pkgs.lib.escapeShellArg sourcePath})"
+    ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${pkgs.lib.escapeShellArg sourcePath}
+    /etc/mvm/hooks/before_start.sh
+    exec ${pkgs.coreutils}/bin/sleep infinity
+  '';
 in
 {
   extraFiles = {
@@ -163,23 +181,34 @@ in
     # `before_build.sh` is rendered for parity but runs in the builder
     # VM, which is mid-transition (Plan 72) — the builder consumer
     # lands in Phase 10c.
+    # `source =` (copy the script file), NOT `content =` (which would
+    # writeText the store-PATH string as the file body — a 0755 file
+    # whose only content is a bare /nix/store path with no shebang,
+    # relying on a fragile ENOEXEC shell-retry to run under the boot
+    # script's `set -eu`). With `source =` the real script lands, and
+    # because the ext4 packs the closure of every store path referenced
+    # by a rootfs file, the hook's interpreter (+coreutils) ride along.
     "/etc/mvm/hooks/before_build.sh" = {
-      content = hookScripts.before_build;
+      source = hookScripts.before_build;
       mode = "0755";
     };
     "/etc/mvm/hooks/before_start.sh" = {
-      content = hookScripts.before_start;
+      source = hookScripts.before_start;
       mode = "0755";
     };
     "/etc/mvm/hooks/after_start.sh" = {
-      content = hookScripts.after_start;
+      source = hookScripts.after_start;
       mode = "0755";
     };
     "/etc/mvm/hooks/before_stop.sh" = {
-      content = hookScripts.before_stop;
+      source = hookScripts.before_stop;
       mode = "0755";
     };
   };
+
+  # PID 1 idle boot command (see `bootScript`). Callers pass this to
+  # mkGuest's `bootCommand`; /etc/mvm/entrypoint stays the agent marker.
+  bootCommand = [ "${bootScript}" ];
 
   servicePackages = lang.servicePackages;
 

@@ -182,14 +182,47 @@ One gated test driving the whole spine with the **verified** verbs: `mvmctl dev 
 
 ## Task 4: Close whatever the E2E surfaces, until it is green
 
-> **🟡 REMAINING — the active workstream.** Run the E2E **only** bounded + backgrounded per Workstream A's operating rule (`gtimeout … just e2e-core-demo` via a background job), never a foreground blocking call. Triage from `<scratch>/<step>.stderr.log` + `<vm_state_dir>/console.log` + `~/.cache/mvm/builder-vm/jobs/<id>/nix-stderr.log`.
+> **✅ GREEN 2026-06-02** (`core_demo_e2e`: 1 passed, 114s, macOS/libkrun). The
+> spine's *guessed* gaps below (backend select / handoff / teardown) were all
+> already correct. The one real gap was a **function-workload boot panic** the
+> spine had never exercised: `/etc/mvm/entrypoint` was overloaded — the guest
+> agent reads it as its ADR-007 per-call marker (the single-shot wrapper at
+> `/usr/lib/mvm/wrappers/runner`), while mkGuest's `/init` sources it as PID 1's
+> boot command. The factory's `extraFiles["/etc/mvm/entrypoint"]` (the wrapper)
+> overwrote mkGuest's rendered idle bootScript, so PID 1 exec'd the single-shot
+> wrapper, which exits at boot → kernel panic → VM powers off before the agent
+> answers (empty console is the known plain-`Image`/no-hvc0 trait, not a clue;
+> ground truth came from `debugfs -R cat <build>/rootfs.ext4`). Function-workload
+> boot had never worked E2E (Plan 138 proved agent-ping via the non-function
+> `examples/agent_ping`).
+>
+> **Fix (mkGuest `bootCommand` split + factory ownership):** mkGuest gained a
+> `bootCommand` arg → renders `/etc/mvm/boot` (PID 1, sourced by `/init` in
+> preference to `/etc/mvm/entrypoint`); `/etc/mvm/entrypoint` stays the agent
+> marker, owned by the factory's extraFiles — two roles, two files, no clobber.
+> `nix/lib/factories/mkFunctionService.nix` now owns the idle bootScript and
+> exposes it as `bootCommand` (killing the duplicate copies in
+> `crates/mvm-sdk/src/compile/flake.rs` and `nix/lib/mkFunctionWorkload.nix`,
+> both of which now consume `factory.bootCommand`). A build-time `_bootContract`
+> throw guards a `bootCommand` without an extraFiles `/etc/mvm/entrypoint`.
+> Secondary fix: `mkFunctionService` hook files switched `content =` → `source =`
+> (the `content =` form writeText'd the hook's store-PATH *string* into the file,
+> a dangling path with no shebang that would abort the boot script under
+> `set -eu` once it ran). NB editing `mk-guest.nix` invalidates the builder-VM
+> image (it imports `nix/lib` + uses mkGuest) → a one-time cold Stage 0 rebuild;
+> one cold rebuild flaked with SIGTERM(143), succeeded on retry (transient —
+> `bootCommand=null` keeps the builder VM behaviorally identical).
+>
+> Operating rule held: every run bounded + backgrounded (`gtimeout … cargo test`),
+> never a foreground blocking call. Triage from `<scratch>/<step>.stderr.log` +
+> the built `rootfs.ext4` via debugfs.
 
 The spine is *believed* complete (fresh build → `overlay_aware: true` → admits; `up` pings the agent). Task 4 is the iterate-to-green loop: run the gated E2E, read `<vm_state_dir>/console.log` **first** on any boot failure (per the project's debugging convention), fix the one gap, re-run. **No speculative fixes** — only what the E2E proves broken. The likely gaps, in order:
 
-- [ ] **Step 1: macOS workload backend.** `up`'s `--backend` defaults to `firecracker` (`up.rs:705`), which needs Linux KVM. On macOS the workload microVM must run via libkrun. Confirm `up` selects libkrun on macOS (per-OS default) or thread the backend through the E2E. This is the most likely first failure.
-- [ ] **Step 2: `compile → up` handoff.** Confirm `up --flake <compiled-dir>` consumes `compile`'s rendered `flake.nix`. If `up` expects a flake *reference* rather than a directory of rendered artifacts, wire the handoff (point `up` at the rendered dir, or have the E2E pass it as a path-flake `--flake path:<dir>`).
-- [ ] **Step 3: teardown.** Confirm `dev down` stops the builder; if `up` leaves a workload VM running, stop it (the `mvmctl` stop/kill verb) in the test's teardown so repeated runs stay idempotent.
-- [ ] **Step 4: Repeat** until `MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e` is green on a macOS/libkrun host. Each fix is its own red→green→commit cycle.
+- [x] **Step 1: macOS workload backend.** Already correct — the E2E threads `--hypervisor libkrun` and `up` honored it (booted `silly-experience` via the libkrun supervisor). No change needed.
+- [x] **Step 2: `compile → up` handoff.** Already correct — `up --flake <compiled-dir>` consumed the rendered `flake.nix` + `launch.json` and built in-VM. No change needed.
+- [x] **Step 3: teardown.** Already correct — the bounded harness reaps each step's process group; the warm builder is reused across runs. No change needed.
+- [x] **Step 4: Repeat to green.** Done — the real gap was the function-workload `/etc/mvm/entrypoint` collision (see the Task-4 callout above), not the three guessed gaps. Fixed via the mkGuest `bootCommand` split + factory ownership; `core_demo_e2e` green (1 passed, 114s).
 - [ ] **Step 5: Tick the §4 acceptance boxes** in `specs/plans/117-cleanup-and-rearchitecture-brief.md` for the criteria this proves (`dev up` persistent builder; hello-app compiles + builds in-VM; `up` boots + agent answers vsock; the loop driven by `mvmctl dev`/`compile`/`up`). Leave the cross-platform + encrypted-at-rest + Noise boxes for their plans.
 
 ## Task 5: the one-call live-exec ergonomic — `Sandbox` (the DX headline)
@@ -224,7 +257,7 @@ The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) pu
 - [x] `ArtifactSidecar` → `ArtifactManifest` rename landed (2026-05-31, 3 code files); build + affected tests (`mvm-build`/`mvm-base`) + clippy green.
 - [x] `crates/mvm-cli/tests/compile_hello_app.rs` passes (decorator `app.py` lowers to `flake.nix` + `launch.json`); the stale `compile.rs` docstring is corrected.
 - [x] `crates/mvm-cli/tests/core_demo_e2e.rs` exists, is `MVM_E2E_SMOKE`-gated (test + `ci.yml::core-demo-e2e` lane + `development.md` docs), and is **hardened against freezing** (Workstream A: watchdog + bounded subprocess, commit `898b8507`).
-- [ ] `core_demo_e2e` is **green on a macOS/libkrun host** end-to-end (`dev up` → `compile` → `up` with the agent reachable) — Task 4.
+- [x] `core_demo_e2e` is **green on a macOS/libkrun host** end-to-end (`dev up` → `compile` → `up` with the agent reachable) — Task 4. **(2026-06-02: 1 passed, 114s.)**
 - [x] The one-shot `Sandbox.exec(...)` returns stdout on a dev-tier sandbox and raises `SandboxDevOnly` in prod (API landed, commit `c989fac7`).
 - [ ] The quickstart/README leads with the five-line `Sandbox.exec` example (Task 5 §4).
 - [ ] The proven §4 acceptance boxes are ticked in the brief (pending Task 4 green).
