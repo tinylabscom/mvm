@@ -23,6 +23,10 @@
 # — real release codegen, readable symbols.
 set -euo pipefail
 
+# Symbol greps are scoped to the agent's own crate (mvm_guest_agent.*<name>)
+# on purpose: a bare `do_exec` also matches std::process::Command::do_exec,
+# the libstd internal that exists in any binary that spawns a subprocess.
+
 PKG=mvm-guest
 BIN=mvm-guest-agent
 
@@ -34,7 +38,7 @@ prod_syms=$(nm "target/release/$BIN")
 
 fail=0
 
-if grep -q 'handle_run_entrypoint' <<<"$prod_syms"; then
+if grep -q 'mvm_guest_agent.*handle_run_entrypoint' <<<"$prod_syms"; then
   echo "ok: handle_run_entrypoint present (W5 handler ships; symbol table is populated)"
 else
   echo "::error::ADR-007 §W5: handle_run_entrypoint is ABSENT from the production agent." >&2
@@ -44,10 +48,10 @@ else
   fail=1
 fi
 
-if grep -q 'do_exec' <<<"$prod_syms"; then
+if grep -q 'mvm_guest_agent.*do_exec' <<<"$prod_syms"; then
   echo "::error::claim 4 / ADR-002 §W4.3: do_exec is PRESENT in the production agent." >&2
   echo "The dev-only \`sh -c\` exec path leaked into a non-dev-shell build." >&2
-  grep 'do_exec' <<<"$prod_syms" >&2 || true
+  grep 'mvm_guest_agent.*do_exec' <<<"$prod_syms" >&2 || true
   fail=1
 else
   echo "ok: do_exec absent from the production agent (claim 4 / W4.3)"
@@ -59,7 +63,7 @@ CARGO_PROFILE_RELEASE_STRIP=false \
     --no-default-features --features dev-shell \
     --target-dir target/claim4-poscontrol
 echo "::endgroup::"
-if grep -q 'do_exec' <<<"$(nm "target/claim4-poscontrol/release/$BIN")"; then
+if grep -q 'mvm_guest_agent.*do_exec' <<<"$(nm "target/claim4-poscontrol/release/$BIN")"; then
   echo "ok: positive control — do_exec is detectable when dev-shell is enabled"
 else
   echo "::error::Positive control FAILED: do_exec not found even WITH dev-shell on." >&2
