@@ -6,6 +6,17 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-06-03
+
+### Added
+
+- **SDK package READMEs.** `sdks/python/README.md` rewritten against the
+  current `mvmctl` surface (the old copy referenced the deprecated
+  `mvmforge` CLI), and a new `sdks/typescript/README.md` mirrors it. These
+  render on the PyPI (`mvm`) and npm (`@runmvm/mvm`) package pages; the
+  registries are immutable per version, so this patch ships them to the
+  live pages.
+
 ## [0.15.0] — 2026-06-03
 
 ### Added
@@ -243,6 +254,7 @@ has a tracking pointer; none is silently broken.
   See [`MIGRATING-FROM-V1.md`](MIGRATING-FROM-V1.md) §"Feature parity
   status" for the per-feature delta.
 
-[Unreleased]: https://github.com/tinylabscom/mvm/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/tinylabscom/mvm/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/tinylabscom/mvm/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/tinylabscom/mvm/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/tinylabscom/mvm/releases/tag/v0.14.0
