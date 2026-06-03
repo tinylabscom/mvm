@@ -79,9 +79,9 @@ use crate::builder_vm::{
 // `supervisor_exit_error` / `shell_job_exit_error` (commit 6), and
 // `builder_vm_timeout` (commit 7 — last pre-VzBuilderVm migration).
 use crate::builder_vm_runtime::{
-    NixStoreImageLock, acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job,
-    finalize_install_job, read_job_result, shell_job_exit_error, stage_job_dir,
-    supervisor_exit_error,
+    NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
+    builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result,
+    shell_job_exit_error, stage_job_dir, supervisor_exit_error,
 };
 
 /// Default vCPU count for the builder VM. Nix builds are
@@ -90,13 +90,12 @@ use crate::builder_vm_runtime::{
 pub const DEFAULT_VCPUS: u8 = 4;
 
 /// Default RAM in MiB. Originally 8 GiB (Plan 72 W5.D bullet 9 —
-/// in-VM nix builds peak ~5-6 GiB). Plan 95 raised this to 16 GiB
-/// alongside bumping the Stage 0 `/nix` tmpfs `size=` cap in
-/// `stage0/init.sh` (4G → 14G): tmpfs is RAM-backed, so the cap
-/// can only be honored if the VM has at least that much RAM. The
-/// real bottleneck in dev-up validation was the tmpfs cap, not the
-/// VM RAM — bumping VM RAM alone is a no-op as long as the
-/// `size=` mount option clips earlier. Keep these two in lockstep.
+/// in-VM nix builds peak ~5-6 GiB). Raised to 16 GiB for headroom
+/// when several derivations' build working sets overlap. Before the
+/// persistent-store cutover this also had to cover a 14 GiB in-RAM
+/// `/nix` tmpfs in `stage0/init.sh`; the Stage 0 store now lives on a
+/// virtio-blk ext4 disk (`nix-store-stage0-<arch>.img`), so this RAM
+/// only has to cover the compiles themselves, not the store.
 pub const DEFAULT_MEMORY_MIB: u32 = 16384;
 
 /// Default size of the persistent `/nix`-store virtio-blk image,
@@ -325,10 +324,19 @@ impl LibkrunBuilderVm {
     }
 
     /// libkrun-side Stage 0 boot. Drives a self-contained `RootDir`
-    /// guest — no `/job/cmd.sh` staging, no `/job/result` parsing, no
-    /// `/nix-store` virtio-blk. The guest's `/init` reads `/work` and
-    /// writes the steady-state builder VM artifacts to `/out`, then
-    /// powers off cleanly.
+    /// guest — no `/job/cmd.sh` staging, no `/job/result` parsing. The
+    /// guest's `/init` reads `/work` and writes the steady-state builder
+    /// VM artifacts to `/out`, then powers off cleanly.
+    ///
+    /// Attaches a dedicated persistent `nix-store-stage0-<arch>.img` as
+    /// the guest's only virtio-blk device (`/dev/vda` — Stage 0 has no
+    /// block rootfs, its root is virtio-fs via `krun_set_root`). The
+    /// guest mounts it at `/nix` (formatting on first boot), so the slim
+    /// kernel + Rust host binaries are built once and reused across
+    /// `dev up` runs instead of recompiled into a throwaway tmpfs every
+    /// time. ext4 is case-sensitive, which is also why the old in-RAM
+    /// tmpfs existed (APFS case-insensitivity breaks Nix substitution) —
+    /// the disk keeps that property and adds persistence.
     ///
     /// On success the caller still validates that the expected artifacts
     /// (`vmlinux`, `rootfs.ext4`) landed in `artifact_out`; this only
@@ -378,6 +386,19 @@ impl LibkrunBuilderVm {
 
         let supervisor_path = resolve_supervisor_path()?;
 
+        // Persistent, host-locked Nix store for the image build. Sparse
+        // image, formatted in-guest on first boot; survives across
+        // `dev up` runs so the slim kernel + Rust toolchain closure are
+        // built once. Dedicated filename (not the builder's
+        // `nix-store-<arch>.img`) so the flock never contends with a
+        // concurrent `mvmctl build`. The guard must outlive the
+        // supervisor — bound here, dropped at function end.
+        let nix_store_lock = acquire_nix_store_image_lock_named(
+            &builder_vm_cache_dir(),
+            &stage0_nix_store_image_name(),
+            u64::from(self.nix_store_mib),
+        )?;
+
         let job_id = unique_job_id();
         let vm_name = format!("mvm-stage0-{job_id}");
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
@@ -393,6 +414,14 @@ impl LibkrunBuilderVm {
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
+            // Persistent /nix store. The only block device on a RootDir
+            // guest, so it enumerates as /dev/vda; init.sh formats it on
+            // first boot and mounts it at /nix.
+            .add_disk(
+                "nix-store",
+                path_to_str(nix_store_lock.path(), "nix_store_img")?,
+                false,
+            )
             .add_virtio_fs("work", path_to_str(workspace_dir, "workspace_dir")?)
             .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
             // /mvm-bins inside the guest — init.sh sets MVM_HOST_BIN_DIR to
@@ -1154,6 +1183,17 @@ pub(crate) fn host_arch_tag() -> &'static str {
 /// function does not touch the filesystem.
 pub(crate) fn builder_vm_cache_dir() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm")
+}
+
+/// Filename of Stage 0's dedicated persistent Nix-store image,
+/// `nix-store-stage0-<arch>.img`. Distinct from the steady-state
+/// builder's `nix-store-<arch>.img` so a `dev up` bootstrap and a
+/// concurrent `mvmctl build` never contend on the same flock — see
+/// [`acquire_nix_store_image_lock_named`]. Lives in
+/// [`builder_vm_cache_dir`] and matches `cache info`'s
+/// `nix-store-*.img` sparse-footprint report.
+pub(crate) fn stage0_nix_store_image_name() -> String {
+    format!("nix-store-stage0-{}.img", host_arch_tag())
 }
 
 /// Find the builder VM image (kernel + rootfs + cmdline) in
@@ -2096,10 +2136,9 @@ mod tests {
         let vm = LibkrunBuilderVm::default();
         assert_eq!(vm.vcpus, 4);
         // Plan 72 W5.D bullet 9: 4 → 8 GiB (in-VM nix builds peak
-        // ~5-6 GiB; OOM at lower default). Plan 95: 8 → 16 GiB
-        // alongside stage0/init.sh bumping the `/nix` tmpfs `size=`
-        // cap to 14G. Hardcoded so a regression on either side
-        // fails fast.
+        // ~5-6 GiB; OOM at lower default). Later raised to 16 GiB for
+        // overlapping build working sets. Hardcoded so a regression on
+        // either side fails fast.
         assert_eq!(vm.memory_mib, 16384);
         assert_eq!(vm.nix_store_mib, 65536);
     }
@@ -2549,6 +2588,19 @@ mod tests {
             tag == "aarch64" || tag == "x86_64",
             "unexpected arch tag: {tag}"
         );
+    }
+
+    #[test]
+    fn stage0_nix_store_image_name_is_arch_keyed_and_distinct_from_builder() {
+        let name = stage0_nix_store_image_name();
+        // `cache info` globs `nix-store-*.img` for its sparse report;
+        // stay inside that glob so the Stage 0 store is surfaced too.
+        assert!(name.starts_with("nix-store-stage0-"), "got {name}");
+        assert!(name.ends_with(".img"), "got {name}");
+        assert!(name.contains(host_arch_tag()), "got {name}");
+        // Must NOT collide with the steady-state builder store filename,
+        // or the two flocks would serialize against each other.
+        assert_ne!(name, format!("nix-store-{}.img", host_arch_tag()));
     }
 
     // `read_job_result_*`, `extract_nix_store_hash_*`,

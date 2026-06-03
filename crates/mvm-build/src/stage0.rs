@@ -773,18 +773,77 @@ mod tests {
     /// compile at `HOSTCC scripts/basic/fixdep`. With Alpine nix's
     /// default `max-jobs = auto`, four heavy derivations
     /// (mvm-host-vm-init, mvm-egress-proxy, mvm-guest-agent, linux)
-    /// ran concurrently and the combined working set exceeded the
-    /// 16 GiB guest RAM / 14 GiB `/nix` tmpfs envelope. Serializing
-    /// derivations with `--max-jobs 1` keeps peak memory under the
-    /// per-derivation ~5-6 GiB observation recorded in
-    /// `libkrun_builder.rs:92-99`.
+    /// ran concurrently and the combined build working set exceeded
+    /// the guest RAM envelope. Serializing derivations with
+    /// `--max-jobs 1` keeps peak memory under the per-derivation
+    /// ~5-6 GiB observation recorded in `libkrun_builder.rs`. (The
+    /// store moved off the in-RAM tmpfs onto a virtio-blk ext4 disk in
+    /// the persistent-store cutover, but the compiles still need the
+    /// headroom, so the cap stays.)
     #[test]
     fn init_script_caps_nix_derivation_parallelism() {
         assert!(
             INIT_SCRIPT.contains("--max-jobs 1"),
             "init script must serialize Stage 0 nix derivations \
-             (`--max-jobs 1`) so parallel kernel + Rust builds don't \
-             blow the guest RAM / /nix-tmpfs envelope"
+             (`--max-jobs 1`) so parallel kernel + Rust build working \
+             sets don't blow the guest RAM envelope"
+        );
+    }
+
+    /// The persistent-store cutover (replacing the in-RAM tmpfs `/nix`
+    /// with a host-backed ext4 virtio-blk image) so a `dev up`
+    /// rebuild reuses the slim kernel + Rust toolchain closure instead
+    /// of recompiling it every time. Pins the load-bearing shape of the
+    /// init script's new `/nix` provisioning.
+    #[test]
+    fn init_script_mounts_persistent_ext4_nix_store() {
+        // The throwaway tmpfs `/nix` is gone. (Other tmpfs mounts —
+        // /tmp, /run — remain, so assert specifically on `/nix`.)
+        assert!(
+            !INIT_SCRIPT.contains("tmpfs /nix"),
+            "init script must no longer mount a tmpfs over /nix"
+        );
+        // e2fsprogs gives mkfs.ext4, installed before /nix is mounted.
+        assert!(
+            INIT_SCRIPT.contains("add e2fsprogs"),
+            "init script must apk-add e2fsprogs for first-boot mkfs.ext4"
+        );
+        // Format-vs-mount is decided by PROBING for an ext4 superblock
+        // with e2fsck (in the e2fsprogs CORE package — dumpe2fs is not),
+        // never by try-mount-then-reformat. A geometry-EINVAL on a disk
+        // that already holds a store must not be read as "blank" and
+        // wipe the warm cache (that was the store-losing bug). Pin the
+        // probe so a refactor can't reintroduce blind reformatting.
+        assert!(
+            INIT_SCRIPT.contains("e2fsck -fy \"$NIX_DEV\""),
+            "init script must probe for an existing ext4 store with e2fsck before formatting"
+        );
+        assert!(
+            INIT_SCRIPT.contains("PROBE_RC") && INIT_SCRIPT.contains("-ge 8"),
+            "init script must format only when the probe finds no superblock (e2fsck rc >= 8)"
+        );
+        // First boot formats the sparse disk with an explicit 4K block
+        // count SIZED UNDER the device: libkrunfw's Stage 0 kernel
+        // over-reports the virtio-blk size, so a fs sized to the kernel
+        // view reads back too large next boot and `mount` EINVALs. The
+        // margin (`- 2048`) keeps the fs strictly inside the real device.
+        assert!(
+            INIT_SCRIPT.contains("mkfs.ext4 -F -q -b 4096"),
+            "init script must format the store disk with an explicit 4K block count"
+        );
+        assert!(
+            INIT_SCRIPT.contains("SECTORS / 8 - 2048"),
+            "init script must size the fs under the kernel-reported device (over-report margin)"
+        );
+        assert!(
+            INIT_SCRIPT.contains("/sys/class/block/"),
+            "init script must read the device size from /sys/class/block"
+        );
+        // Mount the detected device at /nix as ext4 (case-sensitive,
+        // the property the tmpfs originally provided).
+        assert!(
+            INIT_SCRIPT.contains("mount -t ext4 \"$NIX_DEV\" /nix"),
+            "init script must mount the persistent ext4 store at /nix"
         );
     }
 

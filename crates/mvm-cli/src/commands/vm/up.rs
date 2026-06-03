@@ -1832,19 +1832,16 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
 
-    // libkrun runs the workload in a detached supervisor daemon, so `up`
-    // returns while the VM keeps running — but it must still confirm the
-    // guest agent answered over vsock before returning. That is the
-    // boot→ping readiness contract the core-demo E2E asserts: `up`
-    // exiting 0 *without* "Guest agent not reachable" == the agent
-    // answered. Before this, libkrun `up` returned the instant the
-    // supervisor spawned, proving only that a process started, never
-    // that the guest booted (the wait was apple-container-only).
-    // `wait_for_guest_agent` negotiates the Ping capability only (not
-    // the dev exec surface), so it succeeds against sealed prod images
-    // too; it routes through `vsock_transport::for_vm`, which selects
-    // the libkrun transport via the per-VM vsock proxy socket.
-    if effective_hypervisor == "libkrun" {
+    // libkrun / firecracker launch a detached supervisor daemon, so `up`
+    // returns after launch (unlike apple-container below, which blocks
+    // in-process). Verify the guest agent here anyway: without it, `up
+    // --hypervisor libkrun` exits 0 the instant the daemon spawns — never
+    // checking that the guest actually booted and the agent answered —
+    // so a real boot failure passes silently and `core_demo_e2e`'s
+    // boot→ping proof is hollow (it only watches for this exact warning).
+    // `--detach` opts out (fire-and-forget, like the apple-container
+    // launchd path). apple-container keeps its own wait in its block.
+    if matches!(effective_hypervisor, "libkrun" | "firecracker") && !detach {
         ui::info("Waiting for guest agent...");
         record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
         if wait_for_guest_agent(&vm_name_owned, 30) {
@@ -1857,7 +1854,20 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 );
             }
         } else {
-            ui::warn("Guest agent not reachable.");
+            // A non-detached `up` means "bring the workload up and confirm
+            // it" — a daemon that spawned but whose agent never answered
+            // within the boot timeout has failed. Stop the orphaned daemon
+            // and exit non-zero so the failure is unmissable. (Exit code,
+            // not the warning string: `ui::warn` routes to stdout by
+            // default, which a stderr-only check would miss; `ui::error`
+            // below keeps the message on stderr regardless.)
+            ui::error("Guest agent not reachable.");
+            let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name_owned.clone()));
+            let err = anyhow::anyhow!(
+                "guest agent for '{vm_name_owned}' not reachable within 30s of boot"
+            );
+            emit_failed_if(&admission_main, "agent-unreachable", &err);
+            return Err(err);
         }
     }
 

@@ -736,6 +736,29 @@ pub fn acquire_nix_store_image_lock(
     arch: &str,
     size_mib: u64,
 ) -> Result<NixStoreImageLock, BuilderVmError> {
+    acquire_nix_store_image_lock_named(
+        builder_cache_dir,
+        &format!("nix-store-{arch}.img"),
+        size_mib,
+    )
+}
+
+/// Like [`acquire_nix_store_image_lock`] but the image filename is
+/// supplied verbatim instead of derived as `nix-store-<arch>.img`.
+///
+/// Stage 0 (the builder-VM *image* build) uses this to key a dedicated
+/// `nix-store-stage0-<arch>.img` separate from the steady-state
+/// builder's `nix-store-<arch>.img`. Two reasons for the split: the
+/// flock would otherwise serialize a `dev up` bootstrap against any
+/// concurrent `mvmctl build` in another session, and the bootstrap's
+/// kernel/Rust-toolchain closure has no reason to share a store with
+/// user-workload builds. Both images live in the same cache dir and
+/// match `cache info`'s `nix-store-*.img` sparse-footprint report.
+pub fn acquire_nix_store_image_lock_named(
+    builder_cache_dir: &Path,
+    file_name: &str,
+    size_mib: u64,
+) -> Result<NixStoreImageLock, BuilderVmError> {
     use fs2::FileExt;
 
     std::fs::create_dir_all(builder_cache_dir).map_err(|e| {
@@ -744,7 +767,7 @@ pub fn acquire_nix_store_image_lock(
             builder_cache_dir.display()
         ))
     })?;
-    let path = builder_cache_dir.join(format!("nix-store-{arch}.img"));
+    let path = builder_cache_dir.join(file_name);
     let existed_before_open = path.exists();
 
     let file = std::fs::OpenOptions::new()
@@ -1334,6 +1357,59 @@ mod tests {
             guard.path().file_name().and_then(|s| s.to_str()),
             Some("nix-store-aarch64.img")
         );
+    }
+
+    /// fs2's `try_lock_exclusive` can spuriously return `EWOULDBLOCK` on
+    /// a fresh, uncontended path under heavy parallel test load (the
+    /// `reference_fs2_flock_spurious_ewouldblock` flake). Production must
+    /// NOT retry — there a refusal is a real concurrent holder — but a
+    /// test that expects the lock to be FREE retries briefly to absorb
+    /// the spurious failure.
+    fn acquire_named_or_retry(
+        cache_dir: &Path,
+        file_name: &str,
+        size_mib: u64,
+    ) -> NixStoreImageLock {
+        let mut last = String::new();
+        for _ in 0..40 {
+            match acquire_nix_store_image_lock_named(cache_dir, file_name, size_mib) {
+                Ok(g) => return g,
+                Err(e) => {
+                    last = format!("{e}");
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        panic!("acquire {file_name} never succeeded (last: {last})");
+    }
+
+    #[test]
+    fn acquire_nix_store_image_lock_named_uses_supplied_filename() {
+        // The named variant backs Stage 0's dedicated store image. It
+        // must use the filename verbatim, not re-derive `nix-store-<arch>`.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache_dir = scratch.path().join("builder-vm");
+        let guard = acquire_named_or_retry(&cache_dir, "nix-store-stage0-aarch64.img", 64);
+        assert_eq!(
+            guard.path().file_name().and_then(|s| s.to_str()),
+            Some("nix-store-stage0-aarch64.img")
+        );
+        // Matches `cache info`'s `nix-store-*.img` sparse report glob.
+        let n = guard.path().file_name().unwrap().to_string_lossy();
+        assert!(n.starts_with("nix-store-") && n.ends_with(".img"));
+    }
+
+    #[test]
+    fn stage0_and_builder_store_locks_do_not_collide() {
+        // The whole point of the split: a Stage 0 bootstrap and a
+        // steady-state builder build can hold their store locks at the
+        // same time because they key different image files. If they
+        // shared a filename, the second acquire would fail the flock.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache_dir = scratch.path().join("builder-vm");
+        let builder = acquire_named_or_retry(&cache_dir, "nix-store-aarch64.img", 64);
+        let stage0 = acquire_named_or_retry(&cache_dir, "nix-store-stage0-aarch64.img", 64);
+        assert_ne!(builder.path(), stage0.path());
     }
 
     #[test]

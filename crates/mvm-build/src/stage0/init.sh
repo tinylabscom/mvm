@@ -96,40 +96,18 @@ if ! mountpoint -q /mvm-bins; then
   exit 66
 fi
 
-# libkrun's set_root mode backs the guest root with virtio-fs
-# from the host's macOS APFS, which is case-insensitive by
-# default. Several Nix derivations contain files that only differ
-# by case (e.g. the Linux kernel headers ship `xt_connmark.h` and
-# `xt_CONNMARK.h` in the same directory). Substitution from
-# cache.nixos.org fails with `creating file '...xt_CONNMARK.h':
-# File exists` on APFS — the second file collides with the first.
-#
-# Fix: mount tmpfs over /nix BEFORE `apk add nix` runs, so the
-# nix package's closure (and every subsequent `nix-build`
-# substitution) lives on case-sensitive in-memory storage.
-# Mounting after apk would leave the nix binary on APFS and
-# break the case-sensitive guarantee for substitutions.
-#
-# Size cap: 14 GiB. The original 4 GiB assumed a ~600 MB closure
-# (builder-VM rootfs only). With Plan 95's slim-kernel + the Rust
-# binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) building in the
-# same VM, the working set runs:
-#   kernel intermediates (~3 GiB) +
-#   rustc-wrapper substitute closure (~2 GiB) +
-#   Rust build artifacts (~5–8 GiB)
-# 14 GiB leaves headroom. Memory budget is paid from the libkrun
-# guest's RAM allocation (DEFAULT_MEMORY_MIB in
-# crates/mvm-build/src/libkrun_builder.rs) — keep that ≥ this cap.
-mount -t tmpfs -o size=14G,mode=0755 tmpfs /nix
-mkdir -p /nix/store /nix/var/nix /nix/var/log/nix
-
-# Install Nix from Alpine's signed package repos. `apk-tools`
-# verifies the signed APKINDEX against /etc/apk/keys/ (the
-# Alpine release-signing keys shipped in the minirootfs) and
+# Install the toolchain from Alpine's signed package repos.
+# `apk-tools` verifies the signed APKINDEX against /etc/apk/keys/
+# (the Alpine release-signing keys shipped in the minirootfs) and
 # each package's signature before installation.
-echo "stage0-init: installing nix + dependencies via apk..." >&2
+#
+# e2fsprogs (mkfs.ext4) goes in FIRST, before /nix is mounted: it
+# formats the persistent store disk on first boot, and apk writes to
+# the Alpine root (virtio-fs), not /nix, so it's available regardless
+# of /nix state.
+echo "stage0-init: apk update + installing e2fsprogs (mkfs.ext4 for the /nix disk)..." >&2
 set +e
-apk --no-progress update                              > /out/apk-update.log  2>&1
+apk --no-progress update                              > /out/apk-update.log       2>&1
 APK_RC=$?
 if [ "$APK_RC" -ne 0 ]; then
   echo "stage0-init: apk update exited $APK_RC (see /out/apk-update.log)" >&2
@@ -142,7 +120,101 @@ if [ "$APK_RC" -ne 0 ]; then
   fi
   exit "$APK_RC"
 fi
-apk --no-progress add nix git ca-certificates xz      > /out/apk-add.log     2>&1
+apk --no-progress add e2fsprogs                       > /out/apk-add-e2fsprogs.log 2>&1
+APK_RC=$?
+set -e
+if [ "$APK_RC" -ne 0 ]; then
+  echo "stage0-init: apk add e2fsprogs exited $APK_RC (see /out/apk-add-e2fsprogs.log)" >&2
+  if [ -r /out/apk-add-e2fsprogs.log ]; then
+    tail -40 /out/apk-add-e2fsprogs.log >&2
+  fi
+  exit "$APK_RC"
+fi
+
+# Persistent /nix store on a host-backed ext4 virtio-blk image
+# (`nix-store-stage0-<arch>.img`, attached by
+# LibkrunBuilderVm::run_stage0_impl). This replaces the former in-RAM
+# tmpfs for two reasons:
+#
+#   1. Case-sensitivity. libkrun's set_root backs the guest root with
+#      virtio-fs over macOS APFS, which is case-insensitive. Several
+#      Nix derivations ship files differing only by case (e.g. kernel
+#      headers `xt_connmark.h` / `xt_CONNMARK.h`); substitution from
+#      cache.nixos.org fails with `File exists` on APFS. ext4 is
+#      case-sensitive, so it solves this exactly as tmpfs did.
+#   2. Persistence. Unlike a tmpfs that evaporates at poweroff, the
+#      disk survives across `dev up` runs — the slim kernel + Rust host
+#      binaries (the multi-minute derivations) are built once and
+#      reused instead of recompiled into a throwaway store every time.
+#
+# Stage 0's guest root is virtio-fs (no block rootfs), so this disk is
+# the only virtio-blk device — `/dev/vda`. Scan a few names anyway so
+# a future second disk doesn't silently shift the target.
+NIX_DEV=
+for cand in /dev/vda /dev/vdb /dev/vdc /dev/vdd; do
+  if [ -b "$cand" ]; then NIX_DEV="$cand"; break; fi
+done
+if [ -z "$NIX_DEV" ]; then
+  echo "stage0-init: no virtio-blk device found for the persistent /nix store; aborting." >&2
+  exit 67
+fi
+echo "stage0-init: persistent /nix store on $NIX_DEV" >&2
+
+# Decide format-vs-mount by PROBING for an ext4 superblock, never by
+# try-mount-then-reformat. A mount can fail for a geometry reason (see
+# the margin note below) on a disk that already holds a populated
+# store; reading that EINVAL as "blank disk" and reformatting would
+# wipe the warm cache — the exact opposite of persistence. Mirrors
+# mvm-host-vm-init::nix_store_dev_needs_format (superblock probe).
+NIX_DEV_BASE="${NIX_DEV#/dev/}"
+# Decide format-vs-mount by PROBING for an ext4 superblock with e2fsck,
+# never by try-mount-then-reformat. (e2fsck is in the e2fsprogs core
+# package — same one mkfs.ext4 comes from; dumpe2fs/resize2fs live in
+# the separate e2fsprogs-extra, which Alpine's minirootfs doesn't carry.)
+# e2fsck exit codes: 0 clean, 1-2 errors fixed, 4 errors left, 8+ the
+# superblock couldn't be opened (no ext4). So >=8 ⇒ blank disk ⇒ format;
+# 0-7 ⇒ a real store ⇒ it's already been fsck'd, just mount it. A mount
+# that later EINVALs must NEVER be read as "blank" and reformatted — that
+# wipes the warm cache. Mirrors mvm-host-vm-init::nix_store_dev_needs_format.
+# `set +e` around the probe: e2fsck returns non-zero on a fresh (zeroed)
+# disk — rc 8, "no superblock" — and a bare non-zero command under
+# `set -eu` would abort init.sh right here (the bug that left the store
+# empty). Capture the code instead and branch on it.
+set +e
+e2fsck -fy "$NIX_DEV" > /out/stage0-nix-probe.log 2>&1
+PROBE_RC=$?
+set -e
+if [ "$PROBE_RC" -ge 8 ]; then
+  # First boot (no superblock): format. Size the fs ~8 MiB UNDER the
+  # kernel-reported device. libkrunfw's Stage 0 kernel over-reports the
+  # virtio-blk size vs the real backing file by ~64 KiB (16 4K-blocks),
+  # and the host trims the sparse image by another ~128 KiB on first
+  # close — so a fs sized to /sys/class/block/<dev>/size reads back
+  # LARGER than the device on the next boot and `mount` EINVALs (that was
+  # the store-wiping bug). The margin keeps the fs strictly inside the
+  # real device across boots. (mvm-host-vm-init's builder-rootfs kernel
+  # reports the exact size, so it needs no margin.)
+  SECTORS="$(cat "/sys/class/block/${NIX_DEV_BASE}/size")"
+  BLOCKS_4K=$(( SECTORS / 8 - 2048 ))
+  echo "stage0-init: formatting $NIX_DEV ext4 ($BLOCKS_4K 4K-blocks, first boot)" >&2
+  mkfs.ext4 -F -q -b 4096 "$NIX_DEV" "$BLOCKS_4K"
+else
+  echo "stage0-init: reusing existing persistent /nix store on $NIX_DEV (e2fsck rc=$PROBE_RC)" >&2
+fi
+if ! mount -t ext4 "$NIX_DEV" /nix 2>> /out/stage0-nix-mount.log; then
+  echo "stage0-init: /nix mount failed; aborting (see /out/stage0-nix-mount.log)." >&2
+  if [ -r /out/stage0-nix-mount.log ]; then
+    tail -5 /out/stage0-nix-mount.log >&2
+  fi
+  exit 68
+fi
+mkdir -p /nix/store /nix/var/nix /nix/var/log/nix
+
+# Install Nix now that /nix is the case-sensitive ext4 store, so its
+# install-time store writes land on the persistent disk.
+echo "stage0-init: installing nix + dependencies via apk..." >&2
+set +e
+apk --no-progress add nix git ca-certificates xz      > /out/apk-add.log           2>&1
 APK_RC=$?
 set -e
 if [ "$APK_RC" -ne 0 ]; then
@@ -186,13 +258,15 @@ echo "stage0-init: building ${FLAKE_REF}" >&2
 # --max-jobs 1 caps derivation parallelism inside Stage 0. With
 # Alpine nix's default `max-jobs = auto`, four heavy derivations
 # (mvm-host-vm-init, mvm-egress-proxy, mvm-guest-agent, the slim
-# Linux kernel) run concurrently and the combined working set
-# exceeds the 16 GiB guest RAM / 14 GiB `/nix` tmpfs envelope —
-# SIGKILL at `HOSTCC scripts/basic/fixdep`. libkrun_builder.rs:92-99
+# Linux kernel) run concurrently and their combined build working
+# set exceeds the guest RAM envelope — SIGKILL at `HOSTCC
+# scripts/basic/fixdep`. (The store now lives on the persistent ext4
+# disk rather than a RAM tmpfs, so it no longer competes for that
+# RAM — but the compiles themselves still do.) libkrun_builder.rs
 # records the peak-per-derivation observation (~5-6 GiB), which fits
 # one at a time but not in parallel. Per-derivation parallelism stays
 # at the default (cores = nproc) so the kernel compile still uses
-# all 4 vCPUs.
+# all vCPUs.
 set +e
 nix build "$FLAKE_REF" \
     --extra-experimental-features "nix-command flakes" \
