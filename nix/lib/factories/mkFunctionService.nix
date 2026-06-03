@@ -150,7 +150,7 @@ let
   # consume `bootCommand` instead of re-rolling it.
   bootScript = pkgs.writeShellScript "${workloadId}-boot" ''
     set -eu
-    mkdir -p "$(${pkgs.coreutils}/bin/dirname ${pkgs.lib.escapeShellArg sourcePath})"
+    ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname ${pkgs.lib.escapeShellArg sourcePath})"
     ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${pkgs.lib.escapeShellArg sourcePath}
     /etc/mvm/hooks/before_start.sh
     exec ${pkgs.coreutils}/bin/sleep infinity
@@ -229,8 +229,8 @@ in
     '';
     preStart = pkgs.writeShellScript "${workloadId}-prestart" ''
       set -eu
-      mkdir -p "$(dirname ${sourcePath})"
-      ln -sfn ${appPkg} ${sourcePath}
+      ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname ${sourcePath})"
+      ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${sourcePath}
     '';
     env = { };
   };
