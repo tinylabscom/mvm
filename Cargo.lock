@@ -3234,7 +3234,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "mvm"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3268,7 +3268,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-addon-dns"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "hickory-proto 0.26.1",
@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-addon-vsock-bridge"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3298,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-audit-signer"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backend"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ext4-view",
@@ -3345,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-base"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "colored",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-broker"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "mvm-core",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3413,7 +3413,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3467,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3492,7 +3492,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-egress-proxy"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -3500,7 +3500,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-firecracker-bridge"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3519,7 +3519,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3544,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-signer"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-vm-init"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "libc",
  "mvm-build",
@@ -3574,7 +3574,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-ir"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "mvm-guest",
  "schemars 0.8.22",
@@ -3585,7 +3585,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-jailer-lite"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "ctor",
  "landlock",
@@ -3597,7 +3597,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-libkrun"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bindgen",
  "libc",
@@ -3613,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-libkrun-supervisor"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3628,7 +3628,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-mcp"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3639,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-oci"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-plan"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-policy"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-providers"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "block2",
  "dispatch2",
@@ -3709,7 +3709,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runner"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "libc",
  "serde",
@@ -3719,7 +3719,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3744,11 +3744,11 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk-macros"
-version = "0.14.0"
+version = "0.15.0"
 
 [[package]]
 name = "mvm-security"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-storage"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3790,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-supervisor"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3826,7 +3826,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-vz"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3834,7 +3834,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-vz-drainer"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3849,7 +3849,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
