@@ -698,11 +698,19 @@ pub(crate) fn set_no_core_dumps() {
 fn dup_above_fd3(original: &std::fs::File) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let raw = original.as_raw_fd();
-    // F_DUPFD_CLOEXEC: dup to lowest fd >= 4, with CLOEXEC set on the
-    // new fd. CLOEXEC is fine here: the kernel reads the ELF from
-    // this fd during the same `execve` syscall, before CLOEXEC fires.
+    // F_DUPFD (NOT CLOEXEC): the dup must survive `execve` so an
+    // interpreter-script runner works. A shebang runner makes the kernel
+    // re-exec `<interp> /proc/self/fd/<n>`; a CLOEXEC fd is closed across
+    // that second execve, so the interpreter can't reopen the script
+    // (ENOENT — the `mvmctl invoke` failure mode). Leaving CLOEXEC clear
+    // lets the interpreter reopen /proc/self/fd/<n>, which still resolves
+    // to the SAME boot-validated inode the agent holds open — so TOCTOU
+    // safety is preserved, not weakened. The fd is read-only to a
+    // world-readable (0555) wrapper, so leaking it into the runner + its
+    // children grants nothing. ELF runners are unaffected (the kernel
+    // reads the image during the first execve). ADR-007 hardened-exec note.
     // SAFETY: fcntl is async-signal-safe; arguments are validated.
-    let new_raw = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 4) };
+    let new_raw = unsafe { libc::fcntl(raw, libc::F_DUPFD, 4) };
     if new_raw < 0 {
         return Err(std::io::Error::last_os_error());
     }
