@@ -16,13 +16,17 @@
 //! ## KernelFormat sniff (keep it small)
 //!
 //! - Bytes 0-3 == `\x7fELF` → `KernelFormat::Elf`.
+//! - Bytes 0x202-0x205 == `HdrS` (x86 bzImage setup-header magic) →
+//!   `KernelFormat::Raw`. bzImage is neither ELF nor a flat Image; classifying
+//!   it `Raw` makes the validator reject it on ELF/Image direct-boot backends
+//!   instead of mislabeling it `Elf` and failing at boot.
 //! - Bytes 56-59 (LE u32) == `0x644D5241` ("ARMd" in memory, the arm64 Image
 //!   magic) → `KernelFormat::Image`. Offset 56 is the `magic` field in the
 //!   arm64 `Image` header (Linux kernel docs: Documentation/arm64/booting.rst).
 //! - Extension `.gz` / `.bz2` / `.zst` → compressed variants.
 //! - Fallback: `KernelFormat::Elf` with a logged note.
 //!
-//! We read only the first 64 bytes — no mmap, no full-file read.
+//! We read only the first 0x208 bytes — no mmap, no full-file read.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -216,11 +220,16 @@ impl MicrovmArtifactBuilder for NixMicrovmBuilder<'_> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Infer `KernelFormat` by sniffing the first 64 bytes of the file, then
+/// Infer `KernelFormat` by sniffing the first 0x208 bytes of the file, then
 /// falling back to the file extension.
 ///
-/// Magic byte rules (both are stable ABI, safe to rely on):
+/// Magic byte rules (all stable ABI, safe to rely on):
 /// - `\x7f E L F` at offset 0 → `KernelFormat::Elf` (ELF vmlinux).
+/// - `HdrS` at offset 0x202 → `KernelFormat::Raw` (x86 bzImage; the
+///   `header` field of the real-mode setup header, doc:
+///   Documentation/x86/boot.rst). We have no bzImage variant and no
+///   boot-protocol code — `Raw` is the honest bucket, and the validator
+///   then refuses it on the ELF/Image direct-boot backends.
 /// - `0x644D5241` (LE u32) at offset 56 → `KernelFormat::Image` (arm64
 ///   uncompressed kernel Image; the `magic` field in the arm64 image header,
 ///   doc: Documentation/arm64/booting.rst §"Header").
@@ -244,8 +253,9 @@ fn sniff_kernel_format(path: &Path) -> KernelFormat {
         }
     }
 
-    // Read first 64 bytes for magic sniffing.
-    let mut header = [0u8; 64];
+    // Read the head for magic sniffing. The deepest magic we check is the x86
+    // bzImage setup header at offset 0x202, so read through 0x208.
+    let mut header = [0u8; 0x208];
     let n = match std::fs::File::open(path) {
         Ok(mut f) => f.read(&mut header).unwrap_or(0),
         Err(_) => return KernelFormat::Elf, // fallback; validator will catch missing file
@@ -253,6 +263,15 @@ fn sniff_kernel_format(path: &Path) -> KernelFormat {
 
     if n >= 4 && header[..4] == [0x7f, b'E', b'L', b'F'] {
         return KernelFormat::Elf;
+    }
+
+    // x86 bzImage: setup-header magic "HdrS" (0x53726448 LE) at offset 0x202
+    // (Documentation/x86/boot.rst, `header` field). A bzImage is neither ELF
+    // nor a flat Image; classify it Raw so the validator rejects it loudly on
+    // ELF/Image direct-boot backends (Firecracker, libkrun) instead of the old
+    // behaviour of silently calling it Elf and panicking at boot.
+    if n >= 0x206 && &header[0x202..0x206] == b"HdrS" {
+        return KernelFormat::Raw;
     }
 
     // arm64 Image magic is at offset 56 (bytes 56-59), little-endian u32 == 0x644D5241.
@@ -341,6 +360,14 @@ mod tests {
     fn arm64_image_stub() -> Vec<u8> {
         let mut v = vec![0u8; 64];
         v[56..60].copy_from_slice(&0x644D_5241u32.to_le_bytes());
+        v
+    }
+    // x86 bzImage stub: "MZ" at offset 0 (EFI-stub kernels) + the setup-header
+    // magic "HdrS" at offset 0x202, which is what we actually key on.
+    fn bzimage_stub() -> Vec<u8> {
+        let mut v = vec![0u8; 0x208];
+        v[0..2].copy_from_slice(b"MZ");
+        v[0x202..0x206].copy_from_slice(b"HdrS");
         v
     }
 
@@ -467,6 +494,19 @@ mod tests {
         let stub = arm64_image_stub();
         let (path, _) = write_file(tmp.path(), "Image", &stub);
         assert_eq!(sniff_kernel_format(&path), KernelFormat::Image);
+    }
+
+    /// x86 bzImage sniff: a file carrying the "HdrS" setup-header magic at
+    /// offset 0x202 is classified `Raw`, NOT `Elf`. This is the regression
+    /// guard for the old fall-through that silently mislabeled a bzImage as
+    /// ELF — `Raw` is then refused by the validator on Firecracker/libkrun.
+    #[test]
+    fn kernel_format_sniff_bzimage_is_raw_not_elf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _) = write_file(tmp.path(), "bzImage", &bzimage_stub());
+        let fmt = sniff_kernel_format(&path);
+        assert_eq!(fmt, KernelFormat::Raw, "bzImage must sniff as Raw");
+        assert_ne!(fmt, KernelFormat::Elf, "bzImage must not be mislabeled Elf");
     }
 
     /// ELF magic sniff.

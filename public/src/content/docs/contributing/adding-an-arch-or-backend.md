@@ -58,6 +58,33 @@ other file changes.
 compatibility from this table before launch, so a new row is immediately
 enforced.
 
+## Kernel formats: why there's no boot-protocol code
+
+Every backend mvm targets — Firecracker, libkrun, and the Tier-2 Vz/QEMU
+paths — is a **direct-boot** VMM: it loads an uncompressed ELF `vmlinux`
+(x86_64) or a flat arm64 `Image` and jumps straight to the kernel entry point.
+None of them run the x86 real-mode setup stub, the UEFI/PE handoff, or construct
+a `boot_params` page. So mvm carries **none** of that machinery, and `KernelFormat`
+has no `BzImage` variant.
+
+The practical trap this avoids: an x86 `bzImage` (`arch/x86/boot/bzImage`) is the
+real-mode setup code *plus* a compressed payload — exactly the wrapper these VMMs
+don't unwrap. An x86 backend needs the uncompressed ELF `vmlinux`, not the
+`bzImage`. The Nix image build is where this bites (it once copied
+`${kernel}/bzImage` to a file *named* `vmlinux`), so `sniff_kernel_format`
+(`crates/mvm-backend/src/artifacts/builders/nix.rs`) detects a stray bzImage by
+its setup-header magic `HdrS` at offset `0x202` and classifies it `Raw`.
+`Raw` isn't in any direct-boot backend's `kernel_formats`, so `ArtifactValidator`
+rejects it with a clear format error at build time — instead of the kernel
+panicking before userspace at boot.
+
+If mvm ever genuinely needs to *read* a setup header — extract a kernel version
+for `KernelArtifact.version`, or support bzImage on some future firmware-boot
+backend — reuse the `linux-boot-params` crate (pure `boot_params`/`setup_header`
+structs, from the Asterinas project) rather than hand-defining the layout. It's a
+new third-party dependency, so weigh it against the ADR-002 trust model first;
+no current backend needs it.
+
 ## What stays out of scope
 
 Production rootfs images are built **inside the builder VM** (`mke2fs`,
