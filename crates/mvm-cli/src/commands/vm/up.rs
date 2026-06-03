@@ -1832,6 +1832,45 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
 
+    // libkrun / firecracker launch a detached supervisor daemon, so `up`
+    // returns after launch (unlike apple-container below, which blocks
+    // in-process). Verify the guest agent here anyway: without it, `up
+    // --hypervisor libkrun` exits 0 the instant the daemon spawns — never
+    // checking that the guest actually booted and the agent answered —
+    // so a real boot failure passes silently and `core_demo_e2e`'s
+    // boot→ping proof is hollow (it only watches for this exact warning).
+    // `--detach` opts out (fire-and-forget, like the apple-container
+    // launchd path). apple-container keeps its own wait in its block.
+    if matches!(effective_hypervisor, "libkrun" | "firecracker") && !detach {
+        ui::info("Waiting for guest agent...");
+        record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
+        if wait_for_guest_agent(&vm_name_owned, 30) {
+            record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentReady);
+            if let Err(e) = mvm_backend::netinit_audit::emit_for_vm(&vm_name_owned) {
+                tracing::debug!(
+                    vm = %vm_name_owned,
+                    error = %e,
+                    "netinit audit emit skipped (best-effort)"
+                );
+            }
+        } else {
+            // A non-detached `up` means "bring the workload up and confirm
+            // it" — a daemon that spawned but whose agent never answered
+            // within the boot timeout has failed. Stop the orphaned daemon
+            // and exit non-zero so the failure is unmissable. (Exit code,
+            // not the warning string: `ui::warn` routes to stdout by
+            // default, which a stderr-only check would miss; `ui::error`
+            // below keeps the message on stderr regardless.)
+            ui::error("Guest agent not reachable.");
+            let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name_owned.clone()));
+            let err = anyhow::anyhow!(
+                "guest agent for '{vm_name_owned}' not reachable within 30s of boot"
+            );
+            emit_failed_if(&admission_main, "agent-unreachable", &err);
+            return Err(err);
+        }
+    }
+
     // Apple Virtualization VMs live in-process — the process must stay alive.
     if effective_hypervisor == "apple-container" && !detach {
         // ADR-053 §3 / plan 74 W2 (services-health): wait for the
