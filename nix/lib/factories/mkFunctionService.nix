@@ -140,10 +140,14 @@ let
 in
 {
   extraFiles = {
-    "/etc/mvm/entrypoint" = {
-      content = "/usr/lib/mvm/wrappers/runner";
-      mode = "0644";
-    };
+    # NOTE: do NOT write /etc/mvm/entrypoint here. The function workload's
+    # PID 1 must be the *idle* bootScript (`exec sleep infinity`) that the
+    # compile path passes via mkGuest `entrypoint.command` — the agent then
+    # execs the runner per call over vsock RunEntrypoint. Baking the runner
+    # AS the entrypoint (it used to live here) made PID 1 the one-shot
+    # runner: it returns/can't-exec, /init falls through to `sleep 5`, and
+    # the kernel reboots at ~5s — killing the workload before the host can
+    # reach the agent. The runner stays below for the agent to invoke.
     "/usr/lib/mvm/wrappers/runner" = {
       content = lang.runnerScript;
       mode = "0755";
