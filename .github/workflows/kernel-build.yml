@@ -1,0 +1,106 @@
+name: Kernel build
+
+# Builds the slim custom microVM kernels (builder + workload) on native
+# aarch64 and x86_64 runners. The compile arm of `mvmctl kernel build`
+# can only build the host's own arch (Stage 0 boots a host-arch VM under
+# libkrun), so this workflow is how the *other* arch is produced: it
+# realises both kernels on both arches and, on a release tag, publishes
+# the hash-verified `vmlinux` artifacts that `mvmctl kernel build
+# --source download` fetches.
+#
+# Triggers:
+#   - pull_request touching the kernel config → build + verify, no publish.
+#   - workflow_dispatch → build (manual), no publish.
+#   - push tag v* → build + publish to the release ("no prebuilt until
+#     release" — PRs never publish).
+
+on:
+  pull_request:
+    paths:
+      - "nix/lib/kernel/**"
+      - "nix/images/builder-vm/kernel/**"
+      - "nix/images/builder-vm/flake.nix"
+      - ".github/workflows/kernel-build.yml"
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # release asset upload on tags
+
+jobs:
+  kernel:
+    name: Build kernels (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build builder + workload kernels
+        env:
+          ARCH: ${{ matrix.arch }}
+        # `--impure` lets the builder-vm flake read MVM_WORKSPACE_PATH via
+        # getEnv (unset here → it falls back to the in-tree path, same as
+        # the `default` image lane). The kernel attrs don't touch the
+        # rootfs, so no MVM_HOST_BIN_DIR is needed. aarch64 emits `Image`,
+        # x86_64 emits `bzImage`; normalise both to `vmlinux-<arch>-<variant>`.
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          mkdir -p staging
+          for variant in builder workload; do
+            STORE=$(nix build \
+              "./nix/images/builder-vm#packages.${SYSTEM}.${variant}-kernel" \
+              --impure --no-link --print-out-paths | head -1)
+            if   [ -f "$STORE/Image" ];   then SRC="$STORE/Image"
+            elif [ -f "$STORE/bzImage" ]; then SRC="$STORE/bzImage"
+            else
+              echo "::error::no kernel image (Image/bzImage) in $STORE" >&2
+              ls -la "$STORE" >&2
+              exit 1
+            fi
+            cp "$SRC" "staging/vmlinux-${ARCH}-${variant}"
+          done
+          cd staging
+          sha256sum vmlinux-${ARCH}-* > "kernel-${ARCH}-checksums-sha256.txt"
+          echo "=== kernel artifacts (${ARCH}) ==="
+          cat "kernel-${ARCH}-checksums-sha256.txt"
+          du -h vmlinux-${ARCH}-*
+
+      - name: Upload kernel artifacts (CI visibility)
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernels-${{ matrix.arch }}
+          path: |
+            staging/vmlinux-${{ matrix.arch }}-builder
+            staging/vmlinux-${{ matrix.arch }}-workload
+            staging/kernel-${{ matrix.arch }}-checksums-sha256.txt
+
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+        # `mvmctl kernel build --source download` resolves these by the
+        # mvmctl release tag + arch + variant, then SHA-256-verifies each
+        # against the checksums manifest before admitting it to the cache.
+        run: |
+          set -euo pipefail
+          cd staging
+          gh release upload "$TAG" \
+            "vmlinux-${ARCH}-builder" \
+            "vmlinux-${ARCH}-workload" \
+            "kernel-${ARCH}-checksums-sha256.txt" \
+            --clobber

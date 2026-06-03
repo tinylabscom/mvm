@@ -5,6 +5,7 @@ mod cmd_audit;
 mod deps;
 mod env;
 mod image;
+mod kernel;
 mod manifest;
 mod ops;
 mod shared;
@@ -41,6 +42,13 @@ pub(in crate::commands) struct Cli {
     #[arg(long, global = true, value_parser = ["libkrun", "vz"])]
     pub builder: Option<String>,
 
+    /// Where the builder VM's kernel comes from when its image is
+    /// (re)built: `compile` (default — build it in-image via Stage 0),
+    /// `download` (boot on a published, hash-verified kernel — skips the
+    /// kernel compile), or `auto` (download if available, else compile).
+    #[arg(long, global = true, value_parser = ["compile", "download", "auto"])]
+    pub kernel_source: Option<String>,
+
     /// Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set.
     #[arg(long, global = true, alias = "debug")]
     pub verbose: bool,
@@ -68,6 +76,8 @@ pub(in crate::commands) enum Commands {
     Update(env::update::Args),
     /// System diagnostics and dependency checks
     Doctor(env::doctor::Args),
+    /// Build the custom microVM kernels (builder / workload)
+    Kernel(kernel::Args),
     /// Manage built manifest slots
     Manifest(manifest::Args),
     /// Inspect cached OCI images
@@ -197,6 +207,13 @@ pub fn run() -> Result<()> {
         unsafe { std::env::set_var("MVM_BUILDER_BACKEND", backend) };
     }
 
+    // Kernel-acquisition override for the builder VM image bootstrap.
+    // Read by `resolve_kernel_source()` in the Stage 0 path. Same
+    // single-threaded-startup invariant as the blocks above.
+    if let Some(ref source) = cli.kernel_source {
+        unsafe { std::env::set_var("MVM_KERNEL_SOURCE", source) };
+    }
+
     // Verbose `[mvm]` chatter: explicit flag, or any RUST_LOG set.
     let verbose = cli.verbose || std::env::var_os("RUST_LOG").is_some();
     mvm::ui::set_verbose(verbose);
@@ -270,6 +287,7 @@ pub fn run() -> Result<()> {
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
+        Commands::Kernel(a) => kernel::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Image(a) => image::run(&cli, a, &cfg),
         Commands::Storage(a) => storage::run(&cli, a, &cfg),

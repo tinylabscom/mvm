@@ -310,6 +310,66 @@ Per `feedback_adr_out_of_scope_discipline.md` this Security-claim-parity subsect
 - **ADR-056** — Vz runtime backend ADR; gains a "Persistent builder variant" pointer to this section.
 - **ADR-057** — Sprint 56 symmetric trust boundary; bidirectional cross-link (Vz builder narrows the asymmetric-trust gap on macOS that ADR-057 fully closes).
 
+## Amendment: kernel acquisition — compile or download
+
+The slim custom kernel is the slowest, most memory-hungry step of a
+first `mvmctl dev up`: because the config is custom, `cache.nixos.org`
+has no substitute, so every fresh machine compiles it from source
+(3-10 min, ~5-6 GiB peak). To fix that DX without weakening this ADR's
+invariants, the kernel becomes a *separately acquirable* artifact with
+two sources, selected by `mvmctl kernel build --source`:
+
+- **`compile`** — build the kernel attr (`builder-kernel` /
+  `workload-kernel` on `nix/images/builder-vm`) through the **same**
+  Stage 0 path `dev up` uses, writing a `/out/stage0-build.conf` that
+  switches `init.sh` to the kernel attr in kernel-only output mode. The
+  result lands in the persistent `nix-store-stage0` image (shared and
+  locked with the image build), so the next `dev up` *substitutes* the
+  compiled kernel rather than rebuilding it. Host-arch only — Stage 0
+  boots a host-arch VM under libkrun and cannot cross-compile.
+- **`download`** — fetch a published `vmlinux-<arch>-<variant>`,
+  SHA-256-verified against the release's `kernel-<arch>-checksums-sha256.txt`
+  (the Claim-6 / §W5.1 verify-or-reject pattern, with the documented
+  `MVM_SKIP_HASH_VERIFY` escape). This is the *only* way to obtain the
+  **other** arch's kernel (the GHA `kernel-build.yml` builds both arches
+  on native runners and publishes them **on release tags only** — PRs
+  build-and-verify but never publish, honouring "no prebuilt until
+  release").
+
+`dev up` consumes either source through the global `--kernel-source`
+(`MVM_KERNEL_SOURCE`) flag. `download` builds *only* the rootfs
+(`stage0-rootfs` attr — a third `init.sh` output mode that emits no
+kernel) and pairs the fetched, verified `vmlinux` into the image, so a
+fresh `dev up` skips the multi-minute in-image kernel compile. The
+published kernel is the same flake derivation `default` bundles, so the
+paired image is equivalent. `compile` (the default) stays on the
+single-boot `default` build — splitting it would mean two Stage 0 boots
+for no gain, since the compiled kernel derivation is already substituted
+from the persistent nix store.
+
+### Why this does not violate "the contributor path doesn't download"
+
+The §"Why the contributor path doesn't download" and §"Source-checkout
+builds never depend on mvm-published artifacts" invariants are
+preserved exactly:
+
+- **Source checkouts always compile.** `--source compile` requires
+  `find_builder_vm_flake()` to resolve; a contributor who edits
+  `nix/images/builder-vm/kernel/base.nix` or the builder delta sees that change in the
+  very next compile — no release round-trip. Download is keyed by the
+  **mvmctl release tag** + arch + variant, so it can only ever return
+  the kernel that *shipped with that exact mvmctl* — never a substitute
+  for in-tree edits.
+- **Download is an installed-binary / explicit-opt-in path**, not a
+  prerequisite of any source-checkout workflow. The full image build
+  (`dev up`) is unchanged: absent the `stage0-build.conf`, `init.sh`
+  builds `default` exactly as before, byte-for-byte.
+
+Per `feedback_adr_out_of_scope_discipline.md` this section covers only
+the kernel-acquisition decision; the build-tier security posture
+(`feedback_dev_vm_vs_prod_security_tiers.md` — the builder/dev kernel is
+the dev tier) is unchanged and not re-litigated here.
+
 ---
 
 > **Superseded in part by ADR-065 (Plan 115).** ADR-046's

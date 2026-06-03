@@ -31,6 +31,49 @@ just run -- dev
 just release-build
 ```
 
+### Kernel builds
+
+The builder-VM and workload microVM kernels are slim custom Linux
+builds (`nix/images/builder-vm/kernel/base.nix` + per-variant deltas in
+`nix/images/builder-vm/kernel/`). Because the config is custom,
+`cache.nixos.org` has no substitute, so the first `dev up` on a fresh
+machine compiles the kernel from source (3-10 min, memory-heavy).
+
+`mvmctl kernel build` makes that compile explicit and one-time, so it
+stops hijacking your first `dev up`:
+
+```bash
+# Compile the builder kernel once into the cache + persistent nix store.
+# The next `dev up` reuses it (substituted, not rebuilt).
+just run -- kernel build --which builder
+
+# Or both kernels:
+just run -- kernel build --all
+```
+
+To skip the kernel compile entirely on a fresh machine, boot the builder
+VM on a published kernel (once a release has shipped one):
+
+```bash
+# Build only the rootfs locally; fetch + hash-verify the kernel.
+just run -- --kernel-source download dev up
+# `auto` downloads if available, else compiles in-image (the default).
+```
+
+Notes:
+
+- **Host-arch only for `--source compile`.** Stage 0 boots a host-arch
+  VM under libkrun, so it builds your host's arch (aarch64 *or* x86_64).
+  The other arch is published by the `kernel-build` GitHub workflow,
+  which builds both on native runners — fetch it with `--source
+  download` once a release ships it.
+- On macOS the compile arm needs the libkrun trio (`slp/krun/*`), since
+  Stage 0 is libkrun-backed even on Vz-default hosts.
+- Editing `base.nix` or the builder delta? Just re-run the command — a
+  custom config always compiles locally; downloads only ever return the
+  kernel that shipped with that exact `mvmctl` release. See ADR-046
+  §"Amendment: kernel acquisition".
+
 ## Testing
 
 ```bash

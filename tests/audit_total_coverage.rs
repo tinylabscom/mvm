@@ -88,6 +88,12 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+// `kernel build` compiles/downloads a microVM kernel into the local
+// cache. Like `compile`, it produces build outputs but doesn't touch the
+// security audit chain — the Stage-0 supply-chain events the compile arm
+// may trigger are emitted by the shared bootstrap, same as `dev`.
+const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
+
 // Plan 93 Phase 2 Lever 0 — `mvmctl bench microvm-launch`. The live
 // probe boots a throwaway guest through the signed-plan admission path
 // (claim 8), so the documented posture is the same `plan.*`+`VmStart`
@@ -288,6 +294,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
     ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
     // Build / artifact / registry.
+    ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
     ("build", AuditPosture::Emits("TemplateBuild")),
