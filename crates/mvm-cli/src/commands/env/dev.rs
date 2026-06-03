@@ -204,8 +204,14 @@ pub(in crate::commands) enum DevAction {
         #[arg(long)]
         watch_config: bool,
         /// Open an interactive shell after starting.
-        #[arg(long, short = 's')]
+        ///
+        /// Default behavior for `mvmctl dev up`; retained as an
+        /// explicit spelling for compatibility.
+        #[arg(long, short = 's', conflicts_with = "no_shell")]
         shell: bool,
+        /// Start the dev VM without attaching an interactive shell.
+        #[arg(long, conflicts_with = "shell")]
+        no_shell: bool,
     },
     /// Stop the development VM.
     Down {
@@ -530,6 +536,10 @@ fn cmd_dev_vz_status() -> Result<()> {
     Ok(())
 }
 
+fn effective_up_shell(shell: bool, no_shell: bool) -> bool {
+    shell || !no_shell
+}
+
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     let action = args.action.unwrap_or(DevAction::Up {
         cpus: 8,
@@ -537,7 +547,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         project: None,
         metrics_port: 0,
         watch_config: false,
-        shell: false,
+        shell: true,
+        no_shell: false,
     });
 
     // Plan 98 Slice 2B — §2.C1 grace guard removed. `current_backend()`
@@ -553,6 +564,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             metrics_port: _metrics_port,
             watch_config: _watch_config,
             shell,
+            no_shell,
         } => {
             // CLI flag wins; otherwise fall back to per-user config defaults.
             let effective_cpus = if cpus == 8 { cfg.dev_vm_cpus } else { cpus };
@@ -561,14 +573,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             } else {
                 memory
             };
+            let open_shell = effective_up_shell(shell, no_shell);
 
             match backend {
-                DevBackend::Libkrun => cmd_dev_libkrun(effective_cpus, effective_mem, shell),
-                DevBackend::Vz => cmd_dev_vz(effective_cpus, effective_mem, shell),
-                DevBackend::AppleContainer => {
-                    apple_container::cmd_dev_apple_container(effective_cpus, effective_mem, shell)
-                }
-                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native(shell),
+                DevBackend::Libkrun => cmd_dev_libkrun(effective_cpus, effective_mem, open_shell),
+                DevBackend::Vz => cmd_dev_vz(effective_cpus, effective_mem, open_shell),
+                DevBackend::AppleContainer => apple_container::cmd_dev_apple_container(
+                    effective_cpus,
+                    effective_mem,
+                    open_shell,
+                ),
+                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native(open_shell),
                 DevBackend::Unsupported => bail_no_dev_backend(),
             }
         }
@@ -611,7 +626,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     LibkrunBackend.status(&VmId(apple_container::DEV_VM_NAME.to_string()))?,
                     VmStatus::Running
                 ) {
-                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up --shell");
+                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
                 }
                 console::console_interactive(apple_container::DEV_VM_NAME)
             }
@@ -620,7 +635,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     VzBackend.status(&VmId(apple_container::DEV_VM_NAME.to_string()))?,
                     VmStatus::Running
                 ) {
-                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up --shell");
+                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
                 }
                 console::console_interactive(apple_container::DEV_VM_NAME)
             }
@@ -634,7 +649,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     Err(_) => anyhow::bail!(
                         "Dev VM is running but owned by another process.\n\
                          Use the terminal where you ran 'mvmctl dev up',\n\
-                         or restart with: mvmctl dev down && mvmctl dev up --shell"
+                         or restart with: mvmctl dev down && mvmctl dev up"
                     ),
                 }
             }
@@ -706,7 +721,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{DevBackend, DevVmBackend, select_dev_backend, switch_notice};
+    use super::{DevBackend, DevVmBackend, effective_up_shell, select_dev_backend, switch_notice};
     use mvm_core::platform::Platform;
 
     // ──────────────────────────────────────────────────────────────
@@ -740,6 +755,17 @@ mod tests {
         // No leftover VM in either direction → nothing to announce, boot proceeds.
         assert!(switch_notice(DevVmBackend::Libkrun, None).is_none());
         assert!(switch_notice(DevVmBackend::Vz, None).is_none());
+    }
+
+    #[test]
+    fn dev_up_opens_shell_by_default() {
+        assert!(effective_up_shell(false, false));
+        assert!(effective_up_shell(true, false));
+    }
+
+    #[test]
+    fn dev_up_no_shell_opt_out_wins() {
+        assert!(!effective_up_shell(false, true));
     }
 
     // ──────────────────────────────────────────────────────────────

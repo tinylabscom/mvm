@@ -67,7 +67,8 @@ The intentionally kept top-level command families are:
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
-| `mvmctl dev up --shell` (or `-s`) | Open an interactive shell after starting |
+| `mvmctl dev up --shell` (or `-s`) | Force opening an interactive shell after starting (the default behavior) |
+| `mvmctl dev up --no-shell` | Start the dev VM without attaching an interactive shell |
 | `mvmctl dev down` | Stop the dev VM |
 | `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
 | `mvmctl dev shell` | Open a shell in the running dev VM |
