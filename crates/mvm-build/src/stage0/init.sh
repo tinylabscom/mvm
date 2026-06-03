@@ -313,19 +313,21 @@ if [ -z "$NIX_OUT" ]; then
   exit 1
 fi
 
-# The flake output convention: $out/vmlinux and $out/rootfs.ext4.
-# Tolerate the kernel being named Image or bzImage to match other
-# flake conventions in the repo.
-if   [ -f "$NIX_OUT/vmlinux" ]; then cp -L "$NIX_OUT/vmlinux" /out/vmlinux
-elif [ -f "$NIX_OUT/Image"   ]; then cp -L "$NIX_OUT/Image"   /out/vmlinux
-elif [ -f "$NIX_OUT/bzImage" ]; then cp -L "$NIX_OUT/bzImage" /out/vmlinux
-else
-  echo "stage0-init: no kernel in $NIX_OUT" >&2
-  exit 1
+# Output by mode:
+#   image   — kernel + rootfs.ext4 + cmdline.txt   (the `default` attr)
+#   kernel  — kernel only                          (`*-kernel` attrs)
+#   rootfs  — rootfs.ext4 + cmdline.txt only        (`stage0-rootfs` attr,
+#             paired host-side with an externally-acquired kernel)
+# Tolerate the kernel being named Image or bzImage across repo flakes.
+if [ "$MVM_STAGE0_OUTPUT_MODE" != rootfs ]; then
+  if   [ -f "$NIX_OUT/vmlinux" ]; then cp -L "$NIX_OUT/vmlinux" /out/vmlinux
+  elif [ -f "$NIX_OUT/Image"   ]; then cp -L "$NIX_OUT/Image"   /out/vmlinux
+  elif [ -f "$NIX_OUT/bzImage" ]; then cp -L "$NIX_OUT/bzImage" /out/vmlinux
+  else
+    echo "stage0-init: no kernel in $NIX_OUT" >&2
+    exit 1
+  fi
 fi
-# A kernel-only attr (builder-kernel / workload-kernel) emits just the
-# kernel image — no rootfs.ext4 / cmdline.txt. The kernel copy above
-# already landed /out/vmlinux; skip the image-only artifacts.
 if [ "$MVM_STAGE0_OUTPUT_MODE" != kernel ]; then
   if [ ! -f "$NIX_OUT/rootfs.ext4" ]; then
     echo "stage0-init: no rootfs.ext4 in $NIX_OUT" >&2

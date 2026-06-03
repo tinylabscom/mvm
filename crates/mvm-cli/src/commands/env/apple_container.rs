@@ -1999,14 +1999,52 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
             .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
-    let result = run_stage0_root_dir(
-        &staging_dir,
-        &workspace_root,
-        &root_dir,
-        "/init",
-        &host_bin_dir,
-        source_fingerprint,
-    );
+    // Kernel acquisition override (MVM_KERNEL_SOURCE / --kernel-source).
+    // `download` (and `auto` when a publish exists) boots the builder VM
+    // on a published, hash-verified kernel — build only the rootfs and
+    // pair the kernel in, skipping the in-image kernel compile. Unset or
+    // `compile` → the normal `default` build (kernel compiled in-image;
+    // also the cheaper single-boot path, so `dev up --kernel-source
+    // compile` deliberately stays on it).
+    let external_kernel: Option<std::path::PathBuf> = match resolve_kernel_source() {
+        Some(KernelSource::Download) => {
+            ui::info("Kernel source: download — fetching the published builder kernel.");
+            Some(download_builder_kernel(builder_vm_host_arch())?)
+        }
+        Some(KernelSource::Auto) => match download_builder_kernel(builder_vm_host_arch()) {
+            Ok(p) => {
+                ui::info("Kernel source: auto — using the published builder kernel.");
+                Some(p)
+            }
+            Err(e) => {
+                ui::warn(&format!(
+                    "no published builder kernel ({e}); compiling it in-image"
+                ));
+                None
+            }
+        },
+        Some(KernelSource::Compile) | None => None,
+    };
+
+    let result = if let Some(kernel) = &external_kernel {
+        run_stage0_rootfs_with_external_kernel(
+            &staging_dir,
+            &workspace_root,
+            &root_dir,
+            &host_bin_dir,
+            kernel,
+            source_fingerprint,
+        )
+    } else {
+        run_stage0_root_dir(
+            &staging_dir,
+            &workspace_root,
+            &root_dir,
+            "/init",
+            &host_bin_dir,
+            source_fingerprint,
+        )
+    };
     let duration_ms = started.elapsed().as_millis() as u64;
 
     match result {
@@ -2061,6 +2099,114 @@ impl KernelVariant {
             Self::Workload => "workload",
         }
     }
+}
+
+/// Where the builder VM's kernel comes from when bootstrapping its
+/// image, from `MVM_KERNEL_SOURCE` (set by the global `--kernel-source`
+/// flag). `download` boots the builder VM on a published, hash-verified
+/// kernel — building only the rootfs locally and pairing the kernel in,
+/// so a fresh `dev up` skips the multi-minute kernel compile. Unset →
+/// the default `nix build default` path (kernel compiled in-image).
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KernelSource {
+    Compile,
+    Download,
+    Auto,
+}
+
+#[cfg(feature = "builder-vm")]
+fn resolve_kernel_source() -> Option<KernelSource> {
+    let raw = std::env::var("MVM_KERNEL_SOURCE").ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "compile" => Some(KernelSource::Compile),
+        "download" => Some(KernelSource::Download),
+        "auto" => Some(KernelSource::Auto),
+        other => {
+            ui::warn(&format!(
+                "ignoring unrecognised MVM_KERNEL_SOURCE={other:?} \
+                 (expected compile|download|auto)"
+            ));
+            None
+        }
+    }
+}
+
+/// Download + SHA-256-verify the published *builder* kernel for `arch`
+/// into the per-arch kernel cache, returning its path.
+#[cfg(feature = "builder-vm")]
+fn download_builder_kernel(arch: &str) -> Result<std::path::PathBuf> {
+    let dest = std::path::Path::new(&mvm_core::config::mvm_cache_dir())
+        .join("builder-vm")
+        .join(arch)
+        .join("kernels")
+        .join("builder")
+        .join("vmlinux");
+    crate::update::download_kernel(arch, "builder", &dest)?;
+    Ok(dest)
+}
+
+/// Boot Stage 0 to build the builder rootfs *only* (`stage0-rootfs`
+/// attr, kernel-less), then pair `external_kernel` as the image's
+/// `vmlinux` and write the cache sidecars. This is the
+/// `--kernel-source download` path: the builder VM boots on a published
+/// kernel without compiling one inside the `default` image.
+#[cfg(feature = "builder-vm")]
+fn run_stage0_rootfs_with_external_kernel(
+    staging_dir: &std::path::Path,
+    workspace_root: &std::path::Path,
+    guest_root_dir: &std::path::Path,
+    host_bin_dir: &std::path::Path,
+    external_kernel: &std::path::Path,
+    source_fingerprint: &str,
+) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
+    use mvm_build::builder_vm::BuilderVm;
+    use mvm_build::libkrun_builder::LibkrunBuilderVm;
+
+    // Build only the rootfs (`stage0-rootfs`, no kernel in $out).
+    std::fs::write(
+        staging_dir.join("stage0-build.conf"),
+        "MVM_STAGE0_BUILD_ATTR=stage0-rootfs\nMVM_STAGE0_OUTPUT_MODE=rootfs\n",
+    )
+    .map_err(|e| {
+        (
+            Stage0FailureStage::Build,
+            anyhow::anyhow!("writing stage0-build.conf: {e}"),
+        )
+    })?;
+
+    let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+    backend
+        .run_stage0(
+            guest_root_dir,
+            "/init",
+            workspace_root,
+            staging_dir,
+            host_bin_dir,
+        )
+        .map_err(|e| {
+            (
+                Stage0FailureStage::Build,
+                anyhow::anyhow!("Stage 0 rootfs build: {e}"),
+            )
+        })?;
+
+    // Pair the externally-acquired kernel as the image's vmlinux. The
+    // published builder kernel is the same flake derivation `default`
+    // bundles, so the paired image is equivalent.
+    std::fs::copy(external_kernel, staging_dir.join("vmlinux")).map_err(|e| {
+        (
+            Stage0FailureStage::Build,
+            anyhow::anyhow!("pairing kernel {}: {e}", external_kernel.display()),
+        )
+    })?;
+
+    verify_stage0_rootfs_has_init(&staging_dir.join("rootfs.ext4"))
+        .map_err(|e| (Stage0FailureStage::Validate, e))?;
+    write_builder_vm_cache_sidecars(staging_dir, source_fingerprint)
+        .map_err(|e| (Stage0FailureStage::Validate, e))?;
+    Ok(())
 }
 
 /// `mvmctl kernel build --source compile`: compile a single kernel attr

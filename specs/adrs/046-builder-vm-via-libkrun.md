@@ -336,6 +336,17 @@ two sources, selected by `mvmctl kernel build --source`:
   build-and-verify but never publish, honouring "no prebuilt until
   release").
 
+`dev up` consumes either source through the global `--kernel-source`
+(`MVM_KERNEL_SOURCE`) flag. `download` builds *only* the rootfs
+(`stage0-rootfs` attr — a third `init.sh` output mode that emits no
+kernel) and pairs the fetched, verified `vmlinux` into the image, so a
+fresh `dev up` skips the multi-minute in-image kernel compile. The
+published kernel is the same flake derivation `default` bundles, so the
+paired image is equivalent. `compile` (the default) stays on the
+single-boot `default` build — splitting it would mean two Stage 0 boots
+for no gain, since the compiled kernel derivation is already substituted
+from the persistent nix store.
+
 ### Why this does not violate "the contributor path doesn't download"
 
 The §"Why the contributor path doesn't download" and §"Source-checkout

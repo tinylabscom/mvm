@@ -51,6 +51,15 @@ just run -- kernel build --which builder
 just run -- kernel build --all
 ```
 
+To skip the kernel compile entirely on a fresh machine, boot the builder
+VM on a published kernel (once a release has shipped one):
+
+```bash
+# Build only the rootfs locally; fetch + hash-verify the kernel.
+just run -- --kernel-source download dev up
+# `auto` downloads if available, else compiles in-image (the default).
+```
+
 Notes:
 
 - **Host-arch only for `--source compile`.** Stage 0 boots a host-arch

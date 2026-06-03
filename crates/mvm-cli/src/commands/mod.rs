@@ -42,6 +42,13 @@ pub(in crate::commands) struct Cli {
     #[arg(long, global = true, value_parser = ["libkrun", "vz"])]
     pub builder: Option<String>,
 
+    /// Where the builder VM's kernel comes from when its image is
+    /// (re)built: `compile` (default — build it in-image via Stage 0),
+    /// `download` (boot on a published, hash-verified kernel — skips the
+    /// kernel compile), or `auto` (download if available, else compile).
+    #[arg(long, global = true, value_parser = ["compile", "download", "auto"])]
+    pub kernel_source: Option<String>,
+
     /// Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set.
     #[arg(long, global = true, alias = "debug")]
     pub verbose: bool,
@@ -198,6 +205,13 @@ pub fn run() -> Result<()> {
     // the `fc_version` block above.
     if let Some(ref backend) = cli.builder {
         unsafe { std::env::set_var("MVM_BUILDER_BACKEND", backend) };
+    }
+
+    // Kernel-acquisition override for the builder VM image bootstrap.
+    // Read by `resolve_kernel_source()` in the Stage 0 path. Same
+    // single-threaded-startup invariant as the blocks above.
+    if let Some(ref source) = cli.kernel_source {
+        unsafe { std::env::set_var("MVM_KERNEL_SOURCE", source) };
     }
 
     // Verbose `[mvm]` chatter: explicit flag, or any RUST_LOG set.
