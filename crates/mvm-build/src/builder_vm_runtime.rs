@@ -432,7 +432,7 @@ chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 # W6.2 — emit the mvm-meta.json sidecar next to the rootfs. The runtime
 # admission path refuses to boot a rootfs without it (it certifies the
 # overlay-aware contract), and the host has no nix, so we eval the
-# flake's `passthru.mvm` (the ArtifactManifest) here in the guest.
+# flake's `passthru.mvm` (the GuestSidecar) here in the guest.
 # mkGuest puts it on the rootfs derivation; an image that wraps the
 # rootfs (the builder-vm `dev`/`default` attrs are a runCommand around
 # it) surfaces it one level down under `passthru.rootfs`. Try the direct

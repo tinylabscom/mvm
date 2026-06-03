@@ -3322,6 +3322,7 @@ name = "mvm-backend"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "ext4-view",
  "libc",
  "mvm-base",
  "mvm-build",
@@ -3334,9 +3335,11 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "toml",
  "tracing",
+ "uuid",
  "which 7.0.3",
 ]
 
@@ -3472,7 +3475,6 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "ipnet",
- "mvm-libkrun",
  "mvm-providers",
  "rand 0.8.6",
  "regex",
@@ -3599,6 +3601,7 @@ version = "0.14.0"
 dependencies = [
  "bindgen",
  "libc",
+ "mvm-core",
  "mvm-guest",
  "mvm-providers",
  "serde",

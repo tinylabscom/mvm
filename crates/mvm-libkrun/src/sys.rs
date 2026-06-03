@@ -23,6 +23,7 @@ use std::ffi::CString;
 use std::path::Path;
 
 use crate::Error;
+use mvm_core::kernel_format::KernelFormat;
 
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/libkrun_sys.rs"));
@@ -73,29 +74,28 @@ pub fn init_log(target_fd: i32, level: LogLevel, style: u32, options: u32) -> Re
     check(unsafe { bindings::krun_init_log(target_fd, level.as_u32(), style, options) })
 }
 
-/// Kernel-format constants exposed to callers without leaking the
-/// bindgen-generated identifier names.
-#[derive(Debug, Clone, Copy)]
-pub enum KernelFormat {
-    Raw,
-    Elf,
-    PeGz,
-    ImageBz2,
-    ImageGz,
-    ImageZstd,
-}
-
-impl KernelFormat {
-    fn as_u32(self) -> u32 {
-        match self {
-            KernelFormat::Raw => bindings::KRUN_KERNEL_FORMAT_RAW,
-            KernelFormat::Elf => bindings::KRUN_KERNEL_FORMAT_ELF,
-            KernelFormat::PeGz => bindings::KRUN_KERNEL_FORMAT_PE_GZ,
-            KernelFormat::ImageBz2 => bindings::KRUN_KERNEL_FORMAT_IMAGE_BZ2,
-            KernelFormat::ImageGz => bindings::KRUN_KERNEL_FORMAT_IMAGE_GZ,
-            KernelFormat::ImageZstd => bindings::KRUN_KERNEL_FORMAT_IMAGE_ZSTD,
+/// Map a canonical `KernelFormat` to the libkrun FFI constant.
+///
+/// Returns `Err` for `Image` and `Pe` — libkrun has no FFI constant for
+/// uncompressed arm64 `Image` or uncompressed PE. Callers should use
+/// the bundled kernel or a compressed variant (`image_gz`, `pe_gz`).
+fn to_krun_format(f: KernelFormat) -> Result<u32, Error> {
+    Ok(match f {
+        KernelFormat::Raw => bindings::KRUN_KERNEL_FORMAT_RAW,
+        KernelFormat::Elf => bindings::KRUN_KERNEL_FORMAT_ELF,
+        KernelFormat::PeGz => bindings::KRUN_KERNEL_FORMAT_PE_GZ,
+        KernelFormat::ImageBz2 => bindings::KRUN_KERNEL_FORMAT_IMAGE_BZ2,
+        KernelFormat::ImageGz => bindings::KRUN_KERNEL_FORMAT_IMAGE_GZ,
+        KernelFormat::ImageZstd => bindings::KRUN_KERNEL_FORMAT_IMAGE_ZSTD,
+        KernelFormat::Image | KernelFormat::Pe => {
+            return Err(Error::Io {
+                context: format!(
+                    "libkrun cannot load uncompressed {f:?}; \
+                    use the bundled kernel or a compressed format"
+                ),
+            });
         }
-    }
+    })
 }
 
 /// Log-level constants matching `KRUN_LOG_LEVEL_*` in libkrun.h.
@@ -223,11 +223,12 @@ impl Context {
         };
         let initramfs_ptr = initramfs.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let cmdline_ptr = cmdline.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+        let format_u32 = to_krun_format(kernel_format)?;
         check(unsafe {
             bindings::krun_set_kernel(
                 self.ctx_id,
                 kernel.as_ptr(),
-                kernel_format.as_u32(),
+                format_u32,
                 initramfs_ptr,
                 cmdline_ptr,
             )

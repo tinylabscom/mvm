@@ -125,33 +125,22 @@ let
     sourcePath = workingDir;
     inherit hooks;
   };
-
-  # Boot script: stage the user's source tree at `working_dir`, run
-  # the `before_start` hook (no-op when no commands declared), then
-  # idle. The agent dispatches per call over vsock (RunEntrypoint), so
-  # PID 1 doesn't need to *run* the workload — only keep the VM alive.
-  # `_workingDirOnly` is a defensive guard: `dirname /` is `/`, but
-  # `dirname /app` is `/`. We never want to recursively chmod above the
-  # symlink target, so the parent we mkdir is the immediate parent only.
-  #
-  # `before_start.sh` runs after the appPkg symlink so user hook
-  # commands see the bundled source already mounted at workingDir.
-  # Failure of `before_start` aborts boot — the user explicitly
-  # declared the command must succeed.
-  bootScript = pkgs.writeShellScript "${ir.id}-boot" ''
-    set -eu
-    mkdir -p "$(${pkgs.coreutils}/bin/dirname ${lib.escapeShellArg workingDir})"
-    ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${lib.escapeShellArg workingDir}
-    /etc/mvm/hooks/before_start.sh
-    exec ${pkgs.coreutils}/bin/sleep infinity
-  '';
 in
+# PID 1 is the factory's idle boot command (stage source → before_start
+# hook → idle), passed via `bootCommand` so it lands at /etc/mvm/boot.
+# /etc/mvm/entrypoint stays the agent's per-call marker (the wrapper),
+# baked by `factory.extraFiles`. Routing PID 1 through a distinct file is
+# what stops `extraFiles` from clobbering it (the boot→ping panic).
 mkGuest {
   name = ir.id;
   inherit hypervisor vcpus memory_mib;
+  # `entrypoint` only drives classification here (sealed command form);
+  # mkGuest does not write it to disk when `bootCommand` is set — the
+  # factory's extraFiles owns /etc/mvm/entrypoint.
   entrypoint = {
-    command = [ "${bootScript}" ];
+    command = factory.bootCommand;
   };
+  bootCommand = factory.bootCommand;
   # uid 0: the boot script symlinks into `/` which is root-only. The
   # per-call wrapper drops privs internally via setpriv (W2.3) so
   # this is the same posture the sealed function-workload path

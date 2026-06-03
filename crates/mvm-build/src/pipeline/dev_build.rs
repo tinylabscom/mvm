@@ -1708,7 +1708,7 @@ mod tests {
             "",
         );
 
-        let sidecar = crate::builder_vm::ArtifactManifest::read_from_dir(tmp.path())
+        let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(tmp.path())
             .expect("read")
             .expect("present");
         assert!(sidecar.accessible);
@@ -1730,7 +1730,7 @@ mod tests {
             "",
         );
 
-        let sidecar = crate::builder_vm::ArtifactManifest::read_from_dir(tmp.path()).expect("read");
+        let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(tmp.path()).expect("read");
         assert!(sidecar.is_none());
     }
 
@@ -1749,7 +1749,7 @@ mod tests {
             "",
         );
 
-        let sidecar = crate::builder_vm::ArtifactManifest::read_from_dir(tmp.path()).expect("read");
+        let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(tmp.path()).expect("read");
         assert!(sidecar.is_none());
     }
 
@@ -1767,7 +1767,7 @@ mod tests {
             " --impure",
         );
 
-        let sidecar = crate::builder_vm::ArtifactManifest::read_from_dir(tmp.path())
+        let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(tmp.path())
             .expect("read")
             .expect("present");
         assert!(!sidecar.accessible, "sealed fixture round-tripped");

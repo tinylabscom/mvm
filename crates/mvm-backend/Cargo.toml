@@ -49,6 +49,8 @@ mvm-libkrun.workspace = true
 mvm-vz.workspace = true
 
 anyhow.workspace = true
+thiserror = "1"
+uuid.workspace = true
 # `libc` for `kill(pid, 0)` liveness probes + SIGTERM/SIGKILL signaling
 # in `LibkrunBackend::{stop, status, list}`. `which` for the
 # supervisor-binary path resolver fallback (after env override + adjacent
@@ -58,6 +60,7 @@ which.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ext4-view.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true

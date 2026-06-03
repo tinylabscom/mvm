@@ -32,6 +32,7 @@ build = "build.rs"
 # the FFI surface — backend dispatch lives in mvm-backend.
 
 [dependencies]
+mvm-core.workspace = true
 libc.workspace = true
 tracing = "0.1"
 # `serde` is always on (with `derive`) so the `KrunContext`,
@@ -52,12 +53,13 @@ serde = { workspace = true }
 # always-on per the comment above.
 serde_json.workspace = true
 # We intentionally do NOT pull `mvm-guest` from regular deps: that
-# would close a cycle (mvm-core → mvm-libkrun → mvm-guest → mvm-core,
-# since mvm-core depends on mvm-libkrun for `Platform::has_libkrun`).
-# The supervisor receives the vsock port list via the JSON config —
-# the symbolic `GUEST_AGENT_PORT` constant is only needed by callers
-# composing the config, not by the supervisor consuming it. The
-# `libkrun-smoke` example keeps `mvm-guest` as a dev-dep because
+# would form a diamond (mvm-libkrun → mvm-guest → mvm-core ← mvm-libkrun)
+# that, while not a true cycle, inflates build parallelism unnecessarily.
+# mvm-core is now a pure sink — it does NOT depend on mvm-libkrun (commit
+# 5073268b inverted that dep). The supervisor receives the vsock port list
+# via the JSON config — the symbolic `GUEST_AGENT_PORT` constant is only
+# needed by callers composing the config, not the supervisor consuming it.
+# The `libkrun-smoke` example keeps `mvm-guest` as a dev-dep because
 # dev-deps are excluded from cycle analysis.
 #
 # Plan 102 W6.A.5 moved the `mvm-libkrun-supervisor` bin out into

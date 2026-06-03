@@ -1,0 +1,11 @@
+# Runtime Python dependencies for this workload, one per line.
+#
+# Installed at build time inside the builder VM by the default
+# `before_build` hook (`pip install -r requirements.txt`) and baked into
+# the workload rootfs — never on the host, never at boot. Override by
+# declaring your own `before_build` in `@mvm.app(...)`.
+#
+# `mvm` itself is intentionally absent: the `@mvm.app` decorator is
+# build-time metadata that `mvmctl compile` strips from the bundled
+# source, so the guest never imports the SDK. hello-app has no other
+# runtime dependencies; add yours below.

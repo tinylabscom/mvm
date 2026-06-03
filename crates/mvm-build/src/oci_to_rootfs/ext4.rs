@@ -21,6 +21,8 @@
 //!   forward OCI xattrs through unpack today anyway).
 //! - `-b 4096` — fixed block size.
 //! - `-t ext4` — fixed FS type.
+//! - `-O ^orphan_file` — disable the orphan-file feature (default-on in
+//!   e2fsprogs >= 1.47); its inode bytes vary run-to-run.
 //!
 //! ## Host support
 //!
@@ -203,6 +205,13 @@ fn run_mke2fs(
     cmd.env("SOURCE_DATE_EPOCH", options.source_date_epoch.to_string())
         .args(["-F"]) // overwrite the preallocated output file
         .args(["-t", "ext4"])
+        // Disable `orphan_file`: e2fsprogs >= 1.47 enables it by default,
+        // and it allocates an orphan-file inode whose on-disk bytes vary
+        // between otherwise-identical runs — defeating the ADR-050 verity
+        // cache's byte-determinism (and `^metadata_csum_seed` is moot
+        // because `-U` already pins the seed). It's only a crash-recovery
+        // optimization, irrelevant for a read-only verity rootfs.
+        .args(["-O", "^orphan_file"])
         .args(["-L", &options.label])
         .args(["-U", &options.uuid])
         .args([

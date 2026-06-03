@@ -10,7 +10,7 @@
  * can validate identically through:
  *
  *   - The in-process SDK (this module): user writes
- *     `import * as mvm from "mvm-sdk"; export const greet =
+ *     `import * as mvm from "@runmvm/mvm"; export const greet =
  *      mvm.app({...})((name: string) => ...)` and runs `tsc + node` /
  *     `tsx` to emit IR via `mvm.emitJson()`.
  *   - The AST-walking compiler: `mvmctl compile app.ts` reads the same
@@ -49,7 +49,7 @@ import type {
 } from "./ir/workload.js";
 
 // Re-export the codegen output so callers `import { Workload } from
-// "mvm-sdk"` directly rather than reaching into the `ir/` sub-path.
+// "@runmvm/mvm"` directly rather than reaching into the `ir/` sub-path.
 export * from "./ir/workload.js";
 
 // Sandbox SDK (Phase 7c + 7f + Plan 73 Followup H-live). Imperative

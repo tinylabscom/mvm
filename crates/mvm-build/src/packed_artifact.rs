@@ -52,6 +52,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use mvm_core::arch::GuestArch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::{Archive, Builder, EntryType, Header};
@@ -144,10 +145,9 @@ pub struct Manifest {
     /// not load-bearing for verify (we don't pin host-vs-artifact
     /// versions).
     pub mvm_version: String,
-    /// `"aarch64-linux"`, `"x86_64-linux"`, etc. Matches the rootfs
-    /// builder's `--target` argument; mismatched arch fails at boot,
-    /// not at verify.
-    pub target_arch: String,
+    /// Guest CPU architecture. Serializes as `"aarch64"` / `"x86_64"`
+    /// (snake_case). Mismatched arch fails at boot, not at verify.
+    pub target_arch: GuestArch,
     /// SHA-256 hashes of every file in the archive, keyed by
     /// in-archive path. `BTreeMap` for deterministic ordering.
     pub files: BTreeMap<String, FileEntry>,
@@ -181,7 +181,7 @@ pub struct PackInputs<'a> {
     pub verity: Option<&'a Path>,
     pub roothash: Option<&'a Path>,
     pub initrd: Option<&'a Path>,
-    pub target_arch: String,
+    pub target_arch: GuestArch,
     pub build_provenance: Option<String>,
     pub security: SecurityPosture,
 }
@@ -248,7 +248,7 @@ pub fn pack(
     let manifest = Manifest {
         format_version: MANIFEST_FORMAT_VERSION,
         mvm_version: env!("CARGO_PKG_VERSION").to_string(),
-        target_arch: inputs.target_arch.clone(),
+        target_arch: inputs.target_arch,
         files,
         build_provenance: inputs.build_provenance.clone(),
         security: inputs.security.clone(),
@@ -644,7 +644,7 @@ mod tests {
             verity: None,
             roothash: None,
             initrd: None,
-            target_arch: "aarch64-linux".to_string(),
+            target_arch: GuestArch::Aarch64,
             build_provenance: Some("test".to_string()),
             security: SecurityPosture {
                 profile: ArtifactProfile::Dev,
@@ -670,7 +670,7 @@ mod tests {
             verity: Some(verity),
             roothash: Some(roothash),
             initrd: None,
-            target_arch: "aarch64-linux".to_string(),
+            target_arch: GuestArch::Aarch64,
             build_provenance: Some("test".to_string()),
             security: SecurityPosture {
                 profile: ArtifactProfile::SealedProd,
@@ -694,7 +694,7 @@ mod tests {
 
         let mf = verify(&out, &key.verifying_key()).unwrap();
         assert_eq!(mf.format_version, MANIFEST_FORMAT_VERSION);
-        assert_eq!(mf.target_arch, "aarch64-linux");
+        assert_eq!(mf.target_arch, GuestArch::Aarch64);
         assert_eq!(mf.security.profile, ArtifactProfile::Dev);
         assert!(mf.files.contains_key("kernel/vmlinux"));
         assert!(mf.files.contains_key("rootfs/rootfs.ext4"));
@@ -733,7 +733,7 @@ mod tests {
             verity: None,
             roothash: None,
             initrd: None,
-            target_arch: "aarch64-linux".to_string(),
+            target_arch: GuestArch::Aarch64,
             build_provenance: None,
             security: SecurityPosture {
                 profile: ArtifactProfile::SealedProd,
@@ -895,7 +895,7 @@ mod tests {
         let manifest = Manifest {
             format_version: MANIFEST_FORMAT_VERSION,
             mvm_version: "test".to_string(),
-            target_arch: "aarch64-linux".to_string(),
+            target_arch: GuestArch::Aarch64,
             files: BTreeMap::new(),
             build_provenance: None,
             security: SecurityPosture {
@@ -942,7 +942,7 @@ mod tests {
         let mut manifest = Manifest {
             format_version: MANIFEST_FORMAT_VERSION,
             mvm_version: "test".to_string(),
-            target_arch: "aarch64-linux".to_string(),
+            target_arch: GuestArch::Aarch64,
             files: BTreeMap::new(),
             build_provenance: None,
             security: SecurityPosture {
@@ -1155,5 +1155,23 @@ mod tests {
         tar.finish().unwrap();
         drop(tar);
         buf
+    }
+
+    /// Wire-compat: `GuestArch` must serialize as the bare arch string
+    /// (`"aarch64"` / `"x86_64"`), not `"aarch64-linux"`. Any
+    /// previously-persisted JSON that held `"aarch64"` still round-trips
+    /// correctly after this migration — the serde representation is
+    /// unchanged (was already `"aarch64"` via snake_case).
+    #[test]
+    fn target_arch_serde_wire_compat() {
+        let j = serde_json::to_string(&GuestArch::Aarch64).unwrap();
+        assert_eq!(j, "\"aarch64\"", "wire format must be bare arch string");
+        let back: GuestArch = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, GuestArch::Aarch64);
+
+        let j2 = serde_json::to_string(&GuestArch::X86_64).unwrap();
+        assert_eq!(j2, "\"x86_64\"");
+        let back2: GuestArch = serde_json::from_str(&j2).unwrap();
+        assert_eq!(back2, GuestArch::X86_64);
     }
 }
