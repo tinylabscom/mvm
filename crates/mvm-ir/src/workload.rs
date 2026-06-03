@@ -195,7 +195,8 @@ pub enum Entrypoint {
         env: BTreeMap<String, EnvValue>,
     },
     /// Function-call entrypoint (plan 0003 / ADR-0009): a baked
-    /// per-language wrapper at `/etc/mvm/entrypoint` reads stdin,
+    /// per-language wrapper at `/usr/lib/mvm/wrappers/runner` (named by
+    /// the agent marker `/etc/mvm/runner`) reads stdin,
     /// dispatches `module:function` per the declared `format`, writes
     /// the return on stdout. The host SDK calls
     /// `mvmctl invoke <workload> --stdin <encoded>` to invoke.

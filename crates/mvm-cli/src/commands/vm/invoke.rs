@@ -5,7 +5,7 @@
 //! Distinct from `mvmctl exec` (dev-only, arbitrary shell). `invoke`
 //! is the production-safe call surface — it dispatches the
 //! `RunEntrypoint` vsock verb, which the guest agent serves only by
-//! spawning the program named in `/etc/mvm/entrypoint`. There is no
+//! spawning the program named in `/etc/mvm/runner`. There is no
 //! shell, no argv override, and no env injection beyond what the
 //! wrapper template defined at image build time.
 //!

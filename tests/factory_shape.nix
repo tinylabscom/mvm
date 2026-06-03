@@ -47,7 +47,7 @@ let
       ok =
         out ? extraFiles
         && lib.isAttrs out.extraFiles
-        && (out.extraFiles ? "/etc/mvm/entrypoint")
+        && (out.extraFiles ? "/etc/mvm/runner")
         && (out.extraFiles ? "/usr/lib/mvm/wrappers/runner")
         && out ? servicePackages
         && lib.isList out.servicePackages

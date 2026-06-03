@@ -71,7 +71,10 @@ Returns the `{ extraFiles, servicePackages, service }` triple a
 downstream `mkGuest` composition layer consumes.
 
 `extraFiles` always contains:
-- `/etc/mvm/entrypoint` → `/usr/lib/mvm/wrappers/runner`
+- `/etc/mvm/runner` → the agent marker; contents are the absolute path
+  `/usr/lib/mvm/wrappers/runner` the guest agent execs per `RunEntrypoint`
+  (kept distinct from `/etc/mvm/entrypoint`, which is PID 1's idle boot
+  command — see `mvm_guest::entrypoint`).
 - `/usr/lib/mvm/wrappers/runner` → the language's wrapper script
   (cold-tier `oneshot.*` or warm-tier `longrunning.*` depending on
   `concurrency`).
