@@ -38,12 +38,24 @@ fn kernel_build_help_names_flags() {
     let out = mvmctl(&["kernel", "build", "--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
-    for expected in &["--which", "--all", "--source"] {
+    for expected in &[
+        "--which", "--all", "--source", "--arch", "compile", "download", "auto",
+    ] {
         assert!(
             stdout.contains(expected),
             "`mvmctl kernel build --help` missing {expected:?}; stdout:\n{stdout}"
         );
     }
+}
+
+/// `--arch` accepts only the two supported arches.
+#[test]
+fn kernel_build_rejects_unknown_arch() {
+    let out = mvmctl(&["kernel", "build", "--arch", "riscv64"]);
+    assert!(
+        !out.status.success(),
+        "unknown --arch value should fail to parse"
+    );
 }
 
 /// `--which` accepts only the two kernels; a bogus value is rejected.

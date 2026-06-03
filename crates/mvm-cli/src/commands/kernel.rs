@@ -40,9 +40,16 @@ struct BuildArgs {
     #[arg(long)]
     all: bool,
 
-    /// Where the kernel comes from. `compile` builds locally via Stage 0.
+    /// Where the kernel comes from. `compile` builds locally via Stage 0
+    /// (host arch only); `download` fetches a published prebuilt for the
+    /// release; `auto` downloads if available, else compiles.
     #[arg(long, value_enum, default_value_t = Source::Compile)]
     source: Source,
+
+    /// Target architecture. Defaults to the host arch. Only `download`
+    /// can target a non-host arch (Stage 0 cannot cross-compile).
+    #[arg(long, value_parser = ["aarch64", "x86_64"])]
+    arch: Option<String>,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +60,21 @@ enum Which {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
-    /// Compile locally through the Stage 0 builder bootstrap.
+    /// Compile locally through the Stage 0 builder bootstrap (host arch).
     Compile,
+    /// Fetch a published, SHA-256-verified prebuilt for this release.
+    Download,
+    /// Download if available, otherwise compile.
+    Auto,
+}
+
+/// Host architecture tag — matches `builder_vm_host_arch()`.
+fn host_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -65,31 +85,86 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 #[cfg(feature = "builder-vm")]
 fn run_build(args: BuildArgs) -> Result<()> {
-    use crate::commands::env::apple_container::{KernelVariant, build_kernel_via_stage0};
+    use crate::commands::env::apple_container::KernelVariant;
     use crate::ui;
 
-    // Single source today; the binding keeps the flag wired and warns
-    // here if a future variant is added without a branch.
-    let Source::Compile = args.source;
+    let arch = args.arch.clone().unwrap_or_else(|| host_arch().to_string());
 
-    let variants: Vec<KernelVariant> = if args.all {
-        vec![KernelVariant::Builder, KernelVariant::Workload]
+    // (variant, cache-label) — the label keys the cache dir + the
+    // published asset name (vmlinux-<arch>-<label>).
+    let variants: Vec<(KernelVariant, &str)> = if args.all {
+        vec![
+            (KernelVariant::Builder, "builder"),
+            (KernelVariant::Workload, "workload"),
+        ]
     } else {
         match args.which {
-            Which::Builder => vec![KernelVariant::Builder],
-            Which::Workload => vec![KernelVariant::Workload],
+            Which::Builder => vec![(KernelVariant::Builder, "builder")],
+            Which::Workload => vec![(KernelVariant::Workload, "workload")],
         }
     };
 
-    for variant in variants {
-        let path = build_kernel_via_stage0(variant)?;
+    for (variant, label) in variants {
+        let path = acquire_kernel(args.source, variant, label, &arch)?;
         let mib = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
         ui::success(&format!(
-            "Built {variant:?} kernel: {} ({mib:.1} MiB)",
+            "{label} kernel ({arch}): {} ({mib:.1} MiB)",
             path.display()
         ));
     }
     Ok(())
+}
+
+/// Resolve a kernel by `source` into the per-arch cache, returning its path.
+#[cfg(feature = "builder-vm")]
+fn acquire_kernel(
+    source: Source,
+    variant: crate::commands::env::apple_container::KernelVariant,
+    label: &str,
+    arch: &str,
+) -> Result<std::path::PathBuf> {
+    let dest = kernel_cache_path(arch, label);
+    match source {
+        Source::Compile => compile_host_arch(variant, arch),
+        Source::Download => {
+            crate::update::download_kernel(arch, label, &dest)?;
+            Ok(dest)
+        }
+        Source::Auto => match crate::update::download_kernel(arch, label, &dest) {
+            Ok(()) => Ok(dest),
+            Err(e) => {
+                crate::ui::warn(&format!("download failed ({e}); compiling locally"));
+                compile_host_arch(variant, arch)
+            }
+        },
+    }
+}
+
+/// Compile arm — host arch only (Stage 0 cannot cross-compile).
+#[cfg(feature = "builder-vm")]
+fn compile_host_arch(
+    variant: crate::commands::env::apple_container::KernelVariant,
+    arch: &str,
+) -> Result<std::path::PathBuf> {
+    if arch != host_arch() {
+        anyhow::bail!(
+            "--source compile builds the host arch ({}) only; use --source download for {arch}",
+            host_arch()
+        );
+    }
+    crate::commands::env::apple_container::build_kernel_via_stage0(variant)
+}
+
+/// Per-arch, per-variant cached kernel path. Mirrors
+/// `build_kernel_via_stage0`'s output location.
+#[cfg(feature = "builder-vm")]
+fn kernel_cache_path(arch: &str, label: &str) -> std::path::PathBuf {
+    std::path::Path::new(&mvm_core::config::mvm_cache_dir())
+        .join("builder-vm")
+        .join(arch)
+        .join("kernels")
+        .join(label)
+        .join("vmlinux")
 }
 
 #[cfg(not(feature = "builder-vm"))]

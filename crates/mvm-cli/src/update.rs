@@ -196,6 +196,67 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Download a published kernel (`vmlinux-<arch>-<variant>`) from the
+/// release matching this mvmctl's version, SHA-256-verify it against the
+/// release's `kernel-<arch>-checksums-sha256.txt`, and write it to
+/// `dest`. The `--source download` arm of `mvmctl kernel build`.
+///
+/// Keyed by the mvmctl release tag (ADR-046 §"Amendment: kernel
+/// acquisition"): a given mvmctl can only ever fetch the kernel that
+/// shipped with it — never a substitute for an in-tree config edit (a
+/// source checkout compiles instead). `MVM_SKIP_HASH_VERIFY` is the
+/// documented emergency escape (W5.1) — never set it in CI.
+pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
+    let tag = format!("v{}", current_version());
+    let asset = format!("vmlinux-{arch}-{variant}");
+    let checksums = format!("kernel-{arch}-checksums-sha256.txt");
+    let base = github_download_base();
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating kernel cache dir {}", parent.display()))?;
+    }
+
+    let asset_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{asset}");
+    let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
+    let dl = http::download_file(&asset_url, dest);
+    sp.finish_and_clear();
+    dl.with_context(|| {
+        format!(
+            "no kernel asset {asset} in release {tag}. Build it locally with \
+             `--source compile`, or cut a release that publishes kernels."
+        )
+    })?;
+
+    if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
+        ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
+        return Ok(());
+    }
+
+    let checksum_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{checksums}");
+    let expected = http::fetch_text(&checksum_url)
+        .context("downloading kernel checksums — cannot verify integrity")?
+        .lines()
+        .find(|l| l.contains(&asset))
+        .with_context(|| format!("{asset} not found in {checksums}"))
+        .and_then(parse_checksum_line)?;
+
+    let bytes =
+        std::fs::read(dest).with_context(|| format!("reading {} for checksum", dest.display()))?;
+    let actual: [u8; 32] = Sha256::digest(&bytes).into();
+    if actual != expected {
+        let _ = std::fs::remove_file(dest);
+        anyhow::bail!(
+            "Kernel checksum mismatch for {asset}!\n  expected: {}\n  actual:   {}\n\
+             Download rejected and removed.",
+            hex_encode(&expected),
+            hex_encode(&actual),
+        );
+    }
+    ui::success(&format!("Verified {asset}."));
+    Ok(())
+}
+
 /// Check if a directory is writable by the current user.
 fn is_writable(path: &Path) -> bool {
     tempfile::Builder::new()
