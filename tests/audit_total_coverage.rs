@@ -187,6 +187,14 @@ const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
     // Plan 76 follow-up — read manifest without signature check.
     ("inspect", AuditPosture::ReadOnly),
+    // Plan 134 — architecture-aware artifact-model commands. All static
+    // (read manifest / validate / emit a Firecracker config / build an
+    // artifact via the builder); none touch the host audit chain — like
+    // `pack`/`verify` above, they only produce local artifacts.
+    ("model-inspect", AuditPosture::ReadOnly),
+    ("model-validate", AuditPosture::ReadOnly),
+    ("model-config", AuditPosture::ReadOnly),
+    ("model-build", AuditPosture::ReadOnly),
 ];
 
 // Sprint 52 W2 — bundle / trust subcommand tables.
