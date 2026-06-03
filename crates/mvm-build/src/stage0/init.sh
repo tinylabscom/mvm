@@ -243,10 +243,22 @@ export MVM_WORKSPACE_PATH=/work
 # mount above). The flake reads this under --impure.
 export MVM_HOST_BIN_DIR=/mvm-bins
 
-ARCH="$(uname -m)"
-FLAKE_REF="path:/work/nix/images/builder-vm#packages.${ARCH}-linux.default"
+# Stage 0 build target. The host may drop a tiny conf on the /out
+# share to build a single flake attr — e.g. just the kernel via
+# `mvmctl kernel build` — instead of the full builder-VM image. When
+# the file is absent (the `mvmctl dev up` path) the defaults below
+# reproduce the prior behaviour byte-for-byte: build `default` and
+# emit vmlinux + rootfs.ext4.
+if [ -f /out/stage0-build.conf ]; then
+  . /out/stage0-build.conf
+fi
+: "${MVM_STAGE0_BUILD_ATTR:=default}"
+: "${MVM_STAGE0_OUTPUT_MODE:=image}"   # image | kernel
 
-echo "stage0-init: building ${FLAKE_REF}" >&2
+ARCH="$(uname -m)"
+FLAKE_REF="path:/work/nix/images/builder-vm#packages.${ARCH}-linux.${MVM_STAGE0_BUILD_ATTR}"
+
+echo "stage0-init: building ${FLAKE_REF} (output_mode=${MVM_STAGE0_OUTPUT_MODE})" >&2
 
 # --no-link / --no-write-lock-file lets us build against a
 # read-only workspace mount. --print-out-paths spits the result
@@ -311,12 +323,17 @@ else
   echo "stage0-init: no kernel in $NIX_OUT" >&2
   exit 1
 fi
-if [ ! -f "$NIX_OUT/rootfs.ext4" ]; then
-  echo "stage0-init: no rootfs.ext4 in $NIX_OUT" >&2
-  exit 1
+# A kernel-only attr (builder-kernel / workload-kernel) emits just the
+# kernel image — no rootfs.ext4 / cmdline.txt. The kernel copy above
+# already landed /out/vmlinux; skip the image-only artifacts.
+if [ "$MVM_STAGE0_OUTPUT_MODE" != kernel ]; then
+  if [ ! -f "$NIX_OUT/rootfs.ext4" ]; then
+    echo "stage0-init: no rootfs.ext4 in $NIX_OUT" >&2
+    exit 1
+  fi
+  cp -L "$NIX_OUT/rootfs.ext4" /out/rootfs.ext4
+  [ -f "$NIX_OUT/cmdline.txt" ] && cp -L "$NIX_OUT/cmdline.txt" /out/cmdline.txt
 fi
-cp -L "$NIX_OUT/rootfs.ext4" /out/rootfs.ext4
-[ -f "$NIX_OUT/cmdline.txt" ] && cp -L "$NIX_OUT/cmdline.txt" /out/cmdline.txt
 
 sync
 echo "stage0-init: done; halting" >&2

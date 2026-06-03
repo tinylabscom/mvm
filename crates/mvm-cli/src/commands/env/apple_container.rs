@@ -2033,6 +2033,163 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     }
 }
 
+/// Which custom kernel `mvmctl kernel build` realizes. Each maps to a
+/// flake attr on `nix/images/builder-vm` and a cache subdir.
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KernelVariant {
+    /// Builder-VM kernel — shared base + virtio-fs / overlay / netfilter
+    /// / nix-sandbox infra (`nix/images/builder-vm/kernel`).
+    Builder,
+    /// Workload-microVM kernel — the shared base alone (`workload-kernel`).
+    Workload,
+}
+
+#[cfg(feature = "builder-vm")]
+impl KernelVariant {
+    /// Flake attr under `packages.<arch>-linux`.
+    fn attr(self) -> &'static str {
+        match self {
+            Self::Builder => "builder-kernel",
+            Self::Workload => "workload-kernel",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Builder => "builder",
+            Self::Workload => "workload",
+        }
+    }
+}
+
+/// `mvmctl kernel build --source compile`: compile a single kernel attr
+/// through the Stage 0 Alpine bootstrap and land its `vmlinux` in the
+/// per-arch builder-VM cache. Returns the cached kernel path.
+///
+/// Reuses the exact Stage 0 boot path `mvmctl dev up` uses, but writes a
+/// `/out/stage0-build.conf` pointing `init.sh` at the kernel attr in
+/// kernel-only output mode (no rootfs). The persistent
+/// `nix-store-stage0` image is shared — and locked — with the full
+/// image build, so a freshly compiled kernel is *substituted*, not
+/// rebuilt, by the next `dev up`.
+///
+/// Host-arch only: Stage 0 boots a host-arch VM under libkrun and can't
+/// cross-compile. Cross-arch kernels come from the download arm (the
+/// kernel-build GHA publishes both arches).
+#[cfg(feature = "builder-vm")]
+pub(crate) fn build_kernel_via_stage0(variant: KernelVariant) -> Result<std::path::PathBuf> {
+    let builder_flake_dir = find_builder_vm_flake().map_err(|_| {
+        anyhow::anyhow!(
+            "`mvmctl kernel build --source compile` needs a source checkout of mvm \
+             (nix/images/builder-vm/flake.nix). From an installed binary, fetch a \
+             published kernel with `--source download` instead."
+        )
+    })?;
+
+    let arch = builder_vm_host_arch();
+    // Per-arch, per-variant kernel cache, distinct from the image's
+    // `builder-vm/<arch>/vmlinux` so the two never clobber each other.
+    let out_dir = format!(
+        "{}/builder-vm/{arch}/kernels/{}",
+        mvm_core::config::mvm_cache_dir(),
+        variant.label()
+    );
+    let out_dir_path = std::path::Path::new(&out_dir);
+    std::fs::create_dir_all(out_dir_path)
+        .with_context(|| format!("creating kernel cache dir {out_dir}"))?;
+
+    // Shares the Stage 0 output lock with `dev up`; the deeper
+    // nix-store-stage0 image lock (taken inside `run_stage0`) is the
+    // real mutual exclusion against a concurrent image build.
+    let _stage0_guard = acquire_stage0_lock(&out_dir)?;
+
+    let stage0_assets = mvm_build::stage0::assets_for_host_arch();
+    let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
+        .context("preparing Stage 0 bootstrap assets (Alpine minirootfs + signature)")?;
+    for report in &vendor_reports {
+        mvm_core::policy::audit::emit(
+            mvm_core::policy::audit::LocalAuditKind::VendorBlobFetched,
+            None,
+            Some(&report.audit_detail()),
+        );
+    }
+
+    let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
+    if root_dir.exists() {
+        std::fs::remove_dir_all(&root_dir)
+            .with_context(|| format!("clearing Stage 0 root dir {}", root_dir.display()))?;
+    }
+    mvm_build::stage0::materialize_root_dir(&root_dir)
+        .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
+
+    // Workspace root = three dirs above the flake.nix
+    // (nix/images/builder-vm/flake.nix → repo root).
+    let workspace_root = std::path::Path::new(&builder_flake_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("cannot derive workspace root from {builder_flake_dir}"))?
+        .to_path_buf();
+
+    let staging_dir = unique_builder_vm_stage0_staging_dir(out_dir_path)?;
+    std::fs::create_dir_all(&staging_dir)
+        .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
+
+    // Point init.sh at the kernel attr + kernel-only output. Absent this
+    // file (the `dev up` path), init.sh builds the full image.
+    let conf = format!(
+        "MVM_STAGE0_BUILD_ATTR={}\nMVM_STAGE0_OUTPUT_MODE=kernel\n",
+        variant.attr()
+    );
+    std::fs::write(staging_dir.join("stage0-build.conf"), conf)
+        .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
+
+    // ADR-065: the Stage 0 nix build installs the embedded host-vm
+    // binaries from /mvm-bins rather than building them in-guest.
+    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
+    let host_bin_dir =
+        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
+            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+
+    ui::info(&format!(
+        "Compiling {} kernel ({arch}) via Stage 0 — first build is slow \
+         (3-10 min); later runs hit the nix store cache.",
+        variant.label()
+    ));
+
+    {
+        use mvm_build::builder_vm::BuilderVm;
+        use mvm_build::libkrun_builder::LibkrunBuilderVm;
+        let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+        backend
+            .run_stage0(
+                &root_dir,
+                "/init",
+                &workspace_root,
+                &staging_dir,
+                &host_bin_dir,
+            )
+            .map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
+    }
+
+    let built = staging_dir.join("vmlinux");
+    if !built.is_file() {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        anyhow::bail!(
+            "Stage 0 produced no kernel at {} (attr {})",
+            built.display(),
+            variant.attr()
+        );
+    }
+    let dest = out_dir_path.join("vmlinux");
+    std::fs::copy(&built, &dest)
+        .with_context(|| format!("copying kernel to {}", dest.display()))?;
+    let _ = std::fs::remove_dir_all(&staging_dir);
+
+    Ok(dest)
+}
+
 /// Boot the Stage 0 VM with the supplied `RootDir` image, mounting
 /// `workspace_root` as `/work` and `staging_dir` as `/out`. On
 /// clean exit, write the cache-validation sidecars next to the
