@@ -11,205 +11,141 @@ heroImage: /blog/security-boundary.svg
 heroAlt: Layered security architecture showing Nix inputs flowing into a microVM boundary.
 ---
 
-Infrastructure teams increasingly need to run code they did not write.
+Sooner or later, every infrastructure team ends up running code it didn't write.
 
-That code may be a user-submitted script, an AI-generated tool call, a dependency install hook, a CI job, a data-processing task, or a small service that needs to run near sensitive files and credentials. The old answer was often "put it in a container." Containers are useful, fast, and familiar, but they were not designed to be the final security boundary for hostile workloads.
+Maybe it's a script a user pasted in. Maybe it's a tool call an AI agent decided to make, or a dependency's install hook, or a CI job, or some data-processing task that happens to live next to your credentials. For a long time the reflex answer was "just put it in a container." And containers are great. They're everywhere, and most people already know how to use them. They were just never designed to be the thing standing between hostile code and your host.
 
-A stronger design starts from a different assumption: if code might be untrusted, generated, or simply surprising, the isolation boundary should be obvious and strong by default.
+So we started from a different assumption. If a piece of code might be untrusted, or generated, or simply weird in ways you didn't anticipate, then the wall around it should be strong by default, not strong only when you remember to make it strong. Two tools fit that assumption well:
 
-Two technologies fit that posture especially well:
+- **microVMs** give each workload its own small virtual machine.
+- **Nix** makes the software inside that machine reproducible, pinned, and easy to audit.
 
-- **microVMs**, which give each workload its own small virtual machine boundary; and
-- **Nix**, which makes the software inside that boundary reproducible, pinned, and auditable.
+The rest of this post is how they fit together. It stays at the architecture level on purpose; we're after the shape of the system, not the kernel command lines, the seccomp profiles, or the Nix derivations. Those are their own posts.
 
-This post is a high-level tour of what a secure-by-design local execution system should look like. It avoids deep implementation detail on purpose. The goal is to explain the shape of the system before diving into kernel command lines, seccomp profiles, vsock protocols, or Nix derivations.
+## What we actually need
 
-## What a secure runtime should optimize for
+A runtime like this has to cover a lot of ground: dev environments, agent sandboxes, code interpreters, CI-style jobs, the occasional service experiment. The tension is always the same. Make it strong enough that "run this code" doesn't quietly turn into "trust this code with the whole machine," but keep it light enough that people don't route around it.
 
-Before talking about the stack, it helps to name the product requirements.
+That shakes out into a few properties:
 
-A local and programmable runtime for Linux workloads might need to support development environments, AI agent sandboxes, code interpreters, CI-style jobs, and service experiments. The security model has to be practical enough for everyday use, but strong enough that "run this code" does not mean "trust this code with the host."
+- **Real isolation.** Workload code can't wander into the host filesystem, the host's credentials, or a neighbor's data.
+- **Legible boundaries.** Build, launch, guest control, network, secrets, and audit each have an obvious home in the architecture instead of being smeared across everything.
+- **Reproducible inputs.** The image that boots comes from something pinned and inspectable, not a pile of setup steps somebody ran once.
+- **Fast iteration.** A boundary nobody uses protects nothing.
 
-The important requirements are:
+That last point is worth sitting with. Security work fails far more often from being ignored than from being wrong.
 
-- **Strong isolation**: workload code should not be able to freely access the host filesystem, host credentials, or neighboring workloads.
-- **Clear boundaries**: build work, launch decisions, guest control, network access, secrets, and audit records should each have a named place in the architecture.
-- **Reproducible inputs**: the image that boots should come from pinned, inspectable inputs rather than mutable snowflake setup steps.
-- **Fast iteration**: developers still need the experience to feel lightweight. A stronger boundary is not useful if nobody uses it.
-- **Portable intent**: the same workload definition should describe what to run, what it needs, and what policies apply, even when the backend differs by platform.
+## microVMs: a real boundary at runtime
 
-MicroVMs and Nix map neatly onto these goals.
+A microVM is a small virtual machine built for fast startup and low overhead. It's still a full VM underneath, with its own guest kernel, its own filesystem, virtual devices, and a hypervisor below all of it. The "micro" just means the device model is kept deliberately small.
 
-## Why microVMs
+That separate kernel is the whole reason we reach for it. A container shares the host kernel. You can lock one down hard with namespaces, cgroups, seccomp, and capabilities, and you absolutely should, but the moment a workload finds a way through the host kernel or the container runtime, the wall is gone. A microVM puts a *separate* guest kernel in between. Breaking out of your own little Linux environment isn't enough anymore; you'd also have to break the virtualization boundary, which is a much taller order.
 
-A microVM is a small virtual machine designed for fast startup and low overhead. It is still a VM: it has a guest kernel, a guest filesystem, virtual devices, and a hypervisor boundary beneath it. The "micro" part means the device model and runtime surface are intentionally smaller than a general-purpose virtual machine.
-
-That distinction matters for security.
-
-Containers share the host kernel. A container can be locked down with namespaces, cgroups, seccomp, capabilities, and filesystem policy, and those controls are valuable. But if the workload finds a path through the host kernel or container runtime, the boundary can collapse.
-
-A microVM puts a guest kernel between the workload and the host. The workload can still attack its own guest environment, but reaching the host requires crossing the virtualization boundary too.
-
-At a high level, the runtime stack should look like this:
+The useful way to picture it is as a stack where each layer absorbs a mistake in the one above:
 
 ```mermaid
 flowchart TB
   Workload["Workload code"]
-  Agent["Guest agent and in-guest policy"]
+  Agent["Guest agent + in-guest policy"]
   Guest["Guest Linux kernel"]
   VMM["MicroVM backend"]
-  Host["Host OS and hardware virtualization"]
+  Host["Host OS + hardware virtualization"]
 
-  Workload --> Agent
-  Agent --> Guest
-  Guest --> VMM
-  VMM --> Host
+  Workload -->|"must cross"| Agent
+  Agent -->|"must cross"| Guest
+  Guest -->|"must cross"| VMM
+  VMM -->|"must cross"| Host
 ```
 
-Each layer narrows the blast radius of a mistake in the layer above it. A bug in application code should not imply host file access. A compromised process inside the guest should not imply control of the host. A broad tool call should still pass through policy and audit surfaces.
+A bug in application code shouldn't get you host files. A compromised process inside the guest shouldn't get you the host. A sweeping tool call should still pass through policy and audit on its way out.
 
-The most important benefits are:
+Treating the VM as the sandbox gives us a few rules:
 
-- **Kernel separation**: the workload runs on a guest Linux kernel rather than directly on the host kernel.
-- **Smaller device surface**: microVM backends expose a smaller set of virtual devices than a traditional full VM.
-- **One workload per boundary**: the VM is the sandbox, not a shared server for mutually distrusting tenants.
-- **Backend-visible tiers**: when the selected backend cannot provide the same isolation properties, the runtime should name that difference instead of silently pretending all backends are equivalent.
+- **One workload per boundary.** This is a sandbox, not a shared server for tenants who distrust each other.
+- **No host access by default.** The guest gets its own process tree, its own network, and a filesystem that stops at the share you declared.
+- **Guest RPC, not a shell.** Anything host-facing goes through a controlled protocol, never a raw shell.
+- **Honest backend tiers.** When a backend genuinely can't offer the same isolation, we say so. Firecracker on Linux KVM and a Docker fallback are not the same wall, and labeling them as if they were would be dishonest.
 
-This is why a secure runtime should distinguish microVM-capable backends from convenience fallbacks. Docker can be useful for local compatibility, but it is not the same security boundary as a microVM.
+None of this means the microVM "solves" security. It gives you a hardware-backed boundary worth building the rest of the system around.
 
-## Why Nix
+## Nix: knowing what's actually inside
 
-Isolation answers "where does this code run?" Nix helps answer "what exactly is running?"
+Isolation tells you *where* the code runs. It says nothing about *what's in there*, and that second question matters just as much. An image stitched together from mutable package repos, unpinned install scripts, and somebody's shell history is exactly the kind of thing you can't reason about. The boundary at runtime is half the story; the supply chain that produced the thing crossing it is the other half.
 
-That second question is just as important. A sandboxed workload is harder to reason about if its image was assembled from mutable package repositories, unpinned install scripts, or manual shell history. Security is not only about the runtime boundary. It is also about the supply chain that produced the thing crossing that boundary.
+This is the part Nix is good at:
 
-Nix gives this design three high-level advantages:
+- **Pinned inputs.** A `flake.lock` records exact dependency revisions, so a rebuild doesn't silently change because some upstream package moved.
+- **Repeatable images.** The image is built from a declarative definition, not a machine somebody poked at by hand.
+- **Auditable closures.** The packages and files that end up inside are explicit build outputs, which is what makes provenance and review doable instead of aspirational.
 
-- **Pinned inputs**: a `flake.lock` records exact dependency revisions, so rebuilds do not silently drift because an upstream package changed.
-- **Repeatable image construction**: the guest image is built from a declarative definition rather than a hand-mutated machine.
-- **Auditable closures**: the files and packages that enter the VM image are explicit build outputs, which makes provenance and review more practical.
+Day to day, the workload definition lives right next to the code. A flake spells out the packages, services, health checks, and files the guest needs, and the runtime turns that into a Linux image and boots it in a microVM. Nobody has to become a Nix wizard for this to pay off. The win is simply that the image is a known artifact you can cache, identify, sign into a launch plan, and trace back later when something looks off, instead of an informal pile of "I think I installed that at some point."
 
-For developers, this means the workload definition can stay close to the code. A flake can say which packages, services, health checks, and files the guest needs. A runtime can then build a Linux image from that definition and boot it in a microVM.
-
-The result is a cleaner chain:
+Put end to end, the path from source to running VM becomes a chain you can actually follow:
 
 ```mermaid
 flowchart LR
-  Flake["Pinned flake inputs"]
-  Build["Nix build"]
-  Image["Kernel + rootfs artifacts"]
-  Plan["Signed execution plan"]
-  VM["Runtime microVM"]
-  Audit["Audit record"]
-
-  Flake --> Build --> Image --> Plan --> VM --> Audit
+  Flake["Pinned<br/>flake inputs"] --> Build["Nix<br/>build"]
+  Build --> Image["Kernel +<br/>rootfs"]
+  Image --> Plan["Signed<br/>execution plan"]
+  Plan --> VM["Runtime<br/>microVM"]
+  VM --> Audit["Audit<br/>record"]
 ```
 
-The important part is not that every user becomes a Nix expert. The important part is that the runtime can treat the workload image as a known artifact, not an informal pile of setup steps.
+One wrinkle worth calling out, especially on macOS: the thing you're building is a *Linux* guest image, and a Mac can't natively assemble a Linux filesystem. So mvm runs the actual Nix evaluation and image assembly inside a small Linux builder VM rather than on the host. Your machine just orchestrates — invoking the build, moving artifacts around — while the Linux-specific work happens in a Linux environment. As a bonus, that keeps the build reproducible across host operating systems: the same flake produces the same image whether you started from macOS or Linux.
 
-## The secure-by-design stack
+## How the pieces fit
 
-A proper design separates build-time concerns from runtime concerns.
-
-On macOS and Linux, the host process can own the local control plane: CLI parsing, SDK calls, config loading, cache lookup, and lifecycle commands. Linux image construction should happen behind a builder boundary. Runtime execution should happen in a separate microVM boundary.
-
-At a high level:
+The thing we were careful about is that none of this collapses into one big privileged operation. Build, admission, backend launch, and guest control each sit behind their own boundary.
 
 ```mermaid
 flowchart TB
-  User["CLI / SDK / tool caller"]
-  Runtime["Local runtime"]
-  Builder["Builder VM\nLinux Nix eval + image assembly"]
-  Admission["Signed plan admission\nresources + policy + artifact identity"]
-  Backend["MicroVM backend\nFirecracker / Apple VZ / libkrun / other"]
-  Guest["Guest agent + workload"]
-  Evidence["Local audit and receipts"]
+  subgraph host["Host control plane"]
+    User["CLI / SDK / tool caller"]
+    Runtime["mvm runtime"]
+    Admission["Admission<br/>signs + verifies the plan"]
+    Backend["MicroVM backend<br/>Firecracker / libkrun / Apple VZ / Apple Container"]
+    Audit["Audit log + receipts"]
+  end
 
-  User --> Runtime
-  Runtime --> Builder
-  Builder --> Runtime
-  Runtime --> Admission
-  Admission --> Backend
-  Backend --> Guest
-  Admission --> Evidence
-  Guest --> Evidence
+  subgraph builder["Builder VM — separate Linux boundary"]
+    Build["Nix eval + image assembly"]
+  end
+
+  subgraph micro["MicroVM — isolation boundary"]
+    Guest["Guest agent + workload"]
+  end
+
+  User -->|"run request"| Runtime
+  Runtime -->|"build image"| Build
+  Build -->|"kernel + rootfs"| Runtime
+  Runtime -->|"verified image + policy"| Admission
+  Admission -->|"signed plan"| Backend
+  Backend -->|"boots guest"| Guest
+  Admission -.->|"admitted / denied"| Audit
+  Guest -.->|"runtime events"| Audit
 ```
 
-The key design choice is that these are not all one big privileged operation.
+Each box has one job:
 
-- The **builder VM** handles Linux Nix evaluation, builds, and image assembly.
-- The **runtime supervisor** admits launches, selects the backend, wires guest communication, and records local evidence.
-- The **microVM backend** creates the isolated execution boundary.
-- The **guest agent** handles controlled in-guest actions such as process execution, filesystem operations, readiness, and telemetry.
-- The **policy and audit surfaces** make high-value decisions visible after the fact.
+- **Builder VM** — Linux Nix evaluation, builds, and image assembly.
+- **mvm runtime** — the host process you invoked (CLI or SDK). It drives the builder VM, runs admission inline, picks the backend, and writes down what happened. It isn't a long-lived supervisor daemon sitting above the stack — it's the command you ran.
+- **Admission** — binds artifact identity, resources, policy, a validity window, and replay handling into a signed execution plan before anything boots.
+- **MicroVM backend** — stands up the isolated boundary. Each VM gets its own supervisor process (for example `mvm-libkrun-supervisor`) that re-verifies the signed plan at boot and bridges the guest's audit events back to the host log.
+- **Guest agent** — the controlled in-guest work: running a process, touching the filesystem, reporting readiness, telemetry.
+- **Audit** — quietly records the decisions that mattered.
 
-This separation is useful operationally, but it is also useful for security. If something goes wrong, you can ask which boundary was involved: build, admission, backend launch, guest control, network policy, secret release, or audit.
+The reason to split it up this way is partly security and partly just operations. When something breaks at 2am, "which boundary was involved?" has a real answer: build, admission, backend launch, guest control, network policy, secret release, or audit. That beats staring at one giant privileged blob.
 
-## How microVMs should be used for security
+## What this design doesn't claim
 
-A secure runtime should use microVMs as the default mental model for untrusted execution: one workload gets one narrow guest boundary.
+We try to be honest about the edges, too:
 
-That gives the system a stronger baseline than a shared userspace sandbox. The workload sees a Linux environment, but it does not get the host filesystem unless access is explicitly shared. The guest can have its own process tree, filesystem view, network policy, and service lifecycle. The host remains outside the normal execution environment.
+- **It doesn't protect you from a malicious host.** The host holds the hypervisor, the local keys, and the control plane. If the host itself is compromised, the sandbox can't save you from it. That's the trust boundary, and pretending otherwise would be marketing.
+- **It doesn't treat every backend as interchangeable.** Firecracker on Linux KVM, the macOS virtualization backends, and a Docker fallback have genuinely different verified-boot and isolation properties, and the product names those differences instead of papering over them.
+- **Nix isn't a magic supply-chain shield.** Pinning makes builds reproducible and reviewable, which is a lot, but you still have to pick dependencies you trust and update them on purpose.
 
-The runtime should then layer additional controls around that boundary:
+## So, the short version
 
-- **Admission before launch**: a run is admitted through an execution plan that binds artifact identity, resources, policies, validity, and replay handling.
-- **Guest protocol instead of broad access**: host operations should go through controlled guest RPC rather than unconstrained shell access.
-- **Explicit network and filesystem policy**: access should be declared and mediated, not implied by convenience.
-- **Backend tiering**: stronger and weaker backends are named so users know which security claims apply.
-- **Audit evidence**: important actions produce records that can be inspected later.
+Use microVMs because untrusted code deserves a real wall around it. Use Nix because security starts before the thing boots, with actually knowing what's in the image. Then wrap the two in builder isolation, signed admission, explicit policy, honest backend tiers, guest RPC, and audit records, so the secure path is just the normal path and not some special mode you have to remember to turn on.
 
-The point is not that a microVM magically solves every security problem. The point is that it gives the runtime a hardware-backed boundary to compose with policy, reproducible builds, and evidence.
-
-## How Nix should be used for security
-
-A secure runtime should use Nix to make VM images more predictable.
-
-When a workload is described by a flake, the dependencies are pinned and the build result is an artifact. That artifact can be cached, identified, signed into a launch plan, and reused. The host does not need to rely on an interactive "I installed some packages earlier" state to understand what will boot.
-
-This helps in several practical ways:
-
-- **Fewer hidden dependencies**: packages enter the image through the build definition.
-- **Less drift**: lock files make rebuilds stable until inputs are intentionally updated.
-- **Cleaner reviews**: infrastructure changes are visible as code changes.
-- **Better incident analysis**: when something runs, there is a stronger path back to what was built and why.
-
-Linux image construction should stay inside the builder VM. That matters especially on macOS: the final image is a Linux guest image, so Linux-specific build and assembly work should happen in a Linux boundary. The host remains the operator, while the builder owns the Linux build work.
-
-## Why this combination matters
-
-MicroVMs and Nix are useful independently. Together, they cover two sides of the same security story.
-
-MicroVMs reduce the blast radius at runtime. Nix reduces ambiguity before runtime.
-
-That combination lets a runtime make a stronger promise than "we started a process somewhere." It can say:
-
-- this workload came from pinned inputs;
-- this image was built as a Linux guest artifact;
-- this launch was admitted with named resources and policies;
-- this code ran behind a microVM boundary when a Tier 1 or Tier 2 backend was selected;
-- important decisions were recorded for later inspection.
-
-For infrastructure users who are not security specialists, that is the main idea: the system should make the secure path the normal path. You should not need to remember a long checklist every time you run a generated script, launch a tool call, or test a suspicious dependency.
-
-## What this design does not claim
-
-A high-level security post should also be clear about limits.
-
-This design does not defend against a malicious host. The host owns the hypervisor, local keys, and control plane. If the host is compromised, the sandbox cannot protect itself from that host.
-
-It also should not treat every backend as equivalent. Firecracker on Linux with KVM has a different security posture than a Docker fallback. macOS virtualization backends may have different verified-boot properties than the Linux Firecracker path. A product should name those differences rather than hide them.
-
-Finally, Nix is not a magic supply-chain shield. Pinned inputs make builds more reproducible and reviewable, but users still need to choose trustworthy dependencies and update them intentionally.
-
-## The short version
-
-A secure local runtime should use microVMs because untrusted code deserves a real isolation boundary.
-
-It should use Nix because secure execution starts before boot, with knowing what is in the image.
-
-It should combine them with builder isolation, signed admission, explicit policy, backend tiering, guest RPC, and audit records so the secure path is not a special mode. It is the architecture.
-
-That is the foundation.
-
-`mvm` is one implementation of this design. It uses a builder VM for Linux Nix evaluation and image assembly, admits launches through signed execution plans, runs workloads behind microVM-capable backends when the selected platform supports them, names weaker fallback tiers instead of hiding them, and records local evidence for inspection. The deeper posts can go layer by layer: verified boot, vsock framing, guest-agent hardening, egress policy, secret release, and how the Nix image pipeline turns a workload definition into a bootable microVM.
+`mvm` is one take on this. It uses a builder VM for the Linux Nix work, admits every launch through a signed execution plan, runs workloads on microVM-capable backends where the platform allows it, names the weaker fallbacks plainly where it doesn't, and keeps local evidence you can go back and read. The next posts go layer by layer: verified boot, vsock framing, hardening the guest agent, egress policy, secret release, and how a workload definition actually becomes a bootable microVM.
