@@ -30,11 +30,26 @@
 //     See scripts/wrapper_forbidden_check.py for the enforced list.
 //     mvm-allow: this is the comment that documents the gate.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { chdir } from "node:process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
+
+// `cfg.module` is a bare stem ("app") to match the agent's runtime.json and
+// the Python importlib contract. Node ESM does NOT extension-resolve absolute
+// file: URLs, so probe the bundled file's extension here. `.ts` first: the
+// bundler keeps the user's source and Node ≥22.18 strips types on import.
+const MODULE_EXTS = [".ts", ".mts", ".cts", ".mjs", ".js", ".cjs", ""];
+
+function resolveModuleUrl(workingDir, module) {
+  const base = resolve(workingDir, module);
+  const hit = MODULE_EXTS.map((e) => base + e).find((p) => existsSync(p));
+  if (hit === undefined) {
+    throw new Error(`module not found for "${module}" under ${workingDir}`);
+  }
+  return pathToFileURL(hit).href;
+}
 
 const WRAPPER_CONFIG_PATH =
   process.env.MVM_WRAPPER_CONFIG_PATH || "/etc/mvm/wrapper.json";
@@ -244,8 +259,7 @@ async function main() {
     }
     const [args, kwargs] = decoded;
     chdir(cfg.working_dir);
-    const modulePath = resolve(cfg.working_dir, cfg.module);
-    const moduleUrl = pathToFileURL(modulePath).href;
+    const moduleUrl = resolveModuleUrl(cfg.working_dir, cfg.module);
     const mod = await import(moduleUrl);
     const fn = mod[cfg.function];
     if (typeof fn !== "function") {

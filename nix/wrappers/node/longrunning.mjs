@@ -28,11 +28,25 @@
 // wrapper does NOT scrub Node module cache, /tmp, or anything else
 // between calls. Users opting into warm-process accept that.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { chdir } from "node:process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
+
+// See oneshot.mjs: `cfg.module` is a bare stem; Node ESM won't
+// extension-resolve absolute file: URLs, so probe the bundled file. `.ts`
+// first — the bundler keeps the user's source and Node ≥22.18 strips types.
+const MODULE_EXTS = [".ts", ".mts", ".cts", ".mjs", ".js", ".cjs", ""];
+
+function resolveModuleUrl(workingDir, module) {
+  const base = resolve(workingDir, module);
+  const hit = MODULE_EXTS.map((e) => base + e).find((p) => existsSync(p));
+  if (hit === undefined) {
+    throw new Error(`module not found for "${module}" under ${workingDir}`);
+  }
+  return pathToFileURL(hit).href;
+}
 
 const WRAPPER_CONFIG_PATH =
   process.env.MVM_WRAPPER_CONFIG_PATH || "/etc/mvm/wrapper.json";
@@ -343,8 +357,7 @@ async function main() {
   let fn;
   try {
     chdir(cfg.working_dir);
-    const modulePath = resolve(cfg.working_dir, cfg.module);
-    const moduleUrl = pathToFileURL(modulePath).href;
+    const moduleUrl = resolveModuleUrl(cfg.working_dir, cfg.module);
     const mod = await import(moduleUrl);
     fn = mod[cfg.function];
     if (typeof fn !== "function") {

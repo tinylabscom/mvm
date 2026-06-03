@@ -10,9 +10,9 @@ let
   # plan 60 Phase 5 Slice E1 — generic function-service factory.
   # Single entry; the caller passes `language = "python"` / `"node"`
   # and the factory looks up the language in the registry under
-  # `nix/lib/factories/languages/`. Adding a language is one file
-  # under that dir (no caller-side switch, no factory-dispatcher
-  # edit). Returns `{ extraFiles, servicePackages, service }` —
+  # `nix/lib/factories/languages/`. Adding a language is one data row
+  # in `registry.nix` (no new .nix file, no caller-side switch, no
+  # factory-dispatcher edit). Returns `{ extraFiles, servicePackages, service }` —
   # the contract `mkGuest`'s composition layer consumes (see
   # `tests/factory_shape.nix`).
   mkFunctionServiceImpl = import ./factories/mkFunctionService.nix;

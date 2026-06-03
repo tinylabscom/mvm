@@ -1,0 +1,9 @@
+{
+  "name": "hello-app-with-deps",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "is-number": "^7.0.0"
+  }
+}
