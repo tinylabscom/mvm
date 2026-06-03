@@ -3807,6 +3807,7 @@ dependencies = [
  "mvm-plan",
  "mvm-policy",
  "mvm-sdk",
+ "mvm-verify",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
@@ -3822,6 +3823,17 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "mvm-verify"
+version = "0.14.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

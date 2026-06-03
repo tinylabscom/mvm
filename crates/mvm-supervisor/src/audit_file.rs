@@ -357,6 +357,47 @@ mod tests {
         assert_eq!(count, 5);
     }
 
+    // ADR-069 — pin the wasm-clean `mvm-verify` re-implementation to the
+    // bytes this crate actually writes. If `AuditEntry`'s serde shape
+    // drifts from `mvm_verify::MirrorEntry`, a genuine line stops
+    // verifying and this fails here (loudly, in CI) rather than only in
+    // the browser tool.
+    #[tokio::test]
+    async fn mvm_verify_matches_supervisor_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+        let mut entry = make_entry("tenant-a", "plan.launched");
+        // Exercise the optional bundle fields + a label so the
+        // skip_serializing_if / BTreeMap mirroring is covered.
+        entry.bundle_id = Some(mvm_policy::PolicyId("bundle-x".to_string()));
+        entry.bundle_version = Some(3);
+        entry
+            .labels
+            .insert("workflow".to_string(), "wf-1".to_string());
+        signer.sign_and_emit(&entry).await.unwrap();
+        signer
+            .sign_and_emit(&make_entry("tenant-a", "plan.failed"))
+            .await
+            .unwrap();
+
+        let content = std::fs::read_to_string(signer.tenant_path("tenant-a")).unwrap();
+        let verified = mvm_verify::verify_audit_chain_bytes(&content, &vk)
+            .expect("mvm-verify must accept a chain mvm-supervisor wrote");
+        assert_eq!(verified.count, 2);
+        assert_eq!(verified.entries[0].event, "plan.launched");
+        assert_eq!(verified.entries[0].tenant, "tenant-a");
+
+        // And it must reject a tampered stream just like the native path.
+        let tampered = content.replacen("plan.launched", "plan.hijacked", 1);
+        let err = mvm_verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();
+        assert_eq!(
+            err,
+            mvm_verify::AuditVerifyError::SignatureInvalid { line: 0 }
+        );
+    }
+
     #[tokio::test]
     async fn tampering_with_entry_breaks_signature() {
         let dir = tempfile::tempdir().unwrap();
