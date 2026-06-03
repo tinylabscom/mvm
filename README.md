@@ -10,6 +10,25 @@
 > [`MIGRATING-FROM-V1.md`](MIGRATING-FROM-V1.md) and
 > [`CHANGELOG.md`](CHANGELOG.md) for the upgrade path and what changed.
 
+## Quick start
+
+Boot a transient dev-tier microVM, run a command, get its output back — five
+lines with the Python SDK:
+
+```python
+import mvm
+
+with mvm.Sandbox.create(image="python-3.12") as sb:
+    result = sb.exec("python", "-c", "print(2 + 2)")
+    print(result.stdout.strip())   # -> 4
+```
+
+Run it against a real local microVM with `mvmctl run --mode live ./quickstart.py`.
+`exec` is dev-tier (live mode); it refuses prod templates with `SandboxDevOnly`.
+See the [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
+for the imperative-lifecycle and static-declaration paths, and the build/derive
+flow (`mvmctl compile` / `up --flake`) below.
+
 ## Backends
 
 `mvmctl` picks a backend per `AnyBackend::auto_select()` (see ADR-013).

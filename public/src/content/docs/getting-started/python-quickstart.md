@@ -3,9 +3,23 @@ title: Python quickstart
 description: Use the current Python SDK runtime surface and the static decorator compiler safely.
 ---
 
-This page shows the two Python paths: imperative sandbox lifecycle and static workload declaration.
+This page shows the three Python paths: the one-shot `exec` (the quickest), the imperative sandbox lifecycle, and static workload declaration.
 
-> **Status:** The Python package in `sdks/python` has `Sandbox.create(...)`, `commands.start(...)`, `files.write(...)`, record mode, live mode, and context-manager cleanup. Higher-level helpers such as `commands.run(...)`, file read/list/remove, ports, logs, and cold-mode methods are parity work.
+> **Status:** The Python package in `sdks/python` has `Sandbox.create(...)`, `Sandbox.exec(...)`, `commands.start(...)`, `files.write(...)`, record mode, live mode, and context-manager cleanup. Higher-level helpers such as `commands.run(...)`, file read/list/remove, ports, logs, and cold-mode methods are parity work.
+
+## Run a command (five lines)
+
+Boot a transient dev-tier microVM, run one command, get its output back:
+
+```python
+import mvm
+
+with mvm.Sandbox.create(image="python-3.12") as sb:
+    result = sb.exec("python", "-c", "print(2 + 2)")
+    print(result.stdout.strip())   # -> 4
+```
+
+`exec(*argv) -> ExecResult` is a one-shot over `commands.start` (start → wait → collect `stdout`/`stderr`/`exit_code`). `image=` is the friendly alias for the positional template. It is **live-mode only** (dev tier) — run the script with `mvmctl run --mode live ./quickstart.py`; against a prod template it refuses with `SandboxDevOnly` (no silent fallback — ADR-002 claim 4). The `with` block kills the sandbox on exit.
 
 ## Imperative runtime
 
