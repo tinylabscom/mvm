@@ -146,6 +146,12 @@ for the claim numbering, threat model, and per-backend tier matrix;
 this section is the summary. Implementation is sequenced in
 `specs/plans/25-microvm-hardening.md`.
 
+The claim→witness mapping is machine-checked: `specs/claims/catalog.md`
+is the source of truth for which test/CI lane backs which claim, and
+`xtask check-claim-catalog` (a Lint-job gate) fails if a named witness
+stops existing. Keep that table in sync when you rename or move a
+witness — the prose below is the narrative, the catalog is the ledger.
+
 Claim lineage:
 
 - Claims 1–7 ship with ADR-002's original posture.

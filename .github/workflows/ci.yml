@@ -73,6 +73,9 @@ jobs:
       - name: Unique spec numbers
         run: cargo run -p xtask -- check-spec-numbers
 
+      - name: Conformance claim catalog
+        run: cargo run -p xtask -- check-claim-catalog
+
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
