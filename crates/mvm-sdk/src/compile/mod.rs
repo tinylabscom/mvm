@@ -51,6 +51,7 @@ pub mod mvm_pin;
 pub mod orchestrator;
 pub mod reachability;
 pub mod source;
+pub mod strip_framework;
 
 pub use archive::{ArchiveError, archive_dir};
 pub use deps::{DepsError, validate_lockfiles};
