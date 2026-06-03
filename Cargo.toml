@@ -131,7 +131,7 @@ resolver = "3"
 # functionally different software. Bumping the minor signals "0.x
 # breaking changes" without prematurely committing to a 1.0 stability
 # promise.
-version = "0.15.1"
+version = "0.15.2"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"

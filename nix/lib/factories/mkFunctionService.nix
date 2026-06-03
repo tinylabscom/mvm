@@ -65,10 +65,10 @@ let
     languages.${language} or (throw ''
       mkFunctionService: language "${language}" has no entry in the
       language registry. Available: ${builtins.concatStringsSep ", " (builtins.attrNames languages)}.
-      Hint: add `nix/lib/factories/languages/${language}.nix` + append
-      to `nix/lib/factories/languages/default.nix`, then add the bare
-      name to `crates/mvm-ir/data/supported_languages.txt` so the IR
-      validator accepts it.
+      Hint: add a `${language}` row to
+      `nix/lib/factories/languages/registry.nix`, then add the bare name
+      to `crates/mvm-ir/data/supported_languages.txt` so the IR validator
+      accepts it. (No new .nix file — the registry is data-driven.)
     '');
 
   # Per-workload runtime config. Mirrors the IR field set on

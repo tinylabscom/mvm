@@ -40,15 +40,47 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
       launch = builtins.fromJSON (builtins.readFile ./launch.json);
       shellQuote = arg:
         "'" + builtins.replaceStrings [ "'" ] [ "'\\''" ] arg + "'";
-      mkAppPkg = pkgs: pkgs.stdenv.mkDerivation {{
-        pname = "${{launch.workload_id}}-app";
-        version = "0";
-        src = ./src;
-        installPhase = ''
-          mkdir -p $out
-          cp -R . $out/
-        '';
-      }};
+      # When the bundled Node source ships an npm lockfile, build
+      # node_modules reproducibly at BUILD time (in the builder VM) via
+      # nixpkgs' importNpmLock — hash-free, reads package-lock.json directly
+      # using its integrity hashes. node_modules is baked into the app
+      # derivation, which is symlinked at the working dir, so the runtime
+      # resolves `<working_dir>/node_modules` natively: no boot-time install,
+      # no runtime network, no separate volume mount. A bare package.json
+      # with no lockfile falls through to the plain copy (nothing to pin).
+      nodeHasLock =
+        (launch.entrypoint.language or "") == "node"
+        && builtins.pathExists ./src/package.json
+        && builtins.pathExists ./src/package-lock.json;
+      mkAppPkg = pkgs:
+        if nodeHasLock
+        then pkgs.buildNpmPackage {{
+          pname = "${{launch.workload_id}}-app";
+          version = "0";
+          src = ./src;
+          nodejs = pkgs.nodejs_22;
+          npmDeps = pkgs.importNpmLock {{ npmRoot = ./src; }};
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+          # No transpile step — Node strips TS types at import (>=22.18). The
+          # default install assumes a `bin`/`files` package; we instead keep
+          # the whole tree + the npm-populated node_modules.
+          dontNpmBuild = true;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -R . $out/
+            runHook postInstall
+          '';
+        }}
+        else pkgs.stdenv.mkDerivation {{
+          pname = "${{launch.workload_id}}-app";
+          version = "0";
+          src = ./src;
+          installPhase = ''
+            mkdir -p $out
+            cp -R . $out/
+          '';
+        }};
       buildEntrypoint = pkgs:
         pkgs.writeShellScript "${{launch.workload_id}}-entrypoint" ''
           set -eu
@@ -299,6 +331,27 @@ mod tests {
     fn flake_has_lf_line_endings() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(!s.contains('\r'));
+    }
+
+    #[test]
+    fn flake_bakes_node_modules_when_lockfile_present() {
+        // The app-package builder branches on a Node lockfile in ./src and,
+        // when present, builds node_modules reproducibly via importNpmLock at
+        // build time (baked into the RO app derivation → resolves at
+        // /app/node_modules natively, no runtime mount). The branch is in the
+        // emitted nix, so it shows up for any workload; the runtime predicate
+        // (`nodeHasLock`) gates it per build.
+        let s = build_flake_nix(&sample_function()).unwrap();
+        assert!(s.contains("nodeHasLock"), "lockfile predicate emitted");
+        assert!(s.contains("pkgs.buildNpmPackage"), "npm build path emitted");
+        assert!(
+            s.contains("pkgs.importNpmLock { npmRoot = ./src; }"),
+            "hash-free importNpmLock path emitted"
+        );
+        assert!(
+            s.contains("builtins.pathExists ./src/package-lock.json"),
+            "keys off the bundled lockfile"
+        );
     }
 
     #[test]
