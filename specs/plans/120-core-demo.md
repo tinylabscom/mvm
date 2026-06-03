@@ -227,7 +227,7 @@ The spine is *believed* complete (fresh build → `overlay_aware: true` → admi
 
 ## Task 5: the one-call live-exec ergonomic — `Sandbox` (the DX headline)
 
-> **✅ `exec` API LANDED (commit `c989fac7`).** `Sandbox.exec(*argv, timeout, cwd, env) -> ExecResult` is in `sdks/python/mvm/_sandbox.py` with the `SandboxDevOnly`/`SandboxModeError` guards; `sdks/python/tests/test_sandbox_exec.py` exists (gated). **Remaining: §4 — lead the quickstart/README with it (still shows the build/derive path).**
+> **✅ `exec` API LANDED (commit `c989fac7`).** `Sandbox.exec(*argv, timeout, cwd, env) -> ExecResult` is in `sdks/python/mvm/_sandbox.py` with the `SandboxDevOnly`/`SandboxModeError` guards; `sdks/python/tests/test_sandbox_exec.py` exists (gated). **§4 done (2026-06-03): `README.md` "Quick start" + `getting-started/python-quickstart.md` lead with the five-line `Sandbox.exec` snippet. Task 5 (and the plan's acceptance section) complete.**
 
 The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) put the parity gap in one place: the imperative "boot a sandbox, exec against it" experience. mvm **already has the class** — `sdks/python/mvm/_sandbox.py` (`Sandbox.create(...)`, `sb.commands.start(...)`) with two modes (record → prod plan, live → dev) and the dev-tier guard `SandboxDevOnly` already in place. This task adds the dead-simple one-shot ergonomic on top and makes it the demo headline. **Extend `Sandbox`; do not add a new class** (and never name it `Box` — that's a competitor's term). Typed helpers / async / Node are plan 125.
 
@@ -248,9 +248,9 @@ The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) pu
       finally:
           sb.shutdown()
   ```
-- [ ] **Step 2: Add `Sandbox.exec(*argv, timeout=None, cwd=None, env=None) -> ExecResult`** as a one-shot over the existing `commands.start` (start → wait → collect stdout/stderr/exit). Keep the existing `SandboxDevOnly` refusal for prod-tier — no silent fallback (ADR-053). Reuse the `_live_sandbox` one-process invariant already in `_sandbox.py`.
-- [ ] **Step 3: Run gated** (`MVM_E2E_SMOKE=1`) on a libkrun host → PASS; ungated → skip. Commit.
-- [ ] **Step 4: Lead the quickstart with it** — README / `mvmctl` quickstart shows the five-line `Sandbox` example, not the build/derive path.
+- [x] **Step 2: Add `Sandbox.exec(*argv, timeout=None, cwd=None, env=None) -> ExecResult`** as a one-shot over the existing `commands.start` (start → wait → collect stdout/stderr/exit). Keep the existing `SandboxDevOnly` refusal for prod-tier — no silent fallback (ADR-053). Reuse the `_live_sandbox` one-process invariant already in `_sandbox.py`. **(landed, commit `c989fac7`; `image=` keyword alias added for the snippet.)**
+- [ ] **Step 3: Run gated** (`MVM_E2E_SMOKE=1`) on a libkrun host → PASS; ungated → skip. Commit. *(`sdks/python/tests/test_sandbox_exec.py` exists, gated; a green host run is not yet recorded — left open intentionally.)*
+- [x] **Step 4: Lead the quickstart with it** — README / `mvmctl` quickstart shows the five-line `Sandbox` example, not the build/derive path. **(2026-06-03 — `README.md` + `python-quickstart.md`.)**
 
 ## Acceptance (this plan is done when)
 
@@ -259,7 +259,7 @@ The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) pu
 - [x] `crates/mvm-cli/tests/core_demo_e2e.rs` exists, is `MVM_E2E_SMOKE`-gated (test + `ci.yml::core-demo-e2e` lane + `development.md` docs), and is **hardened against freezing** (Workstream A: watchdog + bounded subprocess, commit `898b8507`).
 - [x] `core_demo_e2e` is **green on a macOS/libkrun host** end-to-end (`dev up` → `compile` → `up` with the agent reachable) — Task 4. **(2026-06-02: 1 passed, 114s.)**
 - [x] The one-shot `Sandbox.exec(...)` returns stdout on a dev-tier sandbox and raises `SandboxDevOnly` in prod (API landed, commit `c989fac7`).
-- [ ] The quickstart/README leads with the five-line `Sandbox.exec` example (Task 5 §4).
+- [x] The quickstart/README leads with the five-line `Sandbox.exec` example (Task 5 §4). **(2026-06-03 — `README.md` "Quick start" + `getting-started/python-quickstart.md` "Run a command (five lines)" both lead with `mvm.Sandbox.create(image=…)` → `sb.exec(...)` → `result.stdout`.)**
 - [x] The proven §4 acceptance boxes are ticked in the brief (2026-06-02 — 4 of 5; cross-platform/encryption/Noise box deferred to its plans).
 
 ### deferred follow-ups
