@@ -223,7 +223,7 @@ The spine is *believed* complete (fresh build → `overlay_aware: true` → admi
 - [x] **Step 2: `compile → up` handoff.** Already correct — `up --flake <compiled-dir>` consumed the rendered `flake.nix` + `launch.json` and built in-VM. No change needed.
 - [x] **Step 3: teardown.** Already correct — the bounded harness reaps each step's process group; the warm builder is reused across runs. No change needed.
 - [x] **Step 4: Repeat to green.** Done — the real gap was the function-workload `/etc/mvm/entrypoint` collision (see the Task-4 callout above), not the three guessed gaps. Fixed via the mkGuest `bootCommand` split + factory ownership; `core_demo_e2e` green (1 passed, 114s).
-- [ ] **Step 5: Tick the §4 acceptance boxes** in `specs/plans/117-cleanup-and-rearchitecture-brief.md` for the criteria this proves (`dev up` persistent builder; hello-app compiles + builds in-VM; `up` boots + agent answers vsock; the loop driven by `mvmctl dev`/`compile`/`up`). Leave the cross-platform + encrypted-at-rest + Noise boxes for their plans.
+- [x] **Step 5: Tick the §4 acceptance boxes** in `specs/plans/117-cleanup-and-rearchitecture-brief.md` for the criteria this proves (`dev up` persistent builder; hello-app compiles + builds in-VM; `up` boots + agent answers vsock; the loop driven by `mvmctl dev`/`compile`/`up`). Leave the cross-platform + encrypted-at-rest + Noise boxes for their plans. **(done 2026-06-02 — four §4 boxes ticked; the macOS+Linux/encryption/Noise box left for plan 122 + the `/dev/kvm` test backend.)**
 
 ## Task 5: the one-call live-exec ergonomic — `Sandbox` (the DX headline)
 
@@ -260,7 +260,7 @@ The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) pu
 - [x] `core_demo_e2e` is **green on a macOS/libkrun host** end-to-end (`dev up` → `compile` → `up` with the agent reachable) — Task 4. **(2026-06-02: 1 passed, 114s.)**
 - [x] The one-shot `Sandbox.exec(...)` returns stdout on a dev-tier sandbox and raises `SandboxDevOnly` in prod (API landed, commit `c989fac7`).
 - [ ] The quickstart/README leads with the five-line `Sandbox.exec` example (Task 5 §4).
-- [ ] The proven §4 acceptance boxes are ticked in the brief (pending Task 4 green).
+- [x] The proven §4 acceptance boxes are ticked in the brief (2026-06-02 — 4 of 5; cross-platform/encryption/Noise box deferred to its plans).
 
 ### deferred follow-ups
 

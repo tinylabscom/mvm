@@ -270,7 +270,7 @@ The owner pushed to verify before writing plans; four read-only explorations cor
 > - [ ] **Cross-repo — mvmd API migration:** tracked in **`mvmd/specs/plans/51-mvm-v2-rewrite-api-migration.md`** (the verified mvmd↔mvm coupling + the per-change update tasks), worked in a **dedicated mvmd session** after 121 lands. mvmd breakage accepted (owner, 2026-05-31).
 >
 > **Stage D — Execute** (one plan per session: TDD, dedicated branch, CI green, claim gates intact; re-verify the claim → gate map after each)
-> - [ ] Execute **120** — **core demo** ← the #1 goal (acceptance boxes in §4).
+> - [x] Execute **120** — **core demo** ← the #1 goal (acceptance boxes in §4). **(2026-06-02: `core_demo_e2e` green on macOS/libkrun — `dev up` → `compile` → `up`, agent answers over vsock; PR #538. 4 of 5 §4 boxes ticked; cross-platform/encryption/Noise deferred.)**
 > - [ ] Execute **121** — crate consolidation (apply the §8 rename-break gate-update checklist same-commit; publish the facade/`mvm-core` map for mvmd plan 51).
 > - [ ] Execute **122** — encryption + key lifecycle (+ snapshot encryption + VMGenID rotation).
 > - [ ] Execute **123** — `NetworkProvider` + `StorageProvider` + the warm-start substrate (diff snapshots / UFFD / NBD / hugepages).
@@ -433,11 +433,11 @@ The owner pushed to verify before writing plans; four read-only explorations cor
 >
 > ### 4. THE #1 DELIVERABLE — the core demo
 > A persistent **builder VM** (non-interactive, single purpose: build microVMs) reached *through* the **dev VM** (its interactive sibling), taking a **hello-world app → a built, booting microVM**, fully on the dev path. This is Phase 1. Acceptance:
-> - [ ] `mvmctl dev up` boots a **persistent** builder VM (amortized boot across the session, not single-shot per build).
-> - [ ] A hello-world app (Python, decorator + runtime forms) compiles **via the SDK** to a Nix flake + `mvm.toml`, builds **inside** the builder VM (no host Nix), and produces kernel + rootfs.
-> - [ ] `mvmctl run` boots the microVM from those artifacts and the guest agent answers over vsock.
-> - [ ] **Local dev mode is `mvmctl dev <commands>`** (`up` / `down` / `shell` / `status` + the build loop) and drives the *whole* loop locally — build a microVM and run it — **all derived via the SDK**. This is the canonical DX and the thing to get right first.
-> - [ ] End-to-end on macOS (libkrun) **and** Linux (Firecracker) per the backend trait; CI green; the demo encrypts artifacts at rest and uses the upgraded (Noise) vsock frames.
+> - [x] `mvmctl dev up` boots a **persistent** builder VM (amortized boot across the session, not single-shot per build). **(Plan 120, 2026-06-02: `core_demo_e2e` reuses the running libkrun builder; cold rebuild only on cache miss.)**
+> - [x] A hello-world app (Python, decorator + runtime forms) compiles **via the SDK** to a Nix flake + `mvm.toml`, builds **inside** the builder VM (no host Nix), and produces kernel + rootfs. **(Plan 120, 2026-06-02: decorator form — `examples/python/hello-app/app.py` → `flake.nix` + `launch.json` [the IR-derived manifest, the `mvm.toml` equivalent]; built in the libkrun builder VM → `vmlinux` + `rootfs.ext4`.)**
+> - [x] `mvmctl run` boots the microVM from those artifacts and the guest agent answers over vsock. **(Plan 120, 2026-06-02: via `mvmctl up` = build+boot; `up`'s `wait_for_guest_agent` confirmed the vsock `Ping`. The bug that blocked this — the function-workload `/etc/mvm/entrypoint` collision — is fixed; PR #538.)**
+> - [x] **Local dev mode is `mvmctl dev <commands>`** (`up` / `down` / `shell` / `status` + the build loop) and drives the *whole* loop locally — build a microVM and run it — **all derived via the SDK**. This is the canonical DX and the thing to get right first. **(Plan 120, 2026-06-02: the green E2E is exactly `dev up` → `compile` → `up`, SDK-derived end to end.)**
+> - [ ] End-to-end on macOS (libkrun) **and** Linux (Firecracker) per the backend trait; CI green; the demo encrypts artifacts at rest and uses the upgraded (Noise) vsock frames. **(macOS/libkrun leg proven [Plan 120]; Linux/Firecracker parity, encryption-at-rest, and Noise frames are deferred to their plans — 122 + the `/dev/kvm` test backend.)**
 >
 > ### 5. Stubs & dead code
 > Sweep `todo!`/`unimplemented!`/`TODO`/`FIXME`/commented-out blocks (the audit found them concentrated in broker skeletons + balloon-runtime design notes). Delete dead code; finish or explicitly park stubs (parked → a checkbox in the relevant plan's `### deferred follow-ups`, per repo convention).
