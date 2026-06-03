@@ -1,6 +1,9 @@
 {
-  "name": "mvm-sdk",
+  "name": "@runmvm/mvm",
   "version": "0.14.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "TypeScript SDK for declaring mvm microVM workloads. SDK port Phase 6 — mirror of the Python SDK at sdks/python/.",
   "type": "module",
   "main": "./dist/index.js",
