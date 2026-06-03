@@ -3274,7 +3274,9 @@ fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
 // Gated only on `builder-vm`.
 #[cfg(feature = "builder-vm")]
 fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
-    use mvm_build::builder_backend_select::{resolve_builder_backend, resolve_choice};
+    use mvm_build::builder_backend_select::{
+        resolve_builder_backend_with_override, resolve_choice, resolve_env_override,
+    };
     use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
 
     // Ensure Layer 1 (the builder VM image) is in
@@ -3333,15 +3335,44 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
         staged_user_flake: None,
     };
 
-    // Plan 97 Phase C: `MVM_BUILDER_BACKEND=vz` flips the dispatch
-    // to `VzBuilderVm` without touching the rest of the pipeline.
-    // The resolver defaults to libkrun when the env var is unset,
-    // preserving the historical behaviour for every existing caller.
-    let backend_name = resolve_choice().name();
-    let backend = resolve_builder_backend();
-    backend
-        .run_build(&job, &mounts)
-        .map_err(|e| anyhow::anyhow!("{backend_name} builder VM: {e}"))?;
+    // Plan 97 / Plan 98: source-checkout dev-image builds route
+    // through the selected builder backend. When Vz was chosen only
+    // by auto-detect (no explicit `--builder` / env override), allow
+    // a one-shot fallback to libkrun if Vz bring-up fails. This
+    // keeps `mvmctl dev up` usable on hosts where the platform-level
+    // Vz probe passes but the builder-VM path still trips a backend-
+    // specific runtime issue. Explicit `vz` overrides still fail
+    // loudly so operators can debug the backend they asked for.
+    let selected = resolve_choice();
+    let explicit_override = resolve_env_override().is_some();
+    let attempt_order = builder_backend_attempt_order(selected, explicit_override);
+    let mut used_backend = selected;
+    let mut last_error = None;
+    for (idx, choice) in attempt_order.iter().copied().enumerate() {
+        let backend = resolve_builder_backend_with_override(Some(choice));
+        match backend.run_build(&job, &mounts) {
+            Ok(_) => {
+                used_backend = choice;
+                last_error = None;
+                break;
+            }
+            Err(err) => {
+                if idx + 1 < attempt_order.len() {
+                    ui::warn(&format!(
+                        "Auto-selected {} builder failed ({}); retrying with {}.",
+                        choice.name(),
+                        err,
+                        attempt_order[idx + 1].name(),
+                    ));
+                    prepare_dev_image_out_dir(out_dir)?;
+                }
+                last_error = Some(anyhow::anyhow!("{} builder VM: {err}", choice.name()));
+            }
+        }
+    }
+    if let Some(err) = last_error {
+        return Err(err);
+    }
 
     // run_build wrote vmlinux + rootfs.ext4 into out_dir via the
     // virtio-fs `/out` mount; the same files mvm-cli is about to
@@ -3349,10 +3380,16 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     let kernel = format!("{out_dir}/vmlinux");
     let rootfs = format!("{out_dir}/rootfs.ext4");
     if !std::path::Path::new(&kernel).exists() {
-        anyhow::bail!("{backend_name} builder VM exited cleanly but did not produce {kernel}");
+        anyhow::bail!(
+            "{} builder VM exited cleanly but did not produce {kernel}",
+            used_backend.name()
+        );
     }
     if !std::path::Path::new(&rootfs).exists() {
-        anyhow::bail!("{backend_name} builder VM exited cleanly but did not produce {rootfs}");
+        anyhow::bail!(
+            "{} builder VM exited cleanly but did not produce {rootfs}",
+            used_backend.name()
+        );
     }
 
     // Fix A — persist the source fingerprint + artifact-digest + provenance
@@ -3373,6 +3410,55 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     }
 
     Ok((kernel, rootfs))
+}
+
+#[cfg(feature = "builder-vm")]
+fn builder_backend_attempt_order(
+    selected: mvm_build::builder_backend_select::BuilderBackendChoice,
+    explicit_override: bool,
+) -> Vec<mvm_build::builder_backend_select::BuilderBackendChoice> {
+    use mvm_build::builder_backend_select::BuilderBackendChoice;
+
+    match (selected, explicit_override) {
+        (BuilderBackendChoice::Vz, false) => {
+            vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun]
+        }
+        _ => vec![selected],
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod builder_backend_attempt_order_tests {
+    use super::builder_backend_attempt_order;
+    use mvm_build::builder_backend_select::BuilderBackendChoice;
+
+    #[test]
+    fn auto_selected_vz_retries_with_libkrun() {
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Vz, false),
+            vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun]
+        );
+    }
+
+    #[test]
+    fn explicit_vz_override_does_not_fallback() {
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Vz, true),
+            vec![BuilderBackendChoice::Vz]
+        );
+    }
+
+    #[test]
+    fn libkrun_selection_stays_single_backend() {
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
+            vec![BuilderBackendChoice::Libkrun]
+        );
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, true),
+            vec![BuilderBackendChoice::Libkrun]
+        );
+    }
 }
 
 /// Ensure the bundled default microVM image (kernel + rootfs) is in the cache.

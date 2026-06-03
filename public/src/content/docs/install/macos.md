@@ -72,7 +72,7 @@ If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/sta
 mvmctl doctor
 ```
 
-`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses Apple Container and source image builds use the libkrun-backed builder VM.
+`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses Apple Container and source image builds auto-detect the builder backend: Vz is preferred, and `mvmctl dev up` retries with libkrun when that auto-selected Vz builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
 
 ## First microVM
 
