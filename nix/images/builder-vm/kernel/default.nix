@@ -28,6 +28,18 @@
 #   would otherwise force `=m`). Everything we need is `=y`. The
 #   rootfs ships no `/lib/modules` tree; mkGuest's
 #   `copy_module_closure` is unused for the builder-VM rootfs.
+#
+# Why no dm-verity / netfilter conntrack:
+#   This is the *builder VM* kernel — a dev-tier image (ADR-002
+#   dev-vs-prod tiers). It boots `root=/dev/vda ro` with no roothash
+#   and never opens a dm-verity device; verified boot is a
+#   workload-kernel concern, and the `veritysetup` the builder ships
+#   only runs `format` (userspace Merkle hashing, no kernel `dm`
+#   target). The egress lockdown (mvm-host-vm-init `network.rs`) is an
+#   OUTPUT owner-match + default-DROP ruleset with no conntrack/state/
+#   mark match. So MD/BLK_DEV_DM/DM_VERITY and the netfilter conntrack
+#   symbols live in `disables`, not `enables`. Audited against
+#   crates/mvm-host-vm-init.
 
 { pkgs }:
 
@@ -48,12 +60,9 @@ let
     "PCI" "PCI_MSI"
 
     # filesystems
-    "BLOCK" "EXT4_FS" "EXT4_USE_FOR_EXT2" "OVERLAY_FS" "FUSE_FS"
+    "BLOCK" "EXT4_FS" "OVERLAY_FS" "FUSE_FS"
     "TMPFS" "TMPFS_POSIX_ACL" "TMPFS_XATTR"
     "DEVTMPFS" "DEVTMPFS_MOUNT" "PROC_FS" "SYSFS"
-
-    # dm-verity (Plan 25 W3 / Claim 3 — verified boot of the rootfs)
-    "MD" "BLK_DEV_DM" "DM_VERITY"
 
     # process basics
     "BINFMT_ELF" "BINFMT_SCRIPT" "FUTEX" "EPOLL" "SIGNALFD"
@@ -71,13 +80,13 @@ let
     # net core
     "NET" "INET" "PACKET" "UNIX" "TCP_CONG_CUBIC"
 
-    # iptables-legacy (egress lockdown, ADR-047 / Plan 73 B.2.y)
+    # iptables-legacy (egress lockdown, ADR-047 / Plan 73 B.2.y).
+    # Only the OUTPUT owner-match + default-DROP ruleset is used
+    # (mvm-host-vm-init `network.rs` install_egress_lockdown): no
+    # conntrack/state/mark match, so those symbols are in `disables`.
     "NETFILTER" "NETFILTER_ADVANCED" "NETFILTER_XTABLES"
-    "NF_CONNTRACK" "NF_DEFRAG_IPV4"
     "IP_NF_IPTABLES" "IP_NF_FILTER" "IP_NF_TARGET_REJECT"
     "NETFILTER_XT_MATCH_OWNER"
-    "NETFILTER_XT_MATCH_STATE" "NETFILTER_XT_MATCH_CONNTRACK"
-    "NETFILTER_XT_MARK"
 
     # NLS (kept minimal — UTF-8 + ASCII only)
     "NLS" "NLS_UTF8" "NLS_ASCII"
@@ -93,6 +102,18 @@ let
     "MODULES"        # everything built-in; no /lib/modules tree
     "MODULE_SIG"     # NOP without MODULES; explicit
     "IPV6"           # builder VM has no v6 path
+
+    # Confirmed-unused in the builder VM (audited against
+    # crates/mvm-host-vm-init). Listed here, not merely absent from
+    # `enables`, so `olddefconfig` actually drops them instead of
+    # leaving a defconfig default `=y`. See the header "Why no
+    # dm-verity / netfilter conntrack" note.
+    "MD" "BLK_DEV_DM" "DM_VERITY"   # no dm-verity device opened; format-only
+    "NF_CONNTRACK" "NF_DEFRAG_IPV4" # egress lockdown is owner-match +
+    "NETFILTER_XT_MATCH_STATE"      # default-DROP only — no conntrack/
+    "NETFILTER_XT_MATCH_CONNTRACK"  # state/mark match invoked
+    "NETFILTER_XT_MARK"
+    "EXT4_USE_FOR_EXT2"             # nothing mounts ext2/ext3; only ext4
 
     # Userspace-visible classes we don't need.
     "DRM" "SOUND" "USB" "WIRELESS" "BT" "FB"
