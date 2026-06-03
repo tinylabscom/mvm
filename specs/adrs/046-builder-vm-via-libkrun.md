@@ -355,7 +355,7 @@ preserved exactly:
 
 - **Source checkouts always compile.** `--source compile` requires
   `find_builder_vm_flake()` to resolve; a contributor who edits
-  `nix/lib/kernel/base.nix` or the builder delta sees that change in the
+  `nix/images/builder-vm/kernel/base.nix` or the builder delta sees that change in the
   very next compile — no release round-trip. Download is keyed by the
   **mvmctl release tag** + arch + variant, so it can only ever return
   the kernel that *shipped with that exact mvmctl* — never a substitute

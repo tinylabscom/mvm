@@ -1,7 +1,8 @@
 //! `mvmctl kernel` — build the custom microVM kernels.
 //!
 //! The builder-VM and workload microVM kernels are slim custom Linux
-//! builds (`nix/lib/kernel/base.nix` + per-variant deltas). Because the
+//! builds (`nix/images/builder-vm/kernel/base.nix` + per-variant
+//! deltas). Because the
 //! config is custom, `cache.nixos.org` has no substitute, so a fresh
 //! machine compiles from source — the slow, memory-heavy step a first
 //! `mvmctl dev up` otherwise hits implicitly. This command makes that

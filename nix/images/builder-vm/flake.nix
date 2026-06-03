@@ -124,12 +124,14 @@
         mvmSrc = workspace;
       };
 
-      # Shared kernel-config base. Lives under `nix/lib/` (outside this
-      # flake's source tree), so it's resolved through `workspace` — the
-      # same mechanism as `libFor`, never a `../../lib` escape that
-      # wouldn't exist in the flake's store copy.
+      # Shared kernel-config base. Kept inside this flake's source tree
+      # (`./kernel/base.nix`) and imported relatively: importing it
+      # through the `workspace` path forces realisation of that filtered
+      # store path, which `nix flake check --no-build` (the "Nix flake
+      # check (Linux eval)" lane) refuses — so the builder/workload
+      # kernel + their configfile outputs must not route base through it.
       kernelBaseFor = pkgs:
-        import (workspace + "/nix/lib/kernel/base.nix") { inherit pkgs; };
+        import ./kernel/base.nix { inherit pkgs; };
 
       # ADR-050 / issue #223 — veritysetup sidecar bytes must not drift
       # when nixpkgs revs. The OCI-pull path runs `veritysetup format`
@@ -328,7 +330,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
           # Slim custom kernel — see `./kernel/default.nix` (shared
-          # base `nix/lib/kernel/base.nix` + builder-only delta).
+          # base `./kernel/base.nix` + builder-only delta).
           # `linuxManualConfig` over `make defconfig` carved down by the
           # base disables. `CONFIG_MODULES=n` so the kernel has only what
           # `mvm-host-vm-init` uses built-in — no driver modules tree.

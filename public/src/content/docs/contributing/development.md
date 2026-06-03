@@ -34,7 +34,7 @@ just release-build
 ### Kernel builds
 
 The builder-VM and workload microVM kernels are slim custom Linux
-builds (`nix/lib/kernel/base.nix` + per-variant deltas in
+builds (`nix/images/builder-vm/kernel/base.nix` + per-variant deltas in
 `nix/images/builder-vm/kernel/`). Because the config is custom,
 `cache.nixos.org` has no substitute, so the first `dev up` on a fresh
 machine compiles the kernel from source (3-10 min, memory-heavy).
