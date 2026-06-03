@@ -39,13 +39,15 @@ pub struct EntrypointPolicy {
 impl EntrypointPolicy {
     /// Production policy: read `/etc/mvm/entrypoint`; resolved binary
     /// must live under `/usr/lib/mvm/wrappers/` on the same filesystem
-    /// as `/usr`, owned root, mode 0755.
+    /// as `/usr`, owned root, mode 0555. (Read-only: mkGuest's rootfs
+    /// hardening pass strips owner-write from baked files, and the agent
+    /// binary itself is 0555 — owner-write would be the anomaly here.)
     pub fn production() -> Self {
         Self {
             marker_path: PathBuf::from("/etc/mvm/entrypoint"),
             allowed_prefix: PathBuf::from("/usr/lib/mvm/wrappers/"),
             same_fs_as: Some(PathBuf::from("/usr")),
-            required_mode: 0o755,
+            required_mode: 0o555,
             required_uid: 0,
             required_gid: 0,
         }
@@ -688,11 +690,19 @@ pub(crate) fn set_no_core_dumps() {
 fn dup_above_fd3(original: &std::fs::File) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let raw = original.as_raw_fd();
-    // F_DUPFD_CLOEXEC: dup to lowest fd >= 4, with CLOEXEC set on the
-    // new fd. CLOEXEC is fine here: the kernel reads the ELF from
-    // this fd during the same `execve` syscall, before CLOEXEC fires.
+    // F_DUPFD (NOT CLOEXEC): the dup must survive `execve` so an
+    // interpreter-script runner works. A shebang runner makes the kernel
+    // re-exec `<interp> /proc/self/fd/<n>`; a CLOEXEC fd is closed across
+    // that second execve, so the interpreter can't reopen the script
+    // (ENOENT — the `mvmctl invoke` failure mode). Leaving CLOEXEC clear
+    // lets the interpreter reopen /proc/self/fd/<n>, which still resolves
+    // to the SAME boot-validated inode the agent holds open — so TOCTOU
+    // safety is preserved, not weakened. The fd is read-only to a
+    // world-readable (0555) wrapper, so leaking it into the runner + its
+    // children grants nothing. ELF runners are unaffected (the kernel
+    // reads the image during the first execve). ADR-007 hardened-exec note.
     // SAFETY: fcntl is async-signal-safe; arguments are validated.
-    let new_raw = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 4) };
+    let new_raw = unsafe { libc::fcntl(raw, libc::F_DUPFD, 4) };
     if new_raw < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -981,8 +991,8 @@ mod tests {
 
     #[test]
     fn test_validate_happy_path() {
-        let (tmp, marker, wrapper) = make_tree(0o755, b"#!/bin/sh\necho ok\n");
-        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
+        let (tmp, marker, wrapper) = make_tree(0o555, b"#!/bin/sh\necho ok\n");
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
         let validated = policy.validate().expect("validate should succeed");
         assert_eq!(validated.resolved, std::fs::canonicalize(&wrapper).unwrap());
     }
@@ -1028,11 +1038,11 @@ mod tests {
     #[test]
     fn test_validate_wrong_mode() {
         let (tmp, marker, _wrapper) = make_tree(0o644, b"#!/bin/sh\n");
-        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
         match policy.validate() {
             Err(ValidationError::WrongMode { mode, required, .. }) => {
                 assert_eq!(mode, 0o644);
-                assert_eq!(required, 0o755);
+                assert_eq!(required, 0o555);
             }
             other => panic!("expected WrongMode, got {other:?}"),
         }
@@ -1084,7 +1094,7 @@ mod tests {
         assert_eq!(p.marker_path, PathBuf::from("/etc/mvm/entrypoint"));
         assert_eq!(p.allowed_prefix, PathBuf::from("/usr/lib/mvm/wrappers/"));
         assert_eq!(p.same_fs_as, Some(PathBuf::from("/usr")));
-        assert_eq!(p.required_mode, 0o755);
+        assert_eq!(p.required_mode, 0o555);
         assert_eq!(p.required_uid, 0);
         assert_eq!(p.required_gid, 0);
     }

@@ -102,7 +102,7 @@ fn build_produces_resolver_compatible_artifact() {
         .path()
         .join("runtime-overlay")
         .join(&artifact.version)
-        .join(arch.as_str());
+        .join(arch.to_string());
     std::fs::create_dir_all(&staged).unwrap();
     copy_file(&artifact.overlay_ext4, &staged.join("overlay.ext4"));
     copy_file(&artifact.sidecar, &staged.join("overlay.verity"));

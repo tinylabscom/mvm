@@ -162,9 +162,14 @@ in
       content = "/usr/lib/mvm/wrappers/runner";
       mode = "0644";
     };
+    # Mode 0555 (read-only): the rootfs hardening pass strips owner-write
+    # anyway, and the agent's EntrypointPolicy requires exactly 0555
+    # (matching the agent binary's own mode). Declaring it honestly here
+    # instead of 0755 keeps the baked mode aligned with what the agent
+    # checks when it resolves /etc/mvm/entrypoint → this wrapper.
     "/usr/lib/mvm/wrappers/runner" = {
       content = lang.runnerScript;
-      mode = "0755";
+      mode = "0555";
     };
     "/etc/mvm/wrapper.json" = {
       content = wrapperJson;

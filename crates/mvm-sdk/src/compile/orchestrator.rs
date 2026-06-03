@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 pub enum CompileError {
     OutputExistsNotDir(PathBuf),
     Staging(io::Error),
+    /// Stripping build-time framework constructs (`import mvm` /
+    /// `@mvm.*`) from the bundled source failed.
+    StripFramework(io::Error),
     Render(serde_json::Error),
     Write(io::Error),
     Source(SourceError),
@@ -65,6 +68,7 @@ impl std::fmt::Display for CompileError {
                 )
             }
             Self::Staging(e) => write!(f, "atomic staging failed: {e}"),
+            Self::StripFramework(e) => write!(f, "stripping framework constructs failed: {e}"),
             Self::Render(e) => write!(f, "rendering artifact failed: {e}"),
             Self::Write(e) => write!(f, "writing artifact failed: {e}"),
             Self::Source(e) => write!(f, "source bundling failed: {e}"),
@@ -228,6 +232,17 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
             check_function_presence(&bundle_dir, lang, &app.entrypoints)?;
             prune_unreachable(&bundle_dir, &reachable, lang.extensions())
                 .map_err(CompileError::Source)?;
+            // The @mvm.app decorator is build-time metadata (already lowered
+            // to IR above) and returns the function unchanged. Strip
+            // `import mvm` + `@mvm.*` from the bundled source so the guest
+            // runtime never imports the SDK — the wrapper imports the user
+            // module to dispatch, and a stray `import mvm` would fail in a
+            // rootfs that deliberately doesn't ship it. Python only for now;
+            // Node strip is analogous (tree-sitter-typescript) when wired.
+            if lang == Language::Python {
+                crate::compile::strip_framework::strip_python(&bundle_dir)
+                    .map_err(CompileError::StripFramework)?;
+            }
             source_plan = rehash(&bundle_dir).map_err(CompileError::Source)?;
         }
 

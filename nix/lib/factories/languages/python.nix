@@ -22,6 +22,16 @@ let
 in
 {
   language = "python";
-  runnerScript = builtins.readFile runnerSource;
+  # Stamp the nix interpreter into the shebang. The wrapper source carries
+  # `#!/usr/bin/env python3`, but the busybox workload rootfs has no
+  # /usr/bin/env, so the agent's per-call exec of the runner would fail
+  # `not found`. `pkgs.python3` is in `servicePackages` below, so its
+  # store path is in the rootfs closure. oneshot.py is stdlib-only on the
+  # JSON path (msgpack/jsonschema are lazy best-effort imports), so a bare
+  # python3 shebang suffices — no writePython3/library plumbing.
+  runnerScript =
+    let raw = builtins.readFile runnerSource; in
+    builtins.replaceStrings
+      [ "#!/usr/bin/env python3" ] [ "#!${pkgs.python3}/bin/python3" ] raw;
   servicePackages = [ pkgs.python3 ];
 }
