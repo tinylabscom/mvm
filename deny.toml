@@ -72,6 +72,15 @@ ignore = [
     # we don't expose that surface. Re-evaluate when time v0.4
     # ships with the bound.
     { id = "RUSTSEC-2026-0009", reason = "time stack-exhaustion DoS; transitive via sigstore→openidconnect→serde_with; no untrusted-time-string parsing surface in mvmctl; audited 2026-05-01" },
+    # `async-std` discontinued. DEV-DEPENDENCY ONLY: pulled via httpmock
+    # (test HTTP mock) → async-object-pool → async-std. Absent from every
+    # shipped artifact (mvmctl, guest agents, supervisors); no production
+    # surface. Follow-up: migrate httpmock → wiremock to drop it entirely.
+    { id = "RUSTSEC-2025-0052", reason = "async-std discontinued; DEV-ONLY via httpmock test mock; absent from all shipped artifacts; audited 2026-06-03" },
+    # `paste` unmaintained. Build-time proc-macro only — produces no
+    # runtime code in the shipped binary, same class as proc-macro-error
+    # above. No runtime/IO surface.
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; build-time proc-macro, no runtime surface; audited 2026-06-03" },
 ]
 
 # ── Licenses ──────────────────────────────────────────────────────
