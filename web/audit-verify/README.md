@@ -13,22 +13,17 @@ normal workspace via `mvm-verify`.
 
 ## Build
 
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-pack          # once, if not already installed
+The wasm artifact is **not built by default and not shipped**. It is not
+needed to use or test the verifier — all of the logic lives in the
+`mvm-verify` crate and is covered by the normal workspace test run.
 
-# from this directory:
-wasm-pack build --release --target web --out-dir pkg
-```
-
-That emits `pkg/mvm_audit_verify_web.js` + `…_bg.wasm`, which
-`index.html` imports. Serve the directory statically:
-
-```sh
-python3 -m http.server 8000      # then open http://localhost:8000/
-```
-
-The page is fully offline after load — nothing you paste leaves the tab.
+If you ever do want the browser bundle, build it **inside the builder/dev
+VM** (`mvmctl dev`), never with a host toolchain — same invariant as
+every other build in this repo: builder tools never live on the host
+(ADR-013, ADR-046). The wasm32 target + `wasm-pack` belong in that guest,
+not on a contributor's machine. The output (`pkg/*.js` + `…_bg.wasm`) is
+what `index.html` imports; serve the directory statically and the page is
+fully offline after load — nothing you paste leaves the tab.
 
 ## Inputs
 
