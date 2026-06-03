@@ -1,6 +1,6 @@
 //! Static `ArtifactValidator` implementation.
 //!
-//! `StaticValidator` runs seven checks in order against a `MicrovmArtifact`,
+//! `StaticValidator` runs eight checks in order against a `MicrovmArtifact`,
 //! accumulating a `ValidationCheck` per step into a `ValidationReport`.
 //! All checks run regardless of earlier failures — the report captures the
 //! full picture so a single validate pass surfaces every problem at once.
@@ -14,6 +14,9 @@
 //! 5. `rootfs.format` is in `compat.rootfs_formats`.
 //! 6. Every `compat.required_boot_args` token is present in `artifact.boot_args`.
 //! 7. The rootfs ext4 image contains `/sbin/init` (via `ext4_view`).
+//! 8. `boot_args` tokens are well-formed (no control chars, no empty tokens,
+//!    joined length within the cmdline guard — otherwise the guest kernel
+//!    silently truncates or the VMM rejects the cmdline at boot).
 
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -219,12 +222,63 @@ impl ArtifactValidator for StaticValidator {
             detail: init_detail,
         });
 
+        // ── check 8: boot_args are well-formed ───────────────────────────────
+        let problems = boot_args_problems(&artifact.boot_args);
+        let args_wf_ok = problems.is_empty();
+        checks.push(ValidationCheck {
+            name: "boot_args_wellformed".to_string(),
+            ok: args_wf_ok,
+            detail: if args_wf_ok {
+                String::new()
+            } else {
+                problems.join("; ")
+            },
+        });
+
         let ok = checks.iter().all(|c| c.ok);
         Ok(ValidationReport { ok, checks })
     }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Conservative upper guard on the joined kernel cmdline length.
+///
+/// The guest kernel truncates the cmdline to its compile-time
+/// `COMMAND_LINE_SIZE` (2048 on x86_64/arm64 today; the x86 boot-protocol
+/// `cmdline_size` field historically allowed up to this). mvm cannot know the
+/// bundled/guest kernel's exact constant, so this is a runaway/gross-overflow
+/// guard, not an exact mirror — it errs high to avoid false rejections while
+/// still catching cmdlines that are certain to be truncated or malformed.
+const MAX_BOOT_ARGS_LEN: usize = 4096;
+
+/// Reasons a `boot_args` vector is malformed; empty `Vec` == well-formed.
+///
+/// Catches the two failure modes that otherwise surface at boot with poor
+/// diagnostics: control chars (a NUL breaks libkrun's `CString` in
+/// `set_kernel`; `\n`/`\r` corrupt the Firecracker JSON config) and a joined
+/// cmdline past `MAX_BOOT_ARGS_LEN` (the kernel silently truncates it).
+fn boot_args_problems(boot_args: &[String]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (i, tok) in boot_args.iter().enumerate() {
+        if tok.is_empty() {
+            problems.push(format!("token {i} is empty"));
+        }
+        if let Some(c) = tok.chars().find(|c| c.is_control()) {
+            problems.push(format!("token {i} ({tok:?}) contains control char {c:?}"));
+        }
+    }
+    // join(" ") is how every backend renders the cmdline; +1 per separator.
+    let joined_len =
+        boot_args.iter().map(String::len).sum::<usize>() + boot_args.len().saturating_sub(1);
+    if joined_len > MAX_BOOT_ARGS_LEN {
+        problems.push(format!(
+            "joined cmdline is {joined_len} bytes, exceeds guard {MAX_BOOT_ARGS_LEN} \
+             (kernel would silently truncate)"
+        ));
+    }
+    problems
+}
 
 /// Stream `path` through SHA-256 and return the lowercase hex digest.
 fn hash_file(path: &std::path::Path) -> std::io::Result<String> {
@@ -626,13 +680,13 @@ mod tests {
         );
     }
 
-    /// All 7 checks green: `report.ok == true` on a fully-valid `MicrovmArtifact`.
+    /// All 8 checks green: `report.ok == true` on a fully-valid `MicrovmArtifact`.
     ///
     /// Requires a real ext4 (check 7 — init presence) so this is Linux-only.
     /// Keep the mke2fs-absent early-return skip.
     #[cfg(target_os = "linux")]
     #[test]
-    fn all_seven_checks_green_report_ok() {
+    fn all_eight_checks_green_report_ok() {
         use crate::compat::MicrovmBackend;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -702,7 +756,94 @@ mod tests {
         for c in &report.checks {
             assert!(c.ok, "check {:?} failed unexpectedly: {}", c.name, c.detail);
         }
-        assert!(report.ok, "report.ok must be true when all 7 checks pass");
-        assert_eq!(report.checks.len(), 7, "expected exactly 7 checks");
+        assert!(report.ok, "report.ok must be true when all 8 checks pass");
+        assert_eq!(report.checks.len(), 8, "expected exactly 8 checks");
+    }
+
+    // ── check 8: boot_args well-formedness ───────────────────────────────────
+
+    #[test]
+    fn boot_args_problems_accepts_wellformed() {
+        let args = vec![
+            "console=ttyS0".to_string(),
+            "reboot=k".to_string(),
+            "panic=1".to_string(),
+        ];
+        assert!(boot_args_problems(&args).is_empty());
+    }
+
+    #[test]
+    fn boot_args_problems_flags_control_chars() {
+        // Embedded NUL — breaks libkrun's CString conversion downstream.
+        let nul = boot_args_problems(&["root=/dev/vda\0rw".to_string()]);
+        assert_eq!(nul.len(), 1, "{nul:?}");
+        assert!(nul[0].contains("token 0"));
+        assert!(nul[0].contains("control char"));
+
+        // Embedded newline — corrupts the Firecracker JSON config.
+        let nl = boot_args_problems(&["ok".to_string(), "bad\nline".to_string()]);
+        assert_eq!(nl.len(), 1, "{nl:?}");
+        assert!(nl[0].contains("token 1"));
+    }
+
+    #[test]
+    fn boot_args_problems_flags_empty_token() {
+        let p = boot_args_problems(&["console=hvc0".to_string(), String::new()]);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("token 1 is empty"));
+    }
+
+    #[test]
+    fn boot_args_problems_flags_overflow_and_boundary_passes() {
+        // A single token of exactly MAX_BOOT_ARGS_LEN bytes joins to that length.
+        let at_cap = vec!["a".repeat(MAX_BOOT_ARGS_LEN)];
+        assert!(
+            boot_args_problems(&at_cap).is_empty(),
+            "exactly the cap must pass"
+        );
+
+        // One byte over the cap must be flagged with the byte count + "truncate".
+        let over = vec!["a".repeat(MAX_BOOT_ARGS_LEN + 1)];
+        let p = boot_args_problems(&over);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains(&format!("{}", MAX_BOOT_ARGS_LEN + 1)));
+        assert!(p[0].contains("truncate"));
+    }
+
+    /// A malformed boot arg fails check 8 through the full validator without
+    /// disturbing the other checks.
+    #[test]
+    fn malformed_boot_args_fails_check_eight_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut artifact = stub_artifact(
+            tmp.path(),
+            b"ELF\x7f stub kernel",
+            &[0u8; 4096],
+            KernelFormat::Elf,
+        );
+        // Inject a newline-bearing extra arg on top of the valid required set.
+        artifact.boot_args.push("init=/bin/sh\nrm".to_string());
+
+        let report = StaticValidator.validate(&artifact).unwrap();
+        assert!(!report.ok);
+        let wf = report
+            .checks
+            .iter()
+            .find(|c| c.name == "boot_args_wellformed")
+            .unwrap();
+        assert!(!wf.ok);
+        assert!(wf.detail.contains("control char"), "{}", wf.detail);
+        // required_boot_args (presence) is unaffected — the required tokens are
+        // all still there; only well-formedness fails.
+        let required = report
+            .checks
+            .iter()
+            .find(|c| c.name == "required_boot_args")
+            .unwrap();
+        assert!(
+            required.ok,
+            "presence check must remain green: {}",
+            required.detail
+        );
     }
 }
