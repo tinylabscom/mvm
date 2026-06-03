@@ -30,7 +30,7 @@ automated from the repo.
   Optionally retire the old name: `npm deprecate mvm-sdk "moved to
   @runmvm/mvm"`.
 
-Local is `0.14.0`, not on either registry, so the first publish is a
+Local is `0.15.0`, not on either registry, so the first publish is a
 clean bump (no duplicate-version rejection) that aligns the registries
 with the toolchain. Re-check anytime:
 

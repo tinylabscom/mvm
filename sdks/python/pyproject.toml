@@ -1,6 +1,6 @@
 [project]
 name = "mvm"
-version = "0.14.0"
+version = "0.15.0"
 description = "Declarative microVM workloads for Python — author once, emit a Nix flake, boot under mvm."
 readme = "README.md"
 requires-python = ">=3.10"

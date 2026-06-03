@@ -6,7 +6,32 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-06-03
+
 ### Added
+
+- **Architecture-aware artifact model (Plan 134).** `GuestArch`/
+  `KernelFormat` in `mvm-core`; `MicrovmBackend` + data-driven
+  `BackendCompat` matrix + the `artifacts` module in `mvm-backend`;
+  `NixMicrovmBuilder` adapter; static `ArtifactValidator` +
+  `FirecrackerConfigWriter`; `mvmctl artifact model-inspect|
+  model-validate|model-config|model-build`.
+- **`mvmctl invoke` works end-to-end** (function workloads return their
+  encoded result over vsock `RunEntrypoint`). The build-time `@mvm.app`
+  decorator is stripped from the bundled source at compile time, so the
+  guest never imports the SDK.
+- **SDK publish workflows** — PyPI (`mvm`) + npm (`@runmvm/mvm`),
+  release-triggered with a version==tag guard.
+- **Stage 0 builder-VM nix-store persistence** across `dev up` runs.
+
+### Fixed
+
+- **Function-workload boot** is genuinely stable: PID 1 (the idle
+  bootScript at `/etc/mvm/boot`) no longer aborts on a bare `mkdir`, so
+  the VM stays up instead of rebooting at ~5s (previously boot→ping only
+  "passed" via the agent answering inside that window).
+- OCI→ext4 materialization is byte-deterministic on e2fsprogs ≥1.47
+  (`-O ^orphan_file`), restoring the ADR-050 verity-cache invariant.
 
 - **Plan 63 Phase 2 — encryption everywhere.** Closed in six
   workstreams (commits `b9e4e64`, `1ea9352`, `f7e39a7`, `a30f866`,
@@ -218,5 +243,6 @@ has a tracking pointer; none is silently broken.
   See [`MIGRATING-FROM-V1.md`](MIGRATING-FROM-V1.md) §"Feature parity
   status" for the per-feature delta.
 
-[Unreleased]: https://github.com/tinylabscom/mvm/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/tinylabscom/mvm/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/tinylabscom/mvm/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/tinylabscom/mvm/releases/tag/v0.14.0
