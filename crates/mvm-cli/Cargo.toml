@@ -73,6 +73,9 @@ predicates.workspace = true
 rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# core_demo_e2e uses libc::kill(-pgid, SIGKILL) to reap a timed-out
+# mvmctl process tree (supervisor + gvproxy) so the run can never hang.
+libc.workspace = true
 
 [features]
 # Plan 72 W5.B cutover: `builder-vm` is now default so `mvmctl dev up`

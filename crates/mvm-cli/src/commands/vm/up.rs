@@ -1832,6 +1832,35 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
 
+    // libkrun runs the workload in a detached supervisor daemon, so `up`
+    // returns while the VM keeps running — but it must still confirm the
+    // guest agent answered over vsock before returning. That is the
+    // boot→ping readiness contract the core-demo E2E asserts: `up`
+    // exiting 0 *without* "Guest agent not reachable" == the agent
+    // answered. Before this, libkrun `up` returned the instant the
+    // supervisor spawned, proving only that a process started, never
+    // that the guest booted (the wait was apple-container-only).
+    // `wait_for_guest_agent` negotiates the Ping capability only (not
+    // the dev exec surface), so it succeeds against sealed prod images
+    // too; it routes through `vsock_transport::for_vm`, which selects
+    // the libkrun transport via the per-VM vsock proxy socket.
+    if effective_hypervisor == "libkrun" {
+        ui::info("Waiting for guest agent...");
+        record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
+        if wait_for_guest_agent(&vm_name_owned, 30) {
+            record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentReady);
+            if let Err(e) = mvm_backend::netinit_audit::emit_for_vm(&vm_name_owned) {
+                tracing::debug!(
+                    vm = %vm_name_owned,
+                    error = %e,
+                    "netinit audit emit skipped (best-effort)"
+                );
+            }
+        } else {
+            ui::warn("Guest agent not reachable.");
+        }
+    }
+
     // Apple Virtualization VMs live in-process — the process must stay alive.
     if effective_hypervisor == "apple-container" && !detach {
         // ADR-053 §3 / plan 74 W2 (services-health): wait for the

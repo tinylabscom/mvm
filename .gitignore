@@ -2,7 +2,8 @@
 # Swift Package Manager build output (mvm-providers/swift, mvm-vz-supervisor).
 **/.build/
 .playwright-mcp/
-.claude
+.claude/*
+!.claude/settings.json
 **/node_modules
 specs/scratch.md
 # Astro+Starlight docs build output (public/dist) — built by `pnpm build`

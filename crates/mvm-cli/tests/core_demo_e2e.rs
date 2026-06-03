@@ -15,20 +15,71 @@
 //! `up` waits for the guest agent (`wait_for_guest_agent` → vsock Ping)
 //! and only prints `Guest agent not reachable.` on failure — so `up`
 //! exiting 0 *without* that line is the boot→ping proof.
+//!
+//! NO-FREEZE design (this test cost multiple whole sessions, frozen).
+//! Two independent guards make a hang impossible:
+//!   1. A process-level **watchdog** thread (`arm_watchdog`) that
+//!      `exit(124)`s after a hard deadline — the test process can never
+//!      run forever regardless of any orphaned child.
+//!   2. Every `mvmctl` call is **bounded**: stdio is redirected to files
+//!      (so nothing captures a pipe an orphaned gvproxy could hold open —
+//!      the original `Command::output()` EOF-wait freeze) and the child
+//!      is spawned in its own process group, SIGKILLed whole on timeout.
 
 use assert_cmd::cargo::CommandCargoExt;
-use std::process::Command;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-fn mvmctl(args: &[&str]) -> std::process::Output {
+/// Per-step wall-clock ceilings. The in-VM `nix build` on first `up`
+/// and a cold builder-VM image build on first `dev up` are the long
+/// poles; everything else is seconds. On expiry the step's process
+/// group is SIGKILLed and the step is reported as timed out.
+const DEV_UP_BUDGET: Duration = Duration::from_secs(900);
+const COMPILE_BUDGET: Duration = Duration::from_secs(180);
+const UP_BUDGET: Duration = Duration::from_secs(900);
+const DOWN_BUDGET: Duration = Duration::from_secs(120);
+
+/// Outcome of one bounded `mvmctl` invocation.
+struct Step {
+    success: bool,
+    /// stdout + stderr concatenated. mvm's UI (`ui::info`/`ui::warn`)
+    /// writes to **stdout**, while build/runtime errors land on stderr,
+    /// so any assertion on mvm output must scan both — checking only one
+    /// stream silently misses the other (e.g. "Guest agent not
+    /// reachable." is a `ui::warn` on stdout).
+    output: String,
+    timed_out: bool,
+}
+
+/// Run `mvmctl <args>` bounded by `budget`, capturing stdout/stderr to
+/// `<scratch>/<label>.{stdout,stderr}.log`. NEVER blocks on a pipe: the
+/// freeze that cost us multiple sessions was `Command::output()` waiting
+/// on pipe EOF that an orphaned gvproxy held open (libkrun `exit()`s on
+/// guest poweroff, skipping `GvproxyHandle::Drop`). Here stdio goes to
+/// files (no pipe to hold) and the child runs in its own process group,
+/// SIGKILLed whole on timeout so the supervisor + gvproxy are reaped.
+fn mvmctl(args: &[&str], scratch: &std::path::Path, label: &str, budget: Duration) -> Step {
+    let out_path = scratch.join(format!("{label}.stdout.log"));
+    let err_path = scratch.join(format!("{label}.stderr.log"));
+    let out_f = std::fs::File::create(&out_path).expect("create stdout log");
+    let err_f = std::fs::File::create(&err_path).expect("create stderr log");
+
     #[allow(deprecated)]
     let mut cmd = Command::cargo_bin("mvmctl").expect("locate mvmctl");
-    cmd.args(args);
-    // The E2E pins the builder backend to libkrun on macOS so the
-    // test doesn't depend on the Swift mvm-vz-supervisor having been
-    // built. Plan 98's auto-select would otherwise pick Vz on macOS
-    // 26+ Apple Silicon and bail with "mvm-vz-supervisor binary not
-    // found." Both pins are per-child so they don't leak into other
-    // tests running in the same cargo invocation.
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_f))
+        .stderr(Stdio::from(err_f))
+        // Own process group (pgid == child pid) so a timeout can SIGKILL
+        // the whole tree — mvmctl, its supervisor, and gvproxy.
+        .process_group(0);
+    // The E2E pins the builder backend to libkrun on macOS so the test
+    // doesn't depend on the Swift mvm-vz-supervisor having been built.
+    // Plan 98's auto-select would otherwise pick Vz on macOS 26+ Apple
+    // Silicon and bail with "mvm-vz-supervisor binary not found." Both
+    // pins are per-child so they don't leak into other tests in the same
+    // cargo invocation.
     #[cfg(target_os = "macos")]
     {
         cmd.env("MVM_BUILDER_BACKEND", "libkrun");
@@ -36,16 +87,66 @@ fn mvmctl(args: &[&str]) -> std::process::Output {
         // test -p mvm-cli` does NOT rebuild the separate
         // `mvm-libkrun-supervisor` bin crate (mvm-cli doesn't depend on
         // it), so without this the test execs whatever stale supervisor
-        // sits next to mvmctl. A supervisor built before the gvproxy
-        // stdout/stderr-redirect fix spawns gvproxy with inherited fds;
-        // on guest poweroff libkrun's `exit()` skips
-        // `GvproxyHandle::Drop`, orphaning a gvproxy that still holds
-        // this test's `Command` capture pipes — `output()` then never
-        // sees EOF and the run hangs forever. `resolve_supervisor_path`
-        // honors this override ahead of the next-to-exe fallback.
+        // sits next to mvmctl. `resolve_supervisor_path` honors this
+        // override ahead of the next-to-exe fallback.
         cmd.env("MVM_LIBKRUN_SUPERVISOR_PATH", libkrun_supervisor_path());
     }
-    cmd.output().expect("spawn mvmctl")
+
+    let mut child = cmd.spawn().expect("spawn mvmctl");
+    let pgid = child.id() as i32;
+    let start = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait().expect("try_wait mvmctl") {
+            Some(s) => break Some(s),
+            None if start.elapsed() >= budget => {
+                // SIGKILL the whole process group, then reap the leader.
+                // SAFETY: pgid is this child's own group (process_group(0)).
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                let _ = child.wait();
+                timed_out = true;
+                break None;
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    };
+
+    let mut output = std::fs::read_to_string(&out_path).unwrap_or_default();
+    output.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
+    Step {
+        success: status.map(|s| s.success()).unwrap_or(false),
+        output,
+        timed_out,
+    }
+}
+
+/// Arm a hard process-level deadline. If the test is still alive after
+/// `secs`, print a pointer to the per-step logs and `exit(124)` so the
+/// process can never hang the session — a backstop above the per-step
+/// timeouts in `mvmctl`. Override via `MVM_E2E_DEADLINE_SECS`.
+fn arm_watchdog(secs: u64, scratch: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(secs));
+        eprintln!(
+            "core_demo_e2e WATCHDOG: hard deadline {secs}s hit — aborting to \
+             avoid a frozen session. Per-step logs: {}",
+            scratch.display()
+        );
+        std::process::exit(124);
+    });
+}
+
+/// Stable, non-auto-deleted scratch dir for step logs + the compiled
+/// flake, so a failure (or a watchdog `exit`, which skips destructors)
+/// leaves logs behind for triage. Cleaned at the start of each run.
+/// Override via `MVM_E2E_SCRATCH`.
+fn scratch_dir() -> std::path::PathBuf {
+    let d = std::env::var_os("MVM_E2E_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("mvm-core-demo-e2e"));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).expect("create scratch dir");
+    d
 }
 
 /// Resolve the on-disk `mvm-libkrun-supervisor` path and fail loudly if it
@@ -142,44 +243,86 @@ fn core_demo_dev_compile_up_ping() {
         eprintln!("skipping core-demo E2E; set MVM_E2E_SMOKE=1 to run");
         return;
     }
-    let out = tempfile::tempdir().expect("tmp out");
+
+    let scratch = scratch_dir();
+    eprintln!(
+        "core_demo_e2e scratch (logs + compiled flake): {}",
+        scratch.display()
+    );
+
+    let deadline = std::env::var("MVM_E2E_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2400);
+    arm_watchdog(deadline, scratch.clone());
+
+    let out = scratch.join("compiled");
+    std::fs::create_dir_all(&out).expect("create compile out dir");
     let app = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/python/hello-app/app.py"
     );
 
     // 1) builder VM up (idempotent).
-    let dev_up = mvmctl(&["dev", "up"]);
+    let dev_up = mvmctl(&["dev", "up"], &scratch, "dev-up", DEV_UP_BUDGET);
     assert!(
-        dev_up.status.success(),
-        "dev up failed: {}",
-        String::from_utf8_lossy(&dev_up.stderr)
+        !dev_up.timed_out,
+        "dev up timed out (>{DEV_UP_BUDGET:?}); output:\n{}",
+        dev_up.output
     );
+    assert!(dev_up.success, "dev up failed: {}", dev_up.output);
 
     // 2) lower the decorator app to flake.nix + launch.json.
-    let c = mvmctl(&["compile", app, "--out", out.path().to_str().unwrap()]);
-    assert!(
-        c.status.success(),
-        "compile failed: {}",
-        String::from_utf8_lossy(&c.stderr)
+    let c = mvmctl(
+        &["compile", app, "--out", out.to_str().unwrap()],
+        &scratch,
+        "compile",
+        COMPILE_BUDGET,
     );
+    assert!(
+        !c.timed_out,
+        "compile timed out (>{COMPILE_BUDGET:?}); output:\n{}",
+        c.output
+    );
+    assert!(c.success, "compile failed: {}", c.output);
 
-    // 3) build + boot the workload microVM; `up` waits for the agent.
-    //    Exit 0 with no "not reachable" line == the agent answered.
-    let up = mvmctl(&[
+    // 3) build + boot the workload microVM; `up` waits for the agent
+    //    over vsock (`wait_for_guest_agent` → protocol Ping). The proof
+    //    is twofold and scans BOTH streams (`up.output`): the wait
+    //    actually ran ("Waiting for guest agent...") AND it succeeded
+    //    (no "Guest agent not reachable."). Checking only one of these
+    //    is how this test previously false-greened — `up` used to skip
+    //    the wait entirely on libkrun, and the warn line lands on
+    //    stdout, not stderr.
+    let up = mvmctl(
+        &[
+            "up",
+            "--hypervisor",
+            workload_hypervisor(),
+            "--flake",
+            out.to_str().unwrap(),
+        ],
+        &scratch,
         "up",
-        "--hypervisor",
-        workload_hypervisor(),
-        "--flake",
-        out.path().to_str().unwrap(),
-    ]);
-    let log = String::from_utf8_lossy(&up.stderr);
-    assert!(up.status.success(), "up failed: {log}");
+        UP_BUDGET,
+    );
     assert!(
-        !log.contains("Guest agent not reachable"),
-        "agent never answered: {log}"
+        !up.timed_out,
+        "up timed out (>{UP_BUDGET:?}); output:\n{}",
+        up.output
+    );
+    assert!(up.success, "up failed: {}", up.output);
+    assert!(
+        up.output.contains("Waiting for guest agent"),
+        "up never waited for the guest agent (boot→ping not exercised): {}",
+        up.output
+    );
+    assert!(
+        !up.output.contains("Guest agent not reachable"),
+        "guest agent never answered the vsock ping: {}",
+        up.output
     );
 
-    // 4) tear down the builder (best-effort).
-    let _ = mvmctl(&["dev", "down"]);
+    // 4) tear down the builder (best-effort, still bounded).
+    let _ = mvmctl(&["dev", "down"], &scratch, "dev-down", DOWN_BUDGET);
 }
