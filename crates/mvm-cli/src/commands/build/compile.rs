@@ -34,7 +34,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 
 use mvm_core::user_config::MvmConfig;
-use mvm_ir::Workload;
+use mvm_ir::{Entrypoint, Workload};
 use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
 use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
 
@@ -126,7 +126,48 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             .with_context(|| format!("compile to directory {}", args.out.display()))?;
         eprintln!("compiled directory: {}", args.out.display());
     }
+    warn_node_deps(&workload, &manifest_dir);
     Ok(())
+}
+
+/// Warn at compile time when a Node workload ships a `package.json` whose
+/// dependencies the build won't install. The build-time bake is npm-only
+/// (nixpkgs `importNpmLock`, which reads `package-lock.json` integrity
+/// hashes — the only hash-free path); pnpm/yarn need a precomputed FOD hash
+/// the host-side compile can't produce, so they route through the
+/// sealed-volume builder path (Plan 145 WS-A, not yet wired). Either gap is
+/// silent today — the bundle just copies the source with no `node_modules` —
+/// so a missing dep only surfaces as a runtime import failure. Make it loud.
+fn warn_node_deps(workload: &Workload, manifest_dir: &Path) {
+    let is_node = workload.apps.iter().any(|app| {
+        app.entrypoints
+            .iter()
+            .any(|ep| matches!(ep, Entrypoint::Function { language, .. } if language == "node"))
+    });
+    if !is_node || !manifest_dir.join("package.json").is_file() {
+        return;
+    }
+    // npm lockfile → the nix-native bake handles it; nothing to warn.
+    if manifest_dir.join("package-lock.json").is_file() {
+        return;
+    }
+    if let Some(lock) = ["pnpm-lock.yaml", "yarn.lock"]
+        .into_iter()
+        .find(|f| manifest_dir.join(f).is_file())
+    {
+        eprintln!(
+            "[mvm] warning: {lock} detected, but the build-time bake is npm-only \
+             (nixpkgs importNpmLock). pnpm/yarn dependencies are NOT baked into the image \
+             — install them via the sealed-volume builder path (Plan 145 WS-A, not yet \
+             wired). For a build-time bake today, use npm + package-lock.json."
+        );
+        return;
+    }
+    eprintln!(
+        "[mvm] warning: package.json has no lockfile — dependencies will NOT be installed \
+         and `node_modules` will be absent at runtime. Run `npm install` to generate \
+         package-lock.json so the build bakes the dependency tree into the image."
+    );
 }
 
 fn resolve_mode(args: &Args) -> Result<Mode> {
