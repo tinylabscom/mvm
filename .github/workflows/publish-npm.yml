@@ -1,0 +1,89 @@
+name: Publish SDK to npm
+
+# Publishes the TypeScript SDK (sdks/typescript, package `mvm-sdk`) to npm.
+#
+# Trigger:
+#   - automatically when a GitHub Release is published (same event as
+#     publish-crates.yml / publish-pypi.yml, so all three ship at one
+#     version — see the version-vs-tag guard below);
+#   - manually via workflow_dispatch (dry_run=true does `npm publish
+#     --dry-run`, no upload — rehearse before the first real publish).
+#
+# Auth: NPM_TOKEN repo secret (a granular automation token with publish
+# rights on `mvm-sdk`). Provenance is attested via OIDC. See
+# specs/runbooks/publish-sdks.md.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "npm publish --dry-run only; no upload"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance via OIDC
+      contents: read
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Check token
+        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::Missing NPM_TOKEN secret."
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Version coupling: refuse to publish an SDK whose version doesn't
+      # match the release tag (the SDK emits IR the same-version toolchain
+      # consumes). GITHUB_REF_NAME is read as a shell env var, never
+      # interpolated into the script — no workflow injection.
+      - name: Assert SDK version matches the release tag
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          sdk_ver=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "sdk=$sdk_ver tag=$tag"
+          if [ "$sdk_ver" != "$tag" ]; then
+            echo "::error::sdks/typescript/package.json version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
+            exit 1
+          fi
+
+      - name: Install + build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Publish to npm (dry-run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: npm publish --provenance --access public --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm
+        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

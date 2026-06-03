@@ -1,0 +1,73 @@
+name: Publish SDK to PyPI
+
+# Publishes the Python SDK (sdks/python, package `mvm`) to PyPI.
+#
+# Trigger:
+#   - automatically when a GitHub Release is published (same event that
+#     drives publish-crates.yml, so the SDK ships at the same version as
+#     the toolchain — see the version-vs-tag guard below);
+#   - manually via workflow_dispatch (dry_run=true builds + checks only,
+#     no upload — use this to rehearse before the first real publish).
+#
+# Auth: PyPI Trusted Publishing (OIDC) — no long-lived token. Configure a
+# trusted publisher on PyPI first (see specs/runbooks/publish-sdks.md):
+#   project `mvm` → Publishing → add GitHub publisher
+#   (owner tinylabscom, repo mvm, workflow publish-pypi.yml, environment pypi).
+# New projects use a "pending publisher" so the first publish creates the
+# project under OIDC with no token.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + validate only; skip the PyPI upload"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC for Trusted Publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Version coupling: the SDK emits IR that the same-version toolchain
+      # consumes (launch.json `toolchain_version` == mvmctl CARGO_PKG_VERSION).
+      # Refuse to publish an SDK whose version doesn't match the release tag.
+      - name: Assert SDK version matches the release tag
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          sdk_ver=$(grep -E '^version' sdks/python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "sdk=$sdk_ver tag=$tag"
+          if [ "$sdk_ver" != "$tag" ]; then
+            echo "::error::sdks/python/pyproject.toml version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build sdks/python --outdir dist
+          ls -l dist
+
+      - name: Publish to PyPI (Trusted Publishing)
+        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
