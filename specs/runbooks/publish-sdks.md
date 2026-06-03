@@ -17,32 +17,39 @@ commit that bumps the toolchain.
 These claim public names and configure credentials; they can't be
 automated from the repo.
 
-### 1. Confirm the names are available / yours
+### 1. Names — already claimed by Tinylabs
+
+As of 2026-06-03 both projects exist and are owned by Tinylabs:
+
+- PyPI **`mvm`** — latest `0.1.2` (history: 0.1.0, 0.1.1, 0.1.2).
+- npm **`mvm-sdk`** — latest `0.1.2`.
+
+So there's nothing to claim. Local is `0.14.0`, which is **not** on either
+registry, so publishing it is a clean bump (no duplicate-version
+rejection) that catches the registries up to the toolchain. Re-check
+anytime:
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/mvm/json        # 404 = available
-curl -s -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/mvm-sdk    # 404 = available
+curl -s https://pypi.org/pypi/mvm/json | python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])'
+curl -s https://registry.npmjs.org/mvm-sdk | python3 -c 'import sys,json;print(json.load(sys.stdin)["dist-tags"]["latest"])'
 ```
-
-If `mvm` is taken on PyPI, rename the project in `sdks/python/pyproject.toml`
-(e.g. `mvm-sdk` to match npm) and update `[tool.hatch.build.targets.wheel]
-packages` only if the import package name changes (it should stay `mvm`).
 
 ### 2. PyPI — Trusted Publishing (no token)
 
-On PyPI → your account → **Publishing** → **Add a pending publisher**:
+The `mvm` project already exists, so add a **regular** trusted publisher
+to it: PyPI → project `mvm` → **Manage** → **Publishing** → **Add a new
+publisher** (GitHub):
 
-- PyPI Project Name: `mvm`
 - Owner: `tinylabscom`
 - Repository: `mvm`
 - Workflow name: `publish-pypi.yml`
 - Environment: `pypi`
 
-(A "pending publisher" lets the very first run create the project under
-OIDC — no API token ever stored. After the first publish it becomes a
-normal trusted publisher.) Also create a repo **Environment** named
-`pypi` (Settings → Environments) if you want required reviewers on
-publishes.
+(No API token is stored — the workflow authenticates via OIDC.) Also
+create a repo **Environment** named `pypi` (Settings → Environments) if
+you want required reviewers gating publishes. If you'd rather not use
+trusted publishing, drop a `PYPI_API_TOKEN` secret and swap the publish
+step to `with: { password: ${{ secrets.PYPI_API_TOKEN }} }`.
 
 ### 3. npm — automation token
 
