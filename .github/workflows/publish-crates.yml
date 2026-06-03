@@ -1,8 +1,11 @@
 name: Publish to crates.io
 
 on:
-  release:
-    types: [published]
+  # The `release: published` auto-trigger is intentionally disabled: crates.io
+  # publishing of this workspace isn't wired yet (scripts/deploy-guard.sh is
+  # absent and not every workspace crate is publish-ready), so a release tag
+  # would fail this workflow on every cut. Publish manually via workflow_dispatch
+  # once the deploy guard + dependency-ordered publish are built out.
   workflow_dispatch:
     inputs:
       tag:
