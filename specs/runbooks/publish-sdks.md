@@ -17,21 +17,26 @@ commit that bumps the toolchain.
 These claim public names and configure credentials; they can't be
 automated from the repo.
 
-### 1. Names — already claimed by Tinylabs
+### 1. Names + orgs
 
-As of 2026-06-03 both projects exist and are owned by Tinylabs:
+- **PyPI: `mvm`** under the **`runmvm`** PyPI org. The project already
+  exists (latest `0.1.2`; history 0.1.0–0.1.2) — manage it from the
+  `runmvm` org. The distribution name stays `mvm` and the import stays
+  `import mvm` (PyPI orgs don't scope names).
+- **npm: `@runmvm/mvm`** — a **scoped** package under the **`runmvm`**
+  npm org. This is a rename from the old unscoped `mvm-sdk` (latest
+  `0.1.2`), so `@runmvm/mvm` is a fresh package: the first publish
+  creates it under the org. TS import becomes `from "@runmvm/mvm"`.
+  Optionally retire the old name: `npm deprecate mvm-sdk "moved to
+  @runmvm/mvm"`.
 
-- PyPI **`mvm`** — latest `0.1.2` (history: 0.1.0, 0.1.1, 0.1.2).
-- npm **`mvm-sdk`** — latest `0.1.2`.
-
-So there's nothing to claim. Local is `0.14.0`, which is **not** on either
-registry, so publishing it is a clean bump (no duplicate-version
-rejection) that catches the registries up to the toolchain. Re-check
-anytime:
+Local is `0.14.0`, not on either registry, so the first publish is a
+clean bump (no duplicate-version rejection) that aligns the registries
+with the toolchain. Re-check anytime:
 
 ```sh
 curl -s https://pypi.org/pypi/mvm/json | python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])'
-curl -s https://registry.npmjs.org/mvm-sdk | python3 -c 'import sys,json;print(json.load(sys.stdin)["dist-tags"]["latest"])'
+curl -s https://registry.npmjs.org/@runmvm/mvm | python3 -c 'import sys,json;print(json.load(sys.stdin).get("dist-tags",{}).get("latest","(unpublished)"))'
 ```
 
 ### 2. PyPI — Trusted Publishing (no token)
@@ -51,11 +56,17 @@ you want required reviewers gating publishes. If you'd rather not use
 trusted publishing, drop a `PYPI_API_TOKEN` secret and swap the publish
 step to `with: { password: ${{ secrets.PYPI_API_TOKEN }} }`.
 
-### 3. npm — automation token
+### 3. npm — org + automation token
 
-- Create the package owner/org and a **granular automation token** with
-  publish rights on `mvm-sdk` (npm → Access Tokens → Granular).
+- Ensure the **`runmvm`** npm org exists and your account is a member
+  with publish rights.
+- Create a **granular automation token** scoped to publish under
+  `@runmvm/*` (npm → Access Tokens → Granular → Packages and scopes →
+  `@runmvm`).
 - Add it as repo secret **`NPM_TOKEN`** (Settings → Secrets → Actions).
+- The package is scoped, so the publish must be public — the workflow
+  passes `--access public` and `package.json` sets
+  `publishConfig.access = public`.
 
 ## Rehearse (safe, no upload)
 
@@ -85,7 +96,7 @@ together at one version:
 3. Verify:
    ```sh
    pip index versions mvm        # or: pip install mvm==0.15.0
-   npm view mvm-sdk version
+   npm view @runmvm/mvm version
    ```
 
 ## Notes
