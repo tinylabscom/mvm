@@ -71,30 +71,36 @@ function loads.
       example (`examples/python/hello-app-with-deps`) and confirm the workload
       imports the sealed dep; byte-flip `cve.json` → admission refuses.
 
-## Workstream B — pnpm / yarn in the nix-native path
+## Workstream B — pnpm / yarn (corrected: route to WS-A, don't nix-bake)
 
-Today `flake.rs` keys on `package-lock.json` and uses `importNpmLock` (npm only).
+Original framing ("pnpm/yarn in the nix-native bake like npm") is **infeasible**:
+`importNpmLock` is the *only* hash-free nixpkgs path — it reads `package-lock.json`
+integrity hashes directly. `pnpm.fetchDeps` and `fetchYarnBerryDeps` both require
+a precomputed FOD `hash` (from a `prefetch` tool) that the host-side, VM-less
+`compile` can't produce. So the nix-native bake stays **npm-only**, and pnpm/yarn
+deps belong on the **sealed-volume builder path (WS-A)** — which already runs
+`pnpm install --frozen-lockfile` in the builder VM (no nix FOD hash needed).
 
-- [ ] Detect `pnpm-lock.yaml` → build via `pnpm.fetchDeps` (nixpkgs) instead of
-      `importNpmLock`; `yarn.lock` → the yarn-berry equivalent. Branch on the
-      lockfile filename present in `./src`, same `nodeHasLock` site in
-      `crates/mvm-sdk/src/compile/flake.rs`.
-- [ ] Reconcile with the IR `NodeTool` enum (`mvm-ir` already has
-      `Pnpm`/`Npm`/`Yarn`) so an explicit `mvm.node_deps(lockfile=…, tool=…)`
-      and the file-presence auto-detect agree.
-- [ ] Tests: flake-codegen asserts the right builder per lockfile; an example
-      per tool if cheap.
+- [x] Don't silently bake nothing for pnpm/yarn: `mvmctl compile` detects
+      `pnpm-lock.yaml`/`yarn.lock` and warns they're not baked (use npm +
+      `package-lock.json`, or the sealed-volume path) — PR #553.
+- [ ] When WS-A lands, route pnpm/yarn (and explicit `mvm.node_deps(tool=…)`)
+      through the sealed-volume install instead of the nix bake.
+- [ ] Revisit a nix-native pnpm bake only if a hash-free pnpm importer lands
+      upstream in nixpkgs.
 
 ## Workstream C — Bare `package.json`, no lockfile
 
 Today a `package.json` with no lockfile silently falls through to the plain
 copy — deps are not installed and the function fails at runtime with no signal.
 
-- [ ] Dev: emit a clear `[mvm] warning:` at compile that deps won't be installed
-      without a lockfile (point at `npm install` to generate one).
-- [ ] Prod (`GateLevel::Prod`): fail closed — a dependency set with no pinned
-      lockfile is non-reproducible and must not ship.
-- [ ] Tests: compile-time warning present (dev); prod gate refuses.
+- [x] Dev: `mvmctl compile` emits a clear `[mvm] warning:` that deps won't be
+      installed without a lockfile (points at `npm install`) — PR #553.
+- [ ] Prod fail-closed (a no-lockfile dependency set is non-reproducible and
+      must not ship) belongs in **mvmd**, not mvm — `mvmctl compile` has no prod
+      gate (admission policy is fleet-orchestration territory). Track there.
+- [x] Tests: `compile_node_deps_warnings` asserts the warning fires (and stays
+      quiet with a `package-lock.json`) — PR #553.
 
 ## Sequencing & risk
 
