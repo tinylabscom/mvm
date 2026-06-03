@@ -124,6 +124,13 @@
         mvmSrc = workspace;
       };
 
+      # Shared kernel-config base. Lives under `nix/lib/` (outside this
+      # flake's source tree), so it's resolved through `workspace` — the
+      # same mechanism as `libFor`, never a `../../lib` escape that
+      # wouldn't exist in the flake's store copy.
+      kernelBaseFor = pkgs:
+        import (workspace + "/nix/lib/kernel/base.nix") { inherit pkgs; };
+
       # ADR-050 / issue #223 — veritysetup sidecar bytes must not drift
       # when nixpkgs revs. The OCI-pull path runs `veritysetup format`
       # inside this builder VM, while the Nix-built baseline runs it in
@@ -320,13 +327,13 @@
         { system, interactive ? false }:
         let
           pkgs = import nixpkgs { inherit system; };
-          # Slim custom kernel — see `./kernel/default.nix`.
-          # `pkgs.linuxManualConfig` over `make tinyconfig` + a
-          # narrow `enables` list. `CONFIG_MODULES=n` so the kernel
-          # has only what `mvm-host-vm-init` actually uses built-in
-          # — no driver modules tree to ship.
+          # Slim custom kernel — see `./kernel/default.nix` (shared
+          # base `nix/lib/kernel/base.nix` + builder-only delta).
+          # `linuxManualConfig` over `make defconfig` carved down by the
+          # base disables. `CONFIG_MODULES=n` so the kernel has only what
+          # `mvm-host-vm-init` uses built-in — no driver modules tree.
           # Plan 92 — `specs/plans/92-minimal-builder-vm-kernel.md`.
-          kernelPkg = import ./kernel { inherit pkgs; };
+          kernelPkg = import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; };
           rootfs = mkBuilderVmRootfs { inherit system interactive; };
           kernelFile =
             if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "bzImage";
@@ -451,7 +458,33 @@
       # `disables` edits to confirm SoC platform clusters are gone.
       mkKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
-        in (import ./kernel { inherit pkgs; }).passthru.configfile;
+        in (import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
+
+      # Standalone kernel artifacts — targets for `mvmctl kernel build`
+      # and the kernel-build GHA. The builder image's `default` output
+      # already embeds `builder-kernel`; exposing each kernel on its own
+      # lets the expensive compile run (and be cached / published)
+      # without realizing a full rootfs.
+      #
+      # `workload-kernel` is the shared base alone (no builder infra). No
+      # runtime consumes it yet — workload microVMs currently boot a
+      # host-provided kernel — so it's published as an artifact ahead of
+      # the runtime wiring, which is when its home moves out of this
+      # builder-vm flake.
+      # The workload kernel's one delta over the shared base: dm-verity
+      # (Claim 3 — verified boot of the workload rootfs). The builder
+      # force-drops these (it boots `ro`, no roothash); workloads keep
+      # them. Shared between the kernel + its configfile output.
+      workloadKernelEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" ];
+      mkBuilderKernel = system:
+        let pkgs = import nixpkgs { inherit system; };
+        in import ./kernel { inherit pkgs; base = kernelBaseFor pkgs; };
+      mkWorkloadKernel = system:
+        let pkgs = import nixpkgs { inherit system; };
+        in (kernelBaseFor pkgs).mkKernel { extraEnables = workloadKernelEnables; };
+      mkWorkloadKernelConfigfile = system:
+        let pkgs = import nixpkgs { inherit system; };
+        in (kernelBaseFor pkgs).mkConfigfile { extraEnables = workloadKernelEnables; };
     in
     {
       packages = forAllSystems (system: {
@@ -462,7 +495,14 @@
         # Adds cargo, rustc, nano on top of the headless package set.
         dev = mkBuilderVmImage { inherit system; interactive = true; };
         stage0-rootfs = mkBuilderVmStage0Rootfs system;
+        # Builder kernel config (base + builder delta). `kernel-configfile`
+        # name kept — README + the kernel-build GHA reference it.
         kernel-configfile = mkKernelConfigfile system;
+        # Standalone kernels + the workload config, for `mvmctl kernel
+        # build` and the publish GHA.
+        builder-kernel = mkBuilderKernel system;
+        workload-kernel = mkWorkloadKernel system;
+        workload-kernel-configfile = mkWorkloadKernelConfigfile system;
       });
     };
 }
