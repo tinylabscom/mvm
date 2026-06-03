@@ -39,7 +39,9 @@ pub struct EntrypointPolicy {
 impl EntrypointPolicy {
     /// Production policy: read `/etc/mvm/runner`; resolved binary
     /// must live under `/usr/lib/mvm/wrappers/` on the same filesystem
-    /// as `/usr`, owned root, mode 0755.
+    /// as `/usr`, owned root, mode 0555. (Read-only: mkGuest's rootfs
+    /// hardening pass strips owner-write from baked files, and the agent
+    /// binary itself is 0555 — owner-write would be the anomaly here.)
     ///
     /// The marker is `/etc/mvm/runner`, NOT `/etc/mvm/entrypoint`:
     /// `/etc/mvm/entrypoint` is PID 1's boot command (a shell script
@@ -53,7 +55,7 @@ impl EntrypointPolicy {
             marker_path: PathBuf::from("/etc/mvm/runner"),
             allowed_prefix: PathBuf::from("/usr/lib/mvm/wrappers/"),
             same_fs_as: Some(PathBuf::from("/usr")),
-            required_mode: 0o755,
+            required_mode: 0o555,
             required_uid: 0,
             required_gid: 0,
         }
@@ -989,8 +991,8 @@ mod tests {
 
     #[test]
     fn test_validate_happy_path() {
-        let (tmp, marker, wrapper) = make_tree(0o755, b"#!/bin/sh\necho ok\n");
-        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
+        let (tmp, marker, wrapper) = make_tree(0o555, b"#!/bin/sh\necho ok\n");
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
         let validated = policy.validate().expect("validate should succeed");
         assert_eq!(validated.resolved, std::fs::canonicalize(&wrapper).unwrap());
     }
@@ -1036,11 +1038,11 @@ mod tests {
     #[test]
     fn test_validate_wrong_mode() {
         let (tmp, marker, _wrapper) = make_tree(0o644, b"#!/bin/sh\n");
-        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
         match policy.validate() {
             Err(ValidationError::WrongMode { mode, required, .. }) => {
                 assert_eq!(mode, 0o644);
-                assert_eq!(required, 0o755);
+                assert_eq!(required, 0o555);
             }
             other => panic!("expected WrongMode, got {other:?}"),
         }
@@ -1092,7 +1094,7 @@ mod tests {
         assert_eq!(p.marker_path, PathBuf::from("/etc/mvm/runner"));
         assert_eq!(p.allowed_prefix, PathBuf::from("/usr/lib/mvm/wrappers/"));
         assert_eq!(p.same_fs_as, Some(PathBuf::from("/usr")));
-        assert_eq!(p.required_mode, 0o755);
+        assert_eq!(p.required_mode, 0o555);
         assert_eq!(p.required_uid, 0);
         assert_eq!(p.required_gid, 0);
     }

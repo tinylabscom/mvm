@@ -148,9 +148,13 @@ in
     # runner: it returns/can't-exec, /init falls through to `sleep 5`, and
     # the kernel reboots at ~5s — killing the workload before the host can
     # reach the agent. The runner stays below for the agent to invoke.
+    # Mode 0555 (read-only): the rootfs hardening pass strips owner-write
+    # anyway, and the agent's EntrypointPolicy requires exactly 0555
+    # (matching the agent binary's own mode). Declaring it here keeps the
+    # baked mode honest instead of relying on the strip pass.
     "/usr/lib/mvm/wrappers/runner" = {
       content = lang.runnerScript;
-      mode = "0755";
+      mode = "0555";
     };
     # Agent marker for per-call RunEntrypoint (mvm_guest::entrypoint
     # EntrypointPolicy). SEPARATE from /etc/mvm/entrypoint, which is PID

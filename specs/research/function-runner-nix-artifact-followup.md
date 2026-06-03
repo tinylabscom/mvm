@@ -104,10 +104,16 @@ runnerScript =
 `mkGuest`'s `install -m 0755` lands it at exactly 0755 in the rootfs
 (`mk-guest.nix:558`), owned root by the rootfs build.
 
-**Mode reconciliation is a non-issue** (correcting the earlier draft):
-`install -m 0755` *sets* the mode regardless of the nix store's `555`,
-so the baked runner is 0755 and already matches the agent's
-`required_mode: 0o755`. No agent-policy change, no `0o555` relaxation.
+**Mode: the agent must require 0555.** The live trace showed the baked
+runner is `555`, not `755` (`runner has mode 555 (must be 755)`):
+mkGuest's rootfs hardening pass strips owner-write from baked files —
+`install -m 0755` does not survive it — and the agent binary itself is
+`555`. So set `EntrypointPolicy.required_mode = 0o555` (read-only is the
+*more* hardened mode) and declare the runner at `mode = "0555"` so the
+baked mode is honest rather than relying on the strip pass. (The original
+draft's `0o555` instinct was right; an intermediate "install -m forces
+0755, no relaxation needed" reasoning was wrong — it missed the strip
+pass, and the live trace caught it.)
 
 #### Node
 
@@ -139,8 +145,8 @@ entry, node two.
 ## Files to change
 
 - `crates/mvm-guest/src/entrypoint.rs` — `marker_path` →
-  `/etc/mvm/runner`; update `test_production_policy_constants` and the
-  module doc-comment. `required_mode` stays `0o755`.
+  `/etc/mvm/runner`; `required_mode` → `0o555`; update the mode-sensitive
+  unit tests and the module doc-comment.
 - `crates/mvm-guest/src/bin/mvm-guest-agent.rs`,
   `crates/mvm-guest/src/vsock.rs` — comments naming `/etc/mvm/entrypoint`
   as the marker → `/etc/mvm/runner`.
