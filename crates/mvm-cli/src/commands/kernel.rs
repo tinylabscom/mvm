@@ -69,7 +69,9 @@ enum Source {
     Auto,
 }
 
-/// Host architecture tag — matches `builder_vm_host_arch()`.
+/// Host architecture tag — matches `builder_vm_host_arch()`. Only the
+/// `builder-vm` build path consumes it (compile + cache routing).
+#[cfg(feature = "builder-vm")]
 fn host_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"

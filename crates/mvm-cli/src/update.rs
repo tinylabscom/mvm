@@ -206,6 +206,11 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// shipped with it — never a substitute for an in-tree config edit (a
 /// source checkout compiles instead). `MVM_SKIP_HASH_VERIFY` is the
 /// documented emergency escape (W5.1) — never set it in CI.
+///
+/// Gated to `builder-vm`: the only callers (`mvmctl kernel build`'s
+/// download arm + the `dev up --kernel-source` bootstrap) live behind
+/// that feature.
+#[cfg(feature = "builder-vm")]
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
     let tag = format!("v{}", current_version());
     let asset = format!("vmlinux-{arch}-{variant}");
