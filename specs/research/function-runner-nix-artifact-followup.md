@@ -169,12 +169,47 @@ entry, node two.
 - Boot→ping (Task 4) still green — `/etc/mvm/entrypoint` is untouched,
   so PID 1 still idles.
 
-## Why not the compiled `mvm-runner` binary now
+## The runner MUST be a binary, not a shebang script (fexecve finding)
 
-`mkFunctionService.nix:15-18` documents the eventual end state: a
-compiled, language-agnostic `mvm-runner` Rust binary at
-`/usr/lib/mvm/wrappers/runner` (no shebang, no interpreter, dispatch in
-Rust). That's the clean finish, but it's a larger build-system change.
-The shebang rewrite + marker decouple above makes `invoke` work today
-against the existing audited wrappers; the binary is the later
-replacement, and the marker decoupling it needs is identical.
+Live `RunEntrypoint` (via the `agent_invoke` example) got the agent to
+exec the runner — then failed:
+
+```
+/nix/store/…/python3: can't open file '/proc/self/fd/6': No such file or directory
+Exit { code: 2 }
+```
+
+Root cause: `entrypoint.rs::execute` execs the validated runner via
+`/proc/self/fd/<n>` — its boot-validated, **CLOEXEC** fd, held open to
+defeat TOCTOU between validation and spawn. For an **ELF binary** the
+kernel reads the image from that fd during `execve` (before CLOEXEC
+fires) — fine. For a **shebang script**, the kernel reads `#!…/python3`
+and performs a *second* `execve("…/python3", ["python3", "/proc/self/fd/6"])`;
+the CLOEXEC fd is closed across that re-exec, so the interpreter can't
+reopen the script. **Interpreter scripts fundamentally can't ride the
+TOCTOU-safe fd-exec path.** So the marker decouple + shebang rewrite +
+0555 mode get the runner *selected and exec'd*, but a script runner
+can't complete the exec.
+
+Two ways forward:
+
+1. **Compiled launcher binary (recommended; the documented end state).**
+   A tiny per-language ELF at `/usr/lib/mvm/wrappers/runner` that
+   `execve`s `${python3}/bin/python3 /usr/lib/mvm/wrappers/oneshot.py`
+   (interpreter + script by absolute path — both on the verity RO rootfs,
+   so no TOCTOU). The launcher is ELF, so the agent's fd-exec works
+   unchanged. Build-system work: cross-compile aarch64-musl + bake (like
+   the guest agent). `mkFunctionService.nix:15-18` already names this.
+2. **Non-CLOEXEC exec fd in the agent.** Clear CLOEXEC on the dup in
+   `dup_above_fd3`/`spawn_path` so the fd survives the shebang re-exec and
+   the interpreter can reopen `/proc/self/fd/<n>`. One-line-ish, but it
+   changes ADR-007's hardened exec semantics (the validation fd leaks
+   into the runner + its children — harmless for a world-readable RO
+   wrapper, but a deliberate posture change that belongs in the ADR).
+
+Either way, more invoke layers may follow (wrapper.json module/function
+correctness, `import <module>` resolution against `working_dir`) — this
+is a multi-step bring-up like the boot path was. The `agent_invoke`
+example (`crates/mvm-cli/examples/agent_invoke.rs`) drives a real
+`RunEntrypoint` against an `up --flake` VM by name, so each layer can be
+validated without the template lifecycle.
