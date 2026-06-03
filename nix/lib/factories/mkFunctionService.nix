@@ -199,8 +199,8 @@ in
     '';
     preStart = pkgs.writeShellScript "${workloadId}-prestart" ''
       set -eu
-      mkdir -p "$(dirname ${sourcePath})"
-      ln -sfn ${appPkg} ${sourcePath}
+      ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname ${sourcePath})"
+      ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${sourcePath}
     '';
     env = { };
   };

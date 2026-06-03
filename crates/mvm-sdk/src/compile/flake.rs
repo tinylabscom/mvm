@@ -59,8 +59,8 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
       buildPreStart = pkgs: appPkg:
         pkgs.writeShellScript "${{launch.workload_id}}-prestart" ''
           set -eu
-          mkdir -p "$(dirname ${{launch.entrypoint.working_dir}})"
-          ln -sfn ${{appPkg}} ${{launch.entrypoint.working_dir}}
+          ${{pkgs.coreutils}}/bin/mkdir -p "$(${{pkgs.coreutils}}/bin/dirname ${{launch.entrypoint.working_dir}})"
+          ${{pkgs.coreutils}}/bin/ln -sfn ${{appPkg}} ${{launch.entrypoint.working_dir}}
         '';
       isFunction = launch.entrypoint.kind == "function";
       # Per ADR-0010 §3 (Option A, amended 2026-05-06): factories live
