@@ -1,4 +1,4 @@
-//! Boot-time validation of `/etc/mvm/entrypoint`. ADR-007 / plan 41 W2.
+//! Boot-time validation of `/etc/mvm/runner`. ADR-007 / plan 41 W2.
 //!
 //! `RunEntrypoint` runs only the program named by this marker file. The
 //! agent reads the marker once at boot, resolves it through `realpath`,
@@ -37,12 +37,20 @@ pub struct EntrypointPolicy {
 }
 
 impl EntrypointPolicy {
-    /// Production policy: read `/etc/mvm/entrypoint`; resolved binary
+    /// Production policy: read `/etc/mvm/runner`; resolved binary
     /// must live under `/usr/lib/mvm/wrappers/` on the same filesystem
     /// as `/usr`, owned root, mode 0755.
+    ///
+    /// The marker is `/etc/mvm/runner`, NOT `/etc/mvm/entrypoint`:
+    /// `/etc/mvm/entrypoint` is PID 1's boot command (a shell script
+    /// `/init` sources), which can't double as a bare-absolute-path
+    /// marker. Function workloads write `/etc/mvm/runner` =
+    /// `/usr/lib/mvm/wrappers/runner`; command workloads omit it and the
+    /// (non-fatal) marker read fails benignly since they never call
+    /// `RunEntrypoint`.
     pub fn production() -> Self {
         Self {
-            marker_path: PathBuf::from("/etc/mvm/entrypoint"),
+            marker_path: PathBuf::from("/etc/mvm/runner"),
             allowed_prefix: PathBuf::from("/usr/lib/mvm/wrappers/"),
             same_fs_as: Some(PathBuf::from("/usr")),
             required_mode: 0o755,
@@ -1081,7 +1089,7 @@ mod tests {
     #[test]
     fn test_production_policy_constants() {
         let p = EntrypointPolicy::production();
-        assert_eq!(p.marker_path, PathBuf::from("/etc/mvm/entrypoint"));
+        assert_eq!(p.marker_path, PathBuf::from("/etc/mvm/runner"));
         assert_eq!(p.allowed_prefix, PathBuf::from("/usr/lib/mvm/wrappers/"));
         assert_eq!(p.same_fs_as, Some(PathBuf::from("/usr")));
         assert_eq!(p.required_mode, 0o755);

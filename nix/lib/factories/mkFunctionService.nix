@@ -152,6 +152,16 @@ in
       content = lang.runnerScript;
       mode = "0755";
     };
+    # Agent marker for per-call RunEntrypoint (mvm_guest::entrypoint
+    # EntrypointPolicy). SEPARATE from /etc/mvm/entrypoint, which is PID
+    # 1's idle boot command (a #!/bin/sh script /init sources) and can't
+    # double as a bare-absolute-path marker. The agent reads THIS file,
+    # requires its contents be an absolute path under
+    # /usr/lib/mvm/wrappers/, and execs the resolved binary per call.
+    "/etc/mvm/runner" = {
+      content = "/usr/lib/mvm/wrappers/runner\n";
+      mode = "0644";
+    };
     "/etc/mvm/wrapper.json" = {
       content = wrapperJson;
       mode = "0644";

@@ -1111,7 +1111,7 @@ fn shell_quote_for_sh(s: &str) -> String {
 // ============================================================================
 // RunEntrypoint handler — ADR-007 / plan 41 W2.
 //
-// Boot-time validates `/etc/mvm/entrypoint`, holds the resolved fd open in a
+// Boot-time validates `/etc/mvm/runner`, holds the resolved fd open in a
 // `OnceLock` for the agent's lifetime, and serializes per-VM concurrency
 // through a mutex. Each call gets its own TMPDIR (mode 0700, removed on
 // drop) so transient state never leaks between calls.
@@ -1430,7 +1430,7 @@ fn run_before_stop_hook() {
     }
 }
 
-/// Validate `/etc/mvm/entrypoint` at agent boot. The result is stashed in
+/// Validate `/etc/mvm/runner` at agent boot. The result is stashed in
 /// `VALIDATED_ENTRYPOINT`. On failure, log a single line — the agent stays
 /// up; only `RunEntrypoint` requests fail with `EntrypointInvalid`.
 ///

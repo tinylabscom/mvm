@@ -149,7 +149,7 @@ pub enum GuestRequest {
     /// piped in and stdout/stderr captured. ADR-007 / plan 41 W1.
     ///
     /// This is the production-safe call surface. The agent reads the
-    /// entrypoint path from `/etc/mvm/entrypoint` at boot, validates
+    /// entrypoint path from `/etc/mvm/runner` at boot, validates
     /// it (verity-partition, mode, ownership), and that resolved
     /// path is the only program `RunEntrypoint` will spawn. There is
     /// no argv override, no shell, no env injection beyond what the
@@ -597,7 +597,7 @@ pub struct ReadinessReport {
     /// Vsock listener bound and accepting. Always `Ready` if the
     /// agent could respond at all.
     pub control_plane: ComponentState,
-    /// `/etc/mvm/entrypoint` validation result. Gates `RunEntrypoint`
+    /// `/etc/mvm/runner` validation result. Gates `RunEntrypoint`
     /// — a request submitted while `Starting` returns
     /// `RunEntrypointError::NotReady`.
     pub entrypoint: ComponentState,
@@ -866,7 +866,7 @@ pub enum GuestResponse {
     /// Result of an `EntrypointStatus` query. ADR-007 / plan 41 W5.
     ///
     /// `ok = true` means the agent successfully validated
-    /// `/etc/mvm/entrypoint` at boot and will serve `RunEntrypoint`.
+    /// `/etc/mvm/runner` at boot and will serve `RunEntrypoint`.
     /// `ok = false` means validation failed — `path` carries the
     /// resolved path attempt (or the marker contents if resolution
     /// itself failed) and `detail` carries a human-readable reason.
@@ -1438,7 +1438,7 @@ pub enum RunEntrypointError {
     /// than `EntrypointInvalid` (which would imply a permanent
     /// failure). Hosts should poll readiness, not retry blindly.
     NotReady,
-    /// `/etc/mvm/entrypoint` is missing, fails validation
+    /// `/etc/mvm/runner` is missing, fails validation
     /// (symlink crossing FS, wrong perms, off the verity
     /// partition), or otherwise can't be loaded. Reported per-call
     /// even though the validation runs at agent boot.
