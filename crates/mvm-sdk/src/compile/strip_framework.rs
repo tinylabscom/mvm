@@ -58,7 +58,7 @@ fn strip_source(source: &[u8]) -> Option<Vec<u8>> {
     }
 
     // Remove whole lines, last-first so earlier byte offsets stay valid.
-    ranges.sort_by(|a, b| b.0.cmp(&a.0));
+    ranges.sort_by_key(|&(start, _)| std::cmp::Reverse(start));
     let mut out = source.to_vec();
     for (start, end) in ranges {
         // Expand to the start of the line (decorators/imports sit at
@@ -84,17 +84,13 @@ fn strip_source(source: &[u8]) -> Option<Vec<u8>> {
 /// `from mvm import …` statements and `@mvm.*` decorators.
 fn collect_ranges(node: Node, source: &[u8], ranges: &mut Vec<(usize, usize)>) {
     match node.kind() {
-        "import_statement" | "import_from_statement" => {
-            if imports_mvm(node, source) {
-                ranges.push((node.start_byte(), node.end_byte()));
-                return;
-            }
+        "import_statement" | "import_from_statement" if imports_mvm(node, source) => {
+            ranges.push((node.start_byte(), node.end_byte()));
+            return;
         }
-        "decorator" => {
-            if decorator_is_mvm(node, source) {
-                ranges.push((node.start_byte(), node.end_byte()));
-                return;
-            }
+        "decorator" if decorator_is_mvm(node, source) => {
+            ranges.push((node.start_byte(), node.end_byte()));
+            return;
         }
         _ => {}
     }
@@ -108,35 +104,20 @@ fn collect_ranges(node: Node, source: &[u8], ranges: &mut Vec<(usize, usize)>) {
 /// `import mvm`, `import mvm as m`, or `from mvm[.x] import …`. A module
 /// merely *prefixed* `mvm` (e.g. `mvmfoo`) is left alone.
 fn imports_mvm(node: Node, source: &[u8]) -> bool {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            // `import mvm` / `import mvm as m`: dotted_name or aliased_import.
-            "dotted_name" => {
-                if dotted_root_is_mvm(child, source) {
-                    return true;
-                }
-            }
-            "aliased_import" => {
-                if let Some(name) = child.child_by_field_name("name")
-                    && dotted_root_is_mvm(name, source)
-                {
-                    return true;
-                }
-            }
-            // `from mvm import …`: the module name is the field `module_name`.
-            _ => {
-                if child.kind() == "dotted_name" || node.kind() == "import_from_statement" {
-                    if let Some(m) = node.child_by_field_name("module_name")
-                        && dotted_root_is_mvm(m, source)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
+    // `from mvm import …` carries the module on the `module_name` field.
+    if let Some(m) = node.child_by_field_name("module_name") {
+        return dotted_root_is_mvm(m, source);
     }
-    false
+    // `import mvm`, `import mvm as m`, `import a, mvm` → scan the name
+    // children (`dotted_name` / `aliased_import`).
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|child| match child.kind() {
+        "dotted_name" => dotted_root_is_mvm(child, source),
+        "aliased_import" => child
+            .child_by_field_name("name")
+            .is_some_and(|n| dotted_root_is_mvm(n, source)),
+        _ => false,
+    })
 }
 
 /// First dotted segment equals `mvm` exactly.
