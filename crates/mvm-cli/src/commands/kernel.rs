@@ -12,6 +12,10 @@
 //! `--source download` (fetch a hash-verified published prebuilt) lands
 //! with the kernel-build publish workflow, which is what produces the
 //! artifact to download.
+//!
+//! Progress: the compile path prints an elapsed-time heartbeat every
+//! ~20s; `--verbose` streams the builder VM's `console.log` (the inner
+//! `nix build` output) to stderr live.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -80,14 +84,14 @@ fn host_arch() -> &'static str {
     }
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.cmd {
-        Cmd::Build(b) => run_build(b),
+        Cmd::Build(b) => run_build(b, cli.verbose),
     }
 }
 
 #[cfg(feature = "builder-vm")]
-fn run_build(args: BuildArgs) -> Result<()> {
+fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
     use crate::commands::env::apple_container::KernelVariant;
     use crate::ui;
 
@@ -108,7 +112,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
     };
 
     for (variant, label) in variants {
-        let path = acquire_kernel(args.source, variant, label, &arch)?;
+        let path = acquire_kernel(args.source, variant, label, &arch, verbose)?;
         let mib = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
         ui::success(&format!(
             "{label} kernel ({arch}): {} ({mib:.1} MiB)",
@@ -125,10 +129,11 @@ fn acquire_kernel(
     variant: crate::commands::env::apple_container::KernelVariant,
     label: &str,
     arch: &str,
+    verbose: bool,
 ) -> Result<std::path::PathBuf> {
     let dest = kernel_cache_path(arch, label);
     match source {
-        Source::Compile => compile_host_arch(variant, arch),
+        Source::Compile => compile_host_arch(variant, arch, verbose),
         Source::Download => {
             crate::update::download_kernel(arch, label, &dest)?;
             Ok(dest)
@@ -137,7 +142,7 @@ fn acquire_kernel(
             Ok(()) => Ok(dest),
             Err(e) => {
                 crate::ui::warn(&format!("download failed ({e}); compiling locally"));
-                compile_host_arch(variant, arch)
+                compile_host_arch(variant, arch, verbose)
             }
         },
     }
@@ -148,6 +153,7 @@ fn acquire_kernel(
 fn compile_host_arch(
     variant: crate::commands::env::apple_container::KernelVariant,
     arch: &str,
+    verbose: bool,
 ) -> Result<std::path::PathBuf> {
     if arch != host_arch() {
         anyhow::bail!(
@@ -155,7 +161,7 @@ fn compile_host_arch(
             host_arch()
         );
     }
-    crate::commands::env::apple_container::build_kernel_via_stage0(variant)
+    crate::commands::env::apple_container::build_kernel_via_stage0(variant, verbose)
 }
 
 /// Per-arch, per-variant cached kernel path. Mirrors
@@ -171,7 +177,7 @@ fn kernel_cache_path(arch: &str, label: &str) -> std::path::PathBuf {
 }
 
 #[cfg(not(feature = "builder-vm"))]
-fn run_build(_args: BuildArgs) -> Result<()> {
+fn run_build(_args: BuildArgs, _verbose: bool) -> Result<()> {
     anyhow::bail!(
         "`mvmctl kernel build` requires the `builder-vm` feature; \
          rebuild mvmctl with it enabled."

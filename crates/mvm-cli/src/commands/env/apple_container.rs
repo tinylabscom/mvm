@@ -2209,6 +2209,14 @@ fn run_stage0_rootfs_with_external_kernel(
     Ok(())
 }
 
+/// Render the compile heartbeat line. Pure (testable); the live
+/// heartbeat thread routes it through `ui::info`.
+#[cfg(feature = "builder-vm")]
+fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    format!("still compiling… ({}m{:02}s elapsed)", secs / 60, secs % 60)
+}
+
 /// `mvmctl kernel build --source compile`: compile a single kernel attr
 /// through the Stage 0 Alpine bootstrap and land its `vmlinux` in the
 /// per-arch builder-VM cache. Returns the cached kernel path.
@@ -2224,7 +2232,10 @@ fn run_stage0_rootfs_with_external_kernel(
 /// cross-compile. Cross-arch kernels come from the download arm (the
 /// kernel-build GHA publishes both arches).
 #[cfg(feature = "builder-vm")]
-pub(crate) fn build_kernel_via_stage0(variant: KernelVariant) -> Result<std::path::PathBuf> {
+pub(crate) fn build_kernel_via_stage0(
+    variant: KernelVariant,
+    verbose: bool,
+) -> Result<std::path::PathBuf> {
     let builder_flake_dir = find_builder_vm_flake().map_err(|_| {
         anyhow::anyhow!(
             "`mvmctl kernel build --source compile` needs a source checkout of mvm \
@@ -2307,16 +2318,46 @@ pub(crate) fn build_kernel_via_stage0(variant: KernelVariant) -> Result<std::pat
     {
         use mvm_build::builder_vm::BuilderVm;
         use mvm_build::libkrun_builder::LibkrunBuilderVm;
-        let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
-        backend
-            .run_stage0(
-                &root_dir,
-                "/init",
-                &workspace_root,
-                &staging_dir,
-                &host_bin_dir,
-            )
-            .map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Host-side heartbeat so a quiet (non-verbose) compile is never
+        // dead-silent. In verbose mode the streamed console output is
+        // the liveness signal, so the heartbeat stays off.
+        let stop = Arc::new(AtomicBool::new(false));
+        let heartbeat = if verbose {
+            None
+        } else {
+            let stop = Arc::clone(&stop);
+            Some(std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                // Poll the stop flag every 500ms but only print every ~20s.
+                let mut ticks: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    ticks += 1;
+                    if ticks.is_multiple_of(40) {
+                        ui::info(&format_compile_elapsed(start.elapsed()));
+                    }
+                }
+            }))
+        };
+
+        let backend: &dyn BuilderVm = &LibkrunBuilderVm::default().with_verbose(verbose);
+        let result = backend.run_stage0(
+            &root_dir,
+            "/init",
+            &workspace_root,
+            &staging_dir,
+            &host_bin_dir,
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = heartbeat {
+            let _ = handle.join();
+        }
+
+        result.map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
     }
 
     let built = staging_dir.join("vmlinux");
@@ -5541,6 +5582,24 @@ mod builder_vm_bootstrap_tests {
         assert!(
             format!("{err:#}").contains("missing /sbin/mvm-host-vm-init"),
             "error names the missing binary"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod heartbeat_tests {
+    use super::format_compile_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn format_compile_elapsed_renders_minutes_and_seconds() {
+        assert_eq!(
+            format_compile_elapsed(Duration::from_secs(5)),
+            "still compiling… (0m05s elapsed)"
+        );
+        assert_eq!(
+            format_compile_elapsed(Duration::from_secs(130)),
+            "still compiling… (2m10s elapsed)"
         );
     }
 }

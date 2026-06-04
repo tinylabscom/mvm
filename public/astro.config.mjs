@@ -130,6 +130,7 @@ export default defineConfig({
             { label: "Building MicroVM Images", slug: "guides/building-microvm-images" },
             { label: "Building from Source", slug: "guides/building-from-source" },
             { label: "Builder VM", slug: "guides/builder-vm" },
+            { label: "Custom kernels", slug: "guides/kernels" },
             { label: "Sandboxed Exec", slug: "guides/exec" },
             { label: "Policy Profiles", slug: "guides/policy-profiles" },
             { label: "Config & Secrets", slug: "guides/config-secrets" },
@@ -221,6 +222,7 @@ export default defineConfig({
             { label: "Filesystem & Drives", slug: "reference/filesystem" },
             { label: "Guest Agent", slug: "reference/guest-agent" },
             { label: "Limits & Resources", slug: "reference/limits" },
+            { label: "Releases & downloads", slug: "reference/releases" },
           ],
         },
         {

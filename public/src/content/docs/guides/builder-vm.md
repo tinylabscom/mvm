@@ -202,3 +202,5 @@ If `mvmctl build` fails, check the phase named in the error:
 | Runtime boot timeout | Runtime backend | Backend logs, kernel command line, guest init, guest agent readiness. |
 
 The important debugging rule is to keep build failures and boot failures separate. A Nix failure is not a runtime boot regression, and a runtime timeout is not usually a builder VM problem if the image already exists.
+
+See also: [Custom microVM kernels](/guides/kernels/) for `mvmctl kernel build`.
