@@ -12,6 +12,10 @@
 //! `--source download` (fetch a hash-verified published prebuilt) lands
 //! with the kernel-build publish workflow, which is what produces the
 //! artifact to download.
+//!
+//! Progress: the compile path prints an elapsed-time heartbeat every
+//! ~20s; `--verbose` streams the builder VM's `console.log` (the inner
+//! `nix build` output) to stderr live.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
