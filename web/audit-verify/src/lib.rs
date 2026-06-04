@@ -4,7 +4,7 @@
 //! operator downloaded and the host signer's Ed25519 public key in hex —
 //! and renders the JSON this returns. No host, no server: the wasm runs
 //! the exact same chain verification `mvm-supervisor` runs natively
-//! (ADR-069). Keeping the logic in `mvm-verify` (a real, tested
+//! (ADR-070). Keeping the logic in `mvm-verify` (a real, tested
 //! workspace crate) means this file stays a dumb adapter.
 
 use mvm_verify::{verify_audit_chain_bytes, verifying_key_from_hex};
