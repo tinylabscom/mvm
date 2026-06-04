@@ -255,3 +255,33 @@ ADR-066 §1 lines 35-36: builder-VM-only Linux tools become `[[bin]]`s of `mvm-b
 - **Spec coverage:** every row of the ADR-066 §1 crate map (lines 26-50) maps to a task (A1–D4); the §8 rename-break checklist = the 3 fuzz-dir gate updates (C1/C2/D2) + the `check-mvm-host-binaries-sync` guard (D4), applied same-commit per the recipe; the facade/`mvm-core`-map republish for mvmd (E1) is covered. `mvm-network`/encryption/dep-reduction explicitly deferred with plan pointers.
 - **No placeholders / real grounding:** ref counts, dependents, and the FFI/CI facts are the inventory's; the only "discover at task time" steps are the dedup *source*-impl locations (B4) and the framing/config call sites — expressed as concrete `git grep` discovery, not vague TODOs. Flagged honestly that the three `check-handler-*` lints **don't exist yet** (CLAUDE.md over-claims them; built in 128) so D1 doesn't invent them.
 - **Type/name consistency:** `mvm-vm-host` used throughout (not `mvm-vm-sidecar`); `mvm-core::{plan,policy,security}` and `mvm-sdk::ir` used consistently; the `policy::security` re-export preserved for mvmd's `SessionPolicy` (plan 51 Task 4).
+
+## old→new ident map (for mvmd plan 51 Task 1)
+
+As-built (plan 121, 2026-06). Every former crate ident → its new path. Three destinations deviated from ADR-066 §1 as written, all cycle-forced (the ADR was corrected in E1): `mvm-base`→`mvm-backend` (not `mvm`), the libkrun safe wrapper stays in `libkrun-sys` (not `mvm-backend`), `mvm-vz`→`mvm-build` (not `mvm-backend`).
+
+| Old crate | Old ident | New path | New crate |
+|---|---|---|---|
+| `mvm-runner` | `mvm_runner::` | `mvm_guest::runner::` | `mvm-guest` |
+| `mvm-base` | `mvm_base::` | `mvm_backend::base::` | `mvm-backend` |
+| `mvm-ir` | `mvm_ir::` | `mvm_sdk::ir::` | `mvm-sdk` |
+| `mvm-plan` | `mvm_plan::` | `mvm_core::plan::` | `mvm-core` |
+| `mvm-policy` | `mvm_policy::` | `mvm_core::policy::` | `mvm-core` |
+| `mvm-security` | `mvm_security::` | `mvm_core::crypto::` | `mvm-core` |
+| `mvm-libkrun` | `mvm_libkrun::` | `libkrun_sys::` | `libkrun-sys` (crates/deps/) |
+| `mvm-providers` | `mvm_providers::` | `mvm_backend::providers::` | `mvm-backend` |
+| `mvm-vz` | `mvm_vz::` | `mvm_build::vz::` | `mvm-build` |
+| `mvm-supervisor` | `mvm_supervisor::` | `mvm_hostd::supervisor::` | `mvm-hostd` |
+| `mvm-broker` | `mvm_broker::` | `mvm_hostd::broker::` | `mvm-hostd` |
+| `mvm-host-signer` | `mvm_host_signer::` | `mvm_hostd::host_signer::` | `mvm-hostd` |
+| `mvm-audit-signer` | `mvm_audit_signer::` | `mvm_hostd::audit_signer::` | `mvm-hostd` |
+| `mvm-jailer-lite` | `mvm_jailer_lite::` | `mvm_hostd::jailer::` | `mvm-hostd` |
+| `mvm-firecracker-bridge` | `mvm_firecracker_bridge::` | `mvm_vm_host::firecracker_bridge::` | `mvm-vm-host` |
+| `mvm-addon-dns` | `mvm_addon_dns::` | `mvm_guest_helpers::addon_dns::` | `mvm-guest-helpers` |
+| `mvm-addon-vsock-bridge` | `mvm_addon_vsock_bridge::` | `mvm_guest_helpers::addon_vsock_bridge::` | `mvm-guest-helpers` |
+| `mvm-egress-proxy` | `mvm_egress_proxy::` | `mvm_build::egress_proxy::` | `mvm-build` |
+| `mvm-host-vm-init` | (bin only) | `mvm-build` `[[bin]]` `mvm-host-vm-init` | `mvm-build` |
+
+**Cargo dep renames:** `mvm-libkrun` → `libkrun-sys` (`path = "crates/deps/libkrun-sys"`); every other deleted crate → depend on its new home crate above. All bin names unchanged (load-bearing for nix bake + `build.rs` embed + spawner resolution).
+
+**Facade contract (unchanged — mvmd plan 51 consumes these verbatim):** `mvmctl::core::policy::security::SessionPolicy`, `mvmctl::runtime::shell::{run_in_vm, run_in_vm_visible}`, `mvmctl::build::build::pool_build`, `mvmctl::guest::vsock::GUEST_CID` all still resolve. `mvmctl::security` is now an alias for `mvm_core::crypto`.

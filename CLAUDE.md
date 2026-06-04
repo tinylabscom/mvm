@@ -69,36 +69,38 @@ Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-5-crate Cargo workspace with root facade:
+15-crate Cargo workspace (plan 121 consolidated 32→15 + `crates/deps/libkrun-sys`; ADR-066 §1 is the map). Root facade re-exports the libraries:
 
-- `mvm-core` -- pure types, IDs, config, protocol, signing, routing (NO runtime deps)
-- `mvm-guest` -- vsock protocol, integration manifest/state (OpenClaw)
-- `mvm-build` -- Nix builder pipeline (dev_build uses `ShellEnvironment` trait, pool_build uses `BuildEnvironment`)
-- `mvm` -- shell execution, builder-VM / Firecracker VM lifecycle, UI, template management
-- `mvm-cli` -- Clap CLI, bootstrap, update, doctor, template commands
+- `mvm-core` -- pure types, IDs, config, protocol, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy` (incl. `policy::security` session-policy), and `crypto` (the former `mvm-security`: attestation/keystore/secret_store/snapshot crypto + opt-in cosign behind `manifest-verify`). **No async/runtime deps in the default build.**
+- `mvm-sdk` -- build-time SDK (decorator + runtime authoring) **and the `ir` module** (the canonical `Workload` IR, was `mvm-ir`). `mvm-sdk-macros` is the separate proc-macro crate.
+- `mvm-guest` -- vsock protocol, console, integrations, agent; `runner` module + `mvm-runner` `[[bin]]` (in-guest function entrypoint).
+- `mvm-build` -- Nix builder pipeline; also hosts `vz` (Swift-supervisor interface, was `mvm-vz`), `egress_proxy` (lib), and the builder-VM-only `[[bin]]`s `mvm-host-vm-init` + `mvm-egress-proxy` (cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
+- `mvm` -- runtime: shell, VM lifecycle, UI, templates. Re-exports `shell`/`ui`/`shell_mock`/`cow`/`runtime_meta` from `mvm-backend::base` to preserve the mvmd `mvmctl::runtime::*` contract.
+- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), `providers` (Apple VZ/Container objc2 interface, was `mvm-providers`), `libkrun`/`vz`/`firecracker`/`apple_container`/`docker`/`cloud_hypervisor` dispatch.
+- `crates/deps/libkrun-sys` -- the one true C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt); was `mvm-libkrun`. Lives low so `mvm-build` can consume the wrapper.
+- `mvm-hostd` -- host-side daemon roles: `supervisor` + `jailer` (libs) + `broker`/`host_signer`/`audit_signer` (libs + three subprocess `[[bin]]`s — the process moat). Was `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`.
+- `mvm-vm-host` -- per-VM supervisor host processes (one per guest): cfg-gated `[[bin]]`s `mvm-libkrun-supervisor` / `mvm-vz-drainer` / `mvm-firecracker-bridge`; the lib carries the firecracker-bridge config/passt-hash parsers.
+- `mvm-guest-helpers` -- in-guest helper `[[bin]]`s `mvm-addon-dns` + `mvm-addon-vsock-bridge`, baked into the rootfs by mkGuest.
+- `mvm-cli` -- Clap CLI, bootstrap, update, doctor, template commands; `build.rs` embeds the host binaries.
+- `mvm-mcp`, `mvm-oci`, `mvm-storage` -- unchanged. `mvm-verify` -- wasm-clean audit-log verifier (ADR-069, zero `mvm-*` deps). `mvm-vz-supervisor` -- Swift (outside the cargo workspace). `xtask` -- tooling + claim-gate lints.
 
-Root package: `src/lib.rs` (facade re-exports `mvmctl::core`, `mvmctl::runtime`, `mvmctl::build`, `mvmctl::guest`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
+Root package: `src/lib.rs` (facade re-exports `mvmctl::core`=mvm-core, `mvmctl::runtime`=mvm, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-guest, `mvmctl::backend`=mvm-backend, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
 
 Binary: `mvmctl` (from root, delegates to mvm-cli)
 
-**Dependency graph:**
-```
-mvm-core (foundation, no mvm deps)
-├── mvm-guest (core)
-├── mvm-build (core, guest)
-├── mvm (core, guest, build)
-└── mvm-cli (core, runtime, build)
-```
+**Dependency direction (high → low):** `mvm-cli` → {`mvm`, `mvm-backend`, `mvm-hostd`, `mvm-sdk`, ...} → `mvm` → `mvm-backend` → `mvm-build` → {`libkrun-sys`, `mvm-guest`, `mvm-sdk`} → `mvm-core`. `mvm-core` is the foundation (no `mvm-*` deps). The per-VM/per-role bin crates (`mvm-vm-host`, the `mvm-hostd` bins) sit at the top; nothing depends on them as a library.
 
 **Key module locations:**
 
-mvm-core: `build_env.rs` (ShellEnvironment + BuildEnvironment traits), `pool.rs`, `instance.rs`, `tenant.rs`, `template.rs`, `naming.rs`, `signing.rs`, `routing.rs`, `protocol.rs`, `agent.rs`, `catalog.rs` (image catalog), `dev_network.rs` (named networks), `config.rs` (XDG directory functions)
+mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver/policies), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `dev_network.rs`, `config.rs` (XDG)
 
-mvm: `shell.rs`, `config.rs`, `ui.rs`, `build_env.rs` (DevShellEnv impl), `vm/microvm.rs`, `vm/bridge.rs`, `vm/overlay.rs`, `vm/instance/`, `vm/template/`. Hypervisor backends live in `mvm-backend/` (`libkrun.rs`, `firecracker.rs`, `apple_container.rs`, `docker.rs`) and `mvm-libkrun/`.
+mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `providers/apple_container`, `libkrun.rs`/`vz.rs`/`firecracker.rs`/`apple_container.rs`/`docker.rs` (dispatch), `artifacts/`
 
-mvm-build: `dev_build.rs` (local Nix builds via ShellEnvironment), `build.rs` (orchestrated builds via BuildEnvironment), `nix_manifest.rs`, `scripts.rs`
+mvm-build: `pipeline/` (`build.rs` = `pool_build`, `dev_build.rs`), `vz/` (Swift-supervisor config), `egress_proxy/`, `src/bin/mvm-host-vm-init*` + `src/bin/mvm-egress-proxy.rs`, `nix/`
 
-mvm-guest: `vsock.rs`, `console.rs` (PTY-over-vsock), `integrations.rs`, `builder_agent.rs`
+mvm-guest: `vsock.rs`, `console.rs`, `integrations.rs`, `builder_agent.rs`, `runner/`
+
+mvm-hostd: `supervisor/`, `broker/`, `host_signer/`, `audit_signer/`, `jailer/` + `src/bin/{mvm-broker,mvm-host-signer,mvm-audit-signer}.rs`
 
 mvm-cli: `commands/` (local microVM substrate commands: env, build/run, guest RPC, artifacts/trust, local ops). Tenant lifecycle, tenant policy authoring/review, and deploy-to-control-plane commands live in mvmd, not mvmctl.
 
