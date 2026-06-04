@@ -1,5 +1,15 @@
 # Plan 120 — Core demo (Phase 1): the `dev → compile → up → vsock` spine
 
+> **Status: COMPLETE (2026-06-03).** All acceptance boxes ticked. The spine is
+> proven on macOS/libkrun — re-verified for **both Python and TypeScript** this
+> session (`dev up → compile → up → agent invoke → "hello world"`). The last
+> open box (Task 5 §4 — quickstart/README lead with the five-line `Sandbox.exec`)
+> landed in PR #557. Deferred follow-ups below are out of scope and each owned by
+> a successor plan (Lima/FC-parity/`default-microvm` → Plan 147; encryption →
+> Plan 122; image-slimming → Plans 124/126/127/131). One sub-step left honestly
+> unchecked (Task 5 Step 3: a *recorded* green run of the gated
+> `test_sandbox_exec.py` on a libkrun host) — a sub-step, not an acceptance gate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prove the #1 deliverable end-to-end on macOS (libkrun): `mvmctl dev up` boots the persistent builder VM → `mvmctl compile examples/python/hello-app/app.py` lowers the decorator app to a flake → `mvmctl up --flake <dir>` builds it **inside** the builder VM and boots the microVM → the guest agent answers `Ping` over vsock. Lock that spine behind a CI-gated E2E test so the rest of the rewrite has a regression guard, land the `ArtifactSidecar` → `ArtifactManifest` rename along the way, and ship the one-call live-exec ergonomic on the existing `Sandbox` (`Sandbox.create(image).exec(...)`, dev-tier) as the DX headline (Task 5; full surface in 125).
