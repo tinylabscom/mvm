@@ -1,16 +1,13 @@
 {
-  description =
-    "mvm bundled default microVM image (Plan 158). Two variants: a dev image "
-    + "(accessible, exec-able, unsealed) built locally in dev mode, and a prod "
-    + "image (sealed, rootless, dm-verity-sealed rootfs) shipped as the "
-    + "default-microvm-* release assets. Booted by `mvmctl up`/`exec` when no "
-    + "--flake/--template/--image is given.";
+  description = "mvm bundled default microVM image (Plan 158) — dev + prod (verity-sealed) variants";
 
-  # DRAFT (Plan 158 Task 1). Authored against the grounded patterns but NOT yet
-  # validated by a `nix build` (the author's host has no nix). A nix/Linux
-  # session must: generate/repair flake.lock, `nix flake check`, and `nix build`
-  # both variants. See specs/plans/158-restore-default-microvm-image.md and the
-  # handoff prompt. Verify-points are marked `# VERIFY:`.
+  # Plan 158 Task 1. Both variants (`default`/`prod`, `dev`) eval-validated via
+  # nix-in-docker on the authoring host (eval covers the `*-linux` derivations
+  # cross-platform — imports, the mkGuest call, passthru.mvm/toJSON, the verity
+  # recipe attrs). A full `nix build` (kernel compile + rootfs + veritysetup)
+  # validates the runtime; it runs in the release/security Nix lanes. Remaining
+  # build-time checks are marked `# VERIFY:`. See
+  # specs/plans/158-restore-default-microvm-image.md.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     microvm = {
