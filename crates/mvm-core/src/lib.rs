@@ -22,6 +22,11 @@ pub mod user_config;
 /// (sigstore) feature, so the default build stays runtime-free.
 pub mod crypto;
 pub mod domain;
+/// Length-prefixed message framing (4-byte BE length + body, cap-before-
+/// alloc). The shared transport for the same-uid UDS control channels;
+/// the host↔guest authenticated frame stays in `mvm_guest::vsock` for
+/// now (plan 121 B4). ADR-066 §5.
+pub mod framing;
 pub mod mvmd_iface;
 /// The typed, signed `ExecutionPlan` contract (plan 37 §3.3). Folded
 /// in from the former `mvm-plan` crate (plan 121 B1); it depended only

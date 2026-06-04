@@ -13,17 +13,15 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::broker::{ServiceCall, ServiceResponse};
 use mvm_core::protocol::handler::ServiceCallCtx;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
 use crate::broker::registry::Registry;
-
-const FRAME_LEN_BYTES: usize = 4;
 
 /// Accept loop. Each accepted UDS connection runs to completion in its
 /// own `tokio::spawn`; one connection per supervisor-proxy call in W1a.
@@ -124,43 +122,23 @@ async fn handle_connection(
 /// Read a length-prefixed JSON frame. Enforces the max-frame-bytes cap
 /// before allocating the body buffer (Plan 104 §"Capability gating"
 /// gate 1).
+// Length-prefixed JSON framing lives in `mvm_core::framing` (plan 121
+// B4); these wrappers keep the broker error context on the shared
+// transport. The cap-before-alloc gate is enforced in core.
 pub async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,
 ) -> Result<T> {
-    let mut len_buf = [0u8; FRAME_LEN_BYTES];
-    stream
-        .read_exact(&mut len_buf)
+    mvm_core::framing::read_json_frame(stream, max_frame_bytes)
         .await
-        .context("mvm-broker length-prefix read failed")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > max_frame_bytes {
-        bail!("mvm-broker frame too large: {} > {}", len, max_frame_bytes);
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .context("mvm-broker body read failed")?;
-    serde_json::from_slice(&body).context("mvm-broker JSON parse failed")
+        .context("mvm-broker frame read failed")
 }
 
 /// Write a length-prefixed JSON frame.
 pub async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
-    let body = serde_json::to_vec(value).context("mvm-broker JSON encode failed")?;
-    let len: u32 = body
-        .len()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("mvm-broker frame body too large for u32 prefix"))?;
-    stream
-        .write_all(&len.to_be_bytes())
+    mvm_core::framing::write_json_frame(stream, value)
         .await
-        .context("mvm-broker length-prefix write failed")?;
-    stream
-        .write_all(&body)
-        .await
-        .context("mvm-broker body write failed")?;
-    Ok(())
+        .context("mvm-broker frame write failed")
 }
 
 // ============================================================================
@@ -176,6 +154,7 @@ mod tests {
     use tokio::net::UnixStream as ClientStream;
 
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     async fn write_call(stream: &mut ClientStream, call: &ServiceCall) -> Result<()> {
         let body = serde_json::to_vec(call).unwrap();

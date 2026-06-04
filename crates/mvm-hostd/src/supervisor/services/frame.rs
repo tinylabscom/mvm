@@ -1,17 +1,42 @@
-//! Shared length-prefixed JSON framing for the four supervisor proxies.
+//! Length-prefixed JSON framing for the four supervisor proxies.
 //!
-//! All four broker subprocesses speak the same on-wire framing: 4-byte
-//! big-endian length prefix + JSON body. The cap is enforced on read
-//! *before* allocating the body buffer (matching the subprocess
-//! servers' Plan 104 §"Capability gating" gate 1).
+//! Thin adapter over [`mvm_core::framing`] (plan 121 B4): the on-wire
+//! format (4-byte big-endian length + JSON body, cap-before-alloc) and
+//! its tests live in `mvm-core`; this module only maps the shared
+//! [`FrameError`] onto the path-carrying [`ProxyError`] the proxy call
+//! sites surface, and keeps the UDS [`connect`] helper.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use mvm_core::framing::{self, FrameError};
+use serde::ser::Error as _;
 use tokio::net::UnixStream;
 
 use super::ProxyError;
 
-pub const FRAME_LEN_BYTES: usize = 4;
-pub const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
+pub const FRAME_LEN_BYTES: usize = framing::FRAME_LEN_BYTES;
+pub const DEFAULT_MAX_FRAME_BYTES: usize = framing::DEFAULT_MAX_FRAME_BYTES;
+
+/// Map a framing error onto the path-carrying `ProxyError`.
+fn with_path(err: FrameError, path: &std::path::Path) -> ProxyError {
+    match err {
+        FrameError::Io(source) => ProxyError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+        FrameError::Decode(source) => ProxyError::Decode {
+            path: path.to_path_buf(),
+            source,
+        },
+        FrameError::TooLarge { size, cap } => ProxyError::ResponseTooLarge {
+            path: path.to_path_buf(),
+            size,
+            cap,
+        },
+        FrameError::Encode(source) => ProxyError::Encode { source },
+        FrameError::LengthOverflow => ProxyError::Encode {
+            source: serde_json::Error::custom("request body too large for u32 length prefix"),
+        },
+    }
+}
 
 /// Write a length-prefixed JSON frame to the UDS stream.
 pub async fn write_frame<T: serde::Serialize>(
@@ -19,25 +44,9 @@ pub async fn write_frame<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> Result<(), ProxyError> {
-    let body = serde_json::to_vec(value).map_err(|source| ProxyError::Encode { source })?;
-    let len: u32 = body.len().try_into().map_err(|_| ProxyError::Encode {
-        source: serde::ser::Error::custom("request body too large for u32 length prefix"),
-    })?;
-    stream
-        .write_all(&len.to_be_bytes())
+    framing::write_json_frame(stream, value)
         .await
-        .map_err(|source| ProxyError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    stream
-        .write_all(&body)
-        .await
-        .map_err(|source| ProxyError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(())
+        .map_err(|e| with_path(e, path))
 }
 
 /// Read a length-prefixed JSON frame from the UDS stream. Enforces the
@@ -47,34 +56,9 @@ pub async fn read_frame<T: serde::de::DeserializeOwned>(
     path: &std::path::Path,
     max_frame_bytes: usize,
 ) -> Result<T, ProxyError> {
-    let mut len_buf = [0u8; FRAME_LEN_BYTES];
-    stream
-        .read_exact(&mut len_buf)
+    framing::read_json_frame(stream, max_frame_bytes)
         .await
-        .map_err(|source| ProxyError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > max_frame_bytes {
-        return Err(ProxyError::ResponseTooLarge {
-            path: path.to_path_buf(),
-            size: len,
-            cap: max_frame_bytes,
-        });
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .map_err(|source| ProxyError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    serde_json::from_slice(&body).map_err(|source| ProxyError::Decode {
-        path: path.to_path_buf(),
-        source,
-    })
+        .map_err(|e| with_path(e, path))
 }
 
 /// Connect to the UDS path. Returns a typed `Connect` error if the

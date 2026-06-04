@@ -8,12 +8,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use mvm_core::protocol::audit_signer::{
     AppendEntryRequest, AppendEntryResponse, AuditSignerErrorCode,
 };
 use mvm_core::security::SIG_ALG_ED25519;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -21,7 +21,6 @@ use tracing::{debug, info, warn};
 use crate::audit_signer::canonical::CanonicalEntry;
 use crate::audit_signer::chain::Chain;
 
-const FRAME_LEN_BYTES: usize = 4;
 const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
 pub type SharedChain = Arc<Mutex<Chain>>;
@@ -138,46 +137,22 @@ fn format_code_message(code: AuditSignerErrorCode) -> String {
     }
 }
 
+// Length-prefixed JSON framing lives in `mvm_core::framing` (plan 121
+// B4); these wrappers keep the audit-signer error context on the
+// shared transport. The cap-before-alloc gate is enforced in core.
 async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,
 ) -> Result<T> {
-    let mut len_buf = [0u8; FRAME_LEN_BYTES];
-    stream
-        .read_exact(&mut len_buf)
+    mvm_core::framing::read_json_frame(stream, max_frame_bytes)
         .await
-        .context("mvm-audit-signer length-prefix read failed")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > max_frame_bytes {
-        bail!(
-            "mvm-audit-signer frame too large: {} > {}",
-            len,
-            max_frame_bytes
-        );
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .context("mvm-audit-signer body read failed")?;
-    serde_json::from_slice(&body).context("mvm-audit-signer JSON parse failed")
+        .context("mvm-audit-signer frame read failed")
 }
 
 async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
-    let body = serde_json::to_vec(value).context("mvm-audit-signer JSON encode failed")?;
-    let len: u32 = body
-        .len()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("mvm-audit-signer frame body too large for u32 prefix"))?;
-    stream
-        .write_all(&len.to_be_bytes())
+    mvm_core::framing::write_json_frame(stream, value)
         .await
-        .context("mvm-audit-signer length-prefix write failed")?;
-    stream
-        .write_all(&body)
-        .await
-        .context("mvm-audit-signer body write failed")?;
-    Ok(())
+        .context("mvm-audit-signer frame write failed")
 }
 
 pub fn default_max_frame_bytes() -> usize {
@@ -196,6 +171,7 @@ mod tests {
     use tokio::net::UnixStream as ClientStream;
 
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     async fn write_req(stream: &mut ClientStream, req: &AppendEntryRequest) -> Result<()> {
         let body = serde_json::to_vec(req).unwrap();
