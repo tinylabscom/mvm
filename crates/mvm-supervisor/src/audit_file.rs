@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(count, 5);
     }
 
-    // ADR-069 — pin the wasm-clean `mvm-verify` re-implementation to the
+    // ADR-070 — pin the wasm-clean `mvm-verify` re-implementation to the
     // bytes this crate actually writes. If `AuditEntry`'s serde shape
     // drifts from `mvm_verify::MirrorEntry`, a genuine line stops
     // verifying and this fails here (loudly, in CI) rather than only in

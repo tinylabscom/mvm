@@ -1,0 +1,76 @@
+name: Update Homebrew tap
+
+# On a published release, render the formula from the release's
+# checksums and push it to the tinylabscom/homebrew-mvm tap repo.
+# Requires the HOMEBREW_TAP_TOKEN secret (push access to the tap repo);
+# the default GITHUB_TOKEN cannot push to a second repository.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.15.2)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release download "$TAG" --repo tinylabscom/mvm \
+            --pattern checksums-sha256.txt --dir .
+
+      - name: Render formula
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          chmod +x packaging/homebrew/render-formula.sh
+          packaging/homebrew/render-formula.sh "$VERSION" checksums-sha256.txt mvmctl.rb
+          echo "=== rendered formula ===" && cat mvmctl.rb
+
+      - name: Audit formula
+        run: |
+          brew style mvmctl.rb || true
+          brew audit --formula --new mvmctl.rb || true
+
+      - name: Push to tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN not set — see reference/releases docs for tap setup" >&2
+            exit 1
+          fi
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/tinylabscom/homebrew-mvm.git" tap
+          mkdir -p tap/Formula
+          cp mvmctl.rb tap/Formula/mvmctl.rb
+          cd tap
+          git config user.name "mvm-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add Formula/mvmctl.rb
+          # Skip cleanly when the formula is unchanged, but let a real
+          # commit failure (hook, etc.) surface instead of masking it.
+          if git diff --staged --quiet; then echo "no change"; exit 0; fi
+          git commit -m "mvmctl ${VERSION}"
+          git push

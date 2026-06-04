@@ -85,7 +85,7 @@ members = [
     # parent-inherited socketpair fds to the
     # `mvm-supervisor::gateway_bridge::BridgeEndpoints::Passt` path.
     "crates/mvm-firecracker-bridge",
-    # ADR-069 — wasm-clean, dependency-light verifier for the
+    # ADR-070 — wasm-clean, dependency-light verifier for the
     # chain-signed audit log. Builds on host (linted + tested here) and
     # on wasm32 (the browser transparency tool in `web/audit-verify/`,
     # which is excluded from this workspace to keep wasm-bindgen out of
@@ -121,7 +121,7 @@ exclude = [
     # targets on release-tag pushes + nightly cron + manual
     # dispatch only (not on every PR — the lane is heavy).
     "crates/mvm-firecracker-bridge/fuzz",
-    # ADR-069 — browser audit-log verifier. Excluded so wasm-bindgen +
+    # ADR-070 — browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
     # it depends on the in-workspace `mvm-verify` crate by path and is
     # built separately with `wasm-pack` (see web/audit-verify/README.md).
@@ -407,6 +407,8 @@ mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"
 assert_cmd.workspace = true
 chrono.workspace = true
 flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
 mvm-libkrun.workspace = true
 mvm-oci.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the

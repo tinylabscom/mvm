@@ -89,7 +89,7 @@ rustix = { version = "1.1", features = ["fs"] }
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
-# ADR-069 — drift tripwire: assert the wasm-clean re-implementation in
+# ADR-070 — drift tripwire: assert the wasm-clean re-implementation in
 # mvm-verify accepts a chain this crate actually produced. If AuditEntry
 # gains/reorders a field, mvm-verify's mirror stops matching and this
 # cross-crate test fails here, not silently in the browser.

@@ -1,4 +1,4 @@
-# Browser audit-log verifier (ADR-069)
+# Browser audit-log verifier (ADR-070)
 
 A serverless, static page that verifies an mvm chain-signed audit log
 in the browser — the same Ed25519 chain check `mvmctl audit verify` runs
@@ -31,7 +31,7 @@ fully offline after load — nothing you paste leaves the tab.
   (the private key lives at `~/.mvm/keys/host-signer.ed25519`, mode 0600).
   There is no CLI subcommand to print the public half yet — a small
   `mvmctl audit pubkey` printer is the obvious follow-up (noted in
-  ADR-069). Until then, derive it from the keypair.
+  ADR-070). Until then, derive it from the keypair.
 - **Audit log**: the contents of a per-tenant `~/.mvm/audit/<tenant>.jsonl`
   stream (paste, or pick the file).
 

@@ -48,6 +48,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      - name: Shellcheck install.sh
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck -S warning install.sh
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

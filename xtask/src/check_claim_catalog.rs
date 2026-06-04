@@ -6,7 +6,7 @@
 //! This lint makes `specs/claims/catalog.md` the machine-checked map
 //! from each claim to its witnesses and fails when a named witness no
 //! longer exists in the tree — the same "catalog can't outrun reality"
-//! discipline holospaces' arc42 Ch.10 enforces, scoped to what's
+//! discipline an arc42 Ch.10 architecture doc enforces, scoped to what's
 //! mechanically checkable.
 //!
 //! Catalog row shape (a 5-column markdown table):

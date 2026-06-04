@@ -1,16 +1,16 @@
-# ADR 069 - Browser-reachable surface: verify, don't virtualize
+# ADR 070 - Browser-reachable surface: verify, don't virtualize
 
 **Status**: Accepted
 **Date**: 2026-06-03
-**Cross-refs**: ADR-002 (security posture — the signed/audited artifacts this verifies), ADR-041 (signed, audited execution plans — claim 8), ADR-014 (VmBackend single trait — the seam a wasm backend would *not* fit), Plan 33 (hosted MCP transport — mvm owns protocol, mvmd owns transport). Input: a comparison against the sibling `holospaces` project, which boots Linux in the browser via a RISC-V→wasm emulator.
+**Cross-refs**: ADR-002 (security posture — the signed/audited artifacts this verifies), ADR-041 (signed, audited execution plans — claim 8), ADR-014 (VmBackend single trait — the seam a wasm backend would *not* fit), Plan 33 (hosted MCP transport — mvm owns protocol, mvmd owns transport). Input: a comparison against a sibling browser-VM project that boots Linux in the browser via a RISC-V→wasm emulator.
 
 ## Context
 
-`holospaces` (a separate project) runs full environments **in the browser**: a RISC-V RV64GC interpreter compiled to `wasm32`, booting an unmodified kernel, with a WebSocket relay for egress. The natural question for mvm was "should we grow an analogous browser capability?"
+A sibling browser-VM project runs full environments **in the browser**: a RISC-V RV64GC interpreter compiled to `wasm32`, booting an unmodified kernel, with a WebSocket relay for egress. The natural question for mvm was "should we grow an analogous browser capability?"
 
-The answer turns on one distinction that is easy to miss. holospaces **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun/Vz over KVM/HVF). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline holospaces capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-014). That dead end should be recorded so it is not relitigated.
+The answer turns on one distinction that is easy to miss. That project **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun/Vz over KVM/HVF). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline browser-emulator capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-014). That dead end should be recorded so it is not relitigated.
 
-What *does* transfer is the part of holospaces underneath the emulator: **content-addressed, self-verifying artifacts that any peer can check by re-derivation, with no server to trust** (their Law L5 — `verify_kappa()`). mvm already produces exactly such artifacts — signed `ExecutionPlan`s, content-addressed bundles, and a chain-signed audit log (claims 8/9/14). Those are verifiable from bytes alone. That is the holospaces idea that maps cleanly onto mvm's strengths.
+What *does* transfer is the part underneath the emulator: **content-addressed, self-verifying artifacts that any peer can check by re-derivation, with no server to trust** (its Law L5 — `verify_kappa()`). mvm already produces exactly such artifacts — signed `ExecutionPlan`s, content-addressed bundles, and a chain-signed audit log (claims 8/9/14). Those are verifiable from bytes alone. That is the idea that maps cleanly onto mvm's strengths.
 
 ## Decision
 
@@ -27,7 +27,7 @@ What *does* transfer is the part of holospaces underneath the emulator: **conten
 ## Consequences
 
 - A new, small, fully-tested crate (`mvm-verify`) that is independently useful: any Rust caller (CLI, mvmd, a future `mvmctl audit verify --stdin`) can verify a chain from bytes without the supervisor's heavy dependency graph.
-- A serverless transparency tool: third parties can audit mvm's claim-8 log without running mvm or trusting a server — the strongest form of the holospaces "verify by re-derivation" property, applied to mvm's actual artifacts.
+- A serverless transparency tool: third parties can audit mvm's claim-8 log without running mvm or trusting a server — the strongest form of the "verify by re-derivation" property, applied to mvm's actual artifacts.
 - The browser tool's correctness is guarded by a test in the security-critical crate, so the duplication (a mirrored `AuditEntry`) is drift-proof rather than hope-based.
 
 ### Follow-ups
