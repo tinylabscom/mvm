@@ -551,7 +551,7 @@ impl VmBackend for VzBackend {
         // outside `BackendSecurityProfile`).
         BackendSecurityProfile {
             claims: [
-                ClaimStatus::Holds, // 1 — host-fs isolation via Vz; supervisor refuses non-admitted shares
+                ClaimStatus::Holds, // 1 — host-fs isolation via Vz (ro rootfs attach) + host-side admission gate (enforce_admitted_shares); in-supervisor share re-check is deferred (Plan 97 Phase D)
                 ClaimStatus::Holds, // 2 — uid-0 protections same as FC (guest-side)
                 ClaimStatus::DoesNotHold, // 3 — verified-boot pipeline targets FC today
                 ClaimStatus::Holds, // 4 — guest agent has no do_exec in prod
@@ -946,6 +946,19 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
 /// contract). The Swift bridge already writes flow events to
 /// `events_ingest_socket_path` (PR #487 commit 7); the drainer
 /// closes the loop.
+/// Append the `mvm.uvols=` cmdline param so the dev VM's
+/// `mvm-host-vm-init` mounts user volumes at their guest paths. No-op
+/// (returns the default cmdline unchanged) when there are no volumes.
+/// Harmless for workload guests (mkGuest `/init` ignores the param).
+fn vz_cmdline_with_user_volumes(config: &VmStartConfig) -> String {
+    let mut cmdline = DEFAULT_CMDLINE.to_string();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        cmdline.push(' ');
+        cmdline.push_str(&uvols);
+    }
+    cmdline
+}
+
 fn build_supervisor_config(
     config: &VmStartConfig,
     kernel: &str,
@@ -963,7 +976,7 @@ fn build_supervisor_config(
     let vsock_dir = state_dir.join("vsock").to_string_lossy().into_owned();
     let console_log = state_dir.join("console.log").to_string_lossy().into_owned();
 
-    let disks = vec![vz::DiskConfig {
+    let mut disks = vec![vz::DiskConfig {
         id: "rootfs".into(),
         path: config.rootfs_path.clone(),
         // Rootfs is RO at boot under the W3 verified-boot model; even
@@ -973,13 +986,38 @@ fn build_supervisor_config(
         read_only: true,
     }];
 
+    // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
+    // is a virtio-fs device; a disk image is an extra virtio-blk device.
+    // The tag/id `uvol{idx}` is the coordination key the guest mount
+    // manifest uses to mount each at its requested guest path. Disk
+    // images are sparse-created by the CLI orchestrator before start;
+    // Apple Vz takes its own exclusive lock on a RW disk at start (the
+    // reason the nix-store flock moved to a sidecar — see
+    // builder_vm_runtime::NixStoreImageLock).
+    let mut virtio_fs: Vec<vz::VirtioFsShare> = Vec::new();
+    for (idx, vol) in config.volumes.iter().enumerate() {
+        let tag = format!("uvol{idx}");
+        match vol.kind {
+            mvm_core::vm_backend::VmVolumeKind::DirShare => virtio_fs.push(vz::VirtioFsShare {
+                tag,
+                host_path: vol.host.clone(),
+                read_only: vol.read_only,
+            }),
+            mvm_core::vm_backend::VmVolumeKind::Disk => disks.push(vz::DiskConfig {
+                id: tag,
+                path: vol.host.clone(),
+                read_only: vol.read_only,
+            }),
+        }
+    }
+
     Ok(vz::SupervisorConfig {
         name: config.name.clone(),
         vm_state_dir: state_dir_str,
         pid_file_name: Some(PID_FILE_NAME.to_string()),
         kernel: vz::KernelConfig {
             path: kernel.to_string(),
-            cmdline: DEFAULT_CMDLINE.to_string(),
+            cmdline: vz_cmdline_with_user_volumes(config),
             initrd_path: config.initrd_path.clone(),
         },
         resources: vz::ResourceConfig {
@@ -987,7 +1025,7 @@ fn build_supervisor_config(
             memory_mib: u64::from(config.memory_mib),
         },
         disks,
-        virtio_fs: Vec::new(),
+        virtio_fs,
         vsock: vz::VsockConfig {
             ports: vec![mvm_guest::vsock::GUEST_AGENT_PORT],
             socket_dir: vsock_dir,
@@ -1522,6 +1560,7 @@ mod tests {
         assert_eq!(built.disks.len(), 1);
         assert_eq!(built.disks[0].path, "/abs/rootfs.ext4");
         assert!(built.disks[0].read_only);
+        assert!(built.virtio_fs.is_empty());
         assert_eq!(built.vsock.ports, vec![mvm_guest::vsock::GUEST_AGENT_PORT]);
         assert_eq!(built.pid_file_name.as_deref(), Some(PID_FILE_NAME));
         // Console capture goes to a file under state_dir; never `None`
@@ -1553,6 +1592,92 @@ mod tests {
             }
             None => panic!("network should be Some(Gvproxy {{ .. }}) after W6.A.5"),
         }
+    }
+
+    #[test]
+    fn build_supervisor_config_maps_user_volumes() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let cfg = VmStartConfig {
+            name: "vols".into(),
+            cpus: 1,
+            memory_mib: 512,
+            kernel_path: Some("/abs/vmlinux".into()),
+            rootfs_path: "/abs/rootfs.ext4".into(),
+            volumes: vec![
+                VmVolume {
+                    host: "/host/src".into(),
+                    guest: "/work2".into(),
+                    read_only: true,
+                    kind: VmVolumeKind::DirShare,
+                    ..Default::default()
+                },
+                VmVolume {
+                    host: "/host/data.img".into(),
+                    guest: "/data".into(),
+                    size: "10G".into(),
+                    kind: VmVolumeKind::Disk,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let state_dir = Path::new("/tmp/vz-vols-state");
+        let gvproxy_info = host_gvproxy::HostGvproxyInfo {
+            socket_path: state_dir.join("gvproxy.sock"),
+            pid: 0,
+        };
+        let built =
+            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+
+        // rootfs (RO) + the disk volume.
+        assert_eq!(built.disks.len(), 2);
+        assert_eq!(built.disks[0].id, "rootfs");
+        assert_eq!(built.disks[1].id, "uvol1");
+        assert_eq!(built.disks[1].path, "/host/data.img");
+        assert!(!built.disks[1].read_only);
+        // The directory share.
+        assert_eq!(built.virtio_fs.len(), 1);
+        assert_eq!(built.virtio_fs[0].tag, "uvol0");
+        assert_eq!(built.virtio_fs[0].host_path, "/host/src");
+        assert!(built.virtio_fs[0].read_only);
+    }
+
+    /// Claim 1 witness: the base/core drive (rootfs) is ALWAYS attached
+    /// read-only at the hypervisor on Vz, regardless of any user volumes.
+    /// A regression that flips it to writable trips this test (and the
+    /// catalog gate).
+    #[test]
+    fn vz_rootfs_disk_is_read_only() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let cfg = VmStartConfig {
+            name: "rootfs-ro".into(),
+            cpus: 1,
+            memory_mib: 256,
+            kernel_path: Some("/abs/vmlinux".into()),
+            rootfs_path: "/abs/rootfs.ext4".into(),
+            // Even with a writable user disk attached, the rootfs stays ro.
+            volumes: vec![VmVolume {
+                host: "/host/data.img".into(),
+                guest: "/data".into(),
+                size: "1G".into(),
+                read_only: false,
+                kind: VmVolumeKind::Disk,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let state_dir = Path::new("/tmp/vz-rootfs-ro-state");
+        let gvproxy_info = host_gvproxy::HostGvproxyInfo {
+            socket_path: state_dir.join("gvproxy.sock"),
+            pid: 0,
+        };
+        let built =
+            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        assert_eq!(built.disks[0].id, "rootfs");
+        assert!(
+            built.disks[0].read_only,
+            "rootfs MUST be read-only at the hypervisor"
+        );
     }
 
     #[test]

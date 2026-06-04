@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, DepsVolumeBinding,
-    FsPolicyRef, KeyRotationSpec, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin,
-    Resources, RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, WorkloadId,
+    FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce, PlanId, PolicyRef, PostRunLifecycle,
+    ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, WorkloadId,
 };
 
 /// Wire-format version. Bump when fields change in a way older
@@ -42,7 +42,12 @@ use crate::plan::types::{
 /// that seccomp, network, tool, secret-release, and audit controls
 /// were resolved under one profile, so they must reject rather than
 /// silently ignore the binding.
-pub const SCHEMA_VERSION: u32 = 4;
+///
+/// Bumped 4 → 5 with the addition of `shares` (user host-fs grants):
+/// an older verifier doesn't know to enforce that the launch config's
+/// volumes are a subset of the admitted grants (claim 1 / claim 8), so
+/// it must reject rather than admit a plan whose shares it can't check.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Typed contract for one workload's execution.
 ///
@@ -166,4 +171,14 @@ pub struct ExecutionPlan {
     /// step. Plan 73 Followup A.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deps_volume: Option<DepsVolumeBinding>,
+
+    /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`):
+    /// directory shares and disk images the workload is admitted to
+    /// mount. Empty for the common no-volume case. The admit path
+    /// asserts the launch config's volumes are a subset of this list
+    /// (claim 1 / claim 8) and emits it to the chain-signed audit log;
+    /// the Vz supervisor's future per-attach gate (Plan 97 Phase D)
+    /// reads it to refuse any share the plan didn't name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shares: Vec<HostShareGrant>,
 }

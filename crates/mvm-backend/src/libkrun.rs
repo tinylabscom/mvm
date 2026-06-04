@@ -76,9 +76,17 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         .as_deref()
         .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
     let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    // Append the `mvm.uvols=` param so the dev VM's `mvm-host-vm-init`
+    // mounts user volumes at their guest paths (no-op when there are
+    // none; harmless for workload guests whose `/init` ignores it).
+    let mut cmdline = DEFAULT_CMDLINE.to_string();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        cmdline.push(' ');
+        cmdline.push_str(&uvols);
+    }
     let krun = KrunContext::new(&config.name, kernel, &config.rootfs_path)
         .with_resources(vcpus, config.memory_mib)
-        .with_cmdline(DEFAULT_CMDLINE)
+        .with_cmdline(&cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
     // Plan 87/88 / ADR-058 — configure the per-OS virtio-net gateway
@@ -94,6 +102,43 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     } else {
         krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
     };
+
+    // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
+    // is a virtio-fs device; a disk image is an extra virtio-blk device.
+    // Tag/id `uvol{idx}` is the coordination key the guest mount manifest
+    // uses to mount each at its requested guest path. Disk images are
+    // sparse-created by the CLI orchestrator before start; a RO disk image
+    // is RO at the hypervisor (krun_add_disk takes read_only).
+    //
+    // Tier A.2 — libkrun's `krun_add_virtiofs` has NO host-side read-only
+    // toggle, so a "read-only" virtio-fs share would only be ro by the
+    // guest's own mount flag — a compromised guest could remount it rw.
+    // Rather than make a false ro promise, refuse it and point at the
+    // hypervisor-enforced alternatives. (Vz/Firecracker enforce ro shares
+    // natively; this restriction is libkrun-specific.)
+    let mut krun = krun;
+    for (idx, vol) in config.volumes.iter().enumerate() {
+        let tag = format!("uvol{idx}");
+        krun = match vol.kind {
+            mvm_core::vm_backend::VmVolumeKind::DirShare => {
+                if vol.read_only {
+                    bail!(
+                        "libkrun cannot enforce a read-only virtio-fs share ('{}' -> '{}'): \
+                         krun_add_virtiofs has no host-side read-only toggle, so a compromised \
+                         guest could remount it read-write. Use a read-only disk image \
+                         (host:/guest:SIZE) for hypervisor-enforced read-only, share it ':rw' if \
+                         writes are intended, or run on the Vz backend.",
+                        vol.host,
+                        vol.guest
+                    );
+                }
+                krun.add_virtio_fs(tag, vol.host.clone())
+            }
+            mvm_core::vm_backend::VmVolumeKind::Disk => {
+                krun.add_disk(tag, vol.host.clone(), vol.read_only)
+            }
+        };
+    }
 
     // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
     // validation). When the producer threaded an AdmittedPlan in
@@ -589,6 +634,61 @@ mod tests {
         assert!(cfg.signing_key_path.is_some());
         assert!(cfg.plan.is_some());
         assert!(cfg.bundle.is_none());
+    }
+
+    /// Tier A.2 / claim 1: libkrun can't enforce a read-only virtio-fs
+    /// share at the hypervisor, so it refuses one rather than make a
+    /// false ro promise (a compromised guest could remount it rw). A
+    /// read-write share, or a read-only disk image, is fine.
+    #[test]
+    fn libkrun_refuses_read_only_virtiofs_share() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let tmp = tempfile::tempdir().unwrap();
+        let base = VmStartConfig {
+            name: "ro-fs".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+
+        // read-only dir share → refused.
+        let mut ro = base.clone();
+        ro.volumes = vec![VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: VmVolumeKind::DirShare,
+            ..Default::default()
+        }];
+        let err = build_supervisor_config(&ro, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("read-only virtio-fs"), "got: {err}");
+
+        // read-write dir share → allowed.
+        let mut rw = base.clone();
+        rw.volumes = vec![VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: false,
+            kind: VmVolumeKind::DirShare,
+            ..Default::default()
+        }];
+        assert!(build_supervisor_config(&rw, tmp.path()).is_ok());
+
+        // read-only DISK image → allowed (hypervisor-enforced ro).
+        let mut ro_disk = base;
+        ro_disk.volumes = vec![VmVolume {
+            host: "/h/data.img".into(),
+            guest: "/data".into(),
+            size: "1G".into(),
+            read_only: true,
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        }];
+        assert!(build_supervisor_config(&ro_disk, tmp.path()).is_ok());
     }
 
     #[test]

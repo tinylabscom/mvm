@@ -45,9 +45,15 @@ pub struct SupervisorConfig {
     /// virtio-blk devices, in declared order. The first entry appears
     /// as `/dev/vda` in the guest, the second as `/dev/vdb`, etc.
     pub disks: Vec<DiskConfig>,
-    /// virtio-fs shares. Workload microVMs default to empty; the
-    /// supervisor refuses to attach a share that the admitted
-    /// `ExecutionPlan` (claim 8) does not name.
+    /// virtio-fs shares. Workload microVMs default to empty. Enforcement
+    /// that every share here was admitted by the signed `ExecutionPlan`
+    /// (claim 1 / claim 8) lives **host-side** in the admission gate
+    /// (`mvm-cli` `plan_admission::enforce_admitted_shares`, run before
+    /// the supervisor is spawned). This Swift supervisor does not yet
+    /// receive the plan, so it relays the host-provided shares verbatim;
+    /// an in-supervisor re-check is a deferred defense-in-depth follow-up
+    /// (Plan 97 Phase D) — do NOT describe it here as if it already
+    /// refuses unnamed shares.
     pub virtio_fs: Vec<VirtioFsShare>,
     pub vsock: VsockConfig,
     /// Capture-only console output. Workload microVMs always set this;

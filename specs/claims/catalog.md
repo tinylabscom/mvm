@@ -27,7 +27,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 
 | #  | Claim | Witnesses | Authority | Status |
 |----|-------|-----------|-----------|--------|
-| 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional | seccomp + setpriv (ADR-002 §W2) | Shipped |
+| 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional, fn:validated_conversion_enforces_mount_allow_list, fn:dir_share_two_part_defaults_ro, fn:vz_rootfs_disk_is_read_only, fn:libkrun_refuses_read_only_virtiofs_share, fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched | seccomp + setpriv (ADR-002 §W2) + user-volume allow-list / ro-default / admission-enforced shares (mvm-cli + mvm-backend) | Shipped |
 | 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only | setpriv --no-new-privs + RO config binds (ADR-002 §W2.2) | Shipped |
 | 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash (ADR-002 §W3) | Shipped |
 | 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-002 §W4.3) | Shipped |

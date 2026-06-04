@@ -133,6 +133,28 @@ pub struct RuntimeVolume {
     /// Defaults to false for backwards compatibility with persistent volumes.
     #[serde(default)]
     pub read_only: bool,
+    /// Disk image (virtio-blk) vs live directory share (virtio-fs).
+    /// Defaults to `Disk` so a runtime-config file written before this
+    /// field existed keeps its persistent-volume meaning.
+    #[serde(default)]
+    pub kind: mvm_core::vm_backend::VmVolumeKind,
+    /// `:enc` — route a disk volume through in-guest encryption
+    /// (Plan 101). Fails closed at launch until that lands.
+    #[serde(default)]
+    pub encrypted: bool,
+}
+
+impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
+    fn from(v: &mvm_core::vm_backend::VmVolume) -> Self {
+        RuntimeVolume {
+            host: v.host.clone(),
+            guest: v.guest.clone(),
+            size: v.size.clone(),
+            read_only: v.read_only,
+            kind: v.kind,
+            encrypted: v.encrypted,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

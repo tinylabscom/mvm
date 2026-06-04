@@ -144,6 +144,76 @@ fn virtiofs_tag_is_read_only(tag: &str) -> bool {
     tag == "work" || tag == "mvm-bins"
 }
 
+/// One user-supplied volume to mount, decoded from the `mvm.uvols=`
+/// kernel-cmdline param the host wrote
+/// (`mvm_core::vm_backend::encode_user_volumes_cmdline`).
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct UserVolMount {
+    /// virtio-fs tag (`uvol{idx}`) the host registered for this volume.
+    tag: String,
+    /// Guest mount point (decoded from hex).
+    target: String,
+    read_only: bool,
+    /// `true` = virtio-blk disk image, `false` = virtio-fs dir share.
+    is_disk: bool,
+}
+
+/// Decode lowercase/uppercase hex into a UTF-8 string. `None` on odd
+/// length, non-hex digits, or invalid UTF-8.
+#[cfg(any(target_os = "linux", test))]
+fn hex_decode_utf8(s: &str) -> Option<String> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let b = s.as_bytes();
+    let mut bytes = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i < b.len() {
+        let hi = (b[i] as char).to_digit(16)?;
+        let lo = (b[i + 1] as char).to_digit(16)?;
+        bytes.push((hi * 16 + lo) as u8);
+        i += 2;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Parse the `mvm.uvols=` token out of a kernel cmdline. Format:
+/// `mvm.uvols=<tag>:<hex(path)>:<ro|rw>:<fs|blk>;...`. Best-effort:
+/// malformed entries are skipped rather than failing (a bad mount must
+/// never wedge PID 1). Mirrors the host encoder in `mvm-core`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_user_volumes_cmdline(cmdline: &str) -> Vec<UserVolMount> {
+    let Some(val) = cmdline
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("mvm.uvols="))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in val.split(';').filter(|e| !e.is_empty()) {
+        let mut f = entry.split(':');
+        let (Some(tag), Some(hexpath), Some(mode), Some(kind), None) =
+            (f.next(), f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        let Some(target) = hex_decode_utf8(hexpath) else {
+            continue;
+        };
+        if tag.is_empty() || target.is_empty() {
+            continue;
+        }
+        out.push(UserVolMount {
+            tag: tag.to_string(),
+            target,
+            read_only: mode.eq_ignore_ascii_case("ro"),
+            is_disk: kind.eq_ignore_ascii_case("blk"),
+        });
+    }
+    out
+}
+
 /// Bytes from the start of the ext4 superblock that the host-side
 /// geometry check reads. The high-32 bits of `s_blocks_count` live
 /// at superblock offset `0x150` (336), so 512 is the smallest
@@ -306,6 +376,55 @@ mod tests {
         assert!(virtiofs_tag_is_read_only("mvm-bins"));
         assert!(!virtiofs_tag_is_read_only("out"));
         assert!(!virtiofs_tag_is_read_only("job"));
+    }
+
+    #[test]
+    fn hex_decode_utf8_roundtrips_and_rejects_garbage() {
+        assert_eq!(hex_decode_utf8("2f776f726b32").as_deref(), Some("/work2"));
+        assert_eq!(hex_decode_utf8("").as_deref(), Some(""));
+        assert!(hex_decode_utf8("abc").is_none()); // odd length
+        assert!(hex_decode_utf8("zz").is_none()); // non-hex
+    }
+
+    #[test]
+    fn parse_user_volumes_cmdline_decodes_entries() {
+        // Mirrors mvm_core::vm_backend::encode_user_volumes_cmdline.
+        let cmdline = "console=hvc0 root=/dev/vda \
+             mvm.uvols=uvol0:2f776f726b32:ro:fs;uvol1:2f64617461:rw:blk rw init=/sbin/x";
+        let got = parse_user_volumes_cmdline(cmdline);
+        assert_eq!(
+            got,
+            vec![
+                UserVolMount {
+                    tag: "uvol0".into(),
+                    target: "/work2".into(),
+                    read_only: true,
+                    is_disk: false,
+                },
+                UserVolMount {
+                    tag: "uvol1".into(),
+                    target: "/data".into(),
+                    read_only: false,
+                    is_disk: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_user_volumes_cmdline_absent_is_empty() {
+        assert!(parse_user_volumes_cmdline("console=hvc0 root=/dev/vda rw").is_empty());
+    }
+
+    #[test]
+    fn parse_user_volumes_cmdline_skips_malformed_entries() {
+        // Missing field, bad hex, empty tag → all skipped; the one good
+        // entry survives. Best-effort parsing must never panic.
+        let cmdline = "mvm.uvols=bad;uvol0:zz:ro:fs;:2f61:ro:fs;uvol9:2f6f6b:rw:fs";
+        let got = parse_user_volumes_cmdline(cmdline);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].tag, "uvol9");
+        assert_eq!(got[0].target, "/ok");
     }
 
     /// Build a synthetic ext4 superblock buffer (just the fields
@@ -1790,9 +1909,61 @@ mod linux {
                 eprintln!("mvm-host-vm-init: virtio-fs '{tag}' -> {target} failed: {e}");
             }
         }
+        // User-supplied volumes (`mvmctl dev up -v …` / MVM_VOLUMES),
+        // declared by the host on the kernel cmdline. Best-effort, same
+        // as the fixed shares above — a failed user mount logs and
+        // continues so it can never wedge PID 1.
+        mount_user_volumes();
         stamp(timings, |t| {
             t.virtiofs_ready_ms = Some(BootTimings::ms_since(anchor))
         });
+    }
+
+    /// Mount user-supplied volumes from the `mvm.uvols=` cmdline param.
+    /// Directory shares (virtio-fs) mount by tag at the requested guest
+    /// path with the requested ro/rw mode. Disk-image volumes are
+    /// attached by the host as `/dev/vd*` but guest-side auto-mount of
+    /// disks isn't wired yet — we log so the device isn't silently
+    /// ignored. All errors are non-fatal.
+    fn mount_user_volumes() {
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        for v in crate::parse_user_volumes_cmdline(&cmdline) {
+            if v.is_disk {
+                eprintln!(
+                    "mvm-host-vm-init: user disk volume attached for '{}' \
+                     (guest auto-mount of disk images not yet wired; mount /dev/vd* manually)",
+                    v.target
+                );
+                continue;
+            }
+            match mount_user_virtiofs(&v.tag, &v.target, v.read_only) {
+                Ok(()) => eprintln!(
+                    "mvm-host-vm-init: mounted user volume {} at {} ({})",
+                    v.tag,
+                    v.target,
+                    if v.read_only { "ro" } else { "rw" }
+                ),
+                Err(e) => eprintln!(
+                    "mvm-host-vm-init: user volume {} -> {} failed: {e}",
+                    v.tag, v.target
+                ),
+            }
+        }
+    }
+
+    /// Mount a user virtio-fs share with an explicit ro/rw flag (the
+    /// fixed-share `mount_virtiofs` derives ro from the tag; user tags
+    /// carry their mode in the manifest instead).
+    fn mount_user_virtiofs(tag: &str, target: &str, read_only: bool) -> Result<(), String> {
+        use nix::mount::{MsFlags, mount};
+        std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
+        let flags = if read_only {
+            MsFlags::MS_RDONLY
+        } else {
+            MsFlags::empty()
+        };
+        mount(Some(tag), target, Some("virtiofs"), flags, None::<&str>)
+            .map_err(|e| format!("mount virtiofs {tag} -> {target}: {e}"))
     }
 
     fn run_modprobe(module: &str) {

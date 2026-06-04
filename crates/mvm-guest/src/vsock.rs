@@ -2419,6 +2419,44 @@ pub fn start_port_forward_on(stream: &mut UnixStream, guest_port: u16) -> Result
     }
 }
 
+/// Host-side helper: ask the guest agent to mount an already-attached
+/// virtio-fs volume at `guest_path`. `volume_name` is the virtio-fs tag
+/// the host registered (`uvol{idx}`). Returns the guest's canonical
+/// mount path on success. The guest validates `guest_path` against its
+/// `MountPathPolicy` (allow-roots `/mnt`, `/data`, `/work`); a denied
+/// path surfaces here as an error rather than a silent no-mount.
+pub fn mount_volume_on(
+    stream: &mut UnixStream,
+    volume_name: &str,
+    guest_path: &str,
+    read_only: bool,
+) -> Result<String> {
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let resp = send_request(
+        stream,
+        &GuestRequest::MountVolume {
+            volume_name: volume_name.to_string(),
+            guest_path: guest_path.to_string(),
+            read_only,
+        },
+    )?;
+    match resp {
+        GuestResponse::VolumeMountResult(VolumeMountResult::Mounted { canonical_path }) => {
+            Ok(canonical_path)
+        }
+        GuestResponse::VolumeMountResult(VolumeMountResult::Error { kind, message }) => {
+            bail!("guest refused volume '{volume_name}' -> {guest_path} ({kind:?}): {message}")
+        }
+        GuestResponse::VolumeMountResult(other) => {
+            bail!("unexpected volume-mount result for '{volume_name}': {other:?}")
+        }
+        GuestResponse::Error { message } => {
+            bail!("guest error mounting '{volume_name}': {message}")
+        }
+        _ => bail!("unexpected response to MountVolume for '{volume_name}'"),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

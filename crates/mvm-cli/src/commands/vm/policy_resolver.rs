@@ -626,6 +626,7 @@ mod tests {
             nonce: Nonce::from_bytes([0u8; 16]),
             bundle: None,
             deps_volume: None,
+            shares: Vec::new(),
         }
     }
 

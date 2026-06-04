@@ -260,6 +260,27 @@ pub fn mvm_deps_volumes_dir() -> String {
     format!("{}/volumes/deps", mvm_data_dir())
 }
 
+/// Custom volume specs from the `MVM_VOLUMES` env var: a comma-separated
+/// list of `--volume` specs (e.g. `~/src:/work:ro,data.img:/data:10G`).
+/// Whitespace around each entry is trimmed and empty entries dropped;
+/// unset or empty → `[]`. The CLI merges these *before* `--volume` flag
+/// values (env is the baseline, flags append). Parsing/validation of
+/// each spec lives in the CLI crate (`commands::shared::parse`), so this
+/// returns raw strings and keeps `mvm-core` dependency-free.
+pub fn mvm_volumes_env() -> Vec<String> {
+    std::env::var("MVM_VOLUMES")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
 /// volume. The caller is responsible for verifying the directory
 /// exists and matches its sealed manifest — see
@@ -377,6 +398,24 @@ mod tests {
         unsafe { std::env::set_var("MVM_CACHE_DIR", "/custom/cache") };
         assert_eq!(mvm_cache_dir(), "/custom/cache");
         unsafe { std::env::remove_var("MVM_CACHE_DIR") };
+    }
+
+    #[test]
+    fn test_mvm_volumes_env() {
+        let _g = env_lock();
+        unsafe { std::env::remove_var("MVM_VOLUMES") };
+        assert!(mvm_volumes_env().is_empty(), "unset → empty");
+
+        unsafe { std::env::set_var("MVM_VOLUMES", "") };
+        assert!(mvm_volumes_env().is_empty(), "empty → empty");
+
+        unsafe { std::env::set_var("MVM_VOLUMES", " ~/a:/a:ro , data.img:/d:10G ,, ") };
+        assert_eq!(
+            mvm_volumes_env(),
+            vec!["~/a:/a:ro".to_string(), "data.img:/d:10G".to_string()],
+            "comma-split, trimmed, empties dropped"
+        );
+        unsafe { std::env::remove_var("MVM_VOLUMES") };
     }
 
     #[test]

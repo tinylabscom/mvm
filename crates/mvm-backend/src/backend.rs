@@ -34,6 +34,20 @@ impl FirecrackerConfig {
     /// Convert a backend-agnostic `VmStartConfig` into a Firecracker-specific
     /// `FlakeRunConfig`, allocating a network slot automatically.
     pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
+        // Firecracker has no virtio-fs — a directory share can't be
+        // attached. Disk-image volumes (host:/guest:SIZE) are fine.
+        if let Some(v) = config
+            .volumes
+            .iter()
+            .find(|v| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
+        {
+            anyhow::bail!(
+                "Firecracker has no virtio-fs, so directory share '{}' -> '{}' isn't supported; \
+                 use a disk-image volume instead (host:/guest:SIZE).",
+                v.host,
+                v.guest
+            );
+        }
         let slot = microvm::allocate_slot(&config.name)?;
         let run_config = FlakeRunConfig {
             name: config.name.clone(),
@@ -60,6 +74,8 @@ impl FirecrackerConfig {
                     guest: v.guest.clone(),
                     size: v.size.clone(),
                     read_only: v.read_only,
+                    kind: v.kind,
+                    encrypted: v.encrypted,
                 })
                 .collect(),
             config_files: config

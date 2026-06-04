@@ -256,6 +256,32 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.shares_admitted` — records the user host-fs grants
+    /// (`--volume` / `MVM_VOLUMES`) baked into the admitted plan
+    /// (claim 1 / claim 8), so every share is a tamper-evident audit
+    /// fact rather than an unsigned side-channel. No-op when the plan
+    /// carries no shares (the common case).
+    pub fn emit_shares_admitted(&self, plan: &ExecutionPlan) -> Result<()> {
+        if plan.shares.is_empty() {
+            return Ok(());
+        }
+        let mut labels: Vec<(String, String)> =
+            vec![("share_count".to_string(), plan.shares.len().to_string())];
+        for (i, s) in plan.shares.iter().enumerate() {
+            let kind = match s.kind {
+                mvm_core::plan::ShareKind::Disk => "disk",
+                mvm_core::plan::ShareKind::DirShare => "dir_share",
+            };
+            labels.push((format!("share_{i}_tag"), s.tag.clone()));
+            labels.push((format!("share_{i}_host"), s.host_path.clone()));
+            labels.push((format!("share_{i}_guest"), s.guest_path.clone()));
+            labels.push((format!("share_{i}_kind"), kind.to_string()));
+            labels.push((format!("share_{i}_ro"), s.read_only.to_string()));
+            labels.push((format!("share_{i}_encrypted"), s.encrypted.to_string()));
+        }
+        self.emit(plan, "plan.shares_admitted", labels)
+    }
+
     /// Emit `plan.oci_provenance` — binds an OCI image admission to
     /// the same plan id as the launch decision. The labels are
     /// intentionally digest-oriented; raw registry credentials and
@@ -426,6 +452,7 @@ mod tests {
             nonce: Nonce::from_bytes([0u8; 16]),
             bundle: None,
             deps_volume: None,
+            shares: Vec::new(),
         }
     }
 

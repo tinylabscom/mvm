@@ -307,6 +307,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         // for dry-run admission. Followup B.3 wires deps_volume into
         // the live `mvmctl up` path only.
         deps_volume: None,
+        shares: Vec::new(),
     })
 }
 

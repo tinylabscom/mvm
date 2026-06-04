@@ -141,6 +141,10 @@ pub struct SynthesisInput<'a> {
     /// `volume_hash` + `manifest_sha256` before backend dispatch
     /// (ADR-047 security claim 9).
     pub deps_volume: Option<DepsVolumeBinding>,
+    /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`) to bake
+    /// into the signed plan + audit log (claim 1 / claim 8). Empty for
+    /// the common no-volume case.
+    pub shares: Vec<mvm_core::plan::HostShareGrant>,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -242,6 +246,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         // `install_app_deps` to a sealed volume. `None` preserves
         // claim 8 (the supervisor's deps-volume gate is skipped).
         deps_volume: input.deps_volume.clone(),
+        shares: input.shares.clone(),
     })
 }
 
@@ -342,6 +347,7 @@ mod tests {
             destroy_on_exit: false,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         }
     }
 

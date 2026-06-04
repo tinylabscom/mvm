@@ -30,9 +30,9 @@ use super::policy_resolver::{
 };
 use super::shared::{
     VmStartParams, VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
-    env_vars_to_drive_file, parse_port_specs, parse_volume_spec, ports_to_drive_file,
-    read_dir_to_drive_files, request_port_forward, resolve_flake_ref, resolve_network_policy,
-    wait_for_guest_agent,
+    env_vars_to_drive_file, materialize_disk_volume, merge_volume_specs, parse_port_specs,
+    parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files, request_port_forward,
+    resolve_flake_ref, resolve_network_policy, vm_volume_from_spec_validated, wait_for_guest_agent,
 };
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
@@ -143,6 +143,31 @@ struct AdmitPlanForBootParams<'a> {
     /// the on-disk sealed volume before launch — ADR-047 claim 9.
     /// `None` preserves the claim-8 baseline (no deps gate).
     pub deps_volume: Option<mvm_core::plan::DepsVolumeBinding>,
+    /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`) baked
+    /// into the signed plan + emitted to the chain-signed audit log
+    /// (claim 1 / claim 8). Empty for the common no-volume case.
+    pub shares: Vec<mvm_core::plan::HostShareGrant>,
+}
+
+/// Build the signed-plan host-fs grant list from the resolved volume
+/// config. The `uvol{idx}` tag matches the id the backend assigns when
+/// it attaches each volume (same `VmStartConfig.volumes` order), so the
+/// admitted grants line up 1:1 with what actually gets attached.
+fn shares_from_volume_cfg(vols: &[image::RuntimeVolume]) -> Vec<mvm_core::plan::HostShareGrant> {
+    vols.iter()
+        .enumerate()
+        .map(|(idx, v)| mvm_core::plan::HostShareGrant {
+            tag: format!("uvol{idx}"),
+            host_path: v.host.clone(),
+            guest_path: v.guest.clone(),
+            kind: match v.kind {
+                mvm_core::vm_backend::VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
+                mvm_core::vm_backend::VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
+            },
+            read_only: v.read_only,
+            encrypted: v.encrypted,
+        })
+        .collect()
 }
 
 fn plan_seccomp_tier(
@@ -272,6 +297,7 @@ fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<Admission
         destroy_on_exit: true,
         bundle_pin: bundle_pin.clone(),
         deps_volume: p.deps_volume.clone(),
+        shares: p.shares.clone(),
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -345,6 +371,11 @@ fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<Admission
 
     if let Err(e) = emitter.emit_admitted(&admitted.plan, &admitted.signer_id) {
         tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
+    }
+    // Claim 1 / claim 8 — record the admitted host-fs grants in the
+    // chain-signed log (no-op when there are none).
+    if let Err(e) = emitter.emit_shares_admitted(&admitted.plan) {
+        tracing::warn!(error = %e, "audit emit_shares_admitted failed (non-fatal)");
     }
 
     // Resolve the plan's four policy refs into concrete supervisor
@@ -503,6 +534,22 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
             "persisting admitted plan to ~/.mvm/vms/<vm>/plan.json failed (non-fatal)"
         );
     }
+}
+
+/// Tier A.1 admission enforcement: refuse to boot if any volume about to
+/// be attached isn't named in the verified `ExecutionPlan.shares`. No-op
+/// when admission was skipped (no plan to enforce against). Called right
+/// before every `backend.start()` so no host-fs grant reaches a guest
+/// unless the signed plan admitted it (claim 1 / claim 8).
+fn enforce_shares_if(
+    ctx: &Option<AdmissionContext>,
+    volumes: &[mvm_core::vm_backend::VmVolume],
+) -> Result<()> {
+    if let Some(ctx) = ctx {
+        super::plan_admission::enforce_admitted_shares(volumes, &ctx.admitted.plan)
+            .context("admission share check")?;
+    }
+    Ok(())
 }
 
 /// Emit `plan.failed` against the supplied admission context. No-op
@@ -704,7 +751,10 @@ pub(in crate::commands) struct Args {
     /// Runtime config (TOML) for persistent resources/volumes
     #[arg(long)]
     pub config: Option<String>,
-    /// Volume (host_dir:/guest/path or host:/guest/path:size). Repeatable
+    /// Attach a volume (repeatable). `host:/guest` shares a host dir
+    /// (virtio-fs); `host:/guest:SIZE` is an ext4 disk image. Read-only
+    /// by default — append `:rw` to grant writes. Guest path must be
+    /// under /data, /work, or /mnt (system mounts are read-only).
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
     /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, docker, vz). Default: auto-detect per host
@@ -1330,6 +1380,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             policy_dir: None,
             bundle_pin,
             deps_volume: deps_volume_binding.clone(),
+            // Re-exec path: user volumes aren't threaded here.
+            shares: Vec::new(),
         })?;
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -1352,6 +1404,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             stash_plan_for_bridge(&start_config)?;
         }
 
+        enforce_shares_if(&admission, &start_config.volumes)?;
         let backend = AnyBackend::from_hypervisor(effective_hypervisor);
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission, "backend-start", &e);
@@ -1578,36 +1631,70 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         None => image::RuntimeConfig::default(),
     };
 
-    // Partition --volume specs into dir-inject (config/secrets) and persistent volumes
+    // Partition volume specs (MVM_VOLUMES env baseline + --volume flags)
+    // into the config/secret-drive special-cases and generic
+    // shares/disks. `/mnt/config` + `/mnt/secrets` *directory* specs are
+    // intercepted as RO config/secret drives (the long-standing
+    // contract); everything else becomes a virtio-fs share or virtio-blk
+    // disk, validated against the reserved-mount list and the
+    // encryption-not-yet gate.
     let mut volume_cfg: Vec<image::RuntimeVolume> = Vec::new();
     let mut config_files: Vec<microvm::DriveFile> = Vec::new();
     let mut secret_files: Vec<microvm::DriveFile> = Vec::new();
 
-    if !volumes.is_empty() {
-        for v in volumes {
-            match parse_volume_spec(v)? {
-                VolumeSpec::DirInject {
+    let merged_volumes = merge_volume_specs(volumes);
+    if !merged_volumes.is_empty() {
+        for v in &merged_volumes {
+            let spec = parse_volume_spec(v)?;
+            match &spec {
+                VolumeSpec::DirShare {
                     host_dir,
                     guest_mount,
-                } => match guest_mount.as_str() {
-                    "/mnt/config" => {
-                        config_files.extend(
-                            read_dir_to_drive_files(&host_dir, 0o444)
-                                .with_context(|| format!("reading volume '{}'", v))?,
-                        );
+                    ..
+                } if guest_mount == "/mnt/config" => {
+                    config_files.extend(
+                        read_dir_to_drive_files(host_dir, 0o444)
+                            .with_context(|| format!("reading volume '{v}'"))?,
+                    );
+                }
+                VolumeSpec::DirShare {
+                    host_dir,
+                    guest_mount,
+                    ..
+                } if guest_mount == "/mnt/secrets" => {
+                    secret_files.extend(
+                        read_dir_to_drive_files(host_dir, 0o400)
+                            .with_context(|| format!("reading volume '{v}'"))?,
+                    );
+                }
+                _ => {
+                    let vmv = vm_volume_from_spec_validated(&spec)
+                        .with_context(|| format!("volume '{v}'"))?;
+                    // Claim-1 visibility: host-fs access is never silent.
+                    // A read-WRITE grant lets a (possibly untrusted) guest
+                    // modify host files — warn loudly; a read-only share
+                    // is the safe default, so just note it.
+                    let kind_label = match vmv.kind {
+                        mvm_core::vm_backend::VmVolumeKind::DirShare => "host directory",
+                        mvm_core::vm_backend::VmVolumeKind::Disk => "disk image",
+                    };
+                    if vmv.read_only {
+                        ui::info(&format!(
+                            "Sharing {kind_label} '{}' into the guest at '{}' (read-only).",
+                            vmv.host, vmv.guest,
+                        ));
+                    } else {
+                        ui::warn(&format!(
+                            "READ-WRITE: {kind_label} '{}' is mounted writable at '{}' — \
+                             the guest can modify this host path. Drop ':rw' to share read-only.",
+                            vmv.host, vmv.guest,
+                        ));
                     }
-                    "/mnt/secrets" => {
-                        secret_files.extend(
-                            read_dir_to_drive_files(&host_dir, 0o400)
-                                .with_context(|| format!("reading volume '{}'", v))?,
-                        );
-                    }
-                    other => anyhow::bail!(
-                        "Unsupported guest mount '{}'. Supported: /mnt/config, /mnt/secrets",
-                        other
-                    ),
-                },
-                VolumeSpec::Persistent(vol) => volume_cfg.push(vol),
+                    // Sparse-create a disk-image volume's backing file so
+                    // the hypervisor can attach it (no-op for dir shares).
+                    materialize_disk_volume(&vmv).with_context(|| format!("volume '{v}'"))?;
+                    volume_cfg.push(image::RuntimeVolume::from(&vmv));
+                }
             }
         }
     } else {
@@ -1689,6 +1776,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         policy_dir: None,
         bundle_pin,
         deps_volume: deps_volume_binding.clone(),
+        shares: shares_from_volume_cfg(&volume_cfg),
     })?;
 
     // If a template snapshot exists AND the backend supports snapshots,
@@ -1833,6 +1921,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             return Ok(());
         }
 
+        enforce_shares_if(&admission_main, &start_config.volumes)?;
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission_main, "backend-start", &e);
             return Err(e);
@@ -1898,6 +1987,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let agent_ready = wait_for_guest_agent(&vm_name_owned, 30);
         if agent_ready {
             record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentReady);
+            // User volumes are mounted in-guest by mkGuest's /init from
+            // the `mvm.uvols=` kernel cmdline (the backend attached each
+            // as a virtio-fs tag) — no post-boot RPC needed here.
             // Plan 74 W2 — same audit-emit as the FC path. Apple
             // Container backend captures the guest console to
             // the same `<vm_dir>/console.log` convention; the
@@ -2071,26 +2163,33 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             let mut w_volume_cfg: Vec<image::RuntimeVolume> = Vec::new();
             let mut w_config_files: Vec<microvm::DriveFile> = Vec::new();
             let mut w_secret_files: Vec<microvm::DriveFile> = Vec::new();
-            if !volumes.is_empty() {
-                for v in volumes {
+            let w_merged_volumes = merge_volume_specs(volumes);
+            if !w_merged_volumes.is_empty() {
+                for v in &w_merged_volumes {
                     match parse_volume_spec(v) {
-                        Ok(VolumeSpec::DirInject {
+                        Ok(VolumeSpec::DirShare {
                             host_dir,
                             guest_mount,
-                        }) => match guest_mount.as_str() {
-                            "/mnt/config" => {
-                                if let Ok(files) = read_dir_to_drive_files(&host_dir, 0o444) {
-                                    w_config_files.extend(files);
-                                }
+                            ..
+                        }) if guest_mount == "/mnt/config" => {
+                            if let Ok(files) = read_dir_to_drive_files(&host_dir, 0o444) {
+                                w_config_files.extend(files);
                             }
-                            "/mnt/secrets" => {
-                                if let Ok(files) = read_dir_to_drive_files(&host_dir, 0o400) {
-                                    w_secret_files.extend(files);
-                                }
+                        }
+                        Ok(VolumeSpec::DirShare {
+                            host_dir,
+                            guest_mount,
+                            ..
+                        }) if guest_mount == "/mnt/secrets" => {
+                            if let Ok(files) = read_dir_to_drive_files(&host_dir, 0o400) {
+                                w_secret_files.extend(files);
                             }
-                            _ => {}
-                        },
-                        Ok(VolumeSpec::Persistent(vol)) => w_volume_cfg.push(vol),
+                        }
+                        Ok(spec) => {
+                            if let Ok(vmv) = vm_volume_from_spec_validated(&spec) {
+                                w_volume_cfg.push(image::RuntimeVolume::from(&vmv));
+                            }
+                        }
                         Err(_) => {}
                     }
                 }
@@ -2126,6 +2225,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 policy_dir: None,
                 bundle_pin,
                 deps_volume: deps_volume_binding.clone(),
+                shares: shares_from_volume_cfg(&w_volume_cfg),
             }) {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -2164,6 +2264,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 // re-boot; the prior admission's files are stale.
                 stash_plan_for_bridge(&w_start_config)?;
             }
+            enforce_shares_if(&watch_admission, &w_start_config.volumes)?;
             let w_backend = AnyBackend::from_hypervisor(effective_hypervisor);
             if let Err(e) = w_backend.start(&w_start_config) {
                 emit_failed_if(&watch_admission, "backend-start", &e);
@@ -2408,6 +2509,7 @@ mod admit_plan_tests {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -2437,6 +2539,7 @@ mod admit_plan_tests {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2487,6 +2590,7 @@ mod admit_plan_tests {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -2523,6 +2627,7 @@ mod admit_plan_tests {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .unwrap()
         .unwrap();
@@ -2543,6 +2648,7 @@ mod admit_plan_tests {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .unwrap()
         .unwrap();
@@ -2605,6 +2711,7 @@ mod admit_plan_tests {
             policy_dir: Some(policy_dir.path()),
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2691,6 +2798,7 @@ chain_signing = true
                 destroy_on_exit: true,
                 bundle_pin: None,
                 deps_volume: None,
+                shares: Vec::new(),
             },
             &SystemClock,
             &ledger,
@@ -2789,6 +2897,7 @@ stream_destinations = ["file://{}"]
                 destroy_on_exit: true,
                 bundle_pin: None,
                 deps_volume: None,
+                shares: Vec::new(),
             },
             &SystemClock,
             &ledger,
@@ -2886,6 +2995,7 @@ chain_signing = false
                 destroy_on_exit: true,
                 bundle_pin: None,
                 deps_volume: None,
+                shares: Vec::new(),
             },
             &SystemClock,
             &ledger,
@@ -2958,6 +3068,7 @@ chain_signing = false
                 destroy_on_exit: true,
                 bundle_pin: None,
                 deps_volume: None,
+                shares: Vec::new(),
             },
             &SystemClock,
             &ledger,
@@ -3050,6 +3161,7 @@ disabled_inspectors = ["ssrf_guarrd"]
                 destroy_on_exit: true,
                 bundle_pin: None,
                 deps_volume: None,
+                shares: Vec::new(),
             },
             &SystemClock,
             &ledger,
@@ -3148,6 +3260,7 @@ port_hi  = 443
                 destroy_on_exit: true,
                 bundle_pin: None,
                 deps_volume: None,
+                shares: Vec::new(),
             },
             &SystemClock,
             &ledger,

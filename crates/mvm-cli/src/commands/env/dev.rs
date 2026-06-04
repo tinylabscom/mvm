@@ -24,10 +24,14 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
 
+use crate::commands::shared::{
+    clap_volume_spec, materialize_disk_volumes, merge_volume_specs, parse_volume_spec,
+    vm_volume_from_spec_validated,
+};
 use mvm_backend::{LibkrunBackend, VzBackend};
 use mvm_core::platform::{self, Platform};
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig, VmStatus};
+use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig, VmStatus, VmVolume};
 
 use super::super::vm::console;
 use super::Cli;
@@ -212,6 +216,13 @@ pub(in crate::commands) enum DevAction {
         /// Start the dev VM without attaching an interactive shell.
         #[arg(long, conflicts_with = "shell")]
         no_shell: bool,
+        /// Attach a custom volume (repeatable). Appends to `MVM_VOLUMES`.
+        /// `host:/guest` shares a host dir (virtio-fs); `host:/guest:SIZE`
+        /// attaches an ext4 disk image. Read-only by default — append
+        /// `:rw` to grant writes. Guest path must be under /data, /work,
+        /// or /mnt (system mounts stay read-only).
+        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
+        volume: Vec<String>,
     },
     /// Stop the development VM.
     Down {
@@ -244,6 +255,10 @@ pub(in crate::commands) enum DevAction {
         /// Open an interactive shell after rebuilding.
         #[arg(long, short = 's')]
         shell: bool,
+        /// Attach a custom volume (repeatable). Appends to `MVM_VOLUMES`.
+        /// See `mvmctl dev up --help` for the spec grammar.
+        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
+        volume: Vec<String>,
     },
     /// Import a dev image from local files (air-gapped install).
     ///
@@ -382,7 +397,46 @@ fn take_over_from_other_backend(current: DevVmBackend) -> Result<()> {
     Ok(())
 }
 
-fn cmd_dev_libkrun(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
+/// Resolve the dev VM's custom volumes: `MVM_VOLUMES` env baseline +
+/// `--volume` flags, parsed and validated (reserved-mount + encryption
+/// gates) into backend-agnostic [`VmVolume`]s. The dev VM is the
+/// dev-tier builder (not the hardened workload tier), so these are a
+/// host-side convenience — but the same path-safety validation still
+/// applies (a stray `-v ~/.mvm/keys:/x` must not silently expose host
+/// secrets to the builder).
+fn resolve_dev_volumes(flag: &[String]) -> Result<Vec<VmVolume>> {
+    let volumes: Vec<VmVolume> = merge_volume_specs(flag)
+        .iter()
+        .map(|v| {
+            let spec = parse_volume_spec(v)?;
+            vm_volume_from_spec_validated(&spec).map_err(|e| anyhow::anyhow!("volume '{v}': {e}"))
+        })
+        .collect::<Result<_>>()?;
+    // Sparse-create any disk-image volumes so the hypervisor can attach
+    // them (dir shares need nothing).
+    materialize_disk_volumes(&volumes)?;
+    Ok(volumes)
+}
+
+/// Custom dev volumes are wired for the libkrun + Vz dev VMs only. The
+/// Apple Container and native-Linux dev paths don't thread them yet —
+/// warn loudly rather than silently dropping the user's `-v` request.
+fn warn_dev_volumes_unsupported(volumes: &[VmVolume], backend: &str) {
+    if !volumes.is_empty() {
+        ui::warn(&format!(
+            "Ignoring {} custom volume(s): the {backend} dev backend doesn't support \
+             --volume yet (libkrun and Vz do).",
+            volumes.len()
+        ));
+    }
+}
+
+fn cmd_dev_libkrun(
+    cpus: u32,
+    memory_gib: u32,
+    open_shell: bool,
+    volumes: &[VmVolume],
+) -> Result<()> {
     let backend = LibkrunBackend;
     let id = VmId(apple_container::DEV_VM_NAME.to_string());
 
@@ -408,6 +462,7 @@ fn cmd_dev_libkrun(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
         memory_mib,
         flake_ref: "mvm-dev".into(),
         profile: Some("dev".into()),
+        volumes: volumes.to_vec(),
         ..Default::default()
     };
     backend.start(&config)?;
@@ -465,7 +520,7 @@ fn cmd_dev_libkrun_status() -> Result<()> {
 /// already honours `MVM_BUILDER_BACKEND` through the Phase 1
 /// selection layer — so the same flake produces the same artifacts
 /// regardless of which dev backend boots them.
-fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
+fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool, volumes: &[VmVolume]) -> Result<()> {
     let backend = VzBackend;
     let id = VmId(apple_container::DEV_VM_NAME.to_string());
 
@@ -491,6 +546,7 @@ fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
         memory_mib,
         flake_ref: "mvm-dev".into(),
         profile: Some("dev".into()),
+        volumes: volumes.to_vec(),
         ..Default::default()
     };
     backend.start(&config)?;
@@ -549,6 +605,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         watch_config: false,
         shell: true,
         no_shell: false,
+        volume: Vec::new(),
     });
 
     // Plan 98 Slice 2B — §2.C1 grace guard removed. `current_backend()`
@@ -565,6 +622,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             watch_config: _watch_config,
             shell,
             no_shell,
+            volume,
         } => {
             // CLI flag wins; otherwise fall back to per-user config defaults.
             let effective_cpus = if cpus == 8 { cfg.dev_vm_cpus } else { cpus };
@@ -574,6 +632,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 memory
             };
             let open_shell = effective_up_shell(shell, no_shell);
+            let dev_volumes = resolve_dev_volumes(&volume)?;
 
             // Reap helpers (gvproxy/supervisor) leaked by a prior killed
             // run before booting a fresh builder VM. Kill-only, quiet,
@@ -581,14 +640,24 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             apple_container::sweep_orphaned_vm_helpers_on_startup();
 
             match backend {
-                DevBackend::Libkrun => cmd_dev_libkrun(effective_cpus, effective_mem, open_shell),
-                DevBackend::Vz => cmd_dev_vz(effective_cpus, effective_mem, open_shell),
-                DevBackend::AppleContainer => apple_container::cmd_dev_apple_container(
-                    effective_cpus,
-                    effective_mem,
-                    open_shell,
-                ),
-                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native(open_shell),
+                DevBackend::Libkrun => {
+                    cmd_dev_libkrun(effective_cpus, effective_mem, open_shell, &dev_volumes)
+                }
+                DevBackend::Vz => {
+                    cmd_dev_vz(effective_cpus, effective_mem, open_shell, &dev_volumes)
+                }
+                DevBackend::AppleContainer => {
+                    warn_dev_volumes_unsupported(&dev_volumes, "Apple Container");
+                    apple_container::cmd_dev_apple_container(
+                        effective_cpus,
+                        effective_mem,
+                        open_shell,
+                    )
+                }
+                DevBackend::LinuxKvm => {
+                    warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
+                    linux_native::cmd_dev_linux_native(open_shell)
+                }
                 DevBackend::Unsupported => bail_no_dev_backend(),
             }
         }
@@ -688,6 +757,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             cpus,
             memory,
             shell,
+            volume,
         } => {
             // Down (best-effort — Rebuild semantics is "discard and
             // start over," so a stop failure here shouldn't block the
@@ -711,13 +781,20 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             } else {
                 memory
             };
+            let dev_volumes = resolve_dev_volumes(&volume)?;
             match backend {
-                DevBackend::Libkrun => cmd_dev_libkrun(effective_cpus, effective_mem, shell),
-                DevBackend::Vz => cmd_dev_vz(effective_cpus, effective_mem, shell),
+                DevBackend::Libkrun => {
+                    cmd_dev_libkrun(effective_cpus, effective_mem, shell, &dev_volumes)
+                }
+                DevBackend::Vz => cmd_dev_vz(effective_cpus, effective_mem, shell, &dev_volumes),
                 DevBackend::AppleContainer => {
+                    warn_dev_volumes_unsupported(&dev_volumes, "Apple Container");
                     apple_container::cmd_dev_apple_container(effective_cpus, effective_mem, shell)
                 }
-                DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native(shell),
+                DevBackend::LinuxKvm => {
+                    warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
+                    linux_native::cmd_dev_linux_native(shell)
+                }
                 DevBackend::Unsupported => bail_no_dev_backend(),
             }
         }

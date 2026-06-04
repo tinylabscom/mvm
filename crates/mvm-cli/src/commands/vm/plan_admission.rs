@@ -354,6 +354,47 @@ pub(crate) fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -
     Ok(())
 }
 
+/// Tier A.1 admission enforcement: every volume about to be attached
+/// must be named in the verified `ExecutionPlan.shares`, with matching
+/// host path, guest path, kind, ro/rw, and encryption.
+///
+/// On the local `mvmctl up`/`dev` path the CLI builds both the signed
+/// plan and the launch config from one source, so this is self-consistent
+/// by construction — but it **fails closed** if they ever diverge (a CLI
+/// bug, or a future caller that hands a config the plan didn't authorize).
+/// It's the trust-boundary hook: no host-fs grant reaches a guest unless
+/// the signed plan admitted it (claim 1 / claim 8). The supervisor +
+/// mvmd enforcement mirror this check against the same `plan.shares`.
+pub(crate) fn enforce_admitted_shares(
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    plan: &ExecutionPlan,
+) -> Result<()> {
+    use mvm_core::vm_backend::VmVolumeKind;
+    for v in volumes {
+        let want_kind = match v.kind {
+            VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
+            VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
+        };
+        let admitted = plan.shares.iter().any(|g| {
+            g.host_path == v.host
+                && g.guest_path == v.guest
+                && g.kind == want_kind
+                && g.read_only == v.read_only
+                && g.encrypted == v.encrypted
+        });
+        if !admitted {
+            anyhow::bail!(
+                "refusing to attach volume '{}' -> '{}' ({}): it is not named in the signed \
+                 ExecutionPlan's admitted shares — every host-fs grant must be admitted (claim 1).",
+                v.host,
+                v.guest,
+                if v.read_only { "ro" } else { "rw" },
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +428,7 @@ mod tests {
             destroy_on_exit: true,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         }
     }
 
@@ -396,6 +438,52 @@ mod tests {
         fn now(&self) -> DateTime<Utc> {
             self.0
         }
+    }
+
+    /// Tier A.1 / claim 1: a volume that the signed plan didn't admit —
+    /// or that mismatches the admitted ro/rw — is refused before launch.
+    #[test]
+    fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let grant = mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/h/src".into(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+        };
+        let mut input = fixture_input("vm-shares");
+        input.shares = vec![grant];
+        let plan = synthesize_plan(&input).unwrap();
+
+        let admitted_vol = VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: VmVolumeKind::DirShare,
+            ..Default::default()
+        };
+        // The exact admitted volume passes.
+        assert!(enforce_admitted_shares(std::slice::from_ref(&admitted_vol), &plan).is_ok());
+
+        // A volume the plan never named is refused.
+        let unadmitted = VmVolume {
+            host: "/etc".into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: VmVolumeKind::DirShare,
+            ..Default::default()
+        };
+        assert!(enforce_admitted_shares(&[unadmitted], &plan).is_err());
+
+        // Same path/kind, but read-WRITE when the plan admitted read-only:
+        // an unauthorized escalation, refused.
+        let escalated = VmVolume {
+            read_only: false,
+            ..admitted_vol
+        };
+        assert!(enforce_admitted_shares(&[escalated], &plan).is_err());
     }
 
     #[test]
