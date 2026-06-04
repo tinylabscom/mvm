@@ -1706,6 +1706,19 @@ const KERNEL_PANIC_BANNER: &str = "Kernel panic - not syncing";
 /// handle a partial last line spanning multiple reads.
 const PANIC_WATCHER_BUFFER_CAP: usize = 4096;
 
+/// Under `--verbose`, forward freshly-read console bytes to `sink`
+/// (stderr in production). Extracted so the verbose-gating is unit
+/// testable without capturing process stderr. Write errors are
+/// silently dropped — the echo must never fail the build.
+// Task A2 wires this into the read loop; allow until then.
+#[allow(dead_code)]
+fn echo_console_chunk(sink: &mut impl Write, verbose: bool, chunk: &[u8]) {
+    if verbose && !chunk.is_empty() {
+        let _ = sink.write_all(chunk);
+        let _ = sink.flush();
+    }
+}
+
 /// Tail `console_log` for the kernel panic banner. On match, stores
 /// the matching line into `panic_line` and returns. Polls every
 /// `poll_interval` until either a match is found or `stop` is set.
@@ -3031,5 +3044,16 @@ mod tests {
         assert_eq!(log, dir.join("console.log"));
         // Trait-object safety: confirm the impl satisfies `&dyn ...`.
         let _erased: &dyn VmBackendForBuilder = &backend;
+    }
+
+    #[test]
+    fn echo_console_chunk_writes_only_when_verbose() {
+        let mut sink: Vec<u8> = Vec::new();
+        echo_console_chunk(&mut sink, false, b"hello");
+        assert!(sink.is_empty(), "quiet mode must not echo");
+        echo_console_chunk(&mut sink, true, b"hello");
+        assert_eq!(sink, b"hello", "verbose mode echoes the chunk verbatim");
+        echo_console_chunk(&mut sink, true, b"");
+        assert_eq!(sink, b"hello", "empty chunk is a no-op");
     }
 }
