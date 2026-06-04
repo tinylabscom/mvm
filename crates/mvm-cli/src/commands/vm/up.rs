@@ -1545,7 +1545,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 vm_name
             ),
         );
-        let (kernel, rootfs) = ensure_default_microvm_image()?;
+        let (kernel, rootfs) = ensure_default_microvm_image(build_mode)?;
         (
             kernel,
             None,

@@ -3885,31 +3885,233 @@ mod builder_backend_attempt_order_tests {
     }
 }
 
-/// Ensure the bundled default microVM image (kernel + rootfs) is in the cache.
+/// Ensure the bundled default microVM image (kernel + rootfs) is in the cache,
+/// keyed on `BuildMode` (Plan 158). Used by any image-taking command when no
+/// `--flake`/`--template`/`--image` was supplied. Returns `(kernel, rootfs)`;
+/// the verity + `mvm-meta.json` sidecars land alongside the rootfs.
 ///
-/// Used by any image-taking command when no `--flake` or `--manifest` was
-/// supplied. Returns `(kernel_path, rootfs_path)`.
-///
-/// Downloads a pre-built image from the matching GitHub release when
-/// the local cache is empty.
-pub(crate) fn ensure_default_microvm_image() -> Result<(String, String)> {
-    let cache_dir = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
-    std::fs::create_dir_all(&cache_dir)?;
-
-    let kernel_path = format!("{cache_dir}/vmlinux");
-    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-
-    if std::path::Path::new(&kernel_path).exists() && std::path::Path::new(&rootfs_path).exists() {
-        return Ok((kernel_path, rootfs_path));
+/// - **Prod** downloads the published, verity-sealed prod image (the
+///   `default-microvm-*` release assets), hash-verified.
+/// - **Dev** builds the accessible dev variant locally from the in-repo flake
+///   via the builder VM — dev images are never published.
+pub(crate) fn ensure_default_microvm_image(
+    mode: mvm_build::pipeline::BuildMode,
+) -> Result<(String, String)> {
+    use mvm_build::pipeline::BuildMode;
+    let base = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
+    match mode {
+        BuildMode::Prod => {
+            let cache_dir = format!("{base}/prod");
+            std::fs::create_dir_all(&cache_dir)?;
+            let kernel_path = format!("{cache_dir}/vmlinux");
+            let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+            // All five must be present before skipping the download — a cache
+            // that predates Plan 158 has only vmlinux + rootfs.ext4 and would
+            // fail admission (no overlay-aware sidecar, no verity).
+            let required = [
+                kernel_path.clone(),
+                rootfs_path.clone(),
+                format!("{cache_dir}/mvm-meta.json"),
+                format!("{cache_dir}/rootfs.verity"),
+                format!("{cache_dir}/rootfs.roothash"),
+            ];
+            if required.iter().all(|p| std::path::Path::new(p).exists()) {
+                return Ok((kernel_path, rootfs_path));
+            }
+            download_default_microvm_image(&cache_dir, &kernel_path, &rootfs_path)
+        }
+        BuildMode::Dev => ensure_default_microvm_dev_image(&format!("{base}/dev")),
     }
-
-    download_default_microvm_image(&kernel_path, &rootfs_path)
 }
 
-/// Download a pre-built default microVM image (kernel + rootfs) from the
-/// matching GitHub release. Mirrors `download_dev_image`, including the
-/// ADR-002 §W5.1 hash-verify path.
+/// Dev-mode default image: build the accessible `dev` variant locally from the
+/// in-repo `nix/images/default-tenant` flake via the builder VM (not published).
+#[cfg(feature = "builder-vm")]
+fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)> {
+    std::fs::create_dir_all(cache_dir)?;
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+    let meta_path = format!("{cache_dir}/mvm-meta.json");
+    if [&kernel_path, &rootfs_path, &meta_path]
+        .iter()
+        .all(|p| std::path::Path::new(p).exists())
+    {
+        return Ok((kernel_path, rootfs_path));
+    }
+    ui::info("Building the dev default microVM image locally (dev mode)...");
+    build_default_microvm_dev_via_libkrun(cache_dir)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn ensure_default_microvm_dev_image(_cache_dir: &str) -> Result<(String, String)> {
+    anyhow::bail!(
+        "dev mode builds the default image locally via the builder VM, but this \
+         mvmctl was built without the `builder-vm` feature. Use `--prod` (downloads \
+         the published image), or pass a `--flake`."
+    )
+}
+
+/// Build the bundled **dev** default microVM image via the libkrun builder VM:
+/// `nix build nix/images/default-tenant#packages.<sys>.dev` inside the guest,
+/// extracting `vmlinux` + `rootfs.ext4` + `mvm-meta.json` to `out_dir`. Mirrors
+/// [`build_image_via_libkrun`] but targets the default-tenant flake. Plan 158.
+#[cfg(feature = "builder-vm")]
+fn build_default_microvm_dev_via_libkrun(out_dir: &str) -> Result<(String, String)> {
+    use mvm_build::builder_backend_select::{
+        resolve_builder_backend_with_override, resolve_choice, resolve_env_override,
+    };
+    use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
+
+    bootstrap_builder_vm_image()
+        .context("Stage 0 builder-VM image bootstrap (precondition for libkrun dispatch)")?;
+
+    // The default-tenant flake reads the workspace via the `/work` mount the
+    // builder VM sets (`MVM_WORKSPACE_PATH=/work`), same as the builder-vm flake.
+    let builder_flake = find_builder_vm_flake().context(
+        "builder-vm flake missing at nix/images/builder-vm/flake.nix; libkrun dispatch needs it",
+    )?;
+    let workspace_root = std::path::Path::new(&builder_flake)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("Cannot derive workspace root from {builder_flake}"))?
+        .to_path_buf();
+
+    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
+    let host_bin_dir =
+        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
+            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("creating default-microvm dev out dir {out_dir}"))?;
+
+    let job = BuilderJob::Flake {
+        flake_ref: "path:/work/nix/images/default-tenant".to_string(),
+        attr_path: format!("packages.{}.dev", host_system_linux()),
+    };
+    let mounts = BuilderMounts {
+        flake_src: workspace_root,
+        host_nix_store: None,
+        artifact_out: std::path::PathBuf::from(out_dir),
+        host_bin_dir,
+        staged_user_flake: None,
+    };
+
+    let selected = resolve_choice();
+    let explicit_override = resolve_env_override().is_some();
+    let attempt_order = builder_backend_attempt_order(selected, explicit_override);
+    let mut last_error = None;
+    for (idx, choice) in attempt_order.iter().copied().enumerate() {
+        let backend = resolve_builder_backend_with_override(Some(choice));
+        match backend.run_build(&job, &mounts) {
+            Ok(_) => {
+                last_error = None;
+                break;
+            }
+            Err(err) => {
+                if idx + 1 < attempt_order.len() {
+                    ui::warn(&format!(
+                        "Auto-selected {} builder failed ({}); retrying with {}.",
+                        choice.name(),
+                        err,
+                        attempt_order[idx + 1].name(),
+                    ));
+                }
+                last_error = Some(anyhow::anyhow!("{} builder VM: {err}", choice.name()));
+            }
+        }
+    }
+    if let Some(err) = last_error {
+        return Err(err);
+    }
+
+    let kernel = format!("{out_dir}/vmlinux");
+    let rootfs = format!("{out_dir}/rootfs.ext4");
+    let meta = format!("{out_dir}/mvm-meta.json");
+    for (label, p) in [
+        ("vmlinux", &kernel),
+        ("rootfs.ext4", &rootfs),
+        ("mvm-meta.json", &meta),
+    ] {
+        if !std::path::Path::new(p).exists() {
+            anyhow::bail!("builder VM exited cleanly but did not produce {label} at {p}");
+        }
+    }
+    Ok((kernel, rootfs))
+}
+
+/// The (release asset name, local destination) contract for the prod default
+/// microVM image. Release names match the `default-microvm` job in
+/// `release.yml`; local names are the rootfs siblings the backend verity probe
+/// (`microvm.rs::probe_verity_sidecar`) and `admit_overlay_aware` expect. Pure
+/// — pinned by `default_microvm_assets_pins_the_five_asset_contract`.
+fn default_microvm_assets(cache_dir: &str, arch: &str) -> [(String, String); 5] {
+    [
+        (
+            format!("default-microvm-vmlinux-{arch}"),
+            format!("{cache_dir}/vmlinux"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.ext4"),
+            format!("{cache_dir}/rootfs.ext4"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.verity"),
+            format!("{cache_dir}/rootfs.verity"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.roothash"),
+            format!("{cache_dir}/rootfs.roothash"),
+        ),
+        (
+            format!("default-microvm-meta-{arch}.json"),
+            format!("{cache_dir}/mvm-meta.json"),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod default_microvm_tests {
+    use super::default_microvm_assets;
+
+    #[test]
+    fn default_microvm_assets_pins_the_five_asset_contract() {
+        let a = default_microvm_assets("/cache/dm", "aarch64");
+        let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "default-microvm-vmlinux-aarch64",
+                "default-microvm-rootfs-aarch64.ext4",
+                "default-microvm-rootfs-aarch64.verity",
+                "default-microvm-rootfs-aarch64.roothash",
+                "default-microvm-meta-aarch64.json",
+            ],
+            "release asset names must match the default-microvm release job",
+        );
+        let dests: Vec<&str> = a.iter().map(|(_, d)| d.as_str()).collect();
+        assert_eq!(
+            dests,
+            vec![
+                "/cache/dm/vmlinux",
+                "/cache/dm/rootfs.ext4",
+                "/cache/dm/rootfs.verity",
+                "/cache/dm/rootfs.roothash",
+                "/cache/dm/mvm-meta.json",
+            ],
+            "local dests must be the rootfs siblings the backend + admit gate expect",
+        );
+    }
+}
+
+/// Download the pre-built **prod** default microVM image from the matching
+/// GitHub release: kernel + verity-sealed rootfs + the `rootfs.verity` /
+/// `rootfs.roothash` sidecars + the overlay-aware `mvm-meta.json`. Every file
+/// is SHA-256-verified against the release checksums manifest (ADR-002 §W5.1).
+/// The sidecars land alongside the rootfs so the backend verity probe +
+/// `admit_overlay_aware` resolve them by path convention. Plan 158.
 fn download_default_microvm_image(
+    cache_dir: &str,
     kernel_path: &str,
     rootfs_path: &str,
 ) -> Result<(String, String)> {
@@ -3920,36 +4122,24 @@ fn download_default_microvm_image(
     } else {
         "x86_64"
     };
-    let kernel_name = format!("default-microvm-vmlinux-{arch}");
-    let rootfs_name = format!("default-microvm-rootfs-{arch}.ext4");
+
+    let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
-    let kernel_url = format!("{base_url}/{kernel_name}");
-    let rootfs_url = format!("{base_url}/{rootfs_name}");
     let checksums_url = format!("{base_url}/{checksums_name}");
 
     ui::info(&format!(
         "Downloading default microVM image (v{version})..."
     ));
 
-    let expected = fetch_expected_hashes(&checksums_url, &[&kernel_name, &rootfs_name])?;
+    let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
+    let expected = fetch_expected_hashes(&checksums_url, &asset_names)?;
 
-    ui::info("  Fetching kernel...");
-    download_file(&kernel_url, kernel_path)
-        .with_context(|| format!("Failed to download kernel from {kernel_url}"))?;
-    verify_artifact_hash(
-        kernel_path,
-        &kernel_name,
-        expected.get(kernel_name.as_str()),
-    )?;
-
-    ui::info("  Fetching rootfs...");
-    download_file(&rootfs_url, rootfs_path)
-        .with_context(|| format!("Failed to download rootfs from {rootfs_url}"))?;
-    verify_artifact_hash(
-        rootfs_path,
-        &rootfs_name,
-        expected.get(rootfs_name.as_str()),
-    )?;
+    for (name, dest) in &assets {
+        ui::info(&format!("  Fetching {name}..."));
+        let url = format!("{base_url}/{name}");
+        download_file(&url, dest).with_context(|| format!("Failed to download {url}"))?;
+        verify_artifact_hash(dest, name, expected.get(name.as_str()))?;
+    }
 
     ui::success("Default microVM image downloaded, hash-verified, and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))

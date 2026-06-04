@@ -30,8 +30,9 @@ pub struct ProbeImage {
 /// target (a `HostDescriptor`-comparable baseline).
 #[allow(dead_code)]
 pub fn resolve_probe_image() -> Result<ProbeImage> {
-    let (kernel, rootfs) =
-        ensure_default_microvm_image().context("resolving default-microvm bench image")?;
+    // Bench baseline boots the published, admitted prod default image.
+    let (kernel, rootfs) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
+        .context("resolving default-microvm bench image")?;
     Ok(ProbeImage { kernel, rootfs })
 }
 
