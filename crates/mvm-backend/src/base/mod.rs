@@ -31,7 +31,7 @@ pub mod shell;
 pub mod snapshot_integrity;
 pub mod ui;
 
-// Legacy re-export: `mvm_base::shell_mock::*` matches the
+// Legacy re-export: `crate::base::shell_mock::*` matches the
 // pre-W8 `mvm::shell_mock::*` path that mvmd's quic_integration
 // test relies on.
 pub use shell::mock as shell_mock;

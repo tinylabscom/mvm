@@ -131,7 +131,7 @@ mod tests {
     /// race each other. Reuses `HOME_TEST_LOCK` because we want
     /// serialization with any other registry-touching test (no
     /// other lock needs).
-    use mvm_base::runtime_meta::HOME_TEST_LOCK;
+    use crate::base::runtime_meta::HOME_TEST_LOCK;
 
     #[test]
     fn register_then_deregister_is_idempotent() {

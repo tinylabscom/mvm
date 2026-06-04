@@ -19,7 +19,6 @@ members = [
     # no Swift dep. Parallel role to `mvm-libkrun` for the Vz backend.
     "crates/mvm-vz",
     "crates/mvm-backend",
-    "crates/mvm-base",
     "crates/mvm",
     "crates/mvm-build",
     "crates/mvm-guest",
@@ -309,7 +308,6 @@ mvm-core = { path = "crates/mvm-core", version = "0.15.1" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.15.1" }
 mvm-build = { path = "crates/mvm-build", version = "0.15.1", default-features = false }
 mvm = { path = "crates/mvm", version = "0.15.1", default-features = false }
-mvm-base = { path = "crates/mvm-base", version = "0.15.1" }
 mvm-oci = { path = "crates/mvm-oci", version = "0.15.1" }
 mvm-security = { path = "crates/mvm-security", version = "0.15.1" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.15.1" }

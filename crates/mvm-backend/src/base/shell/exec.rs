@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use std::process::{Command, Output, Stdio};
 use tracing::instrument;
 
-use crate::config::VM_NAME;
-use crate::linux_env;
+use crate::base::config::VM_NAME;
+use crate::base::linux_env;
 
 /// Run a command on the host, capturing output.
 #[instrument(skip_all, fields(cmd, args_count = args.len()))]
@@ -51,7 +51,7 @@ pub fn run_on_vm(vm_name: &str, script: &str) -> Result<Output> {
     }
 
     // Custom VM name — can't use the default LinuxEnv (it's bound to VM_NAME)
-    if let Some(output) = crate::shell_mock::intercept(script) {
+    if let Some(output) = crate::base::shell_mock::intercept(script) {
         return Ok(output);
     }
 
@@ -122,7 +122,7 @@ pub fn run_on_vm_capture(vm_name: &str, script: &str) -> Result<Output> {
         return linux_env::default_env().run_capture(script);
     }
 
-    if let Some(output) = crate::shell_mock::intercept(script) {
+    if let Some(output) = crate::base::shell_mock::intercept(script) {
         return Ok(output);
     }
 

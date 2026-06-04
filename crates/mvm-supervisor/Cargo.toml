@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 mvm-core.workspace = true
-mvm-base.workspace = true
 mvm-backend.workspace = true
 mvm-plan.workspace = true
 mvm-policy.workspace = true

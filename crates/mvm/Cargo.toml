@@ -16,7 +16,6 @@ mvm-security.workspace = true
 mvm-guest.workspace = true
 mvm-build = { workspace = true, default-features = false }
 mvm-backend = { workspace = true, default-features = false }
-mvm-base.workspace = true
 anyhow.workspace = true
 # Plan 60 Phase 7a — `OverlayManager` is an async trait carrying
 # chrono timestamps + thiserror'd typed errors.

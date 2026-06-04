@@ -37,9 +37,9 @@ use mvm_core::vm_backend::{
     VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
+use crate::base::ui;
 use crate::host_gvproxy;
 use crate::vz_control;
-use mvm_base::ui;
 use mvm_vz as vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -208,7 +208,7 @@ impl VmBackend for VzBackend {
         let rootfs = Path::new(&config.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        mvm_base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
         // Plan 102 W6.A.5 — spawn host-side gvproxy so the Swift
         // supervisor has something to connect to. VzBackend is
@@ -1587,7 +1587,7 @@ mod tests {
 
     #[test]
     fn resolve_supervisor_path_honors_env_override() {
-        let _guard = mvm_base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1718,7 +1718,7 @@ mod tests {
 
     #[test]
     fn resolve_supervisor_path_env_pointing_at_missing_file_errors() {
-        let _guard = mvm_base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized by TEST_ENV_LOCK.

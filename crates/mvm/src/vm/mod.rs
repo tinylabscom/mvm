@@ -23,12 +23,12 @@ pub mod volume_registry;
 // runtime_meta}::*` paths. These have external consumers (mvmd's
 // `mvmctl::runtime` surface and the W6.2 console gate) so the
 // re-exports stay even after W8.B.3 migrated in-tree consumers.
-pub use mvm_base::{cow, runtime_meta};
+pub use mvm_backend::base::{cow, runtime_meta};
 
 /// Crate-wide test serialization for tests that mutate
 /// `MVM_DATA_DIR` (and thus rely on a process-global env var).
 /// Tests that mutate `HOME` use
-/// [`mvm_base::runtime_meta::HOME_TEST_LOCK`] instead.
+/// [`mvm_backend::base::runtime_meta::HOME_TEST_LOCK`] instead.
 /// Tests that mutate other process-globals can grab their own lock
 /// or pile onto one of these — the goal is "no two tests touch the
 /// same env var concurrently."

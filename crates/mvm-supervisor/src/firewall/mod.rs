@@ -52,7 +52,7 @@ impl FirewallSpec {
     /// supervisor still supplies the proxy interface because that is
     /// owned by the L4/L7 enforcement layer, not by the backend slot.
     pub fn from_vm_slot(
-        slot: &mvm_base::config::VmSlot,
+        slot: &mvm_backend::base::config::VmSlot,
         proxy_iface: impl Into<String>,
     ) -> Result<Self, FirewallError> {
         let spec = Self::new(&slot.name, &slot.tap_dev, proxy_iface);
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn firewall_spec_derives_from_vm_slot() {
-        let slot = mvm_base::config::VmSlot::new("worker-1", 7);
+        let slot = mvm_backend::base::config::VmSlot::new("worker-1", 7);
         let spec = FirewallSpec::from_vm_slot(&slot, "mvmtun0").expect("valid slot");
 
         assert_eq!(spec.vm_id, "worker-1");
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn firewall_spec_from_vm_slot_rejects_unsafe_proxy_iface() {
-        let slot = mvm_base::config::VmSlot::new("worker-1", 7);
+        let slot = mvm_backend::base::config::VmSlot::new("worker-1", 7);
         let err = FirewallSpec::from_vm_slot(&slot, "tun; rm").unwrap_err();
 
         assert!(matches!(
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn firewall_spec_from_vm_slot_rejects_unsafe_vm_name() {
-        let slot = mvm_base::config::VmSlot::new("worker/1", 7);
+        let slot = mvm_backend::base::config::VmSlot::new("worker/1", 7);
         let err = FirewallSpec::from_vm_slot(&slot, "mvmtun0").unwrap_err();
 
         assert!(matches!(

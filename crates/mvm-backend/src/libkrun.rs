@@ -29,7 +29,7 @@ use mvm_core::vm_backend::{
     VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
-use mvm_base::ui;
+use crate::base::ui;
 use mvm_libkrun::{KrunContext, SupervisorConfig};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -195,7 +195,7 @@ impl VmBackend for LibkrunBackend {
         // file or krun handle behind.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        mvm_base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;

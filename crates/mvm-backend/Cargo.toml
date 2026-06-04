@@ -36,10 +36,9 @@ authors.workspace = true
 [dependencies]
 mvm-core.workspace = true
 mvm-guest.workspace = true
-mvm-base.workspace = true
 # `mvm-build` for the W2 overlay-aware admission gate
 # (`builder_vm::admit_overlay_aware`) called from every backend's
-# `start` impl. The mvm-base sidecar reader already pulls
+# `start` impl. The base substrate's sidecar reader already pulls
 # `mvm-build`, so this doesn't widen the dependency graph.
 mvm-build.workspace = true
 mvm-providers.workspace = true
@@ -47,6 +46,14 @@ mvm-libkrun.workspace = true
 # Plan 97 Phase B — Vz backend foundation crate (SupervisorConfig types,
 # supervisor-binary path resolution). Pure data + helpers; no Swift dep.
 mvm-vz.workspace = true
+# Folded in with the former mvm-base crate (plan 121 A2): the base
+# substrate's ui (colored/indicatif/inquire spinners + prompts),
+# secret handling (secrecy), and crypto (mvm-security) helpers.
+mvm-security.workspace = true
+colored.workspace = true
+indicatif.workspace = true
+inquire.workspace = true
+secrecy.workspace = true
 
 anyhow.workspace = true
 thiserror = "1"

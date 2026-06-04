@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use tracing::{instrument, warn};
 
+use crate::base::config::*;
+use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
+use crate::base::ui;
 use crate::image::RuntimeVolume;
 use crate::{firecracker, network};
-use mvm_base::config::*;
-use mvm_base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
-use mvm_base::ui;
 
 // ============================================================================
 // RAII resource guards — prevent leaks when VM launch fails partway through
@@ -574,7 +574,7 @@ pub struct FlakeRunConfig {
     /// Extra files to write onto the secrets drive.
     pub secret_files: Vec<DriveFile>,
     /// Declared port mappings (host:guest) for forwarding and guest config.
-    pub ports: Vec<mvm_base::config::PortMapping>,
+    pub ports: Vec<crate::base::config::PortMapping>,
     /// Network policy controlling outbound traffic from this VM.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
@@ -760,7 +760,7 @@ pub fn restore_from_template_snapshot(
     // should happen if we're going to refuse the bytes anyway. A
     // missing sidecar is a non-fatal warning unless
     // `MVM_SNAPSHOT_HMAC_STRICT=1`.
-    mvm_base::snapshot_integrity::verify_snapshot_artifacts(snapshot_dir)?;
+    crate::base::snapshot_integrity::verify_snapshot_artifacts(snapshot_dir)?;
 
     let slot = &config.slot;
 
@@ -1587,7 +1587,7 @@ pub fn create_dev_secrets_drive(abs_dir: &str, secret_files: &[DriveFile]) -> Re
 /// hex string; otherwise `(None, None)` so callers fall back to the
 /// unverified-boot path. ADR-002 §W3.
 pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
-    use mvm_base::shell::{run_in_vm, run_in_vm_stdout};
+    use crate::base::shell::{run_in_vm, run_in_vm_stdout};
     use std::path::Path;
 
     let Some(parent) = Path::new(rootfs_path).parent() else {
@@ -2846,7 +2846,7 @@ mod tests {
     /// This tests the pattern used throughout the codebase (Sprint 16 Phase 1.2).
     #[test]
     fn test_log_and_continue_pattern_does_not_propagate_errors() {
-        use mvm_base::shell_mock;
+        use crate::base::shell_mock;
 
         // Install a mock that fails for all commands.
         let _guard = shell_mock::install_handler(|_script: &str| shell_mock::MockResponse {
@@ -2860,14 +2860,15 @@ mod tests {
             // These operations would fail (mock returns exit code 1),
             // but run_in_vm returns Ok(output) — the error is in exit status.
             // The real pattern: if let Err(e) = operation() { warn!(...) }
-            if let Err(e) = mvm_base::shell::run_in_vm("kill -9 12345 2>/dev/null || true") {
+            if let Err(e) = crate::base::shell::run_in_vm("kill -9 12345 2>/dev/null || true") {
                 tracing::warn!("failed to kill process: {e}");
             }
-            if let Err(e) = mvm_base::shell::run_in_vm("sudo ip link del tap0 2>/dev/null || true")
+            if let Err(e) =
+                crate::base::shell::run_in_vm("sudo ip link del tap0 2>/dev/null || true")
             {
                 tracing::warn!("failed to destroy TAP: {e}");
             }
-            if let Err(e) = mvm_base::shell::run_in_vm("rm -rf /tmp/test-dir") {
+            if let Err(e) = crate::base::shell::run_in_vm("rm -rf /tmp/test-dir") {
                 tracing::warn!("failed to remove directory: {e}");
             }
 
@@ -2908,7 +2909,7 @@ mod tests {
 
     #[test]
     fn firecracker_guard_defuse_prevents_cleanup() {
-        use mvm_base::shell_mock;
+        use crate::base::shell_mock;
 
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = call_count.clone();
@@ -2935,7 +2936,7 @@ mod tests {
 
     #[test]
     fn firecracker_guard_runs_cleanup_on_drop() {
-        use mvm_base::shell_mock;
+        use crate::base::shell_mock;
 
         let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let scripts_clone = scripts.clone();
@@ -2969,7 +2970,7 @@ mod tests {
 
     #[test]
     fn tap_guard_defuse_prevents_cleanup() {
-        use mvm_base::shell_mock;
+        use crate::base::shell_mock;
 
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = call_count.clone();
@@ -2995,7 +2996,7 @@ mod tests {
 
     #[test]
     fn tap_guard_runs_cleanup_on_drop() {
-        use mvm_base::shell_mock;
+        use crate::base::shell_mock;
 
         let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let scripts_clone = scripts.clone();
@@ -3024,7 +3025,7 @@ mod tests {
 
     #[test]
     fn firecracker_guard_tolerates_cleanup_failure() {
-        use mvm_base::shell_mock;
+        use crate::base::shell_mock;
 
         let _handler = shell_mock::install_handler(|_script: &str| shell_mock::MockResponse {
             exit_code: 1,

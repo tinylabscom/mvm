@@ -9,8 +9,8 @@
 //! `AnyBackend` enum behind this trait.
 
 use async_trait::async_trait;
+use mvm_backend::base::config::VmSlot;
 use mvm_backend::microvm::FlakeRunConfig;
-use mvm_base::config::VmSlot;
 use mvm_plan::{ExecutionPlan, PlanId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;

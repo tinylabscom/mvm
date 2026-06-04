@@ -50,14 +50,14 @@
 //! with — a real first run will refine details that pure-Rust
 //! review can't catch.
 
+use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
 use anyhow::{Context, Result};
-use mvm_base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
 
 /// Resolve the CH per-VM directory inside `VMS_DIR`. Same shape as
 /// FC's `microvm::resolve_vm_dir` so `mvmctl ls` and friends can
 /// walk a single directory and see both backend families.
 pub(crate) fn ch_vm_dir(name: &str) -> Result<String> {
-    let raw = format!("{}/{}", mvm_base::config::VMS_DIR, name);
+    let raw = format!("{}/{}", crate::base::config::VMS_DIR, name);
     // `~/microvm/vms/<name>` resolves against the shell that runs
     // it; surface the absolute path via the same trick `microvm.rs`
     // uses (echo it through `run_in_vm_stdout`).
@@ -355,7 +355,7 @@ pub(crate) fn reap(abs_dir: &str) -> Result<()> {
 /// `VMS_DIR` is a compile-time constant so doesn't need quoting; the
 /// `echo` resolves any leading `~/` against the shell that runs it.
 pub(crate) fn list_ch_vms() -> Result<Vec<String>> {
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", mvm_base::config::VMS_DIR))?;
+    let abs_vms = run_in_vm_stdout(&format!("echo {}", crate::base::config::VMS_DIR))?;
     let q_dir = shell_quote(abs_vms.trim());
     let listing = run_in_vm_stdout(&format!(
         r#"DIR={q_dir}

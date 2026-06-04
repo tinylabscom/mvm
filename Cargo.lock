@@ -3246,7 +3246,6 @@ dependencies = [
  "inquire",
  "libc",
  "mvm-backend",
- "mvm-base",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
@@ -3322,15 +3321,19 @@ name = "mvm-backend"
 version = "0.15.2"
 dependencies = [
  "anyhow",
+ "colored",
  "ext4-view",
+ "indicatif",
+ "inquire",
  "libc",
- "mvm-base",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
  "mvm-libkrun",
  "mvm-providers",
+ "mvm-security",
  "mvm-vz",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",
@@ -3341,27 +3344,6 @@ dependencies = [
  "tracing",
  "uuid",
  "which 7.0.3",
-]
-
-[[package]]
-name = "mvm-base"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "colored",
- "indicatif",
- "inquire",
- "libc",
- "mvm-build",
- "mvm-core",
- "mvm-guest",
- "mvm-providers",
- "mvm-security",
- "secrecy",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -3792,7 +3774,6 @@ dependencies = [
  "libc",
  "mvm",
  "mvm-backend",
- "mvm-base",
  "mvm-core",
  "mvm-plan",
  "mvm-policy",

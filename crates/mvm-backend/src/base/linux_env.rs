@@ -14,7 +14,7 @@ pub struct NativeEnv;
 
 impl LinuxEnv for NativeEnv {
     fn run(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::shell_mock::intercept(script) {
+        if let Some(output) = crate::base::shell_mock::intercept(script) {
             return Ok(output);
         }
 
@@ -25,7 +25,7 @@ impl LinuxEnv for NativeEnv {
     }
 
     fn run_visible(&self, script: &str) -> Result<()> {
-        if let Some(output) = crate::shell_mock::intercept(script) {
+        if let Some(output) = crate::base::shell_mock::intercept(script) {
             if output.status.success() {
                 return Ok(());
             }
@@ -55,7 +55,7 @@ impl LinuxEnv for NativeEnv {
     }
 
     fn run_capture(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::shell_mock::intercept(script) {
+        if let Some(output) = crate::base::shell_mock::intercept(script) {
             return Ok(output);
         }
 
@@ -101,7 +101,7 @@ fn is_stdin_tty() -> bool {
 /// connection). Inherits stderr so progress messages reach the user.
 fn start_dev_daemon(vm_id: &str) -> Result<()> {
     let exe = std::env::current_exe().context("locating mvmctl binary for dev auto-start")?;
-    crate::ui::progress(&format!(
+    crate::base::ui::progress(&format!(
         "dev VM '{vm_id}' is not running — auto-starting..."
     ));
     let status = Command::new(&exe)
@@ -221,14 +221,14 @@ impl AppleContainerEnv {
 
 impl LinuxEnv for AppleContainerEnv {
     fn run(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::shell_mock::intercept(script) {
+        if let Some(output) = crate::base::shell_mock::intercept(script) {
             return Ok(output);
         }
         self.exec_via_vsock(script, 60)
     }
 
     fn run_visible(&self, script: &str) -> Result<()> {
-        if let Some(output) = crate::shell_mock::intercept(script) {
+        if let Some(output) = crate::base::shell_mock::intercept(script) {
             if output.status.success() {
                 return Ok(());
             }
@@ -263,7 +263,7 @@ impl LinuxEnv for AppleContainerEnv {
     }
 
     fn run_capture(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::shell_mock::intercept(script) {
+        if let Some(output) = crate::base::shell_mock::intercept(script) {
             return Ok(output);
         }
         self.exec_via_vsock(script, 60)

@@ -23,7 +23,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::ui;
+use crate::base::ui;
 
 /// Seal a freshly-created snapshot with an HMAC-SHA256 sidecar.
 /// ADR-007 / plan 41 W4 / M9.
