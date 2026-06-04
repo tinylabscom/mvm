@@ -43,6 +43,12 @@ pub struct LibkrunBackend;
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
 /// write its PID file before giving up and killing the child.
 const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+/// After the PID file appears the supervisor still has to bind the
+/// per-port vsock listener socket; callers (the console attach,
+/// `shell_exec` via `connect_with_auto_start`) race that window and
+/// wrongly see the VM as "not running" (#582). `start` waits for the
+/// agent socket before returning so "ready" actually means reachable.
+const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`LibkrunBackend::stop`] waits after `SIGTERM` before
 /// escalating to `SIGKILL`. Tight because libkrun's signal handling
@@ -303,6 +309,36 @@ impl VmBackend for LibkrunBackend {
                     "supervisor did not write {} within {:?}; killed",
                     pid_file.display(),
                     PID_FILE_TIMEOUT
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The PID file means the supervisor process is up, but it binds the
+        // per-port vsock listener a beat later. Wait for the agent socket so
+        // the console attach / shell_exec that immediately follow don't race
+        // a not-yet-bound socket and report the VM "not running" (#582).
+        let agent_sock = mvm_core::config::vm_vsock_port_socket(
+            &config.name,
+            mvm_guest::vsock::GUEST_AGENT_PORT,
+        );
+        let sock_deadline = Instant::now() + VSOCK_SOCKET_TIMEOUT;
+        while !agent_sock.exists() {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| anyhow!("poll supervisor child: {e}"))?
+            {
+                bail!(
+                    "supervisor exited before binding vsock socket {} (status: {status})",
+                    agent_sock.display()
+                );
+            }
+            if Instant::now() >= sock_deadline {
+                let _ = child.kill();
+                bail!(
+                    "supervisor did not bind vsock socket {} within {:?}; killed",
+                    agent_sock.display(),
+                    VSOCK_SOCKET_TIMEOUT
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
