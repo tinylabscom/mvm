@@ -265,10 +265,10 @@ The gap analysis (`specs/research/embeddable-sandbox-sdk-dx-gap-analysis.md`) pu
 ### deferred follow-ups
 
 - [ ] **Image-slimming track (owner-deferred 2026-06-02 — later track, not this plan).** The workload rootfs is already minimal by design (busybox PID-1, trimmed module closure, no pkg managers/docs/locales, agent on the ADR-051 overlay, release binaries `strip+lto`). Remaining levers, all planned-but-unstarted: **plan 131** (slim `mkfs.ext4 -d` build-layer / erofs-vs-squashfs), **plan 124** (lean guest-agent deps), **plan 126** (workspace dep reduction), **plan 127** (boot/size measurement harness). Plan 139 found the dev loop is ~99% in-VM build time, not boot/image size — so slimming is low-leverage for "feels fast" and should be **measurement-first** when picked up.
-- [ ] **Lima test-env `VmBackend` — Workstream C (queued, after libkrun green).** Implement Lima as a test/dev-tier, prod-refused `VmBackend` (ADR-066 §177) giving a real Linux `/dev/kvm` for the Firecracker E2E path (`MVM_E2E_BACKEND=lima`); reverses ADR-066 §177 "not built." Update ADR-066 §177 + AGENTS.md from "not built" → "built for test env."
-- [ ] Linux / Firecracker parity for this same E2E (own plan; `/dev/kvm` test backend).
+- [ ] **Lima test-env `VmBackend` — Workstream C (queued, after libkrun green).** Implement Lima as a test/dev-tier, prod-refused `VmBackend` (ADR-066 §177) giving a real Linux `/dev/kvm` for the Firecracker E2E path (`MVM_E2E_BACKEND=lima`); reverses ADR-066 §177 "not built." Update ADR-066 §177 + AGENTS.md from "not built" → "built for test env." **→ owned by Plan 147 (WS-A).**
+- [ ] Linux / Firecracker parity for this same E2E (`/dev/kvm` test backend). **→ owned by Plan 147 (WS-B).**
 - [ ] Encrypt build artifacts at rest + upgrade vsock frames to Noise (plan 122) — completes §4's *full* acceptance.
-- [ ] The downloaded `default-microvm` admit blocker (manifest-less image) — separate from this fresh-build path; blocks the bench baseline.
+- [ ] The downloaded `default-microvm` admit blocker (manifest-less image) — separate from this fresh-build path; blocks the bench baseline. **→ owned by Plan 147 (WS-C).**
 - [ ] Builder/dev-VM agent ping (proves the guest agent is *universal* across VM types — ADR-066 §6 invariant) — depends on **plan 124** making `mvm-host-vm-init` fork `mvm-guest-agent`; this plan's E2E only pings the *workload* microVM's agent.
 
 ## Self-review
