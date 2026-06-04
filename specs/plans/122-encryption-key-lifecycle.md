@@ -48,9 +48,13 @@ Gaps this plan fills: macOS volume-at-rest, 90-day rotation timer, per-rebuild D
 
 ### Task A0: pluggable channel layering (the encryption seam)
 
-`core::framing` (built in plan 121 B4) frames `FramedMessage<T>` with a pluggable auth stage. Add a second pluggable stage — an optional encryption transform — so a Noise/AEAD layer can wrap an untrusted-boundary channel later without touching callers. Ship the identity (no-op) transform only; nothing is encrypted on a host-local channel today (see the design note).
+**Reconciled with what plan 121 actually shipped — folds in 121 B4 "Option B".** Plan 121 (#581) shipped `core::framing` as the *simple* `read_json_frame` / `write_json_frame` (4-byte length prefix + serde body, cap-before-alloc) — **not** the `FramedMessage<T>` + pluggable-`AuthStage` structure this task originally assumed. Genericizing the host↔guest Ed25519 `AuthenticatedFrame` onto `FramedMessage<T>` was **descoped** from 121 as zero-dedup churn on a claims-8/12/13 fuzzed wire format, and parked as a 121 follow-up. It lands **here**, as the prerequisite half of this seam, because 122 is the first plan that actually needs the pluggable stage. So A0 is two stages: (1) build the `FramedMessage<T>` auth seam (the retrofit descoped from 121), then (2) add the optional encryption transform.
 
-**Files:** `crates/mvm-core/src/framing.rs`.
+**Gate carried from the 121 descope (do NOT skip):** the auth retrofit rewrites a claims-8/12/13 fuzzed wire format — land it only behind a dedicated cargo-fuzz pass on the unified frame parser **and** a live host↔guest boot round-trip (`examples/agent_ping`) proving the authed path is byte-for-byte unchanged. Never a pure refactor commit.
+
+Then add the encryption transform — an optional second pluggable stage so a Noise/AEAD layer can wrap an untrusted-boundary channel later without touching callers. Ship the identity (no-op) transform only; nothing is encrypted on a host-local channel today (see the design note).
+
+**Files:** `core::framing` — `crates/mvm-core/src/framing.rs`, *unless* plan 126 Task B5 has already relocated `framing` to `mvm-hostd` to make `mvm-core` runtime-free. Coordinate: 126 moves it, this task extends it — whichever runs first, the other operates on whichever crate owns `framing` at that point.
 
 - [ ] **Step 1:** Failing test — a frame round-trips through `Identity` unchanged, and through a stub transform it returns equal after `encode`→`decode`.
   ```rust

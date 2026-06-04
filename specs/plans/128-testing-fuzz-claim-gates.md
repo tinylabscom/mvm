@@ -57,6 +57,13 @@ The §8 note said "build against the `host.audit.v1` reality (the dropped `host.
 - [ ] **Step 4:** the `xtask budget` job (127 C1) → `ci.yml` as **informational** (warns, never fails — ADR-066 §7).
 - [ ] **Step 5:** the docs-drift gate (130) → `ci.yml`. Commit each as it lands.
 
+### Task C4: config fail-closed — `deny_unknown_fields` on file-loaded config types (folds in plan 121's hardening follow-up)
+
+Surfaced during plan 121's B4 config-envelope descope: 5 types are deserialized from on-disk files **without** `#[serde(deny_unknown_fields)]`, so a typo'd key is silently dropped instead of failing loud — `MvmConfig` (`~/.mvm/config.toml`), `Manifest` (`mvm.toml`), `ArtifactManifest` (`manifest.json`), `VmNameRegistry` + nested `VmRegistration` (`vm-names.json`). (Claim 5 / W4.1 enforces this on host↔guest *wire* types; these are local config/manifest files — the same fail-closed principle, one tier in.)
+
+- [ ] **Step 1:** Per-type judgement, **not** a blanket sweep — `MvmConfig::load` is deliberately fail-*open* (returns defaults on any error), so adding `deny_unknown_fields` there would make a typo silently fall to defaults (arguably worse). Decide per type whether to tighten the *type* or harden the *loader* (warn-on-unknown-key + forward-compat check); apply the attribute where it's the right call.
+- [ ] **Step 2:** Lock it — an `xtask check-config-deny-unknown-fields` (or focused test) asserting the agreed file-loaded config set carries the attribute; dropping it from one trips the gate. Wire into `ci.yml`. Commit.
+
 ## Phase D — re-verify the §8 claim→gate map
 
 ### Task D1: all 14 claims, each with a live gate
