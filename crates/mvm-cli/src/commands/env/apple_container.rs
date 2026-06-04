@@ -2333,7 +2333,7 @@ pub(crate) fn build_kernel_via_stage0(
                 let start = std::time::Instant::now();
                 // Poll the stop flag every 500ms but only print every ~20s.
                 let mut ticks: u64 = 0;
-                while !stop.load(Ordering::SeqCst) {
+                while !stop.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     ticks += 1;
                     if ticks.is_multiple_of(40) {
@@ -2352,7 +2352,7 @@ pub(crate) fn build_kernel_via_stage0(
             &host_bin_dir,
         );
 
-        stop.store(true, Ordering::SeqCst);
+        stop.store(true, Ordering::Relaxed);
         if let Some(handle) = heartbeat {
             let _ = handle.join();
         }
