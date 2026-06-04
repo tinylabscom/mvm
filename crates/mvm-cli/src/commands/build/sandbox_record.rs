@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use mvm_ir::Workload;
+use mvm_sdk::ir::Workload;
 use mvm_sdk::runtime::{RuntimeRecording, compile_recording};
 
 /// Languages the auto-exec path supports.

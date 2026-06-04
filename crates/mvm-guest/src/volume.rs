@@ -2,7 +2,7 @@
 //! from the prior `share` module without behavioural change).
 //!
 //! Production-safe. Every host-supplied path runs through
-//! `mvm_security::policy::MountPathPolicy` before the agent
+//! `mvm_core::crypto::policy::MountPathPolicy` before the agent
 //! touches `mount(2)` or `umount(2)`, so a compromised host can't
 //! mount over `/etc`, `/usr`, `/nix/*`, or any other
 //! verity-protected subtree (claim 3 of the security model).
@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use mvm_security::policy::{MountPathError, validate_mount_path};
+use mvm_core::crypto::policy::{MountPathError, validate_mount_path};
 
 use crate::vsock::{VolumeMountErrorKind, VolumeMountResult};
 

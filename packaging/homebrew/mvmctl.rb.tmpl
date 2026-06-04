@@ -1,0 +1,55 @@
+# typed: false
+# frozen_string_literal: true
+
+# mvmctl — Firecracker microVM development tool.
+# This file is generated on release by render-formula.sh; do not edit by hand.
+class Mvmctl < Formula
+  desc "Build and run Firecracker microVMs on macOS and Linux"
+  homepage "https://github.com/tinylabscom/mvm"
+  version "@@VERSION@@"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-aarch64-apple-darwin.tar.gz"
+      sha256 "@@SHA_AARCH64_DARWIN@@"
+    end
+    on_intel do
+      url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-x86_64-apple-darwin.tar.gz"
+      sha256 "@@SHA_X86_64_DARWIN@@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@@SHA_AARCH64_LINUX@@"
+    end
+    on_intel do
+      url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@@SHA_X86_64_LINUX@@"
+    end
+  end
+
+  def install
+    bin.install "mvmctl"
+    (prefix/"resources").install Dir["resources/*"] if Dir.exist?("resources")
+    # macOS: Hypervisor.framework requires the entitlement; re-sign ad-hoc.
+    if OS.mac? && File.exist?("resources/mvmctl.entitlements")
+      system "codesign", "--entitlements", "resources/mvmctl.entitlements",
+             "-f", "-s", "-", bin/"mvmctl"
+    end
+  end
+
+  def caveats
+    <<~EOS
+      macOS (non-Apple-Silicon-26+) needs the libkrun trio:
+        brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
+      Run `mvmctl doctor` to verify your host.
+    EOS
+  end
+
+  test do
+    assert_match "mvmctl", shell_output("#{bin}/mvmctl --version")
+  end
+end

@@ -12,7 +12,7 @@
 //! by `mvmctl trust`). An unknown `key_id` is refused before
 //! reading artifact bytes; a tampered manifest fails signature
 //! verification; a tampered artifact fails the post-signature
-//! sha256 re-check. See `mvm_plan::bundle` module rustdoc for the
+//! sha256 re-check. See `mvm_core::plan::bundle` module rustdoc for the
 //! full rejection ladder.
 //!
 //! ## Scope (this commit)

@@ -29,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mvm_ir::{EnvValue, Workload};
+use crate::ir::{EnvValue, Workload};
 use serde::{Deserialize, Serialize};
 
 use crate::compile::{CompileError, archive_dir, compile};
@@ -216,9 +216,9 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
     };
     let network = app.network.as_ref().map(|n| NetworkSpec {
         mode: match n.mode {
-            mvm_ir::NetworkMode::None => "none".into(),
-            mvm_ir::NetworkMode::Bridge => "bridge".into(),
-            mvm_ir::NetworkMode::Host => "host".into(),
+            crate::ir::NetworkMode::None => "none".into(),
+            crate::ir::NetworkMode::Bridge => "bridge".into(),
+            crate::ir::NetworkMode::Host => "host".into(),
         },
         ports: n
             .ports
@@ -227,15 +227,15 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
                 guest: p.guest,
                 host: p.host,
                 proto: match p.proto {
-                    mvm_ir::PortProto::Tcp => "tcp".into(),
-                    mvm_ir::PortProto::Udp => "udp".into(),
+                    crate::ir::PortProto::Tcp => "tcp".into(),
+                    crate::ir::PortProto::Udp => "udp".into(),
                 },
             })
             .collect(),
     });
     let threat_tier = match app.threat_tier {
-        mvm_ir::ThreatTier::Untrusted => "untrusted",
-        mvm_ir::ThreatTier::Trusted => "trusted",
+        crate::ir::ThreatTier::Untrusted => "untrusted",
+        crate::ir::ThreatTier::Trusted => "trusted",
     }
     .to_string();
     let lifecycle = LifecycleSpec {
@@ -256,10 +256,10 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
     }
 }
 
-fn secret_ref_of(reference: &mvm_ir::SecretRef) -> SecretRef {
+fn secret_ref_of(reference: &crate::ir::SecretRef) -> SecretRef {
     let (mount_kind, mount_target) = match &reference.mount {
-        mvm_ir::SecretMount::Env { var } => ("env".to_string(), var.clone()),
-        mvm_ir::SecretMount::File { path } => ("file".to_string(), path.clone()),
+        crate::ir::SecretMount::Env { var } => ("env".to_string(), var.clone()),
+        crate::ir::SecretMount::File { path } => ("file".to_string(), path.clone()),
     };
     SecretRef {
         name: reference.name.clone(),
@@ -272,7 +272,7 @@ fn secret_ref_of(reference: &mvm_ir::SecretRef) -> SecretRef {
 /// when the phase has no commands. Stable across runs because the
 /// IR's `HookCmd` enum is `serde(tag = "kind")` and the serialization
 /// is deterministic for a given input.
-fn hook_phase_hash(cmds: &[mvm_ir::HookCmd]) -> String {
+fn hook_phase_hash(cmds: &[crate::ir::HookCmd]) -> String {
     if cmds.is_empty() {
         return String::new();
     }
@@ -324,7 +324,7 @@ impl MvmdClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::{
+    use crate::ir::{
         App, Dependencies, Entrypoint, Format, Hooks, Image, NetworkMode, PortProto, Resources,
         Source,
     };
@@ -359,9 +359,9 @@ mod tests {
                 }],
                 env: BTreeMap::new(),
                 mounts: vec![],
-                network: Some(mvm_ir::Network {
+                network: Some(crate::ir::Network {
                     mode: NetworkMode::Bridge,
-                    ports: vec![mvm_ir::PortForward {
+                    ports: vec![crate::ir::PortForward {
                         guest: 8080,
                         host: 0,
                         proto: PortProto::Tcp,
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn hook_phase_hash_is_deterministic_and_nonempty_for_one_command() {
-        let cmds = vec![mvm_ir::HookCmd::Shell {
+        let cmds = vec![crate::ir::HookCmd::Shell {
             line: "echo hi".into(),
         }];
         let a = hook_phase_hash(&cmds);

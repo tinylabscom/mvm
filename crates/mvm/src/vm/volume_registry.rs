@@ -164,7 +164,7 @@ pub struct VolumeMountEntry {
     /// Absolute host-side directory exposed via virtio-fs.
     pub host_path: String,
     /// Mount point inside the guest. Validated via
-    /// `mvm_security::policy::MountPathPolicy` before reaching
+    /// `mvm_core::crypto::policy::MountPathPolicy` before reaching
     /// the registry.
     pub guest_path: String,
     /// `true` when the volume is exposed read-only.

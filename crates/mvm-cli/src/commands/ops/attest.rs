@@ -19,7 +19,7 @@
 //!   parse, or schema failure.
 //!
 //! The CLI surface is intentionally narrow — programmatic verifiers
-//! (mvmd, customer auditors) consume `mvm_security::attestation`
+//! (mvmd, customer auditors) consume `mvm_core::crypto::attestation`
 //! directly. This module is the operator-facing path: "did this host
 //! just sign a report I can show someone?"
 //!
@@ -41,10 +41,10 @@ use std::path::PathBuf;
 
 use ed25519_dalek::VerifyingKey;
 
-use mvm_core::user_config::MvmConfig;
-use mvm_security::attestation::{
+use mvm_core::crypto::attestation::{
     AttestationBody, AttestationReport, IdentityKey, identity, sign_report, verify_report,
 };
+use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
@@ -178,9 +178,9 @@ fn status_at(identity_dir: &std::path::Path) -> Result<()> {
     println!();
     println!("hardware providers:");
     for kind in [
-        mvm_security::attestation::HwProviderKind::Tpm2,
-        mvm_security::attestation::HwProviderKind::SevSnp,
-        mvm_security::attestation::HwProviderKind::Tdx,
+        mvm_core::crypto::attestation::HwProviderKind::Tpm2,
+        mvm_core::crypto::attestation::HwProviderKind::SevSnp,
+        mvm_core::crypto::attestation::HwProviderKind::Tdx,
     ] {
         let state = if kind.compiled_in() {
             "compiled (stub returns NotYetImplemented)"
@@ -203,12 +203,12 @@ fn build_report(key: &IdentityKey) -> AttestationReport {
 
 fn load_pubkey_file(path: &std::path::Path) -> Result<VerifyingKey> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    if bytes.len() != mvm_security::attestation::KEY_BYTES {
+    if bytes.len() != mvm_core::crypto::attestation::KEY_BYTES {
         bail!(
             "{} is {} bytes; expected a {}-byte raw Ed25519 public key",
             path.display(),
             bytes.len(),
-            mvm_security::attestation::KEY_BYTES
+            mvm_core::crypto::attestation::KEY_BYTES
         );
     }
     let array: [u8; 32] = bytes.as_slice().try_into().expect("len-checked above");
@@ -227,7 +227,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_security::attestation::SCHEMA_VERSION;
+    use mvm_core::crypto::attestation::SCHEMA_VERSION;
 
     #[test]
     fn export_then_verify_self_round_trips_through_disk() {

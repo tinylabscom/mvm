@@ -1,4 +1,4 @@
-# ADR-069 — browser audit-log verifier. Deliberately OUTSIDE the main
+# ADR-070 — browser audit-log verifier. Deliberately OUTSIDE the main
 # workspace (see root Cargo.toml `exclude`) so wasm-bindgen and the
 # wasm32 target never enter `cargo build --workspace` or CI. All the
 # verification logic + tests live in the in-workspace `mvm-verify`

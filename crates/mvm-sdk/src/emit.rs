@@ -1,4 +1,4 @@
-use mvm_ir::Workload;
+use crate::ir::Workload;
 
 use crate::error::EmitError;
 
@@ -22,8 +22,8 @@ pub fn emit(workload: &Workload) -> Result<(), EmitError> {
 /// String. Use [`emit`] when you want the ADR-0002 subprocess
 /// behavior; this is the in-process variant for tests and embedding.
 pub fn emit_json(workload: &Workload) -> Result<String, EmitError> {
-    if let Err(errors) = mvm_ir::validate(workload) {
+    if let Err(errors) = crate::ir::validate(workload) {
         return Err(EmitError::Validation(errors));
     }
-    mvm_ir::canonicalize(workload).map_err(EmitError::Canonicalize)
+    crate::ir::canonicalize(workload).map_err(EmitError::Canonicalize)
 }

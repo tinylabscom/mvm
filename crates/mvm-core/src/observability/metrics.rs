@@ -64,7 +64,7 @@ pub struct Metrics {
     pub dev_image_verify_duration_ms: AtomicU64,
 
     // ── Plan 60 Phase 4 audit counters (per-category) ───────────────
-    // Incremented by `mvm_supervisor::Recorder` on every successful
+    // Incremented by `mvm_hostd::supervisor::Recorder` on every successful
     // emit. The 9 categories match `EventCategory::as_str()`; the
     // metric name is `mvm_audit_<category>_total`. Downstream
     // dashboards graph these to spot category-level anomalies (a

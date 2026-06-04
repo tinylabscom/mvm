@@ -143,8 +143,9 @@
         };
 
       # mvm-runner — the function-workload entrypoint runner
-      # (plan 60 Phase 5 Slice C). Same rustPlatform pattern as
-      # the guest agent; workspace Cargo.lock drives the closure.
+      # (plan 60 Phase 5 Slice C). Folded into mvm-guest as a [[bin]]
+      # (plan 121 A1), so we select just that binary out of the
+      # mvm-guest package; workspace Cargo.lock drives the closure.
       mvmRunnerFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -156,7 +157,7 @@
           cargoLock = {
             lockFile = workspace + "/Cargo.lock";
           };
-          buildAndTestSubdir = "crates/mvm-runner";
+          cargoBuildFlags = [ "--package" "mvm-guest" "--bin" "mvm-runner" ];
           doCheck = false;
           meta = {
             description = "mvm function-workload entrypoint runner (plan 60 Phase 5 Slice C)";

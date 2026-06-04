@@ -17,7 +17,7 @@
 //! `audit emit_*` policy in `audit_chain.rs`.
 
 use anyhow::{Context, Result, bail};
-use mvm_plan::ExecutionPlan;
+use mvm_core::plan::ExecutionPlan;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -113,7 +113,7 @@ pub fn read_plan_at(path: &Path) -> Result<ExecutionPlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,

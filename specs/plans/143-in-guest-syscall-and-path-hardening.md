@@ -1,4 +1,4 @@
-# Plan 143 — In-guest syscall + path hardening (syd-inspired defense-in-depth)
+# Plan 143 — In-guest syscall + path hardening (defense-in-depth)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans /
 > subagent-driven-development. Checkbox (`- [ ]`) steps track progress.
@@ -11,12 +11,13 @@
 > before merge (`cargo xtask check-spec-numbers` is CI-gated; 142 was taken by
 > `142-network-no-bypass-egress-audit.md` mid-authoring, hence 143).
 
-**Origin:** a comparison of mvm against `syd` (https://lib.rs/crates/syd — a
-userspace *application-kernel* Linux sandbox: seccomp-unotify, Landlock,
-namespaces, `openat2(2)`, ioctl-command filtering, verified exec). Verdict: ~80% of
-syd is **not** applicable — mvm has a hardware boundary (KVM/VMM) that syd
-deliberately lacks, so adopting syd's software-isolation model would be a
-downgrade. Three sharp, transferable ideas remain; they are this plan.
+**Origin:** a comparison of mvm against an unprivileged userspace
+*application-kernel* Linux sandbox (seccomp-unotify, Landlock, namespaces,
+`openat2(2)`, ioctl-command filtering, verified exec) that confines ordinary
+processes without a VM. Verdict: ~80% of it is **not** applicable — mvm has a
+hardware boundary (KVM/VMM) that such a sandbox deliberately lacks, so adopting
+its software-isolation model would be a downgrade. Three sharp, transferable
+ideas remain; they are this plan.
 
 **Goal:** Close two concrete in-guest hardening gaps surfaced by the comparison,
 and record the architectural positioning in ADR-002. (1) Add `ioctl` command-code
@@ -25,14 +26,15 @@ which today allowlists `ioctl` with no argument filtering. (2) Replace the OCI
 unpacker's check-then-use symlink-parent walk with an atomic
 `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` resolution, deleting a TOCTTOU /
 path-parsing bug class. (3) A one-paragraph ADR-002 note on why mvm chose a
-hardware boundary over an application-kernel like syd.
+hardware boundary over a userspace application-kernel sandbox.
 
 **Architecture / framing:** mvm's workload isolation is hardware virtualization
-(Firecracker/libkrun + KVM); ADR-002 trusts the host + VMM. `syd` exists precisely
-*because* it has no hardware boundary, so it over-invests in syscall-surface compat
-and TOCTTOU correctness. This plan adopts only the two ideas that harden mvm's
-layer *inside* the already-virtualized guest (R1) or its host-side untrusted-input
-parser (R2). Everything else from syd is explicitly rejected (table at end).
+(Firecracker/libkrun + KVM); ADR-002 trusts the host + VMM. The reference sandbox
+exists precisely *because* it has no hardware boundary, so it over-invests in
+syscall-surface compat and TOCTTOU correctness. This plan adopts only the two
+ideas that harden mvm's layer *inside* the already-virtualized guest (R1) or its
+host-side untrusted-input parser (R2). Everything else from it is explicitly
+rejected (table at end).
 
 **Dependency / sequencing:**
 - **Task 1 (R1, ioctl seccomp) is GATED behind `specs/plans/120-core-demo.md`
@@ -66,11 +68,11 @@ condition: `crates/mvm-security/src/seccomp.rs:296` (standard tier),
 `crates/mvm/src/security/seccomp.rs:65,127,214` (older JSON profile), and
 `crates/mvm-guest/src/bin/mvm-seccomp-apply.rs:182` maps `ioctl → SYS_ioctl` with
 no `SeccompCondition` (the file notes it "doesn't filter on syscall arguments").
-`syd` filters ioctl by command code; the classic escape is **TIOCSTI/TIOCLINUX**
-(inject characters into the controlling terminal's input queue → parent shell
-executes them), reachable when a workload shares a PTY console (`mvmctl console`,
-dev-mode). The VMM boundary does not close this — it is an escape *within* the
-guest's trust domain onto the console.
+The reference sandbox filters ioctl by command code; the classic escape is
+**TIOCSTI/TIOCLINUX** (inject characters into the controlling terminal's input
+queue → parent shell executes them), reachable when a workload shares a PTY
+console (`mvmctl console`, dev-mode). The VMM boundary does not close this — it is
+an escape *within* the guest's trust domain onto the console.
 
 - [ ] **Step 0 (gate):** confirm `core_demo_e2e` is green on macOS/libkrun before
       starting (Plan 120 Task 4 acceptance box ticked).
@@ -102,7 +104,7 @@ walk via `symlink_metadata` (`:576`, `parent_chain_has_symlink` at `:904`), and
 `O_NOFOLLOW` on the leaf (`:104`). Step 5 is a **check-then-use**: it walks parents
 with `symlink_metadata` (check), then a later call writes (use); `O_NOFOLLOW` only
 guards the *leaf* open, not the intermediate dirs the kernel traverses. This is the
-hazard `syd` eliminates with one atomic `openat2(2)` resolution.
+hazard the reference sandbox eliminates with one atomic `openat2(2)` resolution.
 
 - [ ] **Step 1 (red):** regression test — swap a parent component to a symlink
       mid-unpack and assert refusal; a `..`/symlink/separator-quirk escape corpus.
@@ -122,16 +124,18 @@ hazard `syd` eliminates with one atomic `openat2(2)` resolution.
 ## Task 3 — ADR-002 positioning note  *(independent)*
 
 Add one paragraph to `specs/adrs/002-microvm-security-posture.md` (Threat model /
-Out-of-scope discussion) stating *why* mvm chose a hardware boundary over an
-application-kernel like syd — stronger isolation, no syscall-compat surface, no
-in-process TOCTTOU class — and naming syd as the reference for the in-guest
-hardening layer (Tasks 1–2). Pre-empts the recurring "why not seccomp/Landlock in
-a namespace?" review question. This is *positioning prose, not a new claim* — keep
-it out of the numbered claim table (only list items in the same threat model as a
-claim under §Out of scope; adjacent-threat positioning goes in §Threat model).
+Out-of-scope discussion) stating *why* mvm chose a hardware boundary over a
+userspace application-kernel sandbox — stronger isolation, no syscall-compat
+surface, no in-process TOCTTOU class — and citing that class of sandbox as the
+reference for the in-guest hardening layer (Tasks 1–2). Pre-empts the recurring
+"why not seccomp/Landlock in a namespace?" review question. This is *positioning
+prose, not a new claim* — keep it out of the numbered claim table (only list items
+in the same threat model as a claim under §Out of scope; adjacent-threat
+positioning goes in §Threat model).
 
-- [ ] **Step 1:** write the paragraph; reference Sandlock (arXiv) + syd FOSDEM
-      2025 as the comparison points. `xtask check-spec-numbers` + ADR lint pass.
+- [ ] **Step 1:** write the paragraph; reference the Landlock + seccomp-unotify
+      application-kernel sandbox literature as the comparison points.
+      `xtask check-spec-numbers` + ADR lint pass.
 
 ## Acceptance (Plan 143 is done when)
 
@@ -143,16 +147,28 @@ claim under §Out of scope; adjacent-threat positioning goes in §Threat model).
       (Task 3).
 - [ ] `just lint` + `cargo test --workspace` green.
 
-## Considered and rejected (syd features NOT adopted)
+## Considered and rejected (reference-sandbox features NOT adopted)
 
-| syd feature | Verdict for mvm |
+| Feature | Verdict for mvm |
 |---|---|
 | seccomp-unotify as an application kernel | **Reject** — the VMM is a stronger boundary; this rebuilds in software what KVM enforces, with a huge compat surface. |
 | Landlock for workloads | **Reject** — guest rootfs is user-controlled; already used for the host-side bridge (`crates/mvm-jailer-lite/src/landlock.rs`); dm-verity (claim 3) gives stronger whole-fs integrity. |
 | Per-binary verified exec (Veriexec) | **Reject** — dm-verity roothash (`crates/mvm-guest/src/bin/mvm-verity-init.rs`) already does whole-rootfs verified boot. |
 | Transparent AES-CTR file encryption | **Reject** — mvm has AES-256-GCM snapshot enc (`crates/mvm-security/src/snapshot_encryption.rs`) + planned LUKS2-in-guest (ADR-058); authenticated GCM beats CTR. |
 | Network firewall / pledge-style categories | **Already convergent** — default-deny egress + mandatory-deny ranges (`crates/mvm-core/src/policy/network_policy.rs:466`) + tiered seccomp categories. |
-| `--bounding-set=-all` cap drop | **Verify, not learn** — documented (`crates/mvm-guest/src/fs_rpc.rs:12`) but not visible in the `setpriv` call (`nix/lib/mk-guest.nix:193`); confirm it's actually applied. Independent of syd. |
+| `--bounding-set=-all` cap drop | **Verify, not learn** — documented (`crates/mvm-guest/src/fs_rpc.rs:12`) but not visible in the `setpriv` call (`nix/lib/mk-guest.nix:193`); confirm it's actually applied. Independent of the comparison. |
+
+## Deferred follow-up (candidate, not yet scoped)
+
+- [ ] **Widen the per-process Landlock + seccomp envelope to host-side helpers.**
+  Distinct from the rejected "Landlock for workloads" row above: today
+  `crates/mvm-jailer-lite/` confines only the Firecracker bridge sidecar
+  (`src/landlock.rs` ABI v2 + `src/seccomp.rs` `BRIDGE_SYSCALLS`). The host-side
+  egress proxy (`crates/mvm-egress-proxy/src/proxy.rs`) parses guest-supplied
+  CONNECT bytes with no Landlock; the supervisor is similarly unconfined. Assess
+  reusing `mvm-jailer-lite` as a library (path-set + syscall-set inputs) to wrap
+  those processes. Lowest-ROI item from the comparison — promote only if there's
+  appetite; Linux/Firecracker-tier only (macOS helpers differ).
 
 ## Self-review
 

@@ -13,7 +13,7 @@
 //! pipeline (in [`BuilderVm::run_build`]):
 //!
 //! 1. Validate mounts + job (`validate_mounts`, `validate_job`).
-//! 2. Check `mvm_libkrun::is_available()` — bail with install hint
+//! 2. Check `libkrun_sys::is_available()` — bail with install hint
 //!    if libkrun isn't on the host.
 //! 3. Locate `mvm-libkrun-supervisor` (env override / next-to-exe /
 //!    PATH).
@@ -62,7 +62,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mvm_libkrun::{KrunContext, SupervisorConfig};
+use libkrun_sys::{KrunContext, SupervisorConfig};
 
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
@@ -159,10 +159,10 @@ fn apply_networking_mode(
     let scratch = path_to_str(vm_state_dir, "vm_state_dir")?;
     Ok(match resolve_networking_mode() {
         NetworkingPreference::Passt => {
-            krun.with_passt(mvm_libkrun::passt::DEFAULT_GUEST_MAC, scratch)
+            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
         }
         NetworkingPreference::Gvproxy => {
-            krun.with_gvproxy(mvm_libkrun::gvproxy::DEFAULT_GUEST_MAC, scratch)
+            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
         }
     })
 }
@@ -253,6 +253,9 @@ pub struct LibkrunBuilderVm {
     /// can build the real builder VM image without downloading a
     /// published builder-VM artifact.
     pub image_override: Option<BuilderVmImage>,
+    /// Stream the guest `console.log` to stderr as the build runs.
+    /// Set by the CLI from `--verbose`. Default false (heartbeat only).
+    pub verbose: bool,
 }
 
 /// Additional virtio-blk device passed to a one-shot builder shell
@@ -294,6 +297,7 @@ impl Default for LibkrunBuilderVm {
             memory_mib: DEFAULT_MEMORY_MIB,
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
             image_override: None,
+            verbose: false,
         }
     }
 }
@@ -320,6 +324,12 @@ impl LibkrunBuilderVm {
     /// resolving the builder VM image from `~/.cache/mvm/builder-vm/`.
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
+        self
+    }
+
+    /// Stream guest console output to stderr during the build (`--verbose`).
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
         self
     }
 
@@ -377,10 +387,10 @@ impl LibkrunBuilderVm {
             ))
         })?;
 
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -444,10 +454,11 @@ impl LibkrunBuilderVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
-        let exit_code = spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir)?;
+        let exit_code =
+            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
         if exit_code != 0 {
             return Err(BuilderVmError::NixBuildFailed(format!(
                 "Stage 0 supervisor exited with status {exit_code}; \
@@ -469,10 +480,10 @@ impl LibkrunBuilderVm {
     ) -> Result<BuilderShellResult, BuilderVmError> {
         self.validate_shell_job(job)?;
 
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -550,7 +561,7 @@ impl LibkrunBuilderVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
         // Plan 89 W2 part 4: spawn the vsock response listener
         // BEFORE the supervisor so it can connect as soon as libkrun
@@ -558,7 +569,8 @@ impl LibkrunBuilderVm {
         // exits — see `log_vsock_response_outcome` for the
         // cross-validation contract.
         let vsock_rx = spawn_vsock_response_listener(&vm_state_dir);
-        let exit_code = spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir)?;
+        let exit_code =
+            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
         if exit_code != 0 {
             log_vsock_response_outcome(vsock_rx, None);
             return Err(supervisor_exit_error(exit_code, &vm_state_dir));
@@ -582,7 +594,7 @@ impl LibkrunBuilderVm {
     /// that would otherwise surface as opaque libkrun C-API
     /// failures: missing directories, non-UTF-8 paths (libkrun's
     /// FFI takes `*const c_char` and we'd hit `CString::new`
-    /// failures inside `mvm_libkrun::sys` otherwise), and
+    /// failures inside `libkrun_sys::sys` otherwise), and
     /// uncreatable artifact dirs.
     ///
     /// Public-in-crate so unit tests can exercise it without
@@ -743,10 +755,10 @@ impl BuilderVm for LibkrunBuilderVm {
         // 2. Refuse to proceed on a host without libkrun. The
         //    `builder-vm` feature being compiled
         //    in doesn't imply the runtime library is installed.
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -865,14 +877,15 @@ impl BuilderVm for LibkrunBuilderVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
         // Plan 89 W2 part 4: same dispatch-listener wiring as
         // `run_shell_script`. Drained after the supervisor exits
         // (or right before bailing on supervisor failure) so the
         // background thread always gets a chance to log.
         let vsock_rx = spawn_vsock_response_listener(&vm_state_dir);
-        let exit_code = spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir)?;
+        let exit_code =
+            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
         if exit_code != 0 {
             log_vsock_response_outcome(vsock_rx, None);
             return Err(supervisor_exit_error(exit_code, &vm_state_dir));
@@ -981,10 +994,10 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         // shared library is the most-common failure mode and an
         // early surface keeps the supervisor spawn from producing
         // a confusing rc -2.
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -1044,7 +1057,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
         let mut child = spawn_supervisor_in_background(&self.supervisor_path, &cfg)?;
@@ -1058,6 +1071,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             Some(&console_log),
             DEFAULT_PANIC_POLL_INTERVAL,
             Some(timeout),
+            false,
         ) {
             Ok(WaitOutcome::Clean(code)) => Ok(BuilderVmExitInfo {
                 exit_code: Some(code),
@@ -1386,6 +1400,7 @@ fn spawn_supervisor_and_wait(
     supervisor_path: &Path,
     cfg: &SupervisorConfig,
     vm_state_dir: &Path,
+    verbose: bool,
 ) -> Result<i32, BuilderVmError> {
     let mut child = spawn_supervisor_in_background(supervisor_path, cfg)?;
 
@@ -1404,6 +1419,7 @@ fn spawn_supervisor_and_wait(
         console_log.as_deref(),
         DEFAULT_PANIC_POLL_INTERVAL,
         Some(timeout),
+        verbose,
     );
 
     // The supervisor has now exited on every arm below — clean guest
@@ -1415,7 +1431,7 @@ fn spawn_supervisor_and_wait(
     // observed the supervisor exit, so this is the one place teardown is
     // guaranteed regardless of how libkrun terminated. See
     // `gvproxy::reap_by_pid_file` (idempotent; no-op if already gone).
-    mvm_libkrun::gvproxy::reap_by_pid_file(vm_state_dir);
+    libkrun_sys::gvproxy::reap_by_pid_file(vm_state_dir);
 
     match outcome {
         Ok(WaitOutcome::Clean(code)) => Ok(code),
@@ -1610,8 +1626,9 @@ fn wait_with_panic_detector(
     child: &mut Child,
     console_log: Option<&Path>,
     poll_interval: Duration,
+    verbose: bool,
 ) -> std::io::Result<WaitOutcome> {
-    wait_with_panic_detector_until(child, console_log, poll_interval, None)
+    wait_with_panic_detector_until(child, console_log, poll_interval, None, verbose)
 }
 
 fn wait_with_panic_detector_until(
@@ -1619,6 +1636,7 @@ fn wait_with_panic_detector_until(
     console_log: Option<&Path>,
     poll_interval: Duration,
     timeout: Option<Duration>,
+    verbose: bool,
 ) -> std::io::Result<WaitOutcome> {
     let deadline = timeout.map(|duration| Instant::now() + duration);
 
@@ -1629,7 +1647,13 @@ fn wait_with_panic_detector_until(
         let watcher_stop = Arc::clone(&stop);
         let watcher_path = console_log.to_path_buf();
         std::thread::spawn(move || {
-            panic_watcher(&watcher_path, &watcher_panic, &watcher_stop, poll_interval);
+            panic_watcher(
+                &watcher_path,
+                &watcher_panic,
+                &watcher_stop,
+                poll_interval,
+                verbose,
+            );
         })
     });
 
@@ -1706,6 +1730,17 @@ const KERNEL_PANIC_BANNER: &str = "Kernel panic - not syncing";
 /// handle a partial last line spanning multiple reads.
 const PANIC_WATCHER_BUFFER_CAP: usize = 4096;
 
+/// Under `--verbose`, forward freshly-read console bytes to `sink`
+/// (stderr in production). Extracted so the verbose-gating is unit
+/// testable without capturing process stderr. Write errors are
+/// silently dropped — the echo must never fail the build.
+fn echo_console_chunk(sink: &mut impl Write, verbose: bool, chunk: &[u8]) {
+    if verbose && !chunk.is_empty() {
+        let _ = sink.write_all(chunk);
+        let _ = sink.flush();
+    }
+}
+
 /// Tail `console_log` for the kernel panic banner. On match, stores
 /// the matching line into `panic_line` and returns. Polls every
 /// `poll_interval` until either a match is found or `stop` is set.
@@ -1728,6 +1763,7 @@ fn panic_watcher(
     panic_line: &Arc<Mutex<Option<String>>>,
     stop: &Arc<AtomicBool>,
     poll_interval: Duration,
+    verbose: bool,
 ) {
     let mut file: Option<std::fs::File> = None;
     let mut buf: Vec<u8> = Vec::new();
@@ -1742,6 +1778,7 @@ fn panic_watcher(
             // the next poll. The supervisor's eventual exit still
             // unblocks the main thread.
             if f.read_to_end(&mut chunk).is_ok() && !chunk.is_empty() {
+                echo_console_chunk(&mut std::io::stderr(), verbose, &chunk);
                 buf.extend_from_slice(&chunk);
                 if let Some(line) = find_panic_line_in(&buf) {
                     *panic_line.lock().unwrap() = Some(line);
@@ -1890,10 +1927,10 @@ impl LibkrunPersistentHostVm {
     /// `HostVmRequest::Shutdown` (clean exit) or the caller
     /// invokes [`PersistentVmHandle::kill`].
     pub fn start(&self) -> Result<PersistentVmHandle, BuilderVmError> {
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -1972,7 +2009,7 @@ impl LibkrunPersistentHostVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
         let child = spawn_supervisor_in_background(&supervisor_path, &cfg)?;
@@ -2734,8 +2771,8 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn sh");
-        let outcome =
-            wait_with_panic_detector(&mut child, None, Duration::from_millis(10)).expect("ok");
+        let outcome = wait_with_panic_detector(&mut child, None, Duration::from_millis(10), false)
+            .expect("ok");
         match outcome {
             WaitOutcome::Clean(7) => {}
             other => panic!("expected Clean(7), got {other:?}"),
@@ -2758,7 +2795,7 @@ mod tests {
             .spawn()
             .expect("spawn sh");
         let outcome =
-            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10))
+            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10), false)
                 .expect("ok");
         match outcome {
             WaitOutcome::Clean(0) => {}
@@ -2799,7 +2836,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let outcome =
-            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10))
+            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10), false)
                 .expect("ok");
         let elapsed = start.elapsed();
         writer.join().expect("writer thread join");
@@ -2857,7 +2894,7 @@ mod tests {
         });
 
         let outcome =
-            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10))
+            wait_with_panic_detector(&mut child, Some(&console), Duration::from_millis(10), false)
                 .expect("ok");
         writer.join().unwrap();
 
@@ -3031,5 +3068,24 @@ mod tests {
         assert_eq!(log, dir.join("console.log"));
         // Trait-object safety: confirm the impl satisfies `&dyn ...`.
         let _erased: &dyn VmBackendForBuilder = &backend;
+    }
+
+    #[test]
+    fn echo_console_chunk_writes_only_when_verbose() {
+        let mut sink: Vec<u8> = Vec::new();
+        echo_console_chunk(&mut sink, false, b"hello");
+        assert!(sink.is_empty(), "quiet mode must not echo");
+        echo_console_chunk(&mut sink, true, b"hello");
+        assert_eq!(sink, b"hello", "verbose mode echoes the chunk verbatim");
+        echo_console_chunk(&mut sink, true, b"");
+        assert_eq!(sink, b"hello", "empty chunk is a no-op");
+    }
+
+    #[test]
+    fn libkrun_builder_vm_with_verbose_sets_flag() {
+        let vm = LibkrunBuilderVm::default();
+        assert!(!vm.verbose, "default is quiet");
+        let vm = LibkrunBuilderVm::default().with_verbose(true);
+        assert!(vm.verbose, "with_verbose(true) flips the flag");
     }
 }

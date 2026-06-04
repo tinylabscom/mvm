@@ -27,9 +27,32 @@ fn main() {
     let host_triple = std::env::var("HOST").unwrap();
     let native = host_triple.contains("linux") && host_triple.contains(strip_glibc(&pin.target));
 
+    // Fast path for local test/dev iteration: skip the nested
+    // `cargo zigbuild --release` cross-compile of the host-vm binaries and
+    // bake zero-byte stubs instead. Cuts the dominant cold-build tax on
+    // macOS (and any fresh worktree) for everyone who isn't exercising a
+    // builder-VM boot. The only consumers that read the *bytes* are the
+    // env-gated boot/E2E tests (`MVM_E2E_SMOKE`, libkrun lifecycle), which
+    // are skipped in a default `cargo test`/`nextest` run — and the
+    // `e2e-core-demo` recipe never sets this var, so a stub build can't
+    // masquerade as a passing E2E. NEVER set this in CI release builds:
+    // the shipped mvmctl must embed the real reproducible binaries
+    // (Plan 115 / ADR-065 claim 11).
+    let skip_embed = std::env::var("MVM_SKIP_EMBED_BINARIES").as_deref() == Ok("1");
+    println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
+    if skip_embed {
+        println!(
+            "cargo:warning=MVM_SKIP_EMBED_BINARIES=1: embedding zero-byte host-vm \
+             stubs; builder-VM boot is unavailable in this build"
+        );
+    }
+
     for name in manifest.iter() {
         let out_file = bins_out.join(name);
-        if native {
+        if skip_embed {
+            std::fs::write(&out_file, b"")
+                .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
+        } else if native {
             run_cargo_build(&workspace_root, name, &pin.target, &out_file);
         } else {
             run_cargo_zigbuild(&workspace_root, name, &pin.target, &out_file);
@@ -38,7 +61,7 @@ fn main() {
         entries.push((name.clone(), out_file.clone(), sha));
         println!(
             "cargo:rerun-if-changed={}",
-            workspace_root.join(format!("crates/{name}/src")).display()
+            workspace_root.join("crates/mvm-build/src/bin").display()
         );
     }
 
@@ -76,8 +99,9 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
 /// Parse `name:` fields from the Rust struct literals in
 /// `crates/mvm-cli/src/host_binaries/manifest.rs`.
 ///
-/// Returns binary names in declaration order. Each name doubles as the
-/// cargo package name — the build script invokes `cargo build -p <name>`.
+/// Returns binary names in declaration order. Each name is a `[[bin]]`
+/// of `mvm-build` (plan 121 D4) — the build script cross-compiles each
+/// with `cargo build -p mvm-build --bin <name>`.
 fn read_rust_manifest(root: &Path) -> Vec<String> {
     let src =
         std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
@@ -108,14 +132,23 @@ fn strip_glibc(t: &str) -> &str {
 }
 
 fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
-    eprintln!("[build.rs] cargo zigbuild --release --target {target} -p {pkg}");
+    eprintln!("[build.rs] cargo zigbuild --release --target {target} -p mvm-build --bin {pkg}");
     // We need the rustup-managed cargo, not the Homebrew one. The Homebrew
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let status = Command::new(&cargo)
-        .args(["zigbuild", "--release", "--target", target, "-p", pkg])
+        .args([
+            "zigbuild",
+            "--release",
+            "--target",
+            target,
+            "-p",
+            "mvm-build",
+            "--bin",
+            pkg,
+        ])
         .env("RUSTC", &rustc)
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTC_WRAPPER")
@@ -139,7 +172,7 @@ fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
 
 fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
     eprintln!(
-        "[build.rs] cargo build --release --target {t} -p {pkg}",
+        "[build.rs] cargo build --release --target {t} -p mvm-build --bin {pkg}",
         t = strip_glibc(target)
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
@@ -150,6 +183,8 @@ fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
             "--target",
             strip_glibc(target),
             "-p",
+            "mvm-build",
+            "--bin",
             pkg,
         ])
         .env("RUSTC", &rustc)

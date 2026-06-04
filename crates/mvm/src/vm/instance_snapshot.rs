@@ -42,9 +42,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_security::keystore;
-use mvm_security::snapshot_encryption;
-use mvm_security::snapshot_hmac::{
+use mvm_core::crypto::keystore;
+use mvm_core::crypto::snapshot_encryption;
+use mvm_core::crypto::snapshot_hmac::{
     EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
     VerifyError, files_in, load_or_init_key, seal, verify,
 };
@@ -135,8 +135,9 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
     encrypt_artifacts_if_keyed(&dir)
         .with_context(|| format!("encrypting snapshot artifacts at {}", dir.display()))?;
 
-    let key_path =
-        mvm_security::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_data_dir()));
+    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
+        &mvm_core::config::mvm_data_dir(),
+    ));
     let key = load_or_init_key(&key_path)
         .with_context(|| format!("loading HMAC key {}", key_path.display()))?;
     let files = files_in(&dir);
@@ -175,8 +176,9 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
             dir.display()
         );
     }
-    let key_path =
-        mvm_security::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_data_dir()));
+    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
+        &mvm_core::config::mvm_data_dir(),
+    ));
     let key = load_or_init_key(&key_path)
         .with_context(|| format!("loading HMAC key {}", key_path.display()))?;
     let files = files_in(&dir);
@@ -775,12 +777,12 @@ mod tests {
         let dir = snapshot_dir("vm-encrypt");
         // Both artifact files must now begin with the MVSE magic.
         for name in [VMSTATE_FILENAME, MEM_FILENAME] {
-            let header = mvm_security::snapshot_encryption::probe(&dir.join(name))
+            let header = mvm_core::crypto::snapshot_encryption::probe(&dir.join(name))
                 .unwrap()
                 .unwrap_or_else(|| panic!("{name} should be encrypted (MVSE magic missing)"));
             assert_eq!(
                 header.version,
-                mvm_security::snapshot_encryption::SCHEMA_VERSION
+                mvm_core::crypto::snapshot_encryption::SCHEMA_VERSION
             );
         }
         // And the on-disk vmstate must NOT contain the plaintext
@@ -804,7 +806,7 @@ mod tests {
         let dir = snapshot_dir("vm-plain");
         // No MVSE magic — vmstate is raw bytes from CannedIO.
         assert!(
-            mvm_security::snapshot_encryption::probe(&dir.join(VMSTATE_FILENAME))
+            mvm_core::crypto::snapshot_encryption::probe(&dir.join(VMSTATE_FILENAME))
                 .unwrap()
                 .is_none()
         );

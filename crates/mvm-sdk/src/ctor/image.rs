@@ -1,4 +1,4 @@
-use mvm_ir::Image;
+use crate::ir::Image;
 
 /// Build the runtime image from a list of Nix package attribute paths.
 pub fn nix_packages<I, S>(packages: I) -> Image

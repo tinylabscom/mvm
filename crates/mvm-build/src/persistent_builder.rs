@@ -57,7 +57,7 @@ use crate::builder_vm::BuilderJob;
 /// on `mvm-supervisor`.
 ///
 /// Why a trait instead of a direct call to
-/// `mvm_supervisor::FileAuditSigner`:
+/// `mvm_hostd::supervisor::FileAuditSigner`:
 ///
 /// - `mvm-build` sits below `mvm-supervisor` in the workspace
 ///   dependency graph (the supervisor uses `mvm-build`'s
@@ -623,7 +623,7 @@ fn read_next_response(
 
 /// Path of the dispatch socket libkrun creates for a builder VM
 /// rooted at `vm_state_dir`. Mirrors the convention
-/// `mvm_libkrun::KrunContext` uses when
+/// `libkrun_sys::KrunContext` uses when
 /// `add_vsock_port(BUILDER_DISPATCH_PORT)` is configured.
 pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join(format!(

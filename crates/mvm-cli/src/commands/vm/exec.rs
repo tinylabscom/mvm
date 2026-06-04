@@ -133,7 +133,7 @@ pub(in crate::commands) struct RunArgs {
     ///
     /// - `--mode plan` (Followup H-plan): synthesize an
     ///   ExecutionPlan per Sandbox call and route through
-    ///   `mvm_supervisor::admit_for_run`; no microVM ever boots.
+    ///   `mvm_hostd::supervisor::admit_for_run`; no microVM ever boots.
     /// - `--mode live` (Followup H-live, Plan 73): spawn the user's
     ///   script with `MVM_SDK_MODE=live` so the SDK shells each
     ///   `Sandbox` operation to existing `mvmctl up` / `proc start` /
@@ -174,7 +174,7 @@ pub(in crate::commands) enum RunMode {
     /// Plan 73 Followup H-live.
     Live,
     /// Plan transport — synthesise one ExecutionPlan per Sandbox
-    /// operation and route through `mvm_supervisor::admit_for_run`.
+    /// operation and route through `mvm_hostd::supervisor::admit_for_run`.
     /// No microVM boots. Useful for dry-running admission gates.
     Plan,
     /// Record transport — capture Sandbox operations into a
@@ -470,7 +470,10 @@ fn build_exec_request(
                     auth_source
                 );
             }
-            let (kernel_path, _default_rootfs_path) = ensure_default_microvm_image()?;
+            // `exec` is interactive (dev): a sealed prod image refuses
+            // console/exec, so the default image must be the dev variant.
+            let (kernel_path, _default_rootfs_path) =
+                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
                 rootfs_path: cached.rootfs_path.display().to_string(),
@@ -480,7 +483,8 @@ fn build_exec_request(
         }
         (None, None) => {
             ui::info("No --manifest specified; using bundled default microVM image.");
-            let (kernel_path, rootfs_path) = ensure_default_microvm_image()?;
+            let (kernel_path, rootfs_path) =
+                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
                 rootfs_path,
@@ -510,8 +514,8 @@ fn emit_oci_run_admission(
     mem_mib: u64,
     timeout_secs: u64,
 ) -> Result<()> {
-    let image_sha256 =
-        mvm_security::image_verify::sha256_file(&image.rootfs_path).with_context(|| {
+    let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
+        .with_context(|| {
             format!(
                 "hashing OCI rootfs at {} for run --image admission",
                 image.rootfs_path.display()
@@ -526,12 +530,12 @@ fn emit_oci_run_admission(
         image_sha256: &image_sha256,
         image_cosign_bundle: None,
         intent: Some("vm:run"),
-        seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
         tool_policy_ref: None,
-        secret_release: mvm_plan::SecretReleasePolicy::None,
+        secret_release: mvm_core::plan::SecretReleasePolicy::None,
         secrets: Vec::new(),
         audit_event_prefix: None,
         cpus,

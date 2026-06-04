@@ -19,7 +19,7 @@
 //!
 //! - `start` writes runtime metadata to `~/.mvm/vms/<name>/` (so
 //!   `mvmctl console` can find the artifacts), constructs a
-//!   [`mvm_vz::SupervisorConfig`] from the `VmStartConfig`, spawns
+//!   [`mvm_build::vz::SupervisorConfig`] from the `VmStartConfig`, spawns
 //!   `mvm-vz-supervisor` with the JSON on stdin, and waits up to
 //!   [`PID_FILE_TIMEOUT`] for the supervisor to write its PID file.
 //! - `stop` reads `<vm_state_dir>/vz.pid`, sends `SIGTERM` (the
@@ -37,10 +37,10 @@ use mvm_core::vm_backend::{
     VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
+use crate::base::ui;
 use crate::host_gvproxy;
 use crate::vz_control;
-use mvm_base::ui;
-use mvm_vz as vz;
+use mvm_build::vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -154,7 +154,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// path: `console=hvc0` for the virtio-console attachment, ext4 rootfs
 /// at `/dev/vda`. The host-side cmdline allow-list (Plan 97 Security
 /// §7 — to be wired in a follow-up that integrates with
-/// `mvm_supervisor::admit_for_run`) will gate any tokens beyond this
+/// `mvm_hostd::supervisor::admit_for_run`) will gate any tokens beyond this
 /// default for workload microVMs.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
@@ -208,7 +208,7 @@ impl VmBackend for VzBackend {
         let rootfs = Path::new(&config.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        mvm_base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
         // Plan 102 W6.A.5 — spawn host-side gvproxy so the Swift
         // supervisor has something to connect to. VzBackend is
@@ -924,7 +924,7 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
         .into_owned()
 }
 
-/// Build the [`mvm_vz::SupervisorConfig`] the supervisor binary
+/// Build the [`mvm_build::vz::SupervisorConfig`] the supervisor binary
 /// consumes on stdin. Maps the backend-agnostic `VmStartConfig` to
 /// the Vz-specific JSON shape.
 ///
@@ -1712,7 +1712,7 @@ mod tests {
 
     #[test]
     fn resolve_supervisor_path_honors_env_override() {
-        let _guard = mvm_base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1843,7 +1843,7 @@ mod tests {
 
     #[test]
     fn resolve_supervisor_path_env_pointing_at_missing_file_errors() {
-        let _guard = mvm_base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized by TEST_ENV_LOCK.

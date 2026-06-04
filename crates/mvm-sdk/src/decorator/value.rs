@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use mvm_ir::{
+use crate::ir::{
     App, Dependencies, Entrypoint, EnvValue, Format, HookCmd, Hooks, Image, Mount, Network,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
     SecretMount, SecretRef, Source, Workload,

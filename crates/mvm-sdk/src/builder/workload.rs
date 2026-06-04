@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mvm_ir::{App, Volume, Workload};
+use crate::ir::{App, Volume, Workload};
 
 use crate::error::BuildError;
 

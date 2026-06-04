@@ -22,12 +22,12 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_core::user_config::MvmConfig;
+use mvm_hostd::supervisor::ToolRegistry;
+use mvm_hostd::supervisor::tools::{download, staging, upload, web_fetch, web_search};
 use mvm_mcp::{
     ContentBlock, Dispatcher, ReapReason, Reaper, RunParams, SessionConfig, SessionLookup,
     SessionMap, SessionState, ToolResult,
 };
-use mvm_supervisor::ToolRegistry;
-use mvm_supervisor::tools::{download, staging, upload, web_fetch, web_search};
 use secrecy::SecretBox;
 
 use super::Cli;
@@ -152,7 +152,7 @@ impl Default for ExecDispatcher {
 /// Plan 65 W4 — operator-rotatable provider credentials. When set,
 /// the value names a secret stored via `mvmctl secret put` (default
 /// tenant `local`). The supervisor fetches the value through
-/// `mvm_security::secret_store::default_secret_store()` — OS
+/// `mvm_core::crypto::secret_store::default_secret_store()` — OS
 /// keyring on Mac/Linux with gnome-keyring, file fallback elsewhere
 /// (mode 0600 under `~/.mvm/secrets/local/`).
 ///
@@ -196,7 +196,7 @@ const PROVIDER_CREDENTIAL_TENANT: &str = "local";
 fn resolve_provider_credential(
     direct_env_var: &str,
     secret_ref_env_var: &str,
-    store: &dyn mvm_security::secret_store::SecretStore,
+    store: &dyn mvm_core::crypto::secret_store::SecretStore,
 ) -> Option<SecretBox<String>> {
     if let Ok(direct) = std::env::var(direct_env_var)
         && !direct.is_empty()
@@ -287,7 +287,7 @@ fn build_tool_registry() -> ToolRegistry {
     // elsewhere). Operators rotate by re-running `mvmctl secret
     // put`; the supervisor picks up the new value on next
     // `mvmctl mcp stdio` boot.
-    let secret_store = mvm_security::secret_store::default_secret_store();
+    let secret_store = mvm_core::crypto::secret_store::default_secret_store();
     if search_allow.contains("brave")
         && let Some(key) = resolve_provider_credential(
             web_search::BRAVE_API_KEY_ENV_VAR,
@@ -695,7 +695,7 @@ impl Dispatcher for ExecDispatcher {
     }
 
     /// Plan 60 Phase 7 — route registry tools through
-    /// `mvm_supervisor::ToolRegistry`. The legacy `run` tool stays
+    /// `mvm_hostd::supervisor::ToolRegistry`. The legacy `run` tool stays
     /// on its dedicated method; everything else (`mvm.time_now`,
     /// `mvm.web_fetch`, `mvm.web_search`, …) lands here.
     ///
@@ -956,7 +956,7 @@ mod tests {
     // tests touching the same key.
     // ──────────────────────────────────────────────────────────────
 
-    use mvm_security::secret_store::{FileSecretStore, SecretStore};
+    use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use secrecy::{ExposeSecret, SecretBox};
 
     /// Expose the inner string of a `SecretBox` for test

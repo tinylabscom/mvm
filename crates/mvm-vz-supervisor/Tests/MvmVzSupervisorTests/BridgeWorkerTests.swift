@@ -4,7 +4,7 @@
 //
 //   1. testHandshakeConstantMatchesRustSide — the handshake string
 //      `MVM_VZ_BRIDGE_V1\n` must agree byte-for-byte with
-//      `mvm_supervisor::gateway_bridge::VZ_BRIDGE_HANDSHAKE`. A drift
+//      `mvm_hostd::supervisor::gateway_bridge::VZ_BRIDGE_HANDSHAKE`. A drift
 //      here would silently break every Vz audit chain on a fresh
 //      `mvmctl up`.
 //   2. testFlowOpenedJsonShape — JSON line for a `flow_opened` event
@@ -33,8 +33,8 @@ final class BridgeWorkerTests: XCTestCase {
     // MARK: - 1. Handshake constant pin
 
     func testHandshakeConstantMatchesRustSide() {
-        // mvm_supervisor::gateway_bridge::VZ_BRIDGE_HANDSHAKE
-        // (gateway_bridge.rs:776) — must match exactly.
+        // mvm_hostd::supervisor::gateway_bridge::VZ_BRIDGE_HANDSHAKE
+        // (gateway_bridge.rs:834) — must match exactly.
         XCTAssertEqual(VZ_BRIDGE_HANDSHAKE, "MVM_VZ_BRIDGE_V1\n")
         XCTAssertEqual(
             Data(VZ_BRIDGE_HANDSHAKE.utf8).count,

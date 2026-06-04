@@ -5,7 +5,7 @@
 //! - **plan** (Followup H-plan, already shipped): runs a
 //!   Sandbox-shaped script with the SDK in record mode, lowers the
 //!   captured recording, synthesises one `ExecutionPlan` per app
-//!   and routes each through `mvm_supervisor::admit_for_run` for a
+//!   and routes each through `mvm_hostd::supervisor::admit_for_run` for a
 //!   dry-run admission check. **No microVM ever boots** — the value
 //!   is that admission gates (signature, validity window, replay
 //!   store, policy resolution) fire end-to-end without the cost of
@@ -59,7 +59,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-use mvm_ir::{App, Workload};
+use mvm_sdk::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use super::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
@@ -184,7 +184,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
     }
 
     eprintln!(
-        "mvmctl run --mode plan: workload {} has {} app(s); admitting each via mvm_supervisor::admit_for_run",
+        "mvmctl run --mode plan: workload {} has {} app(s); admitting each via mvm_hostd::supervisor::admit_for_run",
         workload.id,
         workload.apps.len()
     );
@@ -287,7 +287,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         image_sha256: leaked,
         image_cosign_bundle: None,
         intent: Some("code:execute"),
-        seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,

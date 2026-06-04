@@ -1,9 +1,9 @@
 use anyhow::Result;
 
 use mvm::shell;
+use mvm_core::crypto::posture::SecurityPosture;
 use mvm_core::security::{PostureCheck, SecurityLayer, SecurityPolicy};
 use mvm_core::time;
-use mvm_security::posture::SecurityPosture;
 
 use crate::ui;
 

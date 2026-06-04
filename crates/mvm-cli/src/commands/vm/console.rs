@@ -29,8 +29,11 @@ use crate::ui;
 /// connection (control + data + resize). Cloning the Arc lets the
 /// SIGWINCH handler thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
-    if mvm_providers::apple_container::vsock_connect(name, mvm_guest::vsock::GUEST_AGENT_PORT)
-        .is_ok()
+    if mvm_backend::providers::apple_container::vsock_connect(
+        name,
+        mvm_guest::vsock::GUEST_AGENT_PORT,
+    )
+    .is_ok()
     {
         return Ok(Arc::new(AppleContainerTransport::new(name)));
     }

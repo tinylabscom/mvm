@@ -103,7 +103,7 @@ pub struct ToolSchema {
 }
 
 /// JSON Schema for the `mvm.time_now` tool. Mirrors
-/// `mvm_supervisor::tools::time_now::TimeNowParams`.
+/// `mvm_hostd::supervisor::tools::time_now::TimeNowParams`.
 pub fn time_now_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -119,7 +119,7 @@ pub fn time_now_input_schema() -> serde_json::Value {
 }
 
 /// JSON Schema for the `mvm.web_fetch` tool. Mirrors
-/// `mvm_supervisor::tools::web_fetch::WebFetchParams`.
+/// `mvm_hostd::supervisor::tools::web_fetch::WebFetchParams`.
 pub fn web_fetch_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -140,7 +140,7 @@ pub fn web_fetch_input_schema() -> serde_json::Value {
 }
 
 /// JSON Schema for the `mvm.upload` tool. Mirrors
-/// `mvm_supervisor::tools::upload::UploadParams`.
+/// `mvm_hostd::supervisor::tools::upload::UploadParams`.
 pub fn upload_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -165,7 +165,7 @@ pub fn upload_input_schema() -> serde_json::Value {
 }
 
 /// JSON Schema for the `mvm.download` tool. Mirrors
-/// `mvm_supervisor::tools::download::DownloadParams`.
+/// `mvm_hostd::supervisor::tools::download::DownloadParams`.
 pub fn download_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -186,7 +186,7 @@ pub fn download_input_schema() -> serde_json::Value {
 }
 
 /// JSON Schema for the `mvm.web_search` tool. Mirrors
-/// `mvm_supervisor::tools::web_search::WebSearchParams`.
+/// `mvm_hostd::supervisor::tools::web_search::WebSearchParams`.
 pub fn web_search_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",

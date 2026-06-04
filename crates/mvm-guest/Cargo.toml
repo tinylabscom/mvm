@@ -24,6 +24,14 @@ path = "src/bin/mvm-guest-agent.rs"
 name = "mvm-seccomp-apply"
 path = "src/bin/mvm-seccomp-apply.rs"
 
+# In-guest entrypoint runtime for function-call workloads (folded in
+# from the former mvm-runner crate — plan 121 A1). The library half
+# lives in `src/runner/`; this is the thin binary the nix factories
+# bake at `/usr/lib/mvm/wrappers/runner`.
+[[bin]]
+name = "mvm-runner"
+path = "src/bin/mvm-runner.rs"
+
 # Early-userspace init (PID 1) that runs from the verity initramfs
 # baked by `mkGuest` when `verifiedBoot = true`. Reads the roothash
 # from /proc/cmdline, constructs the dm-verity device-mapper target
@@ -81,7 +89,6 @@ dev-shell = []
 
 [dependencies]
 mvm-core.workspace = true
-mvm-security.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true

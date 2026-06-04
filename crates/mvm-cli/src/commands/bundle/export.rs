@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args as ClapArgs;
-use mvm_plan::bundle::{
+use mvm_core::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, KeyId,
     VerityInfo, sha256_hex, write_bundle,
 };
@@ -147,7 +147,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // `mvmctl up <bundle-sha>` on another host gets sensible
     // defaults without re-discovering them. CLI `--cpus` /
     // `--memory` still override at launch time.
-    let resources = Some(mvm_plan::BundleResources {
+    let resources = Some(mvm_core::plan::BundleResources {
         vcpus: spec.vcpus as u32,
         mem_mib: spec.mem_mib,
     });

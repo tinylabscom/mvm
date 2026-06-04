@@ -1,6 +1,6 @@
 //! Plan 64 W4 — host-side chain-signed audit emitter.
 //!
-//! Wraps `mvm_supervisor::FileAuditSigner` so `mvmctl up` can emit
+//! Wraps `mvm_hostd::supervisor::FileAuditSigner` so `mvmctl up` can emit
 //! tamper-evident `plan.admitted` / `plan.launched` / `plan.failed`
 //! entries bound to the plan-64 `AdmittedPlan`. The chain is signed
 //! under the host signer's keypair (same Ed25519 key W2 introduced for
@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
-use mvm_plan::ExecutionPlan;
-use mvm_supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+use mvm_core::plan::ExecutionPlan;
+use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
 
 use crate::commands::image::OciProvenance;
 
@@ -187,7 +187,7 @@ impl AuditEmitter {
     pub fn with_policy(
         signing_key: SigningKey,
         audit_dir: &Path,
-        policy: &mvm_policy::AuditPolicy,
+        policy: &mvm_core::policy::AuditPolicy,
     ) -> Result<Self> {
         if !policy.chain_signing {
             anyhow::bail!(
@@ -269,8 +269,8 @@ impl AuditEmitter {
             vec![("share_count".to_string(), plan.shares.len().to_string())];
         for (i, s) in plan.shares.iter().enumerate() {
             let kind = match s.kind {
-                mvm_plan::ShareKind::Disk => "disk",
-                mvm_plan::ShareKind::DirShare => "dir_share",
+                mvm_core::plan::ShareKind::Disk => "disk",
+                mvm_core::plan::ShareKind::DirShare => "dir_share",
             };
             labels.push((format!("share_{i}_tag"), s.tag.clone()));
             labels.push((format!("share_{i}_host"), s.host_path.clone()));
@@ -391,12 +391,12 @@ impl AuditEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
     };
-    use mvm_supervisor::verify_audit_chain;
+    use mvm_hostd::supervisor::verify_audit_chain;
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 
@@ -553,7 +553,10 @@ mod tests {
 
         let err = verify_audit_chain(&path, &vk).expect_err("tamper must break verify");
         assert!(
-            matches!(err, mvm_supervisor::VerifyError::SignatureInvalid { .. }),
+            matches!(
+                err,
+                mvm_hostd::supervisor::VerifyError::SignatureInvalid { .. }
+            ),
             "expected SignatureInvalid, got {err:?}"
         );
     }
@@ -720,7 +723,7 @@ mod tests {
         let replica = dir.path().join("replica.jsonl");
         let key = SigningKey::generate(&mut OsRng);
         let vk = key.verifying_key();
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec![format!("file://{}", replica.display())],
         };
@@ -740,7 +743,7 @@ mod tests {
     fn policy_requires_chain_signing() {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: false,
             stream_destinations: Vec::new(),
         };
@@ -755,7 +758,7 @@ mod tests {
     fn policy_refuses_unwired_replication_schemes() {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["https://audit.example.com/ingest".to_string()],
         };
@@ -770,7 +773,7 @@ mod tests {
     fn policy_refuses_relative_file_destinations() {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["file://relative/audit.jsonl".to_string()],
         };

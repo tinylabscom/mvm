@@ -7,6 +7,23 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+# Folded in with mvm-vz (plan 121 C2): auto-builds the mvm-vz-supervisor
+# Swift binary on macOS when MVM_VZ_BUILD_SUPERVISOR=1. No-op otherwise
+# (non-macOS, or env unset) — never fails the Rust build.
+build = "build.rs"
+
+# Builder-VM-only Linux tools (plan 121 D4) — cross-compiled to
+# aarch64-unknown-linux-musl by crates/mvm-cli/build.rs and embedded.
+# Linux-gated in source (stub main() elsewhere) so non-Linux workspace
+# builds stay green. Bin names are load-bearing: build.rs +
+# host_binaries/manifest.rs + nix/lib/mvm-host-binaries.nix all key on them.
+[[bin]]
+name = "mvm-host-vm-init"
+path = "src/bin/mvm-host-vm-init.rs"
+
+[[bin]]
+name = "mvm-egress-proxy"
+path = "src/bin/mvm-egress-proxy.rs"
 
 [dependencies]
 # Plan 74 W1.3 — OCI layer unpack to a staging rootfs. `tar` and
@@ -46,13 +63,12 @@ reqwest = { workspace = true, default-features = false, features = ["blocking", 
 # launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
 # `builder-vm`; default-off until Plan 72 W5
 # cutover flips polarity.
-mvm-libkrun = { workspace = true, optional = true }
+libkrun-sys = { workspace = true, optional = true }
 # Plan 97 Phase C — `VzBuilderBackend` builds a `vz::SupervisorConfig`
 # JSON document and pipes it to the Swift `mvm-vz-supervisor`. The
 # crate is pure types (no C linkage, no platform-specific deps) so
 # it costs nothing on non-macOS hosts; the runtime spawn bails when
 # Vz isn't available.
-mvm-vz.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -82,6 +98,12 @@ uuid.workspace = true
 libc.workspace = true
 which = "6"
 
+# Linux mount/reboot/signal/ioctl syscalls for the mvm-host-vm-init bin
+# (the builder VM's PID 1) — folded in with mvm-host-vm-init (plan 121
+# D4). Linux-only so non-Linux workspace builds don't drag in the dep.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.29", features = ["mount", "reboot", "signal", "ioctl"] }
+
 [dev-dependencies]
 # Plan 76 Phase 6 — `packed_artifact::tests` generate Ed25519
 # keypairs for round-trip tests. ed25519-dalek's
@@ -91,11 +113,19 @@ rand = "0.8"
 
 [features]
 default = []
+# Folded in with the mvm-egress-proxy bin (plan 121 D4). Off by default;
+# tests/dev enable it so the `mvm-egress-proxy` bin honors a
+# `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no
+# features) ship the four ADR-047 hostnames hard-coded — no env override.
+# The bin's `#[cfg(feature = "dev-shell")]` blocks only compile on Linux
+# (inside `mod linux`), so this missing feature was a Linux-only error
+# invisible on a macOS dev host.
+dev-shell = []
 # Plan 72 W1: libkrun-direct builder VM launcher. Pulls the
 # `mvm-libkrun` FFI crate which itself gates the underlying
 # `libkrun-sys` bindings.
 contributor-bootstrap = []
-builder-vm = ["dep:mvm-libkrun"]
+builder-vm = ["dep:libkrun-sys"]
 
 [lints]
 workspace = true

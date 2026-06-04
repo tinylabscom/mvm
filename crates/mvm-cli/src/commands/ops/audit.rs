@@ -6,7 +6,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use crate::ui;
 
 use mvm_core::user_config::MvmConfig;
-use mvm_supervisor::{SignedEnvelope, verify_audit_chain};
+use mvm_hostd::supervisor::{SignedEnvelope, verify_audit_chain};
 
 use super::super::vm::audit_chain::{audit_path_for_tenant, default_audit_dir};
 use super::super::vm::host_signer;
@@ -321,7 +321,8 @@ fn load_chain_fingerprint_index(
         }
         // Each line is a `SignedEnvelope { entry, prev_hash,
         // signature }`. We only need `entry.event` + `entry.labels`.
-        let Ok(envelope) = serde_json::from_str::<mvm_supervisor::SignedEnvelope>(&line) else {
+        let Ok(envelope) = serde_json::from_str::<mvm_hostd::supervisor::SignedEnvelope>(&line)
+        else {
             continue;
         };
         if envelope.entry.event != "lifecycle.tenant.destroyed" {
@@ -719,8 +720,8 @@ mod verify_cert_tests {
     // ──────────────────────────────────────────────────────────────
 
     use mvm::vm::overlay::cert_fingerprint;
-    use mvm_plan::{PlanId, TenantId};
-    use mvm_supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+    use mvm_core::plan::{PlanId, TenantId};
+    use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
     use std::collections::BTreeMap;
 
     fn write_chain_with_entries(
@@ -748,12 +749,12 @@ mod verify_cert_tests {
             let entry = AuditEntry {
                 timestamp: chrono::Utc::now(),
                 tenant: TenantId(tenant.to_string()),
-                plan_id: PlanId(mvm_supervisor::UNBOUND_PLAN_ID.to_string()),
+                plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
                 plan_version: 0,
                 bundle_id: None,
                 bundle_version: None,
-                image_name: mvm_supervisor::UNBOUND_IMAGE_NAME.to_string(),
-                image_sha256: mvm_supervisor::UNBOUND_IMAGE_SHA256.to_string(),
+                image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
+                image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
                 event: "lifecycle.tenant.destroyed".to_string(),
                 labels,
             };
@@ -872,12 +873,12 @@ mod verify_cert_tests {
         let destroy_entry = AuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
-            plan_id: PlanId(mvm_supervisor::UNBOUND_PLAN_ID.to_string()),
+            plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
             bundle_id: None,
             bundle_version: None,
-            image_name: mvm_supervisor::UNBOUND_IMAGE_NAME.to_string(),
-            image_sha256: mvm_supervisor::UNBOUND_IMAGE_SHA256.to_string(),
+            image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "lifecycle.tenant.destroyed".to_string(),
             labels,
         };
@@ -889,12 +890,12 @@ mod verify_cert_tests {
         let other_entry = AuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
-            plan_id: PlanId(mvm_supervisor::UNBOUND_PLAN_ID.to_string()),
+            plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
             bundle_id: None,
             bundle_version: None,
-            image_name: mvm_supervisor::UNBOUND_IMAGE_NAME.to_string(),
-            image_sha256: mvm_supervisor::UNBOUND_IMAGE_SHA256.to_string(),
+            image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "cmd.up.completed".to_string(),
             labels: other_labels,
         };

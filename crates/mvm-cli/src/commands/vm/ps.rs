@@ -35,7 +35,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let mut tag_filter: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for raw in &args.tags {
-        let (k, v) = mvm_security::policy::InputValidator::parse_tag_arg(raw)
+        let (k, v) = mvm_core::crypto::policy::InputValidator::parse_tag_arg(raw)
             .with_context(|| format!("Invalid --tag value: {:?}", raw))?;
         tag_filter.insert(k, v);
     }

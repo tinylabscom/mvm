@@ -13,7 +13,7 @@
 //! relevant entry. If the heuristic can't conclude, we err on the
 //! side of "looks pinned" rather than false-positive.
 
-use mvm_ir::{Dependencies, NodeTool, PythonTool, Workload};
+use crate::ir::{Dependencies, NodeTool, PythonTool, Workload};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -87,11 +87,11 @@ pub fn validate_lockfiles(workload: &Workload, manifest_dir: &Path) -> Result<()
     Ok(())
 }
 
-fn resolve_lockfile_path(manifest_dir: &Path, app: &mvm_ir::App, lockfile: &str) -> PathBuf {
+fn resolve_lockfile_path(manifest_dir: &Path, app: &crate::ir::App, lockfile: &str) -> PathBuf {
     // app.source.path is interpreted relative to manifest_dir. The
     // lockfile is interpreted relative to that resolved source root.
     let source_root = match &app.source {
-        mvm_ir::Source::LocalPath { path, .. } => {
+        crate::ir::Source::LocalPath { path, .. } => {
             let p = Path::new(path);
             if p.is_absolute() {
                 p.to_path_buf()

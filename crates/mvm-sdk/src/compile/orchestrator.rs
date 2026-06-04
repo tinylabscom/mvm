@@ -13,7 +13,7 @@ use crate::compile::reachability::{
     discover_python_reachable,
 };
 use crate::compile::source::{SourceError, copy_source, rehash};
-use mvm_ir::{Entrypoint, EnvValue, Source, Workload};
+use crate::ir::{Entrypoint, EnvValue, Source, Workload};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -268,7 +268,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
     }
 }
 
-fn managed_secret_targets(app: &mvm_ir::App) -> Vec<String> {
+fn managed_secret_targets(app: &crate::ir::App) -> Vec<String> {
     let mut targets = Vec::new();
     collect_secret_targets(&app.env, &mut targets);
     for ep in &app.entrypoints {
@@ -292,8 +292,8 @@ fn collect_secret_targets(
             continue;
         };
         match &reference.mount {
-            mvm_ir::SecretMount::Env { var } => out.push(var.clone()),
-            mvm_ir::SecretMount::File { path } => out.push(path.clone()),
+            crate::ir::SecretMount::Env { var } => out.push(var.clone()),
+            crate::ir::SecretMount::File { path } => out.push(path.clone()),
         }
     }
 }
@@ -366,7 +366,7 @@ fn check_function_presence(
 /// isn't an object schema with a `required` array, returns empty
 /// (we only enforce the strict-required case).
 fn schema_required_not_in_signature(
-    schema: &mvm_ir::JsonSchemaShape,
+    schema: &crate::ir::JsonSchemaShape,
     sig: &crate::compile::func_describe::FunctionSignature,
 ) -> Vec<String> {
     if sig.accepts_kwargs {
@@ -478,7 +478,7 @@ fn write_lf(path: &Path, contents: &str) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::{App, Entrypoint, Format, Image, Resources, SecretMount, SecretRef, Source};
+    use crate::ir::{App, Entrypoint, Format, Image, Resources, SecretMount, SecretRef, Source};
     use tempfile::TempDir;
 
     fn sample() -> Workload {
@@ -745,7 +745,7 @@ mod tests {
             unreachable!()
         };
         if let Entrypoint::Function { args_schema, .. } = &mut w.apps[0].entrypoints[0] {
-            *args_schema = Some(mvm_ir::JsonSchemaShape(map));
+            *args_schema = Some(crate::ir::JsonSchemaShape(map));
         }
         w
     }

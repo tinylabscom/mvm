@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 
-use mvm_plan::{PlanSeccompTier, SecretReleasePolicy};
+use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
 use crate::commands::env::apple_container::ensure_default_microvm_image;
 use crate::commands::vm::plan_admission::{
@@ -30,8 +30,9 @@ pub struct ProbeImage {
 /// target (a `HostDescriptor`-comparable baseline).
 #[allow(dead_code)]
 pub fn resolve_probe_image() -> Result<ProbeImage> {
-    let (kernel, rootfs) =
-        ensure_default_microvm_image().context("resolving default-microvm bench image")?;
+    // Bench baseline boots the published, admitted prod default image.
+    let (kernel, rootfs) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
+        .context("resolving default-microvm bench image")?;
     Ok(ProbeImage { kernel, rootfs })
 }
 
@@ -49,7 +50,7 @@ pub fn admit_probe_plan(
     vm_name: &str,
     keys_dir: Option<&std::path::Path>,
 ) -> Result<AdmittedPlan> {
-    let sha = mvm_security::image_verify::sha256_file(rootfs)
+    let sha = mvm_core::crypto::image_verify::sha256_file(rootfs)
         .with_context(|| format!("hashing probe rootfs {}", rootfs.display()))?;
     let input = SynthesisInput {
         vm_name,

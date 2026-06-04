@@ -133,7 +133,7 @@ impl VmBackend for CloudHypervisorBackend {
         // (no daemon started, no PID file left behind).
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        mvm_base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
         // Spawn the daemon. Waits for the API socket.
         ch_runtime::start_ch_daemon(&abs_dir, &api_socket)?;
@@ -317,7 +317,7 @@ impl VmBackend for CloudHypervisorBackend {
             .with_context(|| format!("resolving per-VM dir for {}", id.0))?;
         let filename = if hypervisor { "ch.log" } else { "console.log" };
         let log_file = format!("{abs_dir}/{filename}");
-        mvm_base::shell::run_in_vm_stdout(&format!(
+        crate::base::shell::run_in_vm_stdout(&format!(
             "tail -n {lines} {log_file} 2>/dev/null || true"
         ))
     }

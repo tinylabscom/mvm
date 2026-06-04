@@ -242,7 +242,7 @@ jobs:
         run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
 
       - name: Fuzz SupervisorConfig (host-side)
-        working-directory: crates/mvm-libkrun
+        working-directory: crates/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -255,7 +255,7 @@ jobs:
         run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
 
       - name: Fuzz Vz SupervisorConfig (host-side)
-        working-directory: crates/mvm-vz
+        working-directory: crates/mvm-build
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -283,7 +283,7 @@ jobs:
         run: cargo fuzz run unpack_layer -- -max_total_time="$DURATION"
 
       - name: Fuzz Firecracker bridge — BridgeConfigJson (host-side)
-        working-directory: crates/mvm-firecracker-bridge
+        working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -296,13 +296,13 @@ jobs:
         # death before the parent's watchdog has a sentinel to react
         # to. Same contract as `fuzz_supervisor_config`: "never panic
         # on any input." `#[serde(deny_unknown_fields)]` on
-        # `BridgeConfigJson` (Task 12 — `crates/mvm-firecracker-bridge/
+        # `BridgeConfigJson` (Task 12 — `crates/mvm-vm-host/
         # src/parse.rs`) means unknown keys fail-closed inside
         # deserialization.
         run: cargo fuzz run fuzz_bridge_config_json -- -max_total_time="$DURATION"
 
       - name: Fuzz Firecracker bridge — passt-hashes TOML
-        working-directory: crates/mvm-firecracker-bridge
+        working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -324,14 +324,14 @@ jobs:
           path: |
             crates/mvm-guest/fuzz/corpus/
             crates/mvm-guest/fuzz/artifacts/
-            crates/mvm-libkrun/fuzz/corpus/
-            crates/mvm-libkrun/fuzz/artifacts/
-            crates/mvm-vz/fuzz/corpus/
-            crates/mvm-vz/fuzz/artifacts/
+            crates/deps/libkrun-sys/fuzz/corpus/
+            crates/deps/libkrun-sys/fuzz/artifacts/
+            crates/mvm-build/fuzz/corpus/
+            crates/mvm-build/fuzz/artifacts/
             crates/mvm-oci/fuzz/corpus/
             crates/mvm-oci/fuzz/artifacts/
-            crates/mvm-firecracker-bridge/fuzz/corpus/
-            crates/mvm-firecracker-bridge/fuzz/artifacts/
+            crates/mvm-vm-host/fuzz/corpus/
+            crates/mvm-vm-host/fuzz/artifacts/
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-002 §W5.1 — the unit tests that exercise the
@@ -355,10 +355,13 @@ jobs:
         run: cargo test -p mvm-cli --lib hash_verify_tests
 
   # ── Lane 6: Verified boot artifact gate ────────────────────────────
-  # ADR-002 §W3.4 — production microVM Nix builds must emit
-  # `rootfs.verity` + `rootfs.roothash` alongside `rootfs.ext4`. If a
-  # refactor flips `verifiedBoot = false` for a production path, this
-  # gate fails the merge before the verity claim breaks silently.
+  # ADR-002 §W3.4 — the production verity-sealed image must emit its
+  # ext4 + `*.verity` + `*.roothash` sidecars. If a refactor disables
+  # the dm-verity seal on the prod path, this gate fails the merge
+  # before the verity claim breaks silently. Witnesses the shipped seal
+  # via the runtime overlay (the bundled prod-rootfs image this lane
+  # once built was retired by Plan 115; the rootfs/OCI seal itself is
+  # unit-tested in `mvm_build::oci_to_rootfs::verity`).
   verified-boot-artifacts:
     name: Verified boot artifacts (ADR-002 §W3.4)
     runs-on: ubuntu-latest
@@ -368,38 +371,45 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Build default-microvm and assert verity output
+      - name: Build runtime overlay and assert verity output
         run: |
           set -euo pipefail
-          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+          # Plan 115 retired the bundled default-tenant prod image this lane
+          # used to build. The dm-verity sealing pipeline it witnessed —
+          # `mvm_build::oci_to_rootfs::verity::seal_with_verity` (veritysetup
+          # format + a 64-hex roothash) — is unchanged and unit-tested in
+          # mvm-build, and is exercised end-to-end by the verity-sealed
+          # runtime overlay (ADR-051: "sealed the same way it seals rootfs"),
+          # which every microVM attaches at boot. Assert that sealed image
+          # emits its ext4 + verity sidecar + a valid roothash.
+          nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           out=$(head -1 /tmp/store-path.txt)
-          for f in rootfs.ext4 rootfs.verity rootfs.roothash vmlinux; do
+          for f in overlay.ext4 overlay.verity overlay.roothash; do
             if [ ! -f "$out/$f" ]; then
               echo "::error::missing $f in $out" >&2
-              echo "ADR-002 §W3.4 requires production microVM builds to emit" >&2
-              echo "rootfs.{ext4,verity,roothash} alongside the kernel. The" >&2
-              echo "default-microvm output is missing one of these files," >&2
-              echo "which usually means verifiedBoot was flipped off on the" >&2
-              echo "production path. Either re-enable it or update ADR-002." >&2
+              echo "ADR-002 §W3.4 requires the production verity-sealed image" >&2
+              echo "to emit {ext4,verity,roothash}; a missing sidecar usually" >&2
+              echo "means the dm-verity seal was disabled on the prod path." >&2
               exit 1
             fi
           done
           # Sanity: roothash must be a 64-char hex string.
-          hash=$(tr -d '\n' < "$out/rootfs.roothash")
+          hash=$(tr -d '\n' < "$out/overlay.roothash")
           if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::roothash is not a 64-char lowercase hex string: ${hash}" >&2
             exit 1
           fi
-          echo "ok: rootfs.{ext4,verity,roothash} present, roothash=${hash:0:12}…"
+          echo "ok: overlay.{ext4,verity,roothash} present, roothash=${hash:0:12}…"
 
   # ── Lane 6b: Sealed-prod rootfs has no SSH (plan 76 Phase 8) ──────
   # Plan 76 §Phase 8 + ADR-002 §"No SSH inside microVMs". The vsock-
   # only claim is enforced at runtime by the `mvm-guest-agent`
   # dispatcher (Plan 76 Phase 1 + the `sealed-prod-allowlist` CI
   # lane in `ci.yml`). This lane is the static counterpart: it
-  # mounts the production rootfs and refuses to merge if any SSH
-  # artifact is present.
+  # mounts the verity-sealed runtime overlay (the mvm-controlled
+  # filesystem attached to every microVM) and refuses to merge if any
+  # SSH artifact is present.
   #
   # No untrusted GitHub event input flows into any step; all
   # commands below are static literals.
@@ -418,55 +428,53 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Build default-tenant and assert no-SSH on rootfs
+      - name: Build runtime overlay and assert no SSH on the sealed image
         run: |
           set -euo pipefail
-          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+          # Plan 115 retired the bundled default-tenant rootfs this lane
+          # used to mount. The mvm-controlled, verity-sealed runtime overlay
+          # is the prod-tier filesystem attached to every microVM; assert it
+          # ships no SSH artifacts anywhere. (Workload-rootfs no-SSH is also
+          # enforced at runtime by the agent dispatcher + the
+          # ci.yml::sealed-prod-allowlist lane.)
+          nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           out=$(head -1 /tmp/store-path.txt)
-          rootfs="$out/rootfs.ext4"
+          rootfs="$out/overlay.ext4"
           if [ ! -f "$rootfs" ]; then
-            echo "::error::rootfs.ext4 missing in $out (rebuild verified-boot-artifacts lane)" >&2
+            echo "::error::overlay.ext4 missing in $out (rebuild verified-boot-artifacts lane)" >&2
             exit 1
           fi
 
-          # Mount the production rootfs read-only and grep for SSH
-          # artifacts. Read-only is load-bearing: any write would
-          # invalidate the dm-verity root hash, and we don't want a
-          # bug in this script to corrupt the artifact.
+          # Mount read-only and scan the whole tree for SSH artifacts.
+          # Read-only is load-bearing: any write would invalidate the
+          # dm-verity root hash. A content scan (not fixed paths) keeps
+          # the check meaningful regardless of filesystem layout.
           mnt=$(mktemp -d)
           sudo mount -o ro,loop "$rootfs" "$mnt"
           trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
 
           fail=0
 
-          # Any sshd binary on a likely production path. The list
-          # mirrors common nixpkgs install locations + the busybox
-          # multi-call binary path.
-          for p in \
-            "$mnt/usr/sbin/sshd" \
-            "$mnt/usr/bin/sshd" \
-            "$mnt/sbin/sshd" \
-            "$mnt/bin/sshd" \
-            "$mnt/run/current-system/sw/bin/sshd"
-          do
-            if [ -e "$p" ]; then
-              echo "::error::sshd binary present at ${p#$mnt}" >&2
-              fail=1
-            fi
-          done
-
-          # SSH host keys (private and public halves), if present,
-          # mean the image is ready to host SSH — a sealed-prod
-          # leak per ADR-002 §"No SSH inside microVMs".
-          if compgen -G "$mnt/etc/ssh/ssh_host_*" > /dev/null; then
-            echo "::error::SSH host keys present under /etc/ssh/" >&2
-            ls "$mnt/etc/ssh/" >&2 || true
+          # Any sshd binary, anywhere in the image.
+          if sudo find "$mnt" -type f -name sshd -print -quit | grep -q .; then
+            echo "::error::sshd binary present in the sealed image:" >&2
+            sudo find "$mnt" -type f -name sshd >&2 || true
             fail=1
           fi
 
-          if [ -e "$mnt/etc/ssh/sshd_config" ]; then
-            echo "::error::/etc/ssh/sshd_config present in sealed-prod rootfs" >&2
+          # SSH host keys (ssh_host_*), anywhere — a ready-to-serve SSH
+          # leak per ADR-002 §"No SSH inside microVMs".
+          if sudo find "$mnt" -type f -name 'ssh_host_*' -print -quit | grep -q .; then
+            echo "::error::SSH host keys present in the sealed image:" >&2
+            sudo find "$mnt" -type f -name 'ssh_host_*' >&2 || true
+            fail=1
+          fi
+
+          # sshd_config, anywhere.
+          if sudo find "$mnt" -type f -name sshd_config -print -quit | grep -q .; then
+            echo "::error::sshd_config present in the sealed image:" >&2
+            sudo find "$mnt" -type f -name sshd_config >&2 || true
             fail=1
           fi
 
@@ -474,7 +482,7 @@ jobs:
             echo "::error::ADR-002 violated; sealed-prod images must not ship SSH artifacts." >&2
             exit 1
           fi
-          echo "ok: sealed-prod rootfs has no sshd / host keys / sshd_config"
+          echo "ok: sealed image has no sshd / host keys / sshd_config"
 
   # ── Lane 7: Flake lockfile cleanliness (plan 36 §Layer 0) ──────────
   # Every flake.lock in the repo must be committed and in sync with

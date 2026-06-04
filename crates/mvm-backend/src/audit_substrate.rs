@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 /// Resolved audit-substrate paths for a single VM. Maps directly into
-/// `mvm_libkrun::SupervisorConfig`'s five `Option`-wrapped audit
+/// `libkrun_sys::SupervisorConfig`'s five `Option`-wrapped audit
 /// fields. `None` on every field means the VM has no admission
 /// context — the supervisor stays on the legacy `run_supervisor`
 /// path.

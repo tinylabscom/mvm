@@ -634,6 +634,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             let open_shell = effective_up_shell(shell, no_shell);
             let dev_volumes = resolve_dev_volumes(&volume)?;
 
+            // Reap helpers (gvproxy/supervisor) leaked by a prior killed
+            // run before booting a fresh builder VM. Kill-only, quiet,
+            // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
+            apple_container::sweep_orphaned_vm_helpers_on_startup();
+
             match backend {
                 DevBackend::Libkrun => {
                     cmd_dev_libkrun(effective_cpus, effective_mem, open_shell, &dev_volumes)

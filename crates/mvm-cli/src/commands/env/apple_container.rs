@@ -38,13 +38,13 @@ const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 /// from other processes will fail. Treating that state as "not running"
 /// keeps `dev status` honest with what `shell::run_in_vm` actually sees.
 pub(in crate::commands) fn is_apple_container_dev_running() -> bool {
-    let pid_running = mvm_providers::apple_container::list_ids()
+    let pid_running = mvm_backend::providers::apple_container::list_ids()
         .iter()
         .any(|id| id == DEV_VM_NAME);
     if !pid_running {
         return false;
     }
-    let proxy = mvm_providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
+    let proxy = mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
     proxy.exists()
 }
 
@@ -108,7 +108,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 
     // Sign the binary BEFORE launching via launchd. The daemon runs with
     // MVM_SIGNED=1 so it won't re-exec (which would lose launchd context).
-    mvm_providers::apple_container::ensure_signed();
+    mvm_backend::providers::apple_container::ensure_signed();
 
     // The host-backed Nix store is a sparse ext4 file at a stable
     // path. Apple Container attaches it as /dev/vdb; the guest's init
@@ -171,7 +171,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 
 /// Path for the vsock proxy Unix socket.
 pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
-    mvm_providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
+    mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
         .to_string_lossy()
         .into_owned()
 }
@@ -185,7 +185,7 @@ fn cmd_dev_apple_container_daemon(cpus: u32, memory_gib: u32) -> Result<()> {
         .unwrap_or_else(|_| format!("{}/dev/rootfs.ext4", mvm_core::config::mvm_cache_dir()));
 
     let memory_mib = (memory_gib as u64) * 1024;
-    mvm_providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
+    mvm_backend::providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
         .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
 
     // Block forever — the VM lives in this process.
@@ -456,7 +456,7 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
     ));
 
     if running
-        && let Ok(mut stream) = mvm_providers::apple_container::vsock_connect_any(
+        && let Ok(mut stream) = mvm_backend::providers::apple_container::vsock_connect_any(
             DEV_VM_NAME,
             mvm_guest::vsock::GUEST_AGENT_PORT,
         )
@@ -1299,8 +1299,8 @@ fn try_fetch_signed_manifest(
     version: &str,
     arch: &str,
     variant: &str,
-) -> Result<Option<mvm_security::image_verify::SignedManifest>> {
-    use mvm_security::image_verify;
+) -> Result<Option<mvm_core::crypto::image_verify::SignedManifest>> {
+    use mvm_core::crypto::image_verify;
 
     let manifest_name = format!("{variant}-image-{arch}.manifest.json");
     let manifest_url = format!("{base_url}/{manifest_name}");
@@ -1434,8 +1434,8 @@ fn try_fetch_signed_manifest(
 /// Returns Ok(None) when the list isn't available *and* we have no
 /// cached copy — caller proceeds without revocation enforcement (with
 /// a warning). Returns Err on signature verification failure.
-fn try_fetch_revocation_list() -> Result<Option<mvm_security::image_verify::RevocationList>> {
-    use mvm_security::image_verify;
+fn try_fetch_revocation_list() -> Result<Option<mvm_core::crypto::image_verify::RevocationList>> {
+    use mvm_core::crypto::image_verify;
     use std::time::{Duration, SystemTime};
 
     let cache_dir = format!("{}/revocations", mvm_core::config::mvm_cache_dir());
@@ -1579,7 +1579,7 @@ pub fn cmd_dev_import_image(
     vmlinux_path: &str,
     rootfs_path: &str,
 ) -> Result<()> {
-    use mvm_security::image_verify;
+    use mvm_core::crypto::image_verify;
 
     let version = env!("CARGO_PKG_VERSION");
     let arch = if cfg!(target_arch = "aarch64") {
@@ -1995,9 +1995,10 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // build can install them from /mvm-bins instead of building them with
     // the guest's nix. Same cache dir the steady-state job path uses.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     // Kernel acquisition override (MVM_KERNEL_SOURCE / --kernel-source).
     // `download` (and `auto` when a publish exists) boots the builder VM
@@ -2209,6 +2210,14 @@ fn run_stage0_rootfs_with_external_kernel(
     Ok(())
 }
 
+/// Render the compile heartbeat line. Pure (testable); the live
+/// heartbeat thread routes it through `ui::info`.
+#[cfg(feature = "builder-vm")]
+fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    format!("still compiling… ({}m{:02}s elapsed)", secs / 60, secs % 60)
+}
+
 /// `mvmctl kernel build --source compile`: compile a single kernel attr
 /// through the Stage 0 Alpine bootstrap and land its `vmlinux` in the
 /// per-arch builder-VM cache. Returns the cached kernel path.
@@ -2224,7 +2233,10 @@ fn run_stage0_rootfs_with_external_kernel(
 /// cross-compile. Cross-arch kernels come from the download arm (the
 /// kernel-build GHA publishes both arches).
 #[cfg(feature = "builder-vm")]
-pub(crate) fn build_kernel_via_stage0(variant: KernelVariant) -> Result<std::path::PathBuf> {
+pub(crate) fn build_kernel_via_stage0(
+    variant: KernelVariant,
+    verbose: bool,
+) -> Result<std::path::PathBuf> {
     let builder_flake_dir = find_builder_vm_flake().map_err(|_| {
         anyhow::anyhow!(
             "`mvmctl kernel build --source compile` needs a source checkout of mvm \
@@ -2294,9 +2306,10 @@ pub(crate) fn build_kernel_via_stage0(variant: KernelVariant) -> Result<std::pat
     // ADR-065: the Stage 0 nix build installs the embedded host-vm
     // binaries from /mvm-bins rather than building them in-guest.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     ui::info(&format!(
         "Compiling {} kernel ({arch}) via Stage 0 — first build is slow \
@@ -2307,16 +2320,46 @@ pub(crate) fn build_kernel_via_stage0(variant: KernelVariant) -> Result<std::pat
     {
         use mvm_build::builder_vm::BuilderVm;
         use mvm_build::libkrun_builder::LibkrunBuilderVm;
-        let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
-        backend
-            .run_stage0(
-                &root_dir,
-                "/init",
-                &workspace_root,
-                &staging_dir,
-                &host_bin_dir,
-            )
-            .map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Host-side heartbeat so a quiet (non-verbose) compile is never
+        // dead-silent. In verbose mode the streamed console output is
+        // the liveness signal, so the heartbeat stays off.
+        let stop = Arc::new(AtomicBool::new(false));
+        let heartbeat = if verbose {
+            None
+        } else {
+            let stop = Arc::clone(&stop);
+            Some(std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                // Poll the stop flag every 500ms but only print every ~20s.
+                let mut ticks: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    ticks += 1;
+                    if ticks.is_multiple_of(40) {
+                        ui::info(&format_compile_elapsed(start.elapsed()));
+                    }
+                }
+            }))
+        };
+
+        let backend: &dyn BuilderVm = &LibkrunBuilderVm::default().with_verbose(verbose);
+        let result = backend.run_stage0(
+            &root_dir,
+            "/init",
+            &workspace_root,
+            &staging_dir,
+            &host_bin_dir,
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = heartbeat {
+            let _ = handle.join();
+        }
+
+        result.map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
     }
 
     let built = staging_dir.join("vmlinux");
@@ -2438,7 +2481,7 @@ fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
     let cache_dir =
         std::path::PathBuf::from(format!("{}/libkrunfw", mvm_core::config::mvm_cache_dir()));
     let target = cache_dir.join("vmlinux");
-    let bundled = mvm_libkrun::extract_bundled_kernel(&target)
+    let bundled = libkrun_sys::extract_bundled_kernel(&target)
         .map_err(|e| anyhow::anyhow!("libkrunfw kernel extraction: {e}"))?;
     ui::info(&format!(
         "Extracted libkrunfw kernel ({} bytes) to {}",
@@ -2724,14 +2767,89 @@ pub(in crate::commands) struct ReapOutcome {
 /// of the prototype `/tmp/plan95/reap.sh`, which during validation
 /// nuked a live mvmctl's state dir.
 pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<ReapOutcome> {
-    let vms_root =
-        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
-    reap_orphaned_vm_helpers_at(&vms_root, dry_run)
+    reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
 }
 
-/// Inner form taking an explicit `vms_root`. Exists for tests against
-/// a tempdir without mutating `MVM_CACHE_DIR`.
-fn reap_orphaned_vm_helpers_at(vms_root: &std::path::Path, dry_run: bool) -> Result<ReapOutcome> {
+/// Best-effort orphan-helper sweep run at the *start* of `mvmctl dev
+/// up` / `mvmctl up`. The next launch reaps the previous run's corpses
+/// — startup is the robust trigger because an abnormal exit (^C,
+/// SIGKILL, crash, the libkrun `krun_start_enter` `exit()` that skips
+/// `GvproxyHandle::Drop`) is exactly when mvmctl can't self-clean and
+/// reparents its helpers to launchd.
+///
+/// Kill-only: it signals provably-orphaned helpers but removes **no**
+/// directories (so it never deletes host bytes and carries no audit
+/// obligation — dir pruning stays the job of `mvmctl cache prune`).
+/// Quiet on the happy path; one line only when it actually reaped
+/// something. Swallows errors — a sweep failure must never block a
+/// launch. Since [`free_loopback_port`](libkrun_sys::gvproxy::free_loopback_port)
+/// gives every gvproxy a fresh port, a missed leak is now harmless
+/// hygiene, not a boot blocker.
+pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
+    match reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ false, false) {
+        Ok(o) if o.killed > 0 => crate::ui::info(&format!(
+            "Reaped {} orphaned VM helper(s) left by a prior run.",
+            o.killed
+        )),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!(error = %e, "startup orphan-helper sweep failed (non-fatal)")
+        }
+    }
+}
+
+/// Sidecar PID file names a *builder* VM dir carries (libkrun + Vz).
+const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
+
+/// Sidecar PID file names a *workload* VM dir under `~/.mvm/vms/<name>/`
+/// carries: `libkrun.pid` (libkrun supervisor), `vz.pid` (Vz
+/// supervisor), and the gvproxy sidecars (`gvproxy.pid` libkrun lane /
+/// `host-gvproxy.pid` Vz lane). The argv scan backstops these, but
+/// reading the sidecar directly is cheaper and catches a detached Vz
+/// supervisor that the argv scan might miss.
+const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "gvproxy.pid", "host-gvproxy.pid"];
+
+/// Scan both VM-state roots: the ephemeral builder cache
+/// (`~/.cache/mvm/builder-vm/vms/`) and the workload VM tree
+/// (`~/.mvm/vms/`). `remove_builder_dirs` deletes dead builder scratch
+/// dirs (cache-prune semantics); workload dirs are **never** removed —
+/// a stopped named VM's `~/.mvm/vms/<name>/` is persistent state the
+/// user may restart, so we only reap its leaked helpers.
+fn reap_orphaned_vm_helpers_both_roots(
+    remove_builder_dirs: bool,
+    dry_run: bool,
+) -> Result<ReapOutcome> {
+    let builder_root =
+        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
+    let workload_root = std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
+
+    let mut out = reap_orphaned_vm_helpers_at(
+        &builder_root,
+        BUILDER_SIDECARS,
+        remove_builder_dirs,
+        dry_run,
+    )?;
+    let workload = reap_orphaned_vm_helpers_at(
+        &workload_root,
+        WORKLOAD_SIDECARS,
+        /* remove_dead_dirs = */ false,
+        dry_run,
+    )?;
+    out.killed += workload.killed;
+    out.removed_dirs += workload.removed_dirs;
+    out.freed_bytes += workload.freed_bytes;
+    Ok(out)
+}
+
+/// Inner form taking an explicit `vms_root`, the sidecar names to look
+/// for in each dir, and whether dead dirs may be removed. Exists for
+/// tests against a tempdir without mutating `MVM_CACHE_DIR`.
+fn reap_orphaned_vm_helpers_at(
+    vms_root: &std::path::Path,
+    sidecars: &[&str],
+    remove_dead_dirs: bool,
+    dry_run: bool,
+) -> Result<ReapOutcome> {
     let mut outcome = ReapOutcome {
         killed: 0,
         removed_dirs: 0,
@@ -2751,9 +2869,11 @@ fn reap_orphaned_vm_helpers_at(vms_root: &std::path::Path, dry_run: bool) -> Res
         let mut killed_in_dir = 0u64;
         let mut seen_pids: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
-        // Scan 1 — sidecar files. Steady-state builder VMs write
-        // `builder.pid`; Stage 0 writes `stage0.pid`.
-        for sidecar in ["builder.pid", "stage0.pid"] {
+        // Scan 1 — sidecar files. Builder dirs write `builder.pid` /
+        // `stage0.pid`; workload dirs write `libkrun.pid` / `vz.pid` /
+        // the gvproxy sidecars. `sidecars` is the per-root set; a
+        // missing file is skipped.
+        for sidecar in sidecars {
             let pid_file = dir.join(sidecar);
             let Some(pid) = read_pid_file(&pid_file) else {
                 continue;
@@ -2802,7 +2922,7 @@ fn reap_orphaned_vm_helpers_at(vms_root: &std::path::Path, dry_run: bool) -> Res
         }
 
         outcome.killed += killed_in_dir;
-        if dir_has_live_owner {
+        if dir_has_live_owner || !remove_dead_dirs {
             continue;
         }
 
@@ -3570,7 +3690,7 @@ fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
 /// and `rootfs.ext4` in `out_dir`.
 ///
 /// Caller is expected to have:
-///   - confirmed `mvm_libkrun::is_available()` true,
+///   - confirmed `libkrun_sys::is_available()` true,
 ///   - confirmed `find_builder_vm_flake().is_ok()` (Layer 1 source is
 ///     present in the workspace),
 ///   - run [`prepare_dev_image_out_dir`] on `out_dir`.
@@ -3617,9 +3737,10 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     // The builder-vm flake's cmd.sh reads MVM_HOST_BIN_DIR=/mvm-bins to
     // install the correct cross-compiled binaries into the rootfs.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     let job = BuilderJob::Flake {
         flake_ref: "path:/work/nix/images/builder-vm".to_string(),
@@ -3764,31 +3885,233 @@ mod builder_backend_attempt_order_tests {
     }
 }
 
-/// Ensure the bundled default microVM image (kernel + rootfs) is in the cache.
+/// Ensure the bundled default microVM image (kernel + rootfs) is in the cache,
+/// keyed on `BuildMode` (Plan 158). Used by any image-taking command when no
+/// `--flake`/`--template`/`--image` was supplied. Returns `(kernel, rootfs)`;
+/// the verity + `mvm-meta.json` sidecars land alongside the rootfs.
 ///
-/// Used by any image-taking command when no `--flake` or `--manifest` was
-/// supplied. Returns `(kernel_path, rootfs_path)`.
-///
-/// Downloads a pre-built image from the matching GitHub release when
-/// the local cache is empty.
-pub(crate) fn ensure_default_microvm_image() -> Result<(String, String)> {
-    let cache_dir = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
-    std::fs::create_dir_all(&cache_dir)?;
-
-    let kernel_path = format!("{cache_dir}/vmlinux");
-    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-
-    if std::path::Path::new(&kernel_path).exists() && std::path::Path::new(&rootfs_path).exists() {
-        return Ok((kernel_path, rootfs_path));
+/// - **Prod** downloads the published, verity-sealed prod image (the
+///   `default-microvm-*` release assets), hash-verified.
+/// - **Dev** builds the accessible dev variant locally from the in-repo flake
+///   via the builder VM — dev images are never published.
+pub(crate) fn ensure_default_microvm_image(
+    mode: mvm_build::pipeline::BuildMode,
+) -> Result<(String, String)> {
+    use mvm_build::pipeline::BuildMode;
+    let base = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
+    match mode {
+        BuildMode::Prod => {
+            let cache_dir = format!("{base}/prod");
+            std::fs::create_dir_all(&cache_dir)?;
+            let kernel_path = format!("{cache_dir}/vmlinux");
+            let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+            // All five must be present before skipping the download — a cache
+            // that predates Plan 158 has only vmlinux + rootfs.ext4 and would
+            // fail admission (no overlay-aware sidecar, no verity).
+            let required = [
+                kernel_path.clone(),
+                rootfs_path.clone(),
+                format!("{cache_dir}/mvm-meta.json"),
+                format!("{cache_dir}/rootfs.verity"),
+                format!("{cache_dir}/rootfs.roothash"),
+            ];
+            if required.iter().all(|p| std::path::Path::new(p).exists()) {
+                return Ok((kernel_path, rootfs_path));
+            }
+            download_default_microvm_image(&cache_dir, &kernel_path, &rootfs_path)
+        }
+        BuildMode::Dev => ensure_default_microvm_dev_image(&format!("{base}/dev")),
     }
-
-    download_default_microvm_image(&kernel_path, &rootfs_path)
 }
 
-/// Download a pre-built default microVM image (kernel + rootfs) from the
-/// matching GitHub release. Mirrors `download_dev_image`, including the
-/// ADR-002 §W5.1 hash-verify path.
+/// Dev-mode default image: build the accessible `dev` variant locally from the
+/// in-repo `nix/images/default-tenant` flake via the builder VM (not published).
+#[cfg(feature = "builder-vm")]
+fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)> {
+    std::fs::create_dir_all(cache_dir)?;
+    let kernel_path = format!("{cache_dir}/vmlinux");
+    let rootfs_path = format!("{cache_dir}/rootfs.ext4");
+    let meta_path = format!("{cache_dir}/mvm-meta.json");
+    if [&kernel_path, &rootfs_path, &meta_path]
+        .iter()
+        .all(|p| std::path::Path::new(p).exists())
+    {
+        return Ok((kernel_path, rootfs_path));
+    }
+    ui::info("Building the dev default microVM image locally (dev mode)...");
+    build_default_microvm_dev_via_libkrun(cache_dir)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn ensure_default_microvm_dev_image(_cache_dir: &str) -> Result<(String, String)> {
+    anyhow::bail!(
+        "dev mode builds the default image locally via the builder VM, but this \
+         mvmctl was built without the `builder-vm` feature. Use `--prod` (downloads \
+         the published image), or pass a `--flake`."
+    )
+}
+
+/// Build the bundled **dev** default microVM image via the libkrun builder VM:
+/// `nix build nix/images/default-tenant#packages.<sys>.dev` inside the guest,
+/// extracting `vmlinux` + `rootfs.ext4` + `mvm-meta.json` to `out_dir`. Mirrors
+/// [`build_image_via_libkrun`] but targets the default-tenant flake. Plan 158.
+#[cfg(feature = "builder-vm")]
+fn build_default_microvm_dev_via_libkrun(out_dir: &str) -> Result<(String, String)> {
+    use mvm_build::builder_backend_select::{
+        resolve_builder_backend_with_override, resolve_choice, resolve_env_override,
+    };
+    use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
+
+    bootstrap_builder_vm_image()
+        .context("Stage 0 builder-VM image bootstrap (precondition for libkrun dispatch)")?;
+
+    // The default-tenant flake reads the workspace via the `/work` mount the
+    // builder VM sets (`MVM_WORKSPACE_PATH=/work`), same as the builder-vm flake.
+    let builder_flake = find_builder_vm_flake().context(
+        "builder-vm flake missing at nix/images/builder-vm/flake.nix; libkrun dispatch needs it",
+    )?;
+    let workspace_root = std::path::Path::new(&builder_flake)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("Cannot derive workspace root from {builder_flake}"))?
+        .to_path_buf();
+
+    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
+    let host_bin_dir =
+        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
+            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("creating default-microvm dev out dir {out_dir}"))?;
+
+    let job = BuilderJob::Flake {
+        flake_ref: "path:/work/nix/images/default-tenant".to_string(),
+        attr_path: format!("packages.{}.dev", host_system_linux()),
+    };
+    let mounts = BuilderMounts {
+        flake_src: workspace_root,
+        host_nix_store: None,
+        artifact_out: std::path::PathBuf::from(out_dir),
+        host_bin_dir,
+        staged_user_flake: None,
+    };
+
+    let selected = resolve_choice();
+    let explicit_override = resolve_env_override().is_some();
+    let attempt_order = builder_backend_attempt_order(selected, explicit_override);
+    let mut last_error = None;
+    for (idx, choice) in attempt_order.iter().copied().enumerate() {
+        let backend = resolve_builder_backend_with_override(Some(choice));
+        match backend.run_build(&job, &mounts) {
+            Ok(_) => {
+                last_error = None;
+                break;
+            }
+            Err(err) => {
+                if idx + 1 < attempt_order.len() {
+                    ui::warn(&format!(
+                        "Auto-selected {} builder failed ({}); retrying with {}.",
+                        choice.name(),
+                        err,
+                        attempt_order[idx + 1].name(),
+                    ));
+                }
+                last_error = Some(anyhow::anyhow!("{} builder VM: {err}", choice.name()));
+            }
+        }
+    }
+    if let Some(err) = last_error {
+        return Err(err);
+    }
+
+    let kernel = format!("{out_dir}/vmlinux");
+    let rootfs = format!("{out_dir}/rootfs.ext4");
+    let meta = format!("{out_dir}/mvm-meta.json");
+    for (label, p) in [
+        ("vmlinux", &kernel),
+        ("rootfs.ext4", &rootfs),
+        ("mvm-meta.json", &meta),
+    ] {
+        if !std::path::Path::new(p).exists() {
+            anyhow::bail!("builder VM exited cleanly but did not produce {label} at {p}");
+        }
+    }
+    Ok((kernel, rootfs))
+}
+
+/// The (release asset name, local destination) contract for the prod default
+/// microVM image. Release names match the `default-microvm` job in
+/// `release.yml`; local names are the rootfs siblings the backend verity probe
+/// (`microvm.rs::probe_verity_sidecar`) and `admit_overlay_aware` expect. Pure
+/// — pinned by `default_microvm_assets_pins_the_five_asset_contract`.
+fn default_microvm_assets(cache_dir: &str, arch: &str) -> [(String, String); 5] {
+    [
+        (
+            format!("default-microvm-vmlinux-{arch}"),
+            format!("{cache_dir}/vmlinux"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.ext4"),
+            format!("{cache_dir}/rootfs.ext4"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.verity"),
+            format!("{cache_dir}/rootfs.verity"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.roothash"),
+            format!("{cache_dir}/rootfs.roothash"),
+        ),
+        (
+            format!("default-microvm-meta-{arch}.json"),
+            format!("{cache_dir}/mvm-meta.json"),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod default_microvm_tests {
+    use super::default_microvm_assets;
+
+    #[test]
+    fn default_microvm_assets_pins_the_five_asset_contract() {
+        let a = default_microvm_assets("/cache/dm", "aarch64");
+        let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "default-microvm-vmlinux-aarch64",
+                "default-microvm-rootfs-aarch64.ext4",
+                "default-microvm-rootfs-aarch64.verity",
+                "default-microvm-rootfs-aarch64.roothash",
+                "default-microvm-meta-aarch64.json",
+            ],
+            "release asset names must match the default-microvm release job",
+        );
+        let dests: Vec<&str> = a.iter().map(|(_, d)| d.as_str()).collect();
+        assert_eq!(
+            dests,
+            vec![
+                "/cache/dm/vmlinux",
+                "/cache/dm/rootfs.ext4",
+                "/cache/dm/rootfs.verity",
+                "/cache/dm/rootfs.roothash",
+                "/cache/dm/mvm-meta.json",
+            ],
+            "local dests must be the rootfs siblings the backend + admit gate expect",
+        );
+    }
+}
+
+/// Download the pre-built **prod** default microVM image from the matching
+/// GitHub release: kernel + verity-sealed rootfs + the `rootfs.verity` /
+/// `rootfs.roothash` sidecars + the overlay-aware `mvm-meta.json`. Every file
+/// is SHA-256-verified against the release checksums manifest (ADR-002 §W5.1).
+/// The sidecars land alongside the rootfs so the backend verity probe +
+/// `admit_overlay_aware` resolve them by path convention. Plan 158.
 fn download_default_microvm_image(
+    cache_dir: &str,
     kernel_path: &str,
     rootfs_path: &str,
 ) -> Result<(String, String)> {
@@ -3799,36 +4122,24 @@ fn download_default_microvm_image(
     } else {
         "x86_64"
     };
-    let kernel_name = format!("default-microvm-vmlinux-{arch}");
-    let rootfs_name = format!("default-microvm-rootfs-{arch}.ext4");
+
+    let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
-    let kernel_url = format!("{base_url}/{kernel_name}");
-    let rootfs_url = format!("{base_url}/{rootfs_name}");
     let checksums_url = format!("{base_url}/{checksums_name}");
 
     ui::info(&format!(
         "Downloading default microVM image (v{version})..."
     ));
 
-    let expected = fetch_expected_hashes(&checksums_url, &[&kernel_name, &rootfs_name])?;
+    let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
+    let expected = fetch_expected_hashes(&checksums_url, &asset_names)?;
 
-    ui::info("  Fetching kernel...");
-    download_file(&kernel_url, kernel_path)
-        .with_context(|| format!("Failed to download kernel from {kernel_url}"))?;
-    verify_artifact_hash(
-        kernel_path,
-        &kernel_name,
-        expected.get(kernel_name.as_str()),
-    )?;
-
-    ui::info("  Fetching rootfs...");
-    download_file(&rootfs_url, rootfs_path)
-        .with_context(|| format!("Failed to download rootfs from {rootfs_url}"))?;
-    verify_artifact_hash(
-        rootfs_path,
-        &rootfs_name,
-        expected.get(rootfs_name.as_str()),
-    )?;
+    for (name, dest) in &assets {
+        ui::info(&format!("  Fetching {name}..."));
+        let url = format!("{base_url}/{name}");
+        download_file(&url, dest).with_context(|| format!("Failed to download {url}"))?;
+        verify_artifact_hash(dest, name, expected.get(name.as_str()))?;
+    }
 
     ui::success("Default microVM image downloaded, hash-verified, and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
@@ -4300,7 +4611,8 @@ mod reap_orphans_tests {
     fn missing_vms_root_is_empty_outcome() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("does-not-exist");
-        let out = reap_orphaned_vm_helpers_at(&vms_root, false).expect("reap");
+        let out =
+            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
         assert_eq!(out.killed, 0);
         assert_eq!(out.removed_dirs, 0);
         assert_eq!(out.freed_bytes, 0);
@@ -4322,7 +4634,8 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 1024]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, false).expect("reap");
+        let out =
+            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
         assert_eq!(out.killed, 0, "no live PID, so nothing to kill");
         assert_eq!(out.removed_dirs, 1, "dir should be removed");
         assert!(out.freed_bytes >= 1024, "payload size counted");
@@ -4342,10 +4655,38 @@ mod reap_orphans_tests {
         let my_pid = std::process::id() as i32;
         std::fs::write(vm.join("builder.pid"), format!("{my_pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, false).expect("reap");
+        let out =
+            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
         assert_eq!(out.killed, 0, "live owner should not be killed");
         assert_eq!(out.removed_dirs, 0, "dir preserved while owner alive");
         assert!(vm.exists(), "dir should still be on disk");
+    }
+
+    #[test]
+    fn workload_root_preserves_dir_with_dead_pid() {
+        // Workload VM dirs (`~/.mvm/vms/<name>/`) are persistent state —
+        // a stopped named VM the user may restart. The reaper must reap
+        // their leaked helpers but NEVER delete the dir, even when its
+        // supervisor PID is long dead. `remove_dead_dirs = false` is the
+        // contract; this pins it against a regression that would `rm -rf`
+        // a user's stopped-VM state.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        // Basename must not substring-match any live process — Scan 2
+        // argv-scans the whole host via `pgrep -f <basename>`, so a
+        // realistic VM name (e.g. "silly-experience") could match a real
+        // leaked daemon and pollute the count. Use an unmistakable one.
+        let vm = vms_root.join("mvm-workload-reaptest-7f3a9c-deadpid");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("libkrun.pid"), "2147483646\n").expect("write pid");
+        std::fs::write(vm.join("config"), vec![0u8; 512]).expect("write state");
+
+        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, false, false)
+            .expect("reap workload root");
+        assert_eq!(out.killed, 0, "dead PID, nothing to kill");
+        assert_eq!(out.removed_dirs, 0, "workload dir must never be removed");
+        assert!(vm.exists(), "workload VM state dir must survive the sweep");
+        assert!(vm.join("config").exists(), "persistent state untouched");
     }
 
     #[test]
@@ -4357,7 +4698,8 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 256]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, true).expect("dry-run reap");
+        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, true)
+            .expect("dry-run reap");
         // Dry-run still *counts* what it would do, but doesn't mutate.
         assert_eq!(out.removed_dirs, 1);
         assert!(vm.exists(), "dry-run must not remove the dir");
@@ -4799,7 +5141,8 @@ mod builder_vm_bootstrap_tests {
         std::fs::write(vz_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
 
         let outcome =
-            reap_orphaned_vm_helpers_at(vms, /* dry_run = */ false).expect("reap should succeed");
+            reap_orphaned_vm_helpers_at(vms, BUILDER_SIDECARS, true, /* dry_run = */ false)
+                .expect("reap should succeed");
 
         assert_eq!(
             outcome.removed_dirs, 1,
@@ -5541,6 +5884,24 @@ mod builder_vm_bootstrap_tests {
         assert!(
             format!("{err:#}").contains("missing /sbin/mvm-host-vm-init"),
             "error names the missing binary"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod heartbeat_tests {
+    use super::format_compile_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn format_compile_elapsed_renders_minutes_and_seconds() {
+        assert_eq!(
+            format_compile_elapsed(Duration::from_secs(5)),
+            "still compiling… (0m05s elapsed)"
+        );
+        assert_eq!(
+            format_compile_elapsed(Duration::from_secs(130)),
+            "still compiling… (2m10s elapsed)"
         );
     }
 }

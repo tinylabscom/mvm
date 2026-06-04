@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use mvm_ir::{App, Dependencies, Entrypoint, EnvValue, Image, Mount, Network, Resources, Source};
+use crate::ir::{
+    App, Dependencies, Entrypoint, EnvValue, Image, Mount, Network, Resources, Source,
+};
 
 use crate::error::BuildError;
 

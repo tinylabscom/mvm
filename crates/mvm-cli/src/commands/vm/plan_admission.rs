@@ -45,8 +45,8 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
-use mvm_plan::bundle::{BundleResolver, TrustStore};
-use mvm_plan::{
+use mvm_core::plan::bundle::{BundleResolver, TrustStore};
+use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
     sign_plan, verify_plan, verify_plan_bundle,
 };
@@ -237,7 +237,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// JSON-encoded so `mvm-core` carries no typed dep on `mvm-plan`. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
 /// trusting any decoded field — see ADR-041 §"Verification at admission"
-/// and `mvm_supervisor::supervisor::SupervisorAdmission::admit`.
+/// and `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
 ///
 /// **Do not log the resulting `plan_json` / `bundle_json` values.**
 /// The signed envelope may contain secret bindings, environment
@@ -372,8 +372,8 @@ pub(crate) fn enforce_admitted_shares(
     use mvm_core::vm_backend::VmVolumeKind;
     for v in volumes {
         let want_kind = match v.kind {
-            VmVolumeKind::DirShare => mvm_plan::ShareKind::DirShare,
-            VmVolumeKind::Disk => mvm_plan::ShareKind::Disk,
+            VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
+            VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
         };
         let admitted = plan.shares.iter().any(|g| {
             g.host_path == v.host
@@ -399,7 +399,7 @@ pub(crate) fn enforce_admitted_shares(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use mvm_plan::{PlanSeccompTier, SecretReleasePolicy};
+    use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -445,11 +445,11 @@ mod tests {
     #[test]
     fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
-        let grant = mvm_plan::HostShareGrant {
+        let grant = mvm_core::plan::HostShareGrant {
             tag: "uvol0".into(),
             host_path: "/h/src".into(),
             guest_path: "/data".into(),
-            kind: mvm_plan::ShareKind::DirShare,
+            kind: mvm_core::plan::ShareKind::DirShare,
             read_only: true,
             encrypted: false,
         };
@@ -506,7 +506,7 @@ mod tests {
         let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
-        let recovered = mvm_plan::verify_plan(&admitted.signed, &trusted).unwrap();
+        let recovered = mvm_core::plan::verify_plan(&admitted.signed, &trusted).unwrap();
         assert_eq!(recovered.plan_id, admitted.plan_id);
     }
 
@@ -521,7 +521,8 @@ mod tests {
         let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
         let signer_id = host_signer_id();
         let signed = sign_plan(&plan, &signer.signing, &signer_id);
-        let verified = mvm_plan::verify_plan(&signed, &[(&signer_id, &signer.verifying)]).unwrap();
+        let verified =
+            mvm_core::plan::verify_plan(&signed, &[(&signer_id, &signer.verifying)]).unwrap();
 
         let ledger = InMemoryNonceLedger::new();
         {
@@ -628,7 +629,7 @@ mod tests {
     // PlanBundleError variant in isolation; these tests prove the
     // wiring fires when admit_for_run sees a pinned plan.
 
-    use mvm_plan::bundle::{
+    use mvm_core::plan::bundle::{
         BundleResolveError, BundleResolver, KeyId as BundleKeyId, PlanArtifact, TrustStore,
         bundle_sha256, write_bundle,
     };
@@ -655,7 +656,7 @@ mod tests {
         kernel: &[u8],
         rootfs: &[u8],
     ) -> (Vec<u8>, PlanArtifact) {
-        use mvm_plan::bundle::{
+        use mvm_core::plan::bundle::{
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
         };
@@ -849,14 +850,15 @@ mod tests {
             Some(admitted.plan.tenant.0.as_str())
         );
         let plan_json = cfg.plan_json.expect("plan_json populated");
-        let roundtrip: mvm_plan::SignedExecutionPlan =
+        let roundtrip: mvm_core::plan::SignedExecutionPlan =
             serde_json::from_str(&plan_json).expect("roundtrip");
         // Re-verify the envelope to get the inner ExecutionPlan and
         // confirm the plan_id matches what the producer admitted.
         let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
             [(&admitted.signer_id, &signer.verifying)];
-        let recovered = mvm_plan::verify_plan(&roundtrip, &trusted).expect("envelope re-verifies");
+        let recovered =
+            mvm_core::plan::verify_plan(&roundtrip, &trusted).expect("envelope re-verifies");
         assert_eq!(recovered.plan_id, admitted.plan_id);
         // fixture has no bundle pin, so bundle_json stays None
         assert!(cfg.bundle_json.is_none());

@@ -48,6 +48,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      - name: Shellcheck install.sh
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck -S warning install.sh
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -115,6 +120,10 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
+
+      - name: Run doctests
+        # nextest does not run doctests; gate them separately.
+        run: cargo test --workspace --doc
 
       - name: Assert auto-detect on Linux picks libkrun
         run: |

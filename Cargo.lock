@@ -3043,6 +3043,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
+name = "libkrun-sys"
+version = "0.15.2"
+dependencies = [
+ "bindgen",
+ "libc",
+ "mvm-backend",
+ "mvm-core",
+ "mvm-guest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "which 7.0.3",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3246,13 +3262,9 @@ dependencies = [
  "inquire",
  "libc",
  "mvm-backend",
- "mvm-base",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-plan",
- "mvm-providers",
- "mvm-security",
  "opendal",
  "rand 0.8.6",
  "secrecy",
@@ -3267,70 +3279,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-addon-dns"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "hickory-proto 0.26.1",
- "mvm-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mvm-addon-vsock-bridge"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "libc",
- "mvm-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mvm-audit-signer"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "ed25519-dalek",
- "mvm-core",
- "rand 0.8.6",
- "serde",
- "serde_jcs",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zeroize",
-]
-
-[[package]]
 name = "mvm-backend"
 version = "0.15.2"
 dependencies = [
  "anyhow",
+ "block2",
+ "colored",
+ "dispatch2",
  "ext4-view",
+ "indicatif",
+ "inquire",
  "libc",
- "mvm-base",
+ "libkrun-sys",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
- "mvm-providers",
- "mvm-vz",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",
@@ -3344,42 +3311,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-base"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "colored",
- "indicatif",
- "inquire",
- "libc",
- "mvm-build",
- "mvm-core",
- "mvm-guest",
- "mvm-providers",
- "mvm-security",
- "secrecy",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "mvm-broker"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "mvm-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mvm-build"
 version = "0.15.2"
 dependencies = [
@@ -3390,11 +3321,11 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "libkrun-sys",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
  "mvm-sdk",
- "mvm-vz",
+ "nix 0.29.0",
  "pgp",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -3430,21 +3361,16 @@ dependencies = [
  "indicatif",
  "inquire",
  "libc",
+ "libkrun-sys",
  "mvm",
  "mvm-backend",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-ir",
- "mvm-libkrun",
+ "mvm-hostd",
  "mvm-mcp",
  "mvm-oci",
- "mvm-plan",
- "mvm-policy",
- "mvm-providers",
  "mvm-sdk",
- "mvm-security",
- "mvm-supervisor",
  "names",
  "notify",
  "notify-debouncer-mini",
@@ -3469,18 +3395,24 @@ dependencies = [
 name = "mvm-core"
 version = "0.15.2"
 dependencies = [
+ "aes-gcm",
+ "aho-corasick",
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
  "fs2",
+ "hmac",
  "ipnet",
- "mvm-providers",
+ "keyring",
  "rand 0.8.6",
  "regex",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",
+ "sigstore",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -3488,33 +3420,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "mvm-egress-proxy"
-version = "0.15.2"
-dependencies = [
- "libc",
- "tempfile",
-]
-
-[[package]]
-name = "mvm-firecracker-bridge"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "ed25519-dalek",
- "mvm-jailer-lite",
- "mvm-plan",
- "mvm-policy",
- "mvm-supervisor",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
- "tracing",
- "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -3529,7 +3435,6 @@ dependencies = [
  "ipnet",
  "libc",
  "mvm-core",
- "mvm-security",
  "netlink-packet-route",
  "rand 0.8.6",
  "rtnetlink",
@@ -3543,87 +3448,59 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-host-signer"
+name = "mvm-guest-helpers"
 version = "0.15.2"
 dependencies = [
  "anyhow",
- "ed25519-dalek",
+ "hickory-proto 0.26.1",
+ "libc",
  "mvm-core",
- "rand 0.8.6",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "zeroize",
 ]
 
 [[package]]
-name = "mvm-host-vm-init"
-version = "0.15.2"
-dependencies = [
- "libc",
- "mvm-build",
- "nix 0.29.0",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "mvm-ir"
-version = "0.15.2"
-dependencies = [
- "mvm-guest",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "mvm-jailer-lite"
-version = "0.15.2"
-dependencies = [
- "ctor",
- "landlock",
- "libc",
- "seccompiler",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "mvm-libkrun"
-version = "0.15.2"
-dependencies = [
- "bindgen",
- "libc",
- "mvm-core",
- "mvm-guest",
- "mvm-providers",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "which 7.0.3",
-]
-
-[[package]]
-name = "mvm-libkrun-supervisor"
+name = "mvm-hostd"
 version = "0.15.2"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ctor",
  "ed25519-dalek",
- "mvm-libkrun",
- "mvm-plan",
- "mvm-policy",
- "mvm-providers",
- "mvm-supervisor",
+ "hickory-resolver",
+ "ipnet",
+ "landlock",
+ "libc",
+ "mvm",
+ "mvm-backend",
+ "mvm-core",
+ "mvm-sdk",
+ "mvm-verify",
+ "rand 0.8.6",
+ "regex",
+ "reqwest 0.12.28",
+ "rustix 1.1.4",
+ "seccompiler",
+ "secrecy",
+ "serde",
+ "serde_jcs",
  "serde_json",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
  "tracing",
+ "tracing-subscriber",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -3660,64 +3537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-plan"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "mvm-core",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "mvm-policy"
-version = "0.15.2"
-dependencies = [
- "chrono",
- "ed25519-dalek",
- "mvm-core",
- "mvm-plan",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "toml",
-]
-
-[[package]]
-name = "mvm-providers"
-version = "0.15.2"
-dependencies = [
- "block2",
- "dispatch2",
- "libc",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "mvm-runner"
-version = "0.15.2"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "mvm-sdk"
 version = "0.15.2"
 dependencies = [
@@ -3726,7 +3545,7 @@ dependencies = [
  "globset",
  "hex",
  "hmac",
- "mvm-ir",
+ "mvm-guest",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -3747,32 +3566,6 @@ name = "mvm-sdk-macros"
 version = "0.15.2"
 
 [[package]]
-name = "mvm-security"
-version = "0.15.2"
-dependencies = [
- "aes-gcm",
- "aho-corasick",
- "anyhow",
- "chrono",
- "ed25519-dalek",
- "hmac",
- "keyring",
- "mvm-core",
- "rand 0.8.6",
- "regex",
- "secrecy",
- "serde",
- "serde_json",
- "sha2",
- "sigstore",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
 name = "mvm-storage"
 version = "0.15.2"
 dependencies = [
@@ -3789,43 +3582,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-supervisor"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "hickory-resolver",
- "ipnet",
- "libc",
- "mvm",
- "mvm-backend",
- "mvm-base",
- "mvm-core",
- "mvm-plan",
- "mvm-policy",
- "mvm-sdk",
- "mvm-verify",
- "rand 0.8.6",
- "regex",
- "reqwest 0.12.28",
- "rustix 1.1.4",
- "secrecy",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "mvm-verify"
 version = "0.15.2"
 dependencies = [
@@ -3837,24 +3593,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-vz"
-version = "0.15.2"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mvm-vz-drainer"
+name = "mvm-vm-host"
 version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
- "mvm-plan",
- "mvm-policy",
- "mvm-supervisor",
+ "libkrun-sys",
+ "mvm-backend",
+ "mvm-core",
+ "mvm-hostd",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3870,20 +3622,21 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "httpmock",
+ "libkrun-sys",
  "mvm",
  "mvm-backend",
  "mvm-build",
  "mvm-cli",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
  "mvm-oci",
- "mvm-security",
  "objc2-foundation",
  "predicates",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
  "tokio",
  "toml",

@@ -48,6 +48,12 @@ mod emit;
 mod error;
 mod runtime_substitution;
 
+/// The canonical `Workload` IR — validate, canonicalize, hash, hooks,
+/// addon, version. Folded in from the former `mvm-ir` crate (plan 121
+/// A3); the SDK is its only consumer alongside mvm-cli (mvmd does not
+/// consume the IR). Authoring + runtime SDKs lower to these types.
+pub mod ir;
+
 /// Author-side machinery for composable attested addons. Ported from
 /// `mvmforge-addon`. Exposes `addon::{manifest, lockfile, validator,
 /// registry, archive, sbom, verify}` plus re-exports the consumer-side
@@ -111,7 +117,7 @@ pub use runtime_substitution::{
 
 // IR type re-exports — public surface aliases consumed by downstream
 // fixtures (the corpus byte-identity gate from ADR-0015) and tests.
-pub use mvm_ir::{
+pub use crate::ir::{
     App as IrApp, Dependencies as IrDependencies, Entrypoint as IrEntrypoint,
     EnvValue as IrEnvValue, Format as IrFormat, HostPort, Image as IrImage, Mount as IrMount,
     MountMode, MountSource, Network as IrNetwork, NetworkDns as IrNetworkDns,

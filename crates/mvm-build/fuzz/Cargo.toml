@@ -1,0 +1,40 @@
+[package]
+name = "mvm-build-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detach from the parent workspace — `crates/mvm-vz/fuzz` is listed
+# under `workspace.exclude` in the repo root Cargo.toml because
+# `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
+# (which injects sanitizer + linker flags). An empty `[workspace]`
+# table self-identifies this manifest as standalone so cargo doesn't
+# complain about a hierarchy mismatch when invoked through
+# `cargo fuzz`.
+[workspace]
+
+# cargo-fuzz keys off this metadata flag.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.mvm-build]
+path = ".."
+default-features = false
+
+# Plan 97 / ADR-002 claim 5 — fuzz the host-side `SupervisorConfig`
+# JSON parser. The Swift `mvm-vz-supervisor` reads attacker-
+# influenced JSON on stdin; the Rust shape this fuzzes is the
+# canonical source the Swift `JSONDecoder` mirrors, so a panic-free
+# Rust decoder is the foundation for the Rust↔Swift corpus
+# equivalence assertion. Analog of
+# `crates/mvm-libkrun/fuzz/fuzz_supervisor_config.rs`.
+[[bin]]
+name = "fuzz_supervisor_config"
+path = "fuzz_targets/fuzz_supervisor_config.rs"
+test = false
+doc = false
+bench = false

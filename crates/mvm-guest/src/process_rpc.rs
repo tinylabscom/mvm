@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use mvm_core::crypto::policy::{OsCanonicalizer, PathOp, PathPolicy};
 use mvm_core::domain::instance::BackpressureReason;
-use mvm_security::policy::{OsCanonicalizer, PathOp, PathPolicy};
 
 use crate::vsock::{ProcErrorKind, ProcInfo, ProcResult, ProcState, ProcWaitEvent};
 

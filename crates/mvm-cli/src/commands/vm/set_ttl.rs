@@ -6,7 +6,7 @@
 //!
 //! Pass `--clear` to remove an existing TTL without specifying a new
 //! one. Otherwise `<duration>` parses through
-//! `mvm_security::policy::parse_ttl` (`30s`, `5m`, `2h`, `7d`, or bare
+//! `mvm_core::crypto::policy::parse_ttl` (`30s`, `5m`, `2h`, `7d`, or bare
 //! seconds) and the `expires_at` is set to `now() + duration`.
 
 use anyhow::{Context, Result, bail};
@@ -40,7 +40,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let new_expires_at: Option<String> = match (args.clear, args.duration.as_deref()) {
         (true, _) => None,
         (false, Some(d)) => {
-            let dur = mvm_security::policy::parse_ttl(d).context("Invalid duration")?;
+            let dur = mvm_core::crypto::policy::parse_ttl(d).context("Invalid duration")?;
             Some(mvm_core::util::time::utc_plus_duration(dur))
         }
         (false, None) => bail!("Provide a duration (e.g. `30m`) or pass `--clear`"),

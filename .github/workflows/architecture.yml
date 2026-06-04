@@ -60,8 +60,11 @@ jobs:
   #      local subscribers (`nc -U`). They do not accept control-plane
   #      commands or host multi-tenant orchestration state.
   #   5. Ephemeral port discovery — `TcpListener::bind("127.0.0.1:0")`
-  #      in `crates/mvm-cli/src/template_cmd.rs`. Binds to find a free
-  #      port; drops the listener immediately. Not a daemon.
+  #      in `crates/mvm-cli/src/template_cmd.rs` and
+  #      `crates/deps/libkrun-sys/src/gvproxy.rs` (`free_loopback_port`).
+  #      Binds to find a free port; drops the listener immediately so
+  #      the caller (here, gvproxy's mandatory ssh-forward listener)
+  #      can claim it. Not a daemon.
   #   6. Test-only mock guest-agent
   #      (`crates/mvm-backend/src/mock_guest_agent.rs`). Mirrors the
   #      in-guest vsock agent on the host side via Unix-domain socket
@@ -69,7 +72,7 @@ jobs:
   #      `MockBackend`. Tier-3 / test-only; never selected by
   #      `AnyBackend::auto_select`. Production callers can't reach it.
   #   7. In-guest local addon plumbing
-  #      (`crates/mvm-addon-vsock-bridge/`). Binds loopback-only TCP
+  #      (`crates/mvm-guest-helpers/src/addon_vsock_bridge.rs`). Binds loopback-only TCP
   #      listeners inside the guest and forwards to the local host
   #      addon proxy over vsock. This is per-VM developer substrate;
   #      distributed service discovery, tenant policy, and
@@ -176,16 +179,13 @@ jobs:
               --glob '!**/benches/**' \
               --glob '!**/examples/**' \
               --glob '!crates/mvm/src/hostd/**' \
-              --glob '!crates/mvm-supervisor/src/l7_proxy.rs' \
-              --glob '!crates/mvm-egress-proxy/**' \
-              --glob '!crates/mvm-providers/src/apple_container/**' \
+              --glob '!crates/mvm-build/src/egress_proxy/**' \
+              --glob '!crates/mvm-backend/src/providers/apple_container/**' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
-              --glob '!crates/mvm-supervisor/src/gateway_bridge.rs' \
-              --glob '!crates/mvm-supervisor/src/gateway_audit.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
+              --glob '!crates/deps/libkrun-sys/src/gvproxy.rs' \
               --glob '!crates/mvm-backend/src/mock_guest_agent.rs' \
-              --glob '!crates/mvm-addon-vsock-bridge/**' \
-              --glob '!crates/mvm-broker/src/bin/mvm-broker.rs' \
+              --glob '!crates/mvm-guest-helpers/src/addon_vsock_bridge.rs' \
               -e "$PATTERNS" \
               crates/ src/ \
               || true)

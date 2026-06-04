@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::base::config::MICROVM_DIR;
+use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
+use crate::base::ui;
 use crate::firecracker;
-use mvm_base::config::MICROVM_DIR;
-use mvm_base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
-use mvm_base::ui;
 
 // ---------------------------------------------------------------------------
 // Mvmfile.toml config structs
@@ -723,7 +723,7 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
         let status = Command::new("limactl")
             .args([
                 "copy",
-                &format!("{}:{}", mvm_base::config::VM_NAME, vm_elf_path.trim()),
+                &format!("{}:{}", crate::base::config::VM_NAME, vm_elf_path.trim()),
                 out,
             ])
             .status()

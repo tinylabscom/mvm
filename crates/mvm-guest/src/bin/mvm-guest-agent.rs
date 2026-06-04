@@ -2323,7 +2323,7 @@ fn handle_client(
 
         // FS RPC verbs (W1 / A1). Production-safe surface backed
         // by `mvm_guest::fs_rpc::handle_with_defaults`: every path
-        // routes through `mvm_security::policy::PathPolicy` (deny
+        // routes through `mvm_core::crypto::policy::PathPolicy` (deny
         // list + canonicalization), per-call caps gate read/write
         // sizes, and `FsResult::Error` carries a typed `kind` so
         // the host can branch without parsing message text.
@@ -2530,7 +2530,7 @@ fn handle_client(
         // virtio-fs volume mount/unmount (plan 45 — renamed from
         // share-mount per Path C). Production-safe; every
         // host-supplied path runs through
-        // `mvm_security::policy::MountPathPolicy` before any
+        // `mvm_core::crypto::policy::MountPathPolicy` before any
         // mount(2) syscall. Real handler lives in `mvm_guest::volume`.
         GuestRequest::MountVolume {
             volume_name,

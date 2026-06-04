@@ -14,11 +14,11 @@ use mvm_core::pool::ArtifactPaths;
 use mvm_core::template::{TemplateRevision, template_current_symlink};
 use mvm_core::time::utc_now;
 
-// `clone_rootfs_for_instance` moved to `mvm_base::cow` (W7
+// `clone_rootfs_for_instance` moved to `mvm_backend::base::cow` (W7
 // substrate split). Re-exported here so existing
 // `crate::vm::template::lifecycle::clone_rootfs_for_instance` callers
 // keep resolving without each one having to migrate.
-pub use mvm_base::cow::clone_rootfs_for_instance;
+pub use mvm_backend::base::cow::clone_rootfs_for_instance;
 
 /// Wire-format string for a [`BuildMode`] when it lands on disk in
 /// the revision record. Matches the CLI's `--dev`/`--prod` flag
@@ -406,7 +406,7 @@ pub fn template_artifacts_dispatched(
 }
 
 /// Resolve a bundle-sha256 reference through
-/// [`mvm_plan::BundleRegistry`] (default path
+/// [`mvm_core::plan::BundleRegistry`] (default path
 /// `~/.mvm/bundles/<sha>/`). Returns the same shape as
 /// [`template_artifacts`] / [`template_artifacts_for_slot`] so the
 /// dispatch fan-in is uniform.
@@ -424,9 +424,9 @@ pub fn template_artifacts_dispatched(
 fn bundle_artifacts_for_sha(
     bundle_sha256: &str,
 ) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
-    use mvm_plan::ArtifactRole;
+    use mvm_core::plan::ArtifactRole;
 
-    let registry = mvm_plan::BundleRegistry::default_path()
+    let registry = mvm_core::plan::BundleRegistry::default_path()
         .context("resolving default bundle registry root")?;
     let installed = registry
         .find(bundle_sha256)
@@ -1421,15 +1421,17 @@ pub fn template_verify(id: &str, revision: Option<&str>) -> Result<()> {
 }
 
 // `seal_snapshot_artifacts` + `verify_snapshot_artifacts` moved to
-// `mvm_base::snapshot_integrity` (W8.B). Re-exported below so
+// `mvm_backend::base::snapshot_integrity` (W8.B). Re-exported below so
 // the local `create_snapshot` call site keeps resolving without
 // renaming.
-pub use mvm_base::snapshot_integrity::{seal_snapshot_artifacts, verify_snapshot_artifacts};
+pub use mvm_backend::base::snapshot_integrity::{
+    seal_snapshot_artifacts, verify_snapshot_artifacts,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_base::cow::CloneStrategy;
+    use mvm_backend::base::cow::CloneStrategy;
     use mvm_guest::integrations::{
         IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
     };

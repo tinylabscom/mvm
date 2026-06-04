@@ -146,7 +146,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install system build deps
-        # `mvm-libkrun` links against system `libcap-ng`. Without
+        # `libkrun-sys` links against system `libcap-ng`. Without
         # `libcap-ng-dev` the linker fails with `unable to find library
         # -lcap-ng`. Ubuntu's GH runner image ships the runtime library
         # but not the -dev headers/symlinks that `cc` needs at link time.
@@ -665,7 +665,7 @@ jobs:
   #     correctly (the `libkrun-sys` feature compiles + links).
   #   - the `mvm-libkrun-supervisor` binary builds.
   #   - the sys::Context::* FFI round-trips against the real
-  #     libkrun.dylib (8 wrapper unit tests in mvm-libkrun).
+  #     libkrun.dylib (8 wrapper unit tests in libkrun-sys).
   #   - LibkrunBackend's spawn / PID-file / signal logic compiles
   #     and its non-FFI unit tests pass.
   #
@@ -686,7 +686,7 @@ jobs:
         with:
           filters: |
             libkrun:
-              - 'crates/mvm-libkrun/**'
+              - 'crates/deps/libkrun-sys/**'
               - 'crates/mvm-backend/src/libkrun.rs'
               - 'crates/mvm-backend/Cargo.toml'
               - 'crates/mvm-providers/src/apple_container/**'
@@ -704,7 +704,7 @@ jobs:
         # `libkrun` ships from Sergio Lopez's `slp/krun` Homebrew tap
         # (not core homebrew). The bottle puts `libkrun.h` +
         # `libkrun.dylib` under `/opt/homebrew/{include,lib}` on Apple
-        # Silicon - exactly the layout `crates/mvm-libkrun/build.rs`
+        # Silicon - exactly the layout `crates/deps/libkrun-sys/build.rs`
         # probes for.
         run: |
           brew tap slp/krun
@@ -725,24 +725,24 @@ jobs:
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
         # Sanity: the fallback path (no libkrun-sys) keeps compiling.
         # Mirrors how every other workspace consumer that touches
-        # mvm-libkrun builds.
-        run: cargo build -p mvm-libkrun -p mvm-backend
+        # libkrun-sys builds.
+        run: cargo build -p libkrun-sys -p mvm-backend
 
-      - name: Build mvm-libkrun with libkrun-sys (lib + bin + examples)
+      - name: Build libkrun-sys with libkrun-sys (lib + bin + examples)
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        run: cargo build -p mvm-libkrun --features libkrun-sys --all-targets
+        run: cargo build -p libkrun-sys --features libkrun-sys --all-targets
 
-      - name: Test mvm-libkrun with libkrun-sys
+      - name: Test libkrun-sys with libkrun-sys
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        run: cargo test -p mvm-libkrun --features libkrun-sys
+        run: cargo test -p libkrun-sys --features libkrun-sys
 
       - name: Test mvm-backend (libkrun module)
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
         run: cargo test -p mvm-backend libkrun
 
-      - name: Clippy mvm-libkrun --features libkrun-sys --all-targets
+      - name: Clippy libkrun-sys --features libkrun-sys --all-targets
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        run: cargo clippy -p mvm-libkrun --features libkrun-sys --all-targets -- -D warnings
+        run: cargo clippy -p libkrun-sys --features libkrun-sys --all-targets -- -D warnings
 
   # ── Lane: Vz / Virtualization.framework (macOS, paths-gated) ──
   # Plan 97 §"macOS minor-version compatibility matrix". Runs the

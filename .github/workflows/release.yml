@@ -112,175 +112,6 @@ jobs:
             staging/*.tar.gz
             staging/*.sha256
 
-  dev-image:
-    # Build on ARM runner for native aarch64-linux (Apple Container target).
-    # Also build x86_64 for Linux dev environments.
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Build dev image
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/builder#packages.${SYSTEM}.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          echo "${STORE_PATH}" > /tmp/dev-store-path.txt
-          mkdir -p staging
-          cp "$STORE_PATH/vmlinux" "staging/dev-vmlinux-${ARCH}"
-          cp "$STORE_PATH/rootfs.ext4" "staging/dev-rootfs-${ARCH}.ext4"
-          cd staging
-          sha256sum "dev-vmlinux-${ARCH}" "dev-rootfs-${ARCH}.ext4" > "dev-image-${ARCH}-checksums-sha256.txt"
-
-      # Plan 36: emit the cosign-signable SignedManifest JSON. The
-      # script lives at scripts/generate-image-manifest.sh and pins
-      # the schema that mvm-security::image_verify consumes.
-      - name: Generate signed-image manifest (plan 36)
-        env:
-          ARCH: ${{ matrix.arch }}
-          VARIANT: dev
-          ROOTFS_EXT: ext4
-          STAGING_DIR: ${{ github.workspace }}/staging
-        run: |
-          STORE_PATH=$(cat /tmp/dev-store-path.txt)
-          export STORE_PATH
-          bash scripts/generate-image-manifest.sh
-
-      - name: Upload dev image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: dev-image-${{ matrix.arch }}
-          path: |
-            staging/dev-vmlinux-${{ matrix.arch }}
-            staging/dev-rootfs-${{ matrix.arch }}.ext4
-            staging/dev-image-${{ matrix.arch }}-checksums-sha256.txt
-            staging/dev-image-${{ matrix.arch }}.manifest.json
-
-  # Plan 36 / ADR 005: the sealed builder image consumed by mvmd's
-  # pool-build pipeline. Same package set as the dev variant but
-  # sourced from the parent flake (no Exec handler, verifiedBoot=true,
-  # dm-verity sidecar emitted). Built without mvmctl's dev override —
-  # the `builder` output of nix/images/builder/flake.nix is wired to
-  # mvm-prod (the parent), so the prod guest agent lands in the
-  # rootfs regardless of any caller's --override-input.
-  builder-image:
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Build sealed builder image
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/builder#packages.${SYSTEM}.builder" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          echo "${STORE_PATH}" > /tmp/builder-store-path.txt
-          mkdir -p staging
-          cp "$STORE_PATH/vmlinux" "staging/builder-vmlinux-${ARCH}"
-          cp "$STORE_PATH/rootfs.ext4" "staging/builder-rootfs-${ARCH}.ext4"
-          # The builder variant ships dm-verity sidecars; mvmd-agent
-          # verifies them on every boot.
-          cp "$STORE_PATH/rootfs.verity" "staging/builder-rootfs-${ARCH}.verity"
-          cp "$STORE_PATH/rootfs.roothash" "staging/builder-rootfs-${ARCH}.roothash"
-          cp "$STORE_PATH/rootfs.initrd" "staging/builder-initrd-${ARCH}"
-          cd staging
-          sha256sum "builder-vmlinux-${ARCH}" \
-                    "builder-rootfs-${ARCH}.ext4" \
-                    "builder-rootfs-${ARCH}.verity" \
-                    "builder-rootfs-${ARCH}.roothash" \
-                    "builder-initrd-${ARCH}" \
-            > "builder-image-${ARCH}-checksums-sha256.txt"
-
-      - name: Generate signed-image manifest (plan 36)
-        env:
-          ARCH: ${{ matrix.arch }}
-          VARIANT: builder
-          ROOTFS_EXT: ext4
-          STAGING_DIR: ${{ github.workspace }}/staging
-        run: |
-          STORE_PATH=$(cat /tmp/builder-store-path.txt)
-          export STORE_PATH
-          bash scripts/generate-image-manifest.sh
-
-      - name: Upload builder image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: builder-image-${{ matrix.arch }}
-          path: |
-            staging/builder-vmlinux-${{ matrix.arch }}
-            staging/builder-rootfs-${{ matrix.arch }}.ext4
-            staging/builder-rootfs-${{ matrix.arch }}.verity
-            staging/builder-rootfs-${{ matrix.arch }}.roothash
-            staging/builder-initrd-${{ matrix.arch }}
-            staging/builder-image-${{ matrix.arch }}-checksums-sha256.txt
-            staging/builder-image-${{ matrix.arch }}.manifest.json
-
-  default-microvm:
-    # Build the bundled default microVM image used by `mvmctl exec` /
-    # `mvmctl up` when no --flake or --template was given. Mirrors the
-    # dev-image job: native per-arch builds, unsigned artifacts.
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Build default microVM image
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          mkdir -p staging
-          cp "$STORE_PATH/vmlinux" "staging/default-microvm-vmlinux-${ARCH}"
-          cp "$STORE_PATH/rootfs.ext4" "staging/default-microvm-rootfs-${ARCH}.ext4"
-          cd staging
-          sha256sum "default-microvm-vmlinux-${ARCH}" "default-microvm-rootfs-${ARCH}.ext4" \
-            > "default-microvm-${ARCH}-checksums-sha256.txt"
-
-      - name: Upload default microVM image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: default-microvm-${{ matrix.arch }}
-          path: |
-            staging/default-microvm-vmlinux-${{ matrix.arch }}
-            staging/default-microvm-rootfs-${{ matrix.arch }}.ext4
-            staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
-
   # Plan 72 W5 / ADR-046: the Layer-1 builder VM image that
   # `LibkrunBuilderVm::run_build` boots into to run `nix build` on
   # behalf of mvmctl. Plan 72 W2 ships the flake at
@@ -288,10 +119,11 @@ jobs:
   # artifacts so installed-binary users (no source checkout) can
   # download them via `download_builder_vm_image`.
   #
-  # Distinct from `builder-image` above — that's the sealed runtime
-  # builder used by mvmd's pool-build pipeline; this is the
-  # development-time builder VM that runs `nix build` against the
-  # user's dev-shell flake.
+  # This is the development-time builder VM that runs `nix build`
+  # against the user's dev-shell flake. (Plan 115 / ADR-064 folded the
+  # old separate dev-shell + sealed-builder images — `nix/images/builder`
+  # — into this one; the sealed runtime builder for mvmd's pool-build
+  # pipeline, if still needed, is sourced from mvmd, not built here.)
   builder-vm-image:
     strategy:
       matrix:
@@ -409,8 +241,69 @@ jobs:
             staging/runtime-overlay-${{ matrix.arch }}.VERSION
             staging/runtime-overlay-${{ matrix.arch }}-checksums-sha256.txt
 
+  # Plan 158: the bundled default microVM image `mvmctl up`/`exec` boots when
+  # no --flake/--template/--image is given. Ships the PROD variant only
+  # (sealed + verity-sealed rootfs); the dev variant is built locally in dev
+  # mode, never published. `download_default_microvm_image` fetches these five
+  # assets + the checksums.
+  default-microvm:
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build default microVM image (prod variant)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          cp -L "$STORE_PATH/vmlinux"         "staging/default-microvm-vmlinux-${ARCH}"
+          cp -L "$STORE_PATH/rootfs.ext4"     "staging/default-microvm-rootfs-${ARCH}.ext4"
+          cp -L "$STORE_PATH/rootfs.verity"   "staging/default-microvm-rootfs-${ARCH}.verity"
+          cp -L "$STORE_PATH/rootfs.roothash" "staging/default-microvm-rootfs-${ARCH}.roothash"
+          cp -L "$STORE_PATH/mvm-meta.json"   "staging/default-microvm-meta-${ARCH}.json"
+          cd staging
+          sha256sum "default-microvm-vmlinux-${ARCH}" \
+                    "default-microvm-rootfs-${ARCH}.ext4" \
+                    "default-microvm-rootfs-${ARCH}.verity" \
+                    "default-microvm-rootfs-${ARCH}.roothash" \
+                    "default-microvm-meta-${ARCH}.json" \
+            > "default-microvm-${ARCH}-checksums-sha256.txt"
+
+      - name: Upload default microVM image artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: default-microvm-${{ matrix.arch }}
+          path: |
+            staging/default-microvm-vmlinux-${{ matrix.arch }}
+            staging/default-microvm-rootfs-${{ matrix.arch }}.ext4
+            staging/default-microvm-rootfs-${{ matrix.arch }}.verity
+            staging/default-microvm-rootfs-${{ matrix.arch }}.roothash
+            staging/default-microvm-meta-${{ matrix.arch }}.json
+            staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
+
   release:
-    needs: [build, dev-image, builder-image, builder-vm-image, default-microvm, runtime-overlay-image]
+    needs: [build, builder-vm-image, runtime-overlay-image, default-microvm]
+    # Gate the published release on the mvmctl binary build ONLY. The Nix
+    # image jobs still run and their artifacts are attached when present,
+    # but an image-build failure must not block the binary download
+    # (mvmctl tarballs + checksums) that install.sh / `mvmctl update` /
+    # the Homebrew tap consume. `!cancelled()` lets this run after image
+    # jobs fail; the result check keeps the binary build a hard requirement.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -473,9 +366,11 @@ jobs:
           shopt -s nullglob
           manifests=(artifacts/*-image-*.manifest.json)
           if [ "${#manifests[@]}" -eq 0 ]; then
-            echo "::error::no image manifests found in artifacts/" >&2
+            # Images are best-effort: an image-build failure must not block
+            # the binary release. Warn and skip rather than fail.
+            echo "::warning::no image manifests in artifacts/ — image jobs likely failed; publishing the binary release without image signatures" >&2
             ls -la artifacts/ >&2 || true
-            exit 1
+            exit 0
           fi
           for manifest in "${manifests[@]}"; do
             cosign sign-blob \
@@ -490,38 +385,39 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          # nullglob: image globs that matched nothing (their job failed)
+          # drop out of the list instead of being passed literally and
+          # erroring `gh release create`. The binary tarballs, the combined
+          # checksums, and the SBOM are always present (the job gates on the
+          # binary build), so the download path is always published; images
+          # attach only when their jobs succeeded.
+          shopt -s nullglob
+          assets=(
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.bundle
+            artifacts/checksums-sha256.txt
+            artifacts/builder-vm-vmlinux-*
+            artifacts/builder-vm-rootfs-*
+            artifacts/builder-vm-*.cmdline.txt
+            artifacts/builder-vm-*.manifest.json
+            artifacts/builder-vm-*-checksums-sha256.txt
+            artifacts/runtime-overlay-*.ext4
+            artifacts/runtime-overlay-*.verity
+            artifacts/runtime-overlay-*.roothash
+            artifacts/runtime-overlay-*.VERSION
+            artifacts/runtime-overlay-*-checksums-sha256.txt
+            artifacts/default-microvm-vmlinux-*
+            artifacts/default-microvm-rootfs-*
+            artifacts/default-microvm-meta-*
+            artifacts/default-microvm-*-checksums-sha256.txt
+            sbom.cdx.json
+            sbom.cdx.json.bundle
+          )
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --generate-notes \
-            artifacts/*.tar.gz \
-            artifacts/*.tar.gz.bundle \
-            artifacts/checksums-sha256.txt \
-            artifacts/dev-vmlinux-* \
-            artifacts/dev-rootfs-* \
-            artifacts/dev-image-*-checksums-sha256.txt \
-            artifacts/dev-image-*.manifest.json \
-            artifacts/dev-image-*.manifest.json.bundle \
-            artifacts/builder-vmlinux-* \
-            artifacts/builder-rootfs-* \
-            artifacts/builder-initrd-* \
-            artifacts/builder-image-*-checksums-sha256.txt \
-            artifacts/builder-image-*.manifest.json \
-            artifacts/builder-image-*.manifest.json.bundle \
-            artifacts/builder-vm-vmlinux-* \
-            artifacts/builder-vm-rootfs-* \
-            artifacts/builder-vm-*.cmdline.txt \
-            artifacts/builder-vm-*.manifest.json \
-            artifacts/builder-vm-*-checksums-sha256.txt \
-            artifacts/default-microvm-vmlinux-* \
-            artifacts/default-microvm-rootfs-* \
-            artifacts/default-microvm-*-checksums-sha256.txt \
-            artifacts/runtime-overlay-*.ext4 \
-            artifacts/runtime-overlay-*.verity \
-            artifacts/runtime-overlay-*.roothash \
-            artifacts/runtime-overlay-*.VERSION \
-            artifacts/runtime-overlay-*-checksums-sha256.txt \
-            sbom.cdx.json \
-            sbom.cdx.json.bundle
+            "${assets[@]}"
 
       # The "release: published" event fired by `gh release create` runs under
       # GITHUB_TOKEN, which by design does not trigger downstream workflows.
