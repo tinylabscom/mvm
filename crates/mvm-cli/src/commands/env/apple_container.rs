@@ -2767,14 +2767,89 @@ pub(in crate::commands) struct ReapOutcome {
 /// of the prototype `/tmp/plan95/reap.sh`, which during validation
 /// nuked a live mvmctl's state dir.
 pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<ReapOutcome> {
-    let vms_root =
-        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
-    reap_orphaned_vm_helpers_at(&vms_root, dry_run)
+    reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
 }
 
-/// Inner form taking an explicit `vms_root`. Exists for tests against
-/// a tempdir without mutating `MVM_CACHE_DIR`.
-fn reap_orphaned_vm_helpers_at(vms_root: &std::path::Path, dry_run: bool) -> Result<ReapOutcome> {
+/// Best-effort orphan-helper sweep run at the *start* of `mvmctl dev
+/// up` / `mvmctl up`. The next launch reaps the previous run's corpses
+/// — startup is the robust trigger because an abnormal exit (^C,
+/// SIGKILL, crash, the libkrun `krun_start_enter` `exit()` that skips
+/// `GvproxyHandle::Drop`) is exactly when mvmctl can't self-clean and
+/// reparents its helpers to launchd.
+///
+/// Kill-only: it signals provably-orphaned helpers but removes **no**
+/// directories (so it never deletes host bytes and carries no audit
+/// obligation — dir pruning stays the job of `mvmctl cache prune`).
+/// Quiet on the happy path; one line only when it actually reaped
+/// something. Swallows errors — a sweep failure must never block a
+/// launch. Since [`free_loopback_port`](mvm_libkrun::gvproxy::free_loopback_port)
+/// gives every gvproxy a fresh port, a missed leak is now harmless
+/// hygiene, not a boot blocker.
+pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
+    match reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ false, false) {
+        Ok(o) if o.killed > 0 => crate::ui::info(&format!(
+            "Reaped {} orphaned VM helper(s) left by a prior run.",
+            o.killed
+        )),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!(error = %e, "startup orphan-helper sweep failed (non-fatal)")
+        }
+    }
+}
+
+/// Sidecar PID file names a *builder* VM dir carries (libkrun + Vz).
+const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
+
+/// Sidecar PID file names a *workload* VM dir under `~/.mvm/vms/<name>/`
+/// carries: `libkrun.pid` (libkrun supervisor), `vz.pid` (Vz
+/// supervisor), and the gvproxy sidecars (`gvproxy.pid` libkrun lane /
+/// `host-gvproxy.pid` Vz lane). The argv scan backstops these, but
+/// reading the sidecar directly is cheaper and catches a detached Vz
+/// supervisor that the argv scan might miss.
+const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "gvproxy.pid", "host-gvproxy.pid"];
+
+/// Scan both VM-state roots: the ephemeral builder cache
+/// (`~/.cache/mvm/builder-vm/vms/`) and the workload VM tree
+/// (`~/.mvm/vms/`). `remove_builder_dirs` deletes dead builder scratch
+/// dirs (cache-prune semantics); workload dirs are **never** removed —
+/// a stopped named VM's `~/.mvm/vms/<name>/` is persistent state the
+/// user may restart, so we only reap its leaked helpers.
+fn reap_orphaned_vm_helpers_both_roots(
+    remove_builder_dirs: bool,
+    dry_run: bool,
+) -> Result<ReapOutcome> {
+    let builder_root =
+        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
+    let workload_root = std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
+
+    let mut out = reap_orphaned_vm_helpers_at(
+        &builder_root,
+        BUILDER_SIDECARS,
+        remove_builder_dirs,
+        dry_run,
+    )?;
+    let workload = reap_orphaned_vm_helpers_at(
+        &workload_root,
+        WORKLOAD_SIDECARS,
+        /* remove_dead_dirs = */ false,
+        dry_run,
+    )?;
+    out.killed += workload.killed;
+    out.removed_dirs += workload.removed_dirs;
+    out.freed_bytes += workload.freed_bytes;
+    Ok(out)
+}
+
+/// Inner form taking an explicit `vms_root`, the sidecar names to look
+/// for in each dir, and whether dead dirs may be removed. Exists for
+/// tests against a tempdir without mutating `MVM_CACHE_DIR`.
+fn reap_orphaned_vm_helpers_at(
+    vms_root: &std::path::Path,
+    sidecars: &[&str],
+    remove_dead_dirs: bool,
+    dry_run: bool,
+) -> Result<ReapOutcome> {
     let mut outcome = ReapOutcome {
         killed: 0,
         removed_dirs: 0,
@@ -2794,9 +2869,11 @@ fn reap_orphaned_vm_helpers_at(vms_root: &std::path::Path, dry_run: bool) -> Res
         let mut killed_in_dir = 0u64;
         let mut seen_pids: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
-        // Scan 1 — sidecar files. Steady-state builder VMs write
-        // `builder.pid`; Stage 0 writes `stage0.pid`.
-        for sidecar in ["builder.pid", "stage0.pid"] {
+        // Scan 1 — sidecar files. Builder dirs write `builder.pid` /
+        // `stage0.pid`; workload dirs write `libkrun.pid` / `vz.pid` /
+        // the gvproxy sidecars. `sidecars` is the per-root set; a
+        // missing file is skipped.
+        for sidecar in sidecars {
             let pid_file = dir.join(sidecar);
             let Some(pid) = read_pid_file(&pid_file) else {
                 continue;
@@ -2845,7 +2922,7 @@ fn reap_orphaned_vm_helpers_at(vms_root: &std::path::Path, dry_run: bool) -> Res
         }
 
         outcome.killed += killed_in_dir;
-        if dir_has_live_owner {
+        if dir_has_live_owner || !remove_dead_dirs {
             continue;
         }
 
@@ -4344,7 +4421,8 @@ mod reap_orphans_tests {
     fn missing_vms_root_is_empty_outcome() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("does-not-exist");
-        let out = reap_orphaned_vm_helpers_at(&vms_root, false).expect("reap");
+        let out =
+            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
         assert_eq!(out.killed, 0);
         assert_eq!(out.removed_dirs, 0);
         assert_eq!(out.freed_bytes, 0);
@@ -4366,7 +4444,8 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 1024]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, false).expect("reap");
+        let out =
+            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
         assert_eq!(out.killed, 0, "no live PID, so nothing to kill");
         assert_eq!(out.removed_dirs, 1, "dir should be removed");
         assert!(out.freed_bytes >= 1024, "payload size counted");
@@ -4386,10 +4465,38 @@ mod reap_orphans_tests {
         let my_pid = std::process::id() as i32;
         std::fs::write(vm.join("builder.pid"), format!("{my_pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, false).expect("reap");
+        let out =
+            reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false).expect("reap");
         assert_eq!(out.killed, 0, "live owner should not be killed");
         assert_eq!(out.removed_dirs, 0, "dir preserved while owner alive");
         assert!(vm.exists(), "dir should still be on disk");
+    }
+
+    #[test]
+    fn workload_root_preserves_dir_with_dead_pid() {
+        // Workload VM dirs (`~/.mvm/vms/<name>/`) are persistent state —
+        // a stopped named VM the user may restart. The reaper must reap
+        // their leaked helpers but NEVER delete the dir, even when its
+        // supervisor PID is long dead. `remove_dead_dirs = false` is the
+        // contract; this pins it against a regression that would `rm -rf`
+        // a user's stopped-VM state.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        // Basename must not substring-match any live process — Scan 2
+        // argv-scans the whole host via `pgrep -f <basename>`, so a
+        // realistic VM name (e.g. "silly-experience") could match a real
+        // leaked daemon and pollute the count. Use an unmistakable one.
+        let vm = vms_root.join("mvm-workload-reaptest-7f3a9c-deadpid");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("libkrun.pid"), "2147483646\n").expect("write pid");
+        std::fs::write(vm.join("config"), vec![0u8; 512]).expect("write state");
+
+        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, false, false)
+            .expect("reap workload root");
+        assert_eq!(out.killed, 0, "dead PID, nothing to kill");
+        assert_eq!(out.removed_dirs, 0, "workload dir must never be removed");
+        assert!(vm.exists(), "workload VM state dir must survive the sweep");
+        assert!(vm.join("config").exists(), "persistent state untouched");
     }
 
     #[test]
@@ -4401,7 +4508,8 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 256]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, true).expect("dry-run reap");
+        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, true)
+            .expect("dry-run reap");
         // Dry-run still *counts* what it would do, but doesn't mutate.
         assert_eq!(out.removed_dirs, 1);
         assert!(vm.exists(), "dry-run must not remove the dir");
@@ -4843,7 +4951,8 @@ mod builder_vm_bootstrap_tests {
         std::fs::write(vz_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
 
         let outcome =
-            reap_orphaned_vm_helpers_at(vms, /* dry_run = */ false).expect("reap should succeed");
+            reap_orphaned_vm_helpers_at(vms, BUILDER_SIDECARS, true, /* dry_run = */ false)
+                .expect("reap should succeed");
 
         assert_eq!(
             outcome.removed_dirs, 1,

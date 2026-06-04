@@ -830,6 +830,11 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
+    // Reap helpers (gvproxy/supervisor) leaked by a prior killed run
+    // before booting this workload's microVM. Kill-only, quiet,
+    // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
+    super::super::env::apple_container::sweep_orphaned_vm_helpers_on_startup();
+
     // Plan 76 Phase 7 — surface the backend's isolation tier
     // when it isn't Tier 1, unless the operator explicitly
     // acknowledged the downgrade. This is observational today;

@@ -143,26 +143,38 @@ pub fn locate_gvproxy() -> Option<PathBuf> {
     which::which("gvproxy").ok()
 }
 
-/// Pick a TCP port for gvproxy's mandatory SSH-forward listener,
-/// derived deterministically from the per-VM scratch dir. gvproxy's
-/// `-ssh-port` arg is *mandatory* (default 2222) and gvproxy binds
-/// it on every start — so a host running more than one gvproxy
-/// fails the second-and-later instances with `bind: address already
-/// in use`. Plan 88 W5 surfaced this when the supervisor unit tests
-/// collided with a live `mvmctl dev up` gvproxy instance.
+/// Reserve a free TCP port on loopback for gvproxy's mandatory
+/// SSH-forward listener by letting the OS assign one.
 ///
-/// Range: 49152..=65535 (IANA dynamic / private ports). The mapping
-/// is deterministic on the dir path so a given VM's gvproxy always
-/// picks the same port (helps log/debug reproducibility); collisions
-/// across simultaneous VMs are improbable in practice but not
-/// impossible — if they happen, the second gvproxy still exits with
-/// a clear bind error and the caller's `EarlyExit` path reports it.
-fn ssh_port_for(scratch_dir: &Path) -> u16 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    scratch_dir.hash(&mut hasher);
-    let dynamic_range: u32 = 65535 - 49152 + 1;
-    49152u16 + ((hasher.finish() as u32) % dynamic_range) as u16
+/// gvproxy's `-ssh-port` arg is *mandatory* (default 2222) and
+/// gvproxy binds it on every start. mvm never uses the SSH forward
+/// (no SSH in microVMs, ever) but gvproxy refuses to disable it
+/// (`-ssh-port` validates to 1024..=65535), so we have to hand it a
+/// port we don't care about.
+///
+/// We bind `127.0.0.1:0`, read back the ephemeral port the kernel
+/// picked, and immediately drop the listener so gvproxy can claim
+/// it. This is collision-proof in the way a deterministic
+/// scratch-dir hash is *not*: the OS never hands out a port already
+/// in `LISTEN`, so a leaked gvproxy from a prior run (libkrun's
+/// `krun_start_enter` `exit()`s on guest shutdown and skips
+/// `GvproxyHandle::Drop`, so daemons routinely outlive their VM) or
+/// a concurrent VM reusing the same scratch dir can't steal the
+/// port out from under us. Plan 88 W5's deterministic hash collided
+/// exactly this way — a re-run reusing `~/.mvm/vms/<name>/` derived
+/// the same port a still-bound leaked daemon already held, and
+/// gvproxy bailed with `bind: address already in use`.
+///
+/// The bind→read→close → gvproxy-bind window is a microsecond-scale
+/// TOCTOU that another process could in principle race, but a closed
+/// listener that never accepted a connection frees its port
+/// immediately (no `TIME_WAIT`), so in practice gvproxy reclaims it
+/// before anything else does.
+pub fn free_loopback_port() -> io::Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    // Listener drops here, freeing the port for gvproxy to bind.
+    Ok(port)
 }
 
 /// Owning handle to a running gvproxy child process. `Drop` cleans up
@@ -229,9 +241,10 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
     //                          (concurrent dev VMs, parallel tests,
     //                          debugging cycles), instance N+1 fails
     //                          to bind 2222 and exits immediately
-    //                          with `address already in use`. Derive
-    //                          a per-VM port from the scratch dir so
-    //                          concurrent instances don't collide.
+    //                          with `address already in use`. Hand it
+    //                          a fresh OS-assigned free port so no two
+    //                          instances — including leaked daemons —
+    //                          collide (see `free_loopback_port`).
     //   -debug               — verbose logging. Not set by default;
     //                          if a future MVM_GVPROXY_DEBUG=1 env
     //                          var trips this we'd flip it here.
@@ -245,7 +258,10 @@ pub fn spawn(scratch_dir: &Path) -> Result<GvproxyHandle, GvproxyError> {
         s.push(socket_path.as_os_str());
         s
     };
-    let ssh_port = ssh_port_for(scratch_dir);
+    let ssh_port = free_loopback_port().map_err(|e| GvproxyError::Io {
+        context: "reserving a free port for gvproxy's ssh-forward listener".to_string(),
+        source: e,
+    })?;
 
     // NEVER inherit the spawner's stdout/stderr. gvproxy is a long-lived
     // daemon; if it holds a write end of the parent's stdout/stderr pipe,
@@ -441,6 +457,20 @@ mod tests {
     #[test]
     fn locate_gvproxy_is_optional() {
         let _ = locate_gvproxy();
+    }
+
+    /// A reserved port is in gvproxy's accepted `-ssh-port` range
+    /// (1024..=65535) and is actually free — we can rebind it after
+    /// the reservation drops, which is exactly what gvproxy does.
+    #[test]
+    fn free_loopback_port_is_in_range_and_bindable() {
+        let port = free_loopback_port().expect("reserve a free port");
+        assert!(port >= 1024, "port {port} below gvproxy's 1024 floor");
+        // The reservation listener is already dropped, so this rebind
+        // models gvproxy claiming the port we handed it.
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("reserved port is free to bind");
+        drop(rebound);
     }
 
     #[test]

@@ -60,8 +60,11 @@ jobs:
   #      local subscribers (`nc -U`). They do not accept control-plane
   #      commands or host multi-tenant orchestration state.
   #   5. Ephemeral port discovery — `TcpListener::bind("127.0.0.1:0")`
-  #      in `crates/mvm-cli/src/template_cmd.rs`. Binds to find a free
-  #      port; drops the listener immediately. Not a daemon.
+  #      in `crates/mvm-cli/src/template_cmd.rs` and
+  #      `crates/mvm-libkrun/src/gvproxy.rs` (`free_loopback_port`).
+  #      Binds to find a free port; drops the listener immediately so
+  #      the caller (here, gvproxy's mandatory ssh-forward listener)
+  #      can claim it. Not a daemon.
   #   6. Test-only mock guest-agent
   #      (`crates/mvm-backend/src/mock_guest_agent.rs`). Mirrors the
   #      in-guest vsock agent on the host side via Unix-domain socket
@@ -183,6 +186,7 @@ jobs:
               --glob '!crates/mvm-supervisor/src/gateway_bridge.rs' \
               --glob '!crates/mvm-supervisor/src/gateway_audit.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
+              --glob '!crates/mvm-libkrun/src/gvproxy.rs' \
               --glob '!crates/mvm-backend/src/mock_guest_agent.rs' \
               --glob '!crates/mvm-addon-vsock-bridge/**' \
               --glob '!crates/mvm-broker/src/bin/mvm-broker.rs' \
