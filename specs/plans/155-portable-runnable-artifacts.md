@@ -1,4 +1,4 @@
-# Plan 147 — Portable runnable artifacts (`mvmctl artifact run`)
+# Plan 155 — Portable runnable artifacts (`mvmctl artifact run`)
 
 Status: proposed (no code lands yet). Sequenced after Plan 120 `core_demo_e2e`
 green and the Plan 134 artifact-model slices, both of which this depends on for
