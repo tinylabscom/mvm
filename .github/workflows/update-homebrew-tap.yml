@@ -69,5 +69,8 @@ jobs:
           git config user.name "mvm-release-bot"
           git config user.email "release-bot@users.noreply.github.com"
           git add Formula/mvmctl.rb
-          git commit -m "mvmctl ${VERSION}" || { echo "no change"; exit 0; }
+          # Skip cleanly when the formula is unchanged, but let a real
+          # commit failure (hook, etc.) surface instead of masking it.
+          if git diff --staged --quiet; then echo "no change"; exit 0; fi
+          git commit -m "mvmctl ${VERSION}"
           git push
