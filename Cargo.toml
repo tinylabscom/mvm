@@ -4,7 +4,7 @@ members = [
     "crates/mvm-storage",
     "crates/mvm-supervisor",
     "crates/mvm-providers",
-    "crates/mvm-libkrun",
+    "crates/deps/libkrun-sys",
     # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
     # supervisor without closing the
     # `mvm-supervisor → mvm-backend → mvm-libkrun` cycle. Produces the
@@ -108,7 +108,7 @@ exclude = [
     # Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" —
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-libkrun/fuzz",
+    "crates/deps/libkrun-sys/fuzz",
     # Plan 97 / ADR-002 claim 5 — Vz supervisor JSON fuzz harness.
     # Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
@@ -319,7 +319,7 @@ mvm-providers = { path = "crates/mvm-providers", version = "0.15.1" }
 # bindgen + libclang build cost is isolated from the Apple-VZ objc2
 # stack. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
-mvm-libkrun = { path = "crates/mvm-libkrun", version = "0.15.1" }
+libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.15.1" }
 # Plan 97 Phase B — type-safe interface to `mvm-vz-supervisor`. No FFI,
 # Linux-safe (compiles everywhere; `Platform::has_vz()` short-circuits
 # on non-macOS).
@@ -406,7 +406,7 @@ chrono.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
-mvm-libkrun.workspace = true
+libkrun-sys.workspace = true
 mvm-oci.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`

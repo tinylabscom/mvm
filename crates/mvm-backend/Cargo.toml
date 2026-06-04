@@ -42,7 +42,7 @@ mvm-guest.workspace = true
 # `mvm-build`, so this doesn't widen the dependency graph.
 mvm-build.workspace = true
 mvm-providers.workspace = true
-mvm-libkrun.workspace = true
+libkrun-sys.workspace = true
 # Plan 97 Phase B — Vz backend foundation crate (SupervisorConfig types,
 # supervisor-binary path resolution). Pure data + helpers; no Swift dep.
 mvm-vz.workspace = true

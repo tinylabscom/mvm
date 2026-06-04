@@ -623,7 +623,7 @@ fn read_next_response(
 
 /// Path of the dispatch socket libkrun creates for a builder VM
 /// rooted at `vm_state_dir`. Mirrors the convention
-/// `mvm_libkrun::KrunContext` uses when
+/// `libkrun_sys::KrunContext` uses when
 /// `add_vsock_port(BUILDER_DISPATCH_PORT)` is configured.
 pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join(format!(

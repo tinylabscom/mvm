@@ -14,7 +14,7 @@ mvm-guest.workspace = true
 mvm = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 mvm-providers.workspace = true
-mvm-libkrun.workspace = true
+libkrun-sys.workspace = true
 mvm-backend = { workspace = true, default-features = false }
 mvm-mcp.workspace = true
 mvm-oci.workspace = true
@@ -76,7 +76,7 @@ libc.workspace = true
 [features]
 # Plan 72 W5.B cutover: `builder-vm` is now default so `mvmctl dev up`
 # prefers the libkrun-backed builder VM with a persistent /nix store.
-# Runtime gating via `mvm_libkrun::is_available()` still falls back cleanly
+# Runtime gating via `libkrun_sys::is_available()` still falls back cleanly
 # when libkrun isn't installed on the host.
 default = ["builder-vm"]
 contributor-bootstrap = [
@@ -91,7 +91,7 @@ builder-vm = ["mvm-build/builder-vm"]
 # is opt-in because normal CI and library consumers should not require
 # libkrun headers. Builds that run the native libkrun path can enable it
 # on hosts where libkrunfw is installed.
-libkrun-sys = ["mvm-libkrun/libkrun-sys"]
+libkrun-sys = ["libkrun-sys/libkrun-sys"]
 # Plan 93 PR-10a: opt-in lane for the `bench microvm-launch` live probe
 # test + its boot orchestration. Off by default so `cargo test
 # --workspace` on stock CI stays VM-free (hosted macOS runners lack

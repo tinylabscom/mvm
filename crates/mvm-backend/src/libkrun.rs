@@ -30,7 +30,7 @@ use mvm_core::vm_backend::{
 };
 
 use crate::base::ui;
-use mvm_libkrun::{KrunContext, SupervisorConfig};
+use libkrun_sys::{KrunContext, SupervisorConfig};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -49,7 +49,7 @@ const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// supervisor is spawned via `std::process::Command` (the production
 /// `mvmctl up` path), SIGTERM often doesn't reach the in-supervisor
 /// `sigaction` handler before we escalate. The in-supervisor handler
-/// (see `mvm_libkrun::install_shutdown_handler`) still helps the
+/// (see `libkrun_sys::install_shutdown_handler`) still helps the
 /// shell-stop case where SIGTERM is delivered cleanly (~200 ms); in
 /// the always-escalate cargo-spawn / launchd path a shorter timeout
 /// means `mvmctl stop` returns in 2 s instead of 5 s.
@@ -90,9 +90,9 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // gateway from this declared mode.
     let scratch = state_dir.to_string_lossy().into_owned();
     let krun = if cfg!(target_os = "macos") {
-        krun.with_gvproxy(mvm_libkrun::gvproxy::DEFAULT_GUEST_MAC, scratch)
+        krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
     } else {
-        krun.with_passt(mvm_libkrun::passt::DEFAULT_GUEST_MAC, scratch)
+        krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
     };
 
     // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
@@ -104,7 +104,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
 
     // Parse the signed-plan + bundle envelopes from VmStartConfig.
-    // mvm_libkrun::SupervisorConfig carries them as Option<serde_json::Value>
+    // libkrun_sys::SupervisorConfig carries them as Option<serde_json::Value>
     // so the supervisor can re-verify the envelope without depending on
     // mvm-plan at the parse boundary.
     let plan = match config.plan_json.as_deref() {
@@ -137,7 +137,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         // implemented today. Defaulting here keeps the producer site
         // explicit while a future plan can change the default or
         // introduce policy-driven selection.
-        bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+        bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
     })
 }
 
@@ -164,10 +164,10 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             bail!(
                 "libkrun is not installed on this host.\n  {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             );
         }
 
@@ -409,13 +409,13 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn is_available(&self) -> Result<bool> {
-        Ok(mvm_libkrun::is_available())
+        Ok(libkrun_sys::is_available())
     }
 
     fn install(&self) -> Result<()> {
         ui::info(&format!(
             "libkrun must be installed via the host's package manager.\n  {}",
-            mvm_libkrun::install_hint()
+            libkrun_sys::install_hint()
         ));
         // Also surface where we look for the supervisor binary so
         // operators can pre-flight the install before hitting a
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn libkrun_install_message_is_actionable() {
         LibkrunBackend.install().expect("install hint never errors");
-        let hint = mvm_libkrun::install_hint();
+        let hint = libkrun_sys::install_hint();
         assert!(!hint.is_empty());
     }
 

@@ -125,7 +125,7 @@ pub fn hint_libkrun_if_useful() {
     if plat.has_kvm() || plat.is_windows() {
         return;
     }
-    if mvm_libkrun::is_available() {
+    if libkrun_sys::is_available() {
         ui::info(
             "Detected libkrun on this host; you can opt in with `mvmctl run --hypervisor libkrun`.",
         );
@@ -136,7 +136,7 @@ pub fn hint_libkrun_if_useful() {
     if matches!(plat, Platform::MacOS) && cfg!(target_arch = "aarch64") {
         ui::info(&format!(
             "Tip: install libkrun for the local builder/runtime path on this Apple Silicon Mac.\n  {}",
-            mvm_libkrun::install_hint()
+            libkrun_sys::install_hint()
         ));
     }
 }

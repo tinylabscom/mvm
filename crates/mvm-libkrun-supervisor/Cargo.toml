@@ -30,7 +30,7 @@ authors.workspace = true
 # `cargo check --workspace` (no features) skips bindgen + libkrun
 # linkage on hosts without libkrun.h — mirrors the pre-split
 # `required-features = ["libkrun-sys"]` gate on the old `[[bin]]`.
-mvm-libkrun.workspace = true
+libkrun-sys.workspace = true
 # Codesigning gate on macOS (`apple_container::ensure_signed`).
 mvm-providers.workspace = true
 serde_json.workspace = true
@@ -59,7 +59,7 @@ default = []
 # Required to actually run this crate's bin; without it the binary
 # compiles but `run_supervisor` returns `Error::NotYetWired` and
 # the lib.rs `configure_*` helpers are absent.
-libkrun-sys = ["mvm-libkrun/libkrun-sys"]
+libkrun-sys = ["libkrun-sys/libkrun-sys"]
 
 [[bin]]
 name = "mvm-libkrun-supervisor"

@@ -242,7 +242,7 @@ jobs:
         run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
 
       - name: Fuzz SupervisorConfig (host-side)
-        working-directory: crates/mvm-libkrun
+        working-directory: crates/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -324,8 +324,8 @@ jobs:
           path: |
             crates/mvm-guest/fuzz/corpus/
             crates/mvm-guest/fuzz/artifacts/
-            crates/mvm-libkrun/fuzz/corpus/
-            crates/mvm-libkrun/fuzz/artifacts/
+            crates/deps/libkrun-sys/fuzz/corpus/
+            crates/deps/libkrun-sys/fuzz/artifacts/
             crates/mvm-vz/fuzz/corpus/
             crates/mvm-vz/fuzz/artifacts/
             crates/mvm-oci/fuzz/corpus/

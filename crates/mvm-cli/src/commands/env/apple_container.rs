@@ -2479,7 +2479,7 @@ fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
     let cache_dir =
         std::path::PathBuf::from(format!("{}/libkrunfw", mvm_core::config::mvm_cache_dir()));
     let target = cache_dir.join("vmlinux");
-    let bundled = mvm_libkrun::extract_bundled_kernel(&target)
+    let bundled = libkrun_sys::extract_bundled_kernel(&target)
         .map_err(|e| anyhow::anyhow!("libkrunfw kernel extraction: {e}"))?;
     ui::info(&format!(
         "Extracted libkrunfw kernel ({} bytes) to {}",
@@ -3611,7 +3611,7 @@ fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
 /// and `rootfs.ext4` in `out_dir`.
 ///
 /// Caller is expected to have:
-///   - confirmed `mvm_libkrun::is_available()` true,
+///   - confirmed `libkrun_sys::is_available()` true,
 ///   - confirmed `find_builder_vm_flake().is_ok()` (Layer 1 source is
 ///     present in the workspace),
 ///   - run [`prepare_dev_image_out_dir`] on `out_dir`.

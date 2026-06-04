@@ -1026,14 +1026,14 @@ fn network_backend_check(plat: Platform) -> Check {
     if cfg!(target_os = "macos") {
         return gateway_check(
             "gvproxy",
-            mvm_libkrun::gvproxy::locate_gvproxy(),
-            mvm_libkrun::gvproxy::install_hint(),
+            libkrun_sys::gvproxy::locate_gvproxy(),
+            libkrun_sys::gvproxy::install_hint(),
         );
     }
     gateway_check(
         "passt",
-        mvm_libkrun::passt::locate_passt(),
-        mvm_libkrun::passt::install_hint(),
+        libkrun_sys::passt::locate_passt(),
+        libkrun_sys::passt::install_hint(),
     )
 }
 
@@ -1131,7 +1131,7 @@ fn libkrun_check(plat: Platform) -> Check {
             name: "libkrun",
             category: "platform",
             ok: true, // Optional; not a failure.
-            info: format!("not available ({})", mvm_libkrun::install_hint()),
+            info: format!("not available ({})", libkrun_sys::install_hint()),
         }
     }
 }
@@ -1183,7 +1183,7 @@ fn builder_backend_check(plat: Platform) -> Check {
             if plat.has_libkrun() {
                 "libkrun available".to_string()
             } else {
-                format!("libkrun NOT available ({})", mvm_libkrun::install_hint())
+                format!("libkrun NOT available ({})", libkrun_sys::install_hint())
             }
         }
         BuilderBackendChoice::Vz => {

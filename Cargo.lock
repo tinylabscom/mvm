@@ -3043,6 +3043,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
+name = "libkrun-sys"
+version = "0.15.2"
+dependencies = [
+ "bindgen",
+ "libc",
+ "mvm-core",
+ "mvm-guest",
+ "mvm-providers",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "which 7.0.3",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3324,10 +3340,10 @@ dependencies = [
  "indicatif",
  "inquire",
  "libc",
+ "libkrun-sys",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
  "mvm-providers",
  "mvm-vz",
  "secrecy",
@@ -3369,9 +3385,9 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "libkrun-sys",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
  "mvm-sdk",
  "mvm-vz",
  "pgp",
@@ -3409,12 +3425,12 @@ dependencies = [
  "indicatif",
  "inquire",
  "libc",
+ "libkrun-sys",
  "mvm",
  "mvm-backend",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
  "mvm-mcp",
  "mvm-oci",
  "mvm-providers",
@@ -3566,29 +3582,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-libkrun"
-version = "0.15.2"
-dependencies = [
- "bindgen",
- "libc",
- "mvm-core",
- "mvm-guest",
- "mvm-providers",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "which 7.0.3",
-]
-
-[[package]]
 name = "mvm-libkrun-supervisor"
 version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
+ "libkrun-sys",
  "mvm-core",
- "mvm-libkrun",
  "mvm-providers",
  "mvm-supervisor",
  "serde_json",
@@ -3765,13 +3765,13 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "httpmock",
+ "libkrun-sys",
  "mvm",
  "mvm-backend",
  "mvm-build",
  "mvm-cli",
  "mvm-core",
  "mvm-guest",
- "mvm-libkrun",
  "mvm-oci",
  "objc2-foundation",
  "predicates",

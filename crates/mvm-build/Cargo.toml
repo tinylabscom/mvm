@@ -46,7 +46,7 @@ reqwest = { workspace = true, default-features = false, features = ["blocking", 
 # launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
 # `builder-vm`; default-off until Plan 72 W5
 # cutover flips polarity.
-mvm-libkrun = { workspace = true, optional = true }
+libkrun-sys = { workspace = true, optional = true }
 # Plan 97 Phase C — `VzBuilderBackend` builds a `vz::SupervisorConfig`
 # JSON document and pipes it to the Swift `mvm-vz-supervisor`. The
 # crate is pure types (no C linkage, no platform-specific deps) so
@@ -95,7 +95,7 @@ default = []
 # `mvm-libkrun` FFI crate which itself gates the underlying
 # `libkrun-sys` bindings.
 contributor-bootstrap = []
-builder-vm = ["dep:mvm-libkrun"]
+builder-vm = ["dep:libkrun-sys"]
 
 [lints]
 workspace = true

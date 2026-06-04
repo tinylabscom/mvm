@@ -50,7 +50,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use mvm_libkrun::{KrunContext, LogLevel, set_log_level, start_enter};
+use libkrun_sys::{KrunContext, LogLevel, set_log_level, start_enter};
 
 fn main() -> ExitCode {
     let args = match Args::parse() {
