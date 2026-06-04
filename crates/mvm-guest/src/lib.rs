@@ -15,6 +15,11 @@ pub mod lifecycle_hooks;
 /// and gated inside the module.
 pub mod netinit;
 pub mod probes;
+/// In-guest entrypoint runtime for function-call workloads (ADR-0009 /
+/// plan 60 Phase 5 Slice C). The `mvm-runner` binary
+/// (`src/bin/mvm-runner.rs`) is the thin entry over these testable
+/// units. Folded in from the former `mvm-runner` crate (plan 121 A1).
+pub mod runner;
 pub mod runtime_config;
 pub mod volume;
 pub mod vsock;

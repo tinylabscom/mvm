@@ -1,5 +1,7 @@
-//! Library half of `mvm-runtime`. The crate's binary lives at
-//! `src/main.rs`; this module exposes the testable units it composes.
+//! Library half of the in-guest function runtime. The `mvm-runner`
+//! binary lives at `src/bin/mvm-runner.rs`; this module exposes the
+//! testable units it composes. (Folded in from the former `mvm-runner`
+//! crate — plan 121 A1.)
 //!
 //! The runtime is the in-guest entrypoint for function-call workloads
 //! (ADR-0009 / plan 0003). At image build time the Nix factories

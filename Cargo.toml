@@ -53,9 +53,6 @@ members = [
     "crates/mvm-ir",
     "crates/mvm-sdk",
     "crates/mvm-sdk-macros",
-    # plan 60 Phase 5 Slice C — in-guest entrypoint runner for
-    # function-call workloads, ported from mvmforge-runtime.
-    "crates/mvm-runner",
     # Plan 104 W1a — host services broker subprocess (one of three
     # per-VM subprocesses: mvm-broker, mvm-host-signer,
     # mvm-audit-signer; ADR-062 dropped mvm-secrets-dispatcher). W1a

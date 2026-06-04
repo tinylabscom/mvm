@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use mvm_runner::{
+use mvm_guest::runner::{
     DEFAULT_CONFIG_PATH, DEFAULT_DISPATCH_DIR, ErrorEnvelope, ErrorKind, RuntimeConfig,
     STDIN_CAP_BYTES,
     config::Language,
