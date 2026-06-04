@@ -3279,36 +3279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-addon-dns"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "hickory-proto 0.26.1",
- "mvm-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mvm-addon-vsock-bridge"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "libc",
- "mvm-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mvm-backend"
 version = "0.15.2"
 dependencies = [
@@ -3482,6 +3452,22 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "mvm-guest-helpers"
+version = "0.15.2"
+dependencies = [
+ "anyhow",
+ "hickory-proto 0.26.1",
+ "libc",
+ "mvm-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

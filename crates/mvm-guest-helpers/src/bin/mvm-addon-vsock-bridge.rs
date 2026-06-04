@@ -6,7 +6,7 @@
 //! length-prefixed peer header, then proxies bytes both ways.
 //!
 use anyhow::{Context, Result};
-use mvm_addon_vsock_bridge::{load_bindings, run_bridge};
+use mvm_guest_helpers::addon_vsock_bridge::{load_bindings, run_bridge};
 use std::env;
 use std::path::PathBuf;
 

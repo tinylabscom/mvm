@@ -26,12 +26,12 @@ pkgs.rustPlatform.buildRustPackage {
   # heavier members (mvm-libkrun, mvm-providers, etc.) are not in the
   # closure of this crate, so the produced artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-addon-dns"
+    "--package" "mvm-guest-helpers"
     "--bin" "mvm-addon-dns"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-addon-dns"
+    "--package" "mvm-guest-helpers"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane; the Nix

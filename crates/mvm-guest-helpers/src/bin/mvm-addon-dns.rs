@@ -9,7 +9,7 @@
 //! that fails to read or parse leaves the previous zone in place.
 
 use anyhow::{Context, Result};
-use mvm_addon_dns::{
+use mvm_guest_helpers::addon_dns::{
     DnsServerConfig, SharedZone, Zone, load_upstreams_from_resolv_conf, load_zone,
     reload_zone_from_path, run_udp_server, shared_zone,
 };

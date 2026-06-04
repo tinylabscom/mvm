@@ -18,6 +18,7 @@ members = [
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-vm-host",
+    "crates/mvm-guest-helpers",
     "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
@@ -38,8 +39,6 @@ members = [
     # Local addon developer experience: in-guest addon name resolution
     # and loopback TCP to host-vsock bridge. Distributed service mesh,
     # tenant policy, and cryptographic routing belong in mvmd.
-    "crates/mvm-addon-dns",
-    "crates/mvm-addon-vsock-bridge",
     # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
     # mvm-sdk is the builder surface (it now also carries the
     # canonical Workload IR as `mvm_sdk::ir`, folded from the former
