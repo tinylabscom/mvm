@@ -241,8 +241,62 @@ jobs:
             staging/runtime-overlay-${{ matrix.arch }}.VERSION
             staging/runtime-overlay-${{ matrix.arch }}-checksums-sha256.txt
 
+  # Plan 158: the bundled default microVM image `mvmctl up`/`exec` boots when
+  # no --flake/--template/--image is given. Ships the PROD variant only
+  # (sealed + verity-sealed rootfs); the dev variant is built locally in dev
+  # mode, never published. `download_default_microvm_image` fetches these five
+  # assets + the checksums.
+  default-microvm:
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build default microVM image (prod variant)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          cp -L "$STORE_PATH/vmlinux"         "staging/default-microvm-vmlinux-${ARCH}"
+          cp -L "$STORE_PATH/rootfs.ext4"     "staging/default-microvm-rootfs-${ARCH}.ext4"
+          cp -L "$STORE_PATH/rootfs.verity"   "staging/default-microvm-rootfs-${ARCH}.verity"
+          cp -L "$STORE_PATH/rootfs.roothash" "staging/default-microvm-rootfs-${ARCH}.roothash"
+          cp -L "$STORE_PATH/mvm-meta.json"   "staging/default-microvm-meta-${ARCH}.json"
+          cd staging
+          sha256sum "default-microvm-vmlinux-${ARCH}" \
+                    "default-microvm-rootfs-${ARCH}.ext4" \
+                    "default-microvm-rootfs-${ARCH}.verity" \
+                    "default-microvm-rootfs-${ARCH}.roothash" \
+                    "default-microvm-meta-${ARCH}.json" \
+            > "default-microvm-${ARCH}-checksums-sha256.txt"
+
+      - name: Upload default microVM image artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: default-microvm-${{ matrix.arch }}
+          path: |
+            staging/default-microvm-vmlinux-${{ matrix.arch }}
+            staging/default-microvm-rootfs-${{ matrix.arch }}.ext4
+            staging/default-microvm-rootfs-${{ matrix.arch }}.verity
+            staging/default-microvm-rootfs-${{ matrix.arch }}.roothash
+            staging/default-microvm-meta-${{ matrix.arch }}.json
+            staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
+
   release:
-    needs: [build, builder-vm-image, runtime-overlay-image]
+    needs: [build, builder-vm-image, runtime-overlay-image, default-microvm]
     # Gate the published release on the mvmctl binary build ONLY. The Nix
     # image jobs still run and their artifacts are attached when present,
     # but an image-build failure must not block the binary download
@@ -353,6 +407,10 @@ jobs:
             artifacts/runtime-overlay-*.roothash
             artifacts/runtime-overlay-*.VERSION
             artifacts/runtime-overlay-*-checksums-sha256.txt
+            artifacts/default-microvm-vmlinux-*
+            artifacts/default-microvm-rootfs-*
+            artifacts/default-microvm-meta-*
+            artifacts/default-microvm-*-checksums-sha256.txt
             sbom.cdx.json
             sbom.cdx.json.bundle
           )

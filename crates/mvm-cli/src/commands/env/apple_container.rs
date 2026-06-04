@@ -3818,18 +3818,98 @@ pub(crate) fn ensure_default_microvm_image() -> Result<(String, String)> {
 
     let kernel_path = format!("{cache_dir}/vmlinux");
     let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-
-    if std::path::Path::new(&kernel_path).exists() && std::path::Path::new(&rootfs_path).exists() {
+    // Sidecars the boot path needs as siblings of the rootfs: the dm-verity
+    // Merkle tree + roothash (probed by `microvm.rs::probe_verity_sidecar`)
+    // and the overlay-aware `mvm-meta.json` (read by `admit_overlay_aware`).
+    // All five must be present before we skip the download — a cache that
+    // predates Plan 158 has only vmlinux + rootfs.ext4 and would fail
+    // admission.
+    let required = [
+        kernel_path.clone(),
+        rootfs_path.clone(),
+        format!("{cache_dir}/mvm-meta.json"),
+        format!("{cache_dir}/rootfs.verity"),
+        format!("{cache_dir}/rootfs.roothash"),
+    ];
+    if required.iter().all(|p| std::path::Path::new(p).exists()) {
         return Ok((kernel_path, rootfs_path));
     }
 
-    download_default_microvm_image(&kernel_path, &rootfs_path)
+    download_default_microvm_image(&cache_dir, &kernel_path, &rootfs_path)
 }
 
-/// Download a pre-built default microVM image (kernel + rootfs) from the
-/// matching GitHub release. Mirrors `download_dev_image`, including the
-/// ADR-002 §W5.1 hash-verify path.
+/// The (release asset name, local destination) contract for the prod default
+/// microVM image. Release names match the `default-microvm` job in
+/// `release.yml`; local names are the rootfs siblings the backend verity probe
+/// (`microvm.rs::probe_verity_sidecar`) and `admit_overlay_aware` expect. Pure
+/// — pinned by `default_microvm_assets_pins_the_five_asset_contract`.
+fn default_microvm_assets(cache_dir: &str, arch: &str) -> [(String, String); 5] {
+    [
+        (
+            format!("default-microvm-vmlinux-{arch}"),
+            format!("{cache_dir}/vmlinux"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.ext4"),
+            format!("{cache_dir}/rootfs.ext4"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.verity"),
+            format!("{cache_dir}/rootfs.verity"),
+        ),
+        (
+            format!("default-microvm-rootfs-{arch}.roothash"),
+            format!("{cache_dir}/rootfs.roothash"),
+        ),
+        (
+            format!("default-microvm-meta-{arch}.json"),
+            format!("{cache_dir}/mvm-meta.json"),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod default_microvm_tests {
+    use super::default_microvm_assets;
+
+    #[test]
+    fn default_microvm_assets_pins_the_five_asset_contract() {
+        let a = default_microvm_assets("/cache/dm", "aarch64");
+        let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "default-microvm-vmlinux-aarch64",
+                "default-microvm-rootfs-aarch64.ext4",
+                "default-microvm-rootfs-aarch64.verity",
+                "default-microvm-rootfs-aarch64.roothash",
+                "default-microvm-meta-aarch64.json",
+            ],
+            "release asset names must match the default-microvm release job",
+        );
+        let dests: Vec<&str> = a.iter().map(|(_, d)| d.as_str()).collect();
+        assert_eq!(
+            dests,
+            vec![
+                "/cache/dm/vmlinux",
+                "/cache/dm/rootfs.ext4",
+                "/cache/dm/rootfs.verity",
+                "/cache/dm/rootfs.roothash",
+                "/cache/dm/mvm-meta.json",
+            ],
+            "local dests must be the rootfs siblings the backend + admit gate expect",
+        );
+    }
+}
+
+/// Download the pre-built **prod** default microVM image from the matching
+/// GitHub release: kernel + verity-sealed rootfs + the `rootfs.verity` /
+/// `rootfs.roothash` sidecars + the overlay-aware `mvm-meta.json`. Every file
+/// is SHA-256-verified against the release checksums manifest (ADR-002 §W5.1).
+/// The sidecars land alongside the rootfs so the backend verity probe +
+/// `admit_overlay_aware` resolve them by path convention. Plan 158.
 fn download_default_microvm_image(
+    cache_dir: &str,
     kernel_path: &str,
     rootfs_path: &str,
 ) -> Result<(String, String)> {
@@ -3840,36 +3920,24 @@ fn download_default_microvm_image(
     } else {
         "x86_64"
     };
-    let kernel_name = format!("default-microvm-vmlinux-{arch}");
-    let rootfs_name = format!("default-microvm-rootfs-{arch}.ext4");
+
+    let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
-    let kernel_url = format!("{base_url}/{kernel_name}");
-    let rootfs_url = format!("{base_url}/{rootfs_name}");
     let checksums_url = format!("{base_url}/{checksums_name}");
 
     ui::info(&format!(
         "Downloading default microVM image (v{version})..."
     ));
 
-    let expected = fetch_expected_hashes(&checksums_url, &[&kernel_name, &rootfs_name])?;
+    let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
+    let expected = fetch_expected_hashes(&checksums_url, &asset_names)?;
 
-    ui::info("  Fetching kernel...");
-    download_file(&kernel_url, kernel_path)
-        .with_context(|| format!("Failed to download kernel from {kernel_url}"))?;
-    verify_artifact_hash(
-        kernel_path,
-        &kernel_name,
-        expected.get(kernel_name.as_str()),
-    )?;
-
-    ui::info("  Fetching rootfs...");
-    download_file(&rootfs_url, rootfs_path)
-        .with_context(|| format!("Failed to download rootfs from {rootfs_url}"))?;
-    verify_artifact_hash(
-        rootfs_path,
-        &rootfs_name,
-        expected.get(rootfs_name.as_str()),
-    )?;
+    for (name, dest) in &assets {
+        ui::info(&format!("  Fetching {name}..."));
+        let url = format!("{base_url}/{name}");
+        download_file(&url, dest).with_context(|| format!("Failed to download {url}"))?;
+        verify_artifact_hash(dest, name, expected.get(name.as_str()))?;
+    }
 
     ui::success("Default microVM image downloaded, hash-verified, and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
