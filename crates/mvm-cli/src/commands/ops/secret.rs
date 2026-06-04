@@ -247,16 +247,15 @@ pub(crate) struct AuditLog {
 
 impl AuditLog {
     pub(crate) fn default() -> Result<Self> {
-        let home = match std::env::var_os("HOME") {
-            Some(h) => h,
-            None => {
-                return Ok(Self {
-                    path: None,
-                    recorder: None,
-                });
-            }
-        };
-        let dir = PathBuf::from(home).join(".mvm").join("audit");
+        // No `$HOME` → no-op log (CI sandboxes, daemons without a home
+        // dir). MVM_DATA_DIR is honored by mvm_audit_dir when set.
+        if std::env::var_os("HOME").is_none() && std::env::var_os("MVM_DATA_DIR").is_none() {
+            return Ok(Self {
+                path: None,
+                recorder: None,
+            });
+        }
+        let dir = mvm_core::config::mvm_audit_dir();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating audit dir {}", dir.display()))?;
         #[cfg(unix)]

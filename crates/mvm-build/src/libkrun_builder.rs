@@ -1483,9 +1483,8 @@ pub fn spawn_vsock_response_listener(
     use crate::builder_protocol::{HostVmResponseRead, read_host_vm_response};
 
     let (tx, rx) = mpsc::channel();
-    let socket_path = vm_state_dir.join(format!(
-        "vsock-{}.sock",
-        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT
+    let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(
+        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
     ));
 
     std::thread::Builder::new()
@@ -2084,10 +2083,10 @@ impl PersistentVmHandle {
     /// inside the guest. The W3 part 1
     /// `PersistentBuilderSupervisor::new` takes this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
-        self.vm_state_dir.join(format!(
-            "vsock-{}.sock",
-            mvm_guest::builder_agent::BUILDER_DISPATCH_PORT
-        ))
+        self.vm_state_dir
+            .join(mvm_core::config::vsock_socket_filename(
+                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+            ))
     }
 
     /// Per-VM job directory bound at `/job` inside the guest.

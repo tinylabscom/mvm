@@ -312,6 +312,90 @@ pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }
 
+// ============================================================================
+// Per-VM host-side state paths
+// ============================================================================
+//
+// Every per-VM artifact mvm writes on the host lives under
+// `<mvm_data_dir>/vms/<name>/`. Build these paths ONLY through the helpers
+// below: a single source of truth for the layout, and `MVM_DATA_DIR` is
+// honored everywhere. The inline `$HOME/.mvm/vms/...` derivations these
+// replace duplicated the convention — which let the libkrun vsock socket
+// name drift between two resolvers (the #582 regression) — and silently
+// ignored `MVM_DATA_DIR`, so parallel sessions collided despite setting it.
+
+/// Per-VM state directory: `<mvm_data_dir>/vms/<name>/`. Holds the
+/// libkrun pid file, console log, vsock listener socket(s), runtime
+/// `mode.json`, `rootfs.ref` / `kernel.ref`, and the `ports` file.
+pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir())
+        .join("vms")
+        .join(name)
+}
+
+/// Filename of libkrun's per-port vsock listener socket: `vsock-<port>.sock`.
+/// The single source of truth for the name. Callers that already hold the
+/// per-VM dir (e.g. a `VsockTransport` constructed from an explicit dir)
+/// join this; callers that hold the VM name use [`vm_vsock_port_socket`].
+pub fn vsock_socket_filename(port: u32) -> String {
+    format!("vsock-{port}.sock")
+}
+
+/// libkrun's per-port vsock listener socket: `<vm_state_dir>/vsock-<port>.sock`.
+/// libkrun's supervisor binds one socket per forwarded port, so a client
+/// connects directly with no port handshake. This + [`vsock_socket_filename`]
+/// are the single source of truth for the convention — every host-side
+/// resolver (the console transport, the dev-VM connect path) must use them
+/// so they cannot drift, which is exactly what broke in #582.
+pub fn vm_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
+    vm_state_dir(name).join(vsock_socket_filename(port))
+}
+
+/// The Apple-Container cross-process vsock proxy socket:
+/// `<vm_state_dir>/vsock.sock`. The dev daemon listens here and
+/// multiplexes ports via a 4-byte little-endian port prefix.
+pub fn vm_vsock_proxy_socket(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("vsock.sock")
+}
+
+/// libkrun supervisor pid file: `<vm_state_dir>/libkrun.pid`.
+pub fn vm_libkrun_pid(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("libkrun.pid")
+}
+
+/// Guest console capture log: `<vm_state_dir>/console.log`.
+pub fn vm_console_log(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("console.log")
+}
+
+// ============================================================================
+// Sensitive ~/.mvm subdirectories
+// ============================================================================
+//
+// Build these ONLY through the helpers below so they honor MVM_DATA_DIR and
+// stay consistent across the diagnostics, signer, and audit paths. The
+// inline `$HOME/.mvm/<sub>` derivations these replace ignored MVM_DATA_DIR.
+
+/// Host signing keys (e.g. `host-signer.ed25519`): `<mvm_data_dir>/keys/`.
+pub fn mvm_keys_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("keys")
+}
+
+/// Chain-signed audit logs: `<mvm_data_dir>/audit/`.
+pub fn mvm_audit_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("audit")
+}
+
+/// Overlay receipts / destruction certificates: `<mvm_data_dir>/overlays/`.
+pub fn mvm_overlays_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("overlays")
+}
+
+/// Secret-material staging: `<mvm_data_dir>/secrets/`.
+pub fn mvm_secrets_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("secrets")
+}
+
 /// Check if running in production mode (MVM_PRODUCTION=1).
 pub fn is_production_mode() -> bool {
     std::env::var("MVM_PRODUCTION")
@@ -579,5 +663,36 @@ mod tests {
         assert_eq!(mode, 0o700, "expected 0700, got 0{:o}", mode);
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn vm_state_paths_honor_data_dir_and_share_one_source() {
+        let _g = env_lock();
+        unsafe { std::env::set_var("MVM_DATA_DIR", "/custom/data") };
+
+        // Per-VM dir + sockets derive from MVM_DATA_DIR; the inline
+        // `$HOME/.mvm/vms/...` derivations this centralizes silently ignored
+        // it, so parallel sessions collided despite setting it.
+        assert_eq!(
+            vm_state_dir("foo"),
+            std::path::PathBuf::from("/custom/data/vms/foo")
+        );
+        assert_eq!(
+            vm_vsock_port_socket("foo", 5252),
+            std::path::PathBuf::from("/custom/data/vms/foo/vsock-5252.sock")
+        );
+        assert_eq!(
+            vm_vsock_proxy_socket("foo"),
+            std::path::PathBuf::from("/custom/data/vms/foo/vsock.sock")
+        );
+        // The dev-VM connect resolver (mvm-backend) and the console transport
+        // (mvm) both build the libkrun socket as state-dir + shared filename,
+        // so they cannot drift again (#582).
+        assert_eq!(
+            vm_state_dir("foo").join(vsock_socket_filename(5252)),
+            vm_vsock_port_socket("foo", 5252)
+        );
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 }

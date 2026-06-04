@@ -104,7 +104,9 @@ test-cargo:
 #      gvproxy-orphan hang.
 e2e-core-demo:
     cargo build --bin mvmctl
-    cargo build -p mvm-libkrun-supervisor --features libkrun-sys
+    # Plan 121 D2 folded the supervisor bin into mvm-vm-host; build the
+    # cfg-gated [[bin]] by crate + bin name (it is no longer its own crate).
+    cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
     MVM_E2E_SMOKE=1 MVM_BUILDER_BACKEND=libkrun cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 
 # ── Lint & Format ────────────────────────────────────────────────────────

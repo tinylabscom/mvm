@@ -172,8 +172,7 @@ pub fn vsock_proxy_path(id: &str) -> std::path::PathBuf {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(format!("{home}/.mvm/vms/{id}/vsock.sock"))
+        mvm_core::config::vm_vsock_proxy_socket(id)
     }
 }
 
@@ -189,23 +188,41 @@ pub fn vsock_proxy_path(id: &str) -> std::path::PathBuf {
 /// Returns a clear error when neither is reachable so callers can decide
 /// whether to surface the message or auto-start the dev daemon.
 pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::UnixStream, String> {
+    // 1. In-process Virtualization.framework reference.
     if let Ok(stream) = vsock_connect(id, port) {
         return Ok(stream);
     }
+    // 2. Apple-Container cross-process proxy socket. The proxy multiplexes
+    //    every port over one socket, so the client writes the target port as
+    //    a 4-byte LE prefix before talking the guest protocol.
     let proxy = vsock_proxy_path(id);
-    if !proxy.exists() {
-        return Err(format!(
-            "dev VM '{id}' is not running (no in-process VM and no proxy socket at {})",
-            proxy.display(),
-        ));
+    if proxy.exists() {
+        use std::io::Write as _;
+        let mut stream = std::os::unix::net::UnixStream::connect(&proxy)
+            .map_err(|e| format!("connect proxy {}: {e}", proxy.display()))?;
+        stream
+            .write_all(&port.to_le_bytes())
+            .map_err(|e| format!("write proxy port: {e}"))?;
+        return Ok(stream);
     }
-    use std::io::Write as _;
-    let mut stream = std::os::unix::net::UnixStream::connect(&proxy)
-        .map_err(|e| format!("connect proxy {}: {e}", proxy.display()))?;
-    stream
-        .write_all(&port.to_le_bytes())
-        .map_err(|e| format!("write proxy port: {e}"))?;
-    Ok(stream)
+    // 3. libkrun per-port socket. A dev VM booted via the libkrun backend
+    //    exposes one socket *per port* at `~/.mvm/vms/<id>/vsock-<port>.sock`,
+    //    so we connect directly — no port handshake. Without this branch a
+    //    healthy libkrun dev VM is misreported as "not running" (#582), which
+    //    is exactly what broke `dev up`'s console attach on macOS+libkrun.
+    //    Path comes from `mvm_core::config` — the single source of truth the
+    //    console transport (`mvm::vsock_transport::LibkrunTransport`) shares,
+    //    so the two resolvers can no longer drift (the #582 root cause).
+    let libkrun = mvm_core::config::vm_vsock_port_socket(id, port);
+    if libkrun.exists() {
+        return std::os::unix::net::UnixStream::connect(&libkrun)
+            .map_err(|e| format!("connect libkrun vsock {}: {e}", libkrun.display()));
+    }
+    Err(format!(
+        "dev VM '{id}' is not running (no in-process VM, no proxy socket at {}, no libkrun socket at {})",
+        proxy.display(),
+        libkrun.display(),
+    ))
 }
 
 /// Guest agent vsock port.
@@ -245,16 +262,17 @@ mod tests {
     }
 
     #[test]
-    fn test_vsock_proxy_path_under_home() {
-        // Whatever HOME points at, the path must resolve below it and end
-        // with the conventional segment used by the dev daemon.
+    fn test_vsock_proxy_path_matches_core_helper() {
+        // The proxy path is the single source of truth in mvm-core::config;
+        // both this provider and the connector must resolve to it identically
+        // (the #582 drift class). Assert equality rather than a $HOME-shaped
+        // suffix so the test honors MVM_DATA_DIR like production does.
         let path = vsock_proxy_path("some-vm");
-        let suffix = std::path::Path::new(".mvm/vms/some-vm/vsock.sock");
+        assert_eq!(path, mvm_core::config::vm_vsock_proxy_socket("some-vm"));
         assert!(
-            path.ends_with(suffix),
-            "expected path to end with {} but got {}",
-            suffix.display(),
-            path.display(),
+            path.ends_with("vms/some-vm/vsock.sock"),
+            "got {}",
+            path.display()
         );
     }
 
@@ -270,5 +288,18 @@ mod tests {
         assert!(err.contains(id), "got: {err}");
         assert!(err.contains("not running"), "got: {err}");
         assert!(err.contains("vsock.sock"), "got: {err}");
+    }
+
+    #[test]
+    fn vsock_connect_any_consults_libkrun_socket() {
+        // #582 regression: a libkrun dev VM's per-port socket must be part of
+        // the resolution chain, so the "not running" error names it (a real
+        // socket is connected — exercised end-to-end by core_demo_e2e).
+        let err = vsock_connect_any("never-existed-vm-582", GUEST_AGENT_PORT)
+            .expect_err("no VM, no sockets → error");
+        assert!(
+            err.contains("libkrun socket"),
+            "error must name the libkrun socket: {err}"
+        );
     }
 }

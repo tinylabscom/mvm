@@ -283,21 +283,7 @@ impl VmBackend for AppleContainerBackend {
 /// lives here. Each running Apple Container VM owns its own copy so VZ
 /// can attach it writable without conflicting with sibling instances.
 fn instance_rootfs_path(vm_name: &str) -> Result<std::path::PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    if home.is_empty() {
-        anyhow::bail!("HOME is not set; cannot resolve instance rootfs path");
-    }
-    Ok(instance_rootfs_path_at(
-        std::path::Path::new(&home),
-        vm_name,
-    ))
-}
-
-fn instance_rootfs_path_at(base: &std::path::Path, vm_name: &str) -> std::path::PathBuf {
-    base.join(".mvm")
-        .join("vms")
-        .join(vm_name)
-        .join("rootfs.ext4")
+    Ok(mvm_core::config::vm_state_dir(vm_name).join("rootfs.ext4"))
 }
 
 /// Materialize the per-instance rootfs for an Apple Container VM and
@@ -345,8 +331,7 @@ fn prepare_instance_rootfs_inner(
 
 /// Read persisted port mappings from the VM state directory.
 fn read_vm_ports(vm_name: &str) -> Vec<mvm_core::vm_backend::VmPortMapping> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let path = format!("{home}/.mvm/vms/{vm_name}/ports");
+    let path = mvm_core::config::vm_state_dir(vm_name).join("ports");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -395,12 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn instance_rootfs_path_at_layout() {
-        let p = instance_rootfs_path_at(std::path::Path::new("/var/home/user"), "vm-1");
+    fn instance_rootfs_path_layout_honors_data_dir() {
+        // MVM_DATA_DIR is process-global; HOME_TEST_LOCK serializes us with
+        // every other test that mutates env-derived path roots.
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("MVM_DATA_DIR");
+        // SAFETY: guarded by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("MVM_DATA_DIR", "/var/home/user/.mvm") };
+        let p = instance_rootfs_path("vm-1").expect("resolve rootfs path");
         assert_eq!(
             p,
             std::path::PathBuf::from("/var/home/user/.mvm/vms/vm-1/rootfs.ext4")
         );
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
+            }
+        }
     }
 
     #[test]

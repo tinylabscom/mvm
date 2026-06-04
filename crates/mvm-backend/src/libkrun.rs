@@ -31,6 +31,7 @@ use mvm_core::vm_backend::{
 
 use crate::base::ui;
 use libkrun_sys::{KrunContext, SupervisorConfig};
+use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -42,6 +43,12 @@ pub struct LibkrunBackend;
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
 /// write its PID file before giving up and killing the child.
 const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+/// After the PID file appears the supervisor still has to bind the
+/// per-port vsock listener socket; callers (the console attach,
+/// `shell_exec` via `connect_with_auto_start`) race that window and
+/// wrongly see the VM as "not running" (#582). `start` waits for the
+/// agent socket before returning so "ready" actually means reachable.
+const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`LibkrunBackend::stop`] waits after `SIGTERM` before
 /// escalating to `SIGKILL`. Tight because libkrun's signal handling
@@ -263,7 +270,7 @@ impl VmBackend for LibkrunBackend {
         // per-VM log so a boot failure / kernel panic is diagnosable
         // (mirrors firecracker.log). Best-effort: fall back to null if
         // the file can't be created.
-        let console_log = std::fs::File::create(state_dir.join("console.log"))
+        let console_log = std::fs::File::create(vm_console_log(&config.name))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
         let mut child = Command::new(&supervisor_path)
@@ -307,6 +314,36 @@ impl VmBackend for LibkrunBackend {
             std::thread::sleep(Duration::from_millis(50));
         }
 
+        // The PID file means the supervisor process is up, but it binds the
+        // per-port vsock listener a beat later. Wait for the agent socket so
+        // the console attach / shell_exec that immediately follow don't race
+        // a not-yet-bound socket and report the VM "not running" (#582).
+        let agent_sock = mvm_core::config::vm_vsock_port_socket(
+            &config.name,
+            mvm_guest::vsock::GUEST_AGENT_PORT,
+        );
+        let sock_deadline = Instant::now() + VSOCK_SOCKET_TIMEOUT;
+        while !agent_sock.exists() {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| anyhow!("poll supervisor child: {e}"))?
+            {
+                bail!(
+                    "supervisor exited before binding vsock socket {} (status: {status})",
+                    agent_sock.display()
+                );
+            }
+            if Instant::now() >= sock_deadline {
+                let _ = child.kill();
+                bail!(
+                    "supervisor did not bind vsock socket {} within {:?}; killed",
+                    agent_sock.display(),
+                    VSOCK_SOCKET_TIMEOUT
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
         ui::success(&format!(
             "libkrun VM '{}' started (pid file: {}).",
             config.name,
@@ -316,7 +353,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let pid_path = vm_state_dir(&id.0).join("libkrun.pid");
+        let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {
             Some(p) => p,
             None => {
@@ -393,7 +430,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn status(&self, id: &VmId) -> Result<VmStatus> {
-        let pid_path = vm_state_dir(&id.0).join("libkrun.pid");
+        let pid_path = vm_libkrun_pid(&id.0);
         match read_pid(&pid_path) {
             Some(pid) if pid_alive(pid) => Ok(VmStatus::Running),
             _ => Ok(VmStatus::Stopped),
@@ -401,7 +438,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = vms_root();
+        let root = PathBuf::from(mvm_data_dir()).join("vms");
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -513,15 +550,6 @@ impl VmBackend for LibkrunBackend {
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
-
-fn vms_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".mvm/vms")
-}
-
-fn vm_state_dir(name: &str) -> PathBuf {
-    vms_root().join(name)
-}
 
 /// Resolve the absolute path to the `mvm-libkrun-supervisor` binary,
 /// checking three sources in order:

@@ -88,12 +88,16 @@ impl LibkrunTransport {
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        Self::new(PathBuf::from(home).join(".mvm/vms").join(vm_name))
+        // Single source of truth for the per-VM dir (honors MVM_DATA_DIR).
+        // for_vm(name).socket_path(port) now equals
+        // mvm_core::config::vm_vsock_port_socket(name, port) — the same path
+        // the dev-VM connect resolver uses, so they can't drift (#582).
+        Self::new(mvm_core::config::vm_state_dir(vm_name))
     }
 
     fn socket_path(&self, port: u32) -> PathBuf {
-        self.socket_dir.join(format!("vsock-{port}.sock"))
+        self.socket_dir
+            .join(mvm_core::config::vsock_socket_filename(port))
     }
 }
 

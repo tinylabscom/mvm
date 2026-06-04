@@ -462,7 +462,7 @@ impl VmBackend for VzBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = vms_root();
+        let root = PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -511,7 +511,7 @@ impl VmBackend for VzBackend {
         // logs", which today is empty — the supervisor inherits stderr
         // from the parent `mvmctl`, so its logs are already on the
         // user's terminal. Surface the console capture in both cases.
-        let log = vm_state_dir(&id.0).join("console.log");
+        let log = mvm_core::config::vm_console_log(&id.0);
         let contents = std::fs::read_to_string(&log)
             .map_err(|e| anyhow!("read console log {}: {e}", log.display()))?;
         if lines == 0 {
@@ -857,11 +857,6 @@ fn persist_supervisor_config(path: &Path, json: &str) -> Result<()> {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-fn vms_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".mvm/vms")
-}
-
 /// Plan 97 Phase E gate: snapshot save/restore lands in macOS 14
 /// (`VZVirtualMachine.saveMachineStateTo` / `restoreMachineStateFrom`).
 /// Reported as the *backend* capability rather than the live host's
@@ -898,7 +893,7 @@ fn macos_major_version() -> u32 {
 }
 
 fn vm_state_dir(name: &str) -> PathBuf {
-    vms_root().join(name)
+    mvm_core::config::vm_state_dir(name)
 }
 
 /// Plan 102 W6.A.5 — per-VM Vz events-ingest socket path. The Swift

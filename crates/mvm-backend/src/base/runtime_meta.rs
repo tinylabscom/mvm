@@ -86,19 +86,8 @@ impl From<StartModeKind> for StartMode {
     }
 }
 
-#[cfg(unix)]
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-#[cfg(not(unix))]
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
-}
-
 fn meta_path(name: &str) -> Result<PathBuf> {
-    let home = home_dir().context("$HOME unset; cannot locate ~/.mvm/vms/<name>/mode.json")?;
-    Ok(home.join(".mvm").join("vms").join(name).join("mode.json"))
+    Ok(mvm_core::config::vm_state_dir(name).join("mode.json"))
 }
 
 /// Write the metadata file.
@@ -209,15 +198,25 @@ mod tests {
         let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("HOME");
-        // SAFETY: tests only; HOME is process-global but the
-        // HOME_TEST_LOCK serializes us with everything else that
-        // reads it.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        // `meta_path` resolves via `vm_state_dir`, which prefers MVM_DATA_DIR
+        // over $HOME — clear it so these $HOME-rooted assertions hold even if
+        // a sibling test (under the same lock) leaked the override.
+        let prev_data = std::env::var_os("MVM_DATA_DIR");
+        // SAFETY: tests only; HOME/MVM_DATA_DIR are process-global but the
+        // HOME_TEST_LOCK serializes us with everything else that reads them.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+            std::env::remove_var("MVM_DATA_DIR");
+        }
         f(tmp.path());
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
+            }
+            match prev_data {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
             }
         }
     }
