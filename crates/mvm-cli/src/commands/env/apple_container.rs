@@ -1995,9 +1995,10 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // build can install them from /mvm-bins instead of building them with
     // the guest's nix. Same cache dir the steady-state job path uses.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     // Kernel acquisition override (MVM_KERNEL_SOURCE / --kernel-source).
     // `download` (and `auto` when a publish exists) boots the builder VM
@@ -2305,9 +2306,10 @@ pub(crate) fn build_kernel_via_stage0(
     // ADR-065: the Stage 0 nix build installs the embedded host-vm
     // binaries from /mvm-bins rather than building them in-guest.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     ui::info(&format!(
         "Compiling {} kernel ({arch}) via Stage 0 — first build is slow \
@@ -3658,9 +3660,10 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     // The builder-vm flake's cmd.sh reads MVM_HOST_BIN_DIR=/mvm-bins to
     // install the correct cross-compiled binaries into the rootfs.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     let job = BuilderJob::Flake {
         flake_ref: "path:/work/nix/images/builder-vm".to_string(),

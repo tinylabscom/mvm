@@ -27,9 +27,32 @@ fn main() {
     let host_triple = std::env::var("HOST").unwrap();
     let native = host_triple.contains("linux") && host_triple.contains(strip_glibc(&pin.target));
 
+    // Fast path for local test/dev iteration: skip the nested
+    // `cargo zigbuild --release` cross-compile of the host-vm binaries and
+    // bake zero-byte stubs instead. Cuts the dominant cold-build tax on
+    // macOS (and any fresh worktree) for everyone who isn't exercising a
+    // builder-VM boot. The only consumers that read the *bytes* are the
+    // env-gated boot/E2E tests (`MVM_E2E_SMOKE`, libkrun lifecycle), which
+    // are skipped in a default `cargo test`/`nextest` run — and the
+    // `e2e-core-demo` recipe never sets this var, so a stub build can't
+    // masquerade as a passing E2E. NEVER set this in CI release builds:
+    // the shipped mvmctl must embed the real reproducible binaries
+    // (Plan 115 / ADR-065 claim 11).
+    let skip_embed = std::env::var("MVM_SKIP_EMBED_BINARIES").as_deref() == Ok("1");
+    println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
+    if skip_embed {
+        println!(
+            "cargo:warning=MVM_SKIP_EMBED_BINARIES=1: embedding zero-byte host-vm \
+             stubs; builder-VM boot is unavailable in this build"
+        );
+    }
+
     for name in manifest.iter() {
         let out_file = bins_out.join(name);
-        if native {
+        if skip_embed {
+            std::fs::write(&out_file, b"")
+                .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
+        } else if native {
             run_cargo_build(&workspace_root, name, &pin.target, &out_file);
         } else {
             run_cargo_zigbuild(&workspace_root, name, &pin.target, &out_file);

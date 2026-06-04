@@ -353,9 +353,24 @@ No task is done without tests. Before marking any feature complete:
 
 ```bash
 cargo fmt --all -- --check           # workspace-wide fmt; --all matters
-cargo test --workspace               # all tests must pass
+cargo nextest run --workspace        # all tests must pass (process-parallel)
+cargo test --workspace --doc         # doctests — nextest does NOT run these
 cargo clippy --workspace -- -D warnings  # zero warnings
 ```
+
+`cargo nextest run --workspace` (what `just test` and CI run) is the named
+test gate — it's process-parallel and faster than `cargo test` on this
+~4,350-test suite. The one gap: **nextest skips doctests**, so the
+`cargo test --workspace --doc` line above (wrapped as `just test-doc`, and
+folded into `just ci`) keeps doc-fence coverage gated. `cargo test
+--workspace` still works as a fallback if nextest isn't installed.
+
+For fast inner-loop iteration or a freshly-created worktree, `just
+test-fast` (`MVM_SKIP_EMBED_BINARIES=1`) skips the embedded host-vm binary
+cross-compile in `crates/mvm-cli/build.rs` — safe for everything except a
+builder-VM boot (which fails closed with a clear message under a stub
+build). `just test-cached` wraps rustc in sccache to share compilation
+across worktrees/branches (needs `cargo install sccache`).
 
 **Always pass `--all` to `cargo fmt`.** Without it, fmt only checks the
 manifest crate (whichever one the manifest points at), silently missing
@@ -366,8 +381,8 @@ fmt --all` and re-stages — `just install-hooks` wires
 `core.hooksPath` to `.githooks/` so it fires on every commit.
 
 The Justfile recipes wrap this correctly: `just fmt-check`, `just
-clippy`, `just lint` (both), `just ci` (lint + test). Prefer those over
-raw cargo invocations.
+clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
+those over raw cargo invocations.
 
 Every new module, type, or function needs test coverage:
 - Types: serde roundtrip, default values

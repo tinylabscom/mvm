@@ -54,6 +54,28 @@ dev-check:
 test:
     cargo nextest run --workspace
 
+# Fast inner-loop / fresh-worktree run: skips the embedded host-vm binary
+# cross-compile (cargo zigbuild --release) in mvm-cli/build.rs. Safe for
+# everything except builder-VM boot — the env-gated E2E tests need the
+# real binaries and the `e2e-core-demo` recipe never sets this var.
+test-fast:
+    MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace
+
+# Doctests. nextest does NOT run doctests, so `just test` skips them;
+# this is the companion that keeps doc-fence coverage gated.
+test-doc:
+    cargo test --workspace --doc
+
+# Run tests with sccache wrapping rustc — caches compilation across
+# worktrees/branches (a content cache, not a build lock, so parallel
+# sessions don't serialize on it). Incremental is OFF because sccache and
+# incremental compilation are mutually exclusive: this trades inner-loop
+# incremental for cross-worktree cache hits. Needs `cargo install sccache`.
+test-cached:
+    @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
+    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace
+    @sccache --show-stats
+
 # Test a single crate
 test-crate CRATE:
     cargo nextest run -p {{CRATE}}
@@ -104,8 +126,8 @@ lint: fmt-check clippy
 
 # ── CI Gate ──────────────────────────────────────────────────────────────
 
-# Full CI gate: lint + test
-ci: lint test
+# Full CI gate: lint + test + doctests (nextest skips doctests).
+ci: lint test test-doc
 
 # Alias for ci
 preflight: ci
