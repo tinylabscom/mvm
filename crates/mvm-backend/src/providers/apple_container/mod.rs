@@ -211,9 +211,10 @@ pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::Unix
     //    so we connect directly — no port handshake. Without this branch a
     //    healthy libkrun dev VM is misreported as "not running" (#582), which
     //    is exactly what broke `dev up`'s console attach on macOS+libkrun.
-    //    Mirrors `mvm::vsock_transport::LibkrunTransport::socket_path`; the two
-    //    resolvers live in different crate layers, so keep them in lockstep.
-    let libkrun = libkrun_vsock_path(id, port);
+    //    Path comes from `mvm_core::config` — the single source of truth the
+    //    console transport (`mvm::vsock_transport::LibkrunTransport`) shares,
+    //    so the two resolvers can no longer drift (the #582 root cause).
+    let libkrun = mvm_core::config::vm_vsock_port_socket(id, port);
     if libkrun.exists() {
         return std::os::unix::net::UnixStream::connect(&libkrun)
             .map_err(|e| format!("connect libkrun vsock {}: {e}", libkrun.display()));
@@ -223,18 +224,6 @@ pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::Unix
         proxy.display(),
         libkrun.display(),
     ))
-}
-
-/// Host path of a libkrun dev VM's per-port vsock socket. Mirrors
-/// `mvm::vsock_transport::LibkrunTransport::socket_path` and the
-/// `vsock-<port>.sock` convention libkrun's supervisor writes (Plan 57),
-/// duplicated here because this provider sits below the `mvm` crate.
-fn libkrun_vsock_path(id: &str, port: u32) -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".mvm/vms")
-        .join(id)
-        .join(format!("vsock-{port}.sock"))
 }
 
 /// Guest agent vsock port.
@@ -299,21 +288,6 @@ mod tests {
         assert!(err.contains(id), "got: {err}");
         assert!(err.contains("not running"), "got: {err}");
         assert!(err.contains("vsock.sock"), "got: {err}");
-    }
-
-    #[test]
-    fn libkrun_vsock_path_matches_convention() {
-        // #582: libkrun dev VMs expose a per-port socket; the resolver must
-        // build `~/.mvm/vms/<id>/vsock-<port>.sock` (mirrors LibkrunTransport).
-        let path = libkrun_vsock_path("some-vm", GUEST_AGENT_PORT);
-        let suffix =
-            std::path::PathBuf::from(format!(".mvm/vms/some-vm/vsock-{GUEST_AGENT_PORT}.sock"));
-        assert!(
-            path.ends_with(&suffix),
-            "expected path to end with {} but got {}",
-            suffix.display(),
-            path.display(),
-        );
     }
 
     #[test]
