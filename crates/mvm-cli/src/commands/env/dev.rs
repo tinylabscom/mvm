@@ -217,8 +217,10 @@ pub(in crate::commands) enum DevAction {
         #[arg(long, conflicts_with = "shell")]
         no_shell: bool,
         /// Attach a custom volume (repeatable). Appends to `MVM_VOLUMES`.
-        /// `host:/guest[:ro|rw]` shares a host dir (virtio-fs);
-        /// `host:/guest:SIZE[:ro|rw]` attaches an ext4 disk image.
+        /// `host:/guest` shares a host dir (virtio-fs); `host:/guest:SIZE`
+        /// attaches an ext4 disk image. Read-only by default — append
+        /// `:rw` to grant writes. Guest path must be under /data, /work,
+        /// or /mnt (system mounts stay read-only).
         #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
     },

@@ -729,7 +729,10 @@ pub(in crate::commands) struct Args {
     /// Runtime config (TOML) for persistent resources/volumes
     #[arg(long)]
     pub config: Option<String>,
-    /// Volume (host_dir:/guest/path or host:/guest/path:size). Repeatable
+    /// Attach a volume (repeatable). `host:/guest` shares a host dir
+    /// (virtio-fs); `host:/guest:SIZE` is an ext4 disk image. Read-only
+    /// by default — append `:rw` to grant writes. Guest path must be
+    /// under /data, /work, or /mnt (system mounts are read-only).
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
     /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, docker, vz). Default: auto-detect per host
@@ -1639,21 +1642,24 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 _ => {
                     let vmv = vm_volume_from_spec_validated(&spec)
                         .with_context(|| format!("volume '{v}'"))?;
-                    if matches!(vmv.kind, mvm_core::vm_backend::VmVolumeKind::DirShare) {
-                        // Claim-1 visibility: a host-dir share is host-fs
-                        // access — never let it be silent (mirrors the
-                        // unrestricted-network opt-in notice).
+                    // Claim-1 visibility: host-fs access is never silent.
+                    // A read-WRITE grant lets a (possibly untrusted) guest
+                    // modify host files — warn loudly; a read-only share
+                    // is the safe default, so just note it.
+                    let kind_label = match vmv.kind {
+                        mvm_core::vm_backend::VmVolumeKind::DirShare => "host directory",
+                        mvm_core::vm_backend::VmVolumeKind::Disk => "disk image",
+                    };
+                    if vmv.read_only {
+                        ui::info(&format!(
+                            "Sharing {kind_label} '{}' into the guest at '{}' (read-only).",
+                            vmv.host, vmv.guest,
+                        ));
+                    } else {
                         ui::warn(&format!(
-                            "Mounting host directory '{}' into the guest at '{}' ({}). \
-                             The guest can read{} this host path.",
-                            vmv.host,
-                            vmv.guest,
-                            if vmv.read_only {
-                                "read-only"
-                            } else {
-                                "read-write"
-                            },
-                            if vmv.read_only { "" } else { "/write" },
+                            "READ-WRITE: {kind_label} '{}' is mounted writable at '{}' — \
+                             the guest can modify this host path. Drop ':rw' to share read-only.",
+                            vmv.host, vmv.guest,
                         ));
                     }
                     // Sparse-create a disk-image volume's backing file so

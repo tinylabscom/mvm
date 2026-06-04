@@ -85,7 +85,13 @@ pub fn parse_port_specs(specs: &[String]) -> Result<Vec<mvm::config::PortMapping
 /// Disambiguation is positional: the token right after the guest mount
 /// is the SIZE iff it isn't a `ro`/`rw`/`enc` keyword; its presence is
 /// what makes the volume a disk rather than a dir share. Mode/`enc`
-/// modifiers follow in any order. Default mode is read-write.
+/// modifiers follow in any order.
+///
+/// **Default mode is read-only** — a security-posture choice. Writing to
+/// a host directory or disk from inside a (potentially untrusted) guest
+/// is a deliberate grant the operator opts into with an explicit `:rw`.
+/// The base rootfs + every runtime-managed mount stay read-only and are
+/// never user-controllable (see `validate_guest_mount`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolumeSpec {
     /// Live host-directory share over virtio-fs (two-way unless `read_only`).
@@ -148,7 +154,9 @@ pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
         _ => (None, rest),
     };
 
-    let mut read_only = false;
+    // Default read-only: writes from a guest to a host path are opt-in
+    // via an explicit `:rw`. Highest-security posture (see type docs).
+    let mut read_only = true;
     let mut mode_seen = false;
     let mut encrypted = false;
     for m in modifiers {
@@ -275,40 +283,47 @@ pub fn materialize_disk_volumes(volumes: &[VmVolume]) -> Result<()> {
     Ok(())
 }
 
-/// Guest mount points owned by the mvm runtime. A user volume must not
-/// shadow these — doing so could hide the rootfs, the persistent store,
-/// the builder shares, or the config/secret drives. `/mnt/config` and
-/// `/mnt/secrets` are reserved too: a *directory share* at those paths
-/// is intercepted earlier by the workload config/secret-drive handling;
-/// any other use (e.g. a disk image) is refused here.
-const RESERVED_GUEST_MOUNTS: &[&str] = &[
-    "/",
-    "/nix",
-    "/nix-store",
-    "/work",
-    "/out",
-    "/job",
-    "/mnt/config",
-    "/mnt/secrets",
-    "/run/mvm",
-    "/run/mvm-secrets",
-    "/mvm",
-    "/etc/mvm",
-    "/dev",
-];
+/// The only guest paths a user volume may mount on. An **allow-list**
+/// (not a deny-list) so the base rootfs and every runtime-managed mount
+/// (`/`, `/root`, `/etc`, `/usr`, `/nix`, `/dev`, the builder shares, …)
+/// are read-only and never user-controllable *by construction* — a
+/// volume can only land at/under one of these roots. These mirror the
+/// in-guest `mvm_security::policy::MountPathPolicy` allow-roots and are
+/// the only mountpoints mkGuest pre-creates on the read-only rootfs.
+const ALLOWED_GUEST_MOUNT_ROOTS: &[&str] = &["/data", "/work", "/mnt"];
 
-/// Reject a guest mount that collides with a runtime-reserved path
-/// (exact match or a path *under* a reserved dir). Pure (no FS access).
+/// Guest paths reserved by the runtime even though they sit under an
+/// allowed root: the config + secret drives. A *directory share* at
+/// these is intercepted earlier as a config/secret drive; any other use
+/// (e.g. a disk image) is refused here.
+const RESERVED_UNDER_ALLOWED: &[&str] = &["/mnt/config", "/mnt/secrets"];
+
+/// Enforce the user-volume mount allow-list: the guest path must be one
+/// of [`ALLOWED_GUEST_MOUNT_ROOTS`] or a path under one, and must not be
+/// a reserved drive path. Pure (no FS access). This is the Tier-0
+/// guarantee that a user volume can never shadow or make-writable a
+/// system mount.
 pub fn validate_guest_mount(guest: &str) -> Result<()> {
     let g = guest.trim_end_matches('/');
     let g = if g.is_empty() { "/" } else { g };
-    for r in RESERVED_GUEST_MOUNTS {
-        let collides = g == *r || (*r != "/" && g.starts_with(&format!("{r}/")));
-        if collides {
+
+    for r in RESERVED_UNDER_ALLOWED {
+        if g == *r || g.starts_with(&format!("{r}/")) {
             anyhow::bail!(
                 "guest mount '{guest}' is reserved by the mvm runtime ('{r}'); choose another path"
             );
         }
+    }
+
+    let allowed = ALLOWED_GUEST_MOUNT_ROOTS
+        .iter()
+        .any(|root| g == *root || g.starts_with(&format!("{root}/")));
+    if !allowed {
+        anyhow::bail!(
+            "guest mount '{guest}' is not allowed — user volumes may only mount under {}. \
+             The rootfs and all system mounts are read-only and not user-controllable.",
+            ALLOWED_GUEST_MOUNT_ROOTS.join(", ")
+        );
     }
     Ok(())
 }
@@ -441,7 +456,7 @@ mod volume_spec_tests {
     use super::*;
 
     #[test]
-    fn dir_share_two_part_defaults_rw() {
+    fn dir_share_two_part_defaults_ro() {
         match parse_volume_spec("/h/src:/work").unwrap() {
             VolumeSpec::DirShare {
                 host_dir,
@@ -450,7 +465,7 @@ mod volume_spec_tests {
             } => {
                 assert_eq!(host_dir, "/h/src");
                 assert_eq!(guest_mount, "/work");
-                assert!(!read_only);
+                assert!(read_only, "default is read-only (security posture)");
             }
             _ => panic!("expected dir share"),
         }
@@ -483,7 +498,7 @@ mod volume_spec_tests {
     }
 
     #[test]
-    fn disk_three_part_size_defaults_rw_unencrypted() {
+    fn disk_three_part_size_defaults_ro_unencrypted() {
         match parse_volume_spec("/h/data.img:/data:10G").unwrap() {
             VolumeSpec::Disk {
                 host,
@@ -495,7 +510,7 @@ mod volume_spec_tests {
                 assert_eq!(host, "/h/data.img");
                 assert_eq!(guest, "/data");
                 assert_eq!(size, "10G");
-                assert!(!read_only);
+                assert!(read_only, "default is read-only (security posture)");
                 assert!(!encrypted);
             }
             _ => panic!("expected disk"),
@@ -569,21 +584,45 @@ mod volume_spec_tests {
     }
 
     #[test]
-    fn validated_conversion_rejects_reserved_guest_mounts() {
-        // Reserved-mount check fires before host-path validation, so a
-        // fake host path is fine here.
+    fn validated_conversion_enforces_mount_allow_list() {
+        // The guest-mount allow-list fires before host-path validation,
+        // so a fake host path is fine here. Anything not under
+        // /data,/work,/mnt — including system paths — is refused.
         for guest in [
             "/",
+            "/root",
+            "/etc",
+            "/etc/passwd",
+            "/usr/bin",
             "/nix",
             "/nix-store/x",
-            "/work",
-            "/mvm/runtime",
             "/dev/foo",
+            "/proc/1",
+            "/srv/data",
+            "/data-evil",
+            "/workspace",
         ] {
             let spec = parse_volume_spec(&format!("/h:{guest}")).unwrap();
             assert!(
                 vm_volume_from_spec_validated(&spec).is_err(),
-                "should reject reserved mount {guest}"
+                "should refuse mount outside the allow-list: {guest}"
+            );
+        }
+        // The config/secret drives are reserved even though under /mnt.
+        for guest in ["/mnt/config", "/mnt/secrets"] {
+            let spec = parse_volume_spec(&format!("/h:{guest}")).unwrap();
+            assert!(
+                vm_volume_from_spec_validated(&spec).is_err(),
+                "should reserve {guest}"
+            );
+        }
+        // The allow-roots (and paths under them) pass the mount check —
+        // validate_guest_mount is pure, so it returns Ok before the
+        // host-path FS check would run.
+        for guest in ["/data", "/work", "/mnt", "/mnt/extra", "/data/sub"] {
+            assert!(
+                validate_guest_mount(guest).is_ok(),
+                "allow-root should pass: {guest}"
             );
         }
     }

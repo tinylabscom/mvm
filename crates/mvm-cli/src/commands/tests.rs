@@ -672,7 +672,7 @@ fn test_parse_volume_spec_dir_share() {
         } => {
             assert_eq!(host_dir, "/tmp/config");
             assert_eq!(guest_mount, "/mnt/config");
-            assert!(!read_only);
+            assert!(read_only, "default is read-only");
         }
         _ => panic!("Expected DirShare"),
     }
