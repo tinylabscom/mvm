@@ -1,5 +1,5 @@
 [package]
-name = "mvm-vz-fuzz"
+name = "mvm-build-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -21,7 +21,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 
-[dependencies.mvm-vz]
+[dependencies.mvm-build]
 path = ".."
 default-features = false
 

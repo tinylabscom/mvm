@@ -141,7 +141,7 @@ fn main() {
 }
 
 /// Resolve the absolute path to `crates/mvm-vz-supervisor/`. We are
-/// `crates/mvm-vz/build.rs`, so the supervisor package is a sibling.
+/// `crates/mvm-build/build.rs`, so the supervisor package is a sibling.
 fn supervisor_package_root() -> PathBuf {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");

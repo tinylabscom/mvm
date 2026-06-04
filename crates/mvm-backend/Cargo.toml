@@ -44,7 +44,6 @@ mvm-build.workspace = true
 libkrun-sys.workspace = true
 # Plan 97 Phase B — Vz backend foundation crate (SupervisorConfig types,
 # supervisor-binary path resolution). Pure data + helpers; no Swift dep.
-mvm-vz.workspace = true
 # Folded in with the former mvm-base crate (plan 121 A2): the base
 # substrate's ui (colored/indicatif/inquire spinners + prompts) and
 # secret handling (secrecy). Crypto helpers come from mvm_core::crypto

@@ -13,7 +13,6 @@ members = [
     # Plan 97 Phase B — type-safe interface to the Swift
     # `mvm-vz-supervisor` binary. Pure data + path resolution; no FFI,
     # no Swift dep. Parallel role to `mvm-libkrun` for the Vz backend.
-    "crates/mvm-vz",
     "crates/mvm-backend",
     "crates/mvm",
     "crates/mvm-build",
@@ -111,7 +110,7 @@ exclude = [
     # Plan 97 / ADR-002 claim 5 — Vz supervisor JSON fuzz harness.
     # Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
-    "crates/mvm-vz/fuzz",
+    "crates/mvm-build/fuzz",
     # Plan 113 §Task 15 / ADR-064 — `BridgeConfigJson` JSON +
     # `PasstHashesFile` TOML fuzz harnesses. Same libfuzzer-sys
     # linker-flag constraints as the mvm-libkrun/fuzz crate; the
@@ -321,7 +320,6 @@ libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.15.1" }
 # Plan 97 Phase B — type-safe interface to `mvm-vz-supervisor`. No FFI,
 # Linux-safe (compiles everywhere; `Platform::has_vz()` short-circuits
 # on non-macOS).
-mvm-vz = { path = "crates/mvm-vz", version = "0.15.1" }
 mvm-backend = { path = "crates/mvm-backend", version = "0.15.1", default-features = false }
 
 # Plan 73 Followup B.2.x — builder-VM egress allowlist proxy.

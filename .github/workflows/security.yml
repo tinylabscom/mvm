@@ -255,7 +255,7 @@ jobs:
         run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
 
       - name: Fuzz Vz SupervisorConfig (host-side)
-        working-directory: crates/mvm-vz
+        working-directory: crates/mvm-build
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -326,8 +326,8 @@ jobs:
             crates/mvm-guest/fuzz/artifacts/
             crates/deps/libkrun-sys/fuzz/corpus/
             crates/deps/libkrun-sys/fuzz/artifacts/
-            crates/mvm-vz/fuzz/corpus/
-            crates/mvm-vz/fuzz/artifacts/
+            crates/mvm-build/fuzz/corpus/
+            crates/mvm-build/fuzz/artifacts/
             crates/mvm-oci/fuzz/corpus/
             crates/mvm-oci/fuzz/artifacts/
             crates/mvm-firecracker-bridge/fuzz/corpus/

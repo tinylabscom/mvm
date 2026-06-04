@@ -28,6 +28,13 @@ pub mod persistent_builder;
 pub mod rootfs;
 pub mod stage0;
 pub mod template_reuse;
+/// Type-safe interface to the `mvm-vz-supervisor` Swift binary —
+/// `SupervisorConfig` + on-disk path helpers. Folded in from the former
+/// `mvm-vz` crate (plan 121 C2); it lives in mvm-build (not mvm-backend)
+/// because mvm-build's `vz_builder` consumes it and sits below
+/// mvm-backend, which would cycle. mvm-backend's `VzBackend` reaches it
+/// via `mvm_build::vz`.
+pub mod vz;
 
 /// Plan 72 W1 — libkrun-backed builder VM (gated by
 /// `builder-vm`). Currently scaffolding; the actual

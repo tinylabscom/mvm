@@ -19,7 +19,7 @@
 //!
 //! - `start` writes runtime metadata to `~/.mvm/vms/<name>/` (so
 //!   `mvmctl console` can find the artifacts), constructs a
-//!   [`mvm_vz::SupervisorConfig`] from the `VmStartConfig`, spawns
+//!   [`mvm_build::vz::SupervisorConfig`] from the `VmStartConfig`, spawns
 //!   `mvm-vz-supervisor` with the JSON on stdin, and waits up to
 //!   [`PID_FILE_TIMEOUT`] for the supervisor to write its PID file.
 //! - `stop` reads `<vm_state_dir>/vz.pid`, sends `SIGTERM` (the
@@ -40,7 +40,7 @@ use mvm_core::vm_backend::{
 use crate::base::ui;
 use crate::host_gvproxy;
 use crate::vz_control;
-use mvm_vz as vz;
+use mvm_build::vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -924,7 +924,7 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
         .into_owned()
 }
 
-/// Build the [`mvm_vz::SupervisorConfig`] the supervisor binary
+/// Build the [`mvm_build::vz::SupervisorConfig`] the supervisor binary
 /// consumes on stdin. Maps the backend-agnostic `VmStartConfig` to
 /// the Vz-specific JSON shape.
 ///

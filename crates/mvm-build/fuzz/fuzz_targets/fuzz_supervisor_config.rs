@@ -16,7 +16,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mvm_vz::SupervisorConfig;
+use mvm_build::vz::SupervisorConfig;
 
 fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_slice::<SupervisorConfig>(data);

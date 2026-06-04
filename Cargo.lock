@@ -3345,7 +3345,6 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-vz",
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",
@@ -3392,7 +3391,6 @@ dependencies = [
  "mvm-core",
  "mvm-guest",
  "mvm-sdk",
- "mvm-vz",
  "pgp",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -3717,14 +3715,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
-]
-
-[[package]]
-name = "mvm-vz"
-version = "0.15.2"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
