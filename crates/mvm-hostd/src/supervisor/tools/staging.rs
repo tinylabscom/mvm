@@ -77,7 +77,9 @@ pub const MAX_PATH_LEN: usize = 512;
 /// Default per-tenant staging dir.
 /// `~/.mvm/tool-staging/<tenant>/`.
 pub fn default_staging_root() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mvm").join("tool-staging"))
+    mvm_core::config::mvm_data_dir_strict()
+        .ok()
+        .map(|d| d.join("tool-staging"))
 }
 
 /// Canonical env-var name for overriding the staging root.

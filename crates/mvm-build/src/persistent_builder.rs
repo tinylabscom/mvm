@@ -667,12 +667,9 @@ pub struct SessionRecord {
 /// On-disk location of the session record. Returns `None` only if
 /// `$HOME` isn't set, which would be a misconfigured environment.
 pub fn session_record_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| {
-        PathBuf::from(h)
-            .join(".mvm")
-            .join("run")
-            .join("persistent-builder.json")
-    })
+    mvm_core::config::mvm_data_dir_strict()
+        .ok()
+        .map(|d| d.join("run").join("persistent-builder.json"))
 }
 
 /// Read the session record and verify the supervisor is alive.

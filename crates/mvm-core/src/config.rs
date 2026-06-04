@@ -69,6 +69,28 @@ pub fn mvm_data_dir() -> String {
     format!("{}/.mvm", home)
 }
 
+/// Like [`mvm_data_dir`] but fails instead of silently falling back to
+/// `/tmp` when neither `MVM_DATA_DIR` nor `$HOME` is set. Use this for
+/// security-sensitive state — secrets, signed bundles, the trusted-
+/// publisher store, per-tenant policy — that must never land in a
+/// world-traversable `/tmp` just because `$HOME` happened to be unset.
+/// Honors the `MVM_DATA_DIR` override so parallel sessions stay isolated
+/// (the inline `$HOME/.mvm` derivations this replaces silently ignored it).
+pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("MVM_DATA_DIR")
+        && !d.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(d));
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "$HOME unset and MVM_DATA_DIR not set; cannot locate ~/.mvm",
+        )
+    })?;
+    Ok(std::path::PathBuf::from(home).join(".mvm"))
+}
+
 /// Create `~/.mvm` (or whatever `mvm_data_dir()` resolves to) with
 /// mode `0700` and return its path. Idempotent: if the dir already
 /// exists with looser perms, chmod it to `0700` so a host that was
@@ -434,6 +456,34 @@ mod tests {
         unsafe { std::env::remove_var("XDG_CACHE_HOME") };
         let dir = mvm_cache_dir();
         assert!(dir.ends_with("/.cache/mvm"));
+    }
+
+    #[test]
+    fn test_mvm_data_dir_strict_honors_override() {
+        let _g = env_lock();
+        unsafe { std::env::set_var("MVM_DATA_DIR", "/custom/data") };
+        assert_eq!(
+            mvm_data_dir_strict().unwrap(),
+            std::path::PathBuf::from("/custom/data")
+        );
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
+    fn test_mvm_data_dir_strict_errs_without_home_or_override() {
+        // The security contract: secrets/bundles/trust-store callers must
+        // never get a silent /tmp fallback. With neither MVM_DATA_DIR nor
+        // $HOME set, the strict resolver errors (unlike infallible
+        // mvm_data_dir(), which returns /tmp/.mvm).
+        let _g = env_lock();
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+        let saved_home = std::env::var_os("HOME");
+        unsafe { std::env::remove_var("HOME") };
+        let res = mvm_data_dir_strict();
+        if let Some(h) = saved_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        assert!(res.is_err());
     }
 
     #[test]

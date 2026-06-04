@@ -99,9 +99,9 @@ fn config_dir(override_dir: Option<&Path>) -> PathBuf {
         return xdg_dir;
     }
 
-    // Fall back to legacy ~/.mvm/ if config exists there
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let legacy_dir = PathBuf::from(&home).join(".mvm");
+    // Fall back to the legacy data dir (`~/.mvm/`, or MVM_DATA_DIR) if a
+    // config lives there.
+    let legacy_dir = PathBuf::from(crate::config::mvm_data_dir());
     if legacy_dir.join("config.toml").exists() {
         return legacy_dir;
     }

@@ -118,14 +118,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     if args.all {
-        // Remove ~/.mvm/.
-        if let Ok(home) = std::env::var("HOME") {
-            let config_dir = std::path::PathBuf::from(home).join(".mvm");
-            if config_dir.exists() {
-                ui::info("Removing ~/.mvm/...");
-                if let Err(e) = std::fs::remove_dir_all(&config_dir) {
-                    tracing::warn!("failed to remove ~/.mvm/: {e}");
-                }
+        // Remove the mvm data dir (~/.mvm or MVM_DATA_DIR). Skip if it
+        // can't be resolved (no HOME + no override) rather than guessing.
+        if let Ok(config_dir) = mvm_core::config::mvm_data_dir_strict()
+            && config_dir.exists()
+        {
+            ui::info("Removing ~/.mvm/...");
+            if let Err(e) = std::fs::remove_dir_all(&config_dir) {
+                tracing::warn!("failed to remove ~/.mvm/: {e}");
             }
         }
 

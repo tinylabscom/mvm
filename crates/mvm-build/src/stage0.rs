@@ -183,8 +183,9 @@ pub fn alpine_minirootfs_for_host_arch() -> Option<&'static BootstrapAsset> {
 
 /// `~/.cache/mvm/stage0/`. Materialized by [`prepare_assets`].
 pub fn stage0_cache_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    home.join(".cache").join("mvm").join("stage0")
+    // Honors MVM_CACHE_DIR / XDG_CACHE_HOME (parallel sessions isolate
+    // via MVM_CACHE_DIR) instead of the old hardcoded $HOME/.cache/mvm.
+    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("stage0")
 }
 
 /// Path on disk where the detached signature for `asset` is
