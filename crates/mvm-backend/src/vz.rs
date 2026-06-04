@@ -551,7 +551,7 @@ impl VmBackend for VzBackend {
         // outside `BackendSecurityProfile`).
         BackendSecurityProfile {
             claims: [
-                ClaimStatus::Holds, // 1 — host-fs isolation via Vz; supervisor refuses non-admitted shares
+                ClaimStatus::Holds, // 1 — host-fs isolation via Vz (ro rootfs attach) + host-side admission gate (enforce_admitted_shares); in-supervisor share re-check is deferred (Plan 97 Phase D)
                 ClaimStatus::Holds, // 2 — uid-0 protections same as FC (guest-side)
                 ClaimStatus::DoesNotHold, // 3 — verified-boot pipeline targets FC today
                 ClaimStatus::Holds, // 4 — guest agent has no do_exec in prod
