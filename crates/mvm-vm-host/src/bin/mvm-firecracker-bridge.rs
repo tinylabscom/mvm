@@ -2,7 +2,7 @@
 //!
 //! Linux-only A2 process that runs alongside every Firecracker microVM
 //! the host launches via `mvm-backend::firecracker`. Reads a
-//! [`mvm_firecracker_bridge::parse::BridgeConfigJson`] document from
+//! [`mvm_vm_host::firecracker_bridge::parse::BridgeConfigJson`] document from
 //! stdin, verifies the operator-pinned `passt` binary hash, applies
 //! `mvm-jailer-lite` confinement (seccomp + Landlock — Plan 113 §Task 8),
 //! reconstructs the parent-inherited socketpair fds into a
@@ -33,7 +33,7 @@
 //! ## Parser surface
 //!
 //! `BridgeConfigJson`, `PasstHashesFile`, and `verify_passt_hash` live
-//! in `mvm_firecracker_bridge::parse` (the crate's `src/lib.rs` /
+//! in `mvm_vm_host::firecracker_bridge::parse` (the crate's `src/lib.rs` /
 //! `src/parse.rs`). Plan 113 §Task 15's `firecracker-bridge-fuzz` CI
 //! lane drives `cargo fuzz` against those serde deserializers
 //! directly via the crate's lib surface; the binary's `main()` uses
@@ -70,8 +70,6 @@ use mvm_core::plan::ExecutionPlan;
 #[cfg(target_os = "linux")]
 use mvm_core::policy::PolicyBundle;
 #[cfg(target_os = "linux")]
-use mvm_firecracker_bridge::parse::{BridgeConfigJson, verify_passt_hash};
-#[cfg(target_os = "linux")]
 use mvm_hostd::jailer::{ConfinementSpec, confine_self};
 #[cfg(target_os = "linux")]
 use mvm_hostd::supervisor::audit::AuditSigner;
@@ -83,6 +81,8 @@ use mvm_hostd::supervisor::gateway_bridge::{
 };
 #[cfg(target_os = "linux")]
 use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
+#[cfg(target_os = "linux")]
+use mvm_vm_host::firecracker_bridge::parse::{BridgeConfigJson, verify_passt_hash};
 #[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]

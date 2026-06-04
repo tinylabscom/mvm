@@ -1,0 +1,55 @@
+[package]
+name = "mvm-vm-host"
+description = "Per-VM supervisor host processes for mvm — one process per guest VM. Cfg-gated [[bin]]s: mvm-libkrun-supervisor (libkrun; gated by the libkrun-sys feature), mvm-vz-drainer (Vz), mvm-firecracker-bridge (Firecracker; Linux-gated in source). Consolidated from the three former per-VM crates (plan 121 D2). The shared lib carries the firecracker-bridge config/passt-hash parsers (fuzzed)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# libkrun supervisor — requires the libkrun-sys FFI feature, so the
+# default `cargo build --workspace` skips it on hosts without libkrun.h
+# (mirrors the pre-consolidation required-features gate).
+[[bin]]
+name = "mvm-libkrun-supervisor"
+path = "src/bin/mvm-libkrun-supervisor.rs"
+required-features = ["libkrun-sys"]
+
+[[bin]]
+name = "mvm-vz-drainer"
+path = "src/bin/mvm-vz-drainer.rs"
+
+# Linux-only at runtime; src/bin self-gates with cfg(target_os="linux")
+# to a stub main() elsewhere so non-Linux workspace builds stay green.
+[[bin]]
+name = "mvm-firecracker-bridge"
+path = "src/bin/mvm-firecracker-bridge.rs"
+
+[dependencies]
+mvm-core = { workspace = true }
+mvm-hostd = { workspace = true }
+# Codesigning gate on macOS (apple_container::ensure_signed) for the
+# libkrun supervisor bin.
+mvm-backend = { workspace = true }
+# libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
+libkrun-sys = { workspace = true }
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+# Build the libkrun supervisor bin against libkrun's FFI.
+libkrun-sys = ["libkrun-sys/libkrun-sys"]
+
+[lints]
+workspace = true

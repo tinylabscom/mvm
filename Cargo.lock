@@ -3461,23 +3461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-firecracker-bridge"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "ed25519-dalek",
- "mvm-core",
- "mvm-hostd",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mvm-guest"
 version = "0.15.2"
 dependencies = [
@@ -3551,20 +3534,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "mvm-libkrun-supervisor"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "ed25519-dalek",
- "libkrun-sys",
- "mvm-backend",
- "mvm-core",
- "mvm-hostd",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -3657,15 +3626,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-vz-drainer"
+name = "mvm-vm-host"
 version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
+ "libkrun-sys",
+ "mvm-backend",
  "mvm-core",
  "mvm-hostd",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
