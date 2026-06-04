@@ -11,7 +11,6 @@ authors.workspace = true
 [dependencies]
 mvm-core.workspace = true
 mvm-backend.workspace = true
-mvm-policy.workspace = true
 # Plan 73 Followup A — admission gate calls
 # `mvm_sdk::compile::deps_audit::verify_sealed_volume` to re-derive
 # the on-disk volume hash and compare it against the plan's pinned

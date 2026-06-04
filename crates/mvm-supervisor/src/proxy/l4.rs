@@ -229,11 +229,11 @@ impl LiveL4Gate {
         Self { policy }
     }
 
-    /// Translate a slice of `mvm_policy::L4RuleSpec` rows into a
+    /// Translate a slice of `mvm_core::policy::L4RuleSpec` rows into a
     /// `LiveL4Gate`. Refuses unparseable CIDRs and unknown protocols
     /// at *translate* time — the operator sees a loud admission
     /// failure rather than a silent default-deny at runtime.
-    pub fn from_specs(specs: &[mvm_policy::L4RuleSpec]) -> Result<Self, L4SpecError> {
+    pub fn from_specs(specs: &[mvm_core::policy::L4RuleSpec]) -> Result<Self, L4SpecError> {
         let mut rules = Vec::with_capacity(specs.len());
         for (i, spec) in specs.iter().enumerate() {
             let proto = match spec.proto.as_str() {
@@ -565,8 +565,8 @@ mod tests {
     // LiveL4Gate::from_specs — bundle spec → live gate translation
     // ──────────────────────────────────────────────────────────────
 
-    fn spec(proto: &str, cidr: &str, port_lo: u16, port_hi: u16) -> mvm_policy::L4RuleSpec {
-        mvm_policy::L4RuleSpec {
+    fn spec(proto: &str, cidr: &str, port_lo: u16, port_hi: u16) -> mvm_core::policy::L4RuleSpec {
+        mvm_core::policy::L4RuleSpec {
             proto: proto.to_string(),
             dst_cidr: cidr.to_string(),
             port_lo,

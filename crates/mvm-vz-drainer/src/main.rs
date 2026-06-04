@@ -50,7 +50,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
-use mvm_policy::PolicyBundle;
+use mvm_core::policy::PolicyBundle;
 use mvm_supervisor::audit::AuditSigner;
 use mvm_supervisor::audit_file::FileAuditSigner;
 use mvm_supervisor::gateway_bridge::{

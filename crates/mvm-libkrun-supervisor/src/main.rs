@@ -48,11 +48,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
+use mvm_core::policy::PolicyBundle;
 use mvm_libkrun::{
     BridgeFds, LogLevel, SupervisorConfig, init_log, run_supervisor, run_supervisor_with_bridge,
     set_log_level,
 };
-use mvm_policy::PolicyBundle;
 use mvm_supervisor::audit::AuditSigner;
 use mvm_supervisor::audit_file::FileAuditSigner;
 use mvm_supervisor::gateway_bridge::{

@@ -411,7 +411,7 @@ fn validate_policy_path_segment(segment: &str, kind: &str) -> Result<(), BuildEr
 /// `mvm-cli → mvm-supervisor → mvm-cli`). Inline the same parse logic
 /// here: `"<tenant>:<workload>"` → `~/.mvm/policies/<tenant>/<workload>.toml`.
 /// Task 5 of Plan 113 adds `observers: Vec<String>` to
-/// `mvm_policy::NetworkPolicy`; this `BundleShim` reads the same field
+/// `mvm_core::policy::NetworkPolicy`; this `BundleShim` reads the same field
 /// without requiring Task 5 to be done first. The shim stays private
 /// to this function so Task 5 can refactor cleanly to the real type.
 ///

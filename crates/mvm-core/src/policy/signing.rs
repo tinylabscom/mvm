@@ -2,12 +2,12 @@
 //! `PolicyBundle`. Same shape `mvm-plan` uses for
 //! `SignedExecutionPlan`.
 
+use crate::protocol::signing::SignedPayload;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use mvm_core::protocol::signing::SignedPayload;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::bundle::{PolicyBundle, SCHEMA_VERSION};
+use crate::policy::bundle::{PolicyBundle, SCHEMA_VERSION};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -82,10 +82,10 @@ pub fn verify_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::{PolicyId, TenantOverlay};
-    use crate::policies::*;
+    use crate::plan::TenantId;
+    use crate::policy::bundle::{PolicyId, TenantOverlay};
+    use crate::policy::policies::*;
     use ed25519_dalek::SigningKey;
-    use mvm_core::plan::TenantId;
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 

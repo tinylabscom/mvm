@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
-use mvm_policy::{PolicyBundle, PolicyId};
+use mvm_core::policy::{PolicyBundle, PolicyId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -275,7 +275,9 @@ mod tests {
         KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
     };
-    use mvm_policy::{AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy};
+    use mvm_core::policy::{
+        AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
+    };
     use std::collections::BTreeMap;
 
     fn sample_plan() -> ExecutionPlan {
@@ -342,7 +344,7 @@ mod tests {
             egress: EgressPolicy::default(),
             pii: PiiPolicy::default(),
             tool: ToolPolicy::default(),
-            artifact: mvm_policy::policies::ArtifactPolicy::default(),
+            artifact: mvm_core::policy::policies::ArtifactPolicy::default(),
             keys: KeyPolicy::default(),
             audit: AuditPolicy::default(),
             tenant_overlays: BTreeMap::new(),

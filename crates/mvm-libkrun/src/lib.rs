@@ -1327,7 +1327,7 @@ pub struct SupervisorConfig {
     /// `validate_audit_substrate` will refuse).
     #[serde(default)]
     pub plan: Option<serde_json::Value>,
-    /// JSON-encoded [`mvm_policy::PolicyBundle`] for this admission.
+    /// JSON-encoded [`mvm_core::policy::PolicyBundle`] for this admission.
     /// Optional even when `plan` is set — workloads can run with
     /// no bundle (matches the existing `Option<Arc<PolicyBundle>>`
     /// in `BridgeConfig`).

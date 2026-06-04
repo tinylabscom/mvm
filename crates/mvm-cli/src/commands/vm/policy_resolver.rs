@@ -103,7 +103,7 @@ pub struct ResolvedSlots {
     pub tool_gate: Box<dyn ToolGate>,
     pub keystore: Box<dyn KeystoreReleaser>,
     pub artifacts: Box<dyn ArtifactCollector>,
-    pub audit: Option<mvm_policy::AuditPolicy>,
+    pub audit: Option<mvm_core::policy::AuditPolicy>,
 }
 
 /// Errors `resolve_supervisor_components` can return.
@@ -313,11 +313,11 @@ fn classify(value: &str) -> RefShape<'_> {
 }
 
 /// Default base dir for policy bundles. Mirrors
-/// `mvm_policy::toml_loader::default_policy_dir` but falls back to
+/// `mvm_core::policy::toml_loader::default_policy_dir` but falls back to
 /// the literal `~/.mvm/policies/` (good for error messages) when
 /// `$HOME` is unset.
 fn default_policy_dir() -> PathBuf {
-    mvm_policy::toml_loader::default_policy_dir()
+    mvm_core::policy::toml_loader::default_policy_dir()
         .unwrap_or_else(|| PathBuf::from("~/.mvm/policies"))
 }
 
@@ -390,7 +390,8 @@ pub fn resolve_supervisor_components_with_dir(
         RefShape::LocalDefault => Ok(noop_slots()),
         RefShape::TenantWorkload { tenant, workload } => {
             let bundle = load_tenant_workload(base_dir, network, tenant, workload)?;
-            let bundle_path = mvm_policy::toml_loader::bundle_path(base_dir, tenant, workload);
+            let bundle_path =
+                mvm_core::policy::toml_loader::bundle_path(base_dir, tenant, workload);
             slots_from_bundle(&bundle, network, &bundle_path)
         }
         // classify_plan_refs already converts Unrecognized into a
@@ -423,7 +424,7 @@ fn noop_slots() -> ResolvedSlots {
 /// `ResolveError::L4SpecInvalid` with the underlying detail so the
 /// operator knows which row to fix.
 fn slots_from_bundle(
-    bundle: &mvm_policy::PolicyBundle,
+    bundle: &mvm_core::policy::PolicyBundle,
     ref_value: &str,
     path: &std::path::Path,
 ) -> Result<ResolvedSlots, ResolveError> {
@@ -488,7 +489,7 @@ fn slots_from_bundle(
         },
     )?;
     let body_cap = if bundle.egress.body_cap_bytes == 0 {
-        mvm_policy::DEFAULT_BODY_CAP_BYTES as usize
+        mvm_core::policy::DEFAULT_BODY_CAP_BYTES as usize
     } else {
         bundle.egress.body_cap_bytes as usize
     };
@@ -529,11 +530,11 @@ fn load_tenant_workload(
     ref_value: &str,
     tenant: &str,
     workload: &str,
-) -> Result<mvm_policy::PolicyBundle, ResolveError> {
-    let path = mvm_policy::toml_loader::bundle_path(base, tenant, workload);
-    match mvm_policy::toml_loader::load_bundle_from_path(base, tenant, workload) {
+) -> Result<mvm_core::policy::PolicyBundle, ResolveError> {
+    let path = mvm_core::policy::toml_loader::bundle_path(base, tenant, workload);
+    match mvm_core::policy::toml_loader::load_bundle_from_path(base, tenant, workload) {
         Ok(bundle) => Ok(bundle),
-        Err(mvm_policy::toml_loader::LoadError::NotFound { path }) => {
+        Err(mvm_core::policy::toml_loader::LoadError::NotFound { path }) => {
             Err(ResolveError::BundleNotFound {
                 field: "network_policy",
                 value: ref_value.to_string(),
@@ -541,15 +542,15 @@ fn load_tenant_workload(
             })
         }
         Err(
-            mvm_policy::toml_loader::LoadError::Parse { detail, .. }
-            | mvm_policy::toml_loader::LoadError::Io { detail, .. },
+            mvm_core::policy::toml_loader::LoadError::Parse { detail, .. }
+            | mvm_core::policy::toml_loader::LoadError::Io { detail, .. },
         ) => Err(ResolveError::BundleParseFailed {
             field: "network_policy",
             value: ref_value.to_string(),
             path,
             detail,
         }),
-        Err(mvm_policy::toml_loader::LoadError::SchemaMismatch { got, known, .. }) => {
+        Err(mvm_core::policy::toml_loader::LoadError::SchemaMismatch { got, known, .. }) => {
             Err(ResolveError::BundleParseFailed {
                 field: "network_policy",
                 value: ref_value.to_string(),
@@ -1435,7 +1436,7 @@ disabled_inspectors = [{list}]
             &fixture_bundle_with_tool_allow("web_search"),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
         let chain = mvm_supervisor::build_inspector_chain(&bundle.egress, None);
         assert_eq!(
@@ -1458,7 +1459,7 @@ disabled_inspectors = [{list}]
             &fixture_bundle_with_disabled_inspectors(&["ssrf_guard", "secrets_scanner"]),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
         let chain = mvm_supervisor::build_inspector_chain(&bundle.egress, None);
         assert_eq!(
@@ -1487,7 +1488,7 @@ disabled_inspectors = [{list}]
             &fixture_bundle_with_disabled_inspectors(&["typo_inspector"]),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
         let chain = mvm_supervisor::build_inspector_chain(&bundle.egress, None);
         assert_eq!(
@@ -1647,7 +1648,7 @@ bundle_version = 1
             &fixture_bundle_with_pii(Some("disabled"), &[]),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
         let chain =
             mvm_supervisor::build_inspector_chain_with_pii(&bundle.egress, &bundle.pii, None)

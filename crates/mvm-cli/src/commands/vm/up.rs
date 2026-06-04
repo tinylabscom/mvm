@@ -362,7 +362,7 @@ fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<Admission
 #[derive(Debug)]
 struct PolicyAdmissionResolution {
     slots_mode: &'static str,
-    audit: Option<mvm_policy::AuditPolicy>,
+    audit: Option<mvm_core::policy::AuditPolicy>,
 }
 
 fn build_default_audit_emitter(
@@ -378,7 +378,7 @@ fn build_default_audit_emitter(
 fn build_policy_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
-    policy: Option<&mvm_policy::AuditPolicy>,
+    policy: Option<&mvm_core::policy::AuditPolicy>,
 ) -> Result<AuditEmitter> {
     match policy {
         Some(policy) => {

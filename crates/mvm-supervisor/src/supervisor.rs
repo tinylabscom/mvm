@@ -27,7 +27,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use mvm_core::plan::Variant;
-use mvm_policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
+use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
 
 use crate::artifact::{ArtifactCollector, NoopArtifactCollector};
 use crate::audit::{AuditSigner, NoopAuditSigner};
@@ -822,7 +822,7 @@ pub fn validate_egress_policy_inspector_names(
     Ok(())
 }
 
-/// URL schemes accepted in [`mvm_policy::AuditPolicy::stream_destinations`].
+/// URL schemes accepted in [`mvm_core::policy::AuditPolicy::stream_destinations`].
 /// The supervisor's eventual audit-stream replicator (Plan 60 Phase 4
 /// follow-on after the mvm-hostd lift) will emit each entry to its
 /// matching backend; validating shape at admission means a typo
@@ -859,7 +859,7 @@ pub enum AuditPolicyValidationError {
 /// they've configured TLS audit replication while the boot proceeds
 /// in silence. Plan 60 Phase 4 follow-on.
 pub fn validate_audit_policy_stream_destinations(
-    policy: &mvm_policy::AuditPolicy,
+    policy: &mvm_core::policy::AuditPolicy,
 ) -> Result<(), AuditPolicyValidationError> {
     for (index, value) in policy.stream_destinations.iter().enumerate() {
         if !KNOWN_AUDIT_STREAM_SCHEMES
@@ -933,7 +933,7 @@ pub fn build_inspector_chain(
 }
 
 /// Same as [`build_inspector_chain`] but the PII inspector is
-/// constructed from a parsed [`mvm_policy::PiiPolicy`] (mode +
+/// constructed from a parsed [`mvm_core::policy::PiiPolicy`] (mode +
 /// category filter) instead of hardwired to defaults. Used by the
 /// plan-64 W5 resolver so a tenant bundle's `[pii]` section actually
 /// drives runtime behavior (Mode::Detect / Redact / Block, scoped to
@@ -951,7 +951,7 @@ pub fn build_inspector_chain(
 /// rather than silently scanning fewer categories than intended.
 pub fn build_inspector_chain_with_pii(
     egress: &EgressPolicy,
-    pii: &mvm_policy::PiiPolicy,
+    pii: &mvm_core::policy::PiiPolicy,
     breakers: Option<Arc<InspectorReporter>>,
 ) -> Result<InspectorChain, crate::pii_redactor::PiiPolicyError> {
     let disabled = |name: &'static str| egress.disabled_inspectors.iter().any(|d| d == name);
@@ -1930,8 +1930,8 @@ mod tests {
         }
     }
 
-    fn dev_pii_policy() -> mvm_policy::PiiPolicy {
-        mvm_policy::PiiPolicy {
+    fn dev_pii_policy() -> mvm_core::policy::PiiPolicy {
+        mvm_core::policy::PiiPolicy {
             mode: None,
             categories: vec![],
         }
@@ -1954,7 +1954,7 @@ mod tests {
         // semantically equivalent to adding `"pii_redactor"` to
         // `disabled_inspectors`. The chain shrinks to 4.
         let egress = dev_egress_policy(false);
-        let pii = mvm_policy::PiiPolicy {
+        let pii = mvm_core::policy::PiiPolicy {
             mode: Some("disabled".to_string()),
             categories: vec![],
         };
@@ -1969,7 +1969,7 @@ mod tests {
         // the internal Mode through the InspectorChain trait surface,
         // but we can prove from_policy preserves mode by going
         // through the redactor constructor directly.
-        let pii = mvm_policy::PiiPolicy {
+        let pii = mvm_core::policy::PiiPolicy {
             mode: Some("redact".to_string()),
             categories: vec![],
         };
@@ -1982,7 +1982,7 @@ mod tests {
     #[test]
     fn build_inspector_chain_with_pii_refuses_unknown_mode() {
         let egress = dev_egress_policy(false);
-        let pii = mvm_policy::PiiPolicy {
+        let pii = mvm_core::policy::PiiPolicy {
             mode: Some("paranoid".to_string()),
             categories: vec![],
         };
@@ -2000,7 +2000,7 @@ mod tests {
     #[test]
     fn build_inspector_chain_with_pii_refuses_unknown_category() {
         let egress = dev_egress_policy(false);
-        let pii = mvm_policy::PiiPolicy {
+        let pii = mvm_core::policy::PiiPolicy {
             mode: Some("detect".to_string()),
             categories: vec!["email".to_string(), "license_plate".to_string()],
         };
@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn validate_audit_policy_accepts_known_schemes() {
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec![
                 "file:///var/log/mvm/audit.jsonl".to_string(),
@@ -2033,13 +2033,13 @@ mod tests {
     fn validate_audit_policy_passes_empty_destinations() {
         // Empty stream_destinations is the common case — no audit
         // replication configured. Must validate cleanly.
-        let policy = mvm_policy::AuditPolicy::default();
+        let policy = mvm_core::policy::AuditPolicy::default();
         validate_audit_policy_stream_destinations(&policy).expect("empty ok");
     }
 
     #[test]
     fn validate_audit_policy_refuses_typo_with_row_index() {
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec![
                 "file:///var/log/mvm/audit.jsonl".to_string(),
@@ -2063,7 +2063,7 @@ mod tests {
 
     #[test]
     fn validate_audit_policy_refuses_scheme_less_value() {
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["/var/log/audit.jsonl".to_string()],
         };

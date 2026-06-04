@@ -3419,7 +3419,6 @@ dependencies = [
  "mvm-libkrun",
  "mvm-mcp",
  "mvm-oci",
- "mvm-policy",
  "mvm-providers",
  "mvm-sdk",
  "mvm-security",
@@ -3486,7 +3485,6 @@ dependencies = [
  "ed25519-dalek",
  "mvm-core",
  "mvm-jailer-lite",
- "mvm-policy",
  "mvm-supervisor",
  "serde",
  "serde_json",
@@ -3588,7 +3586,6 @@ dependencies = [
  "ed25519-dalek",
  "mvm-core",
  "mvm-libkrun",
- "mvm-policy",
  "mvm-providers",
  "mvm-supervisor",
  "serde_json",
@@ -3626,21 +3623,6 @@ dependencies = [
  "url",
  "wiremock",
  "xattr",
-]
-
-[[package]]
-name = "mvm-policy"
-version = "0.15.2"
-dependencies = [
- "chrono",
- "ed25519-dalek",
- "mvm-core",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "toml",
 ]
 
 [[package]]
@@ -3743,7 +3725,6 @@ dependencies = [
  "mvm",
  "mvm-backend",
  "mvm-core",
- "mvm-policy",
  "mvm-sdk",
  "mvm-verify",
  "rand 0.8.6",
@@ -3789,7 +3770,6 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "mvm-core",
- "mvm-policy",
  "mvm-supervisor",
  "serde",
  "serde_json",

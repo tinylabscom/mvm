@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use mvm_core::plan::ExecutionPlan;
-use mvm_policy::PolicyBundle;
+use mvm_core::policy::PolicyBundle;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::audit::{AuditEntry, AuditSigner, FlowCloseReason, FlowDirection};

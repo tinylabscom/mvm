@@ -187,7 +187,7 @@ impl AuditEmitter {
     pub fn with_policy(
         signing_key: SigningKey,
         audit_dir: &Path,
-        policy: &mvm_policy::AuditPolicy,
+        policy: &mvm_core::policy::AuditPolicy,
     ) -> Result<Self> {
         if !policy.chain_signing {
             anyhow::bail!(
@@ -693,7 +693,7 @@ mod tests {
         let replica = dir.path().join("replica.jsonl");
         let key = SigningKey::generate(&mut OsRng);
         let vk = key.verifying_key();
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec![format!("file://{}", replica.display())],
         };
@@ -713,7 +713,7 @@ mod tests {
     fn policy_requires_chain_signing() {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: false,
             stream_destinations: Vec::new(),
         };
@@ -728,7 +728,7 @@ mod tests {
     fn policy_refuses_unwired_replication_schemes() {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["https://audit.example.com/ingest".to_string()],
         };
@@ -743,7 +743,7 @@ mod tests {
     fn policy_refuses_relative_file_destinations() {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let policy = mvm_policy::AuditPolicy {
+        let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["file://relative/audit.jsonl".to_string()],
         };

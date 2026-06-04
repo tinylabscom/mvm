@@ -176,7 +176,7 @@ impl PiiRedactor {
         Self::new(DEFAULT_RULES, Mode::Detect).expect("DEFAULT_RULES must compile")
     }
 
-    /// Construct from a parsed `mvm_policy::PiiPolicy`. Returns
+    /// Construct from a parsed `mvm_core::policy::PiiPolicy`. Returns
     /// `Ok(None)` when the policy explicitly disables PII scanning
     /// (`mode = "disabled"`) — the caller skips inserting the
     /// inspector into the chain rather than inserting a no-op that
@@ -196,7 +196,9 @@ impl PiiRedactor {
     ///     list. Unknown names yield [`PiiPolicyError::UnknownCategory`]
     ///     so a typo fails admission instead of silently scanning
     ///     fewer categories than the operator intended.
-    pub fn from_policy(policy: &mvm_policy::PiiPolicy) -> Result<Option<Self>, PiiPolicyError> {
+    pub fn from_policy(
+        policy: &mvm_core::policy::PiiPolicy,
+    ) -> Result<Option<Self>, PiiPolicyError> {
         let mode = match policy.mode.as_deref() {
             None | Some("detect") => Mode::Detect,
             Some("redact") => Mode::Redact,

@@ -93,8 +93,8 @@ pub struct LiveKeystoreReleaser {
 }
 
 impl LiveKeystoreReleaser {
-    /// Construct from a parsed `mvm_policy::KeyPolicy`.
-    pub fn from_policy(policy: &mvm_policy::KeyPolicy) -> Self {
+    /// Construct from a parsed `mvm_core::policy::KeyPolicy`.
+    pub fn from_policy(policy: &mvm_core::policy::KeyPolicy) -> Self {
         Self {
             rotation_interval_days: policy.rotation_interval_days,
         }
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn live_collector_carries_rotation_from_policy() {
-        let policy = mvm_policy::KeyPolicy {
+        let policy = mvm_core::policy::KeyPolicy {
             rotation_interval_days: 30,
         };
         let k = LiveKeystoreReleaser::from_policy(&policy);
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn live_release_errors_not_implemented_with_rotation_interval() {
-        let policy = mvm_policy::KeyPolicy {
+        let policy = mvm_core::policy::KeyPolicy {
             rotation_interval_days: 90,
         };
         let k = LiveKeystoreReleaser::from_policy(&policy);
@@ -189,7 +189,7 @@ mod tests {
         // (0 = warn-but-accept) is still distinct from "no bundle
         // at all" — the live releaser reports NotImplemented{0};
         // the noop reports NotWired.
-        let policy = mvm_policy::KeyPolicy {
+        let policy = mvm_core::policy::KeyPolicy {
             rotation_interval_days: 0,
         };
         let k = LiveKeystoreReleaser::from_policy(&policy);

@@ -73,9 +73,9 @@ pub struct LiveArtifactCollector {
 }
 
 impl LiveArtifactCollector {
-    /// Construct from a parsed `mvm_policy::ArtifactPolicy`. Clones
+    /// Construct from a parsed `mvm_core::policy::ArtifactPolicy`. Clones
     /// the path list so the collector outlives the borrowed policy.
-    pub fn from_policy(policy: &mvm_policy::ArtifactPolicy) -> Self {
+    pub fn from_policy(policy: &mvm_core::policy::ArtifactPolicy) -> Self {
         Self {
             capture_paths: policy.capture_paths.clone(),
             retention_days: policy.retention_days,
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn live_collector_carries_paths_from_policy() {
-        let policy = mvm_policy::ArtifactPolicy {
+        let policy = mvm_core::policy::ArtifactPolicy {
             capture_paths: vec!["/artifacts".to_string(), "/output".to_string()],
             retention_days: 7,
         };
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn live_collector_errors_not_implemented_with_paths_count() {
-        let policy = mvm_policy::ArtifactPolicy {
+        let policy = mvm_core::policy::ArtifactPolicy {
             capture_paths: vec!["/a".to_string(), "/b".to_string(), "/c".to_string()],
             retention_days: 30,
         };
@@ -156,7 +156,7 @@ mod tests {
         // reports zero paths via NotImplemented, the noop reports
         // NotWired. This matters to operators auditing whether
         // their bundle parsed.
-        let policy = mvm_policy::ArtifactPolicy {
+        let policy = mvm_core::policy::ArtifactPolicy {
             capture_paths: vec![],
             retention_days: 0,
         };

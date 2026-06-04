@@ -73,7 +73,6 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 ed25519-dalek = { workspace = true }
 mvm-core = { workspace = true }
-mvm-policy = { workspace = true }
 mvm-supervisor = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

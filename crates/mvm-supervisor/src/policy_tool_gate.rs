@@ -44,7 +44,7 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use mvm_policy::ToolPolicy;
+use mvm_core::policy::ToolPolicy;
 use thiserror::Error;
 
 use crate::tool_gate::{ToolDecision, ToolError, ToolGate};

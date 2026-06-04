@@ -51,7 +51,7 @@ use std::sync::atomic::Ordering;
 
 use mvm_core::observability::metrics::Metrics;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
-use mvm_policy::PolicyBundle;
+use mvm_core::policy::PolicyBundle;
 
 use crate::audit::{AuditEntry, AuditError, AuditSigner};
 

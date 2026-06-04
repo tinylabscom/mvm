@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use mvm_core::plan::TenantId;
+use crate::plan::TenantId;
 use serde::{Deserialize, Serialize};
 
-use crate::policies::{
+use crate::policy::policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
 

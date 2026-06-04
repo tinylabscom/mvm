@@ -371,7 +371,7 @@ mod tests {
         let mut entry = make_entry("tenant-a", "plan.launched");
         // Exercise the optional bundle fields + a label so the
         // skip_serializing_if / BTreeMap mirroring is covered.
-        entry.bundle_id = Some(mvm_policy::PolicyId("bundle-x".to_string()));
+        entry.bundle_id = Some(mvm_core::policy::PolicyId("bundle-x".to_string()));
         entry.bundle_version = Some(3);
         entry
             .labels

@@ -67,7 +67,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::bundle::{PolicyBundle, SCHEMA_VERSION};
+use crate::policy::bundle::{PolicyBundle, SCHEMA_VERSION};
 
 /// Errors `load_bundle_from_path` can return. Distinguish "file not
 /// there" (operator hasn't provisioned a bundle) from
@@ -153,7 +153,7 @@ pub fn load_bundle_from_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PolicyId;
+    use crate::policy::PolicyId;
 
     fn minimal_bundle_toml() -> String {
         format!(

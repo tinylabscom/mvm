@@ -45,7 +45,6 @@ mvm-supervisor.workspace = true
 # `Option<serde_json::Value>` carrier still keeps mvm-libkrun itself
 # free of the typed-plan dep.
 mvm-core.workspace = true
-mvm-policy.workspace = true
 # Ed25519 key load from `cfg.signing_key_path`. The host signer
 # secret is written by `mvm-cli::host_signer::load_or_init_at` at
 # `mvmctl up` admission time; the bin re-reads the bytes to seed

@@ -33,11 +33,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::bundle::PolicyBundle;
-use crate::policies::{
+use crate::plan::TenantId;
+use crate::policy::bundle::PolicyBundle;
+use crate::policy::policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
-use mvm_core::plan::TenantId;
 
 /// An out-of-band deny instruction with bounded lifetime. Plan 37
 /// §18.1 emergency deny rules are signed updates that bypass the
@@ -142,7 +142,7 @@ fn pick<T: Clone>(overlay: Option<T>, base: &T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
+    use crate::policy::bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
     use chrono::TimeZone;
     use std::collections::BTreeMap;
 
