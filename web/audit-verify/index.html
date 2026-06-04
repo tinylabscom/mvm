@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mvm audit-log verifier</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  p.lede { opacity: 0.8; }
+  label { display: block; font-weight: 600; margin: 1rem 0 0.25rem; }
+  textarea, input { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 13px; }
+  textarea { height: 9rem; }
+  button { margin-top: 1rem; padding: 0.5rem 1rem; font-size: 15px; cursor: pointer; }
+  #result { margin-top: 1.25rem; padding: 0.75rem 1rem; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
+  #result.ok { background: #e6f4ea; color: #14532d; }
+  #result.bad { background: #fde8e8; color: #7f1d1d; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 13px; }
+  th, td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid #8884; }
+  footer { margin-top: 2rem; font-size: 12px; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>mvm audit-log verifier</h1>
+<p class="lede">
+  Verifies an mvm chain-signed audit log entirely in your browser — no
+  upload, no server. The exact same Ed25519 chain check
+  <code>mvmctl audit verify</code> runs on the host, compiled to WebAssembly.
+  Nothing you paste here leaves this tab.
+</p>
+
+<label for="key">Host signer public key (hex, 32 bytes)</label>
+<input id="key" placeholder="64 hex characters" autocomplete="off" spellcheck="false" />
+
+<label for="log">Audit log (<code>&lt;tenant&gt;.jsonl</code> contents)</label>
+<textarea id="log" placeholder="paste the .jsonl stream, or choose a file below"></textarea>
+<input id="file" type="file" accept=".jsonl,.json,.txt,text/plain" />
+
+<button id="go" disabled>Verify chain</button>
+
+<div id="result" hidden></div>
+<div id="entries"></div>
+
+<footer>
+  Built from <code>web/audit-verify/</code> over the <code>mvm-verify</code>
+  crate. See ADR-069. The verifier is byte-for-byte identical to
+  <code>mvm_supervisor::verify_audit_chain</code> (pinned by a cross-crate test).
+</footer>
+
+<script type="module">
+  import init, { verify } from "./pkg/mvm_audit_verify_web.js";
+
+  const $ = (id) => document.getElementById(id);
+  const fileInput = $("file");
+  const logArea = $("log");
+  const keyInput = $("key");
+  const goBtn = $("go");
+  const result = $("result");
+  const entries = $("entries");
+
+  init().then(() => { goBtn.disabled = false; });
+
+  fileInput.addEventListener("change", async () => {
+    const f = fileInput.files?.[0];
+    if (f) logArea.value = await f.text();
+  });
+
+  goBtn.addEventListener("click", () => {
+    entries.innerHTML = "";
+    let out;
+    try {
+      out = JSON.parse(verify(logArea.value, keyInput.value));
+    } catch (e) {
+      out = { ok: false, error: String(e) };
+    }
+    result.hidden = false;
+    if (out.ok) {
+      result.className = "ok";
+      result.textContent = `✓ chain verified — ${out.count} entr${out.count === 1 ? "y" : "ies"}`;
+      if (out.entries?.length) {
+        const rows = out.entries
+          .map((e) => `<tr><td>${e.line}</td><td>${escapeHtml(e.timestamp)}</td><td>${escapeHtml(e.tenant)}</td><td>${escapeHtml(e.event)}</td><td>${escapeHtml(e.image_name)}</td></tr>`)
+          .join("");
+        entries.innerHTML = `<table><thead><tr><th>#</th><th>timestamp</th><th>tenant</th><th>event</th><th>image</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+    } else {
+      result.className = "bad";
+      result.textContent = `✗ ${out.error}`;
+    }
+  });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+</script>
+</body>
+</html>

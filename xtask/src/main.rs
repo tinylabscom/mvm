@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 mod build_dev_image;
 mod check_adr_coverage;
 mod check_audit_positional;
+mod check_claim_catalog;
 mod check_doc_claims;
 mod check_forbidden_deps;
 mod check_mvm_host_binaries_sync;
@@ -48,6 +49,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_spec_numbers::run(&workspace)
         }
+        Some("check-claim-catalog") => {
+            let workspace = workspace_root();
+            check_claim_catalog::run(&workspace)
+        }
         Some("check-mvm-host-binaries-sync") => {
             let workspace = workspace_root();
             check_mvm_host_binaries_sync::run(&workspace)
@@ -66,7 +71,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-no-overclaim, check-spec-numbers, check-mvm-host-binaries-sync, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-no-overclaim, check-spec-numbers, check-claim-catalog, check-mvm-host-binaries-sync, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -95,6 +100,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-spec-numbers                     Reject duplicate numeric prefixes in specs/plans and specs/adrs"
+            );
+            eprintln!(
+                "  check-claim-catalog                    Verify specs/claims/catalog.md witnesses still exist in the tree"
             );
             eprintln!(
                 "  check-mvm-host-binaries-sync            Plan 115 / ADR-065: assert Rust manifest and Nix attrset agree"

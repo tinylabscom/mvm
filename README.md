@@ -259,6 +259,33 @@ Out of scope (named in ADR-002):
 
 ## Development
 
+### Contributor host setup
+
+Whether you need to install libkrun depends on your machine — the
+builder VM (the Linux guest that runs `nix build`) picks its host VMM
+per [Plan 98](specs/plans/98-vz-builder-vm.md):
+
+| Host | libkrun (`slp/krun/*`) needed? |
+|---|---|
+| macOS 26+ Apple Silicon | **No** — auto-selects the **Vz** builder backend (Apple Virtualization.framework, ships with the OS). `mvmctl dev up` only retries libkrun if the Vz path fails. |
+| macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`. |
+| Linux + `/dev/kvm` | **No** — Firecracker runs directly; swap `gvproxy` for `passt` from your distro. |
+
+Source-checkout contributors also need `zig` + `cargo-zigbuild` so
+`crates/mvm-cli/build.rs` can cross-compile the embedded host-VM
+binaries as static `aarch64-unknown-linux-musl` (the builder rootfs has
+no dynamic loader):
+
+```bash
+brew install zig            # or your distro's zig
+cargo install cargo-zigbuild
+```
+
+You do **not** need host Nix — Nix evaluation and `nix build` run inside
+the builder VM. After building, run `mvmctl doctor`: it reports the
+resolved builder backend on the `builder backend` line and emits install
+hints for anything missing.
+
 ```bash
 cargo build                              # Debug
 cargo test --workspace                   # All tests (1937+ passing)

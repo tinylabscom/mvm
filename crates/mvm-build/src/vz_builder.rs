@@ -862,8 +862,10 @@ pub fn resolve_vz_supervisor_path() -> Result<PathBuf, BuilderVmError> {
 /// isn't laid out as `<root>/crates/<name>/Cargo.toml` (e.g. a
 /// flattened build or a vendored layout).
 fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
-    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
-    let manifest_dir = PathBuf::from(manifest);
+    workspace_root_from_crate_manifest_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf> {
     // <root>/crates/mvm-build → two `..` is <root>.
     let crates_dir = manifest_dir.parent()?;
     let workspace_root = crates_dir.parent()?;
@@ -1732,6 +1734,14 @@ mod tests {
             let err = resolve_vz_supervisor_path().expect_err("missing file must reject");
             assert!(format!("{err}").contains("not a file"), "got: {err:?}");
         });
+    }
+
+    #[test]
+    fn workspace_root_from_manifest_dir_uses_compile_time_crate_layout() {
+        let manifest_dir = Path::new("/tmp/ws/crates/mvm-build");
+        let root = workspace_root_from_crate_manifest_dir(manifest_dir)
+            .expect("crate-style manifest dir resolves");
+        assert_eq!(root, PathBuf::from("/tmp/ws"));
     }
 
     #[test]

@@ -899,14 +899,16 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
 ///   a hard failure because we can't distinguish "tooling unavailable"
 ///   from "binary actually unsigned" without the tool itself.
 fn vz_entitlement_probe(supervisor_path: &std::path::Path) -> Option<bool> {
-    // `codesign --display --entitlements -:- <path>` writes the
-    // entitlement plist to stdout. `-:-` selects the XML plist format
-    // (the alternative is binary plist or unspecified, which varies
-    // across macOS versions). We grep for the entitlement key rather
-    // than parse the plist — the key is a long well-known identifier,
-    // false positives are vanishingly unlikely.
+    // `codesign --display --entitlements :- <path>` writes the
+    // entitlement plist to stdout. The LEADING colon selects the XML
+    // plist format and the `-` means stdout. The colon must be first:
+    // `-:-` does not start with `:`, so codesign treats it as a literal
+    // output-file path and silently writes a file named `-:-` into the
+    // CWD instead of streaming to stdout. We grep for the entitlement
+    // key rather than parse the plist — the key is a long well-known
+    // identifier, false positives are vanishingly unlikely.
     let output = std::process::Command::new("codesign")
-        .args(["--display", "--entitlements", "-:-", "--"])
+        .args(["--display", "--entitlements", ":-", "--"])
         .arg(supervisor_path)
         .output()
         .ok()?;
@@ -2251,7 +2253,7 @@ mod tests {
 
     #[test]
     fn entitlement_probe_parses_xml_plist_with_entitlement() {
-        // Real `codesign --display --entitlements -:-` XML plist output
+        // Real `codesign --display --entitlements :-` XML plist output
         // shape captured from a build.sh-signed mvm-vz-supervisor.
         let stdout = br#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
