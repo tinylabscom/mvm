@@ -1642,6 +1642,44 @@ mod tests {
         assert!(built.virtio_fs[0].read_only);
     }
 
+    /// Claim 1 witness: the base/core drive (rootfs) is ALWAYS attached
+    /// read-only at the hypervisor on Vz, regardless of any user volumes.
+    /// A regression that flips it to writable trips this test (and the
+    /// catalog gate).
+    #[test]
+    fn vz_rootfs_disk_is_read_only() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let cfg = VmStartConfig {
+            name: "rootfs-ro".into(),
+            cpus: 1,
+            memory_mib: 256,
+            kernel_path: Some("/abs/vmlinux".into()),
+            rootfs_path: "/abs/rootfs.ext4".into(),
+            // Even with a writable user disk attached, the rootfs stays ro.
+            volumes: vec![VmVolume {
+                host: "/host/data.img".into(),
+                guest: "/data".into(),
+                size: "1G".into(),
+                read_only: false,
+                kind: VmVolumeKind::Disk,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let state_dir = Path::new("/tmp/vz-rootfs-ro-state");
+        let gvproxy_info = host_gvproxy::HostGvproxyInfo {
+            socket_path: state_dir.join("gvproxy.sock"),
+            pid: 0,
+        };
+        let built =
+            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        assert_eq!(built.disks[0].id, "rootfs");
+        assert!(
+            built.disks[0].read_only,
+            "rootfs MUST be read-only at the hypervisor"
+        );
+    }
+
     #[test]
     fn build_supervisor_config_refuses_unsafe_tenant() {
         // Plan 112 Phase 3c — defense-in-depth: an unsafe tenant_id

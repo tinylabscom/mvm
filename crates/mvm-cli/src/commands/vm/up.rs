@@ -536,6 +536,22 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
     }
 }
 
+/// Tier A.1 admission enforcement: refuse to boot if any volume about to
+/// be attached isn't named in the verified `ExecutionPlan.shares`. No-op
+/// when admission was skipped (no plan to enforce against). Called right
+/// before every `backend.start()` so no host-fs grant reaches a guest
+/// unless the signed plan admitted it (claim 1 / claim 8).
+fn enforce_shares_if(
+    ctx: &Option<AdmissionContext>,
+    volumes: &[mvm_core::vm_backend::VmVolume],
+) -> Result<()> {
+    if let Some(ctx) = ctx {
+        super::plan_admission::enforce_admitted_shares(volumes, &ctx.admitted.plan)
+            .context("admission share check")?;
+    }
+    Ok(())
+}
+
 /// Emit `plan.failed` against the supplied admission context. No-op
 /// when admission was skipped. `class` is a short grep-friendly tag
 /// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
@@ -1377,6 +1393,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             stash_plan_for_bridge(&start_config)?;
         }
 
+        enforce_shares_if(&admission, &start_config.volumes)?;
         let backend = AnyBackend::from_hypervisor(effective_hypervisor);
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission, "backend-start", &e);
@@ -1893,6 +1910,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             return Ok(());
         }
 
+        enforce_shares_if(&admission_main, &start_config.volumes)?;
         if let Err(e) = backend.start(&start_config) {
             emit_failed_if(&admission_main, "backend-start", &e);
             return Err(e);
@@ -2231,6 +2249,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 // re-boot; the prior admission's files are stale.
                 stash_plan_for_bridge(&w_start_config)?;
             }
+            enforce_shares_if(&watch_admission, &w_start_config.volumes)?;
             let w_backend = AnyBackend::from_hypervisor(effective_hypervisor);
             if let Err(e) = w_backend.start(&w_start_config) {
                 emit_failed_if(&watch_admission, "backend-start", &e);
