@@ -6,15 +6,14 @@
 //! Max-frame-bytes cap enforced *before* parse (same pattern as the
 //! broker's gate 1).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use mvm_core::protocol::host_signer::{HostSignerErrorCode, SignRequest, SignResponse};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
 use crate::host_signer::keystore::SharedKeystore;
 
-const FRAME_LEN_BYTES: usize = 4;
 const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
 /// Accept loop.
@@ -94,47 +93,23 @@ fn dispatch(req: &SignRequest, keystore: &SharedKeystore) -> SignResponse {
 }
 
 /// Read a length-prefixed JSON frame.
+// Length-prefixed JSON framing lives in `mvm_core::framing` (plan 121
+// B4); these wrappers keep the host-signer error context on the shared
+// transport. The cap-before-alloc gate is enforced in core.
 async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,
 ) -> Result<T> {
-    let mut len_buf = [0u8; FRAME_LEN_BYTES];
-    stream
-        .read_exact(&mut len_buf)
+    mvm_core::framing::read_json_frame(stream, max_frame_bytes)
         .await
-        .context("mvm-host-signer length-prefix read failed")?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > max_frame_bytes {
-        bail!(
-            "mvm-host-signer frame too large: {} > {}",
-            len,
-            max_frame_bytes
-        );
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .context("mvm-host-signer body read failed")?;
-    serde_json::from_slice(&body).context("mvm-host-signer JSON parse failed")
+        .context("mvm-host-signer frame read failed")
 }
 
 /// Write a length-prefixed JSON frame.
 async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
-    let body = serde_json::to_vec(value).context("mvm-host-signer JSON encode failed")?;
-    let len: u32 = body
-        .len()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("mvm-host-signer frame body too large for u32 prefix"))?;
-    stream
-        .write_all(&len.to_be_bytes())
+    mvm_core::framing::write_json_frame(stream, value)
         .await
-        .context("mvm-host-signer length-prefix write failed")?;
-    stream
-        .write_all(&body)
-        .await
-        .context("mvm-host-signer body write failed")?;
-    Ok(())
+        .context("mvm-host-signer frame write failed")
 }
 
 /// Build an `Err` response with the supplied typed code. Kept around
@@ -175,6 +150,7 @@ mod tests {
 
     use super::*;
     use crate::host_signer::keystore::Keystore;
+    use tokio::io::AsyncReadExt;
 
     async fn write_req(stream: &mut ClientStream, req: &SignRequest) -> Result<()> {
         let body = serde_json::to_vec(req).unwrap();
