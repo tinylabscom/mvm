@@ -3083,45 +3083,44 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 /// builder-VM rootfs.
 ///
 /// The builder-VM rootfs is built by `nix/images/builder-vm/flake.nix`
-/// from three categories of source input:
+/// from these categories of source input:
 ///
 /// 1. The flake itself (`flake.nix` + `flake.lock`) — controls
 ///    which `nixpkgs` rev, which `mkGuest` shape, which `microvm.nix`,
 ///    which packages get installed.
-/// 2. The workspace `Cargo.lock` — `rustPlatform.buildRustPackage`
-///    consumes it for the dep closure of every Rust binary baked
-///    into the rootfs (`mvm-host-vm-init`, `mvm-egress-proxy`).
-/// 3. The Rust sources of the in-VM binaries (`crates/mvm-host-vm-init/`,
-///    `crates/mvm-egress-proxy/`) — these are the actual PID-1 +
-///    egress-proxy binaries the rootfs runs.
+/// 2. The workspace `Cargo.lock` — the dep closure of every Rust
+///    binary baked into the rootfs.
+/// 3. The embedded host-binary bytes — `build.rs` cross-compiles the
+///    in-VM PID-1 + egress-proxy binaries (`cargo build -p mvm-build
+///    --bin <name>`) and embeds the bytes in mvmctl; injected into the
+///    rootfs at boot. The byte hash captures the bin source, the
+///    `mvm-build` lib, its deps, AND the cross-compile toolchain in one
+///    shot — strictly more than the per-crate `src/` hash this replaced
+///    (which also broke when Plan 121 folded the two former top-level
+///    `crates/<name>/` crates into `crates/mvm-build/src/bin/`).
+/// 4. The shared Nix library (`nix/lib`) the flake imports.
 ///
-/// Pre-2026-05 this function only hashed (1), with the result that
-/// contributor edits to `crates/mvm-host-vm-init/src/main.rs` (or
-/// any other Rust source baked into the rootfs) silently reused the
-/// cached `rootfs.ext4`. The bug burned the PR #420 dev-loop
-/// repeatedly: every test required manually `rm -rf
-/// ~/.cache/mvm/builder-vm/aarch64/` to force a Stage 0 rebuild.
-/// This version closes that hole.
+/// Pre-2026-05 this function only hashed (1), so contributor edits to
+/// the in-VM binaries silently reused the cached `rootfs.ext4`,
+/// burning the dev loop. This version closes that hole — now via the
+/// embedded-byte hash rather than a per-crate source walk.
 ///
 /// ## Scope and tradeoffs
 ///
 /// We don't hash the entire workspace. A change to `mvm-cli` doesn't
-/// affect the rootfs and shouldn't invalidate the cache. The two
-/// crates listed match the `rustPlatform.buildRustPackage` calls in
-/// `nix/images/builder-vm/flake.nix` (`mvmBuilderInitFor` +
-/// `mvmEgressProxyFor`); a future flake change that bakes a third
-/// Rust binary into the rootfs needs to add that crate to the list
-/// here.
+/// affect the rootfs and shouldn't invalidate the cache; only the
+/// embedded binaries' bytes carry the in-VM binary identity.
 ///
 /// ## Hash discipline
 ///
-/// Same shape as the original flake-only hash:
+/// File layers use the original flake-only shape:
 /// `{name}\0{u64-length-LE}\0{contents}\0`, repeated for each input.
 /// The `name` is the relative path keyed off the workspace, so
-/// renaming a file or moving it across crates changes the fingerprint.
-/// Files within a directory are visited in lexicographic order
-/// regardless of filesystem read order so the hash is deterministic
-/// across HFS+, APFS, and ext4.
+/// renaming a file changes the fingerprint. Files within a directory
+/// are visited in lexicographic order regardless of filesystem read
+/// order so the hash is deterministic across HFS+, APFS, and ext4.
+/// The embedded-binary layer folds `(name, sha256_hex)` under a
+/// `host-bin\0` domain tag (see `fold_embedded_binary_identity`).
 fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
     let flake_dir = std::path::Path::new(builder_flake_dir);
     let workspace_root = workspace_root_for_builder_flake(flake_dir)?;
@@ -3152,58 +3151,20 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
     }
     hash_named_file(&mut hasher, "Cargo.lock", &cargo_lock)?;
 
-    // Layer 3: in-VM binary sources. Each crate listed here
-    // corresponds to a `rustPlatform.buildRustPackage` call in
-    // `nix/images/builder-vm/flake.nix`. Add to this list when a
-    // new Rust binary gets baked into the rootfs.
-    //
-    // Only `Cargo.toml` and the recursive `src/` tree enter the
-    // closure `rustc` actually sees. `README.md`, `CHANGELOG.md`,
-    // and other crate-root files don't influence the baked binary,
-    // so they don't bust the Stage 0 cache (Plan 93 Phase 0).
-    for crate_name in ["mvm-host-vm-init", "mvm-egress-proxy"] {
-        let crate_dir = workspace_root.join("crates").join(crate_name);
-        if !crate_dir.is_dir() {
-            anyhow::bail!(
-                "builder VM source fingerprint missing crate dir {}",
-                crate_dir.display()
-            );
-        }
-
-        let cargo_toml = crate_dir.join("Cargo.toml");
-        if !cargo_toml.is_file() {
-            anyhow::bail!(
-                "builder VM source fingerprint missing {}",
-                cargo_toml.display()
-            );
-        }
-        hash_named_file(
-            &mut hasher,
-            &format!("crates/{crate_name}/Cargo.toml"),
-            &cargo_toml,
-        )?;
-
-        let src_dir = crate_dir.join("src");
-        if !src_dir.is_dir() {
-            anyhow::bail!(
-                "builder VM source fingerprint missing crate src dir {}",
-                src_dir.display()
-            );
-        }
-        hash_dir_recursive(&mut hasher, &format!("crates/{crate_name}/src"), &src_dir)?;
-    }
-
-    // Layer 4: the embedded host-binary identity. These bytes are what
-    // actually get baked into the rootfs, so their SHA captures anything
-    // the crate-src hash above can miss — chiefly the cross-compile
-    // toolchain (a gnu→musl target switch produces different binaries
-    // from identical source). Without this a toolchain change would
-    // silently reuse a stale cached image.
+    // Layer 3: the embedded host-binary identity — the authoritative
+    // fingerprint of the in-VM Rust binaries (`mvm-host-vm-init`,
+    // `mvm-egress-proxy`). `build.rs` cross-compiles them with
+    // `cargo build -p mvm-build --bin <name>` and embeds the bytes in
+    // mvmctl; they are injected into the rootfs at boot
+    // (`host_binaries::extract`), NOT built by the flake (which forbids
+    // `rustPlatform.buildRustPackage`). Hashing the bytes captures the bin
+    // source, the `mvm-build` lib, its deps, AND the cross-compile
+    // toolchain (a gnu→musl switch yields different bytes from identical
+    // source) in one shot — strictly more than the per-crate `src/` hash
+    // this replaced, which also broke when Plan 121 folded the two former
+    // top-level `crates/<name>/` crates into `crates/mvm-build/src/bin/`.
     for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
-        hasher.update(b"host-bin\0");
-        hasher.update(bin.name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(bin.sha256_hex.as_bytes());
+        fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
     }
 
     // Layer 5: the shared Nix library the flake imports. The builder-vm
@@ -3217,6 +3178,19 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Fold one embedded host-binary's identity into the fingerprint.
+/// Keyed on `(name, sha256_hex)` so a rebuilt binary's byte change —
+/// the authoritative signal that the in-VM PID-1 / egress-proxy source
+/// or toolchain shifted — busts the Stage 0 cache key. The `host-bin\0`
+/// domain tag keeps these entries from colliding with the file-hash
+/// layers above.
+fn fold_embedded_binary_identity(hasher: &mut Sha256, name: &str, sha256_hex: &str) {
+    hasher.update(b"host-bin\0");
+    hasher.update(name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(sha256_hex.as_bytes());
 }
 
 /// Resolve the workspace root from the builder-VM flake dir.
@@ -4223,12 +4197,12 @@ mod dev_status_image_tests {
     }
 
     /// Stage the workspace prerequisites that `builder_vm_source_fingerprint`
-    /// (post-PR #422) reads in addition to the flake dir itself:
-    /// `Cargo.lock` at the workspace root + stub `mvm-host-vm-init` and
-    /// `mvm-egress-proxy` crate dirs. Without this, any test that calls
-    /// the fingerprint helper against a fresh tempdir-rooted flake at
-    /// `<tmp>/nix/images/builder-vm` blows up with
-    /// `builder VM source fingerprint missing <tmp>/Cargo.lock`.
+    /// reads beyond the flake dir: a `Cargo.lock` at the workspace root.
+    /// Without it, a test calling the fingerprint helper against a fresh
+    /// tempdir-rooted flake at `<tmp>/nix/images/builder-vm` blows up with
+    /// `builder VM source fingerprint missing <tmp>/Cargo.lock`. (The
+    /// in-VM binary identity comes from the embedded host-binary bytes,
+    /// not on-disk crate dirs, so no crate stubs are needed.)
     ///
     /// Matches `builder_vm_bootstrap_tests::write_builder_vm_workspace`
     /// in shape; lives here as well because the two test mods are
@@ -4237,16 +4211,6 @@ mod dev_status_image_tests {
     fn write_builder_vm_workspace_prereqs(workspace_root: &std::path::Path) {
         std::fs::write(workspace_root.join("Cargo.lock"), "# stub Cargo.lock\n")
             .expect("write Cargo.lock");
-        for crate_name in ["mvm-host-vm-init", "mvm-egress-proxy"] {
-            let src = workspace_root.join("crates").join(crate_name).join("src");
-            std::fs::create_dir_all(&src).expect("mkdir crate src");
-            std::fs::write(
-                src.parent().unwrap().join("Cargo.toml"),
-                format!("[package]\nname = \"{crate_name}\"\nversion = \"0.0.0\"\n"),
-            )
-            .expect("write Cargo.toml");
-            std::fs::write(src.join("main.rs"), "fn main() {}\n").expect("write main.rs");
-        }
     }
 
     #[test]
@@ -5227,32 +5191,29 @@ mod builder_vm_bootstrap_tests {
     }
 
     /// Lay out a synthetic mvm workspace under `tmp` that the
-    /// expanded `builder_vm_source_fingerprint` will accept:
+    /// `builder_vm_source_fingerprint` will accept:
     ///
     /// ```text
     /// tmp/
     ///   Cargo.lock
-    ///   crates/
-    ///     mvm-host-vm-init/{Cargo.toml,src/main.rs}
-    ///     mvm-egress-proxy/{Cargo.toml,src/main.rs}
+    ///   nix/lib/mkguest.nix
     ///   nix/images/builder-vm/{flake.nix,flake.lock}
     /// ```
+    ///
+    /// In-VM binary identity now rides on the embedded host-binary
+    /// bytes (see `fold_embedded_binary_identity`), so the old per-crate
+    /// `crates/<name>/{Cargo.toml,src}` stubs are gone. `nix/lib` is
+    /// present because the flake imports it (Layer 5) and the dir-walker
+    /// skip tests exercise it.
     ///
     /// Returns the path of the `nix/images/builder-vm/` dir — the
     /// argument the fingerprint function expects.
     fn write_builder_vm_workspace(tmp: &std::path::Path) -> std::path::PathBuf {
         std::fs::write(tmp.join("Cargo.lock"), "# stub Cargo.lock\n").expect("write Cargo.lock");
 
-        for crate_name in ["mvm-host-vm-init", "mvm-egress-proxy"] {
-            let src = tmp.join("crates").join(crate_name).join("src");
-            std::fs::create_dir_all(&src).expect("mkdir crate src");
-            std::fs::write(
-                src.parent().unwrap().join("Cargo.toml"),
-                format!("[package]\nname = \"{crate_name}\"\nversion = \"0.0.0\"\n"),
-            )
-            .expect("write Cargo.toml");
-            std::fs::write(src.join("main.rs"), "fn main() {}\n").expect("write main.rs");
-        }
+        let nix_lib = tmp.join("nix/lib");
+        std::fs::create_dir_all(&nix_lib).expect("mkdir nix/lib");
+        std::fs::write(nix_lib.join("mkguest.nix"), "{ }\n").expect("write nix/lib");
 
         let flake = tmp.join("nix/images/builder-vm");
         write_builder_vm_flake(&flake, "{ outputs = _: {}; }", Some("{\"nodes\":{}}"));
@@ -5298,135 +5259,43 @@ mod builder_vm_bootstrap_tests {
     }
 
     #[test]
-    fn builder_vm_source_fingerprint_changes_with_mvm_host_vm_init_source() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        // The bug this whole expansion fixes: a contributor edits
-        // the PID-1 binary source and `mvmctl dev up` silently
-        // serves the stale cached rootfs.
-        std::fs::write(
-            tmp.path().join("crates/mvm-host-vm-init/src/main.rs"),
-            "fn main() { println!(\"hello from edited builder-init\"); }\n",
-        )
-        .expect("rewrite main.rs");
-        let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        assert_ne!(
-            first, second,
-            "edit to mvm-host-vm-init source must invalidate the builder-vm cache key"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_changes_with_mvm_egress_proxy_source() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        std::fs::write(
-            tmp.path().join("crates/mvm-egress-proxy/src/main.rs"),
-            "fn main() { println!(\"updated proxy\"); }\n",
-        )
-        .expect("rewrite main.rs");
-        let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
+    fn fold_embedded_binary_identity_distinguishes_inputs() {
+        // The new contract: in-VM binary identity rides on the embedded
+        // bytes, not a per-crate source walk. A rebuilt binary (changed
+        // name OR changed sha256) must fold to a different digest so the
+        // Stage 0 cache key busts.
+        let base = {
+            let mut h = Sha256::new();
+            fold_embedded_binary_identity(&mut h, "mvm-host-vm-init", "aa");
+            format!("{:x}", h.finalize())
+        };
+        let changed_hash = {
+            let mut h = Sha256::new();
+            fold_embedded_binary_identity(&mut h, "mvm-host-vm-init", "bb");
+            format!("{:x}", h.finalize())
+        };
+        let changed_name = {
+            let mut h = Sha256::new();
+            fold_embedded_binary_identity(&mut h, "mvm-egress-proxy", "aa");
+            format!("{:x}", h.finalize())
+        };
 
         assert_ne!(
-            first, second,
-            "edit to mvm-egress-proxy source must invalidate the builder-vm cache key"
+            base, changed_hash,
+            "a rebuilt binary (new sha256) must bust the cache key"
         );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_does_not_change_with_readme_edit() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let baseline =
-            builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("baseline fingerprint");
-
-        // Plan 93 Phase 0: only `Cargo.toml` + `src/**` enter the
-        // closure rustc sees. README, CHANGELOG, LICENSE, and other
-        // crate-root files don't influence the baked binary, so they
-        // must NOT bust the Stage 0 cache — a contributor tweaking
-        // docs shouldn't eat a 10-30 minute rebuild.
-        std::fs::write(
-            tmp.path().join("crates/mvm-host-vm-init/README.md"),
-            "# mvm-host-vm-init\n\nAdded docs.\n",
-        )
-        .expect("write README");
-        std::fs::write(
-            tmp.path().join("crates/mvm-egress-proxy/CHANGELOG.md"),
-            "# changelog\n",
-        )
-        .expect("write CHANGELOG");
-
-        let after =
-            builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("after fingerprint");
-
-        assert_eq!(
-            baseline, after,
-            "non-src crate-root files must not affect the builder-vm cache key"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_changes_with_cargo_toml_edit() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        // A dep bump or a feature-flag change in Cargo.toml shifts
-        // what rustPlatform.buildRustPackage produces, so the
-        // fingerprint must pick it up.
-        std::fs::write(
-            tmp.path().join("crates/mvm-host-vm-init/Cargo.toml"),
-            "[package]\nname = \"mvm-host-vm-init\"\nversion = \"0.0.1\"\n",
-        )
-        .expect("rewrite Cargo.toml");
-        let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
         assert_ne!(
-            first, second,
-            "Cargo.toml edit must invalidate the builder-vm cache key"
+            base, changed_name,
+            "a renamed embedded binary must bust the cache key"
         );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_errors_when_cargo_toml_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        std::fs::remove_file(tmp.path().join("crates/mvm-host-vm-init/Cargo.toml"))
-            .expect("rm Cargo.toml");
-
-        let err = builder_vm_source_fingerprint(flake.to_str().unwrap())
-            .expect_err("missing Cargo.toml must be a hard error");
-        assert!(
-            err.to_string().contains("Cargo.toml"),
-            "error must name the missing path: {err}"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_changes_when_new_file_added_to_crate() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        let first = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        // A `git add` of a new module file under the crate also
-        // changes the closure rustc sees, so the fingerprint must
-        // reflect new files, not just modifications of existing ones.
-        std::fs::write(
-            tmp.path().join("crates/mvm-host-vm-init/src/new_module.rs"),
-            "pub fn whatever() {}\n",
-        )
-        .expect("write new_module.rs");
-        let second = builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("fingerprint");
-
-        assert_ne!(
-            first, second,
-            "new file in mvm-host-vm-init must invalidate the builder-vm cache key"
-        );
+        // The `\0` separator prevents (name+hash) concatenation
+        // collisions, e.g. ("ab","") vs ("a","b").
+        let glued = {
+            let mut h = Sha256::new();
+            fold_embedded_binary_identity(&mut h, "mvm-host-vm-initaa", "");
+            format!("{:x}", h.finalize())
+        };
+        assert_ne!(base, glued, "name/hash boundary must be unambiguous");
     }
 
     #[test]
@@ -5455,20 +5324,12 @@ mod builder_vm_bootstrap_tests {
         let baseline =
             builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("baseline fingerprint");
 
-        // cargo build artifacts under `target/` are not flake inputs.
-        // Adding multi-MB junk there must not change the fingerprint
-        // (otherwise every `cargo build` would invalidate the cache).
-        // Place a `target/` both at the crate root (outside the
-        // narrowed walk) and inside `src/` (inside the walk, exercising
-        // the explicit skip).
-        let crate_target = tmp.path().join("crates/mvm-host-vm-init/target/debug");
-        std::fs::create_dir_all(&crate_target).expect("mkdir crate target");
-        std::fs::write(crate_target.join("garbage.rlib"), vec![0u8; 4096])
-            .expect("write crate target garbage");
-        let src_target = tmp.path().join("crates/mvm-host-vm-init/src/target/debug");
-        std::fs::create_dir_all(&src_target).expect("mkdir src/target");
-        std::fs::write(src_target.join("junk.rlib"), vec![0u8; 4096])
-            .expect("write src/target garbage");
+        // The `nix/lib` walk (Layer 5) skips `target/`. Drop junk in a
+        // `target/` under the walked dir; the fingerprint must ignore it.
+        let lib_target = tmp.path().join("nix/lib/target/debug");
+        std::fs::create_dir_all(&lib_target).expect("mkdir nix/lib/target");
+        std::fs::write(lib_target.join("junk.rlib"), vec![0u8; 4096])
+            .expect("write target garbage");
 
         let after =
             builder_vm_source_fingerprint(flake.to_str().unwrap()).expect("after fingerprint");
@@ -5488,14 +5349,12 @@ mod builder_vm_bootstrap_tests {
 
         // `.git/HEAD`, editor swap files (`.swp`, `foo.rs.swp`),
         // `.DS_Store`, etc. — none are flake inputs and editing them
-        // shouldn't bust the cache. Place each both at the crate root
-        // (outside the narrowed walk) and inside `src/` (inside the
-        // walk, exercising the explicit skip).
+        // shouldn't bust the cache. Drop each inside the walked `nix/lib`
+        // dir, exercising the explicit skip in `walk_source_dir_sorted`.
         for path in [
-            "crates/mvm-host-vm-init/.swp",
-            "crates/mvm-host-vm-init/.DS_Store",
-            "crates/mvm-host-vm-init/src/.DS_Store",
-            "crates/mvm-host-vm-init/src/main.rs.swp",
+            "nix/lib/.DS_Store",
+            "nix/lib/.swp",
+            "nix/lib/mkguest.nix.swp",
         ] {
             std::fs::write(tmp.path().join(path), b"junk").expect("write hidden");
         }
@@ -5520,20 +5379,6 @@ mod builder_vm_bootstrap_tests {
         assert!(
             err.to_string().contains("Cargo.lock"),
             "error must name the missing path: {err}"
-        );
-    }
-
-    #[test]
-    fn builder_vm_source_fingerprint_errors_when_in_vm_crate_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let flake = write_builder_vm_workspace(tmp.path());
-        std::fs::remove_dir_all(tmp.path().join("crates/mvm-host-vm-init")).expect("rm crate dir");
-
-        let err = builder_vm_source_fingerprint(flake.to_str().unwrap())
-            .expect_err("missing in-VM crate dir must be a hard error");
-        assert!(
-            err.to_string().contains("mvm-host-vm-init"),
-            "error must name the missing crate: {err}"
         );
     }
 
