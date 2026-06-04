@@ -84,7 +84,7 @@ struct SupervisorConfig: Decodable, StrictKeys {
 }
 
 /// Plan 97 Phase E — supervisor startup mode. Mirrors the Rust
-/// `mvm_vz::StartupMode` tagged enum: JSON looks like
+/// `mvm_build::vz::StartupMode` tagged enum: JSON looks like
 /// `{"kind":"boot"}` or
 /// `{"kind":"restore","snapshot_path":"/abs/path","machine_id_path":"..."}`.
 /// Strict-keys enforced; unknown keys cause a decode error.

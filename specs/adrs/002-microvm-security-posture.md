@@ -144,6 +144,19 @@ by definition (see Threat model). L1 *enables* claim 3 (verified boot
 needs a hypervisor that respects the kernel cmdline). If the host is
 compromised, every layer falls; that case is explicitly out of scope.
 
+**Verified-boot verity surface (claim 3, current architecture).** The
+dm-verity seal is produced by `mvm_build::oci_to_rootfs::verity`
+(`veritysetup format` + a 64-hex roothash) and covers two read-only
+images: the workload **rootfs** — sealed-prod `.mvm` artifacts carry
+`rootfs.verity` + `roothash`, which the backend wires as a dm-verity
+device on the kernel cmdline (`mvm-backend/src/microvm.rs`) and
+`mvm-verity-init` mounts — and the **runtime overlay** attached to
+every microVM (ADR-051, "sealed the same way it seals rootfs"). The
+`verified-boot-artifacts` CI lane witnesses the seal end-to-end via the
+runtime-overlay build (the standalone bundled prod image it formerly
+built was retired by Plan 115); the live-KVM tamper test exercises the
+boot-time panic on a flipped data block.
+
 ### Backend symmetry (Plan 98)
 
 Claims 1, 5, 7, 8, and 11 have **backend-symmetric evidence**: the

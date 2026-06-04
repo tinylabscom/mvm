@@ -121,6 +121,10 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
+      - name: Run doctests
+        # nextest does not run doctests; gate them separately.
+        run: cargo test --workspace --doc
+
       - name: Assert auto-detect on Linux picks libkrun
         run: |
           cargo test -p mvm-build --features builder-vm --lib \

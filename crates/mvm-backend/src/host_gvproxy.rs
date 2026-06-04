@@ -98,15 +98,16 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
     // gvproxy args (mirror mvm-libkrun::gvproxy::spawn):
     //   -listen-vfkit unixgram://<path>  — Vz connects here
     //   -log-file <path>                 — diagnostic log
-    //   -ssh-port <port>                 — per-scratch-dir derived
-    //                                      so concurrent gvproxies
-    //                                      don't collide on 2222
+    //   -ssh-port <port>                 — fresh OS-assigned free port
+    //                                      so concurrent gvproxies (and
+    //                                      leaked daemons) never collide
     let listen_url = {
         let mut s = OsString::from("unixgram://");
         s.push(socket_path.as_os_str());
         s
     };
-    let ssh_port = ssh_port_for(scratch_dir);
+    let ssh_port = libkrun_sys::gvproxy::free_loopback_port()
+        .map_err(|e| anyhow!("reserve a free gvproxy ssh-forward port: {e}"))?;
 
     // NEVER inherit the parent's stderr. gvproxy is detached and
     // re-parented to init; an inherited stderr write end keeps the
@@ -272,20 +273,6 @@ pub fn derive_mac(vm_name: &str) -> String {
         .join(":")
 }
 
-/// Per-scratch-dir port derivation for gvproxy's SSH-forward
-/// listener. Mirrors the heuristic in `libkrun_sys::gvproxy` so
-/// concurrent VMs (host + libkrun lane, multiple Vz lanes, etc.)
-/// don't collide on a single TCP port.
-fn ssh_port_for(scratch_dir: &Path) -> u16 {
-    let mut hasher = Sha256::new();
-    hasher.update(scratch_dir.as_os_str().as_encoded_bytes());
-    let digest = hasher.finalize();
-    // Range 22220..=29999 — wide enough that 4096 concurrent VMs
-    // is collision-improbable.
-    let n = u16::from(digest[0]) << 8 | u16::from(digest[1]);
-    22220 + (n % 7780)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,13 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn ssh_port_in_range_and_stable() {
-        let p1 = ssh_port_for(Path::new("/tmp/x/vm-a"));
-        let p2 = ssh_port_for(Path::new("/tmp/x/vm-a"));
-        let p3 = ssh_port_for(Path::new("/tmp/x/vm-b"));
-        assert_eq!(p1, p2);
-        assert_ne!(p1, p3);
-        assert!((22220..30000).contains(&p1));
+    fn ssh_port_uses_a_free_os_assigned_port() {
+        // The Vz lane reserves its gvproxy ssh-forward port the same
+        // way the libkrun lane does — a fresh OS-assigned free port,
+        // never a deterministic scratch-dir hash that could collide
+        // with a leaked daemon.
+        let port = libkrun_sys::gvproxy::free_loopback_port().expect("reserve a free port");
+        assert!(port >= 1024, "port {port} below gvproxy's 1024 floor");
     }
 
     #[test]
