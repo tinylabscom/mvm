@@ -366,9 +366,7 @@ impl FsBundleResolver {
     /// `FsTrustStore::default_path` so admission code can resolve
     /// both with no extra plumbing.
     pub fn default_path() -> anyhow::Result<Self> {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| anyhow::anyhow!("$HOME is not set; cannot resolve bundle cache"))?;
-        let p = PathBuf::from(home).join(".mvm").join("bundles");
+        let p = crate::config::mvm_data_dir_strict()?.join("bundles");
         Ok(Self::new(p))
     }
 
@@ -486,10 +484,7 @@ impl BundleRegistry {
     /// uses — the archive (`<sha>.mvmpkg`) and the unpacked
     /// directory (`<sha>/`) cohabit under one tree.
     pub fn default_path() -> anyhow::Result<Self> {
-        let home = std::env::var_os("HOME").ok_or_else(|| {
-            anyhow::anyhow!("$HOME is not set; cannot resolve bundle registry root")
-        })?;
-        let p = PathBuf::from(home).join(".mvm").join("bundles");
+        let p = crate::config::mvm_data_dir_strict()?.join("bundles");
         Ok(Self::new(p))
     }
 
@@ -1117,9 +1112,7 @@ impl FsTrustStore {
     /// Default path: `~/.mvm/trusted-publishers/`. Errors when
     /// `$HOME` is unset.
     pub fn default_path() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| anyhow::anyhow!("$HOME is not set; cannot resolve trust store"))?;
-        let p = PathBuf::from(home).join(".mvm").join("trusted-publishers");
+        let p = crate::config::mvm_data_dir_strict()?.join("trusted-publishers");
         Ok(Self::new(p))
     }
 

@@ -91,7 +91,9 @@ pub enum LoadError {
 /// Per-tenant subdir `<base>/<tenant>/`, per-workload file
 /// `<base>/<tenant>/<workload>.toml`.
 pub fn default_policy_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mvm").join("policies"))
+    crate::config::mvm_data_dir_strict()
+        .ok()
+        .map(|d| d.join("policies"))
 }
 
 /// Compose the canonical bundle path: `<base>/<tenant>/<workload>.toml`.
