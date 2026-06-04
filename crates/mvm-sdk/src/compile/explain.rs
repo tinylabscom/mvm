@@ -247,7 +247,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::ErrorCode;
+    use crate::ir::ErrorCode;
 
     #[test]
     fn loads_every_entry_from_registry() {

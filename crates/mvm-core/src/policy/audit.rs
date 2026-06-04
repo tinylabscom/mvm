@@ -122,7 +122,7 @@ pub enum LocalAuditKind {
     /// Snapshot integrity verification failed at resume time. Covers
     /// HMAC tag mismatch (tampered bytes or rotated host key), version
     /// mismatch under strict mode, and lower-level I/O / encoding
-    /// failures from `mvm_security::snapshot_hmac::verify`. ADR-007 /
+    /// failures from `crate::crypto::snapshot_hmac::verify`. ADR-007 /
     /// plan 41 W4 — refusing to resume a tampered snapshot is a
     /// security signal and must be auditable.
     SnapshotIntegrityFailed,

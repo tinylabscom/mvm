@@ -26,11 +26,11 @@ The target is **17 architectural crates** (from 32), plus a bracketed-off `crate
 | Current crate(s) | Destination | Note |
 |---|---|---|
 | `mvm-core` | **`mvm-core`** (keep) | absorbs plan + policy + security; hosts the dedups (`core::framing`, `core::config_envelope`, `core::paths`, `core::subprocess`) |
-| `mvm-plan`, `mvm-policy`, `mvm-security` | → `mvm-core` | pure types + crypto; `mvm-core` already owns "signing". **No async/runtime deps may enter `mvm-core`.** |
+| `mvm-plan`, `mvm-policy`, `mvm-security` | → `mvm-core` | pure types + crypto; `mvm-core` already owns "signing". **No async/runtime deps may enter `mvm-core`** (held — `sigstore` stays opt-in behind `manifest-verify`). **As-built (plan 121):** `mvm-plan`→`mvm-core::plan`, `mvm-policy`→`mvm-core::policy`, `mvm-security`→`mvm-core::crypto` (named `crypto`, not `security`, to avoid clashing with `policy::security`, the session-policy type). |
 | `mvm-ir` | → `mvm-sdk` | the IR is the SDK's lowering target |
 | `mvm-sdk` | **`mvm-sdk`** (keep) | the central derivation engine; absorbs the IR |
 | `mvm-sdk-macros` | **`mvm-sdk-macros`** (keep) | proc-macro crates must stand alone |
-| `mvm-base` | → `mvm` | Lima-era leftover |
+| `mvm-base` | → `mvm-backend::base` | Lima-era leftover. **As-built (plan 121 A2):** folds into `mvm-backend`, **not** `mvm` — `mvm-backend` is its heaviest consumer (~53/71 refs) and sits *below* `mvm`, so folding up into `mvm` cycles (`mvm → mvm-backend → mvm`). `mvm` re-exports `shell`/`ui`/`shell_mock`/`cow`/`runtime_meta` at their old paths so the mvmd `mvmctl::runtime::*` contract is unchanged. |
 | `mvm` | **`mvm`** (keep) | runtime: shell, VM lifecycle, UI, templates |
 | `mvm-build` | **`mvm-build`** (keep) | Nix builder pipeline; also hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init`, `mvm-egress-proxy`), cfg-gated inert on non-Linux |
 | `mvm-host-vm-init`, `mvm-egress-proxy` | → `mvm-build` (`[[bin]]`s) | builder-VM-only Linux tools |
@@ -40,16 +40,19 @@ The target is **17 architectural crates** (from 32), plus a bracketed-off `crate
 | `mvm-mcp` | **`mvm-mcp`** (keep) | backs `mvmctl mcp serve` (local stdio MCP; **not** the REST sidecar — that is mvmd's) |
 | `mvm-oci` | **`mvm-oci`** (keep) | OCI import/export (claim 14) |
 | `mvm-backend` | **`mvm-backend`** (keep) | `VmBackend` trait + all impls; backend **selection/dispatch** lives here |
-| `mvm-providers`, `mvm-libkrun`, `mvm-vz` | → `mvm-backend` (+ `crates/deps/libkrun-sys`) | FFI binding moves to `crates/deps/`; the Swift-interface (`mvm-vz`, no FFI) folds into `mvm-backend` |
+| `mvm-providers`, `mvm-libkrun`, `mvm-vz` | → `mvm-backend` / `crates/deps/libkrun-sys` / `mvm-build` | **As-built (plan 121 C1/C2):** `mvm-providers`→`mvm-backend::providers`. `mvm-libkrun`→**`crates/deps/libkrun-sys`** (the C-FFI binding **and** the safe wrapper — `mvm-build` consumes the wrapper and sits below `mvm-backend`, so the wrapper can't move up into `mvm-backend`; only the `VmBackend` dispatch (`LibkrunBackend`) stays in `mvm-backend`). `mvm-vz` (Swift-interface, no FFI) → **`mvm-build::vz`**, **not** `mvm-backend` — `mvm-build`'s `vz_builder` consumes it and sits below `mvm-backend` (same cycle); `crates/deps/` is FFI-only so it doesn't fit there. `VzBackend` dispatch stays in `mvm-backend`. |
 | — | **`mvm-network`** (new) | `NetworkProvider`: provisioning + ingress/egress policy + DNS + audit (ADR-064 generalized to provisioning) |
 | `mvm-storage` | **`mvm-storage`** (keep) | `StorageProvider` (host-owned volumes: `local`/**`encrypted`**/snapshot) **+ `MountProvider`** (mount-source resolution: `HostPath`/`Volume`/`Tmpfs` built-in; **S3 / Hetzner-Volume / NFS as feature-gated external impls** via the IR's open `MountSource::External`) |
 | `mvm-addon-dns`, `mvm-addon-vsock-bridge` | → **`mvm-guest-helpers`** (`[[bin]]`s) | in-guest helper daemons |
 | `mvm-supervisor`, `mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`, `mvm-jailer-lite` | → **`mvm-hostd`** | one crate, **four separate `[[bin]]`s** (see §3); jailer-lite is a module |
 | `mvm-libkrun-supervisor`, `mvm-vz-drainer`, `mvm-firecracker-bridge` | → **`mvm-vm-host`** | one crate, cfg-gated per-backend `[[bin]]`s (one process per VM) |
 | `mvm-vz-supervisor` (Swift) | **`mvm-vz-supervisor`** (keep) | non-Rust; separate build, outside the cargo workspace |
+| `mvm-verify` | **`mvm-verify`** (keep) | **omitted from the original table; preserved by plan 121.** wasm-clean, dependency-light verifier for the chain-signed audit log (ADR-069); zero `mvm-*` deps, external consumer `web/audit-verify/`, drift-tripwire in `mvm-hostd` tests — earns separate existence. |
 | `xtask` | **`xtask`** (keep) | workspace tooling + the claim-gate lints |
 
-**The 17 architectural crates:** `mvm-core`, `mvm-sdk`, `mvm-sdk-macros`, `mvm`, `mvm-build`, `mvm-guest`, `mvm-cli`, `mvm-mcp`, `mvm-oci`, `mvm-backend`, `mvm-network`, `mvm-storage`, `mvm-hostd`, `mvm-vm-host`, `mvm-guest-helpers`, `mvm-vz-supervisor` (Swift), `xtask`. (+ the `crates/*/fuzz` crates, excluded from the workspace as today.)
+**The 17 architectural crates:** `mvm-core`, `mvm-sdk`, `mvm-sdk-macros`, `mvm`, `mvm-build`, `mvm-guest`, `mvm-cli`, `mvm-mcp`, `mvm-oci`, `mvm-backend`, `mvm-network`, `mvm-storage`, `mvm-hostd`, `mvm-vm-host`, `mvm-guest-helpers`, `mvm-vz-supervisor` (Swift), `xtask`. (+ `crates/deps/libkrun-sys`, the standalone `mvm-verify`, and the `crates/*/fuzz` crates, all excluded from the architectural count above.)
+
+> **As-built after plan 121 (2026-06):** 15 Rust crates with a `Cargo.toml` under `crates/` — `mvm-core`, `mvm-sdk`, `mvm-sdk-macros`, `mvm`, `mvm-build`, `mvm-guest`, `mvm-guest-helpers`, `mvm-cli`, `mvm-mcp`, `mvm-oci`, `mvm-backend`, `mvm-storage`, `mvm-hostd`, `mvm-vm-host`, `mvm-verify` — plus `crates/deps/libkrun-sys`, the Swift `mvm-vz-supervisor`, and `xtask`. `mvm-network` (the 17th) is created by **plan 123** when `NetworkProvider` lands. The `core::` dedups (§1 line 54 / `mvm-core` row) land in **plan 121 Task B4**, deferred to run after the structural folds.
 
 `mvm-core` is the common crate: the six vsock/framing impls collapse to one `core::framing` (`FramedMessage<T>` with pluggable auth **and an optional encryption stage** — the transport is layered so a Noise/AEAD wrapper drops in for any future untrusted-boundary channel without touching callers; none ships today, see §5); the four config/secret loaders to one `core::config_envelope`; scattered XDG/path helpers to one `core::paths`; the three signer-subprocess templates to one `core::subprocess` scaffold (keyless — see §3).
 

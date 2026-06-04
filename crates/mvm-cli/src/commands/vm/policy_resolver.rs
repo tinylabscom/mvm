@@ -22,12 +22,12 @@
 //! bundle:
 //!
 //! - `egress_policy` → `L7EgressProxy::new` from
-//!   `mvm_supervisor::l7_proxy`. The chain wraps a
+//!   `mvm_hostd::supervisor::l7_proxy`. The chain wraps a
 //!   `DestinationPolicy::new(bundle.egress.allow_list)`; CONNECT
 //!   targets that miss the allow-list return 403 + audit. Plain-HTTP
 //!   is gated on `bundle.egress.allow_plain_http` per ADR-002.
 //! - `tool_policy` → `PolicyToolGate::from_policy(&bundle.tool)`
-//!   from `mvm_supervisor::policy_tool_gate`. RPC calls to tool
+//!   from `mvm_hostd::supervisor::policy_tool_gate`. RPC calls to tool
 //!   names absent from `bundle.tool.allowed` get
 //!   `ToolDecision::Deny`.
 //!
@@ -68,8 +68,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mvm_plan::{ExecutionPlan, FsPolicyRef, PolicyRef};
-use mvm_supervisor::{
+use mvm_core::plan::{ExecutionPlan, FsPolicyRef, PolicyRef};
+use mvm_hostd::supervisor::{
     ArtifactCollector, AuditPolicyValidationError, EgressPolicyValidationError, EgressProxy,
     KeystoreReleaser, L4Gate, L4SpecError, L7EgressProxy, LiveArtifactCollector,
     LiveKeystoreReleaser, LiveL4Gate, NoopArtifactCollector, NoopEgressAuditSink, NoopEgressProxy,
@@ -103,7 +103,7 @@ pub struct ResolvedSlots {
     pub tool_gate: Box<dyn ToolGate>,
     pub keystore: Box<dyn KeystoreReleaser>,
     pub artifacts: Box<dyn ArtifactCollector>,
-    pub audit: Option<mvm_policy::AuditPolicy>,
+    pub audit: Option<mvm_core::policy::AuditPolicy>,
 }
 
 /// Errors `resolve_supervisor_components` can return.
@@ -313,11 +313,11 @@ fn classify(value: &str) -> RefShape<'_> {
 }
 
 /// Default base dir for policy bundles. Mirrors
-/// `mvm_policy::toml_loader::default_policy_dir` but falls back to
+/// `mvm_core::policy::toml_loader::default_policy_dir` but falls back to
 /// the literal `~/.mvm/policies/` (good for error messages) when
 /// `$HOME` is unset.
 fn default_policy_dir() -> PathBuf {
-    mvm_policy::toml_loader::default_policy_dir()
+    mvm_core::policy::toml_loader::default_policy_dir()
         .unwrap_or_else(|| PathBuf::from("~/.mvm/policies"))
 }
 
@@ -390,7 +390,8 @@ pub fn resolve_supervisor_components_with_dir(
         RefShape::LocalDefault => Ok(noop_slots()),
         RefShape::TenantWorkload { tenant, workload } => {
             let bundle = load_tenant_workload(base_dir, network, tenant, workload)?;
-            let bundle_path = mvm_policy::toml_loader::bundle_path(base_dir, tenant, workload);
+            let bundle_path =
+                mvm_core::policy::toml_loader::bundle_path(base_dir, tenant, workload);
             slots_from_bundle(&bundle, network, &bundle_path)
         }
         // classify_plan_refs already converts Unrecognized into a
@@ -423,7 +424,7 @@ fn noop_slots() -> ResolvedSlots {
 /// `ResolveError::L4SpecInvalid` with the underlying detail so the
 /// operator knows which row to fix.
 fn slots_from_bundle(
-    bundle: &mvm_policy::PolicyBundle,
+    bundle: &mvm_core::policy::PolicyBundle,
     ref_value: &str,
     path: &std::path::Path,
 ) -> Result<ResolvedSlots, ResolveError> {
@@ -488,7 +489,7 @@ fn slots_from_bundle(
         },
     )?;
     let body_cap = if bundle.egress.body_cap_bytes == 0 {
-        mvm_policy::DEFAULT_BODY_CAP_BYTES as usize
+        mvm_core::policy::DEFAULT_BODY_CAP_BYTES as usize
     } else {
         bundle.egress.body_cap_bytes as usize
     };
@@ -529,11 +530,11 @@ fn load_tenant_workload(
     ref_value: &str,
     tenant: &str,
     workload: &str,
-) -> Result<mvm_policy::PolicyBundle, ResolveError> {
-    let path = mvm_policy::toml_loader::bundle_path(base, tenant, workload);
-    match mvm_policy::toml_loader::load_bundle_from_path(base, tenant, workload) {
+) -> Result<mvm_core::policy::PolicyBundle, ResolveError> {
+    let path = mvm_core::policy::toml_loader::bundle_path(base, tenant, workload);
+    match mvm_core::policy::toml_loader::load_bundle_from_path(base, tenant, workload) {
         Ok(bundle) => Ok(bundle),
-        Err(mvm_policy::toml_loader::LoadError::NotFound { path }) => {
+        Err(mvm_core::policy::toml_loader::LoadError::NotFound { path }) => {
             Err(ResolveError::BundleNotFound {
                 field: "network_policy",
                 value: ref_value.to_string(),
@@ -541,15 +542,15 @@ fn load_tenant_workload(
             })
         }
         Err(
-            mvm_policy::toml_loader::LoadError::Parse { detail, .. }
-            | mvm_policy::toml_loader::LoadError::Io { detail, .. },
+            mvm_core::policy::toml_loader::LoadError::Parse { detail, .. }
+            | mvm_core::policy::toml_loader::LoadError::Io { detail, .. },
         ) => Err(ResolveError::BundleParseFailed {
             field: "network_policy",
             value: ref_value.to_string(),
             path,
             detail,
         }),
-        Err(mvm_policy::toml_loader::LoadError::SchemaMismatch { got, known, .. }) => {
+        Err(mvm_core::policy::toml_loader::LoadError::SchemaMismatch { got, known, .. }) => {
             Err(ResolveError::BundleParseFailed {
                 field: "network_policy",
                 value: ref_value.to_string(),
@@ -566,7 +567,7 @@ fn load_tenant_workload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, KeyRotationSpec,
         Nonce, PlanId, PlanSeccompTier, PostRunLifecycle, Resources, RuntimeProfileRef,
         SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
@@ -649,14 +650,14 @@ mod tests {
             let net_err = slots
                 .network
                 .evaluate(
-                    mvm_supervisor::L4Protocol::Tcp,
+                    mvm_hostd::supervisor::L4Protocol::Tcp,
                     "1.1.1.1".parse().unwrap(),
                     443,
                 )
                 .await
                 .expect_err("Noop L4 gate must error");
             assert!(
-                matches!(net_err, mvm_supervisor::L4Error::NotWired),
+                matches!(net_err, mvm_hostd::supervisor::L4Error::NotWired),
                 "unexpected L4 err: {net_err:?}"
             );
 
@@ -666,7 +667,7 @@ mod tests {
                 .await
                 .expect_err("Noop egress must error");
             assert!(
-                matches!(egress_err, mvm_supervisor::EgressError::NotWired),
+                matches!(egress_err, mvm_hostd::supervisor::EgressError::NotWired),
                 "unexpected egress err: {egress_err:?}"
             );
 
@@ -676,7 +677,7 @@ mod tests {
                 .await
                 .expect_err("Noop tool gate must error");
             assert!(
-                matches!(tool_err, mvm_supervisor::ToolError::NotWired),
+                matches!(tool_err, mvm_hostd::supervisor::ToolError::NotWired),
                 "unexpected tool err: {tool_err:?}"
             );
 
@@ -686,7 +687,7 @@ mod tests {
                 .await
                 .expect_err("Noop keystore must error");
             assert!(
-                matches!(revoke_err, mvm_supervisor::KeystoreError::NotWired),
+                matches!(revoke_err, mvm_hostd::supervisor::KeystoreError::NotWired),
                 "unexpected keystore err: {revoke_err:?}"
             );
 
@@ -696,7 +697,7 @@ mod tests {
                 .await
                 .expect_err("Noop artifact collector must error");
             assert!(
-                matches!(collect_err, mvm_supervisor::ArtifactError::NotWired),
+                matches!(collect_err, mvm_hostd::supervisor::ArtifactError::NotWired),
                 "unexpected artifact err: {collect_err:?}"
             );
         });
@@ -911,7 +912,7 @@ allowed = ["{name}"]
                 .await
                 .expect("policy lookup must succeed (not NotWired)");
             assert!(
-                matches!(deny, mvm_supervisor::EgressDecision::Deny { .. }),
+                matches!(deny, mvm_hostd::supervisor::EgressDecision::Deny { .. }),
                 "off-list host should produce Deny, got {deny:?}"
             );
 
@@ -920,9 +921,9 @@ allowed = ["{name}"]
             // (sandbox). NotWired would mean the slot is still a
             // NoopEgressProxy.
             match slots.egress.inspect("api.example.com", "/v1/x").await {
-                Ok(_) => {}                                                    // Allow — DNS resolved
-                Err(mvm_supervisor::EgressError::UpstreamUnreachable(_)) => {} // sandboxed
-                Err(mvm_supervisor::EgressError::NotWired) => {
+                Ok(_) => {} // Allow — DNS resolved
+                Err(mvm_hostd::supervisor::EgressError::UpstreamUnreachable(_)) => {} // sandboxed
+                Err(mvm_hostd::supervisor::EgressError::NotWired) => {
                     panic!("slot is still a NoopEgressProxy — Slice A wiring missing")
                 }
                 Err(other) => panic!("unexpected egress error: {other:?}"),
@@ -958,14 +959,14 @@ allowed = ["{name}"]
                 .check("web_search")
                 .await
                 .expect("PolicyToolGate must not return NotWired post-Slice-A");
-            assert_eq!(allow, mvm_supervisor::ToolDecision::Allow);
+            assert_eq!(allow, mvm_hostd::supervisor::ToolDecision::Allow);
             let deny = slots
                 .tool_gate
                 .check("forbidden_tool")
                 .await
                 .expect("policy lookup itself must succeed");
             assert!(
-                matches!(deny, mvm_supervisor::ToolDecision::Deny { .. }),
+                matches!(deny, mvm_hostd::supervisor::ToolDecision::Deny { .. }),
                 "off-list tool should produce Deny, got {deny:?}"
             );
         });
@@ -1023,7 +1024,7 @@ rotation_interval_days = {days}
                 .await
                 .expect_err("live keystore must surface NotImplemented");
             match err {
-                mvm_supervisor::KeystoreError::NotImplemented {
+                mvm_hostd::supervisor::KeystoreError::NotImplemented {
                     rotation_interval_days,
                 } => assert_eq!(rotation_interval_days, 30),
                 other => panic!("expected NotImplemented, got {other:?}"),
@@ -1064,7 +1065,7 @@ rotation_interval_days = {days}
             assert!(
                 matches!(
                     err,
-                    mvm_supervisor::KeystoreError::NotImplemented {
+                    mvm_hostd::supervisor::KeystoreError::NotImplemented {
                         rotation_interval_days: 0
                     }
                 ),
@@ -1129,7 +1130,7 @@ retention_days = {retention_days}
                 .await
                 .expect_err("live collector must surface NotImplemented");
             match err {
-                mvm_supervisor::ArtifactError::NotImplemented {
+                mvm_hostd::supervisor::ArtifactError::NotImplemented {
                     path_count,
                     retention_days,
                 } => {
@@ -1174,7 +1175,7 @@ retention_days = {retention_days}
             assert!(
                 matches!(
                     err,
-                    mvm_supervisor::ArtifactError::NotImplemented {
+                    mvm_hostd::supervisor::ArtifactError::NotImplemented {
                         path_count: 0,
                         retention_days: 0
                     }
@@ -1247,26 +1248,26 @@ port_hi  = {port}
             let allow = slots
                 .network
                 .evaluate(
-                    mvm_supervisor::L4Protocol::Tcp,
+                    mvm_hostd::supervisor::L4Protocol::Tcp,
                     "10.0.0.5".parse().unwrap(),
                     443,
                 )
                 .await
                 .expect("L4Gate must not return NotWired post-Slice-B");
-            assert_eq!(allow, mvm_supervisor::L4Decision::Allow);
+            assert_eq!(allow, mvm_hostd::supervisor::L4Decision::Allow);
 
             // Off-rule flow: same host, different port → Deny.
             let deny = slots
                 .network
                 .evaluate(
-                    mvm_supervisor::L4Protocol::Tcp,
+                    mvm_hostd::supervisor::L4Protocol::Tcp,
                     "10.0.0.5".parse().unwrap(),
                     22,
                 )
                 .await
                 .expect("policy lookup itself must succeed");
             assert!(
-                matches!(deny, mvm_supervisor::L4Decision::Deny { .. }),
+                matches!(deny, mvm_hostd::supervisor::L4Decision::Deny { .. }),
                 "off-rule flow should produce Deny, got {deny:?}"
             );
         });
@@ -1300,14 +1301,14 @@ port_hi  = {port}
             let d = slots
                 .network
                 .evaluate(
-                    mvm_supervisor::L4Protocol::Tcp,
+                    mvm_hostd::supervisor::L4Protocol::Tcp,
                     "8.8.8.8".parse().unwrap(),
                     443,
                 )
                 .await
                 .expect("LiveL4Gate must not return NotWired even for empty policy");
             assert!(
-                matches!(d, mvm_supervisor::L4Decision::Deny { .. }),
+                matches!(d, mvm_hostd::supervisor::L4Decision::Deny { .. }),
                 "empty L4 policy must default-deny, got {d:?}"
             );
         });
@@ -1435,9 +1436,9 @@ disabled_inspectors = [{list}]
             &fixture_bundle_with_tool_allow("web_search"),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
-        let chain = mvm_supervisor::build_inspector_chain(&bundle.egress, None);
+        let chain = mvm_hostd::supervisor::build_inspector_chain(&bundle.egress, None);
         assert_eq!(
             chain.len(),
             5,
@@ -1458,9 +1459,9 @@ disabled_inspectors = [{list}]
             &fixture_bundle_with_disabled_inspectors(&["ssrf_guard", "secrets_scanner"]),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
-        let chain = mvm_supervisor::build_inspector_chain(&bundle.egress, None);
+        let chain = mvm_hostd::supervisor::build_inspector_chain(&bundle.egress, None);
         assert_eq!(
             chain.len(),
             3,
@@ -1487,9 +1488,9 @@ disabled_inspectors = [{list}]
             &fixture_bundle_with_disabled_inspectors(&["typo_inspector"]),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
-        let chain = mvm_supervisor::build_inspector_chain(&bundle.egress, None);
+        let chain = mvm_hostd::supervisor::build_inspector_chain(&bundle.egress, None);
         assert_eq!(
             chain.len(),
             5,
@@ -1647,11 +1648,14 @@ bundle_version = 1
             &fixture_bundle_with_pii(Some("disabled"), &[]),
         );
         let bundle =
-            mvm_policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
                 .expect("bundle parses");
-        let chain =
-            mvm_supervisor::build_inspector_chain_with_pii(&bundle.egress, &bundle.pii, None)
-                .expect("disabled is valid");
+        let chain = mvm_hostd::supervisor::build_inspector_chain_with_pii(
+            &bundle.egress,
+            &bundle.pii,
+            None,
+        )
+        .expect("disabled is valid");
         assert_eq!(
             chain.len(),
             4,
@@ -1896,7 +1900,7 @@ stream_destinations = [{list}]
                 .await
                 .expect("policy lookup must succeed (not NotWired)");
             assert!(
-                matches!(deny, mvm_supervisor::EgressDecision::Deny { .. }),
+                matches!(deny, mvm_hostd::supervisor::EgressDecision::Deny { .. }),
                 "off-list host should still produce Deny after chain expansion, got {deny:?}"
             );
         });

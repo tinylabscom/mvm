@@ -2,7 +2,7 @@
 //!
 //! Plan 102 W6.A.5 — VzBackend is stateless (no per-VM in-memory
 //! ownership), so `gvproxy` must outlive `VzBackend::start`'s
-//! return. We can't use [`mvm_libkrun::gvproxy::spawn`] directly:
+//! return. We can't use [`libkrun_sys::gvproxy::spawn`] directly:
 //! it returns a `GvproxyHandle` whose Drop SIGTERMs the child the
 //! moment the handle goes out of scope — perfect for the in-libkrun-
 //! supervisor model (which holds the handle on the supervisor
@@ -18,7 +18,7 @@
 //! original parent (and re-parented to init when the parent
 //! eventually exits).
 //!
-//! The libkrun lane keeps using `mvm_libkrun::gvproxy::spawn` —
+//! The libkrun lane keeps using `libkrun_sys::gvproxy::spawn` —
 //! that model is in-process and the Drop semantics fit it. We
 //! deliberately don't refactor the libkrun lane to share this
 //! module: the trade-offs are different (in-process vs detached).
@@ -73,10 +73,10 @@ pub struct HostGvproxyInfo {
 /// `~/.mvm/vms/<name>/`). Created if missing. Stale PID + socket
 /// files from a prior run are pre-cleaned.
 pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
-    let gvproxy_bin = mvm_libkrun::gvproxy::locate_gvproxy().ok_or_else(|| {
+    let gvproxy_bin = libkrun_sys::gvproxy::locate_gvproxy().ok_or_else(|| {
         anyhow!(
             "gvproxy binary not found on PATH. {}",
-            mvm_libkrun::gvproxy::install_hint()
+            libkrun_sys::gvproxy::install_hint()
         )
     })?;
 
@@ -106,7 +106,7 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
         s.push(socket_path.as_os_str());
         s
     };
-    let ssh_port = mvm_libkrun::gvproxy::free_loopback_port()
+    let ssh_port = libkrun_sys::gvproxy::free_loopback_port()
         .map_err(|e| anyhow!("reserve a free gvproxy ssh-forward port: {e}"))?;
 
     // NEVER inherit the parent's stderr. gvproxy is detached and
@@ -311,7 +311,7 @@ mod tests {
         // way the libkrun lane does — a fresh OS-assigned free port,
         // never a deterministic scratch-dir hash that could collide
         // with a leaked daemon.
-        let port = mvm_libkrun::gvproxy::free_loopback_port().expect("reserve a free port");
+        let port = libkrun_sys::gvproxy::free_loopback_port().expect("reserve a free port");
         assert!(port >= 1024, "port {port} below gvproxy's 1024 floor");
     }
 

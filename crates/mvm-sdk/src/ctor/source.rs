@@ -1,4 +1,4 @@
-use mvm_ir::Source;
+use crate::ir::Source;
 
 /// Bundle the source tree at `path` (relative to the manifest dir).
 /// Default include is `["**"]`.

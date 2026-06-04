@@ -1,0 +1,35 @@
+[package]
+name = "mvm-guest-helpers"
+description = "In-guest helper binaries for mvm microVMs: mvm-addon-dns (loopback DNS resolver) + mvm-addon-vsock-bridge (loopback TCP ↔ host-vsock bridge). Consolidated from the two former mvm-addon-* crates (plan 121 D3). Baked into the rootfs by mkGuest; run inside the guest, not on the host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mvm-addon-dns"
+path = "src/bin/mvm-addon-dns.rs"
+
+[[bin]]
+name = "mvm-addon-vsock-bridge"
+path = "src/bin/mvm-addon-vsock-bridge.rs"
+
+[dependencies]
+mvm-core.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# mvm-addon-dns's in-guest resolver parses/answers DNS over loopback.
+hickory-proto.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

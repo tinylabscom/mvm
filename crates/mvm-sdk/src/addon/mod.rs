@@ -44,4 +44,4 @@ pub use manifest::{
 // Re-export the consumer-side IR shapes so authors can write
 // `use mvm_sdk::addon::{AddonUse, AddonRef, ...}` rather than reaching
 // across two crates.
-pub use mvm_ir::{AddonRef, AddonTier, AddonUse, ThreatTier};
+pub use crate::ir::{AddonRef, AddonTier, AddonUse, ThreatTier};

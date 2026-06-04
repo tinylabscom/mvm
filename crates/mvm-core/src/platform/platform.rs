@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 /// so probes short-circuit on the typical developer install.
 ///
 /// Single source of truth shared by [`Platform::has_libkrun`] and
-/// `mvm_libkrun::install_paths()`. Keeping both sides in sync is
+/// `libkrun_sys::install_paths()`. Keeping both sides in sync is
 /// structurally guaranteed: `install_paths()` is derived from this const, so
 /// the two lists cannot drift.
 #[cfg(target_os = "macos")]
@@ -132,7 +132,7 @@ impl Platform {
             return false;
         }
         // Filesystem probe — delegates to the canonical path list so
-        // this probe and mvm_libkrun::install_paths() can never drift.
+        // this probe and libkrun_sys::install_paths() can never drift.
         LIBKRUN_LIB_PATHS.iter().any(|p| Path::new(p).exists())
     }
 
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn test_has_libkrun_returns_false_on_windows_regardless_of_filesystem() {
         // Windows: libkrun has no Windows port. Always false irrespective
-        // of what `mvm_libkrun::is_available()` would say.
+        // of what `libkrun_sys::is_available()` would say.
         assert!(!Platform::Windows.has_libkrun());
     }
 

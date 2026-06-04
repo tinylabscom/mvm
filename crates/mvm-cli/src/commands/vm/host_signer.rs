@@ -252,7 +252,7 @@ fn read_exact_n(path: &Path, n: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::{sign_plan, verify_plan};
+    use mvm_core::plan::{sign_plan, verify_plan};
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -354,12 +354,12 @@ mod tests {
             image_sha256: &"a".repeat(64),
             image_cosign_bundle: None,
             intent: None,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             network_policy_ref: None,
             fs_policy_ref: None,
             egress_policy_ref: None,
             tool_policy_ref: None,
-            secret_release: mvm_plan::SecretReleasePolicy::None,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             audit_event_prefix: None,
             cpus: 1,

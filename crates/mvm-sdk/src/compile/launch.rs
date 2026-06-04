@@ -6,7 +6,7 @@
 
 use crate::compile::hooks::merge_hooks;
 use crate::compile::source::SourcePlan;
-use mvm_ir::{Hooks, Workload, canonicalize, ir_hash};
+use crate::ir::{Hooks, Workload, canonicalize, ir_hash};
 use serde::Serialize;
 
 /// Bumped from `"1.0"` to `"1.1"` at addon GA (ADR-0018). The
@@ -108,7 +108,7 @@ pub fn build_launch_json(
         .dependencies
         .as_ref()
         .and_then(|d| match d {
-            mvm_ir::Dependencies::None => None,
+            crate::ir::Dependencies::None => None,
             other => Some(serde_json::to_value(other)),
         })
         .transpose()?;
@@ -142,7 +142,7 @@ pub fn build_launch_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::{App, Entrypoint, Image, Resources, Source};
+    use crate::ir::{App, Entrypoint, Image, Resources, Source};
 
     fn sample() -> Workload {
         Workload {

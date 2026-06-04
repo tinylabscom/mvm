@@ -276,7 +276,7 @@ pub struct InstanceState {
     #[serde(default)]
     pub last_busy_at: Option<String>,
     /// Caller-supplied metadata. Tenant-controlled; validated via
-    /// `mvm_security::policy::InputValidator`. Echoed in audit events
+    /// `crate::crypto::policy::InputValidator`. Echoed in audit events
     /// and webhook bodies, so charset/length constraints are
     /// load-bearing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

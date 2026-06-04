@@ -6,7 +6,7 @@ use super::fc_config;
 use super::net;
 use super::snapshot;
 use crate::security::{audit, cgroups, encryption, jailer, metadata, seccomp};
-use mvm_security::keystore;
+use mvm_core::crypto::keystore;
 use crate::shell;
 use crate::vm::bridge;
 use crate::vm::pool::lifecycle::pool_load;

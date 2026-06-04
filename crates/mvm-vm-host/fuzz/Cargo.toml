@@ -1,0 +1,54 @@
+[package]
+name = "mvm-vm-host-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detach from the parent workspace — `crates/mvm-firecracker-bridge/fuzz`
+# is listed under `workspace.exclude` in the repo root Cargo.toml
+# because `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
+# (which injects sanitizer + linker flags). An empty `[workspace]`
+# table self-identifies this manifest as standalone so cargo doesn't
+# complain about a hierarchy mismatch when invoked through
+# `cargo fuzz`.
+[workspace]
+
+# cargo-fuzz keys off this metadata flag.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+toml = "0.8"
+
+[dependencies.mvm-vm-host]
+path = ".."
+
+# Plan 113 §Task 15 — fuzz the host-side `BridgeConfigJson` JSON
+# parser. The bridge binary reads attacker-influenced bytes on stdin
+# (Task 13's `FirecrackerBackend` writes them, but the bytes traverse
+# a pipe boundary the bridge must defend before installing Landlock +
+# seccomp). Analog of `fuzz_supervisor_config` and `fuzz_guest_request`;
+# harness goal is "never panic on any input." See
+# `crates/mvm-firecracker-bridge/fuzz/fuzz_targets/fuzz_bridge_config_json.rs`
+# for the harness body and ADR-064 §"Trust model" for the trust
+# boundary.
+[[bin]]
+name = "fuzz_bridge_config_json"
+path = "fuzz_targets/fuzz_bridge_config_json.rs"
+test = false
+doc = false
+bench = false
+
+# Plan 113 §Task 15 — fuzz the operator-curated `passt-hashes.toml`
+# parser. The bridge reads this file BEFORE installing confinement, so
+# a panic here surfaces as a hard process death before the FlowEvent
+# pipeline is up. `#[serde(deny_unknown_fields)]` is asserted by the
+# unit tests; this target is the no-panic complement.
+[[bin]]
+name = "fuzz_passt_hashes_toml"
+path = "fuzz_targets/fuzz_passt_hashes_toml.rs"
+test = false
+doc = false
+bench = false

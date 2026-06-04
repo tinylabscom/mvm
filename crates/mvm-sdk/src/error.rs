@@ -1,7 +1,7 @@
 //! Error types surfaced by the builder and emit paths.
 
-/// Errors surfaced when constructing a [`mvm_ir::Workload`] or
-/// [`mvm_ir::App`] via the builders. The builders enforce required-field
+/// Errors surfaced when constructing a [`crate::ir::Workload`] or
+/// [`crate::ir::App`] via the builders. The builders enforce required-field
 /// presence at `.build()` time so the rest of the SDK can take typed
 /// values.
 #[derive(Debug, thiserror::Error)]
@@ -16,7 +16,7 @@ pub enum BuildError {
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
     #[error("workload validation failed: {0:?}")]
-    Validation(Vec<mvm_ir::ValidationError>),
+    Validation(Vec<crate::ir::ValidationError>),
     #[error("canonicalization failed: {0}")]
     Canonicalize(serde_json::Error),
     #[error("write to MVM_IR_OUT path `{0}` failed: {1}")]

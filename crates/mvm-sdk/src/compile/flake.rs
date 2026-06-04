@@ -19,7 +19,7 @@
 
 use crate::compile::launch::{ARTIFACT_FORMAT_VERSION, TOOLCHAIN_VERSION};
 use crate::compile::mvm_pin::resolved_mvm_flake_url;
-use mvm_ir::{Workload, ir_hash};
+use crate::ir::{Workload, ir_hash};
 
 pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error> {
     let hash = ir_hash(workload)?;
@@ -205,7 +205,7 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::{App, Entrypoint, Image, Resources, Source};
+    use crate::ir::{App, Entrypoint, Image, Resources, Source};
 
     fn sample() -> Workload {
         Workload {
@@ -294,7 +294,7 @@ mod tests {
             language: "python".into(),
             module: "app".into(),
             function: "greet".into(),
-            format: mvm_ir::Format::Json,
+            format: crate::ir::Format::Json,
             working_dir: "/app".into(),
             env: Default::default(),
             args_schema: None,

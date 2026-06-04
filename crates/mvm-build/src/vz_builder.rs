@@ -3,7 +3,7 @@
 //!
 //! Plan 97 Phase C, second `VmBackendForBuilder` impl. Owns the
 //! Vz-specific spawn (`mvm-vz-supervisor` binary with
-//! [`mvm_vz::SupervisorConfig`] JSON on stdin) and surfaces the
+//! [`crate::vz::SupervisorConfig`] JSON on stdin) and surfaces the
 //! resulting [`BuilderVmExitInfo`] back to the seam.
 //!
 //! ## Scope
@@ -178,7 +178,7 @@ impl VmBackendForBuilder for VzBuilderBackend {
     }
 }
 
-/// Build the Vz [`mvm_vz::SupervisorConfig`] from the trait's
+/// Build the Vz [`crate::vz::SupervisorConfig`] from the trait's
 /// hypervisor-agnostic inputs. Pulled out of
 /// `run_attached_with_mounts` so unit tests can exercise the mapping
 /// without spawning a supervisor.
@@ -187,7 +187,7 @@ fn build_vz_supervisor_config(
     image: &BuilderVmImage,
     mounts: &[BuilderVmMount],
     extra_disks: &[BuilderVmDisk],
-) -> Result<mvm_vz::SupervisorConfig, BuilderVmError> {
+) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
     let BuilderVmImage::Rootfs {
         kernel_path,
         rootfs_path,
@@ -222,7 +222,7 @@ fn build_vz_supervisor_config(
         cmdline.clone()
     };
 
-    let mut disks = vec![mvm_vz::DiskConfig {
+    let mut disks = vec![crate::vz::DiskConfig {
         id: "rootfs".to_string(),
         path: rootfs,
         // Rootfs is RO at boot (matches the W3 verified-boot model
@@ -231,7 +231,7 @@ fn build_vz_supervisor_config(
         read_only: true,
     }];
     for d in extra_disks {
-        disks.push(mvm_vz::DiskConfig {
+        disks.push(crate::vz::DiskConfig {
             id: d.id.clone(),
             path: path_to_string(&d.host_path, "extra_disk")?,
             read_only: d.read_only,
@@ -240,7 +240,7 @@ fn build_vz_supervisor_config(
 
     let mut virtio_fs = Vec::with_capacity(mounts.len());
     for m in mounts {
-        virtio_fs.push(mvm_vz::VirtioFsShare {
+        virtio_fs.push(crate::vz::VirtioFsShare {
             tag: m.tag.clone(),
             host_path: path_to_string(&m.host_path, "mount_host_path")?,
             read_only: m.read_only,
@@ -252,24 +252,24 @@ fn build_vz_supervisor_config(
         None => None,
     };
 
-    Ok(mvm_vz::SupervisorConfig {
+    Ok(crate::vz::SupervisorConfig {
         name: config.name.clone(),
         vm_state_dir: state_dir,
         pid_file_name: Some("builder.pid".to_string()),
-        kernel: mvm_vz::KernelConfig {
+        kernel: crate::vz::KernelConfig {
             path: kernel,
             cmdline: effective_cmdline,
             initrd_path,
         },
-        resources: mvm_vz::ResourceConfig {
+        resources: crate::vz::ResourceConfig {
             // BuilderVmRunConfig.vcpus is u8 (caller-bound by host
-            // cap checks); mvm_vz::ResourceConfig.cpu_count is u32.
+            // cap checks); crate::vz::ResourceConfig.cpu_count is u32.
             cpu_count: u32::from(config.vcpus),
             memory_mib: u64::from(config.memory_mib),
         },
         disks,
         virtio_fs,
-        vsock: mvm_vz::VsockConfig {
+        vsock: crate::vz::VsockConfig {
             ports: config.vsock_ports.clone(),
             socket_dir: vsock_dir,
         },
@@ -282,7 +282,7 @@ fn build_vz_supervisor_config(
         network: None,
         balloon: None,
         control_socket_path: None,
-        startup_mode: mvm_vz::StartupMode::Boot,
+        startup_mode: crate::vz::StartupMode::Boot,
     })
 }
 
@@ -803,11 +803,11 @@ impl BuilderVm for VzBuilderVm {
 ///    exe — the layout produced by `cargo install` + Homebrew
 ///    bottles that ship `mvmctl` alongside it.
 /// 3. The source-checkout build output via
-///    [`mvm_vz::source_tree_binary_path`] — CLAUDE.md "Source-checkout
+///    [`crate::vz::source_tree_binary_path`] — CLAUDE.md "Source-checkout
 ///    builds never depend on mvm-published artifacts".
 /// 4. The version-pinned release layout
 ///    `~/.mvm/bin/mvm-vz-supervisor-<version>` via
-///    [`mvm_vz::supervisor_binary_path`].
+///    [`crate::vz::supervisor_binary_path`].
 ///
 /// Returned errors are
 /// `BuilderVmError::ExtractionFailed` rather than a Vz-specific
@@ -834,13 +834,14 @@ pub fn resolve_vz_supervisor_path() -> Result<PathBuf, BuilderVmError> {
         }
     }
     if let Some(workspace_root) = workspace_root_from_manifest_dir() {
-        let candidate = mvm_vz::source_tree_binary_path(&workspace_root);
+        let candidate = crate::vz::source_tree_binary_path(&workspace_root);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
-        let candidate = mvm_vz::supervisor_binary_path(Path::new(&home), env!("CARGO_PKG_VERSION"));
+        let candidate =
+            crate::vz::supervisor_binary_path(Path::new(&home), env!("CARGO_PKG_VERSION"));
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -966,7 +967,7 @@ impl VzPersistentBuilderVm {
     /// pre-flight checks (Vz available, workspace dir exists,
     /// supervisor binary resolvable) → image + nix-store lock
     /// acquisition → state dir + job dir staging →
-    /// `mvm_vz::SupervisorConfig` build → `mvm-vz-supervisor` spawn.
+    /// `crate::vz::SupervisorConfig` build → `mvm-vz-supervisor` spawn.
     /// The nix-store flock is held inside the returned handle for
     /// the VM's lifetime so a concurrent `mvmctl up --prod` Install
     /// dispatch on the same host can't corrupt the shared ext4
@@ -1077,7 +1078,7 @@ fn stage_persistent_vz_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
     Ok(())
 }
 
-/// Build a [`mvm_vz::SupervisorConfig`] for the persistent VM.
+/// Build a [`crate::vz::SupervisorConfig`] for the persistent VM.
 /// Distinct from [`build_vz_supervisor_config`] because the
 /// persistent path doesn't come through the
 /// [`VmBackendForBuilder`] seam — `BuilderVmRunConfig` would force
@@ -1094,7 +1095,7 @@ fn build_vz_persistent_supervisor_config(
     nix_store_img: &Path,
     vcpus: u8,
     memory_mib: u32,
-) -> Result<mvm_vz::SupervisorConfig, BuilderVmError> {
+) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
     let BuilderVmImage::Rootfs {
         kernel_path,
         rootfs_path,
@@ -1124,21 +1125,21 @@ fn build_vz_persistent_supervisor_config(
         cmdline.clone()
     };
 
-    Ok(mvm_vz::SupervisorConfig {
+    Ok(crate::vz::SupervisorConfig {
         name: vm_name.to_string(),
         vm_state_dir: state_dir,
         pid_file_name: Some("builder.pid".to_string()),
-        kernel: mvm_vz::KernelConfig {
+        kernel: crate::vz::KernelConfig {
             path: kernel,
             cmdline: effective_cmdline,
             initrd_path: None,
         },
-        resources: mvm_vz::ResourceConfig {
+        resources: crate::vz::ResourceConfig {
             cpu_count: u32::from(vcpus),
             memory_mib: u64::from(memory_mib),
         },
         disks: vec![
-            mvm_vz::DiskConfig {
+            crate::vz::DiskConfig {
                 id: "rootfs".to_string(),
                 path: rootfs,
                 read_only: true,
@@ -1146,7 +1147,7 @@ fn build_vz_persistent_supervisor_config(
             // `/nix-store` rides as the second virtio-blk; the
             // in-guest `mvm-host-vm-init` mounts it before invoking
             // cmd.sh. Same layout libkrun uses.
-            mvm_vz::DiskConfig {
+            crate::vz::DiskConfig {
                 id: "nix-store".to_string(),
                 path: nix_store,
                 read_only: false,
@@ -1155,7 +1156,7 @@ fn build_vz_persistent_supervisor_config(
         virtio_fs: vec![
             // `/work` is the workspace bind. Bound at VM start (not
             // per-dispatch) per Plan 89 §"Workspace mount strategy".
-            mvm_vz::VirtioFsShare {
+            crate::vz::VirtioFsShare {
                 tag: "work".to_string(),
                 host_path: work,
                 // Builder writes into the workspace under
@@ -1169,18 +1170,18 @@ fn build_vz_persistent_supervisor_config(
             // `/out`. Two shares (same host path) match libkrun's
             // convention; the dispatch protocol assumes that
             // shape.
-            mvm_vz::VirtioFsShare {
+            crate::vz::VirtioFsShare {
                 tag: "out".to_string(),
                 host_path: job.clone(),
                 read_only: false,
             },
-            mvm_vz::VirtioFsShare {
+            crate::vz::VirtioFsShare {
                 tag: "job".to_string(),
                 host_path: job,
                 read_only: false,
             },
         ],
-        vsock: mvm_vz::VsockConfig {
+        vsock: crate::vz::VsockConfig {
             ports: vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT],
             socket_dir: vsock_dir,
         },
@@ -1191,7 +1192,7 @@ fn build_vz_persistent_supervisor_config(
         network: None,
         balloon: None,
         control_socket_path: None,
-        startup_mode: mvm_vz::StartupMode::Boot,
+        startup_mode: crate::vz::StartupMode::Boot,
     })
 }
 
@@ -1201,7 +1202,7 @@ fn build_vz_persistent_supervisor_config(
 /// returns the live `Child` so the caller can `wait()` or `kill()`.
 fn spawn_vz_supervisor_in_background(
     supervisor_path: &Path,
-    cfg: &mvm_vz::SupervisorConfig,
+    cfg: &crate::vz::SupervisorConfig,
 ) -> Result<Child, BuilderVmError> {
     let cfg_json = serde_json::to_string(cfg).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("serialising Vz SupervisorConfig: {e}"))
@@ -1893,7 +1894,7 @@ mod tests {
         assert!(cfg.network.is_none());
         // Boot startup; persistent Vz doesn't restore from a saved
         // snapshot (that's Phase E territory).
-        assert!(matches!(cfg.startup_mode, mvm_vz::StartupMode::Boot));
+        assert!(matches!(cfg.startup_mode, crate::vz::StartupMode::Boot));
     }
 
     #[test]

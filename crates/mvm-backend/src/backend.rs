@@ -9,6 +9,8 @@ use mvm_core::vm_backend::{
 // `crate::`; the substrate (`config`, `shell`, `runtime_meta`) lives
 // in `mvm-base`.
 use crate::apple_container::AppleContainerBackend;
+use crate::base::config::{PortMapping, VMS_DIR};
+use crate::base::shell::run_in_vm_stdout;
 use crate::cloud_hypervisor::CloudHypervisorBackend;
 use crate::docker::DockerBackend;
 use crate::image::RuntimeVolume;
@@ -17,8 +19,6 @@ use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::vz::VzBackend;
 use crate::{firecracker, microvm, microvm_nix};
-use mvm_base::config::{PortMapping, VMS_DIR};
-use mvm_base::shell::run_in_vm_stdout;
 
 pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 
@@ -135,7 +135,7 @@ impl VmBackend for FirecrackerBackend {
         // clean — no FC API socket, no VM dir half-populated.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        mvm_base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
         microvm::run_from_build(&fc_config.run_config)?;
         Ok(VmId(fc_config.run_config.name.clone()))
     }

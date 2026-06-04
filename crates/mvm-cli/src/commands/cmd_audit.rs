@@ -30,8 +30,8 @@
 
 use std::sync::Arc;
 
-use mvm_plan::TenantId;
-use mvm_supervisor::{EventCategory, FileAuditSigner, Recorder};
+use mvm_core::plan::TenantId;
+use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
 
 use super::Commands;
 use super::vm::audit_chain::default_audit_dir;
@@ -201,7 +201,7 @@ impl Commands {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_supervisor::CapturingAuditSigner;
+    use mvm_hostd::supervisor::CapturingAuditSigner;
 
     fn recorder_with_capturing_signer() -> (Recorder, Arc<CapturingAuditSigner>) {
         let signer = Arc::new(CapturingAuditSigner::new());

@@ -57,7 +57,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 /// it doesn't already exist. Centralised so add/list/remove agree
 /// on the path and on the create-on-first-use behaviour.
 pub(super) fn ensure_trust_dir() -> Result<std::path::PathBuf> {
-    use mvm_plan::bundle::FsTrustStore;
+    use mvm_core::plan::bundle::FsTrustStore;
     let store = FsTrustStore::default_path()?;
     let dir = store.root().to_path_buf();
     if !dir.exists() {

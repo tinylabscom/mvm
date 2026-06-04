@@ -54,8 +54,9 @@ pub use mvm_core as core;
 
 /// Security posture evaluation, command gating, and threat classification.
 ///
-/// See [`mvm_security`] for full documentation.
-pub use mvm_security as security;
+/// Folded into `mvm_core::crypto` (plan 121 B3); the `security` facade
+/// path is preserved as an alias. See [`mvm_core::crypto`].
+pub use mvm_core::crypto as security;
 
 /// Shell execution, VM lifecycle, and template management.
 ///

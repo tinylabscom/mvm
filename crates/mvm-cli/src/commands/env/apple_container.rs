@@ -38,13 +38,13 @@ const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 /// from other processes will fail. Treating that state as "not running"
 /// keeps `dev status` honest with what `shell::run_in_vm` actually sees.
 pub(in crate::commands) fn is_apple_container_dev_running() -> bool {
-    let pid_running = mvm_providers::apple_container::list_ids()
+    let pid_running = mvm_backend::providers::apple_container::list_ids()
         .iter()
         .any(|id| id == DEV_VM_NAME);
     if !pid_running {
         return false;
     }
-    let proxy = mvm_providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
+    let proxy = mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
     proxy.exists()
 }
 
@@ -108,7 +108,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 
     // Sign the binary BEFORE launching via launchd. The daemon runs with
     // MVM_SIGNED=1 so it won't re-exec (which would lose launchd context).
-    mvm_providers::apple_container::ensure_signed();
+    mvm_backend::providers::apple_container::ensure_signed();
 
     // The host-backed Nix store is a sparse ext4 file at a stable
     // path. Apple Container attaches it as /dev/vdb; the guest's init
@@ -171,7 +171,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 
 /// Path for the vsock proxy Unix socket.
 pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
-    mvm_providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
+    mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
         .to_string_lossy()
         .into_owned()
 }
@@ -185,7 +185,7 @@ fn cmd_dev_apple_container_daemon(cpus: u32, memory_gib: u32) -> Result<()> {
         .unwrap_or_else(|_| format!("{}/dev/rootfs.ext4", mvm_core::config::mvm_cache_dir()));
 
     let memory_mib = (memory_gib as u64) * 1024;
-    mvm_providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
+    mvm_backend::providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
         .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
 
     // Block forever — the VM lives in this process.
@@ -456,7 +456,7 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
     ));
 
     if running
-        && let Ok(mut stream) = mvm_providers::apple_container::vsock_connect_any(
+        && let Ok(mut stream) = mvm_backend::providers::apple_container::vsock_connect_any(
             DEV_VM_NAME,
             mvm_guest::vsock::GUEST_AGENT_PORT,
         )
@@ -1299,8 +1299,8 @@ fn try_fetch_signed_manifest(
     version: &str,
     arch: &str,
     variant: &str,
-) -> Result<Option<mvm_security::image_verify::SignedManifest>> {
-    use mvm_security::image_verify;
+) -> Result<Option<mvm_core::crypto::image_verify::SignedManifest>> {
+    use mvm_core::crypto::image_verify;
 
     let manifest_name = format!("{variant}-image-{arch}.manifest.json");
     let manifest_url = format!("{base_url}/{manifest_name}");
@@ -1434,8 +1434,8 @@ fn try_fetch_signed_manifest(
 /// Returns Ok(None) when the list isn't available *and* we have no
 /// cached copy — caller proceeds without revocation enforcement (with
 /// a warning). Returns Err on signature verification failure.
-fn try_fetch_revocation_list() -> Result<Option<mvm_security::image_verify::RevocationList>> {
-    use mvm_security::image_verify;
+fn try_fetch_revocation_list() -> Result<Option<mvm_core::crypto::image_verify::RevocationList>> {
+    use mvm_core::crypto::image_verify;
     use std::time::{Duration, SystemTime};
 
     let cache_dir = format!("{}/revocations", mvm_core::config::mvm_cache_dir());
@@ -1579,7 +1579,7 @@ pub fn cmd_dev_import_image(
     vmlinux_path: &str,
     rootfs_path: &str,
 ) -> Result<()> {
-    use mvm_security::image_verify;
+    use mvm_core::crypto::image_verify;
 
     let version = env!("CARGO_PKG_VERSION");
     let arch = if cfg!(target_arch = "aarch64") {
@@ -2481,7 +2481,7 @@ fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
     let cache_dir =
         std::path::PathBuf::from(format!("{}/libkrunfw", mvm_core::config::mvm_cache_dir()));
     let target = cache_dir.join("vmlinux");
-    let bundled = mvm_libkrun::extract_bundled_kernel(&target)
+    let bundled = libkrun_sys::extract_bundled_kernel(&target)
         .map_err(|e| anyhow::anyhow!("libkrunfw kernel extraction: {e}"))?;
     ui::info(&format!(
         "Extracted libkrunfw kernel ({} bytes) to {}",
@@ -2782,7 +2782,7 @@ pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<Rea
 /// obligation — dir pruning stays the job of `mvmctl cache prune`).
 /// Quiet on the happy path; one line only when it actually reaped
 /// something. Swallows errors — a sweep failure must never block a
-/// launch. Since [`free_loopback_port`](mvm_libkrun::gvproxy::free_loopback_port)
+/// launch. Since [`free_loopback_port`](libkrun_sys::gvproxy::free_loopback_port)
 /// gives every gvproxy a fresh port, a missed leak is now harmless
 /// hygiene, not a boot blocker.
 pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
@@ -3690,7 +3690,7 @@ fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
 /// and `rootfs.ext4` in `out_dir`.
 ///
 /// Caller is expected to have:
-///   - confirmed `mvm_libkrun::is_available()` true,
+///   - confirmed `libkrun_sys::is_available()` true,
 ///   - confirmed `find_builder_vm_flake().is_ok()` (Layer 1 source is
 ///     present in the workspace),
 ///   - run [`prepare_dev_image_out_dir`] on `out_dir`.

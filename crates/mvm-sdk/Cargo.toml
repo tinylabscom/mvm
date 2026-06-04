@@ -8,7 +8,6 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-mvm-ir = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
@@ -39,6 +38,17 @@ tree-sitter-typescript = { workspace = true }
 [[bin]]
 name = "emit_addon_schema"
 path = "src/bin/emit_addon_schema.rs"
+
+# Workload IR JSON-schema emitter — folded in with mvm-ir (plan 121 A3).
+[[bin]]
+name = "emit_workload_schema"
+path = "src/bin/emit_schema.rs"
+
+[dev-dependencies]
+# IR↔guest-parser contract test (runtime_json_contract) folded in with
+# mvm-ir (plan 121 A3): asserts the IR's emitted runtime.json shapes
+# match mvm-guest's runtime_config parser.
+mvm-guest = { workspace = true }
 
 [lints]
 workspace = true

@@ -4,7 +4,7 @@
 //!     mvm-seccomp-apply <tier> -- <cmd> [args...]
 //!
 //! `<tier>` is one of `essential` / `minimal` / `standard` / `network`
-//! / `unrestricted` (matching `mvm_security::seccomp::SeccompTier`).
+//! / `unrestricted` (matching `mvm_core::crypto::seccomp::SeccompTier`).
 //! On `unrestricted`, the shim is a no-op handoff — useful so the
 //! launcher line stays uniform regardless of tier.
 //!
@@ -45,7 +45,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
-use mvm_security::seccomp::SeccompTier;
+use mvm_core::crypto::seccomp::SeccompTier;
 #[cfg(target_os = "linux")]
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
 
@@ -152,7 +152,7 @@ fn set_no_new_privs() -> anyhow::Result<()> {
 }
 
 /// Map a syscall name to its number on this target. The list is
-/// curated to match `mvm_security::seccomp::SeccompTier::syscalls()`.
+/// curated to match `mvm_core::crypto::seccomp::SeccompTier::syscalls()`.
 ///
 /// Maintenance note: anything in the "common" list must be present in
 /// libc for both x86_64-linux and aarch64-linux. Anything x86_64-only

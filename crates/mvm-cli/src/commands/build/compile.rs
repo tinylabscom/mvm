@@ -34,9 +34,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 
 use mvm_core::user_config::MvmConfig;
-use mvm_ir::{Entrypoint, Workload};
 use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
 use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
+use mvm_sdk::ir::{Entrypoint, Workload};
 
 use super::Cli;
 use super::sandbox_record::{

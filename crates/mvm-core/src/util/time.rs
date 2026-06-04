@@ -7,7 +7,7 @@ pub fn utc_now() -> String {
 
 /// Return the UTC timestamp `dur` seconds from now in ISO 8601 format.
 /// Saturates at `chrono::DateTime::MAX_UTC` rather than panicking on
-/// overflow — callers downstream of `mvm_security::policy::parse_ttl`
+/// overflow — callers downstream of `crate::crypto::policy::parse_ttl`
 /// already cap the duration to 30d, but this saturates anyway as
 /// defense in depth.
 pub fn utc_plus_duration(dur: Duration) -> String {

@@ -15,8 +15,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
+use libkrun_sys::{KrunContext, SupervisorConfig};
 use mvm_build::rootfs::{MaterializeExt4Input, MaterializeExt4Options, materialize_ext4};
-use mvm_libkrun::{KrunContext, SupervisorConfig};
 use mvm_oci::{
     LayerFetchOptions, LinuxPlatform, OciLayerFetcher, OciManifestFetcher, UnpackOptions,
     unpack_layer,
@@ -214,7 +214,7 @@ fn boot_with_libkrun(
         signing_key_path: None,
         plan: None,
         bundle: None,
-        bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+        bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
     };
     let json = serde_json::to_string(&cfg).expect("serialize supervisor config");
 

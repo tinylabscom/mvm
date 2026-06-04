@@ -61,7 +61,7 @@ fn main() {
         entries.push((name.clone(), out_file.clone(), sha));
         println!(
             "cargo:rerun-if-changed={}",
-            workspace_root.join(format!("crates/{name}/src")).display()
+            workspace_root.join("crates/mvm-build/src/bin").display()
         );
     }
 
@@ -99,8 +99,9 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
 /// Parse `name:` fields from the Rust struct literals in
 /// `crates/mvm-cli/src/host_binaries/manifest.rs`.
 ///
-/// Returns binary names in declaration order. Each name doubles as the
-/// cargo package name — the build script invokes `cargo build -p <name>`.
+/// Returns binary names in declaration order. Each name is a `[[bin]]`
+/// of `mvm-build` (plan 121 D4) — the build script cross-compiles each
+/// with `cargo build -p mvm-build --bin <name>`.
 fn read_rust_manifest(root: &Path) -> Vec<String> {
     let src =
         std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
@@ -131,14 +132,23 @@ fn strip_glibc(t: &str) -> &str {
 }
 
 fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
-    eprintln!("[build.rs] cargo zigbuild --release --target {target} -p {pkg}");
+    eprintln!("[build.rs] cargo zigbuild --release --target {target} -p mvm-build --bin {pkg}");
     // We need the rustup-managed cargo, not the Homebrew one. The Homebrew
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let status = Command::new(&cargo)
-        .args(["zigbuild", "--release", "--target", target, "-p", pkg])
+        .args([
+            "zigbuild",
+            "--release",
+            "--target",
+            target,
+            "-p",
+            "mvm-build",
+            "--bin",
+            pkg,
+        ])
         .env("RUSTC", &rustc)
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTC_WRAPPER")
@@ -162,7 +172,7 @@ fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
 
 fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
     eprintln!(
-        "[build.rs] cargo build --release --target {t} -p {pkg}",
+        "[build.rs] cargo build --release --target {t} -p mvm-build --bin {pkg}",
         t = strip_glibc(target)
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
@@ -173,6 +183,8 @@ fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
             "--target",
             strip_glibc(target),
             "-p",
+            "mvm-build",
+            "--bin",
             pkg,
         ])
         .env("RUSTC", &rustc)

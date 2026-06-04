@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mvm_ir::{Entrypoint, EnvValue, Format};
+use crate::ir::{Entrypoint, EnvValue, Format};
 
 /// Command-style entrypoint (legacy v0 shape). Working dir defaults to
 /// `/app`.
@@ -234,7 +234,7 @@ impl EntrypointExt for Entrypoint {
                 format,
                 working_dir,
                 env,
-                args_schema: Some(mvm_ir::JsonSchemaShape(schema)),
+                args_schema: Some(crate::ir::JsonSchemaShape(schema)),
                 return_schema,
                 extra_imports,
                 primary,
@@ -268,7 +268,7 @@ impl EntrypointExt for Entrypoint {
                 working_dir,
                 env,
                 args_schema,
-                return_schema: Some(mvm_ir::JsonSchemaShape(schema)),
+                return_schema: Some(crate::ir::JsonSchemaShape(schema)),
                 extra_imports,
                 primary,
                 concurrency,

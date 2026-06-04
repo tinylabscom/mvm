@@ -12,6 +12,11 @@ pub mod builder_vm;
 /// implementation (libkrun today, Vz in PR-C).
 pub mod builder_vm_runtime;
 pub mod cache;
+/// Builder-VM egress allowlist proxy — the lib half of the
+/// `mvm-egress-proxy` bin (folded in from the former crate, plan 121
+/// D4). Kept as a lib module (not bin-inlined) so its pub API is
+/// dead-code-clean on non-Linux and its tests run cross-platform.
+pub mod egress_proxy;
 pub mod firecracker;
 /// Plan 76 Phase 6 — portable signed `.mvm` artifacts. A tar.gz
 /// wrapper around kernel + rootfs + verity sidecars + cmdline,
@@ -28,6 +33,13 @@ pub mod persistent_builder;
 pub mod rootfs;
 pub mod stage0;
 pub mod template_reuse;
+/// Type-safe interface to the `mvm-vz-supervisor` Swift binary —
+/// `SupervisorConfig` + on-disk path helpers. Folded in from the former
+/// `mvm-vz` crate (plan 121 C2); it lives in mvm-build (not mvm-backend)
+/// because mvm-build's `vz_builder` consumes it and sits below
+/// mvm-backend, which would cycle. mvm-backend's `VzBackend` reaches it
+/// via `mvm_build::vz`.
+pub mod vz;
 
 /// Plan 72 W1 — libkrun-backed builder VM (gated by
 /// `builder-vm`). Currently scaffolding; the actual

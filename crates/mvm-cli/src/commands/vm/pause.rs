@@ -502,7 +502,7 @@ fn snap_restore(name: &str, path: &Path, hypervisor: &str) -> Result<()> {
 ///   plan isn't persisted, or the audit chain lookup fails (we
 ///   warn and degrade rather than fail).
 fn chain_match_for_snapshot(
-    plan: Option<&mvm_plan::ExecutionPlan>,
+    plan: Option<&mvm_core::plan::ExecutionPlan>,
     snapshot_path: &Path,
     actual_sha: &str,
 ) -> super::audit_chain::SnapshotChainMatch {

@@ -22,8 +22,8 @@
 //! ## Dependency direction (post-W8)
 //!
 //!   mvm-core              ← VmBackend trait + types
-//!   mvm-base      ← config + shell + linux_env + ui +
-//!                           runtime_meta + cow (substrate)
+//!   base (module)         ← config + shell + linux_env + ui +
+//!                           runtime_meta + cow (substrate, was mvm-base)
 //!   mvm-providers         ← libkrun/Apple-VZ FFI shims
 //!     ↓                     ↓                     ↓
 //!     └─────── mvm-backend (this crate) ────────┘
@@ -37,12 +37,27 @@ pub mod apple_container;
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
+// Shared host-side substrate (config + shell + linux_env + ui +
+// runtime_meta + cow + snapshot_integrity) — folded in from the
+// former Lima-era `mvm-base` crate (plan 121 A2). It lives here, not
+// in `mvm`, because `mvm-backend`'s concrete backends are its heaviest
+// consumer and sit below `mvm`; folding it up into `mvm` would cycle
+// (`mvm → mvm-backend → mvm`). `mvm` re-exports these at their old
+// paths so the mvmd `mvmctl::runtime::{shell,ui,shell_mock}` contract
+// surface keeps resolving.
+pub mod base;
 pub mod ch_runtime;
 pub mod cloud_hypervisor;
 pub mod compat;
 pub mod docker;
 pub mod firecracker;
 pub mod handle_registry;
+/// Apple Container / Apple Virtualization.framework runtime interface
+/// (objc2 + Swift bridge, process spawn + verity wiring) — folded in
+/// from the former `mvm-providers` crate (plan 121 C2). The
+/// `apple_container` backend dispatch (`AppleContainerBackend`) stays in
+/// `apple_container.rs`; this is the lower-level interface it drives.
+pub mod providers;
 // Plan 102 W6.A.5 — host-side gvproxy lifecycle for the Vz
 // backend. VzBackend is stateless and the Swift supervisor doesn't
 // spawn gvproxy itself, so the host process spawns gvproxy as a
@@ -77,7 +92,7 @@ pub use vz::VzBackend;
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from
-/// [`mvm_base::runtime_meta::HOME_TEST_LOCK`] so the
+/// [`crate::base::runtime_meta::HOME_TEST_LOCK`] so the
 /// alt-backend tests share the same mutex with `mvm` tests
 /// — without sharing one lock the modules race each other when
 /// their tests run on the same `cargo test` binary.
@@ -85,4 +100,4 @@ pub use vz::VzBackend;
 /// Tests import from `mvm_base` directly; keep this note near the
 /// module list so future process-global tests reuse the same lock.
 #[cfg(any())]
-pub(crate) use mvm_base::runtime_meta::HOME_TEST_LOCK;
+pub(crate) use crate::base::runtime_meta::HOME_TEST_LOCK;

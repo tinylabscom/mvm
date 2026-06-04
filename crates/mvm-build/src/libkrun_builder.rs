@@ -13,7 +13,7 @@
 //! pipeline (in [`BuilderVm::run_build`]):
 //!
 //! 1. Validate mounts + job (`validate_mounts`, `validate_job`).
-//! 2. Check `mvm_libkrun::is_available()` — bail with install hint
+//! 2. Check `libkrun_sys::is_available()` — bail with install hint
 //!    if libkrun isn't on the host.
 //! 3. Locate `mvm-libkrun-supervisor` (env override / next-to-exe /
 //!    PATH).
@@ -62,7 +62,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mvm_libkrun::{KrunContext, SupervisorConfig};
+use libkrun_sys::{KrunContext, SupervisorConfig};
 
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
@@ -159,10 +159,10 @@ fn apply_networking_mode(
     let scratch = path_to_str(vm_state_dir, "vm_state_dir")?;
     Ok(match resolve_networking_mode() {
         NetworkingPreference::Passt => {
-            krun.with_passt(mvm_libkrun::passt::DEFAULT_GUEST_MAC, scratch)
+            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
         }
         NetworkingPreference::Gvproxy => {
-            krun.with_gvproxy(mvm_libkrun::gvproxy::DEFAULT_GUEST_MAC, scratch)
+            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
         }
     })
 }
@@ -387,10 +387,10 @@ impl LibkrunBuilderVm {
             ))
         })?;
 
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -454,7 +454,7 @@ impl LibkrunBuilderVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
         let exit_code =
@@ -480,10 +480,10 @@ impl LibkrunBuilderVm {
     ) -> Result<BuilderShellResult, BuilderVmError> {
         self.validate_shell_job(job)?;
 
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -561,7 +561,7 @@ impl LibkrunBuilderVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
         // Plan 89 W2 part 4: spawn the vsock response listener
         // BEFORE the supervisor so it can connect as soon as libkrun
@@ -594,7 +594,7 @@ impl LibkrunBuilderVm {
     /// that would otherwise surface as opaque libkrun C-API
     /// failures: missing directories, non-UTF-8 paths (libkrun's
     /// FFI takes `*const c_char` and we'd hit `CString::new`
-    /// failures inside `mvm_libkrun::sys` otherwise), and
+    /// failures inside `libkrun_sys::sys` otherwise), and
     /// uncreatable artifact dirs.
     ///
     /// Public-in-crate so unit tests can exercise it without
@@ -755,10 +755,10 @@ impl BuilderVm for LibkrunBuilderVm {
         // 2. Refuse to proceed on a host without libkrun. The
         //    `builder-vm` feature being compiled
         //    in doesn't imply the runtime library is installed.
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -877,7 +877,7 @@ impl BuilderVm for LibkrunBuilderVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
         // Plan 89 W2 part 4: same dispatch-listener wiring as
         // `run_shell_script`. Drained after the supervisor exits
@@ -994,10 +994,10 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         // shared library is the most-common failure mode and an
         // early surface keeps the supervisor spawn from producing
         // a confusing rc -2.
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -1057,7 +1057,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
         let mut child = spawn_supervisor_in_background(&self.supervisor_path, &cfg)?;
@@ -1431,7 +1431,7 @@ fn spawn_supervisor_and_wait(
     // observed the supervisor exit, so this is the one place teardown is
     // guaranteed regardless of how libkrun terminated. See
     // `gvproxy::reap_by_pid_file` (idempotent; no-op if already gone).
-    mvm_libkrun::gvproxy::reap_by_pid_file(vm_state_dir);
+    libkrun_sys::gvproxy::reap_by_pid_file(vm_state_dir);
 
     match outcome {
         Ok(WaitOutcome::Clean(code)) => Ok(code),
@@ -1927,10 +1927,10 @@ impl LibkrunPersistentHostVm {
     /// `HostVmRequest::Shutdown` (clean exit) or the caller
     /// invokes [`PersistentVmHandle::kill`].
     pub fn start(&self) -> Result<PersistentVmHandle, BuilderVmError> {
-        if !mvm_libkrun::is_available() {
+        if !libkrun_sys::is_available() {
             return Err(BuilderVmError::LibkrunUnavailable(format!(
                 "libkrun shared library not found on host. {}",
-                mvm_libkrun::install_hint()
+                libkrun_sys::install_hint()
             )));
         }
 
@@ -2009,7 +2009,7 @@ impl LibkrunPersistentHostVm {
             // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
             // are always hard-fail; they don't model long-running
             // user workloads where a restart policy would apply.
-            bridge_restart_policy: mvm_libkrun::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
         let child = spawn_supervisor_in_background(&supervisor_path, &cfg)?;

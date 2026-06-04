@@ -242,7 +242,7 @@ jobs:
         run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
 
       - name: Fuzz SupervisorConfig (host-side)
-        working-directory: crates/mvm-libkrun
+        working-directory: crates/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -255,7 +255,7 @@ jobs:
         run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
 
       - name: Fuzz Vz SupervisorConfig (host-side)
-        working-directory: crates/mvm-vz
+        working-directory: crates/mvm-build
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -283,7 +283,7 @@ jobs:
         run: cargo fuzz run unpack_layer -- -max_total_time="$DURATION"
 
       - name: Fuzz Firecracker bridge — BridgeConfigJson (host-side)
-        working-directory: crates/mvm-firecracker-bridge
+        working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -296,13 +296,13 @@ jobs:
         # death before the parent's watchdog has a sentinel to react
         # to. Same contract as `fuzz_supervisor_config`: "never panic
         # on any input." `#[serde(deny_unknown_fields)]` on
-        # `BridgeConfigJson` (Task 12 — `crates/mvm-firecracker-bridge/
+        # `BridgeConfigJson` (Task 12 — `crates/mvm-vm-host/
         # src/parse.rs`) means unknown keys fail-closed inside
         # deserialization.
         run: cargo fuzz run fuzz_bridge_config_json -- -max_total_time="$DURATION"
 
       - name: Fuzz Firecracker bridge — passt-hashes TOML
-        working-directory: crates/mvm-firecracker-bridge
+        working-directory: crates/mvm-vm-host
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -324,14 +324,14 @@ jobs:
           path: |
             crates/mvm-guest/fuzz/corpus/
             crates/mvm-guest/fuzz/artifacts/
-            crates/mvm-libkrun/fuzz/corpus/
-            crates/mvm-libkrun/fuzz/artifacts/
-            crates/mvm-vz/fuzz/corpus/
-            crates/mvm-vz/fuzz/artifacts/
+            crates/deps/libkrun-sys/fuzz/corpus/
+            crates/deps/libkrun-sys/fuzz/artifacts/
+            crates/mvm-build/fuzz/corpus/
+            crates/mvm-build/fuzz/artifacts/
             crates/mvm-oci/fuzz/corpus/
             crates/mvm-oci/fuzz/artifacts/
-            crates/mvm-firecracker-bridge/fuzz/corpus/
-            crates/mvm-firecracker-bridge/fuzz/artifacts/
+            crates/mvm-vm-host/fuzz/corpus/
+            crates/mvm-vm-host/fuzz/artifacts/
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-002 §W5.1 — the unit tests that exercise the

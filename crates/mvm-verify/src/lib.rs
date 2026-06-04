@@ -3,7 +3,7 @@
 //! `mvm-supervisor` writes per-tenant `<tenant>.jsonl` streams where
 //! each line is a [`SignedEnvelope`]: an audit entry, the SHA-256 of
 //! the previous line, and an Ed25519 signature over
-//! `serde_json(entry) || prev_hash`. `mvm_supervisor::verify_audit_chain`
+//! `serde_json(entry) || prev_hash`. `mvm_hostd::supervisor::verify_audit_chain`
 //! verifies those streams from a file path — but it lives in a crate
 //! that pulls tokio/libc/rustix and cannot compile to `wasm32`.
 //!
@@ -15,7 +15,7 @@
 //! ADR-070.
 //!
 //! Byte-exactness: the signed payload is `serde_json::to_vec(entry)`.
-//! [`MirrorEntry`] reproduces `mvm_supervisor::audit::AuditEntry`'s
+//! [`MirrorEntry`] reproduces `mvm_hostd::supervisor::audit::AuditEntry`'s
 //! serde shape field-for-field (declaration order, `#[serde(transparent)]`
 //! string ids flattened to `String`, `skip_serializing_if` on the
 //! bundle fields, `deny_unknown_fields`) so re-serializing here yields
@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Mirror of `mvm_supervisor::audit::AuditEntry`. Field order and serde
+/// Mirror of `mvm_hostd::supervisor::audit::AuditEntry`. Field order and serde
 /// attributes MUST match the upstream struct byte-for-byte — the
 /// signature is computed over `serde_json::to_vec(entry)`, so any
 /// divergence (reordered field, different skip rule) makes a genuine,
@@ -67,7 +67,7 @@ pub struct MirrorEntry {
 }
 
 /// On-disk representation of one audit line. Mirrors
-/// `mvm_supervisor::audit_file::SignedEnvelope`.
+/// `mvm_hostd::supervisor::audit_file::SignedEnvelope`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedEnvelope {
@@ -108,7 +108,7 @@ pub struct VerifiedChain {
 }
 
 /// Why a chain failed to verify. Variants mirror
-/// `mvm_supervisor::audit_file::VerifyError` plus the key-decode case
+/// `mvm_hostd::supervisor::audit_file::VerifyError` plus the key-decode case
 /// this crate owns (the supervisor receives an already-parsed key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditVerifyError {
@@ -163,7 +163,7 @@ pub fn verifying_key_from_hex(hex: &str) -> Result<VerifyingKey, AuditVerifyErro
 /// against the running chain hash and its signature against the key.
 /// Returns the verified entries on success; stops at the first failure
 /// and reports its line index. This is the byte-for-byte counterpart of
-/// `mvm_supervisor::verify_audit_chain`, operating on a string.
+/// `mvm_hostd::supervisor::verify_audit_chain`, operating on a string.
 pub fn verify_audit_chain_bytes(
     content: &str,
     verifying_key: &VerifyingKey,

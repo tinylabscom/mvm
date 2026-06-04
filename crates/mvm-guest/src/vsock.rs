@@ -383,7 +383,7 @@ pub enum GuestRequest {
     // The host launches a `virtiofsd` process exposing a host
     // directory under a virtio-fs `tag`; the agent then runs the
     // in-guest `mount -t virtiofs <tag> <guest_path>`. Mount paths
-    // are validated against `mvm_security::policy::MountPathPolicy`
+    // are validated against `mvm_core::crypto::policy::MountPathPolicy`
     // (default allow-roots `/mnt`, `/data`, `/work`; deny anything
     // under `/etc`, `/usr`, `/proc`, etc.) so a host can't shadow
     // verity-protected files post-boot. Production-safe.

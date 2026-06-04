@@ -1,0 +1,23 @@
+//! mvm-hostd — host-side daemon roles (plan 121 D1).
+//!
+//! Consolidates five former crates into one, each a module; the
+//! broker / host-signer / audit-signer additionally ship as separate
+//! `[[bin]]`s so each key subprocess stays its own process (ADR-066 §3
+//! "the process moat").
+//!
+//! - [`supervisor`] — the trusted host-side supervisor library (egress
+//!   proxy, tool gate, key release, audit signing, plan execution state
+//!   machine). Run in-process by `mvm-vm-host`'s per-VM bins, not as a
+//!   standalone process.
+//! - [`broker`] — host services broker subprocess (vsock dispatch).
+//! - [`host_signer`] — Ed25519 host-key signer subprocess.
+//! - [`audit_signer`] — chain-signing audit subprocess.
+//! - [`jailer`] — the `mvm-jailer-lite` seccomp + landlock confinement
+//!   helper, applied in-process by each role before it touches keys or
+//!   untrusted input.
+
+pub mod audit_signer;
+pub mod broker;
+pub mod host_signer;
+pub mod jailer;
+pub mod supervisor;

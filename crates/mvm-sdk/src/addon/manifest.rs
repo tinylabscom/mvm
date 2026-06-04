@@ -7,7 +7,7 @@
 //! and committed as well.
 //!
 //! Round-trip discipline: a manifest parsed and re-serialized via
-//! `mvm_ir::canonicalize` must produce the registry's canonical
+//! `crate::ir::canonicalize` must produce the registry's canonical
 //! bytes. The signature payload is over those canonical bytes.
 
 use schemars::JsonSchema;
@@ -213,7 +213,7 @@ pub fn parse(s: &str) -> Result<AddonManifest, ParseError> {
 
 /// Serialize a manifest back to TOML. Output is deterministic given
 /// the input (the canonical-bytes guarantee is established by routing
-/// the parsed value through `mvm_ir::canonicalize` at the
+/// the parsed value through `crate::ir::canonicalize` at the
 /// registry/lockfile boundary).
 pub fn to_toml(manifest: &AddonManifest) -> Result<String, ParseError> {
     toml::to_string_pretty(manifest).map_err(ParseError::Serialize)

@@ -1,11 +1,11 @@
 //! Emit the canonical Addon Manifest JSON Schema to stdout.
 //!
 //! Mirrors `mvm-ir/src/bin/emit_schema.rs`. Output is canonicalized
-//! via `mvm_ir::canonicalize` so that schema-freshness checks are
+//! via `mvm_sdk::ir::canonicalize` so that schema-freshness checks are
 //! deterministic across toolchain versions and platforms.
 
-use mvm_ir::canonicalize;
 use mvm_sdk::addon::AddonManifest;
+use mvm_sdk::ir::canonicalize;
 use schemars::schema_for;
 
 fn main() {
