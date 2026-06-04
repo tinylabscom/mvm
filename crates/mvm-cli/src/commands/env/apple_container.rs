@@ -1299,8 +1299,8 @@ fn try_fetch_signed_manifest(
     version: &str,
     arch: &str,
     variant: &str,
-) -> Result<Option<mvm_security::image_verify::SignedManifest>> {
-    use mvm_security::image_verify;
+) -> Result<Option<mvm_core::crypto::image_verify::SignedManifest>> {
+    use mvm_core::crypto::image_verify;
 
     let manifest_name = format!("{variant}-image-{arch}.manifest.json");
     let manifest_url = format!("{base_url}/{manifest_name}");
@@ -1434,8 +1434,8 @@ fn try_fetch_signed_manifest(
 /// Returns Ok(None) when the list isn't available *and* we have no
 /// cached copy — caller proceeds without revocation enforcement (with
 /// a warning). Returns Err on signature verification failure.
-fn try_fetch_revocation_list() -> Result<Option<mvm_security::image_verify::RevocationList>> {
-    use mvm_security::image_verify;
+fn try_fetch_revocation_list() -> Result<Option<mvm_core::crypto::image_verify::RevocationList>> {
+    use mvm_core::crypto::image_verify;
     use std::time::{Duration, SystemTime};
 
     let cache_dir = format!("{}/revocations", mvm_core::config::mvm_cache_dir());
@@ -1579,7 +1579,7 @@ pub fn cmd_dev_import_image(
     vmlinux_path: &str,
     rootfs_path: &str,
 ) -> Result<()> {
-    use mvm_security::image_verify;
+    use mvm_core::crypto::image_verify;
 
     let version = env!("CARGO_PKG_VERSION");
     let arch = if cfg!(target_arch = "aarch64") {

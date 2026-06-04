@@ -32,8 +32,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Args as ClapArgs, Subcommand};
+use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_core::plan::TenantId;
-use mvm_security::secret_store::{self, SecretStore};
 use mvm_supervisor::{EventCategory, FileAuditSigner, Recorder};
 use secrecy::SecretBox;
 
@@ -420,7 +420,7 @@ fn emit_through_recorder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_security::secret_store::FileSecretStore;
+    use mvm_core::crypto::secret_store::FileSecretStore;
 
     fn temp_audit() -> (tempfile::TempDir, AuditLog) {
         let tmp = tempfile::tempdir().unwrap();

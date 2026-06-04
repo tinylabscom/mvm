@@ -1,7 +1,7 @@
 use aho_corasick::AhoCorasick;
 use regex::RegexSet;
 
-use mvm_core::security::{Severity, ThreatCategory, ThreatFinding};
+use crate::security::{Severity, ThreatCategory, ThreatFinding};
 
 /// Three-tier threat classifier for vsock message content.
 ///

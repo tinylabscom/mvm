@@ -28,7 +28,7 @@ pub struct VmRegistration {
     /// RFC 3339 timestamp of registration.
     pub registered_at: String,
     /// Caller-supplied metadata (validated via
-    /// `mvm_security::policy::InputValidator::validate_tag_map`).
+    /// `mvm_core::crypto::policy::InputValidator::validate_tag_map`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tags: BTreeMap<String, String>,
     /// RFC 3339 wall-clock time at which the supervisor reaper should

@@ -1,6 +1,6 @@
 use aho_corasick::AhoCorasick;
 
-use mvm_core::security::{BlocklistAction, BlocklistEntry, BlocklistSeverity, GateDecision};
+use crate::security::{BlocklistAction, BlocklistEntry, BlocklistSeverity, GateDecision};
 
 /// Host-side command gate that evaluates vsock commands against a blocklist.
 ///

@@ -414,7 +414,7 @@ impl LaunchProbe for LibkrunProbe {
         let kernel_sha256 = super::bench_probe::resolve_probe_image()
             .ok()
             .and_then(|img| {
-                mvm_security::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
             });
         HostDescriptor {
             os: self.os.clone(),

@@ -190,7 +190,7 @@ impl std::fmt::Display for VolumePath {
 
 /// Guest mount path — must be an absolute, validated path inside an
 /// allowed mount root. The actual deny-list lives in
-/// `mvm_security::policy::MountPathPolicy`; this newtype only enforces
+/// `crate::crypto::policy::MountPathPolicy`; this newtype only enforces
 /// shape (absolute, no NUL, no `..`, length cap).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -397,13 +397,13 @@ pub struct VolumeEntry {
 pub enum WrapAlgorithm {
     /// AES Key Wrap with Padding (NIST SP 800-38F / RFC 5649).
     /// Implemented mvmd-side per plan 45 §D5 ("EncryptedBackend
-    /// lives in mvmd, not mvm"); `mvm_security::key_rotation`'s
+    /// lives in mvmd, not mvm"); `crate::crypto::key_rotation`'s
     /// rewrap path returns `UnsupportedAlgorithm` when asked to
     /// rewrap an `AesKwp` envelope.
     AesKwp,
 
     /// AES-256-GCM AEAD wrap (12-byte nonce || ciphertext || 16-byte
-    /// tag, the `mvm_security::snapshot_crypto` envelope shape).
+    /// tag, the `crate::crypto::snapshot_crypto` envelope shape).
     /// mvm-side rotation supports this variant out of the box —
     /// `rewrap_dek` decrypts under the old master and re-encrypts
     /// under the new master with a fresh nonce, preserving the

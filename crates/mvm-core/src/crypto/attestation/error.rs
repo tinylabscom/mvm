@@ -4,7 +4,7 @@
 //! it without a circular dep, and so the CLI / supervisor can match
 //! on variants by name rather than text.
 
-use crate::attestation::provider::HwProviderKind;
+use crate::crypto::attestation::provider::HwProviderKind;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

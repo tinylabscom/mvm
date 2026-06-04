@@ -4,7 +4,7 @@
 //! the data they protect:
 //!
 //! 1. **Per-volume DEK** wrapped under a versioned master key
-//!    ([`WrappedKey`] in `mvm_core::domain::volume`). When the master
+//!    ([`WrappedKey`] in `crate::domain::volume`). When the master
 //!    rotates, every `WrappedKey` gets unwrapped under the prior
 //!    master and re-wrapped under the new one — the underlying DEK
 //!    (and thus the ciphertext on disk) stays unchanged.
@@ -17,7 +17,7 @@
 //! 3. **LUKS2 keyslot passphrases** ([`rotate_luks_slot`]) and
 //!    **snapshot HMAC keys** ([`reseal_snapshot`]) — both shell out
 //!    to existing primitives (`cryptsetup luksChangeKey`,
-//!    `mvm_security::snapshot_hmac::seal/verify`).
+//!    `crate::crypto::snapshot_hmac::seal/verify`).
 //!
 //! ## Scope boundary
 //!
@@ -46,13 +46,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mvm_core::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretBox};
 
-use crate::snapshot_crypto;
+use crate::crypto::snapshot_crypto;
 
 /// Master key size in bytes (256 bits — matches AES-256 / HMAC-SHA256
 /// nominal strength). Same constant as the wrapping algorithms
@@ -416,16 +416,16 @@ fn write_secret_tempfile(bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
 /// under a different key — rotating to a third key won't help).
 pub fn reseal_snapshot(
     snapshot_dir: &Path,
-    old_key: &[u8; crate::snapshot_hmac::HMAC_KEY_BYTES],
-    new_key: &[u8; crate::snapshot_hmac::HMAC_KEY_BYTES],
+    old_key: &[u8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES],
+    new_key: &[u8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES],
     mvmctl_version: &str,
 ) -> Result<()> {
     // Verify under the old key first; if this fails the snapshot
     // was either tampered or sealed under a third key.
-    let files = crate::snapshot_hmac::files_in(snapshot_dir);
-    let epoch_store = crate::snapshot_hmac::EpochStore::new(snapshot_dir.join(".epoch"));
+    let files = crate::crypto::snapshot_hmac::files_in(snapshot_dir);
+    let epoch_store = crate::crypto::snapshot_hmac::EpochStore::new(snapshot_dir.join(".epoch"));
     let current_epoch = epoch_store.load();
-    crate::snapshot_hmac::verify(
+    crate::crypto::snapshot_hmac::verify(
         snapshot_dir,
         &files,
         current_epoch,
@@ -445,13 +445,13 @@ pub fn reseal_snapshot(
     let next_epoch = epoch_store
         .next()
         .with_context(|| format!("advancing epoch for {}", snapshot_dir.display()))?;
-    crate::snapshot_hmac::seal(snapshot_dir, &files, next_epoch, mvmctl_version, new_key)
+    crate::crypto::snapshot_hmac::seal(snapshot_dir, &files, next_epoch, mvmctl_version, new_key)
         .with_context(|| {
-            format!(
-                "sealing snapshot at {} under new key",
-                snapshot_dir.display()
-            )
-        })?;
+        format!(
+            "sealing snapshot at {} under new key",
+            snapshot_dir.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -462,7 +462,7 @@ pub fn reseal_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::domain::volume::OrgId;
+    use crate::domain::volume::OrgId;
     use rand::Rng;
 
     fn random_master_key() -> [u8; MASTER_KEY_BYTES] {
@@ -781,34 +781,34 @@ mod tests {
     // reseal_snapshot
     // ──────────────────────────────────────────────────────────────
 
-    fn make_snap(dir: &Path) -> crate::snapshot_hmac::SnapshotFiles {
+    fn make_snap(dir: &Path) -> crate::crypto::snapshot_hmac::SnapshotFiles {
         let v = dir.join("vmstate.bin");
         let m = dir.join("mem.bin");
         fs::write(&v, b"vmstate-bytes").unwrap();
         fs::write(&m, b"memory-image-bytes").unwrap();
-        crate::snapshot_hmac::SnapshotFiles { vmstate: v, mem: m }
+        crate::crypto::snapshot_hmac::SnapshotFiles { vmstate: v, mem: m }
     }
 
     #[test]
     fn reseal_snapshot_round_trips_under_new_key() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let old_key = [0xAAu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
-        let new_key = [0xBBu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
+        let old_key = [0xAAu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
+        let new_key = [0xBBu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
 
         // Initial seal under old_key.
-        let store = crate::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
+        let store = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let e0 = store.next().unwrap();
-        crate::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &old_key).unwrap();
+        crate::crypto::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &old_key).unwrap();
 
         // Reseal.
         reseal_snapshot(tmp.path(), &old_key, &new_key, "1.2.3").unwrap();
 
         // New verify under new_key with current high-water mark
         // (now `e0 + 1`) must succeed.
-        let store2 = crate::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
+        let store2 = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let current = store2.load();
-        crate::snapshot_hmac::verify(tmp.path(), &files, current, "1.2.3", &new_key, false)
+        crate::crypto::snapshot_hmac::verify(tmp.path(), &files, current, "1.2.3", &new_key, false)
             .expect("new key + advanced epoch verifies");
     }
 
@@ -819,12 +819,12 @@ mod tests {
         // refuse to advance.
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let old_key = [0xAAu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
-        let new_key = [0xBBu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
+        let old_key = [0xAAu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
+        let new_key = [0xBBu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
 
-        let store = crate::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
+        let store = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let e0 = store.next().unwrap();
-        crate::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &old_key).unwrap();
+        crate::crypto::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &old_key).unwrap();
 
         // Tamper.
         let mut bytes = fs::read(&files.vmstate).unwrap();
@@ -847,13 +847,13 @@ mod tests {
         // actually hold.
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let real_old = [0xAAu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
-        let wrong_old = [0xCCu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
-        let new_key = [0xBBu8; crate::snapshot_hmac::HMAC_KEY_BYTES];
+        let real_old = [0xAAu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
+        let wrong_old = [0xCCu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
+        let new_key = [0xBBu8; crate::crypto::snapshot_hmac::HMAC_KEY_BYTES];
 
-        let store = crate::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
+        let store = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let e0 = store.next().unwrap();
-        crate::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &real_old).unwrap();
+        crate::crypto::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &real_old).unwrap();
 
         let err = reseal_snapshot(tmp.path(), &wrong_old, &new_key, "1.2.3").unwrap_err();
         assert!(err.to_string().contains("verifying snapshot"));

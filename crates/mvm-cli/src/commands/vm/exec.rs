@@ -510,8 +510,8 @@ fn emit_oci_run_admission(
     mem_mib: u64,
     timeout_secs: u64,
 ) -> Result<()> {
-    let image_sha256 =
-        mvm_security::image_verify::sha256_file(&image.rootfs_path).with_context(|| {
+    let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
+        .with_context(|| {
             format!(
                 "hashing OCI rootfs at {} for run --image admission",
                 image.rootfs_path.display()

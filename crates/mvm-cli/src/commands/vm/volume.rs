@@ -8,7 +8,7 @@
 //!
 //! The actual `virtiofsd`-on-host + Firecracker virtio-device-attach
 //! is a follow-up — the substrate routes through
-//! `mvm_security::policy::MountPathPolicy` and emits the same
+//! `mvm_core::crypto::policy::MountPathPolicy` and emits the same
 //! `MountVolume` / `UnmountVolume` vsock verbs the agent handler
 //! already serves.
 //!
@@ -37,11 +37,11 @@ use mvm::vm::volume_registry::{
     LocalVolumeCatalog, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeState,
     MvmManagedVolumeEncryption, VolumeMountEntry, VolumeMountRegistry,
 };
+use mvm_core::crypto::key_rotation;
+use mvm_core::crypto::policy::validate_mount_path;
 use mvm_core::domain::volume::{OrgId, WrapAlgorithm, WrappedKey};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_security::key_rotation;
-use mvm_security::policy::validate_mount_path;
 use rand::RngCore;
 use secrecy::ExposeSecret;
 
@@ -347,9 +347,9 @@ fn generate_wrapped_volume_key() -> Result<(WrappedKey, secrecy::SecretBox<Vec<u
         manifest.latest_version()
     };
     let master = key_rotation::load_master_key(&active_dir, version)?;
-    let mut dek = vec![0u8; mvm_security::snapshot_encryption::KEY_SIZE];
+    let mut dek = vec![0u8; mvm_core::crypto::snapshot_encryption::KEY_SIZE];
     rand::thread_rng().fill_bytes(&mut dek);
-    let wrapped = mvm_security::snapshot_crypto::encrypt(&dek, master.expose_secret())
+    let wrapped = mvm_core::crypto::snapshot_crypto::encrypt(&dek, master.expose_secret())
         .context("wrapping volume data key")?;
     Ok((
         WrappedKey {
@@ -375,22 +375,21 @@ fn unwrap_volume_key(entry: &LocalVolumeEntry) -> Result<secrecy::SecretBox<Vec<
         key_rotation::load_master_key(&local_master_key_dir(), enc.wrapped_key.master_key_version)
             .with_context(|| format!("loading master key for volume {:?}", entry.volume_name))?;
     let dek = match enc.wrapped_key.algorithm {
-        WrapAlgorithm::Aes256Gcm => {
-            mvm_security::snapshot_crypto::decrypt(&enc.wrapped_key.wrapped, master.expose_secret())
-                .with_context(|| {
-                    format!("unwrapping data key for volume {:?}", entry.volume_name)
-                })?
-        }
+        WrapAlgorithm::Aes256Gcm => mvm_core::crypto::snapshot_crypto::decrypt(
+            &enc.wrapped_key.wrapped,
+            master.expose_secret(),
+        )
+        .with_context(|| format!("unwrapping data key for volume {:?}", entry.volume_name))?,
         WrapAlgorithm::AesKwp => {
             bail!("AES-KWP wrapped local volume keys are not supported by mvmctl")
         }
     };
-    if dek.len() != mvm_security::snapshot_encryption::KEY_SIZE {
+    if dek.len() != mvm_core::crypto::snapshot_encryption::KEY_SIZE {
         bail!(
             "unwrapped data key for volume {:?} is {} bytes, expected {}",
             entry.volume_name,
             dek.len(),
-            mvm_security::snapshot_encryption::KEY_SIZE
+            mvm_core::crypto::snapshot_encryption::KEY_SIZE
         );
     }
     Ok(secrecy::SecretBox::new(Box::new(dek)))
@@ -422,7 +421,7 @@ fn write_encrypted_volume_archive(
     let tmp = ciphertext_path.with_extension(format!("{}.plain.tmp", std::process::id()));
     let result = (|| -> Result<()> {
         write_plain_archive(src_dir, &tmp)?;
-        mvm_security::snapshot_encryption::encrypt_file_in_place(&tmp, dek)
+        mvm_core::crypto::snapshot_encryption::encrypt_file_in_place(&tmp, dek)
             .context("encrypting volume archive")?;
         fs::rename(&tmp, ciphertext_path).with_context(|| {
             format!(
@@ -470,7 +469,7 @@ fn decrypt_volume_archive_to_dir(
                 tmp.display()
             )
         })?;
-        mvm_security::snapshot_encryption::decrypt_file_in_place(&tmp, dek)
+        mvm_core::crypto::snapshot_encryption::decrypt_file_in_place(&tmp, dek)
             .context("decrypting volume archive")?;
         let file = File::open(&tmp).with_context(|| format!("opening {}", tmp.display()))?;
         let mut archive = tar::Archive::new(file);

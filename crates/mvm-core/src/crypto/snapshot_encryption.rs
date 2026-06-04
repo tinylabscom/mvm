@@ -1,6 +1,6 @@
 //! Plan 63 W5 — chunked AES-256-GCM for snapshot artifacts.
 //!
-//! `mvm_security::snapshot_crypto` provides AES-256-GCM over byte
+//! `crate::crypto::snapshot_crypto` provides AES-256-GCM over byte
 //! slices. Snapshots can be multi-GB, so this module adds the
 //! file-bound, chunked wrapper the pause/resume pipeline needs:
 //!

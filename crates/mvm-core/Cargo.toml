@@ -39,9 +39,50 @@ tempfile.workspace = true
 # `mvm-supervisor::proxy::l4`).
 ipnet = { workspace = true }
 
+# Folded in with the former mvm-security crate (plan 121 B3): the
+# `crypto` module's AEAD (aes-gcm), HMAC, OS keychain (keyring),
+# secret wrappers (secrecy/zeroize), and secret-token scanning
+# (aho-corasick). All sync. `rand` is promoted from dev-only because
+# key_rotation / secret_store generate keys at runtime.
+aes-gcm.workspace = true
+aho-corasick.workspace = true
+hmac.workspace = true
+keyring.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+# Opt-in cosign-keyless image verification (off by default). Pulls the
+# large sigstore OIDC/TUF/Rekor graph only under `manifest-verify`, so
+# the default mvm-core build stays async/runtime-free.
+sigstore = { version = "0.13", default-features = false, features = ["bundle", "sigstore-trust-root", "rustls-tls"], optional = true }
+
+[features]
+default = []
+# Cosign-keyless manifest verification via sigstore (folded from
+# mvm-security, plan 121 B3). sigstore uses a blocking verifier backed
+# by a tokio runtime, so enable the tokio features it needs on top of
+# mvm-core's default `io-util`.
+manifest-verify = [
+    "dep:sigstore",
+    "tokio/rt",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/net",
+    "tokio/time",
+    "tokio/fs",
+    "tokio/sync",
+]
+# Hardware attestation provider stubs (plan 60 Phase 6) — each enables
+# the corresponding `crypto::attestation::provider` impl.
+attestation-tpm2 = []
+attestation-sev-snp = []
+attestation-tdx = []
+
 [dev-dependencies]
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
-# without committing static fixtures.
+# without committing static fixtures. (Also a non-dev dep above for the
+# crypto module; kept here so a future dep-trim of the main `rand` does
+# not silently break the signed_config tests.)
 rand.workspace = true
 
 [lints]

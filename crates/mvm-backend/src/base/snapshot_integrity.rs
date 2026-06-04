@@ -35,22 +35,23 @@ use crate::base::ui;
 pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     use std::path::Path;
     let snap_path = Path::new(snap_dir);
-    let key_path =
-        mvm_security::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_data_dir()));
-    let key = mvm_security::snapshot_hmac::load_or_init_key(&key_path)
+    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
+        &mvm_core::config::mvm_data_dir(),
+    ));
+    let key = mvm_core::crypto::snapshot_hmac::load_or_init_key(&key_path)
         .with_context(|| format!("loading snapshot HMAC key {}", key_path.display()))?;
-    let files = mvm_security::snapshot_hmac::files_in(snap_path);
+    let files = mvm_core::crypto::snapshot_hmac::files_in(snap_path);
     let mvmctl_version = env!("CARGO_PKG_VERSION");
     // Bump the per-resource epoch counter so a future `verify` call
     // can detect a captured-and-replayed older envelope (G5 of the
     // filesystem-volumes plan). Counter lives next to the snapshot files
     // so re-creating the dir with `mvmctl template build --force`
     // resumes from the previous high-water mark.
-    let epoch_store = mvm_security::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
+    let epoch_store = mvm_core::crypto::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
     let next_epoch = epoch_store
         .next()
         .with_context(|| format!("advancing epoch counter for {snap_dir}"))?;
-    let _sidecar = mvm_security::snapshot_hmac::seal(
+    let _sidecar = mvm_core::crypto::snapshot_hmac::seal(
         snap_path,
         &files,
         next_epoch,
@@ -71,11 +72,11 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
 /// non-fatal warning (default — preserves restorability of pre-W4
 /// snapshots) into a hard error.
 pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
-    use mvm_security::snapshot_hmac::VerifyError;
+    use mvm_core::crypto::snapshot_hmac::VerifyError;
     use std::path::Path;
 
     let snap_path = Path::new(snap_dir);
-    let sidecar_path = snap_path.join(mvm_security::snapshot_hmac::SIDECAR_FILENAME);
+    let sidecar_path = snap_path.join(mvm_core::crypto::snapshot_hmac::SIDECAR_FILENAME);
     if !sidecar_path.exists() {
         if std::env::var("MVM_SNAPSHOT_HMAC_STRICT").as_deref() == Ok("1") {
             anyhow::bail!(
@@ -91,19 +92,20 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         return Ok(());
     }
 
-    let key_path =
-        mvm_security::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_data_dir()));
-    let key = mvm_security::snapshot_hmac::load_or_init_key(&key_path)
+    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
+        &mvm_core::config::mvm_data_dir(),
+    ));
+    let key = mvm_core::crypto::snapshot_hmac::load_or_init_key(&key_path)
         .with_context(|| format!("loading snapshot HMAC key {}", key_path.display()))?;
-    let files = mvm_security::snapshot_hmac::files_in(snap_path);
+    let files = mvm_core::crypto::snapshot_hmac::files_in(snap_path);
     let mvmctl_version = env!("CARGO_PKG_VERSION");
     let allow_stale = std::env::var("MVM_ALLOW_STALE_SNAPSHOT").as_deref() == Ok("1");
     // Read the per-resource high-water mark; the verifier rejects
     // any envelope whose epoch is below it (G5 replay defence).
-    let epoch_store = mvm_security::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
+    let epoch_store = mvm_core::crypto::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
     let min_epoch = epoch_store.load();
 
-    match mvm_security::snapshot_hmac::verify(
+    match mvm_core::crypto::snapshot_hmac::verify(
         snap_path,
         &files,
         min_epoch,

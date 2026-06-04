@@ -13,6 +13,14 @@ pub mod naming;
 pub mod observability;
 pub mod user_config;
 
+/// Cryptographic primitives — attestation, key rotation, keystore,
+/// secret store, snapshot encryption/HMAC, image (cosign) verification,
+/// seccomp, fs/mount/path/ttl policy. Folded in from the former
+/// `mvm-security` crate (plan 121 B3); named `crypto` to avoid clashing
+/// with `policy::security` (the session-policy type). All sync; the
+/// only opt-in async surface is the off-by-default `manifest-verify`
+/// (sigstore) feature, so the default build stays runtime-free.
+pub mod crypto;
 pub mod domain;
 pub mod mvmd_iface;
 /// The typed, signed `ExecutionPlan` contract (plan 37 §3.3). Folded

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use mvm_core::security::RateLimitPolicy;
+use crate::security::RateLimitPolicy;
 
 /// Outcome of a rate limit check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

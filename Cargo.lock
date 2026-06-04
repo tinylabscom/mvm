@@ -3250,7 +3250,6 @@ dependencies = [
  "mvm-core",
  "mvm-guest",
  "mvm-providers",
- "mvm-security",
  "opendal",
  "rand 0.8.6",
  "secrecy",
@@ -3330,7 +3329,6 @@ dependencies = [
  "mvm-guest",
  "mvm-libkrun",
  "mvm-providers",
- "mvm-security",
  "mvm-vz",
  "secrecy",
  "serde",
@@ -3421,7 +3419,6 @@ dependencies = [
  "mvm-oci",
  "mvm-providers",
  "mvm-sdk",
- "mvm-security",
  "mvm-supervisor",
  "names",
  "notify",
@@ -3447,18 +3444,24 @@ dependencies = [
 name = "mvm-core"
 version = "0.15.2"
 dependencies = [
+ "aes-gcm",
+ "aho-corasick",
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
  "fs2",
+ "hmac",
  "ipnet",
+ "keyring",
  "mvm-providers",
  "rand 0.8.6",
  "regex",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",
+ "sigstore",
  "tar",
  "tempfile",
  "thiserror 1.0.69",
@@ -3467,6 +3470,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -3507,7 +3511,6 @@ dependencies = [
  "ipnet",
  "libc",
  "mvm-core",
- "mvm-security",
  "netlink-packet-route",
  "rand 0.8.6",
  "rtnetlink",
@@ -3669,32 +3672,6 @@ name = "mvm-sdk-macros"
 version = "0.15.2"
 
 [[package]]
-name = "mvm-security"
-version = "0.15.2"
-dependencies = [
- "aes-gcm",
- "aho-corasick",
- "anyhow",
- "chrono",
- "ed25519-dalek",
- "hmac",
- "keyring",
- "mvm-core",
- "rand 0.8.6",
- "regex",
- "secrecy",
- "serde",
- "serde_json",
- "sha2",
- "sigstore",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
 name = "mvm-storage"
 version = "0.15.2"
 dependencies = [
@@ -3796,7 +3773,6 @@ dependencies = [
  "mvm-guest",
  "mvm-libkrun",
  "mvm-oci",
- "mvm-security",
  "objc2-foundation",
  "predicates",
  "rand 0.8.6",

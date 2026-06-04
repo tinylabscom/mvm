@@ -89,7 +89,6 @@ dev-shell = []
 
 [dependencies]
 mvm-core.workspace = true
-mvm-security.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true

@@ -57,11 +57,11 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::keystore::validate_shell_id;
-use crate::snapshot_crypto;
+use crate::crypto::keystore::validate_shell_id;
+use crate::crypto::snapshot_crypto;
 
 /// Service name for OS-native keyring entries. Distinct from
-/// `mvm_security::keystore::KEYRING_SERVICE` so per-tenant master
+/// `crate::crypto::keystore::KEYRING_SERVICE` so per-tenant master
 /// keys (W3) and per-name tenant secrets (W4) don't collide.
 pub const KEYRING_SERVICE: &str = "mvm-secrets";
 #[cfg(target_os = "macos")]
@@ -83,7 +83,7 @@ const FILE_STORE_KEYRING_TARGET: &str = "mvm-file-secret-store";
 const FILE_STORE_KEYRING_USER: &str = "file-backend-key";
 
 /// Multi-key tenant-scoped secret store. Separate from
-/// [`crate::keystore::KeyProvider`] (which is single-key, tenant-
+/// [`crate::crypto::keystore::KeyProvider`] (which is single-key, tenant-
 /// scoped, used for the per-tenant *master DEK* — plan 63 W3).
 pub trait SecretStore: Send + Sync {
     /// Store `value` under `(tenant, name)`. Overwrites any
@@ -620,7 +620,7 @@ pub const BACKEND_ENV: &str = "MVM_SECRET_STORE_BACKEND";
 /// Order (when env is `auto` or unset): an aggregate store that
 /// prefers KeyringSecretStore but keeps FileSecretStore entries
 /// visible if the OS keystore backend is reachable, else
-/// FileSecretStore. Mirrors [`crate::keystore::default_provider`]
+/// FileSecretStore. Mirrors [`crate::crypto::keystore::default_provider`]
 /// while avoiding backend split-brain across CLI invocations.
 ///
 /// On a host whose keyring's `Entry::new` succeeds but `set_password`
@@ -646,7 +646,7 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
         }
         _ => {}
     }
-    if crate::keystore::KeyringProvider::backend_reachable() {
+    if crate::crypto::keystore::KeyringProvider::backend_reachable() {
         return Box::new(AutoSecretStore::default());
     }
     Box::new(FileSecretStore::default())

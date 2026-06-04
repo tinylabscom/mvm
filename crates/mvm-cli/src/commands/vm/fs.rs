@@ -2,7 +2,7 @@
 //! running microVM. W1 / A1 of the filesystem-volumes plan.
 //!
 //! Production-safe surface: every call routes through the agent's
-//! `mvm_security::policy::PathPolicy` (deny-list +
+//! `mvm_core::crypto::policy::PathPolicy` (deny-list +
 //! canonicalization) and the agent's per-call resource caps. The
 //! host side here is a thin transport — we don't validate paths
 //! before sending because the agent owns the canonical answer

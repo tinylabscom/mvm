@@ -1969,7 +1969,7 @@ fn security_network_policy_default_check() -> Check {
 /// snapshot seal. Existence with looser perms is a security finding:
 /// any local user could read the key and forge sidecars.
 fn security_snapshot_key_check() -> Check {
-    let path = mvm_security::snapshot_hmac::default_key_path(std::path::Path::new(
+    let path = mvm_core::crypto::snapshot_hmac::default_key_path(std::path::Path::new(
         &mvm_core::config::mvm_data_dir(),
     ));
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
@@ -1988,7 +1988,7 @@ fn security_snapshot_key_check() -> Check {
         use std::os::unix::fs::PermissionsExt;
         let mode = meta.permissions().mode() & 0o777;
         let expected = 0o600;
-        let len_ok = meta.len() == mvm_security::snapshot_hmac::HMAC_KEY_BYTES as u64;
+        let len_ok = meta.len() == mvm_core::crypto::snapshot_hmac::HMAC_KEY_BYTES as u64;
         Check {
             name: "snapshot HMAC key",
             category: "security",
@@ -2004,7 +2004,7 @@ fn security_snapshot_key_check() -> Check {
                     "key file at {} is {} bytes (expected {}) — corrupt; rotate by deleting the file",
                     path.display(),
                     meta.len(),
-                    mvm_security::snapshot_hmac::HMAC_KEY_BYTES
+                    mvm_core::crypto::snapshot_hmac::HMAC_KEY_BYTES
                 )
             } else {
                 format!("0{mode:o} at {}", path.display())

@@ -21,7 +21,7 @@
 //! attestation for compliance (plan 60 §"Hardware attestation
 //! everywhere", tier 5).
 
-use crate::attestation::error::AttestationError;
+use crate::crypto::attestation::error::AttestationError;
 use serde::{Deserialize, Serialize};
 
 /// Discriminant for the three hardware attestation backends. Stable

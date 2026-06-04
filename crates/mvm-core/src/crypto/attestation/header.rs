@@ -21,7 +21,7 @@
 //!   provider produced one; `None` means "no hardware backend was
 //!   asked for a quote" (the v0 default).
 //!
-//! The envelope reuses `mvm_core::protocol::signing::SignedPayload`
+//! The envelope reuses `crate::protocol::signing::SignedPayload`
 //! verbatim — same canonical-JSON-then-Ed25519 pattern that
 //! `mvm-plan` already uses for signed `ExecutionPlan`s.
 //!
@@ -37,10 +37,10 @@
 //! so a tampered payload is rejected without ever exposing
 //! `serde_json::from_slice` to attacker-controlled bytes.
 
-use crate::attestation::error::AttestationError;
-use crate::attestation::provider::HwMeasurement;
+use crate::crypto::attestation::error::AttestationError;
+use crate::crypto::attestation::provider::HwMeasurement;
+use crate::protocol::signing::SignedPayload;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use mvm_core::protocol::signing::SignedPayload;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -192,7 +192,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attestation::provider::HwProviderKind;
+    use crate::crypto::attestation::provider::HwProviderKind;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 

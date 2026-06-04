@@ -1,7 +1,7 @@
 //! Filesystem RPC handler — A1 of the filesystem-volumes plan.
 //!
 //! Translates a `GuestRequest` FS verb into an `FsResult`. Routes
-//! every host-supplied path through `mvm_security::policy::PathPolicy`
+//! every host-supplied path through `mvm_core::crypto::policy::PathPolicy`
 //! before touching the disk; applies per-verb resource caps; maps
 //! `std::io::Error` kinds to the closed `FsErrorKind` enum so the
 //! host can branch without parsing message text.
@@ -11,7 +11,7 @@
 //! Unlike `Exec` (dev-only, ADR-002 §W4.3), every FS verb here is
 //! prod-safe. The agent runs as uid 901 with `--bounding-set=-all
 //! --no-new-privs`; W2.1 bind-mounts `/etc/{passwd,group,nsswitch.conf}`
-//! read-only, and `mvm_security::policy::PathPolicy` denies
+//! read-only, and `mvm_core::crypto::policy::PathPolicy` denies
 //! `/etc/mvm/*` and `/run/mvm-secrets/*` even when canonicalization
 //! resolves a guest-side symlink into them.
 //!
@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use mvm_security::policy::{
+use mvm_core::crypto::policy::{
     CanonicalPath, OsCanonicalizer, PathCanonicalizer, PathOp, PathPolicy, PolicyError,
 };
 

@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/mvm-core",
-    "crates/mvm-security",
     "crates/mvm-storage",
     "crates/mvm-supervisor",
     "crates/mvm-providers",
@@ -307,7 +306,6 @@ mvm-guest = { path = "crates/mvm-guest", version = "0.15.1" }
 mvm-build = { path = "crates/mvm-build", version = "0.15.1", default-features = false }
 mvm = { path = "crates/mvm", version = "0.15.1", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.15.1" }
-mvm-security = { path = "crates/mvm-security", version = "0.15.1" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.15.1" }
 mvm-supervisor = { path = "crates/mvm-supervisor", version = "0.15.1" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.15.1", default-features = false }
@@ -375,7 +373,6 @@ path = "src/main.rs"
 
 [dependencies]
 mvm-core.workspace = true
-mvm-security.workspace = true
 mvm = { workspace = true, default-features = false }
 mvm-backend = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
@@ -460,7 +457,7 @@ dev-watch = ["mvm-cli/dev-watch"]
 manifest-verify = [
     "mvm/manifest-verify",
     "mvm-cli/manifest-verify",
-    "mvm-security/manifest-verify",
+    "mvm-core/manifest-verify",
 ]
 template-registry-s3 = [
     "mvm/template-registry-s3",

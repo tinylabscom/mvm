@@ -47,9 +47,9 @@ mvm-libkrun.workspace = true
 # supervisor-binary path resolution). Pure data + helpers; no Swift dep.
 mvm-vz.workspace = true
 # Folded in with the former mvm-base crate (plan 121 A2): the base
-# substrate's ui (colored/indicatif/inquire spinners + prompts),
-# secret handling (secrecy), and crypto (mvm-security) helpers.
-mvm-security.workspace = true
+# substrate's ui (colored/indicatif/inquire spinners + prompts) and
+# secret handling (secrecy). Crypto helpers come from mvm_core::crypto
+# (plan 121 B3), already available via the mvm-core dep above.
 colored.workspace = true
 indicatif.workspace = true
 inquire.workspace = true

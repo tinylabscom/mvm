@@ -146,7 +146,7 @@ struct AdmitPlanForBootParams<'a> {
 }
 
 fn plan_seccomp_tier(
-    tier: mvm_security::seccomp::SeccompTier,
+    tier: mvm_core::crypto::seccomp::SeccompTier,
 ) -> Result<mvm_core::plan::PlanSeccompTier> {
     tier.to_string()
         .parse()
@@ -205,13 +205,13 @@ impl std::fmt::Debug for AdmissionContext {
 ///
 /// The image name on the plan is the VM name (the workload identifier
 /// the rest of the supervisor surface uses). Once `mvm-hostd` lifts
-/// the supervisor in-process, the proper `mvm_security::image_verify`
+/// the supervisor in-process, the proper `mvm_core::crypto::image_verify`
 /// signed-manifest path can replace this.
 fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
         return Ok(None);
     }
-    let sha = mvm_security::image_verify::sha256_file(p.rootfs_path).with_context(|| {
+    let sha = mvm_core::crypto::image_verify::sha256_file(p.rootfs_path).with_context(|| {
         format!(
             "hashing rootfs at {} for plan admission",
             p.rootfs_path.display()
@@ -748,7 +748,7 @@ pub(in crate::commands) struct Args {
     #[arg(long, default_value = "default")]
     pub network: String,
     /// Sandbox tag in `KEY=VALUE` form. Repeatable. Validated against
-    /// `mvm_security::policy::InputValidator` charset/length rules.
+    /// `mvm_core::crypto::policy::InputValidator` charset/length rules.
     #[arg(long = "tag", value_name = "KEY=VALUE")]
     pub tags: Vec<String>,
     /// Sandbox time-to-live (e.g. `30s`, `5m`, `2h`, `7d`). After
@@ -925,7 +925,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
              to suppress this warning."
         ));
     }
-    let seccomp_tier: mvm_security::seccomp::SeccompTier =
+    let seccomp_tier: mvm_core::crypto::seccomp::SeccompTier =
         args.seccomp.parse().context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
     let lowered_plan_secrets = load_workload_ir(args.from_workload_ir.as_deref())?
@@ -939,16 +939,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let mut sandbox_tags: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for raw in &args.tags {
-        let (k, v) = mvm_security::policy::InputValidator::parse_tag_arg(raw)
+        let (k, v) = mvm_core::crypto::policy::InputValidator::parse_tag_arg(raw)
             .with_context(|| format!("Invalid --tag value: {:?}", raw))?;
         sandbox_tags.insert(k, v);
     }
-    mvm_security::policy::InputValidator::validate_tag_map(&sandbox_tags)
+    mvm_core::crypto::policy::InputValidator::validate_tag_map(&sandbox_tags)
         .context("Tag map exceeds aggregate caps")?;
     let sandbox_ttl = args
         .ttl
         .as_deref()
-        .map(mvm_security::policy::parse_ttl)
+        .map(mvm_core::crypto::policy::parse_ttl)
         .transpose()
         .context("Invalid --ttl value")?;
     let auto_resume = !args.no_auto_resume;
@@ -1099,7 +1099,7 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) detach: bool,
     pub(super) network_policy: mvm_core::network_policy::NetworkPolicy,
     pub(super) network_name: &'a str,
-    pub(super) seccomp_tier: mvm_security::seccomp::SeccompTier,
+    pub(super) seccomp_tier: mvm_core::crypto::seccomp::SeccompTier,
     pub(super) plan_seccomp_tier: mvm_core::plan::PlanSeccompTier,
     pub(super) plan_secret_release: mvm_core::plan::SecretReleasePolicy,
     pub(super) plan_secrets: Vec<mvm_core::plan::SecretBinding>,
@@ -2656,7 +2656,7 @@ chain_signing = true
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"live-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_security::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
                 vm_name: "vm-live",
@@ -2754,7 +2754,7 @@ stream_destinations = ["file://{}"]
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"stream-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_security::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
                 vm_name: "vm-stream",
@@ -2851,7 +2851,7 @@ chain_signing = false
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"unsigned-audit-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_security::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
                 vm_name: "vm-unsigned-audit",
@@ -2923,7 +2923,7 @@ chain_signing = false
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"missing-bundle-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_security::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
                 vm_name: "vm-nope",
@@ -3015,7 +3015,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"typo-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_security::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
                 vm_name: "vm-typo",
@@ -3113,7 +3113,7 @@ port_hi  = 443
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"bad-cidr-payload");
         let ledger = InMemoryNonceLedger::new();
-        let sha = mvm_security::image_verify::sha256_file(&rootfs).unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
                 vm_name: "vm-bad",

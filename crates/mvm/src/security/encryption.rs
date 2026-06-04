@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use zeroize::Zeroizing;
 
 use crate::shell;
-use mvm_security::keystore::validate_shell_id;
+use mvm_core::crypto::keystore::validate_shell_id;
 
 /// Create a LUKS-encrypted volume at the given path.
 ///

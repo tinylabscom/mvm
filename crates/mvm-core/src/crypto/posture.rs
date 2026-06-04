@@ -1,4 +1,4 @@
-use mvm_core::security::{PostureCheck, PostureReport, SecurityLayer};
+use crate::security::{PostureCheck, PostureReport, SecurityLayer};
 
 /// Evaluates security posture from a set of individual checks.
 ///

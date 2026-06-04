@@ -11,7 +11,7 @@
 //!   sequenced post-Phase-6.
 //!
 //! Re-exports below collapse the module path so callers can write
-//! `use mvm_security::attestation::{IdentityKey, sign_report, ...}`.
+//! `use crate::crypto::attestation::{IdentityKey, sign_report, ...}`.
 //!
 //! The CLI surface (`mvmctl attest export`, `mvmctl attest verify`)
 //! lives in `mvm-cli`; this crate carries only the library primitives
