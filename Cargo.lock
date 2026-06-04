@@ -3325,6 +3325,7 @@ dependencies = [
  "mvm-core",
  "mvm-guest",
  "mvm-sdk",
+ "nix 0.29.0",
  "pgp",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -3423,14 +3424,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-egress-proxy"
-version = "0.15.2"
-dependencies = [
- "libc",
- "tempfile",
-]
-
-[[package]]
 name = "mvm-guest"
 version = "0.15.2"
 dependencies = [
@@ -3468,18 +3461,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "mvm-host-vm-init"
-version = "0.15.2"
-dependencies = [
- "libc",
- "mvm-build",
- "nix 0.29.0",
- "serde_json",
- "tempfile",
- "uuid",
 ]
 
 [[package]]

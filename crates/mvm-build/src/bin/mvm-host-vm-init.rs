@@ -71,6 +71,7 @@ use std::process::ExitCode;
 // would flag them otherwise. Real dead code would still surface as
 // red because the tests would lose coverage.
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/boot_timings.rs"]
 mod boot_timings;
 /// Plan 89 W3 part 2 — hand-rolled parser for the
 /// `HostVmRequest` wire shape the persistent builder VM's
@@ -79,6 +80,7 @@ mod boot_timings;
 /// body. Tested against the host's serde-derived encoding so
 /// schema drift on either side is loud.
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/builder_request.rs"]
 mod builder_request;
 /// Plan 89 W2 part 3 — hand-rolled `HostVmResponse::Result`
 /// JSON. Cross-platform (testable on macOS) so the wire shape can
@@ -86,20 +88,26 @@ mod builder_request;
 /// serde via a dev-dep test, without dragging serde_json into the
 /// production builder-init binary.
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/dispatch_response.rs"]
 mod dispatch_response;
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/install.rs"]
 mod install;
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/install_spec.rs"]
 mod install_spec;
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/network.rs"]
 mod network;
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/proxy.rs"]
 mod proxy;
 /// Plan 107 A2.2 / A2.3 — spawn a workload microVM inside the host
 /// VM via a `WorkloadVmm` backend (Firecracker today). Cross-platform
 /// trait + state-dir/lifecycle logic (tested on macOS); the
 /// signal-based stop/status helpers are Linux-only.
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/workload.rs"]
 mod workload;
 /// Plan 107 A3 — in-host-VM vsock forwarder (the nesting hop). The
 /// cross-platform CONNECT+splice core is unit-tested on every host;
@@ -107,6 +115,7 @@ mod workload;
 /// because it uses `UnixStream` (the crate is inert on Windows).
 #[cfg(unix)]
 #[allow(dead_code)]
+#[path = "mvm-host-vm-init/workload_proxy.rs"]
 mod workload_proxy;
 
 fn main() -> ExitCode {

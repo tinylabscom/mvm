@@ -30,12 +30,10 @@ members = [
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
-    "crates/mvm-host-vm-init",
     # Plan 73 Followup B.2.x — HTTP CONNECT proxy with hostname
     # allowlist for the builder VM's application-deps install.
     # Linux-only at runtime; same workspace-ergonomics rule as
     # mvm-host-vm-init.
-    "crates/mvm-egress-proxy",
     # Local addon developer experience: in-guest addon name resolution
     # and loopback TCP to host-vsock bridge. Distributed service mesh,
     # tenant policy, and cryptographic routing belong in mvmd.

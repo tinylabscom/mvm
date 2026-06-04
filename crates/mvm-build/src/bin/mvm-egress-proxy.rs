@@ -6,7 +6,7 @@
 //! 1. Builds an [`Allowlist`] (production hostnames by default;
 //!    `MVM_EGRESS_ALLOWLIST` env-var override gated behind the
 //!    `dev-shell` Cargo feature for tests).
-//! 2. Binds the proxy at [`mvm_egress_proxy::DEFAULT_BIND`] (or
+//! 2. Binds the proxy at [`crate::proxy::DEFAULT_BIND`] (or
 //!    `MVM_EGRESS_BIND` if set — gated the same way for tests).
 //! 3. Prints `mvm-egress-proxy: listening on <addr>` to stdout so
 //!    the parent (mvm-host-vm-init) can scrape the addr if it
@@ -46,7 +46,8 @@ mod linux {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use mvm_egress_proxy::{Allowlist, DEFAULT_BIND, start};
+    use mvm_build::egress_proxy::Allowlist;
+    use mvm_build::egress_proxy::{DEFAULT_BIND, start};
 
     pub fn run() -> ExitCode {
         let allowlist = build_allowlist();
@@ -93,7 +94,7 @@ mod linux {
                 let port = std::env::var("MVM_EGRESS_ALLOWLIST_PORT")
                     .ok()
                     .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(mvm_egress_proxy::ALLOWED_PORT);
+                    .unwrap_or(mvm_build::egress_proxy::ALLOWED_PORT);
                 eprintln!(
                     "mvm-egress-proxy: dev-shell feature on — allowlist override `{raw}` :{port}"
                 );
@@ -158,7 +159,7 @@ mod linux {
 mod tests {
     // The library tests in `proxy.rs` cover the proxy lifecycle
     // end-to-end. The binary's `main()` is a thin wrapper around
-    // `mvm_egress_proxy::start` + a signal-driven park loop; the
+    // `crate::proxy::start` + a signal-driven park loop; the
     // signal path is exercised by mvm-host-vm-init's integration
     // test (`install::tests::proxy_lifecycle_wraps_installer`).
     // No standalone binary test fixture lives here.

@@ -12,6 +12,11 @@ pub mod builder_vm;
 /// implementation (libkrun today, Vz in PR-C).
 pub mod builder_vm_runtime;
 pub mod cache;
+/// Builder-VM egress allowlist proxy — the lib half of the
+/// `mvm-egress-proxy` bin (folded in from the former crate, plan 121
+/// D4). Kept as a lib module (not bin-inlined) so its pub API is
+/// dead-code-clean on non-Linux and its tests run cross-platform.
+pub mod egress_proxy;
 pub mod firecracker;
 /// Plan 76 Phase 6 — portable signed `.mvm` artifacts. A tar.gz
 /// wrapper around kernel + rootfs + verity sidecars + cmdline,

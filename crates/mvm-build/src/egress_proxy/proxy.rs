@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::allowlist::Allowlist;
+use crate::egress_proxy::allowlist::Allowlist;
 
 /// Default address the proxy listens on inside the builder VM.
 /// 127.0.0.1 only — the installer runs on the same network
@@ -365,7 +365,7 @@ fn copy_half(mut src: TcpStream, mut dst: TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::allowlist::Allowlist;
+    use crate::egress_proxy::allowlist::Allowlist;
     use std::io::Write;
     use std::net::TcpStream;
 

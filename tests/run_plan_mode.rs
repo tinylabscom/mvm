@@ -6,7 +6,7 @@
 //! the same script. The recording flows through
 //! `mvm_sdk::runtime::compile_recording` to a Workload; the CLI
 //! synthesises one `ExecutionPlan` per app and routes each through
-//! `mvm_supervisor::admit_for_run` for a dry-run admission check.
+//! `mvm_hostd::supervisor::admit_for_run` for a dry-run admission check.
 //!
 //! What this test asserts (the CLI surface the regression bites):
 //!
