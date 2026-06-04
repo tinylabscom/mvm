@@ -6,10 +6,40 @@ description: Getting started as a contributor to mvm.
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS or Linux** — macOS for development via Apple Container (26+) or libkrun (pre-26); Linux for native `/dev/kvm`
-- **Nix** (optional) — only needed for building microVM images
+- **macOS Apple Silicon or Linux** — macOS for development via Apple Container (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; `crates/mvm-cli/build.rs` uses them to cross-compile the embedded host-VM binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static `aarch64-unknown-linux-musl`. End-users running a downloaded `mvmctl` don't need them.
+- **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
-Run the bootstrap script on a fresh machine:
+### Do I need to install libkrun?
+
+It depends on your machine. The builder VM (the Linux guest that runs
+`nix build` inside `mvmctl build` / `up` / `dev`) auto-selects its host
+VMM:
+
+| Host | libkrun (`slp/krun/*`) needed? |
+|---|---|
+| macOS 26+ Apple Silicon | **No** — auto-detect picks the **Vz** backend (Apple Virtualization.framework, ships with the OS). `mvmctl dev up` only retries libkrun if the Vz path fails. |
+| macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`. |
+| Linux + `/dev/kvm` | **No** — Firecracker runs directly. Swap `gvproxy` for `passt` from your distro package manager. |
+
+`mvmctl doctor` reports the resolved choice on the `builder backend`
+line (`<backend> — <source> — <availability>`) and emits install hints
+for anything missing — run it first and follow what it says.
+
+### Getting started
+
+```bash
+# Install zig + cargo-zigbuild if building from a source checkout (see above)
+brew install zig && cargo install cargo-zigbuild
+
+git clone https://github.com/tinylabscom/mvm.git
+cd mvm
+cargo build
+cargo run -- doctor     # reports the builder backend + anything missing
+cargo run -- dev        # auto-bootstrap + drop into the builder-VM shell
+```
+
+Or run the bootstrap script on a fresh machine:
 
 ```bash
 ./ops/bootstrap/dev-setup.sh
