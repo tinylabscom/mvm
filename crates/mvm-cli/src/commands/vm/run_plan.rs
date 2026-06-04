@@ -59,7 +59,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-use mvm_ir::{App, Workload};
+use mvm_sdk::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use super::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};

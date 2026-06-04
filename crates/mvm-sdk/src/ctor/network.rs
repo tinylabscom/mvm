@@ -1,4 +1,4 @@
-use mvm_ir::{HostPort, Network, NetworkDns, NetworkEgress, NetworkMode, PortForward};
+use crate::ir::{HostPort, Network, NetworkDns, NetworkEgress, NetworkMode, PortForward};
 
 /// Network policy with the given mode. Use [`NetworkExt`] chained
 /// setters to declare ports, egress allowlist, peers, and DNS.

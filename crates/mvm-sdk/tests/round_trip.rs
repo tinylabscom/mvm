@@ -1,4 +1,4 @@
-use mvm_ir::{
+use mvm_sdk::ir::{
     App, Concurrency, Entrypoint, Format, Image, InProcessMode, Resources, Source,
     WarmProcessConfig, Workload, canonicalize, validate_schema_version,
 };
@@ -148,7 +148,7 @@ fn warm_process_workload() -> Workload {
                 memory_mb: 512,
                 rootfs_size_mb: 1024,
             },
-            dependencies: Some(mvm_ir::Dependencies::None),
+            dependencies: Some(mvm_sdk::ir::Dependencies::None),
             threat_tier: Default::default(),
             addons: vec![],
             hooks: Default::default(),

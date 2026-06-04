@@ -20,7 +20,7 @@ mod tests {
 
     #[test]
     fn supported_languages_list_loads_and_includes_wasm() {
-        let langs = parse_lines(include_str!("../data/supported_languages.txt"));
+        let langs = parse_lines(include_str!("../../data/supported_languages.txt"));
         assert!(langs.contains(&"python"));
         assert!(langs.contains(&"node"));
         assert!(langs.contains(&"wasm"));
@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn secret_field_tokens_list_loads_with_no_blank_or_comment_entries() {
-        let tokens = parse_lines(include_str!("../data/secret_field_tokens.txt"));
+        let tokens = parse_lines(include_str!("../../data/secret_field_tokens.txt"));
         assert!(!tokens.is_empty());
         assert!(tokens.iter().all(|t| !t.is_empty() && !t.starts_with('#')));
         // Auth credentials tier.

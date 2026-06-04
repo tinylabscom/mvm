@@ -58,7 +58,7 @@ fn recording_json_round_trips_through_compile_pipeline() {
     let app = &workload.apps[0];
     // Final CommandStart → entrypoint.
     match &app.entrypoints[0] {
-        mvm_ir::Entrypoint::Command { command, .. } => {
+        mvm_sdk::ir::Entrypoint::Command { command, .. } => {
             assert_eq!(command, &vec!["python".to_string(), "src/run.py".into()]);
         }
         other => panic!("expected Command entrypoint, got {other:?}"),
@@ -66,7 +66,7 @@ fn recording_json_round_trips_through_compile_pipeline() {
     // FilesWrite → before_start shell hook.
     assert_eq!(app.hooks.before_start.len(), 1);
     match &app.hooks.before_start[0] {
-        mvm_ir::HookCmd::Shell { line } => assert!(
+        mvm_sdk::ir::HookCmd::Shell { line } => assert!(
             line.contains("/app/note.txt") && line.contains("base64 -d"),
             "got: {line}"
         ),

@@ -46,10 +46,10 @@ members = [
     "crates/mvm-addon-dns",
     "crates/mvm-addon-vsock-bridge",
     # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-    # mvm-ir is the canonical Workload IR; mvm-sdk is the builder
-    # surface; mvm-sdk-macros is a placeholder for the proc-macro
-    # surface that lands in a Phase 5 follow-on.
-    "crates/mvm-ir",
+    # mvm-sdk is the builder surface (it now also carries the
+    # canonical Workload IR as `mvm_sdk::ir`, folded from the former
+    # mvm-ir crate in plan 121 A3); mvm-sdk-macros is a placeholder
+    # for the proc-macro surface that lands in a Phase 5 follow-on.
     "crates/mvm-sdk",
     "crates/mvm-sdk-macros",
     # Plan 104 W1a — host services broker subprocess (one of three
@@ -317,7 +317,6 @@ mvm-supervisor = { path = "crates/mvm-supervisor", version = "0.15.1" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.15.1", default-features = false }
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-mvm-ir = { path = "crates/mvm-ir", version = "0.15.1" }
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.15.1" }
 mvm-sdk-macros = { path = "crates/mvm-sdk-macros", version = "0.15.1" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.15.1" }

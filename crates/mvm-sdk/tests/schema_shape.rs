@@ -1,4 +1,4 @@
-use mvm_ir::{Workload, canonicalize};
+use mvm_sdk::ir::{Workload, canonicalize};
 use schemars::schema_for;
 use serde_json::Value;
 

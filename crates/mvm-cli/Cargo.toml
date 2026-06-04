@@ -22,9 +22,8 @@ mvm-oci.workspace = true
 mvm-plan.workspace = true
 mvm-policy.workspace = true
 mvm-supervisor.workspace = true
-# SDK port Phase 2c — `mvmctl compile` reads the Workload IR and routes
-# it through the compile pipeline.
-mvm-ir.workspace = true
+# SDK port Phase 2c — `mvmctl compile` reads the Workload IR
+# (mvm_sdk::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
 anyhow.workspace = true
 # Real ext4 inode lookup for the Stage 0 post-build check (replaces the

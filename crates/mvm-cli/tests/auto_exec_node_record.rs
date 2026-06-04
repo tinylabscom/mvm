@@ -71,7 +71,7 @@ fn auto_exec_node_script_emits_recording_and_compile_lowers_it() {
     let app = &workload.apps[0];
     // node-22 template → nodejs_22 nix package.
     match &app.image {
-        mvm_ir::Image::NixPackages { packages } => {
+        mvm_sdk::ir::Image::NixPackages { packages } => {
             assert!(
                 packages.iter().any(|p| p == "nodejs_22"),
                 "expected nodejs_22 package, got {packages:?}"
@@ -80,7 +80,7 @@ fn auto_exec_node_script_emits_recording_and_compile_lowers_it() {
         other => panic!("expected NixPackages, got {other:?}"),
     }
     match &app.entrypoints[0] {
-        mvm_ir::Entrypoint::Command { command, .. } => {
+        mvm_sdk::ir::Entrypoint::Command { command, .. } => {
             assert_eq!(command, &vec!["node".to_string(), "run.js".into()]);
         }
         other => panic!("expected Command entrypoint, got {other:?}"),

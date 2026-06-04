@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use mvm_ir::{
+use crate::ir::{
     App, Entrypoint, EnvValue, HookCmd, Hooks, Image, Network, Resources, Source, Workload,
 };
 

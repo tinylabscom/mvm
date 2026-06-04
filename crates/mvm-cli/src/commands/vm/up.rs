@@ -544,13 +544,13 @@ fn resolve_deps_volume_binding(
 
 fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
-) -> Result<Option<mvm_ir::Workload>> {
+) -> Result<Option<mvm_sdk::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {
         return Ok(None);
     };
     let bytes = std::fs::read(ir_path)
         .with_context(|| format!("reading workload IR at {}", ir_path.display()))?;
-    let workload: mvm_ir::Workload = serde_json::from_slice(&bytes)
+    let workload: mvm_sdk::ir::Workload = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
     Ok(Some(workload))
 }
@@ -570,7 +570,7 @@ fn resolve_deps_volume_binding_with_cache(
     };
     let bytes = std::fs::read(ir_path)
         .with_context(|| format!("reading workload IR at {}", ir_path.display()))?;
-    let workload: mvm_ir::Workload = serde_json::from_slice(&bytes)
+    let workload: mvm_sdk::ir::Workload = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
 
     // v1 surface: one app per workload. ADR-0009; the IR validator
@@ -586,20 +586,20 @@ fn resolve_deps_volume_binding_with_cache(
 
     // `Dependencies::None` and absent-field both mean "no lockfile".
     let dep = match &app.dependencies {
-        None | Some(mvm_ir::Dependencies::None) => return Ok(None),
+        None | Some(mvm_sdk::ir::Dependencies::None) => return Ok(None),
         Some(d) => d,
     };
 
     // Resolve lockfile path + language from the IR.
     let (language, lockfile_rel) = match dep {
-        mvm_ir::Dependencies::Python { lockfile, .. } => {
+        mvm_sdk::ir::Dependencies::Python { lockfile, .. } => {
             (mvm_build::app_deps::Language::Python, lockfile)
         }
-        mvm_ir::Dependencies::Node { lockfile, .. } => {
+        mvm_sdk::ir::Dependencies::Node { lockfile, .. } => {
             (mvm_build::app_deps::Language::Node, lockfile)
         }
         // unreachable: handled above.
-        mvm_ir::Dependencies::None => return Ok(None),
+        mvm_sdk::ir::Dependencies::None => return Ok(None),
     };
     let source_root = source_root_for_app(app, ir_path)?;
     let lockfile_path = source_root.join(lockfile_rel);
@@ -653,9 +653,12 @@ fn resolve_deps_volume_binding_with_cache(
 /// parent; absolute paths are used verbatim. Other source kinds (`Nix
 /// derivation`, `OCI image`) carry no host-resolvable source root, so
 /// they're refused here with a hint.
-fn source_root_for_app(app: &mvm_ir::App, ir_path: &std::path::Path) -> Result<std::path::PathBuf> {
+fn source_root_for_app(
+    app: &mvm_sdk::ir::App,
+    ir_path: &std::path::Path,
+) -> Result<std::path::PathBuf> {
     match &app.source {
-        mvm_ir::Source::LocalPath { path, .. } => {
+        mvm_sdk::ir::Source::LocalPath { path, .. } => {
             let p = std::path::Path::new(path);
             if p.is_absolute() {
                 Ok(p.to_path_buf())
@@ -666,11 +669,13 @@ fn source_root_for_app(app: &mvm_ir::App, ir_path: &std::path::Path) -> Result<s
                 Ok(base.join(p))
             }
         }
-        mvm_ir::Source::NixDerivation { .. } | mvm_ir::Source::OciImage { .. } => anyhow::bail!(
-            "Workload IR app source is {:?}; --from-workload-ir + dependency \
+        mvm_sdk::ir::Source::NixDerivation { .. } | mvm_sdk::ir::Source::OciImage { .. } => {
+            anyhow::bail!(
+                "Workload IR app source is {:?}; --from-workload-ir + dependency \
              installation only supports `Source::LocalPath` today",
-            app.source
-        ),
+                app.source
+            )
+        }
     }
 }
 

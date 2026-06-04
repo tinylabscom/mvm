@@ -9,7 +9,7 @@
 //! (manifest schema `addon.toml`, registry API, lockfile) live in
 //! `crates/mvm-sdk-addon`.
 
-use crate::hooks::Hooks;
+use crate::ir::hooks::Hooks;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

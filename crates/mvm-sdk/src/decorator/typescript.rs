@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use mvm_ir::Workload;
+use crate::ir::Workload;
 use tree_sitter::{Node, Parser};
 
 use super::value::{HELPER_ALLOWLIST, Value, lower_to_workload, non_literal_at};
@@ -521,7 +521,7 @@ fn first_error_location(root: Node, source: &[u8]) -> (usize, usize, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::{Entrypoint, EnvValue, HookCmd, Image, NetworkMode, SecretMount};
+    use crate::ir::{Entrypoint, EnvValue, HookCmd, Image, NetworkMode, SecretMount};
     use std::path::PathBuf;
 
     fn parse_str(src: &str) -> Result<(Workload, DecoratorManifest), ParseError> {

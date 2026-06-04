@@ -1,8 +1,8 @@
-use crate::addon::{AddonRef, AddonTier, AddonUse};
-use crate::data::parse_lines;
-use crate::error_codes::ErrorCode;
-use crate::version::{VersionError, validate_schema_version};
-use crate::workload::{
+use crate::ir::addon::{AddonRef, AddonTier, AddonUse};
+use crate::ir::data::parse_lines;
+use crate::ir::error_codes::ErrorCode;
+use crate::ir::version::{VersionError, validate_schema_version};
+use crate::ir::workload::{
     Concurrency, Entrypoint, EnvValue, InProcessMode, JsonSchemaShape, NetworkMode, Resources,
     Source, WarmProcessConfig, Workload,
 };
@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 /// for the two tiers (auth credentials, financial/government
 /// identifiers) and the rationale for what is and isn't included.
 static SECRET_FIELD_TOKENS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| parse_lines(include_str!("../data/secret_field_tokens.txt")));
+    LazyLock::new(|| parse_lines(include_str!("../../data/secret_field_tokens.txt")));
 
 /// Languages mvm currently has Nix factory dispatch for. Per
 /// ADR-0010 §4, the IR field is an open string but the host
@@ -26,7 +26,7 @@ static SECRET_FIELD_TOKENS: LazyLock<Vec<&'static str>> =
 /// plus a per-language Nix factory in `nix/factories/`, dispatch
 /// from `flake.rs`, and a corpus entry.
 pub static SUPPORTED_LANGUAGES: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| parse_lines(include_str!("../data/supported_languages.txt")));
+    LazyLock::new(|| parse_lines(include_str!("../../data/supported_languages.txt")));
 
 /// Recognize wildcard / "any" host strings in an egress allowlist.
 /// Plan-0004 §5: callers must enumerate concrete hosts.

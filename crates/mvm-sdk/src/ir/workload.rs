@@ -1,5 +1,5 @@
-use crate::addon::{AddonUse, ThreatTier};
-use crate::hooks::Hooks;
+use crate::ir::addon::{AddonUse, ThreatTier};
+use crate::ir::hooks::Hooks;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

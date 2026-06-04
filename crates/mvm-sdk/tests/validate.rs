@@ -1,4 +1,4 @@
-use mvm_ir::{
+use mvm_sdk::ir::{
     App, Concurrency, Entrypoint, EnvValue, ErrorCode, Format, HostPort, Image, InProcessMode,
     Network, NetworkEgress, NetworkMode, PortForward, PortProto, Resources, SecretMount, SecretRef,
     Source, Volume, WarmProcessConfig, Workload, validate,
@@ -230,7 +230,7 @@ fn function_app() -> App {
             primary: true,
             concurrency: None,
         }],
-        dependencies: Some(mvm_ir::Dependencies::None),
+        dependencies: Some(mvm_sdk::ir::Dependencies::None),
         ..base_app()
     }
 }
@@ -416,7 +416,7 @@ fn allows_host_network_on_command_entrypoint() {
 
 #[test]
 fn rejects_secret_named_field_in_args_schema() {
-    use mvm_ir::JsonSchemaShape;
+    use mvm_sdk::ir::JsonSchemaShape;
     let mut w = base_workload();
     let mut props = serde_json::Map::new();
     props.insert("username".into(), serde_json::json!({"type": "string"}));
@@ -437,7 +437,7 @@ fn rejects_secret_named_field_in_args_schema() {
         primary: true,
         concurrency: None,
     }];
-    w.apps[0].dependencies = Some(mvm_ir::Dependencies::None);
+    w.apps[0].dependencies = Some(mvm_sdk::ir::Dependencies::None);
     let errs = validate(&w).unwrap_err();
     let secret_err = errs
         .iter()
@@ -452,7 +452,7 @@ fn rejects_secret_named_field_in_args_schema() {
 
 #[test]
 fn rejects_secret_named_field_under_nested_properties() {
-    use mvm_ir::JsonSchemaShape;
+    use mvm_sdk::ir::JsonSchemaShape;
     let mut w = base_workload();
     let schema_json = serde_json::json!({
         "type": "object",
@@ -482,7 +482,7 @@ fn rejects_secret_named_field_under_nested_properties() {
         primary: true,
         concurrency: None,
     }];
-    w.apps[0].dependencies = Some(mvm_ir::Dependencies::None);
+    w.apps[0].dependencies = Some(mvm_sdk::ir::Dependencies::None);
     let errs = validate(&w).unwrap_err();
     assert!(
         errs.iter()
@@ -492,7 +492,7 @@ fn rejects_secret_named_field_under_nested_properties() {
 
 #[test]
 fn rejects_financial_identifier_field_names_in_schema() {
-    use mvm_ir::JsonSchemaShape;
+    use mvm_sdk::ir::JsonSchemaShape;
     let mut w = base_workload();
     let schema_json = serde_json::json!({
         "type": "object",
@@ -518,7 +518,7 @@ fn rejects_financial_identifier_field_names_in_schema() {
         primary: true,
         concurrency: None,
     }];
-    w.apps[0].dependencies = Some(mvm_ir::Dependencies::None);
+    w.apps[0].dependencies = Some(mvm_sdk::ir::Dependencies::None);
     let errs = validate(&w).unwrap_err();
     assert!(
         errs.iter()
@@ -533,7 +533,7 @@ fn rejects_financial_identifier_field_names_in_schema() {
 
 #[test]
 fn accepts_innocent_field_names_in_schema() {
-    use mvm_ir::JsonSchemaShape;
+    use mvm_sdk::ir::JsonSchemaShape;
     let mut w = base_workload();
     let schema_json = serde_json::json!({
         "type": "object",
@@ -559,7 +559,7 @@ fn accepts_innocent_field_names_in_schema() {
         primary: true,
         concurrency: None,
     }];
-    w.apps[0].dependencies = Some(mvm_ir::Dependencies::None);
+    w.apps[0].dependencies = Some(mvm_sdk::ir::Dependencies::None);
     validate(&w).expect("innocent field names should pass");
 }
 

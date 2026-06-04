@@ -15,7 +15,7 @@
 //! lifecycle point — no merging in Nix, where the language is too
 //! cumbersome for it.
 
-use mvm_ir::Hooks;
+use crate::ir::Hooks;
 
 /// Merge the consuming `App`'s hooks with each attached addon's
 /// hooks. For every phase: `addons[0].phase ++ addons[1].phase ++ …
@@ -44,7 +44,7 @@ pub fn merge_hooks(app: &Hooks, addons: &[&Hooks]) -> Hooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::HookCmd;
+    use crate::ir::HookCmd;
 
     fn shell(line: &str) -> HookCmd {
         HookCmd::Shell {

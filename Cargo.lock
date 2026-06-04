@@ -3417,7 +3417,6 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-ir",
  "mvm-libkrun",
  "mvm-mcp",
  "mvm-oci",
@@ -3555,17 +3554,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-ir"
-version = "0.15.2"
-dependencies = [
- "mvm-guest",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "mvm-jailer-lite"
 version = "0.15.2"
 dependencies = [
@@ -3698,7 +3686,7 @@ dependencies = [
  "globset",
  "hex",
  "hmac",
- "mvm-ir",
+ "mvm-guest",
  "schemars 0.8.22",
  "serde",
  "serde_json",

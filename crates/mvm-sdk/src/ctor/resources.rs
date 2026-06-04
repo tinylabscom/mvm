@@ -1,4 +1,4 @@
-use mvm_ir::Resources;
+use crate::ir::Resources;
 
 /// VM resource declaration.
 pub fn resources(cpu_cores: u16, memory_mb: u32, rootfs_size_mb: u32) -> Resources {

@@ -1,4 +1,4 @@
-use mvm_ir::{Dependencies, NodeTool, PythonTool};
+use crate::ir::{Dependencies, NodeTool, PythonTool};
 
 /// Python lockfile dependency (`uv.lock` by default).
 pub fn python_deps(lockfile: impl Into<String>) -> Dependencies {

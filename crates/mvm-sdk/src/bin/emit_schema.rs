@@ -6,7 +6,7 @@
 //! `schema/workload-ir-v0.json`; `just schema-check` compares fresh output
 //! against the committed file.
 
-use mvm_ir::{Workload, canonicalize};
+use mvm_sdk::ir::{Workload, canonicalize};
 use schemars::schema_for;
 
 fn main() {
