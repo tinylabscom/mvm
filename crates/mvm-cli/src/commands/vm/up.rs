@@ -30,10 +30,9 @@ use super::policy_resolver::{
 };
 use super::shared::{
     VmStartParams, VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
-    env_vars_to_drive_file, materialize_disk_volume, merge_volume_specs, mount_user_dir_shares,
-    parse_port_specs, parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files,
-    request_port_forward, resolve_flake_ref, resolve_network_policy, vm_volume_from_spec_validated,
-    wait_for_guest_agent,
+    env_vars_to_drive_file, materialize_disk_volume, merge_volume_specs, parse_port_specs,
+    parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files, request_port_forward,
+    resolve_flake_ref, resolve_network_policy, vm_volume_from_spec_validated, wait_for_guest_agent,
 };
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
@@ -168,19 +167,6 @@ fn shares_from_volume_cfg(vols: &[image::RuntimeVolume]) -> Vec<mvm_plan::HostSh
             read_only: v.read_only,
             encrypted: v.encrypted,
         })
-        .collect()
-}
-
-/// `(tag, guest_path, read_only)` for the directory-share volumes only,
-/// used by the post-boot guest-agent mount (path b). The `uvol{idx}` tag
-/// uses the index into the full volume list so it matches the id the
-/// backend attached the device under. Disk images are excluded (the
-/// workload mounts those block devices itself).
-fn dir_share_mounts(vols: &[image::RuntimeVolume]) -> Vec<(String, String, bool)> {
-    vols.iter()
-        .enumerate()
-        .filter(|(_, v)| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
-        .map(|(idx, v)| (format!("uvol{idx}"), v.guest.clone(), v.read_only))
         .collect()
 }
 
@@ -1681,10 +1667,6 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volume_cfg = rt_config.volumes.clone();
     };
 
-    // Capture the dir-share mount list before `volume_cfg` is moved into
-    // the boot config below; used for the post-boot guest-agent mount.
-    let dir_shares_for_mount = dir_share_mounts(&volume_cfg);
-
     let user_cfg = mvm_core::user_config::load(None);
     let final_cpus = cpus
         .or(rt_config.cpus)
@@ -1970,11 +1952,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let agent_ready = wait_for_guest_agent(&vm_name_owned, 30);
         if agent_ready {
             record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentReady);
-            // Path (b): mount user directory-share volumes now that the
-            // agent is up (the backend already attached them as virtio-fs
-            // tags). Disk-image volumes are attached as block devices for
-            // the workload to mount itself.
-            mount_user_dir_shares(&vm_name_owned, &dir_shares_for_mount);
+            // User volumes are mounted in-guest by mkGuest's /init from
+            // the `mvm.uvols=` kernel cmdline (the backend attached each
+            // as a virtio-fs tag) — no post-boot RPC needed here.
             // Plan 74 W2 — same audit-emit as the FC path. Apple
             // Container backend captures the guest console to
             // the same `<vm_dir>/console.log` convention; the

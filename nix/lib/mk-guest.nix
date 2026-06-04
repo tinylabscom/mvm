@@ -285,6 +285,42 @@ let
       /bin/busybox modprobe vmw_vsock_virtio_transport 2>/dev/null || true
     fi
 
+    # Stage 2.3 — user-supplied volumes (`--volume` / MVM_VOLUMES).
+    # The host (mvm_core::vm_backend::encode_user_volumes_cmdline) wrote
+    # `mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>;...` onto the
+    # kernel cmdline. Mount each virtio-fs share at its guest path;
+    # best-effort so a bad mount logs and continues rather than wedging
+    # PID 1. Disk (`blk`) volumes are attached as block devices for the
+    # workload to mount itself (guest auto-mount of disks isn't wired).
+    # The guest path is hex-encoded to survive the cmdline's
+    # space/`:`/`;` delimiters; we decode it via `sed`+`printf %b`.
+    if [ -d /lib/modules ]; then
+      /bin/busybox modprobe virtiofs 2>/dev/null || true
+    fi
+    MVM_UVOLS=$(/bin/busybox sed -n 's/.*\bmvm\.uvols=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_UVOLS" ]; then
+      echo "$MVM_UVOLS" | /bin/busybox tr ';' '\n' | while IFS=: read -r utag uhex umode ukind; do
+        [ -n "$utag" ] || continue
+        [ -n "$uhex" ] || continue
+        upath=$(printf '%b' "$(echo "$uhex" | /bin/busybox sed 's/../\\x&/g')")
+        [ -n "$upath" ] || continue
+        if [ "$ukind" = blk ]; then
+          echo "mvm-init: user disk volume for '$upath' attached (guest auto-mount of disks not wired)"
+          continue
+        fi
+        /bin/busybox mkdir -p "$upath" 2>/dev/null || true
+        if [ "$umode" = ro ]; then
+          /bin/busybox mount -t virtiofs -o ro "$utag" "$upath" \
+            && echo "mvm-init: mounted user volume $utag at $upath (ro)" \
+            || echo "mvm-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
+        else
+          /bin/busybox mount -t virtiofs "$utag" "$upath" \
+            && echo "mvm-init: mounted user volume $utag at $upath (rw)" \
+            || echo "mvm-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
+        fi
+      done
+    fi
+
     # Stage 2.45 — Plan 74 W2 — guest-side network defense.
     # Install kernel blackhole routes for `MANDATORY_DENY_RANGES`
     # (cloud metadata, link-local, CGNAT, host loopback) BEFORE
@@ -620,8 +656,11 @@ let
     # Standard FHS dirs the kernel + init expect. `/nix-store`,
     # `/job`, `/out`, `/work`, `/mvm-bins` are mount points the libkrun
     # builder VM (Plan 72 W3 / ADR-065) needs pre-created — rootfs boots
-    # `ro` so `mvm-host-vm-init` can't `mkdir` them at runtime.
-    mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins}
+    # `ro` so `mvm-host-vm-init` can't `mkdir` them at runtime. `/mnt`,
+    # `/data` are the user-volume mount roots (MountPathPolicy allow-roots,
+    # alongside `/work`) — `/init` mounts `--volume` shares here and can't
+    # mkdir on the ro rootfs either.
+    mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins,mnt,data}
     chmod 1777 "$out/tmp"
     chmod 0755 "$out/run"
 
