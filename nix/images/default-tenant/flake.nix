@@ -109,7 +109,12 @@
         pkgs.runCommand imageName
           {
             nativeBuildInputs = [ pkgs.e2fsprogs (pinnedCryptsetupFor pkgs) pkgs.coreutils ];
-            passthru = { inherit rootfsPkg meta; kernel = kernelPkg; };
+            # Expose the inner mkGuest rootfs as `passthru.rootfs` (the
+            # convention builder-vm uses): the builder VM's nix-build cmd.sh
+            # emits mvm-meta.json by eval'ing `<attr>.passthru.rootfs.passthru.mvm`
+            # for runCommand-wrapped images (builder_vm_runtime.rs). Without
+            # this the dev-build path would produce an image admission refuses.
+            passthru = { rootfs = rootfsPkg; kernel = kernelPkg; };
           }
           (''
             set -euo pipefail
