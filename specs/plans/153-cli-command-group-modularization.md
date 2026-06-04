@@ -1,4 +1,4 @@
-# Plan 144 — CLI command directory normalization
+# Plan 153 — CLI command directory normalization
 
 Status: proposed (sequenced for later in the rearchitecture; no code lands yet)
 
