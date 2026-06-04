@@ -52,6 +52,14 @@ Release signing. `pgp`/`sequoia` is a large closure for a sign-and-verify a rele
 - [ ] **Step 1:** Find what pulls `aws-lc-rs` (`cargo tree -i aws-lc-rs`) — likely rustls's default provider (rustls 0.23+) and/or a TLS stack.
 - [ ] **Step 2:** Pin rustls to the `ring` `CryptoProvider` everywhere it's constructed; set the relevant `default-features = false` + `ring` features. Failing test — `cargo tree -i aws-lc-rs` is empty; TLS still works (a smoke connect). The native cmake build is gone (faster cold build — note it). Commit.
 
+### Task B5: drop `tokio` from `mvm-core`'s default closure (folds in plan 121's "runtime-free core" follow-up)
+
+`mvm-core` carries `tokio` (`io-util` base + feature-gated `rt`/`net`/`fs`/`sync`) and has since the first workspace import — so CLAUDE.md's "mvm-core is runtime-free" was untrue (plan 121 reconciled the *wording*; this task makes it *true*). The only unconditional async surface in core is `core::framing`'s `read_json_frame`/`write_json_frame` (`tokio::io`), whose **only callers are the 4 `mvm-hostd` UDS channels** (supervisor proxy + broker / host-signer / audit-signer).
+
+- [ ] **Step 1:** Audit core's `tokio` users — `cargo tree -i tokio` + grep `tokio::` under `crates/mvm-core/src`: `core::framing` (unconditional) plus whatever the feature-gated `rt`/`net`/`fs`/`sync` features serve. Write down each + its consumer.
+- [ ] **Step 2:** Move `core::framing` → `mvm-hostd` (`mvm_hostd::framing`), where its only callers live; update the 4 channel call sites + the `services/frame.rs` adapter. Relocate or feature-gate any remaining core `tokio` users so the **default** `mvm-core` build pulls no runtime. (Coordinate with **plan 122 Task A0**, which extends `framing` with the auth+encryption seam — whichever lands first, the other operates on framing's then-current home.)
+- [ ] **Step 3:** Failing test → gate: `cargo tree -p mvm-core -e no-dev | grep -q tokio` must be **empty**; fold the assertion into D1's `check-forbidden-deps` so core can't silently re-acquire a runtime. Flip CLAUDE.md's `mvm-core` line back to the now-true "no async/runtime deps in the default build." Commit.
+
 ## Phase C — unify duplicate majors
 
 ### Task C1: `oci-client` / `reqwest` duplicate majors
@@ -65,7 +73,7 @@ Two major versions of the same crate inflate the lock + compile time.
 
 ### Task D1: the forbidden-dep gate
 
-- [ ] **Step 1:** Extend `xtask check-forbidden-deps` (exists) to fail if `sigstore`, `opendal`, `pgp`, or `aws-lc-rs` re-enter the default `mvmctl` closure (an allow-list of off-by-default features for the deliberately-gated ones). Failing test — adding one back trips the gate.
+- [ ] **Step 1:** Extend `xtask check-forbidden-deps` (exists) to fail if `sigstore`, `opendal`, `pgp`, or `aws-lc-rs` re-enter the default `mvmctl` closure (an allow-list of off-by-default features for the deliberately-gated ones), **and** if `tokio` re-enters `mvm-core`'s default closure (the B5 runtime-free-core assertion). Failing test — adding any one back trips the gate.
 - [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). Commit. Wire the gate into `ci.yml` (with 128), alongside 156's sibling `check-binary-size` gate.
 
 ## Acceptance
