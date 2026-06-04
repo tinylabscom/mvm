@@ -1,5 +1,19 @@
 # Plan 121 — Crate consolidation (32 → 16; `mvm-network` makes 17 in 123) + `crates/deps/*-sys`
 
+## Status: COMPLETE (2026-06-04)
+
+All structural work landed and merged to `main`; `cargo check --workspace` green on the composed result.
+
+- **#573** — structural folds A1–E1 (32 → 15 Rust crates under `crates/` + `crates/deps/libkrun-sys` + Swift `mvm-vz-supervisor` + `xtask`). The §8 rename-break gate checklist was applied (incl. the architecture.yml allowlist repoint done during the merge-with-main).
+- **#581** — B4 Step 1 framing dedup → `mvm_core::framing` (4 real no-auth UDS copies).
+- **#583** — B4 Step 3 paths dedup (call-site, via the existing `mvm_core::config` helpers + new `mvm_data_dir_strict()`; fixed a real `MVM_DATA_DIR`/`MVM_CACHE_DIR` override-bypass at 15 sites) + B4 closeout.
+
+**Four descopes, each investigated, each rationalised in B4 / the deferred-follow-ups below (NOT silently dropped):** framing Option B (the authed `FramedMessage<T>` retrofit — single impl, not a duplicate); config_envelope generic loader (loaders have distinct contracts); subprocess scaffold (already unified in `mvm-hostd`); and no new `core::paths` module (helpers already live in `mvm_core::config`).
+
+**One accepted out-of-scope caveat:** the Acceptance item *"no async/runtime dep in `mvm-core`"* is **not met** — `tokio` has been a normal dep since the first workspace import (`1c3e00c3`), pre-dating every B-fold; B1–B3 added none. Not CI-enforced, not introduced here. Making core genuinely runtime-free is a tracked deferred follow-up, not a plan-121 deliverable. The granular per-Step boxes below are the historical execution recipe — the work shipped in the three PRs named above.
+
+The remaining unchecked boxes are either (a) that recipe, or (b) the **deferred follow-ups** at the foot of this doc, all of which were always scoped to *other* plans (122/123/124/126/128) or are explicit own-PR follow-ups (Option B, `deny_unknown_fields` hardening, runtime-free core).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Reshape the workspace from **32 crates to the 16 existing-code architectural crates** of ADR-066 §1 (the 17th, `mvm-network`, is created by plan 123 when `NetworkProvider` lands), plus a bracketed `crates/deps/*-sys` for the one true FFI crate. Pure structural migration — renames, folds, bin relocations, FFI extraction — that adds **no new third-party deps** (build-units only) and keeps the workspace green + every claim gate intact after each task.
