@@ -631,7 +631,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             } else {
                 memory
             };
-            let open_shell = effective_up_shell(shell, no_shell);
+            // The interactive shell bridges the guest console over a PTY,
+            // which needs a real terminal. Without one (CI, scripts, the
+            // core_demo test — stdin is redirected) `console_interactive`'s
+            // openpty() fails. Boot the VM and return instead; `dev shell`
+            // attaches later once a TTY is present. (#582)
+            let want_shell = effective_up_shell(shell, no_shell);
+            let open_shell = want_shell && std::io::IsTerminal::is_terminal(&std::io::stdin());
+            if want_shell && !open_shell {
+                ui::info(
+                    "No interactive terminal detected; dev VM is up — run \
+                     `mvmctl dev shell` to attach.",
+                );
+            }
             let dev_volumes = resolve_dev_volumes(&volume)?;
 
             // Reap helpers (gvproxy/supervisor) leaked by a prior killed
