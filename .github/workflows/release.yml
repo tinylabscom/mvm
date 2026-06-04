@@ -411,6 +411,13 @@ jobs:
 
   release:
     needs: [build, dev-image, builder-image, builder-vm-image, default-microvm, runtime-overlay-image]
+    # Gate the published release on the mvmctl binary build ONLY. The Nix
+    # image jobs still run and their artifacts are attached when present,
+    # but an image-build failure must not block the binary download
+    # (mvmctl tarballs + checksums) that install.sh / `mvmctl update` /
+    # the Homebrew tap consume. `!cancelled()` lets this run after image
+    # jobs fail; the result check keeps the binary build a hard requirement.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -473,9 +480,11 @@ jobs:
           shopt -s nullglob
           manifests=(artifacts/*-image-*.manifest.json)
           if [ "${#manifests[@]}" -eq 0 ]; then
-            echo "::error::no image manifests found in artifacts/" >&2
+            # Images are best-effort: an image-build failure must not block
+            # the binary release. Warn and skip rather than fail.
+            echo "::warning::no image manifests in artifacts/ — image jobs likely failed; publishing the binary release without image signatures" >&2
             ls -la artifacts/ >&2 || true
-            exit 1
+            exit 0
           fi
           for manifest in "${manifests[@]}"; do
             cosign sign-blob \
@@ -490,38 +499,49 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          # nullglob: image globs that matched nothing (their job failed)
+          # drop out of the list instead of being passed literally and
+          # erroring `gh release create`. The binary tarballs, the combined
+          # checksums, and the SBOM are always present (the job gates on the
+          # binary build), so the download path is always published; images
+          # attach only when their jobs succeeded.
+          shopt -s nullglob
+          assets=(
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.bundle
+            artifacts/checksums-sha256.txt
+            artifacts/dev-vmlinux-*
+            artifacts/dev-rootfs-*
+            artifacts/dev-image-*-checksums-sha256.txt
+            artifacts/dev-image-*.manifest.json
+            artifacts/dev-image-*.manifest.json.bundle
+            artifacts/builder-vmlinux-*
+            artifacts/builder-rootfs-*
+            artifacts/builder-initrd-*
+            artifacts/builder-image-*-checksums-sha256.txt
+            artifacts/builder-image-*.manifest.json
+            artifacts/builder-image-*.manifest.json.bundle
+            artifacts/builder-vm-vmlinux-*
+            artifacts/builder-vm-rootfs-*
+            artifacts/builder-vm-*.cmdline.txt
+            artifacts/builder-vm-*.manifest.json
+            artifacts/builder-vm-*-checksums-sha256.txt
+            artifacts/default-microvm-vmlinux-*
+            artifacts/default-microvm-rootfs-*
+            artifacts/default-microvm-*-checksums-sha256.txt
+            artifacts/runtime-overlay-*.ext4
+            artifacts/runtime-overlay-*.verity
+            artifacts/runtime-overlay-*.roothash
+            artifacts/runtime-overlay-*.VERSION
+            artifacts/runtime-overlay-*-checksums-sha256.txt
+            sbom.cdx.json
+            sbom.cdx.json.bundle
+          )
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --generate-notes \
-            artifacts/*.tar.gz \
-            artifacts/*.tar.gz.bundle \
-            artifacts/checksums-sha256.txt \
-            artifacts/dev-vmlinux-* \
-            artifacts/dev-rootfs-* \
-            artifacts/dev-image-*-checksums-sha256.txt \
-            artifacts/dev-image-*.manifest.json \
-            artifacts/dev-image-*.manifest.json.bundle \
-            artifacts/builder-vmlinux-* \
-            artifacts/builder-rootfs-* \
-            artifacts/builder-initrd-* \
-            artifacts/builder-image-*-checksums-sha256.txt \
-            artifacts/builder-image-*.manifest.json \
-            artifacts/builder-image-*.manifest.json.bundle \
-            artifacts/builder-vm-vmlinux-* \
-            artifacts/builder-vm-rootfs-* \
-            artifacts/builder-vm-*.cmdline.txt \
-            artifacts/builder-vm-*.manifest.json \
-            artifacts/builder-vm-*-checksums-sha256.txt \
-            artifacts/default-microvm-vmlinux-* \
-            artifacts/default-microvm-rootfs-* \
-            artifacts/default-microvm-*-checksums-sha256.txt \
-            artifacts/runtime-overlay-*.ext4 \
-            artifacts/runtime-overlay-*.verity \
-            artifacts/runtime-overlay-*.roothash \
-            artifacts/runtime-overlay-*.VERSION \
-            artifacts/runtime-overlay-*-checksums-sha256.txt \
-            sbom.cdx.json \
-            sbom.cdx.json.bundle
+            "${assets[@]}"
 
       # The "release: published" event fired by `gh release create` runs under
       # GITHUB_TOKEN, which by design does not trigger downstream workflows.
