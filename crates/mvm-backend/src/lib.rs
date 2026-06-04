@@ -52,6 +52,12 @@ pub mod compat;
 pub mod docker;
 pub mod firecracker;
 pub mod handle_registry;
+/// Apple Container / Apple Virtualization.framework runtime interface
+/// (objc2 + Swift bridge, process spawn + verity wiring) — folded in
+/// from the former `mvm-providers` crate (plan 121 C2). The
+/// `apple_container` backend dispatch (`AppleContainerBackend`) stays in
+/// `apple_container.rs`; this is the lower-level interface it drives.
+pub mod providers;
 // Plan 102 W6.A.5 — host-side gvproxy lifecycle for the Vz
 // backend. VzBackend is stateless and the Swift supervisor doesn't
 // spawn gvproxy itself, so the host process spawns gvproxy as a

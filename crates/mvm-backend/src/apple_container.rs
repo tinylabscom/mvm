@@ -47,7 +47,7 @@ impl AppleContainerBackend {
     /// detection otherwise.
     pub fn is_platform_available() -> bool {
         // Try the Swift bridge first (most accurate — checks actual framework)
-        if mvm_providers::apple_container::is_available() {
+        if crate::providers::apple_container::is_available() {
             return true;
         }
         // Fall back to platform detection (works without Swift bridge)
@@ -125,7 +125,7 @@ impl VmBackend for AppleContainerBackend {
             config.name, config.cpus, config.memory_mib
         ));
 
-        mvm_providers::apple_container::start(
+        crate::providers::apple_container::start(
             &config.name,
             kernel_path,
             effective_rootfs
@@ -141,7 +141,7 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let stop_result = mvm_providers::apple_container::stop(&id.0)
+        let stop_result = crate::providers::apple_container::stop(&id.0)
             .map_err(|e| anyhow::anyhow!("Apple Container stop failed: {e}"));
         // Best-effort: remove the per-instance rootfs clone (Plan D).
         // A missing file means stop already cleaned up or the VM never
@@ -176,9 +176,9 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn stop_all(&self) -> Result<()> {
-        let ids = mvm_providers::apple_container::list_ids();
+        let ids = crate::providers::apple_container::list_ids();
         for id in &ids {
-            if let Err(e) = mvm_providers::apple_container::stop(id) {
+            if let Err(e) = crate::providers::apple_container::stop(id) {
                 tracing::warn!("Failed to stop container '{id}': {e}");
             }
         }
@@ -186,7 +186,7 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn status(&self, id: &VmId) -> Result<VmStatus> {
-        let ids = mvm_providers::apple_container::list_ids();
+        let ids = crate::providers::apple_container::list_ids();
         if ids.contains(&id.0) {
             Ok(VmStatus::Running)
         } else {
@@ -195,7 +195,7 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let ids = mvm_providers::apple_container::list_ids();
+        let ids = crate::providers::apple_container::list_ids();
         Ok(ids
             .into_iter()
             .map(|id| {
@@ -248,7 +248,7 @@ impl VmBackend for AppleContainerBackend {
         // Firecracker.
         Ok(GuestChannelInfo::Vsock {
             cid: 3, // standard guest CID
-            port: mvm_providers::apple_container::GUEST_AGENT_PORT,
+            port: crate::providers::apple_container::GUEST_AGENT_PORT,
         })
     }
 

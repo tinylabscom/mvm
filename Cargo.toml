@@ -3,7 +3,6 @@ members = [
     "crates/mvm-core",
     "crates/mvm-storage",
     "crates/mvm-supervisor",
-    "crates/mvm-providers",
     "crates/deps/libkrun-sys",
     # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
     # supervisor without closing the
@@ -314,7 +313,6 @@ mvm-cli = { path = "crates/mvm-cli", version = "0.15.1", default-features = fals
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.15.1" }
 mvm-sdk-macros = { path = "crates/mvm-sdk-macros", version = "0.15.1" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.15.1" }
-mvm-providers = { path = "crates/mvm-providers", version = "0.15.1" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the Apple-VZ objc2
 # stack. Default feature set is empty; consumers wanting real FFI

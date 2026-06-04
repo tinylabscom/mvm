@@ -26,6 +26,6 @@
 // `#[cfg(target_os = "macos")]` to gate the Virtualization.framework
 // implementation behind `mod macos;` and provides non-macOS fallbacks
 // at each public entry point. Cross-platform callers can therefore
-// reference `mvm_providers::apple_container::*` without sprinkling
+// reference `crate::providers::apple_container::*` without sprinkling
 // `cfg` guards at every call site.
 pub mod apple_container;

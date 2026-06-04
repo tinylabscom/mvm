@@ -120,7 +120,7 @@ fn start_vsock_proxy_listener(id: &str) -> Result<(), String> {
 fn proxy_port_is_allowed(port: u32) -> bool {
     const PORT_FORWARD_BASE: u32 = 10_000;
     const CONSOLE_PORT_BASE: u32 = 20_000;
-    port == crate::apple_container::GUEST_AGENT_PORT
+    port == crate::providers::apple_container::GUEST_AGENT_PORT
         || (PORT_FORWARD_BASE..=PORT_FORWARD_BASE + 65_535).contains(&port)
         || (CONSOLE_PORT_BASE..=CONSOLE_PORT_BASE + 65_535).contains(&port)
 }
@@ -484,7 +484,7 @@ pub fn start_vm(
     rootfs_path: &str,
     cpus: u32,
     memory_mib: u64,
-    verity: Option<crate::apple_container::VerityConfig<'_>>,
+    verity: Option<crate::providers::apple_container::VerityConfig<'_>>,
 ) -> Result<(), String> {
     ensure_signed();
 
@@ -1120,7 +1120,7 @@ mod tests {
             // VM), but the protocol read on this side must succeed.
             let mut client = UnixStream::connect(&path).expect("connect to proxy");
             client
-                .write_all(&crate::apple_container::GUEST_AGENT_PORT.to_le_bytes())
+                .write_all(&crate::providers::apple_container::GUEST_AGENT_PORT.to_le_bytes())
                 .expect("write port");
 
             // Read should return EOF (0 bytes) once the worker thread gives
@@ -1179,7 +1179,7 @@ mod tests {
     fn test_proxy_port_allowlist() {
         // Allowed: guest agent control channel.
         assert!(proxy_port_is_allowed(
-            crate::apple_container::GUEST_AGENT_PORT
+            crate::providers::apple_container::GUEST_AGENT_PORT
         ));
         // Specifically, 52 — the historical privileged-port choice —
         // must be rejected now: it's outside the agent port and outside
@@ -1208,10 +1208,10 @@ mod tests {
 
         // Rejected: agent-slot boundary (only the exact port is allowed).
         assert!(!proxy_port_is_allowed(
-            crate::apple_container::GUEST_AGENT_PORT - 1
+            crate::providers::apple_container::GUEST_AGENT_PORT - 1
         ));
         assert!(!proxy_port_is_allowed(
-            crate::apple_container::GUEST_AGENT_PORT + 1
+            crate::providers::apple_container::GUEST_AGENT_PORT + 1
         ));
 
         // Rejected: gap between agent slot and port-forward range.
@@ -1253,7 +1253,7 @@ mod tests {
     #[test]
     fn start_vm_rejects_short_roothash() {
         let (_dir, k, r, v, i) = dummy_paths();
-        let cfg = crate::apple_container::VerityConfig {
+        let cfg = crate::providers::apple_container::VerityConfig {
             verity_path: &v,
             roothash: "deadbeef",
             initrd_path: &i,
@@ -1269,7 +1269,7 @@ mod tests {
     fn start_vm_rejects_non_hex_roothash() {
         let (_dir, k, r, v, i) = dummy_paths();
         let bad = "z".repeat(64);
-        let cfg = crate::apple_container::VerityConfig {
+        let cfg = crate::providers::apple_container::VerityConfig {
             verity_path: &v,
             roothash: &bad,
             initrd_path: &i,
@@ -1285,7 +1285,7 @@ mod tests {
     fn start_vm_rejects_missing_verity_sidecar() {
         let (_dir, k, r, _v, i) = dummy_paths();
         let valid_hash = "a".repeat(64);
-        let cfg = crate::apple_container::VerityConfig {
+        let cfg = crate::providers::apple_container::VerityConfig {
             verity_path: "/nonexistent/path/to/rootfs.verity",
             roothash: &valid_hash,
             initrd_path: &i,
@@ -1301,7 +1301,7 @@ mod tests {
     fn start_vm_rejects_missing_verity_initrd() {
         let (_dir, k, r, v, _i) = dummy_paths();
         let valid_hash = "a".repeat(64);
-        let cfg = crate::apple_container::VerityConfig {
+        let cfg = crate::providers::apple_container::VerityConfig {
             verity_path: &v,
             roothash: &valid_hash,
             initrd_path: "/nonexistent/path/to/rootfs.initrd",

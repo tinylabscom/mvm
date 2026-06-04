@@ -13,7 +13,6 @@ mvm-core.workspace = true
 mvm-guest.workspace = true
 mvm = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
-mvm-providers.workspace = true
 libkrun-sys.workspace = true
 mvm-backend = { workspace = true, default-features = false }
 mvm-mcp.workspace = true

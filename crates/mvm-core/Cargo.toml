@@ -17,7 +17,6 @@ chrono.workspace = true
 # is consumed by every subprocess crate at parse time; mvm-core is
 # the natural home since it already owns the wire-format types.
 ed25519-dalek.workspace = true
-mvm-providers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

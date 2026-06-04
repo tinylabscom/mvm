@@ -65,7 +65,7 @@ fn main() -> ExitCode {
     // self-signs + re-spawns the binary on first run; subsequent
     // invocations are silent (`MVM_SIGNED=1`). Without this,
     // `krun_start_enter` fails at VM creation with rc -22.
-    mvm_providers::apple_container::ensure_signed();
+    mvm_backend::providers::apple_container::ensure_signed();
 
     // Plan 88 W5 diagnostic: opt-in libkrun internal logger. Set
     // `MVM_KRUN_LOG={off,error,warn,info,debug,trace}` to surface

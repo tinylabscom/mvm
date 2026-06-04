@@ -103,7 +103,7 @@ mvm-guest.workspace = true
 # `com.apple.security.hypervisor`; the smoke binary self-signs on
 # first run and re-spawns, same as `mvmctl up --hypervisor
 # apple-container` does.
-mvm-providers.workspace = true
+mvm-backend.workspace = true
 # Plan 72 W4 prerequisite: unit tests for `KrunContext`'s serde
 # shape (incl. the new `virtio_fs_mounts` field with `#[serde(default)]`
 # back-compat) exercise the JSON pipe shape the supervisor binary

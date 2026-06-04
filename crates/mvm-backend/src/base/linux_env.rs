@@ -156,7 +156,7 @@ impl AppleContainerEnv {
     /// set (CI shouldn't silently boot a heavyweight VM).
     fn connect_with_auto_start(&self) -> Result<std::os::unix::net::UnixStream> {
         let port = mvm_guest::vsock::GUEST_AGENT_PORT;
-        match mvm_providers::apple_container::vsock_connect_any(&self.vm_id, port) {
+        match crate::providers::apple_container::vsock_connect_any(&self.vm_id, port) {
             Ok(stream) => Ok(stream),
             Err(initial_err) => {
                 if !auto_start_allowed() {
@@ -171,7 +171,7 @@ impl AppleContainerEnv {
                         self.vm_id
                     )
                 })?;
-                mvm_providers::apple_container::vsock_connect_any(&self.vm_id, port).map_err(|e| {
+                crate::providers::apple_container::vsock_connect_any(&self.vm_id, port).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to connect to dev VM '{}' after auto-start: {e} (initial: {initial_err})",
                         self.vm_id,

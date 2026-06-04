@@ -3048,9 +3048,9 @@ version = "0.15.2"
 dependencies = [
  "bindgen",
  "libc",
+ "mvm-backend",
  "mvm-core",
  "mvm-guest",
- "mvm-providers",
  "serde",
  "serde_json",
  "tempfile",
@@ -3265,7 +3265,6 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-providers",
  "opendal",
  "rand 0.8.6",
  "secrecy",
@@ -3335,7 +3334,9 @@ name = "mvm-backend"
 version = "0.15.2"
 dependencies = [
  "anyhow",
+ "block2",
  "colored",
+ "dispatch2",
  "ext4-view",
  "indicatif",
  "inquire",
@@ -3344,8 +3345,10 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-providers",
  "mvm-vz",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
  "secrecy",
  "serde",
  "serde_json",
@@ -3433,7 +3436,6 @@ dependencies = [
  "mvm-guest",
  "mvm-mcp",
  "mvm-oci",
- "mvm-providers",
  "mvm-sdk",
  "mvm-supervisor",
  "names",
@@ -3470,7 +3472,6 @@ dependencies = [
  "hmac",
  "ipnet",
  "keyring",
- "mvm-providers",
  "rand 0.8.6",
  "regex",
  "secrecy",
@@ -3588,8 +3589,8 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "libkrun-sys",
+ "mvm-backend",
  "mvm-core",
- "mvm-providers",
  "mvm-supervisor",
  "serde_json",
  "tracing",
@@ -3626,20 +3627,6 @@ dependencies = [
  "url",
  "wiremock",
  "xattr",
-]
-
-[[package]]
-name = "mvm-providers"
-version = "0.15.2"
-dependencies = [
- "block2",
- "dispatch2",
- "libc",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
- "tempfile",
- "tracing",
 ]
 
 [[package]]

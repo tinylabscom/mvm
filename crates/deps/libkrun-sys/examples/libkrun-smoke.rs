@@ -73,7 +73,7 @@ fn main() -> ExitCode {
     // ad-hoc codesigns the current binary on first run and re-spawns
     // with `MVM_SIGNED=1`; subsequent runs are silent. Without this
     // call, `krun_start_enter` fails at VM creation with rc -22.
-    mvm_providers::apple_container::ensure_signed();
+    mvm_backend::providers::apple_container::ensure_signed();
 
     // Sanity-check every path that has to exist before we hand it to
     // libkrun. The C wrapper would fail later anyway, but failing here

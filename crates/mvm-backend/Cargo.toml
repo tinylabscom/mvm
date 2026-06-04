@@ -41,7 +41,6 @@ mvm-guest.workspace = true
 # `start` impl. The base substrate's sidecar reader already pulls
 # `mvm-build`, so this doesn't widen the dependency graph.
 mvm-build.workspace = true
-mvm-providers.workspace = true
 libkrun-sys.workspace = true
 # Plan 97 Phase B — Vz backend foundation crate (SupervisorConfig types,
 # supervisor-binary path resolution). Pure data + helpers; no Swift dep.
@@ -72,6 +71,44 @@ tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+
+# Apple Virtualization.framework bindings (objc2 + Swift bridge) for the
+# `providers::apple_container` interface — folded in with the former
+# mvm-providers crate (plan 121 C2). macOS-only; the workspace lock
+# already carries these (no new third-party dep).
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSError"] }
+objc2-virtualization = { version = "0.3", features = [
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZGenericPlatformConfiguration",
+    "VZPlatformConfiguration",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZStorageDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZNATNetworkDeviceAttachment",
+    "VZNetworkDeviceAttachment",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZEntropyDeviceConfiguration",
+    "VZSerialPortConfiguration",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZMemoryBalloonDeviceConfiguration",
+    "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketConnection",
+] }
 
 [features]
 default = []

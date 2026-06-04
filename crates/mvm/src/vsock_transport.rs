@@ -7,7 +7,7 @@
 //! don't have to know which backend the VM is running under. Before
 //! this trait, every
 //! caller open-coded the same `if let Ok(stream) =
-//! mvm_providers::apple_container::vsock_connect(...) { ... } else { ... }`
+//! mvm_backend::providers::apple_container::vsock_connect(...) { ... } else { ... }`
 //! ladder; new backends or backend changes had to chase down every
 //! occurrence.
 //!
@@ -107,7 +107,7 @@ impl VsockTransport for LibkrunTransport {
 
 /// Connects through Apple's `Virtualization.framework` vsock device.
 ///
-/// `mvm_providers::apple_container::vsock_connect` consults the framework's
+/// `mvm_backend::providers::apple_container::vsock_connect` consults the framework's
 /// in-process VM registry and either returns a direct
 /// `VZVirtioSocketDevice` stream (mac host) or routes through the
 /// per-VM proxy socket (cross-process / development).
@@ -125,7 +125,7 @@ impl AppleContainerTransport {
 
 impl VsockTransport for AppleContainerTransport {
     fn connect(&self, port: u32) -> Result<UnixStream> {
-        mvm_providers::apple_container::vsock_connect(&self.vm_name, port)
+        mvm_backend::providers::apple_container::vsock_connect(&self.vm_name, port)
             .map_err(|e| anyhow::anyhow!("Apple Container vsock connect failed: {e}"))
     }
 }
@@ -227,8 +227,11 @@ impl VsockTransport for NestingHopTransport {
 /// `connect()`. This matches the legacy ladder it replaces, which
 /// already did one throwaway probe before the real call.
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
-    if mvm_providers::apple_container::vsock_connect(vm_name, mvm_guest::vsock::GUEST_AGENT_PORT)
-        .is_ok()
+    if mvm_backend::providers::apple_container::vsock_connect(
+        vm_name,
+        mvm_guest::vsock::GUEST_AGENT_PORT,
+    )
+    .is_ok()
     {
         return Ok(Box::new(AppleContainerTransport::new(vm_name)));
     }

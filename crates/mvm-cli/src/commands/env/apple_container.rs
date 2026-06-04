@@ -38,13 +38,13 @@ const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 /// from other processes will fail. Treating that state as "not running"
 /// keeps `dev status` honest with what `shell::run_in_vm` actually sees.
 pub(in crate::commands) fn is_apple_container_dev_running() -> bool {
-    let pid_running = mvm_providers::apple_container::list_ids()
+    let pid_running = mvm_backend::providers::apple_container::list_ids()
         .iter()
         .any(|id| id == DEV_VM_NAME);
     if !pid_running {
         return false;
     }
-    let proxy = mvm_providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
+    let proxy = mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME);
     proxy.exists()
 }
 
@@ -108,7 +108,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 
     // Sign the binary BEFORE launching via launchd. The daemon runs with
     // MVM_SIGNED=1 so it won't re-exec (which would lose launchd context).
-    mvm_providers::apple_container::ensure_signed();
+    mvm_backend::providers::apple_container::ensure_signed();
 
     // The host-backed Nix store is a sparse ext4 file at a stable
     // path. Apple Container attaches it as /dev/vdb; the guest's init
@@ -171,7 +171,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 
 /// Path for the vsock proxy Unix socket.
 pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
-    mvm_providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
+    mvm_backend::providers::apple_container::vsock_proxy_path(DEV_VM_NAME)
         .to_string_lossy()
         .into_owned()
 }
@@ -185,7 +185,7 @@ fn cmd_dev_apple_container_daemon(cpus: u32, memory_gib: u32) -> Result<()> {
         .unwrap_or_else(|_| format!("{}/dev/rootfs.ext4", mvm_core::config::mvm_cache_dir()));
 
     let memory_mib = (memory_gib as u64) * 1024;
-    mvm_providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
+    mvm_backend::providers::apple_container::start(DEV_VM_NAME, &kernel, &rootfs, cpus, memory_mib)
         .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
 
     // Block forever — the VM lives in this process.
@@ -456,7 +456,7 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
     ));
 
     if running
-        && let Ok(mut stream) = mvm_providers::apple_container::vsock_connect_any(
+        && let Ok(mut stream) = mvm_backend::providers::apple_container::vsock_connect_any(
             DEV_VM_NAME,
             mvm_guest::vsock::GUEST_AGENT_PORT,
         )
