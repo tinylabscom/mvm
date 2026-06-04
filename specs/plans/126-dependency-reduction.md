@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Cut the real third-party dependency weight — the heavy *optional* features and the duplicate/C-backed crates — and lock a forbidden-dep gate so it stays cut. This is the host/feature counterpart to 124's lean-agent cut; together they are where the dep graph actually shrinks. The 32→17 consolidation (121) delivers ~0 third-party reduction (build-units only), so this plan does not double-count it.
+**Goal:** Cut the real third-party dependency weight — the heavy *optional* features and the duplicate/C-backed crates — and lock a forbidden-dep gate so it stays cut. This is the host/feature counterpart to 124's lean-agent cut; together they are where the dep graph actually shrinks. The 32→17 consolidation (121) delivers ~0 third-party reduction (build-units only), so this plan does not double-count it. The whole-crate cuts here are also the **primary size driver** for 156 (binary-size reduction) — 156 re-measures `mvmctl`'s size after each task below lands.
 
 **Architecture:** Measure, prune, re-measure, gate. Each target is a feature-gated heavy dep whose closure is replaced by a lean one or relocated to mvmd: `sigstore` (manifest-verify), `opendal` (template-registry-s3), `pgp` (release signing), `aws-lc-rs` (C/cmake crypto). Then unify the duplicate `oci-client`/`reqwest` majors, and add the gate. Every step records a `cargo tree` delta — no asserted numbers.
 
 **Tech Stack:** `cargo tree`, the `xtask check-forbidden-deps` gate (exists), `object_store` (the opendal replacement, shared with 123), `minisign` (the pgp replacement), `ring` (the aws-lc-rs replacement).
 
-**Prereqs:** 121 (final crate homes). Coordinates with 123 (the `object_store` S3 client) and 127 (the dep-count dashboard consumes the re-baselined methodology).
+**Prereqs:** 121 (final crate homes). Coordinates with 123 (the `object_store` S3 client), 127 (the dep-count dashboard consumes the re-baselined methodology), and 156 (binary-size reduction — these cuts are its primary size driver; its `check-binary-size` gate is the sibling of D1's `check-forbidden-deps`).
 
-**Re-baseline (measured 2026-05-31):** `Cargo.lock` is **735 packages** (the brief's "723" was stale) and per-crate closures are ~170 *lower* than an earlier count. Lock the `cargo tree` methodology in Phase A before tracking any delta.
+**Re-baseline (measured 2026-05-31; re-confirmed 2026-06-03):** `Cargo.lock` was **735 packages** on 2026-05-31 (the brief's "723" was stale) and per-crate closures ~170 *lower* than an earlier count. As of 2026-06-03 the lock has drifted to **739** and this plan is still **unstarted** — all four targets (`sigstore`, `opendal`, `pgp`, `aws-lc-rs`) remain present; `minisign`/`object_store` not yet introduced; `docs/investigations/dep-baseline.md` not yet created. Lock the `cargo tree` methodology in Phase A against the live count before tracking any delta.
 
 ---
 
@@ -66,7 +66,7 @@ Two major versions of the same crate inflate the lock + compile time.
 ### Task D1: the forbidden-dep gate
 
 - [ ] **Step 1:** Extend `xtask check-forbidden-deps` (exists) to fail if `sigstore`, `opendal`, `pgp`, or `aws-lc-rs` re-enter the default `mvmctl` closure (an allow-list of off-by-default features for the deliberately-gated ones). Failing test — adding one back trips the gate.
-- [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). Commit. Wire the gate into `ci.yml` (with 128).
+- [ ] **Step 2:** Final measure — total before/after in `dep-baseline.md`; the sum of B1–B4 + C1 is the headline reduction (alongside 124's ~25–35 agent crates). Commit. Wire the gate into `ci.yml` (with 128), alongside 156's sibling `check-binary-size` gate.
 
 ## Acceptance
 
