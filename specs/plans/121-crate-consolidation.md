@@ -2,7 +2,12 @@
 
 ## Status: COMPLETE (2026-06-04)
 
-All structural work landed and merged to `main`; `cargo check --workspace` green on the composed result.
+All structural work landed and merged to `main`.
+
+**Production verification (2026-06-04, integrated `main` @ `539bc59c` — includes the concurrent #571 custom-volumes + the gvproxy fix + plans 158/161):**
+- Green: nightly `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings` on a **real build** (no embed-skip — `build.rs` cross-compiled the `aarch64-musl` host-vm binaries, exercising D4's production path); all 8 xtask claim/spec gates (`check-spec-numbers`, `check-forbidden-deps`, `check-doc-claims`, `check-no-overclaim`, `check-mvm-host-binaries-sync`, `check-no-display-on-secret-types`, `check-audit-positional`, `check-claim-catalog`); workspace doctests.
+- `cargo nextest run --workspace`: **4427/4432 pass** (workspace minus the codesign-walled `mvm-backend`). The 5 failures are all **documented macOS-dev-host environmental issues, not regressions** — 3× `mvm-guest entrypoint` root-ownership checks at uid 501, 1× `mvm-oci` setgid, 1× `mvm-cli embedded_binaries` ELF-magic (fails only under the `MVM_SKIP_EMBED_BINARIES` fast-path; the real clippy build had genuine binaries).
+- `mvm-backend`'s test binary links `Virtualization.framework`, so macOS `amfid` nondeterministically SIGKILLs it locally (it ran 681 tests green in one pass; `--list` succeeded in another). **Linux CI is the authoritative test gate for it and is green on `main`.**
 
 - **#573** — structural folds A1–E1 (32 → 15 Rust crates under `crates/` + `crates/deps/libkrun-sys` + Swift `mvm-vz-supervisor` + `xtask`). The §8 rename-break gate checklist was applied (incl. the architecture.yml allowlist repoint done during the merge-with-main).
 - **#581** — B4 Step 1 framing dedup → `mvm_core::framing` (4 real no-auth UDS copies).
