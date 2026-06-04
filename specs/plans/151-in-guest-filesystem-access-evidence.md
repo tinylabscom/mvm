@@ -3,24 +3,24 @@
 > **For agentic workers:** use `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans` to implement task-by-task. Steps use `- [ ]` for tracking.
 
-> **Spec number:** 151 is free on disk, `origin/main`, and open PRs at authoring time
-> (144–150 taken — 149 = `149-live-operator-event-stream.md`, 150 = the OSV deps plan;
-> PR branches hold 146/147). Numbering is racing across parallel sessions
-> ([[feedback_always_use_git_worktrees]]); re-confirm before merge — `xtask
-> check-spec-numbers` is a Lint gate.
+> **Spec number:** 151 chosen free at authoring. Numbering is actively raced across
+> parallel worktrees ([[feedback_always_use_git_worktrees]]) — re-confirm against `main`
+> + open PRs before merge (`xtask check-spec-numbers` is a Lint gate). Sibling branch-local
+> plans were renumbered off merged-`main` collisions in the same pass: 144→153, 146→154,
+> 147→155.
 
 > **Sequencing:** Follow-on to the Plan 120 line, not a blocker for it. Gated behind Plan
 > 120 `core_demo_e2e` green (it touches the workload-guest boot path — a bad monitor init
 > presents as "agent never answered", Plan 120 Task 4's exact symptom) and lands *on top
 > of* Plan 143 R1 (shares the in-guest seccomp-apply boot path — don't race it). The live
-> surfacing depends on this-branch Plan 145 Workstream A (`mvmctl watch` category filter).
+> surfacing depends on this-branch Plan 149 (`mvmctl watch` category filter).
 
 ## Context
 
 mvm audits **network** access at the host boundary: the gateway audit substrate emits
 `FlowOpened/Closed/Bytes/PolicyDecision` over `~/.mvm/audit/gateway-<vm>.sock`
 (`crates/mvm-supervisor/src/gateway_audit.rs`; wire shape `FlowEventWire` in
-`gateway_bridge.rs`), and Plan 145 Workstream A merges that into `mvmctl watch`. mvm has
+`gateway_bridge.rs`), and Plan 149 merges that into `mvmctl watch`. mvm has
 **no filesystem-access evidence** — nothing records which paths a workload read, which
 writes it attempted, or which opens escaped its shares.
 
@@ -39,7 +39,7 @@ flow audit, deliberately scoped as a *visibility layer*, the same way Plan 143 f
 in-guest hardening as layered niceties over the hardware boundary, never a replacement.
 
 So: an **opt-in, dev-tier** fs-access evidence stream that reuses the in-guest
-seccomp/agent infra (Plan 143) and the audit substrate + `mvmctl watch` (Plan 145),
+seccomp/agent infra (Plan 143) and the audit substrate + `mvmctl watch` (Plan 149),
 surfaced as a live category and a per-run digest. Off by default; never on the hardened
 admitted path.
 
@@ -48,7 +48,7 @@ admitted path.
 - **Network evidence to mirror:** `FlowEventWire` (`gateway_bridge.rs`), `EventCategory`
   (`crates/mvm-supervisor/src/audit_recorder.rs`), per-VM bounded/lossy live socket
   (`gateway_audit.rs`, 256-event drop-oldest, 0700). `mvmctl watch --categories flow`
-  (Plan 145 WS-A) is the consumer.
+  (Plan 149) is the consumer.
 - **In-guest seccomp/agent path:** the agent execs the workload; `mvm-seccomp-apply`
   (`crates/mvm-guest/src/bin/mvm-seccomp-apply.rs`) applies the workload filter at boot,
   built via `crates/mvm-security/src/seccomp.rs` (`seccompiler` dep). Plan 143 R1 extends
@@ -78,8 +78,8 @@ audit substrate; `clap` under `crates/mvm-cli`; `tests/cli.rs`; `cargo test --wo
 ## Workstream A — Capture mechanism + in-guest monitor
 
 ### Task A1: ADR-071 — capture mechanism + advisory framing
-- [ ] Write `specs/adrs/071-filesystem-access-evidence.md` (confirm 071 free — 070 is
-      claimed by Plan 145's attested-snapshot ADR). Decide and record:
+- [ ] Write `specs/adrs/071-filesystem-access-evidence.md` (confirm 070/071 free before
+      authoring — claim the next open ADR number). Decide and record:
   - **Capture mechanism, with the feasibility result, not a guess:**
     - *Candidate A — fanotify* on each share-root subtree inside the guest
       (`FAN_OPEN`/`FAN_ACCESS`/`FAN_MODIFY`/`FAN_OPEN_EXEC`, `FAN_REPORT_DFID_NAME` for
@@ -140,10 +140,10 @@ audit substrate; `clap` under `crates/mvm-cli`; `tests/cli.rs`; `cargo test --wo
       events are high-volume; lossy-live is correct.
 
 ### Task B2: live stream (`mvmctl watch --categories fs`)
-- [ ] Add the fs source to `mvmctl watch` (Plan 145 WS-A) so `--categories fs` streams
+- [ ] Add the fs source to `mvmctl watch` (Plan 149) so `--categories fs` streams
       `FsEventWire`; one-line human formatter
-      (`… fs_open  ro  /work/src/main.py  vm=web`) + raw record under `--json`. If Plan 145
-      WS-A has not landed, gate this task on it rather than duplicating the merge reader.
+      (`… fs_open  ro  /work/src/main.py  vm=web`) + raw record under `--json`. If Plan 149
+      has not landed, gate this task on it rather than duplicating the merge reader.
 
 ### Task B3: per-run digest
 - [ ] On workload exit emit a digest rendered like `deps inspect`'s report:
@@ -202,7 +202,7 @@ audit substrate; `clap` under `crates/mvm-cli`; `tests/cli.rs`; `cargo test --wo
       reads under shares, EROFS-denied writes, opens-outside-shares, dropped-paths — and
       `--json` emits the structured rollup; flag-off / prod-tier is a strict no-op.
 - [ ] `mvmctl watch --categories fs` streams `FsEventWire` live for a running dev workload
-      (once Plan 145 WS-A lands).
+      (once Plan 149 lands).
 - [ ] libkrun + Vz covered; the monitor never blocks the workload; capture failure degrades
       to "evidence unavailable", not a boot failure.
 - [ ] ADR-071 merged stating advisory-not-a-claim + dev-tier-only + the chosen capture
@@ -224,4 +224,4 @@ audit substrate; `clap` under `crates/mvm-cli`; `tests/cli.rs`; `cargo test --wo
 - **Boundary-ideal deferred deliberately:** host virtiofs request logging is named as the
   future accurate capture, not silently omitted.
 - **Dependencies explicit:** after Plan 120 green + Plan 143 R1 (shared boot path);
-  live surfacing needs Plan 145 WS-A; libkrun + Vz first.
+  live surfacing needs Plan 149; libkrun + Vz first.

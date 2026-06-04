@@ -1,4 +1,4 @@
-# Plan 146 — Cloud-hypervisor Tier-1 parity (Kuasar-referenced) + Wasm-sandbox note
+# Plan 154 — Cloud-hypervisor Tier-1 parity (Kuasar-referenced) + Wasm-sandbox note
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans /
 > subagent-driven-development. Checkbox (`- [ ]`) steps track progress.
@@ -7,11 +7,9 @@
 > top of the refactor (plans 120–132). It **does not stand alone or execute ahead
 > of its prereqs** — Task 1's live bring-up waits on Plan 120's `core_demo_e2e`
 > green; Task 2 waits on Plan 141's Rust-owned-shuffle trait; Task 3 feeds Plan
-> 140's snapshot security gaps. Verify the `146` prefix against `main` + open PRs
-> before merge (`cargo xtask check-spec-numbers` is CI-gated). Note: `145` is
-> already double-used on disk (`145-microvm-fork-fanout-and-branch.md` +
-> `145-portable-runnable-artifacts.md`) — that pre-existing collision is someone
-> else's to resolve; this plan deliberately takes 146.
+> 140's snapshot security gaps. Renumbered 146 → 154: `main` merged
+> `146-wasm-wasi-polyglot` (PR #556), so this branch-local plan yields. Re-confirm
+> before merge (`cargo xtask check-spec-numbers` is CI-gated).
 
 **Origin:** a comparison of mvm against **Kuasar** (https://github.com/kuasar-io/kuasar
 — a CNCF multi-sandbox container runtime, Apache-2.0, mostly Rust: a node-level
@@ -169,7 +167,7 @@ libkrun.
       `exit()`); the daemon-vs-process-per-VM tradeoff at fleet scale is **mvmd's**
       call, not mvm's. Record, don't implement here.
 
-## Acceptance (Plan 146 is done when)
+## Acceptance (Plan 154 is done when)
 
 - [ ] CH boots a real VM on a Lima KVM host and answers `agent_ping` over
       vsock:5252; the boot→ping smoke lane is green in the Plan 128 gate set

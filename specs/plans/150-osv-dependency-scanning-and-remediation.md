@@ -3,18 +3,17 @@
 > **For agentic workers:** use `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans` to implement task-by-task. Steps use `- [ ]` for tracking.
 
-> **Spec number:** 150 is free on disk, `origin/main`, and open PRs at authoring time
-> (144–149 are taken — 149 was claimed by a parallel session's
-> `149-live-operator-event-stream.md` mid-authoring, hence 150; PR branches hold 146/147;
-> the pre-existing branch/main collision at 144–145 is not ours to resolve here).
-> Re-confirm before merge — `xtask check-spec-numbers` is a Lint gate.
+> **Spec number:** 150 chosen free at authoring. Numbering is actively raced across
+> parallel worktrees — re-confirm against `main` + open PRs before merge (`xtask
+> check-spec-numbers` is a Lint gate). Sibling branch-local plans were renumbered off
+> merged-`main` collisions in the same pass: 144→153, 146→154, 147→155.
 
 > **Sequencing:** Follow-on to the Plan 120 line, not a blocker for it. Depends on the
 > app-deps install pipeline actually running in the builder VM (Plan 73 W4/W5 cutover +
 > Plan 120 `core_demo_e2e` green) and pairs with the sealed-volume runtime mount
 > (`main`'s Plan 145, `145-app-deps-completion`) — land *after* that mount leg so the
 > `fix → rebuild → reseal → mount` loop is real end-to-end. Independent of this branch's
-> Plan 145 (snapshots/`watch`).
+> Plan 140 (snapshots) and Plan 149 (`mvmctl watch`).
 
 ## Context
 
@@ -245,4 +244,4 @@ pre-release.
   items (fs evidence, scheduled re-audit, DB pinning) named so omission is deliberate.
 - **Dependencies explicit:** after Plan 120 green + the sealed-volume runtime mount
   (`main` Plan 145) so `fix → rebuild → mount` is a real loop; independent of this branch's
-  Plan 145.
+  Plan 140 (snapshots) and Plan 149 (`watch`).
