@@ -158,6 +158,18 @@ positioning goes in §Threat model).
 | Network firewall / pledge-style categories | **Already convergent** — default-deny egress + mandatory-deny ranges (`crates/mvm-core/src/policy/network_policy.rs:466`) + tiered seccomp categories. |
 | `--bounding-set=-all` cap drop | **Verify, not learn** — documented (`crates/mvm-guest/src/fs_rpc.rs:12`) but not visible in the `setpriv` call (`nix/lib/mk-guest.nix:193`); confirm it's actually applied. Independent of the comparison. |
 
+## Deferred follow-up (candidate, not yet scoped)
+
+- [ ] **Widen the per-process Landlock + seccomp envelope to host-side helpers.**
+  Distinct from the rejected "Landlock for workloads" row above: today
+  `crates/mvm-jailer-lite/` confines only the Firecracker bridge sidecar
+  (`src/landlock.rs` ABI v2 + `src/seccomp.rs` `BRIDGE_SYSCALLS`). The host-side
+  egress proxy (`crates/mvm-egress-proxy/src/proxy.rs`) parses guest-supplied
+  CONNECT bytes with no Landlock; the supervisor is similarly unconfined. Assess
+  reusing `mvm-jailer-lite` as a library (path-set + syscall-set inputs) to wrap
+  those processes. Lowest-ROI item from the comparison — promote only if there's
+  appetite; Linux/Firecracker-tier only (macOS helpers differ).
+
 ## Self-review
 
 - Real symbols only: every file:line above was read during research (seccomp
