@@ -417,6 +417,8 @@ mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"
 assert_cmd.workspace = true
 chrono.workspace = true
 flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
 mvm-libkrun.workspace = true
 mvm-oci.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
