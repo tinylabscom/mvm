@@ -294,11 +294,16 @@ let
     # workload to mount itself (guest auto-mount of disks isn't wired).
     # The guest path is hex-encoded to survive the cmdline's
     # space/`:`/`;` delimiters; we decode it via `sed`+`printf %b`.
-    if [ -d /lib/modules ]; then
-      /bin/busybox modprobe virtiofs 2>/dev/null || true
-    fi
     MVM_UVOLS=$(/bin/busybox sed -n 's/.*\bmvm\.uvols=\([^ ]*\).*/\1/p' /proc/cmdline)
     if [ -n "$MVM_UVOLS" ]; then
+      # virtio-fs may be a module on some rootfs. Load it best-effort, but
+      # ONLY when user volumes are present, so a no-volume boot (every
+      # core-demo workload + the dev VM) runs this entire block as a no-op
+      # and is byte-identical to pre-volume behaviour. Errors swallowed —
+      # `|| true` means this can never fail or wedge PID 1.
+      if [ -d /lib/modules ]; then
+        /bin/busybox modprobe virtiofs 2>/dev/null || true
+      fi
       echo "$MVM_UVOLS" | /bin/busybox tr ';' '\n' | while IFS=: read -r utag uhex umode ukind; do
         [ -n "$utag" ] || continue
         [ -n "$uhex" ] || continue
