@@ -368,6 +368,34 @@ pub fn vm_console_log(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("console.log")
 }
 
+// ============================================================================
+// Sensitive ~/.mvm subdirectories
+// ============================================================================
+//
+// Build these ONLY through the helpers below so they honor MVM_DATA_DIR and
+// stay consistent across the diagnostics, signer, and audit paths. The
+// inline `$HOME/.mvm/<sub>` derivations these replace ignored MVM_DATA_DIR.
+
+/// Host signing keys (e.g. `host-signer.ed25519`): `<mvm_data_dir>/keys/`.
+pub fn mvm_keys_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("keys")
+}
+
+/// Chain-signed audit logs: `<mvm_data_dir>/audit/`.
+pub fn mvm_audit_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("audit")
+}
+
+/// Overlay receipts / destruction certificates: `<mvm_data_dir>/overlays/`.
+pub fn mvm_overlays_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("overlays")
+}
+
+/// Secret-material staging: `<mvm_data_dir>/secrets/`.
+pub fn mvm_secrets_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("secrets")
+}
+
 /// Check if running in production mode (MVM_PRODUCTION=1).
 pub fn is_production_mode() -> bool {
     std::env::var("MVM_PRODUCTION")
