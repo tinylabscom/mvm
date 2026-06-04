@@ -2,7 +2,6 @@
 members = [
     "crates/mvm-core",
     "crates/mvm-storage",
-    "crates/mvm-supervisor",
     "crates/deps/libkrun-sys",
     # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
     # supervisor without closing the
@@ -18,6 +17,7 @@ members = [
     "crates/mvm-build",
     "crates/mvm-guest",
     "crates/mvm-cli",
+    "crates/mvm-hostd",
     "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
@@ -53,12 +53,9 @@ members = [
     # ships the dispatch-loop skeleton + UDS listener + config
     # envelope for the general broker subprocess only. ADR-061 /
     # ADR-062 / Plan 104 §"Host-side: three-subprocess architecture".
-    "crates/mvm-broker",
     # Plan 104 W1b.1 — the remaining two key subprocesses, each as
     # its own crate. The supervisor lifecycle + cosign-verify +
     # cgroup + seccomp + binary hardening land in W1b.2.
-    "crates/mvm-host-signer",
-    "crates/mvm-audit-signer",
     # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper wrapping
     # seccompiler 0.5 + landlock 0.4. Called by the per-VM
     # `mvm-firecracker-bridge` sidecar (Task 12) just after startup so
@@ -66,7 +63,6 @@ members = [
     # packet loop touches untrusted bytes. Linux-only at runtime; the
     # crate compiles as inert stubs on macOS / Windows so workspace
     # builds stay green for non-Linux contributors.
-    "crates/mvm-jailer-lite",
     # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary. Closes
     # Plan 112's "Vz carve-out" by binding the Swift `mvm-vz-supervisor`'s
     # `events_ingest_socket_path` and threading the NDJSON `FlowEventWire`
@@ -305,8 +301,8 @@ mvm-build = { path = "crates/mvm-build", version = "0.15.1", default-features = 
 mvm = { path = "crates/mvm", version = "0.15.1", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.15.1" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.15.1" }
-mvm-supervisor = { path = "crates/mvm-supervisor", version = "0.15.1" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.15.1", default-features = false }
+mvm-hostd = { path = "crates/mvm-hostd", version = "0.15.1" }
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.15.1" }
@@ -329,7 +325,6 @@ mvm-egress-proxy = { path = "crates/mvm-egress-proxy", version = "0.15.1" }
 
 # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper (seccompiler +
 # landlock). Consumed by the per-VM `mvm-firecracker-bridge` sidecar.
-mvm-jailer-lite = { path = "crates/mvm-jailer-lite", version = "0.15.1" }
 
 # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary crate. Leaf
 # entry consumed by `mvm-backend::vz::start()` (Task 11) via fork+exec;

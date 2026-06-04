@@ -133,7 +133,7 @@ pub(in crate::commands) struct RunArgs {
     ///
     /// - `--mode plan` (Followup H-plan): synthesize an
     ///   ExecutionPlan per Sandbox call and route through
-    ///   `mvm_supervisor::admit_for_run`; no microVM ever boots.
+    ///   `mvm_hostd::supervisor::admit_for_run`; no microVM ever boots.
     /// - `--mode live` (Followup H-live, Plan 73): spawn the user's
     ///   script with `MVM_SDK_MODE=live` so the SDK shells each
     ///   `Sandbox` operation to existing `mvmctl up` / `proc start` /
@@ -174,7 +174,7 @@ pub(in crate::commands) enum RunMode {
     /// Plan 73 Followup H-live.
     Live,
     /// Plan transport — synthesise one ExecutionPlan per Sandbox
-    /// operation and route through `mvm_supervisor::admit_for_run`.
+    /// operation and route through `mvm_hostd::supervisor::admit_for_run`.
     /// No microVM boots. Useful for dry-running admission gates.
     Plan,
     /// Record transport — capture Sandbox operations into a

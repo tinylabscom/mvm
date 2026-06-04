@@ -154,7 +154,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// path: `console=hvc0` for the virtio-console attachment, ext4 rootfs
 /// at `/dev/vda`. The host-side cmdline allow-list (Plan 97 Security
 /// §7 — to be wired in a follow-up that integrates with
-/// `mvm_supervisor::admit_for_run`) will gate any tokens beyond this
+/// `mvm_hostd::supervisor::admit_for_run`) will gate any tokens beyond this
 /// default for workload microVMs.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 

@@ -1,6 +1,6 @@
 //! Plan 64 W4 — host-side chain-signed audit emitter.
 //!
-//! Wraps `mvm_supervisor::FileAuditSigner` so `mvmctl up` can emit
+//! Wraps `mvm_hostd::supervisor::FileAuditSigner` so `mvmctl up` can emit
 //! tamper-evident `plan.admitted` / `plan.launched` / `plan.failed`
 //! entries bound to the plan-64 `AdmittedPlan`. The chain is signed
 //! under the host signer's keypair (same Ed25519 key W2 introduced for
@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
-use mvm_supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
 
 use crate::commands::image::OciProvenance;
 
@@ -370,7 +370,7 @@ mod tests {
         KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
     };
-    use mvm_supervisor::verify_audit_chain;
+    use mvm_hostd::supervisor::verify_audit_chain;
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 
@@ -526,7 +526,10 @@ mod tests {
 
         let err = verify_audit_chain(&path, &vk).expect_err("tamper must break verify");
         assert!(
-            matches!(err, mvm_supervisor::VerifyError::SignatureInvalid { .. }),
+            matches!(
+                err,
+                mvm_hostd::supervisor::VerifyError::SignatureInvalid { .. }
+            ),
             "expected SignatureInvalid, got {err:?}"
         );
     }

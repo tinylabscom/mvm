@@ -719,7 +719,7 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
 /// the libkrun `sys::Context` and a [`GatewayHandle`] that keeps
 /// the gateway child process alive. Consumed by the bridge factory
 /// closure passed to [`run_supervisor_with_bridge`], which builds
-/// `mvm_supervisor::gateway_bridge::BridgeEndpoints` from these
+/// `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` from these
 /// values and calls `spawn_bridge_thread`.
 ///
 /// Variants mirror `BridgeEndpoints` one-for-one so the bin can
@@ -905,18 +905,18 @@ fn bridge_socketpair_stream() -> std::io::Result<(OwnedFd, OwnedFd)> {
 /// run_supervisor_with_bridge(&cfg, |bridge_fds| {
 ///     let endpoints = match bridge_fds {
 ///         BridgeFds::Passt { gateway_fd, supervisor_fd } => {
-///             mvm_supervisor::gateway_bridge::BridgeEndpoints::Passt {
+///             mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints::Passt {
 ///                 gateway_fd, supervisor_fd,
 ///             }
 ///         }
 ///         BridgeFds::LibkrunGvproxy { gvproxy_socket_path, supervisor_listen_path } => {
-///             mvm_supervisor::gateway_bridge::BridgeEndpoints::LibkrunGvproxy {
+///             mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints::LibkrunGvproxy {
 ///                 gvproxy_socket_path, supervisor_listen_path,
 ///             }
 ///         }
 ///     };
-///     let bridge_cfg = mvm_supervisor::gateway_bridge::BridgeConfig { /* … */ };
-///     let _join = mvm_supervisor::gateway_bridge::spawn_bridge_thread(endpoints, bridge_cfg);
+///     let bridge_cfg = mvm_hostd::supervisor::gateway_bridge::BridgeConfig { /* … */ };
+///     let _join = mvm_hostd::supervisor::gateway_bridge::spawn_bridge_thread(endpoints, bridge_cfg);
 /// })?;
 /// ```
 ///
@@ -1279,7 +1279,7 @@ pub struct SupervisorConfig {
 
     // --- Plan 102 W6.A commit 6: gateway audit substrate ---------------
     //
-    // The bridge ([`mvm_supervisor::gateway_bridge`]) needs these to
+    // The bridge ([`mvm_hostd::supervisor::gateway_bridge`]) needs these to
     // construct a per-VM `BridgeConfig`. `#[serde(default)]` keeps
     // pre-W6.A JSON callers parseable; admission validation
     // ([`SupervisorConfig::validate_audit_substrate`]) refuses
@@ -1295,7 +1295,7 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub audit_dir: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket
-    /// the [`mvm_supervisor::gateway_audit::GatewayAuditSink`] binds.
+    /// the [`mvm_hostd::supervisor::gateway_audit::GatewayAuditSink`] binds.
     #[serde(default)]
     pub gateway_audit_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-events-<vm>.sock` — per-VM ingest
@@ -1312,7 +1312,7 @@ pub struct SupervisorConfig {
 
     // --- Plan 102 W6.A.5: plan + bundle for bridge construction -----
     //
-    // The bridge ([`mvm_supervisor::gateway_bridge::BridgeConfig`])
+    // The bridge ([`mvm_hostd::supervisor::gateway_bridge::BridgeConfig`])
     // needs `Arc<ExecutionPlan>` + `Option<Arc<PolicyBundle>>` to
     // construct chained `AuditEntry`s. Carrying them as
     // `Option<serde_json::Value>` (instead of the typed structs)

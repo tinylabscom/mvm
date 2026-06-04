@@ -57,7 +57,7 @@ use crate::builder_vm::BuilderJob;
 /// on `mvm-supervisor`.
 ///
 /// Why a trait instead of a direct call to
-/// `mvm_supervisor::FileAuditSigner`:
+/// `mvm_hostd::supervisor::FileAuditSigner`:
 ///
 /// - `mvm-build` sits below `mvm-supervisor` in the workspace
 ///   dependency graph (the supervisor uses `mvm-build`'s

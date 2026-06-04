@@ -22,12 +22,12 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_core::user_config::MvmConfig;
+use mvm_hostd::supervisor::ToolRegistry;
+use mvm_hostd::supervisor::tools::{download, staging, upload, web_fetch, web_search};
 use mvm_mcp::{
     ContentBlock, Dispatcher, ReapReason, Reaper, RunParams, SessionConfig, SessionLookup,
     SessionMap, SessionState, ToolResult,
 };
-use mvm_supervisor::ToolRegistry;
-use mvm_supervisor::tools::{download, staging, upload, web_fetch, web_search};
 use secrecy::SecretBox;
 
 use super::Cli;
@@ -695,7 +695,7 @@ impl Dispatcher for ExecDispatcher {
     }
 
     /// Plan 60 Phase 7 — route registry tools through
-    /// `mvm_supervisor::ToolRegistry`. The legacy `run` tool stays
+    /// `mvm_hostd::supervisor::ToolRegistry`. The legacy `run` tool stays
     /// on its dedicated method; everything else (`mvm.time_now`,
     /// `mvm.web_fetch`, `mvm.web_search`, …) lands here.
     ///

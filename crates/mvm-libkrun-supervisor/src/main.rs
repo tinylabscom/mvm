@@ -7,7 +7,7 @@
 //!
 //! 1. **Bridge path** (`cfg.tenant_id` is `Some`) — calls
 //!    [`run_supervisor_with_bridge`] with a factory that spawns the
-//!    per-VM gateway audit bridge (`mvm_supervisor::gateway_bridge::
+//!    per-VM gateway audit bridge (`mvm_hostd::supervisor::gateway_bridge::
 //!    spawn_bridge_thread`). Every guest network byte transits the
 //!    bridge, FlowOpened/FlowClosed entries chain-sign into
 //!    `~/.mvm/audit/<tenant>.jsonl`, and `nc -U
@@ -53,9 +53,9 @@ use libkrun_sys::{
 };
 use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
 use mvm_core::policy::PolicyBundle;
-use mvm_supervisor::audit::AuditSigner;
-use mvm_supervisor::audit_file::FileAuditSigner;
-use mvm_supervisor::gateway_bridge::{
+use mvm_hostd::supervisor::audit::AuditSigner;
+use mvm_hostd::supervisor::audit_file::FileAuditSigner;
+use mvm_hostd::supervisor::gateway_bridge::{
     AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
 };
 
@@ -238,18 +238,18 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
     // Leaf capabilities are fixed per backend: libkrun reports
     // `payload_tap: true`. The Vz drainer (Plan 113 §Task 10) will
     // set `payload_tap: false` from its own bin.
-    let leaf_caps = mvm_supervisor::network::ProviderCapabilities {
+    let leaf_caps = mvm_hostd::supervisor::network::ProviderCapabilities {
         flow_events: true,
         payload_tap: true,
     };
-    let observer_names = mvm_supervisor::network::resolve_observer_chain_from_plan(&plan)
+    let observer_names = mvm_hostd::supervisor::network::resolve_observer_chain_from_plan(&plan)
         .context("resolve observer chain from admitted plan")?;
     let observers = if observer_names.is_empty() {
         Vec::new()
     } else {
-        let allowlist = mvm_supervisor::network::ObserverAllowlist::load_from_host_config()
+        let allowlist = mvm_hostd::supervisor::network::ObserverAllowlist::load_from_host_config()
             .context("load ObserverAllowlist from ~/.mvm/observers/allowlist.toml")?;
-        let mut pipe = mvm_supervisor::network::Pipeline::new();
+        let mut pipe = mvm_hostd::supervisor::network::Pipeline::new();
         for name in observer_names {
             let obs = allowlist
                 .resolve(&name)

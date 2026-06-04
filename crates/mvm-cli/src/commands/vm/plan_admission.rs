@@ -237,7 +237,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// JSON-encoded so `mvm-core` carries no typed dep on `mvm-plan`. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
 /// trusting any decoded field — see ADR-041 §"Verification at admission"
-/// and `mvm_supervisor::supervisor::SupervisorAdmission::admit`.
+/// and `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
 ///
 /// **Do not log the resulting `plan_json` / `bundle_json` values.**
 /// The signed envelope may contain secret bindings, environment

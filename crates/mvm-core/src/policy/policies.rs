@@ -54,7 +54,7 @@ pub struct NetworkPolicy {
 
 /// Wire-format L4 rule row inside `[[network.l4]]`. The supervisor's
 /// `LiveL4Gate::from_specs` parses `dst_cidr` via `ipnet::IpNet` and
-/// folds the rows into a concrete `mvm_supervisor::L4Policy`; this
+/// folds the rows into a concrete `mvm_hostd::supervisor::L4Policy`; this
 /// crate stays free of `ipnet` so the policy schema doesn't take a
 /// hard dep on the address-family crate.
 ///

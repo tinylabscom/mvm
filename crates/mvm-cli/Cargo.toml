@@ -17,7 +17,7 @@ libkrun-sys.workspace = true
 mvm-backend = { workspace = true, default-features = false }
 mvm-mcp.workspace = true
 mvm-oci.workspace = true
-mvm-supervisor.workspace = true
+mvm-hostd.workspace = true
 # SDK port Phase 2c — `mvmctl compile` reads the Workload IR
 # (mvm_sdk::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
@@ -108,7 +108,7 @@ libkrun-live = []
 # release artifact. The feature is only intended to be enabled when cutting
 # an end-user-binary release that legitimately wants the download fallback.
 release-artifact-bootstrap = []
-custom-dns = ["mvm-supervisor/custom-dns"]
+custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [
     "mvm/manifest-verify",

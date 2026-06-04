@@ -2350,7 +2350,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
 
     // ── Step 3: create the socketpair. Both halves go to the child
     //            (one feeds passt, one feeds the supervisor's gateway
-    //            loop — see `mvm_supervisor::gateway_bridge::
+    //            loop — see `mvm_hostd::supervisor::gateway_bridge::
     //            BridgeEndpoints::Passt`). We use stdlib pairs which
     //            arrive with FD_CLOEXEC set; the `pre_exec` block
     //            clears CLOEXEC in the child before `execve` so the

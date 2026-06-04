@@ -34,7 +34,7 @@ use chrono::Utc;
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_core::plan::TenantId;
-use mvm_supervisor::{EventCategory, FileAuditSigner, Recorder};
+use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
 use secrecy::SecretBox;
 
 use mvm_core::user_config::MvmConfig;
@@ -615,7 +615,7 @@ mod tests {
     // unchanged.
     // ──────────────────────────────────────────────────────────────
 
-    use mvm_supervisor::CapturingAuditSigner;
+    use mvm_hostd::supervisor::CapturingAuditSigner;
 
     fn temp_audit_with_recorder() -> (
         tempfile::TempDir,

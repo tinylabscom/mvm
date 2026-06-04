@@ -73,16 +73,16 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 ed25519-dalek = { workspace = true }
 mvm-core = { workspace = true }
-mvm-supervisor = { workspace = true }
+# Supervisor lib + jailer (mvm_hostd::jailer) both come from mvm-hostd
+# now (plan 121 D1); the jailer's seccomp/landlock impl is Linux-gated
+# inside mvm-hostd, so the dep stays unconditional here.
+mvm-hostd = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-mvm-jailer-lite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -2816,11 +2816,11 @@ stream_destinations = ["file://{}"]
         assert!(default_content.contains("plan.admitted"));
         assert!(stream_content.contains("plan.admitted"));
         assert_eq!(
-            mvm_supervisor::verify_audit_chain(&default_path, &vk).unwrap(),
+            mvm_hostd::supervisor::verify_audit_chain(&default_path, &vk).unwrap(),
             2
         );
         assert_eq!(
-            mvm_supervisor::verify_audit_chain(&stream_path, &vk).unwrap(),
+            mvm_hostd::supervisor::verify_audit_chain(&stream_path, &vk).unwrap(),
             2
         );
     }

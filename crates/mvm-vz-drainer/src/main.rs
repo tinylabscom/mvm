@@ -9,7 +9,7 @@
 //!
 //! Reads a [`DrainerConfig`] JSON document on stdin, constructs a
 //! `BridgeConfig` + `BridgeEndpoints::VzIngest`, then calls
-//! `mvm_supervisor::gateway_bridge::spawn_bridge_thread`. The bridge
+//! `mvm_hostd::supervisor::gateway_bridge::spawn_bridge_thread`. The bridge
 //! thread internally builds its own tokio current-thread runtime, so
 //! this binary does not pull tokio as a direct dep — the
 //! `mvm-supervisor` crate already carries it transitively.
@@ -51,12 +51,12 @@ use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::policy::PolicyBundle;
-use mvm_supervisor::audit::AuditSigner;
-use mvm_supervisor::audit_file::FileAuditSigner;
-use mvm_supervisor::gateway_bridge::{
+use mvm_hostd::supervisor::audit::AuditSigner;
+use mvm_hostd::supervisor::audit_file::FileAuditSigner;
+use mvm_hostd::supervisor::gateway_bridge::{
     AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
 };
-use mvm_supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
+use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
 use serde::Deserialize;
 
 /// Stdin JSON contract. Producer is `mvm-backend::vz::start()`

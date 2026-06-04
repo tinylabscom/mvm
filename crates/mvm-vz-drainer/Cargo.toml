@@ -34,7 +34,7 @@ description = "Per-VM Vz drainer sidecar that binds the Swift mvm-vz-supervisor'
 anyhow = { workspace = true }
 ed25519-dalek = { workspace = true }
 mvm-core = { workspace = true }
-mvm-supervisor = { workspace = true }
+mvm-hostd = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }

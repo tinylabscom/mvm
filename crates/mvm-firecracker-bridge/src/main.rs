@@ -7,7 +7,7 @@
 //! `mvm-jailer-lite` confinement (seccomp + Landlock — Plan 113 §Task 8),
 //! reconstructs the parent-inherited socketpair fds into a
 //! [`BridgeEndpoints::Passt`] pair, and hands the packet loop to
-//! `mvm_supervisor::gateway_bridge::spawn_bridge_thread`.
+//! `mvm_hostd::supervisor::gateway_bridge::spawn_bridge_thread`.
 //!
 //! Spawned by Plan 113 §Task 13's `FirecrackerBackend::start` between
 //! the host passt `spawn_detached` step and the Firecracker VM boot.
@@ -72,17 +72,17 @@ use mvm_core::policy::PolicyBundle;
 #[cfg(target_os = "linux")]
 use mvm_firecracker_bridge::parse::{BridgeConfigJson, verify_passt_hash};
 #[cfg(target_os = "linux")]
-use mvm_jailer_lite::{ConfinementSpec, confine_self};
+use mvm_hostd::jailer::{ConfinementSpec, confine_self};
 #[cfg(target_os = "linux")]
-use mvm_supervisor::audit::AuditSigner;
+use mvm_hostd::supervisor::audit::AuditSigner;
 #[cfg(target_os = "linux")]
-use mvm_supervisor::audit_file::FileAuditSigner;
+use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 #[cfg(target_os = "linux")]
-use mvm_supervisor::gateway_bridge::{
+use mvm_hostd::supervisor::gateway_bridge::{
     AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
 };
 #[cfg(target_os = "linux")]
-use mvm_supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
+use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
 #[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]
@@ -138,7 +138,7 @@ fn run() -> Result<()> {
     //   * read from `cfg.passt_path` + `cfg.keys_dir`
     //   * read/write under `cfg.audit_dir`
     //   * invoke the allowlisted syscalls (see
-    //     `mvm_jailer_lite::seccomp::BRIDGE_SYSCALLS`)
+    //     `mvm_hostd::jailer::seccomp::BRIDGE_SYSCALLS`)
     //
     // Per `confine_self`'s partial-confinement contract: any error
     // here MUST cause hard exit. We propagate up to `main()` which

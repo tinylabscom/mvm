@@ -38,7 +38,7 @@ serde_json.workspace = true
 # `BridgeConfig` + `BridgeEndpoints` and calls
 # `spawn_bridge_thread`. `FileAuditSigner` is the chain-signing
 # AuditSigner the factory feeds to the bridge.
-mvm-supervisor.workspace = true
+mvm-hostd.workspace = true
 # Plan 102 W6.A.5 — typed `ExecutionPlan` (mvm_core::plan, folded from
 # the former mvm-plan crate in plan 121 B1) and `PolicyBundle`. The
 # leaf bin can depend on both; the SupervisorConfig

@@ -1,0 +1,82 @@
+[package]
+name = "mvm-hostd"
+description = "Host-side daemon roles for mvm: the trusted supervisor library + the broker / host-signer / audit-signer subprocess binaries + the jailer-lite confinement helper. One crate, separate [[bin]]s so each role stays its own process (ADR-066 §3 process moat). Consolidated from mvm-supervisor + mvm-broker + mvm-host-signer + mvm-audit-signer + mvm-jailer-lite (plan 121 D1)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Each key subprocess is its own process — the moat. The supervisor and
+# jailer are library modules (the per-VM supervisor processes live in
+# mvm-vm-host; the jailer is applied in-process by each role).
+[[bin]]
+name = "mvm-broker"
+path = "src/bin/mvm-broker.rs"
+
+[[bin]]
+name = "mvm-host-signer"
+path = "src/bin/mvm-host-signer.rs"
+
+[[bin]]
+name = "mvm-audit-signer"
+path = "src/bin/mvm-audit-signer.rs"
+
+[dependencies]
+mvm-core.workspace = true
+mvm-backend.workspace = true
+# `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
+# admission gate (security claim 9).
+mvm-sdk.workspace = true
+# `mvm` provides the `VmNameRegistry` the TTL reaper walks.
+mvm.workspace = true
+anyhow.workspace = true
+async-trait = "0.1"
+base64.workspace = true
+chrono.workspace = true
+# rand_core feature for the signers' Ed25519 keygen.
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+sysinfo = { version = "0.30", default-features = false }
+ipnet.workspace = true
+hickory-resolver = { workspace = true, features = ["tokio-runtime"], optional = true }
+rand.workspace = true
+regex.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# RFC 8785 JSON Canonicalization Scheme — audit-signer stable bytes-to-sign.
+serde_jcs = "0.1"
+sha2.workspace = true
+thiserror = "1"
+toml.workspace = true
+url = "2"
+reqwest = { workspace = true }
+zeroize.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix = { version = "1.1", features = ["fs"] }
+
+# mvm-jailer-lite confinement: seccomp + landlock are Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { workspace = true }
+landlock = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
+# ADR-070 audit-chain drift tripwire (supervisor tests).
+mvm-verify = { path = "../mvm-verify" }
+# jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
+ctor = "0.2"
+
+[features]
+default = []
+custom-dns = ["dep:hickory-resolver"]
+
+[lints]
+workspace = true

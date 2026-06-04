@@ -5,7 +5,7 @@
 //! - **plan** (Followup H-plan, already shipped): runs a
 //!   Sandbox-shaped script with the SDK in record mode, lowers the
 //!   captured recording, synthesises one `ExecutionPlan` per app
-//!   and routes each through `mvm_supervisor::admit_for_run` for a
+//!   and routes each through `mvm_hostd::supervisor::admit_for_run` for a
 //!   dry-run admission check. **No microVM ever boots** — the value
 //!   is that admission gates (signature, validity window, replay
 //!   store, policy resolution) fire end-to-end without the cost of
@@ -184,7 +184,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
     }
 
     eprintln!(
-        "mvmctl run --mode plan: workload {} has {} app(s); admitting each via mvm_supervisor::admit_for_run",
+        "mvmctl run --mode plan: workload {} has {} app(s); admitting each via mvm_hostd::supervisor::admit_for_run",
         workload.id,
         workload.apps.len()
     );
