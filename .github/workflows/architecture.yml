@@ -176,16 +176,12 @@ jobs:
               --glob '!**/benches/**' \
               --glob '!**/examples/**' \
               --glob '!crates/mvm/src/hostd/**' \
-              --glob '!crates/mvm-supervisor/src/l7_proxy.rs' \
-              --glob '!crates/mvm-egress-proxy/**' \
-              --glob '!crates/mvm-providers/src/apple_container/**' \
+              --glob '!crates/mvm-build/src/egress_proxy/**' \
+              --glob '!crates/mvm-backend/src/providers/apple_container/**' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
-              --glob '!crates/mvm-supervisor/src/gateway_bridge.rs' \
-              --glob '!crates/mvm-supervisor/src/gateway_audit.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
               --glob '!crates/mvm-backend/src/mock_guest_agent.rs' \
-              --glob '!crates/mvm-addon-vsock-bridge/**' \
-              --glob '!crates/mvm-broker/src/bin/mvm-broker.rs' \
+              --glob '!crates/mvm-guest-helpers/src/addon_vsock_bridge.rs' \
               -e "$PATTERNS" \
               crates/ src/ \
               || true)

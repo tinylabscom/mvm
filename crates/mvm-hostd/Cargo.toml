@@ -8,6 +8,15 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+# Architectural invariant #1 (.github/workflows/architecture.yml): mvm-hostd
+# IS the host-daemon substrate — the supervisor's gateway/audit/L7 proxy
+# listeners plus the broker / host-signer / audit-signer subprocess UDS
+# servers are all legitimate substrate servers (was the per-crate metadata
+# on mvm-broker/mvm-host-signer/mvm-audit-signer + the per-file globs on
+# mvm-supervisor; consolidated here in plan 121 D1).
+[package.metadata.mvm.architecture]
+substrate_server_category = "host daemon roles substrate (supervisor + broker + key signers)"
+
 # Each key subprocess is its own process — the moat. The supervisor and
 # jailer are library modules (the per-VM supervisor processes live in
 # mvm-vm-host; the jailer is applied in-process by each role).

@@ -113,6 +113,14 @@ rand = "0.8"
 
 [features]
 default = []
+# Folded in with the mvm-egress-proxy bin (plan 121 D4). Off by default;
+# tests/dev enable it so the `mvm-egress-proxy` bin honors a
+# `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no
+# features) ship the four ADR-047 hostnames hard-coded — no env override.
+# The bin's `#[cfg(feature = "dev-shell")]` blocks only compile on Linux
+# (inside `mod linux`), so this missing feature was a Linux-only error
+# invisible on a macOS dev host.
+dev-shell = []
 # Plan 72 W1: libkrun-direct builder VM launcher. Pulls the
 # `mvm-libkrun` FFI crate which itself gates the underlying
 # `libkrun-sys` bindings.
