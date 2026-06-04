@@ -1271,10 +1271,11 @@ impl VzPersistentVmHandle {
     /// guest. The W3 part 1 `PersistentBuilderSupervisor::new` takes
     /// this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
-        self.vm_state_dir.join("vsock").join(format!(
-            "vsock-{}.sock",
-            mvm_guest::builder_agent::BUILDER_DISPATCH_PORT
-        ))
+        self.vm_state_dir
+            .join("vsock")
+            .join(mvm_core::config::vsock_socket_filename(
+                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+            ))
     }
 
     /// Per-VM job directory bound at `/job` (and `/out`) inside the

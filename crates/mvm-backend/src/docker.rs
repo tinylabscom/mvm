@@ -172,11 +172,10 @@ impl VmBackend for DockerBackend {
 
         // Config files — write to temp dir and mount
         if !config.config_files.is_empty() {
-            let config_dir = format!(
-                "{}/.mvm/vms/{}/config",
-                std::env::var("HOME").unwrap_or_default(),
-                config.name
-            );
+            let config_dir = mvm_core::config::vm_state_dir(&config.name)
+                .join("config")
+                .to_string_lossy()
+                .into_owned();
             std::fs::create_dir_all(&config_dir)?;
             for f in &config.config_files {
                 std::fs::write(format!("{}/{}", config_dir, f.name), &f.content)?;
@@ -360,9 +359,12 @@ impl VmBackend for DockerBackend {
     }
 
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        let home = std::env::var("HOME").unwrap_or_default();
         Ok(GuestChannelInfo::UnixSocket {
-            path: std::path::PathBuf::from(format!("{home}/.mvm/vms/{}/agent/agent.sock", id.0)),
+            // No dedicated helper for the agent socket; build it on the per-VM
+            // state dir so it honors MVM_DATA_DIR like every other backend.
+            path: mvm_core::config::vm_state_dir(&id.0)
+                .join("agent")
+                .join("agent.sock"),
         })
     }
 

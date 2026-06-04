@@ -31,6 +31,7 @@ use mvm_core::vm_backend::{
 
 use crate::base::ui;
 use libkrun_sys::{KrunContext, SupervisorConfig};
+use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -263,7 +264,7 @@ impl VmBackend for LibkrunBackend {
         // per-VM log so a boot failure / kernel panic is diagnosable
         // (mirrors firecracker.log). Best-effort: fall back to null if
         // the file can't be created.
-        let console_log = std::fs::File::create(state_dir.join("console.log"))
+        let console_log = std::fs::File::create(vm_console_log(&config.name))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
         let mut child = Command::new(&supervisor_path)
@@ -316,7 +317,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let pid_path = vm_state_dir(&id.0).join("libkrun.pid");
+        let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {
             Some(p) => p,
             None => {
@@ -393,7 +394,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn status(&self, id: &VmId) -> Result<VmStatus> {
-        let pid_path = vm_state_dir(&id.0).join("libkrun.pid");
+        let pid_path = vm_libkrun_pid(&id.0);
         match read_pid(&pid_path) {
             Some(pid) if pid_alive(pid) => Ok(VmStatus::Running),
             _ => Ok(VmStatus::Stopped),
@@ -401,7 +402,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = vms_root();
+        let root = PathBuf::from(mvm_data_dir()).join("vms");
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -513,15 +514,6 @@ impl VmBackend for LibkrunBackend {
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
-
-fn vms_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".mvm/vms")
-}
-
-fn vm_state_dir(name: &str) -> PathBuf {
-    vms_root().join(name)
-}
 
 /// Resolve the absolute path to the `mvm-libkrun-supervisor` binary,
 /// checking three sources in order:

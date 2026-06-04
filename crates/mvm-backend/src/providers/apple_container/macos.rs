@@ -25,15 +25,16 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 static VMS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Directory for persisted VM state (PID files + metadata).
-fn vm_state_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(format!("{home}/.mvm/vms"))
+/// Root of per-VM persisted state (`<mvm_data_dir>/vms/`); callers join the
+/// VM id. Shares `mvm_core::config`'s data-dir resolution so MVM_DATA_DIR is
+/// honored and the per-VM layout matches every other backend.
+fn vms_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms")
 }
 
 /// Write VM state to disk so other processes can see it.
 fn persist_vm_state(id: &str) {
-    let dir = vm_state_dir().join(id);
+    let dir = vms_root().join(id);
     tracing::info!("Persisting VM state to {}", dir.display());
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("Failed to create VM state dir {}: {e}", dir.display());
@@ -44,9 +45,12 @@ fn persist_vm_state(id: &str) {
     let _ = std::fs::write(dir.join("backend"), "apple-virtualization");
 }
 
-/// Path to the cross-process vsock proxy Unix socket for VM `id`.
+/// Path to the cross-process vsock proxy Unix socket for VM `id`. Both the
+/// listener (`start_vsock_proxy_listener`) and the connector resolve through
+/// this, and it must equal what `mvm_core::config` hands the rest of mvm —
+/// the single source of truth that keeps the two ends from drifting (#582).
 fn vsock_proxy_socket_path(id: &str) -> std::path::PathBuf {
-    vm_state_dir().join(id).join("vsock.sock")
+    mvm_core::config::vm_vsock_proxy_socket(id)
 }
 
 /// Listen on the per-VM Unix socket and forward each connection to a vsock
@@ -172,7 +176,7 @@ fn proxy_accept_loop(listener: std::os::unix::net::UnixListener, id: String) {
 /// Remove VM state from disk and unload launchd agent.
 fn remove_vm_state(id: &str) {
     unload_launchd_agent(id);
-    let dir = vm_state_dir().join(id);
+    let dir = vms_root().join(id);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -207,7 +211,7 @@ pub fn install_launchd_direct(
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let label = launchd_label(id);
     let plist_path = launchd_plist_path(id);
-    let log_dir = vm_state_dir().join(id);
+    let log_dir = vms_root().join(id);
     std::fs::create_dir_all(&log_dir).map_err(|e| format!("mkdir: {e}"))?;
 
     // The plist runs mvmctl with --hypervisor apple-container and
@@ -295,7 +299,7 @@ fn unload_launchd_agent(id: &str) {
 
 /// Read all VM IDs from disk, filtering out dead PIDs.
 fn read_persisted_vm_ids() -> Vec<String> {
-    let dir = vm_state_dir();
+    let dir = vms_root();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return vec![],
@@ -511,7 +515,7 @@ pub fn start_vm(
 
     // Copy rootfs to a writable location — the Nix store copy is read-only
     // but Virtualization.framework needs read-write access for the disk.
-    let vm_dir = vm_state_dir().join(id);
+    let vm_dir = vms_root().join(id);
     std::fs::create_dir_all(&vm_dir).map_err(|e| format!("create vm dir: {e}"))?;
     let writable_rootfs = vm_dir.join("rootfs.ext4");
     // Always create a fresh copy — previous runs may have left a locked file
@@ -900,7 +904,7 @@ pub fn start_vm(
                         // and tear down the just-persisted state, but
                         // leave any launchd plist alone so the agent that
                         // spawned us isn't cleaned up mid-execution.
-                        let _ = std::fs::remove_dir_all(vm_state_dir().join(id));
+                        let _ = std::fs::remove_dir_all(vms_root().join(id));
                         return Err(format!("start vsock proxy listener: {e}"));
                     }
                     return Ok(());
@@ -1043,13 +1047,25 @@ mod tests {
         let temp = std::path::PathBuf::from(format!("/tmp/mvmac-{}", unique_id()));
         std::fs::create_dir_all(&temp).expect("create temp HOME");
         let saved = std::env::var("HOME").ok();
+        // The proxy path now resolves via `mvm_core::config`, which prefers
+        // MVM_DATA_DIR over $HOME. Clear it so the $HOME-rooted, SUN_LEN-safe
+        // socket path these tests rely on holds even if a sibling test leaked
+        // a long override (which would overflow `sockaddr_un`).
+        let saved_data = std::env::var("MVM_DATA_DIR").ok();
         // SAFETY: serialised by HOME_LOCK above.
-        unsafe { std::env::set_var("HOME", &temp) };
+        unsafe {
+            std::env::set_var("HOME", &temp);
+            std::env::remove_var("MVM_DATA_DIR");
+        }
         body(&temp);
         unsafe {
             match saved {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
+            }
+            match saved_data {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
             }
         }
         let _ = std::fs::remove_dir_all(&temp);

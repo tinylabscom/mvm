@@ -172,8 +172,7 @@ pub fn vsock_proxy_path(id: &str) -> std::path::PathBuf {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(format!("{home}/.mvm/vms/{id}/vsock.sock"))
+        mvm_core::config::vm_vsock_proxy_socket(id)
     }
 }
 
@@ -263,16 +262,17 @@ mod tests {
     }
 
     #[test]
-    fn test_vsock_proxy_path_under_home() {
-        // Whatever HOME points at, the path must resolve below it and end
-        // with the conventional segment used by the dev daemon.
+    fn test_vsock_proxy_path_matches_core_helper() {
+        // The proxy path is the single source of truth in mvm-core::config;
+        // both this provider and the connector must resolve to it identically
+        // (the #582 drift class). Assert equality rather than a $HOME-shaped
+        // suffix so the test honors MVM_DATA_DIR like production does.
         let path = vsock_proxy_path("some-vm");
-        let suffix = std::path::Path::new(".mvm/vms/some-vm/vsock.sock");
+        assert_eq!(path, mvm_core::config::vm_vsock_proxy_socket("some-vm"));
         assert!(
-            path.ends_with(suffix),
-            "expected path to end with {} but got {}",
-            suffix.display(),
-            path.display(),
+            path.ends_with("vms/some-vm/vsock.sock"),
+            "got {}",
+            path.display()
         );
     }
 
