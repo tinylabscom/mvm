@@ -222,6 +222,7 @@ export default defineConfig({
             { label: "Filesystem & Drives", slug: "reference/filesystem" },
             { label: "Guest Agent", slug: "reference/guest-agent" },
             { label: "Limits & Resources", slug: "reference/limits" },
+            { label: "Releases & downloads", slug: "reference/releases" },
           ],
         },
         {
