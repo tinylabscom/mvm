@@ -1236,12 +1236,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // Start config watcher so the user is notified if the config file changes
     // while the build or boot is in progress.
     let _config_watcher = if watch_config {
-        let config_path = {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(home)
-                .join(".mvm")
-                .join("config.toml")
-        };
+        let config_path =
+            std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("config.toml");
         if config_path.exists() {
             match crate::config_watcher::ConfigWatcher::start(&config_path) {
                 Ok(w) => {

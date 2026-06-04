@@ -33,8 +33,9 @@ pub const PLAN_MODE: u32 = 0o600;
 
 /// Resolve `~/.mvm/vms/<vm_name>/`.
 pub fn vm_state_dir(vm_name: &str) -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("$HOME unset; cannot locate ~/.mvm/vms")?;
-    Ok(PathBuf::from(home).join(".mvm").join("vms").join(vm_name))
+    Ok(mvm_core::config::mvm_data_dir_strict()?
+        .join("vms")
+        .join(vm_name))
 }
 
 /// Resolve `~/.mvm/vms/<vm_name>/plan.json`.

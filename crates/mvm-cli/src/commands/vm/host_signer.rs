@@ -56,8 +56,7 @@ pub const KEY_BYTES: usize = 32;
 
 /// Resolve `~/.mvm/keys/` from the calling user's `$HOME`.
 pub fn default_keys_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("$HOME unset; cannot locate ~/.mvm/keys/")?;
-    Ok(PathBuf::from(home).join(".mvm").join("keys"))
+    Ok(mvm_core::config::mvm_data_dir_strict()?.join("keys"))
 }
 
 /// Compose the host-signer identifier used as `signer_id` in the
