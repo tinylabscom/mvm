@@ -470,7 +470,10 @@ fn build_exec_request(
                     auth_source
                 );
             }
-            let (kernel_path, _default_rootfs_path) = ensure_default_microvm_image()?;
+            // `exec` is interactive (dev): a sealed prod image refuses
+            // console/exec, so the default image must be the dev variant.
+            let (kernel_path, _default_rootfs_path) =
+                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
                 rootfs_path: cached.rootfs_path.display().to_string(),
@@ -480,7 +483,8 @@ fn build_exec_request(
         }
         (None, None) => {
             ui::info("No --manifest specified; using bundled default microVM image.");
-            let (kernel_path, rootfs_path) = ensure_default_microvm_image()?;
+            let (kernel_path, rootfs_path) =
+                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
             crate::exec::ImageSource::Prebuilt {
                 kernel_path,
                 rootfs_path,
