@@ -189,23 +189,52 @@ pub fn vsock_proxy_path(id: &str) -> std::path::PathBuf {
 /// Returns a clear error when neither is reachable so callers can decide
 /// whether to surface the message or auto-start the dev daemon.
 pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::UnixStream, String> {
+    // 1. In-process Virtualization.framework reference.
     if let Ok(stream) = vsock_connect(id, port) {
         return Ok(stream);
     }
+    // 2. Apple-Container cross-process proxy socket. The proxy multiplexes
+    //    every port over one socket, so the client writes the target port as
+    //    a 4-byte LE prefix before talking the guest protocol.
     let proxy = vsock_proxy_path(id);
-    if !proxy.exists() {
-        return Err(format!(
-            "dev VM '{id}' is not running (no in-process VM and no proxy socket at {})",
-            proxy.display(),
-        ));
+    if proxy.exists() {
+        use std::io::Write as _;
+        let mut stream = std::os::unix::net::UnixStream::connect(&proxy)
+            .map_err(|e| format!("connect proxy {}: {e}", proxy.display()))?;
+        stream
+            .write_all(&port.to_le_bytes())
+            .map_err(|e| format!("write proxy port: {e}"))?;
+        return Ok(stream);
     }
-    use std::io::Write as _;
-    let mut stream = std::os::unix::net::UnixStream::connect(&proxy)
-        .map_err(|e| format!("connect proxy {}: {e}", proxy.display()))?;
-    stream
-        .write_all(&port.to_le_bytes())
-        .map_err(|e| format!("write proxy port: {e}"))?;
-    Ok(stream)
+    // 3. libkrun per-port socket. A dev VM booted via the libkrun backend
+    //    exposes one socket *per port* at `~/.mvm/vms/<id>/vsock-<port>.sock`,
+    //    so we connect directly — no port handshake. Without this branch a
+    //    healthy libkrun dev VM is misreported as "not running" (#582), which
+    //    is exactly what broke `dev up`'s console attach on macOS+libkrun.
+    //    Mirrors `mvm::vsock_transport::LibkrunTransport::socket_path`; the two
+    //    resolvers live in different crate layers, so keep them in lockstep.
+    let libkrun = libkrun_vsock_path(id, port);
+    if libkrun.exists() {
+        return std::os::unix::net::UnixStream::connect(&libkrun)
+            .map_err(|e| format!("connect libkrun vsock {}: {e}", libkrun.display()));
+    }
+    Err(format!(
+        "dev VM '{id}' is not running (no in-process VM, no proxy socket at {}, no libkrun socket at {})",
+        proxy.display(),
+        libkrun.display(),
+    ))
+}
+
+/// Host path of a libkrun dev VM's per-port vsock socket. Mirrors
+/// `mvm::vsock_transport::LibkrunTransport::socket_path` and the
+/// `vsock-<port>.sock` convention libkrun's supervisor writes (Plan 57),
+/// duplicated here because this provider sits below the `mvm` crate.
+fn libkrun_vsock_path(id: &str, port: u32) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home)
+        .join(".mvm/vms")
+        .join(id)
+        .join(format!("vsock-{port}.sock"))
 }
 
 /// Guest agent vsock port.
@@ -270,5 +299,33 @@ mod tests {
         assert!(err.contains(id), "got: {err}");
         assert!(err.contains("not running"), "got: {err}");
         assert!(err.contains("vsock.sock"), "got: {err}");
+    }
+
+    #[test]
+    fn libkrun_vsock_path_matches_convention() {
+        // #582: libkrun dev VMs expose a per-port socket; the resolver must
+        // build `~/.mvm/vms/<id>/vsock-<port>.sock` (mirrors LibkrunTransport).
+        let path = libkrun_vsock_path("some-vm", GUEST_AGENT_PORT);
+        let suffix =
+            std::path::PathBuf::from(format!(".mvm/vms/some-vm/vsock-{GUEST_AGENT_PORT}.sock"));
+        assert!(
+            path.ends_with(&suffix),
+            "expected path to end with {} but got {}",
+            suffix.display(),
+            path.display(),
+        );
+    }
+
+    #[test]
+    fn vsock_connect_any_consults_libkrun_socket() {
+        // #582 regression: a libkrun dev VM's per-port socket must be part of
+        // the resolution chain, so the "not running" error names it (a real
+        // socket is connected — exercised end-to-end by core_demo_e2e).
+        let err = vsock_connect_any("never-existed-vm-582", GUEST_AGENT_PORT)
+            .expect_err("no VM, no sockets → error");
+        assert!(
+            err.contains("libkrun socket"),
+            "error must name the libkrun socket: {err}"
+        );
     }
 }
