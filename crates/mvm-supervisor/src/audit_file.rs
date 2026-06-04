@@ -279,7 +279,7 @@ mod tests {
 
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
-    use mvm_plan::{PlanId, TenantId};
+    use mvm_core::plan::{PlanId, TenantId};
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 

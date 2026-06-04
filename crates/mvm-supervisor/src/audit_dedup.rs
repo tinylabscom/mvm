@@ -38,7 +38,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use mvm_plan::PlanId;
+use mvm_core::plan::PlanId;
 
 /// One dedup bucket — the supervisor folds equivalent retries
 /// into a single bucket via this key.

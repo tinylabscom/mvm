@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
+use mvm_core::plan::bundle::{FsTrustStore, bundle_sha256, read_and_verify_bundle};
 use mvm_core::user_config::MvmConfig;
-use mvm_plan::bundle::{FsTrustStore, bundle_sha256, read_and_verify_bundle};
 
 use super::super::Cli;
 

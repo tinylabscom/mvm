@@ -6,13 +6,13 @@
 use std::collections::BTreeMap;
 
 use chrono::{TimeZone, Utc};
-use mvm_plan::types::{
+use mvm_core::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
     KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
     Resources, RuntimeProfileRef, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
 };
-use mvm_plan::validity::{NonceStore, PlanValidityError, check_window};
-use mvm_plan::{ExecutionPlan, SCHEMA_VERSION};
+use mvm_core::plan::validity::{NonceStore, PlanValidityError, check_window};
+use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION};
 
 fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
     ExecutionPlan {

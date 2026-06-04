@@ -1310,7 +1310,7 @@ pub fn read_and_verify_bundle(
 
 /// Convenience: SHA-256 of the entire archive bytes, encoded as
 /// lowercase hex. The `bundle_sha256` field on
-/// [`crate::types::PlanArtifact`] holds this exact value, so an
+/// [`crate::plan::types::PlanArtifact`] holds this exact value, so an
 /// `ExecutionPlan` can pin a specific bundle without trusting any
 /// publisher metadata.
 pub fn bundle_sha256(archive_bytes: &[u8]) -> String {

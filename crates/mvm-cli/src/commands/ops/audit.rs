@@ -719,7 +719,7 @@ mod verify_cert_tests {
     // ──────────────────────────────────────────────────────────────
 
     use mvm::vm::overlay::cert_fingerprint;
-    use mvm_plan::{PlanId, TenantId};
+    use mvm_core::plan::{PlanId, TenantId};
     use mvm_supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
     use std::collections::BTreeMap;
 

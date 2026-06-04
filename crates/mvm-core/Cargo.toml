@@ -21,6 +21,9 @@ mvm-providers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Folded in with mvm-plan (plan 121 B1): `plan::bundle` reads/writes
+# tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
+tar = "0.4"
 thiserror = "1"
 tokio = { workspace = true, features = ["io-util"] }
 toml.workspace = true

@@ -1320,7 +1320,7 @@ pub struct SupervisorConfig {
     // which would close the `mvm-libkrun ← mvm-core ← mvm-plan`
     // cycle. The leaf bin crate `mvm-libkrun-supervisor` can freely
     // depend on both and deserializes the Values on the bridge side.
-    /// JSON-encoded [`mvm_plan::ExecutionPlan`] for this admission.
+    /// JSON-encoded [`mvm_core::plan::ExecutionPlan`] for this admission.
     /// The bin deserializes into the typed value when building
     /// `BridgeConfig.plan`. `None` ⇒ legacy non-bridge path
     /// (`tenant_id` will also be `None` and

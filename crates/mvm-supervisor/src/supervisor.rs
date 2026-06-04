@@ -19,14 +19,14 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
-use mvm_plan::{
+use mvm_core::plan::{
     DepsVolumeBinding, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
 };
 use mvm_sdk::compile::deps_audit::{VolumeError, verify_sealed_volume};
 use thiserror::Error;
 use tracing::warn;
 
-use mvm_plan::Variant;
+use mvm_core::plan::Variant;
 use mvm_policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
 
 use crate::artifact::{ArtifactCollector, NoopArtifactCollector};
@@ -277,7 +277,7 @@ impl Supervisor {
     /// state the second transition errors out, which is fine because
     /// we're already returning an error).
     ///
-    /// `trusted_keys` mirrors `mvm_plan::verify_plan`'s contract —
+    /// `trusted_keys` mirrors `mvm_core::plan::verify_plan`'s contract —
     /// pass the supervisor's trusted-key set so a plan signed by an
     /// unknown party is refused before any other step runs.
     ///
@@ -305,7 +305,7 @@ impl Supervisor {
         // add a separate `EnvelopeRejected` audit type that carries
         // only the envelope's signer_id and a rejection reason; for
         // now this path is logged via `tracing` only.
-        let plan = match mvm_plan::verify_plan(signed, trusted_keys) {
+        let plan = match mvm_core::plan::verify_plan(signed, trusted_keys) {
             Ok(p) => p,
             Err(e) => {
                 let err = SupervisorError::PlanVerify(e.to_string());
@@ -540,7 +540,7 @@ impl Supervisor {
     /// outcome, otherwise a stuck supervisor wedges in `Pending`.
     async fn emit_audit_then_fail(
         &mut self,
-        plan: &mvm_plan::ExecutionPlan,
+        plan: &mvm_core::plan::ExecutionPlan,
         event: &str,
         reason: &str,
     ) -> Result<(), SupervisorError> {
@@ -564,7 +564,7 @@ impl Supervisor {
     /// per the §22 / B17 invariant "audit emits before forward".
     async fn emit_admission_audit(
         &self,
-        plan: &mvm_plan::ExecutionPlan,
+        plan: &mvm_core::plan::ExecutionPlan,
         event: &str,
         reason: &str,
     ) -> Result<(), SupervisorError> {
@@ -580,7 +580,7 @@ impl Supervisor {
     /// detects drift if either hash changes between runs.
     async fn emit_admission_audit_with_extras(
         &self,
-        plan: &mvm_plan::ExecutionPlan,
+        plan: &mvm_core::plan::ExecutionPlan,
         event: &str,
         reason: &str,
         extras: Vec<(String, String)>,
@@ -995,7 +995,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
-    use mvm_plan::*;
+    use mvm_core::plan::*;
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -2301,7 +2301,7 @@ mod tests {
     fn plan_with_deps_volume(
         volume_hash: &str,
         manifest_sha256: &str,
-    ) -> Result<ExecutionPlan, mvm_plan::DepsVolumeBindingError> {
+    ) -> Result<ExecutionPlan, mvm_core::plan::DepsVolumeBindingError> {
         let mut plan = sample_plan();
         plan.deps_volume = Some(DepsVolumeBinding::new(volume_hash, manifest_sha256)?);
         Ok(plan)
@@ -2539,15 +2539,15 @@ mod tests {
         // reaches the supervisor.
         assert!(matches!(
             DepsVolumeBinding::new("a".repeat(63), "b".repeat(64)),
-            Err(mvm_plan::DepsVolumeBindingError::WrongLength { len: 63 })
+            Err(mvm_core::plan::DepsVolumeBindingError::WrongLength { len: 63 })
         ));
         assert!(matches!(
             DepsVolumeBinding::new("a".repeat(64), "b".repeat(65)),
-            Err(mvm_plan::DepsVolumeBindingError::WrongLength { len: 65 })
+            Err(mvm_core::plan::DepsVolumeBindingError::WrongLength { len: 65 })
         ));
         assert!(matches!(
             DepsVolumeBinding::new("A".repeat(64), "b".repeat(64)),
-            Err(mvm_plan::DepsVolumeBindingError::NonHex { ch: 'A' })
+            Err(mvm_core::plan::DepsVolumeBindingError::NonHex { ch: 'A' })
         ));
         DepsVolumeBinding::new("0".repeat(64), "1".repeat(64)).expect("valid pin");
     }

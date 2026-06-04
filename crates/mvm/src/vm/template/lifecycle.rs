@@ -406,7 +406,7 @@ pub fn template_artifacts_dispatched(
 }
 
 /// Resolve a bundle-sha256 reference through
-/// [`mvm_plan::BundleRegistry`] (default path
+/// [`mvm_core::plan::BundleRegistry`] (default path
 /// `~/.mvm/bundles/<sha>/`). Returns the same shape as
 /// [`template_artifacts`] / [`template_artifacts_for_slot`] so the
 /// dispatch fan-in is uniform.
@@ -424,9 +424,9 @@ pub fn template_artifacts_dispatched(
 fn bundle_artifacts_for_sha(
     bundle_sha256: &str,
 ) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
-    use mvm_plan::ArtifactRole;
+    use mvm_core::plan::ArtifactRole;
 
-    let registry = mvm_plan::BundleRegistry::default_path()
+    let registry = mvm_core::plan::BundleRegistry::default_path()
         .context("resolving default bundle registry root")?;
     let installed = registry
         .find(bundle_sha256)

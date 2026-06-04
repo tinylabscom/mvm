@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
+use mvm_core::plan::BundleRegistry;
 use mvm_core::user_config::MvmConfig;
-use mvm_plan::BundleRegistry;
 
 use super::super::Cli;
 

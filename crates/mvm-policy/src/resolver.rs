@@ -37,7 +37,7 @@ use crate::bundle::PolicyBundle;
 use crate::policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
-use mvm_plan::TenantId;
+use mvm_core::plan::TenantId;
 
 /// An out-of-band deny instruction with bounded lifetime. Plan 37
 /// §18.1 emergency deny rules are signed updates that bypass the

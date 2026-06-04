@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
-use mvm_plan::ExecutionPlan;
+use mvm_core::plan::ExecutionPlan;
 use mvm_supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
 
 use crate::commands::image::OciProvenance;
@@ -365,7 +365,7 @@ impl AuditEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,

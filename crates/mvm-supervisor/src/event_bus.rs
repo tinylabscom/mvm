@@ -48,7 +48,7 @@
 
 use tokio::sync::broadcast;
 
-use mvm_plan::{PlanId, TenantId};
+use mvm_core::plan::{PlanId, TenantId};
 
 /// Default channel capacity. Sized for bursty lifecycle events
 /// (e.g., 100-instance reconcile cycle) without surprising

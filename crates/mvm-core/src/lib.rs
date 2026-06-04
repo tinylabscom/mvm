@@ -15,6 +15,10 @@ pub mod user_config;
 
 pub mod domain;
 pub mod mvmd_iface;
+/// The typed, signed `ExecutionPlan` contract (plan 37 §3.3). Folded
+/// in from the former `mvm-plan` crate (plan 121 B1); it depended only
+/// on `mvm-core`, so the fold adds no async/runtime dep (just `tar`).
+pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;

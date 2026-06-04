@@ -13,7 +13,7 @@
 //! attestation requirement, etc.).
 //!
 //! Structure:
-//! - `plan` — `ExecutionPlan`, `SCHEMA_VERSION`.
+//! - `execution_plan` — `ExecutionPlan`, `SCHEMA_VERSION`.
 //! - `types` — every `*Ref` / `*Spec` placeholder type the plan
 //!   references. Each is a thin newtype with serde + deny_unknown_fields
 //!   so older verifiers fail closed on a future field addition.
@@ -28,7 +28,7 @@
 //!   valid plan now".
 
 pub mod bundle;
-pub mod plan;
+pub mod execution_plan;
 pub mod signing;
 pub mod types;
 pub mod validity;
@@ -40,7 +40,7 @@ pub use bundle::{
     TrustStore, VerifiedBundle, VerityInfo, bundle_sha256, read_and_verify_bundle, sha256_hex,
     signature_from_base64, signature_to_base64, verify_plan_bundle, write_bundle,
 };
-pub use plan::{ExecutionPlan, SCHEMA_VERSION};
+pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use signing::{PlanVerifyError, SignedExecutionPlan, sign_plan, verify_plan};
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditTaxonomy,

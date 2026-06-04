@@ -52,11 +52,11 @@ impl InMemoryBundleResolver {
     }
 }
 
-impl mvm_plan::BundleResolver for InMemoryBundleResolver {
+impl mvm_core::plan::BundleResolver for InMemoryBundleResolver {
     fn resolve(
         &self,
         _bundle_sha256: &str,
-    ) -> std::result::Result<Vec<u8>, mvm_plan::BundleResolveError> {
+    ) -> std::result::Result<Vec<u8>, mvm_core::plan::BundleResolveError> {
         Ok(self.bytes.clone())
     }
 }
@@ -78,8 +78,8 @@ const DEGRADED_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// publisher's `key_id`.
 fn bundle_pin_from_archive(
     archive: &[u8],
-    key_id: mvm_plan::KeyId,
-) -> Result<mvm_plan::PlanArtifact> {
+    key_id: mvm_core::plan::KeyId,
+) -> Result<mvm_core::plan::PlanArtifact> {
     let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
     for entry in tar.entries().context("walking archive entries")? {
         let mut entry = entry.context("reading archive entry")?;
@@ -95,8 +95,8 @@ fn bundle_pin_from_archive(
             let sig_arr: [u8; 64] = bytes.as_slice().try_into().map_err(|_| {
                 anyhow::anyhow!("manifest.sig is {} bytes; expected 64", bytes.len())
             })?;
-            return Ok(mvm_plan::PlanArtifact::new(
-                mvm_plan::bundle_sha256(archive),
+            return Ok(mvm_core::plan::PlanArtifact::new(
+                mvm_core::plan::bundle_sha256(archive),
                 &sig_arr,
                 key_id,
             ));
@@ -112,9 +112,9 @@ struct AdmitPlanForBootParams<'a> {
     pub rootfs_path: &'a std::path::Path,
     pub cpus: u32,
     pub mem_mib: u64,
-    pub seccomp_tier: mvm_plan::PlanSeccompTier,
-    pub secret_release: mvm_plan::SecretReleasePolicy,
-    pub secrets: Vec<mvm_plan::SecretBinding>,
+    pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
+    pub secret_release: mvm_core::plan::SecretReleasePolicy,
+    pub secrets: Vec<mvm_core::plan::SecretBinding>,
     pub no_supervisor: bool,
     pub ledger: &'a InMemoryNonceLedger,
     /// Override for the host-signer keys directory. Production callers
@@ -142,12 +142,12 @@ struct AdmitPlanForBootParams<'a> {
     /// and the supervisor's admission gate (Followup A) re-verifies
     /// the on-disk sealed volume before launch — ADR-047 claim 9.
     /// `None` preserves the claim-8 baseline (no deps gate).
-    pub deps_volume: Option<mvm_plan::DepsVolumeBinding>,
+    pub deps_volume: Option<mvm_core::plan::DepsVolumeBinding>,
 }
 
 fn plan_seccomp_tier(
     tier: mvm_security::seccomp::SeccompTier,
-) -> Result<mvm_plan::PlanSeccompTier> {
+) -> Result<mvm_core::plan::PlanSeccompTier> {
     tier.to_string()
         .parse()
         .context("converting runtime seccomp tier into plan seccomp tier")
@@ -231,9 +231,9 @@ fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<Admission
         Some(path) => {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("reading bundle archive at {}", path.display()))?;
-            let trust = mvm_plan::FsTrustStore::default_path()
+            let trust = mvm_core::plan::FsTrustStore::default_path()
                 .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
-            let verified = mvm_plan::read_and_verify_bundle(&bytes, &trust)
+            let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
                 .with_context(|| format!("verifying bundle at {}", path.display()))?;
             let pin =
                 bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(|| {
@@ -400,7 +400,7 @@ fn build_policy_audit_emitter(
 /// Tests inject a tempdir to stage / omit bundles deterministically.
 ///
 fn resolve_policy_for_admission(
-    plan: &mvm_plan::ExecutionPlan,
+    plan: &mvm_core::plan::ExecutionPlan,
     policy_dir: Option<&std::path::Path>,
 ) -> Result<PolicyAdmissionResolution> {
     let resolved = match policy_dir {
@@ -433,7 +433,7 @@ fn resolve_policy_for_admission(
 }
 
 fn emit_policy_resolved(
-    plan: &mvm_plan::ExecutionPlan,
+    plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     slots_mode: &'static str,
 ) {
@@ -443,7 +443,7 @@ fn emit_policy_resolved(
 }
 
 fn emit_policy_resolve_failure(
-    plan: &mvm_plan::ExecutionPlan,
+    plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
 ) {
@@ -467,7 +467,7 @@ fn emit_policy_resolve_failure(
 }
 
 fn emit_policy_audit_invalid(
-    plan: &mvm_plan::ExecutionPlan,
+    plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
     err: &anyhow::Error,
 ) {
@@ -538,7 +538,7 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 fn resolve_deps_volume_binding(
     workload_ir_path: Option<&std::path::Path>,
     build_mode: mvm_build::pipeline::BuildMode,
-) -> Result<Option<mvm_plan::DepsVolumeBinding>> {
+) -> Result<Option<mvm_core::plan::DepsVolumeBinding>> {
     resolve_deps_volume_binding_with_cache(workload_ir_path, build_mode, None)
 }
 
@@ -564,7 +564,7 @@ fn resolve_deps_volume_binding_with_cache(
     workload_ir_path: Option<&std::path::Path>,
     build_mode: mvm_build::pipeline::BuildMode,
     cache_root_override: Option<&std::path::Path>,
-) -> Result<Option<mvm_plan::DepsVolumeBinding>> {
+) -> Result<Option<mvm_core::plan::DepsVolumeBinding>> {
     let Some(ir_path) = workload_ir_path else {
         return Ok(None);
     };
@@ -635,15 +635,16 @@ fn resolve_deps_volume_binding_with_cache(
     mvm_build::app_deps_gate::apply_install_gate(&install, gate)
         .with_context(|| format!("app-deps gate ({gate:?}) refused the install"))?;
 
-    let binding = mvm_plan::DepsVolumeBinding::new(&install.volume_hash, &install.manifest_sha256)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "install pipeline returned a malformed hash pair: {e} \
+    let binding =
+        mvm_core::plan::DepsVolumeBinding::new(&install.volume_hash, &install.manifest_sha256)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "install pipeline returned a malformed hash pair: {e} \
                      (volume_hash={}, manifest_sha256={})",
-                install.volume_hash,
-                install.manifest_sha256
-            )
-        })?;
+                    install.volume_hash,
+                    install.manifest_sha256
+                )
+            })?;
     Ok(Some(binding))
 }
 
@@ -1099,9 +1100,9 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) network_policy: mvm_core::network_policy::NetworkPolicy,
     pub(super) network_name: &'a str,
     pub(super) seccomp_tier: mvm_security::seccomp::SeccompTier,
-    pub(super) plan_seccomp_tier: mvm_plan::PlanSeccompTier,
-    pub(super) plan_secret_release: mvm_plan::SecretReleasePolicy,
-    pub(super) plan_secrets: Vec<mvm_plan::SecretBinding>,
+    pub(super) plan_seccomp_tier: mvm_core::plan::PlanSeccompTier,
+    pub(super) plan_secret_release: mvm_core::plan::SecretReleasePolicy,
+    pub(super) plan_secrets: Vec<mvm_core::plan::SecretBinding>,
     /// Validated sandbox tags from `--tag k=v`.
     pub(super) sandbox_tags: std::collections::BTreeMap<String, String>,
     /// Parsed `--ttl` duration; reaper tears VM down after this elapses.
@@ -2281,8 +2282,8 @@ mod admit_plan_tests {
     /// Build a signed `.mvmpkg` archive in-memory so the
     /// `--bundle-pin` test path doesn't need a real fetched bundle.
     /// Uses mvm_plan's own writer + signing primitives.
-    fn make_bundle_for_pin(sk: &ed25519_dalek::SigningKey) -> (Vec<u8>, mvm_plan::KeyId) {
-        use mvm_plan::{
+    fn make_bundle_for_pin(sk: &ed25519_dalek::SigningKey) -> (Vec<u8>, mvm_core::plan::KeyId) {
+        use mvm_core::plan::{
             ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, KeyId, sha256_hex,
             write_bundle,
         };
@@ -2335,7 +2336,7 @@ mod admit_plan_tests {
         let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let (archive, key_id) = make_bundle_for_pin(&sk);
         let pin = bundle_pin_from_archive(&archive, key_id.clone()).expect("recovers pin");
-        assert_eq!(pin.bundle_sha256, mvm_plan::bundle_sha256(&archive));
+        assert_eq!(pin.bundle_sha256, mvm_core::plan::bundle_sha256(&archive));
         assert_eq!(pin.key_id, key_id);
         // Signature round-trips through base64 → bytes → verify.
         let sig_arr = pin.signature_bytes().expect("base64 decodes");
@@ -2360,7 +2361,7 @@ mod admit_plan_tests {
         }
         let archive = buf.into_inner();
         let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        let key_id = mvm_plan::KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = mvm_core::plan::KeyId::from_pubkey(&sk.verifying_key());
         let err = bundle_pin_from_archive(&archive, key_id).expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("manifest.sig"), "msg was: {msg}");
@@ -2370,7 +2371,7 @@ mod admit_plan_tests {
     fn in_memory_bundle_resolver_returns_archive_bytes() {
         let bytes = b"hello-archive".to_vec();
         let resolver = InMemoryBundleResolver::new(bytes.clone());
-        let out = mvm_plan::BundleResolver::resolve(&resolver, "anything").unwrap();
+        let out = mvm_core::plan::BundleResolver::resolve(&resolver, "anything").unwrap();
         assert_eq!(out, bytes);
     }
 
@@ -2388,8 +2389,8 @@ mod admit_plan_tests {
             rootfs_path: &rootfs,
             cpus: 2,
             mem_mib: 512,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
-            secret_release: mvm_plan::SecretReleasePolicy::None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             no_supervisor: true,
             ledger: &ledger,
@@ -2417,8 +2418,8 @@ mod admit_plan_tests {
             rootfs_path: &rootfs,
             cpus: 2,
             mem_mib: 512,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Network,
-            secret_release: mvm_plan::SecretReleasePolicy::PlanBound,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
+            secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
             secrets: Vec::new(),
             no_supervisor: false,
             ledger: &ledger,
@@ -2437,11 +2438,11 @@ mod admit_plan_tests {
         assert_eq!(ctx.admitted.plan.resources.mem_mib, 512);
         assert_eq!(
             ctx.admitted.plan.admission_profile.seccomp_tier,
-            mvm_plan::PlanSeccompTier::Network
+            mvm_core::plan::PlanSeccompTier::Network
         );
         assert_eq!(
             ctx.admitted.plan.admission_profile.secret_release,
-            mvm_plan::SecretReleasePolicy::PlanBound
+            mvm_core::plan::SecretReleasePolicy::PlanBound
         );
 
         // The `plan.admitted` audit line must be present in the
@@ -2467,8 +2468,8 @@ mod admit_plan_tests {
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
-            secret_release: mvm_plan::SecretReleasePolicy::None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             no_supervisor: false,
             ledger: &ledger,
@@ -2503,8 +2504,8 @@ mod admit_plan_tests {
             rootfs_path: &rootfs,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
-            secret_release: mvm_plan::SecretReleasePolicy::None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             no_supervisor: false,
             ledger: &ledger,
@@ -2523,8 +2524,8 @@ mod admit_plan_tests {
             rootfs_path: &rootfs,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
-            secret_release: mvm_plan::SecretReleasePolicy::None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             no_supervisor: false,
             ledger: &ledger,
@@ -2585,8 +2586,8 @@ mod admit_plan_tests {
             rootfs_path: &rootfs,
             cpus: 1,
             mem_mib: 128,
-            seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
-            secret_release: mvm_plan::SecretReleasePolicy::None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             no_supervisor: false,
             ledger: &ledger,
@@ -2622,7 +2623,7 @@ mod admit_plan_tests {
         // `local-default`), so this test exercises the audit-mode
         // branch via `resolve_policy_for_admission` directly with an
         // ExecutionPlan we mutate post-synthesis.
-        use mvm_plan::PolicyRef;
+        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -2665,12 +2666,12 @@ chain_signing = true
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
-                seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
                 tool_policy_ref: None,
-                secret_release: mvm_plan::SecretReleasePolicy::None,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
                 cpus: 1,
@@ -2692,7 +2693,7 @@ chain_signing = true
         plan.network_policy = PolicyRef("acme:vm-live".to_string());
         plan.egress_policy = PolicyRef("acme:vm-live".to_string());
         plan.tool_policy = PolicyRef("acme:vm-live".to_string());
-        plan.fs_policy = mvm_plan::FsPolicyRef("acme:vm-live".to_string());
+        plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-live".to_string());
 
         // Resolve policy, then construct the policy-derived emitter
         // and emit the hook. This mirrors `admit_plan_for_boot`'s
@@ -2719,7 +2720,7 @@ chain_signing = true
 
     #[test]
     fn admission_uses_bundle_audit_file_destination() {
-        use mvm_plan::PolicyRef;
+        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -2763,12 +2764,12 @@ stream_destinations = ["file://{}"]
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
-                seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
                 tool_policy_ref: None,
-                secret_release: mvm_plan::SecretReleasePolicy::None,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
                 cpus: 1,
@@ -2790,7 +2791,7 @@ stream_destinations = ["file://{}"]
         plan.network_policy = PolicyRef("acme:vm-stream".to_string());
         plan.egress_policy = PolicyRef("acme:vm-stream".to_string());
         plan.tool_policy = PolicyRef("acme:vm-stream".to_string());
-        plan.fs_policy = mvm_plan::FsPolicyRef("acme:vm-stream".to_string());
+        plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-stream".to_string());
 
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
             .expect("stream bundle resolves");
@@ -2822,7 +2823,7 @@ stream_destinations = ["file://{}"]
 
     #[test]
     fn admission_audits_rejected_unsigned_policy_audit() {
-        use mvm_plan::PolicyRef;
+        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -2860,12 +2861,12 @@ chain_signing = false
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
-                seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
                 tool_policy_ref: None,
-                secret_release: mvm_plan::SecretReleasePolicy::None,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
                 cpus: 1,
@@ -2887,7 +2888,7 @@ chain_signing = false
         plan.network_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.egress_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.tool_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
-        plan.fs_policy = mvm_plan::FsPolicyRef("acme:vm-unsigned-audit".to_string());
+        plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-unsigned-audit".to_string());
 
         let resolved = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
             .expect("bundle shape still resolves");
@@ -2915,7 +2916,7 @@ chain_signing = false
         // A plan whose refs name `acme:nope` but no bundle exists on
         // disk must fail admission with a typed `policy-bundle-not-found`
         // error and emit `plan.failed` with that class.
-        use mvm_plan::PolicyRef;
+        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -2932,12 +2933,12 @@ chain_signing = false
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
-                seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
                 tool_policy_ref: None,
-                secret_release: mvm_plan::SecretReleasePolicy::None,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
                 cpus: 1,
@@ -2959,7 +2960,7 @@ chain_signing = false
         plan.network_policy = PolicyRef("acme:nope".to_string());
         plan.egress_policy = PolicyRef("acme:nope".to_string());
         plan.tool_policy = PolicyRef("acme:nope".to_string());
-        plan.fs_policy = mvm_plan::FsPolicyRef("acme:nope".to_string());
+        plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:nope".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
             .expect_err("missing bundle must fail");
@@ -2986,7 +2987,7 @@ chain_signing = false
         // typo must fail admission with
         // `error_class=policy-egress-invalid` rather than silently
         // booting with the inspector still enforced.
-        use mvm_plan::PolicyRef;
+        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -3024,12 +3025,12 @@ disabled_inspectors = ["ssrf_guarrd"]
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
-                seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
                 tool_policy_ref: None,
-                secret_release: mvm_plan::SecretReleasePolicy::None,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
                 cpus: 1,
@@ -3051,7 +3052,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         plan.network_policy = PolicyRef("acme:vm-typo".to_string());
         plan.egress_policy = PolicyRef("acme:vm-typo".to_string());
         plan.tool_policy = PolicyRef("acme:vm-typo".to_string());
-        plan.fs_policy = mvm_plan::FsPolicyRef("acme:vm-typo".to_string());
+        plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-typo".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
             .expect_err("typo must fail");
@@ -3078,7 +3079,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         // unparseable `dst_cidr` must fail admission with
         // `policy-l4-spec-invalid`. Same hermetic shape as the
         // missing-bundle test.
-        use mvm_plan::PolicyRef;
+        use mvm_core::plan::PolicyRef;
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -3122,12 +3123,12 @@ port_hi  = 443
                 image_sha256: &sha,
                 image_cosign_bundle: None,
                 intent: None,
-                seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 network_policy_ref: None,
                 fs_policy_ref: None,
                 egress_policy_ref: None,
                 tool_policy_ref: None,
-                secret_release: mvm_plan::SecretReleasePolicy::None,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 audit_event_prefix: None,
                 cpus: 1,
@@ -3149,7 +3150,7 @@ port_hi  = 443
         plan.network_policy = PolicyRef("acme:vm-bad".to_string());
         plan.egress_policy = PolicyRef("acme:vm-bad".to_string());
         plan.tool_policy = PolicyRef("acme:vm-bad".to_string());
-        plan.fs_policy = mvm_plan::FsPolicyRef("acme:vm-bad".to_string());
+        plan.fs_policy = mvm_core::plan::FsPolicyRef("acme:vm-bad".to_string());
 
         let err = resolve_policy_for_admission(&plan, Some(policy_dir.path()))
             .expect_err("bad CIDR must fail");

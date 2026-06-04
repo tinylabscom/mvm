@@ -287,7 +287,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         image_sha256: leaked,
         image_cosign_bundle: None,
         intent: Some("code:execute"),
-        seccomp_tier: mvm_plan::PlanSeccompTier::Standard,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,

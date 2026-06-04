@@ -11,12 +11,12 @@
 //! so the same envelope shape used for control-plane messages can
 //! carry plans, keeping the audit + transport surface uniform.
 
+use crate::protocol::signing::SignedPayload;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use mvm_core::protocol::signing::SignedPayload;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::plan::{ExecutionPlan, SCHEMA_VERSION};
+use crate::plan::execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 
 /// Plan envelope. Wraps the canonical-JSON-encoded `ExecutionPlan`
 /// alongside the Ed25519 signature and a signer identifier.
@@ -126,7 +126,7 @@ pub fn verify_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::*;
+    use crate::plan::types::*;
     use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
@@ -289,7 +289,8 @@ mod tests {
         // same signature input for the same plan.
         let mut plan = sample_plan();
         plan.deps_volume = Some(
-            crate::DepsVolumeBinding::new("a".repeat(64), "b".repeat(64)).expect("valid binding"),
+            crate::plan::DepsVolumeBinding::new("a".repeat(64), "b".repeat(64))
+                .expect("valid binding"),
         );
         let (sk, vk) = fresh_key();
         let signed_a = sign_plan(&plan, &sk, "test-signer");

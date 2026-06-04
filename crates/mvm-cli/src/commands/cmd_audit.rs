@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use mvm_plan::TenantId;
+use mvm_core::plan::TenantId;
 use mvm_supervisor::{EventCategory, FileAuditSigner, Recorder};
 
 use super::Commands;

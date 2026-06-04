@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use mvm_backend::base::config::VmSlot;
 use mvm_backend::microvm::FlakeRunConfig;
-use mvm_plan::{ExecutionPlan, PlanId};
+use mvm_core::plan::{ExecutionPlan, PlanId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -222,53 +222,53 @@ mod tests {
         let expected_slot = config.slot.clone();
         let launcher = FirecrackerRunConfigLauncher::new(config).expect("valid config");
         let plan = ExecutionPlan {
-            schema_version: mvm_plan::SCHEMA_VERSION,
+            schema_version: mvm_core::plan::SCHEMA_VERSION,
             plan_id: PlanId("01HXTEST0000000000000000".to_string()),
             plan_version: 1,
-            tenant: mvm_plan::TenantId("tenant-a".to_string()),
-            workload: mvm_plan::WorkloadId("workload-1".to_string()),
-            runtime_profile: mvm_plan::RuntimeProfileRef("firecracker".to_string()),
-            image: mvm_plan::SignedImageRef {
+            tenant: mvm_core::plan::TenantId("tenant-a".to_string()),
+            workload: mvm_core::plan::WorkloadId("workload-1".to_string()),
+            runtime_profile: mvm_core::plan::RuntimeProfileRef("firecracker".to_string()),
+            image: mvm_core::plan::SignedImageRef {
                 name: "tenant-worker-aarch64".to_string(),
                 sha256: "a".repeat(64),
                 cosign_bundle: None,
             },
-            resources: mvm_plan::Resources {
+            resources: mvm_core::plan::Resources {
                 cpus: 2,
                 mem_mib: 1024,
                 disk_mib: 4096,
-                timeouts: mvm_plan::TimeoutSpec {
+                timeouts: mvm_core::plan::TimeoutSpec {
                     boot_secs: 30,
                     exec_secs: 600,
                 },
             },
-            admission_profile: mvm_plan::AdmissionProfile::local_default(
+            admission_profile: mvm_core::plan::AdmissionProfile::local_default(
                 "vm:boot",
-                mvm_plan::PlanSeccompTier::Standard,
+                mvm_core::plan::PlanSeccompTier::Standard,
             ),
-            network_policy: mvm_plan::PolicyRef("default-deny".to_string()),
-            fs_policy: mvm_plan::FsPolicyRef("default".to_string()),
+            network_policy: mvm_core::plan::PolicyRef("default-deny".to_string()),
+            fs_policy: mvm_core::plan::FsPolicyRef("default".to_string()),
             secrets: vec![],
-            egress_policy: mvm_plan::PolicyRef("agent-l7".to_string()),
-            tool_policy: mvm_plan::PolicyRef("read-only".to_string()),
-            artifact_policy: mvm_plan::ArtifactPolicy {
+            egress_policy: mvm_core::plan::PolicyRef("agent-l7".to_string()),
+            tool_policy: mvm_core::plan::PolicyRef("read-only".to_string()),
+            artifact_policy: mvm_core::plan::ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
             },
             audit_labels: BTreeMap::new(),
-            key_rotation: mvm_plan::KeyRotationSpec { interval_days: 7 },
-            attestation: mvm_plan::AttestationRequirement {
-                mode: mvm_plan::AttestationMode::Noop,
+            key_rotation: mvm_core::plan::KeyRotationSpec { interval_days: 7 },
+            attestation: mvm_core::plan::AttestationRequirement {
+                mode: mvm_core::plan::AttestationMode::Noop,
             },
             release_pin: None,
-            post_run: mvm_plan::PostRunLifecycle {
+            post_run: mvm_core::plan::PostRunLifecycle {
                 destroy_on_exit: true,
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
             valid_from: chrono::Utc::now(),
             valid_until: chrono::Utc::now(),
-            nonce: mvm_plan::Nonce::from_bytes([0xab; 16]),
+            nonce: mvm_core::plan::Nonce::from_bytes([0xab; 16]),
             bundle: None,
             deps_volume: None,
         };

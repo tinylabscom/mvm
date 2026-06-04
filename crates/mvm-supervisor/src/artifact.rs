@@ -22,7 +22,7 @@
 //!   persists. Not in this crate yet.
 
 use async_trait::async_trait;
-use mvm_plan::PlanId;
+use mvm_core::plan::PlanId;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

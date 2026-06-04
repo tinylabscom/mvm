@@ -1,4 +1,4 @@
-use mvm_plan::{SecretBinding, SecretReleasePolicy, SecretSource};
+use mvm_core::plan::{SecretBinding, SecretReleasePolicy, SecretSource};
 use mvm_sdk::ir::{App, Entrypoint, EnvValue, SecretMount, Workload};
 
 // allow(secret-debug): `SecretBinding` is a reference type carrying

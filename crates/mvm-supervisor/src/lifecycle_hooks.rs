@@ -43,7 +43,7 @@
 
 use std::sync::Arc;
 
-use mvm_plan::{ExecutionPlan, TenantId};
+use mvm_core::plan::{ExecutionPlan, TenantId};
 
 use crate::audit_recorder::{EventCategory, Recorder, RecorderError};
 use crate::event_bus::{EventBus, LifecycleEvent};
@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::audit::CapturingAuditSigner;
     use mvm_core::observability::metrics::Metrics;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,

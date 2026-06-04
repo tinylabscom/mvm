@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-use crate::plan::ExecutionPlan;
-use crate::types::Nonce;
+use crate::plan::execution_plan::ExecutionPlan;
+use crate::plan::types::Nonce;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlanValidityError {

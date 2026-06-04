@@ -10,8 +10,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::bundle::PlanArtifact;
-use crate::types::{
+use crate::plan::bundle::PlanArtifact;
+use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, DepsVolumeBinding,
     FsPolicyRef, KeyRotationSpec, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin,
     Resources, RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, WorkloadId,
@@ -139,7 +139,7 @@ pub struct ExecutionPlan {
 
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
     /// present, the supervisor's admit path re-runs
-    /// [`crate::bundle::read_and_verify_bundle`] against the
+    /// [`crate::plan::bundle::read_and_verify_bundle`] against the
     /// resolved archive bytes, then compares the resulting
     /// `bundle_sha256` + `manifest_sig` + `key_id` against the
     /// pinned values here. Any mismatch refuses the admission —

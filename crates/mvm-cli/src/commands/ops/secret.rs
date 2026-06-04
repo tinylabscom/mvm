@@ -32,7 +32,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Args as ClapArgs, Subcommand};
-use mvm_plan::TenantId;
+use mvm_core::plan::TenantId;
 use mvm_security::secret_store::{self, SecretStore};
 use mvm_supervisor::{EventCategory, FileAuditSigner, Recorder};
 use secrecy::SecretBox;

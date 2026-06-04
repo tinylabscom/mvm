@@ -255,7 +255,7 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
     use crate::audit::CapturingAuditSigner;
-    use mvm_plan::TenantId;
+    use mvm_core::plan::TenantId;
     use std::sync::Arc;
 
     /// Test stub — records each invoke for assertions. Returns the

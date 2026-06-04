@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// What the supervisor is asking the host-signer to sign.
 ///
-/// `SignPlan` carries `mvm_plan::ExecutionPlan` bytes; the host-signer
+/// `SignPlan` carries `crate::plan::ExecutionPlan` bytes; the host-signer
 /// treats the input as opaque bytes and does not parse them. ADR-062
 /// dropped the `SignCredential` variant when `host.secrets.v1` was
 /// removed from v1 scope; future verbs (PQC, attestation) extend this

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use mvm_plan::{ExecutionPlan, PlanId, TenantId};
+use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
 use mvm_policy::{PolicyBundle, PolicyId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -270,7 +270,7 @@ impl AuditSigner for CapturingAuditSigner {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,

@@ -68,7 +68,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mvm_plan::{ExecutionPlan, FsPolicyRef, PolicyRef};
+use mvm_core::plan::{ExecutionPlan, FsPolicyRef, PolicyRef};
 use mvm_supervisor::{
     ArtifactCollector, AuditPolicyValidationError, EgressPolicyValidationError, EgressProxy,
     KeystoreReleaser, L4Gate, L4SpecError, L7EgressProxy, LiveArtifactCollector,
@@ -566,7 +566,7 @@ fn load_tenant_workload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::{
+    use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, KeyRotationSpec,
         Nonce, PlanId, PlanSeccompTier, PostRunLifecycle, Resources, RuntimeProfileRef,
         SCHEMA_VERSION, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,

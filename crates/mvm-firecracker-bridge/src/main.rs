@@ -66,11 +66,11 @@ use anyhow::{Context, Result, anyhow};
 #[cfg(target_os = "linux")]
 use ed25519_dalek::SigningKey;
 #[cfg(target_os = "linux")]
+use mvm_core::plan::ExecutionPlan;
+#[cfg(target_os = "linux")]
 use mvm_firecracker_bridge::parse::{BridgeConfigJson, verify_passt_hash};
 #[cfg(target_os = "linux")]
 use mvm_jailer_lite::{ConfinementSpec, confine_self};
-#[cfg(target_os = "linux")]
-use mvm_plan::ExecutionPlan;
 #[cfg(target_os = "linux")]
 use mvm_policy::PolicyBundle;
 #[cfg(target_os = "linux")]

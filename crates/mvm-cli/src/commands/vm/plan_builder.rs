@@ -1,7 +1,7 @@
 //! Plan 64 W1 — `ExecutionPlan` synthesis from `mvmctl up` CLI args.
 //!
 //! Turns the surface-level CLI shape (flake ref, name, cpus, memory,
-//! volumes, ports, secrets, etc.) into a typed `mvm_plan::ExecutionPlan`
+//! volumes, ports, secrets, etc.) into a typed `mvm_core::plan::ExecutionPlan`
 //! the supervisor can verify, audit, and gate on.
 //!
 //! ## What lives here
@@ -37,7 +37,7 @@
 
 use anyhow::Result;
 use chrono::{Duration, Utc};
-use mvm_plan::{
+use mvm_core::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditTaxonomy,
     DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId, PlanSeccompTier,
     PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding,
@@ -130,7 +130,7 @@ pub struct SynthesisInput<'a> {
     /// admit path re-verifies the archive against this triple before
     /// backend dispatch. Sprint 52 W2 follow-on substrate — populating
     /// it from `mvmctl up` flags is the next step.
-    pub bundle_pin: Option<mvm_plan::bundle::PlanArtifact>,
+    pub bundle_pin: Option<mvm_core::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
     /// `mvm_sdk::compile::deps_audit::seal_volume`. Populated by
     /// `mvmctl up`'s deps-install path (Plan 73 Followup B.3) when
@@ -148,7 +148,7 @@ pub struct SynthesisInput<'a> {
 /// Generates a fresh `plan_id` (UUIDv4) and `nonce` (128 random bits)
 /// per invocation; the validity window starts at the call site's
 /// `now()` and lasts `VALIDITY_WINDOW_MINUTES`. The caller signs the
-/// returned plan via [`mvm_plan::sign_plan`] before passing it to the
+/// returned plan via [`mvm_core::plan::sign_plan`] before passing it to the
 /// supervisor.
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let plan_id = PlanId(uuid::Uuid::new_v4().to_string());
@@ -245,7 +245,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     })
 }
 
-/// Generate a fresh 128-bit nonce from `OsRng`. `mvm_plan::Nonce`
+/// Generate a fresh 128-bit nonce from `OsRng`. `mvm_core::plan::Nonce`
 /// wraps a 32-character lowercase hex string (i.e., 16 bytes = 128
 /// bits) — match that here so the wire format roundtrips.
 fn fresh_nonce() -> Nonce {
@@ -534,7 +534,7 @@ mod tests {
         inp.secret_release = SecretReleasePolicy::PlanBound;
         inp.secrets = vec![SecretBinding {
             name: "API_KEY".into(),
-            source: mvm_plan::SecretSource::Keystore {
+            source: mvm_core::plan::SecretSource::Keystore {
                 address: "api-key".into(),
             },
         }];

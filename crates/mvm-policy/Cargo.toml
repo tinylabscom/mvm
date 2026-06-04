@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 mvm-core.workspace = true
-mvm-plan.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 serde.workspace = true

@@ -47,11 +47,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::SigningKey;
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
 use mvm_libkrun::{
     BridgeFds, LogLevel, SupervisorConfig, init_log, run_supervisor, run_supervisor_with_bridge,
     set_log_level,
 };
-use mvm_plan::{ExecutionPlan, SignedExecutionPlan};
 use mvm_policy::PolicyBundle;
 use mvm_supervisor::audit::AuditSigner;
 use mvm_supervisor::audit_file::FileAuditSigner;
@@ -182,7 +182,7 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
     // payload. The host already verified the signature + G4 window/nonce at
     // admit time and spawns this supervisor over a private channel, so under
     // ADR-002 (host is trusted) we extract rather than re-verify here.
-    // Defense-in-depth re-verify via `mvm_plan::verify_plan` with the host
+    // Defense-in-depth re-verify via `mvm_core::plan::verify_plan` with the host
     // signer pubkey is a follow-up.
     let signed: SignedExecutionPlan =
         serde_json::from_value(plan_value).context("decode cfg.plan into SignedExecutionPlan")?;

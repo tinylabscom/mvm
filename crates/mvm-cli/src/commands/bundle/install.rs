@@ -7,7 +7,7 @@
 //! plain HTTP refused unless `--allow-http`). After verification
 //! the archive is atomically installed under
 //! `~/.mvm/bundles/<bundle_sha256>/` via
-//! [`mvm_plan::BundleRegistry::install`]; the archive bytes are
+//! [`mvm_core::plan::BundleRegistry::install`]; the archive bytes are
 //! also written to `<bundle_sha256>.mvmpkg` so the
 //! `FsBundleResolver` admit-time path finds them too.
 
@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
+use mvm_core::plan::{BundleRegistry, FsTrustStore};
 use mvm_core::user_config::MvmConfig;
-use mvm_plan::{BundleRegistry, FsTrustStore};
 
 use super::super::Cli;
 use super::fetch::load_bundle_bytes;

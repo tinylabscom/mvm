@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use mvm_plan::TenantId;
+use mvm_core::plan::TenantId;
 use serde::{Deserialize, Serialize};
 
 use crate::policies::{

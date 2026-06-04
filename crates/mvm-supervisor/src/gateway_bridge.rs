@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use mvm_plan::ExecutionPlan;
+use mvm_core::plan::ExecutionPlan;
 use mvm_policy::PolicyBundle;
 use tokio::sync::{broadcast, mpsc};
 
@@ -1405,9 +1405,9 @@ mod tests {
     /// Plan-doc-shaped `ExecutionPlan` for fan-out tests. Mirrors the
     /// `sample_plan()` helper in `audit.rs` but kept local so this
     /// test module owns its fixture lifecycle.
-    fn test_plan() -> mvm_plan::ExecutionPlan {
+    fn test_plan() -> mvm_core::plan::ExecutionPlan {
         use chrono::TimeZone;
-        use mvm_plan::{
+        use mvm_core::plan::{
             AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement,
             ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef,
             PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef,

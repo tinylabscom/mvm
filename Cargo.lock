@@ -3249,7 +3249,6 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-plan",
  "mvm-providers",
  "mvm-security",
  "opendal",
@@ -3420,7 +3419,6 @@ dependencies = [
  "mvm-libkrun",
  "mvm-mcp",
  "mvm-oci",
- "mvm-plan",
  "mvm-policy",
  "mvm-providers",
  "mvm-sdk",
@@ -3462,6 +3460,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -3485,8 +3484,8 @@ version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
+ "mvm-core",
  "mvm-jailer-lite",
- "mvm-plan",
  "mvm-policy",
  "mvm-supervisor",
  "serde",
@@ -3587,8 +3586,8 @@ version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
+ "mvm-core",
  "mvm-libkrun",
- "mvm-plan",
  "mvm-policy",
  "mvm-providers",
  "mvm-supervisor",
@@ -3630,31 +3629,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-plan"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "mvm-core",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "mvm-policy"
 version = "0.15.2"
 dependencies = [
  "chrono",
  "ed25519-dalek",
  "mvm-core",
- "mvm-plan",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -3763,7 +3743,6 @@ dependencies = [
  "mvm",
  "mvm-backend",
  "mvm-core",
- "mvm-plan",
  "mvm-policy",
  "mvm-sdk",
  "mvm-verify",
@@ -3809,7 +3788,7 @@ version = "0.15.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
- "mvm-plan",
+ "mvm-core",
  "mvm-policy",
  "mvm-supervisor",
  "serde",

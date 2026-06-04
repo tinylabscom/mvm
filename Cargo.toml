@@ -3,7 +3,6 @@ members = [
     "crates/mvm-core",
     "crates/mvm-security",
     "crates/mvm-storage",
-    "crates/mvm-plan",
     "crates/mvm-policy",
     "crates/mvm-supervisor",
     "crates/mvm-providers",
@@ -311,7 +310,6 @@ mvm = { path = "crates/mvm", version = "0.15.1", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.15.1" }
 mvm-security = { path = "crates/mvm-security", version = "0.15.1" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.15.1" }
-mvm-plan = { path = "crates/mvm-plan", version = "0.15.1" }
 mvm-policy = { path = "crates/mvm-policy", version = "0.15.1" }
 mvm-supervisor = { path = "crates/mvm-supervisor", version = "0.15.1" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.15.1", default-features = false }

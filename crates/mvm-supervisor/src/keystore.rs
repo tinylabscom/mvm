@@ -21,7 +21,7 @@
 //!   this crate yet.
 
 use async_trait::async_trait;
-use mvm_plan::SecretBinding;
+use mvm_core::plan::SecretBinding;
 use thiserror::Error;
 
 /// A live secret grant — name (workload-visible) + opaque value the
@@ -119,7 +119,7 @@ impl KeystoreReleaser for LiveKeystoreReleaser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_plan::SecretBinding;
+    use mvm_core::plan::SecretBinding;
 
     #[test]
     fn noop_keystore_releaser_is_constructable() {
@@ -137,7 +137,7 @@ mod tests {
     fn fixture_binding() -> SecretBinding {
         SecretBinding {
             name: "api-token".to_string(),
-            source: mvm_plan::SecretSource::Keystore {
+            source: mvm_core::plan::SecretSource::Keystore {
                 address: "acme/api-token".to_string(),
             },
         }

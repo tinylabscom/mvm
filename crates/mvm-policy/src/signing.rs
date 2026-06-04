@@ -85,7 +85,7 @@ mod tests {
     use crate::bundle::{PolicyId, TenantOverlay};
     use crate::policies::*;
     use ed25519_dalek::SigningKey;
-    use mvm_plan::TenantId;
+    use mvm_core::plan::TenantId;
     use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 

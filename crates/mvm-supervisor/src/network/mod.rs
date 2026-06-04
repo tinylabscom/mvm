@@ -357,7 +357,7 @@ impl ObserverAllowlist {
 /// consulting the allowlist, so callers can use `resolve_observer_chain_from_plan`
 /// first to decide whether to load the allowlist at all.
 pub fn from_admitted(
-    plan: &mvm_plan::ExecutionPlan,
+    plan: &mvm_core::plan::ExecutionPlan,
     leaf_caps: ProviderCapabilities,
     allowlist: &ObserverAllowlist,
 ) -> Result<Vec<Arc<dyn Observer>>, BuildError> {
@@ -420,7 +420,7 @@ fn validate_policy_path_segment(segment: &str, kind: &str) -> Result<(), BuildEr
 /// load the allowlist at all — preserving the local-default
 /// short-circuit at the bin boundary.
 pub fn resolve_observer_chain_from_plan(
-    plan: &mvm_plan::ExecutionPlan,
+    plan: &mvm_core::plan::ExecutionPlan,
 ) -> Result<Vec<String>, BuildError> {
     const LOCAL_DEFAULT: &str = "local-default";
     let policy_ref = &plan.network_policy.0;
@@ -770,16 +770,16 @@ mod tests {
 
     // Plan 113 §Task 4 — `from_admitted` + `resolve_observer_chain_from_plan`.
 
-    fn test_execution_plan_with_policy(policy_ref: &str) -> mvm_plan::ExecutionPlan {
+    fn test_execution_plan_with_policy(policy_ref: &str) -> mvm_core::plan::ExecutionPlan {
         test_execution_plan_with_policy_and_tenant(policy_ref, "test")
     }
 
     fn test_execution_plan_with_policy_and_tenant(
         policy_ref: &str,
         tenant: &str,
-    ) -> mvm_plan::ExecutionPlan {
+    ) -> mvm_core::plan::ExecutionPlan {
         use chrono::TimeZone;
-        use mvm_plan::{
+        use mvm_core::plan::{
             AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement,
             ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef,
             PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef,
