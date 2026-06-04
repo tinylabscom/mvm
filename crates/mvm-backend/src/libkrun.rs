@@ -76,9 +76,17 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         .as_deref()
         .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
     let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    // Append the `mvm.uvols=` param so the dev VM's `mvm-host-vm-init`
+    // mounts user volumes at their guest paths (no-op when there are
+    // none; harmless for workload guests whose `/init` ignores it).
+    let mut cmdline = DEFAULT_CMDLINE.to_string();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        cmdline.push(' ');
+        cmdline.push_str(&uvols);
+    }
     let krun = KrunContext::new(&config.name, kernel, &config.rootfs_path)
         .with_resources(vcpus, config.memory_mib)
-        .with_cmdline(DEFAULT_CMDLINE)
+        .with_cmdline(&cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
     // Plan 87/88 / ADR-058 — configure the per-OS virtio-net gateway
@@ -94,6 +102,26 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     } else {
         krun.with_passt(mvm_libkrun::passt::DEFAULT_GUEST_MAC, scratch)
     };
+
+    // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
+    // is a virtio-fs device; a disk image is an extra virtio-blk device.
+    // Tag/id `uvol{idx}` is the coordination key the guest mount manifest
+    // uses to mount each at its requested guest path. Disk images are
+    // sparse-created by the CLI orchestrator before start. virtio-fs RO
+    // is enforced guest-side (krun_add_virtiofs has no host-side RO
+    // toggle); a RO disk image is RO at the hypervisor.
+    let mut krun = krun;
+    for (idx, vol) in config.volumes.iter().enumerate() {
+        let tag = format!("uvol{idx}");
+        krun = match vol.kind {
+            mvm_core::vm_backend::VmVolumeKind::DirShare => {
+                krun.add_virtio_fs(tag, vol.host.clone())
+            }
+            mvm_core::vm_backend::VmVolumeKind::Disk => {
+                krun.add_disk(tag, vol.host.clone(), vol.read_only)
+            }
+        };
+    }
 
     // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
     // validation). When the producer threaded an AdmittedPlan in

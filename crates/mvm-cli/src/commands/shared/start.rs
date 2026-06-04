@@ -63,6 +63,8 @@ impl VmStartParams<'_> {
                     guest: v.guest.clone(),
                     size: v.size.clone(),
                     read_only: v.read_only,
+                    kind: v.kind,
+                    encrypted: v.encrypted,
                 })
                 .collect(),
             config_files: self

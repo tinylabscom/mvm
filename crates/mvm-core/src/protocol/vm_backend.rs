@@ -130,6 +130,22 @@ pub struct VmPortMapping {
     pub guest: u16,
 }
 
+/// Which hypervisor device a [`VmVolume`] / `RuntimeVolume` maps to.
+///
+/// Default is `Disk`: the legacy `RuntimeVolume` carrier (and any
+/// runtime-config file written before this field existed) means a disk
+/// image. A live directory share is the new case and is always set
+/// explicitly, so defaulting to `Disk` keeps old configs correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmVolumeKind {
+    /// Persistent ext4 disk image attached as a virtio-blk device.
+    #[default]
+    Disk,
+    /// Live host-directory share over virtio-fs (two-way unless read-only).
+    DirShare,
+}
+
 /// A volume to mount in the guest, backend-agnostic.
 #[derive(Debug, Clone, Default)]
 pub struct VmVolume {
@@ -137,10 +153,48 @@ pub struct VmVolume {
     pub host: String,
     /// Mount point inside the guest.
     pub guest: String,
-    /// Size hint (e.g. "1G"). Backend may ignore.
+    /// Size hint (e.g. "1G"). Used as the sparse cap for a `Disk`; a
+    /// `DirShare` ignores it.
     pub size: String,
-    /// Mark the underlying drive read-only at the hypervisor level.
+    /// Mark the underlying device read-only at the hypervisor level.
     pub read_only: bool,
+    /// Directory share (virtio-fs) vs disk image (virtio-blk). Backends
+    /// attach the right device per kind rather than inferring from `size`.
+    pub kind: VmVolumeKind,
+    /// `:enc` — route a `Disk` volume through in-guest encryption
+    /// (Plan 101). Fails closed at launch until that lands; never
+    /// silently plaintext. Always false for a `DirShare`.
+    pub encrypted: bool,
+}
+
+/// Encode user volumes as a kernel-cmdline parameter the guest init
+/// (`mvm-host-vm-init`) parses to mount each at its requested path.
+///
+/// Format (one entry per volume, `;`-separated):
+/// `mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>`
+/// where `tag` is `uvol{idx}` — the virtio-fs tag / virtio-blk id the
+/// backend assigned for the volume at the same index. The guest path is
+/// hex-encoded so an arbitrary path can't collide with the cmdline's
+/// space / `:` / `;` delimiters. Returns `None` for an empty volume set
+/// so no parameter is appended.
+///
+/// The decoder lives in `mvm-host-vm-init` (kept dependency-free for its
+/// size budget); both sides are unit-tested against this exact format.
+pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
+    if volumes.is_empty() {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(volumes.len());
+    for (idx, v) in volumes.iter().enumerate() {
+        let kind = match v.kind {
+            VmVolumeKind::DirShare => "fs",
+            VmVolumeKind::Disk => "blk",
+        };
+        let mode = if v.read_only { "ro" } else { "rw" };
+        let hexpath: String = v.guest.bytes().map(|b| format!("{b:02x}")).collect();
+        entries.push(format!("uvol{idx}:{hexpath}:{mode}:{kind}"));
+    }
+    Some(format!("mvm.uvols={}", entries.join(";")))
 }
 
 /// A file to inject into the guest (config or secret).
@@ -726,6 +780,37 @@ mod tests {
     fn test_vm_id_display() {
         let id = VmId("my-vm".to_string());
         assert_eq!(format!("{id}"), "my-vm");
+    }
+
+    #[test]
+    fn encode_user_volumes_cmdline_empty_is_none() {
+        assert!(encode_user_volumes_cmdline(&[]).is_none());
+    }
+
+    #[test]
+    fn encode_user_volumes_cmdline_format() {
+        let vols = vec![
+            VmVolume {
+                host: "/h/src".into(),
+                guest: "/work2".into(),
+                read_only: true,
+                kind: VmVolumeKind::DirShare,
+                ..Default::default()
+            },
+            VmVolume {
+                host: "/h/d.img".into(),
+                guest: "/data".into(),
+                kind: VmVolumeKind::Disk,
+                ..Default::default()
+            },
+        ];
+        // "/work2" = 2f776f726b32, "/data" = 2f64617461
+        assert_eq!(
+            encode_user_volumes_cmdline(&vols).unwrap(),
+            "mvm.uvols=uvol0:2f776f726b32:ro:fs;uvol1:2f64617461:rw:blk"
+        );
+        // No spaces — must be a single cmdline token.
+        assert!(!encode_user_volumes_cmdline(&vols).unwrap().contains(' '));
     }
 
     #[test]

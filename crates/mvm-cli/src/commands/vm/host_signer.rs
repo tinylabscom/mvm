@@ -370,6 +370,7 @@ mod tests {
             destroy_on_exit: true,
             bundle_pin: None,
             deps_volume: None,
+            shares: Vec::new(),
         })
         .expect("synth");
 

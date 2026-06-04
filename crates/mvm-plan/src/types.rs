@@ -500,3 +500,112 @@ where
     let s = String::deserialize(d)?;
     validate_sha256_hex(s).map_err(serde::de::Error::custom)
 }
+
+/// Whether a [`HostShareGrant`] is a live directory share (virtio-fs)
+/// or a disk image (virtio-blk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareKind {
+    DirShare,
+    Disk,
+}
+
+/// A host-filesystem grant recorded in — and signed with — the
+/// `ExecutionPlan`: one user `--volume` directory share or disk image.
+///
+/// Claim 1 ("no host-fs access from a guest beyond explicit shares") +
+/// claim 8. Today user volumes attach as a host-side launch detail; this
+/// binding makes each an *admitted, signed, audited* grant so the Vz
+/// supervisor's future "refuse a share the admitted plan didn't name"
+/// gate (Plan 97 Phase D) can allow them, and every admission emits the
+/// list to the chain-signed audit log. `deny_unknown_fields` + the
+/// absolute-path check keep a forged plan from smuggling a grant past
+/// the envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostShareGrant {
+    /// Coordination tag/id the backend assigns (`uvol{idx}`) — the
+    /// virtio-fs tag or virtio-blk device id.
+    pub tag: String,
+    /// Resolved (canonical) host path shared/attached. The CLI pins the
+    /// symlink-resolved path here (TOCTOU-safe).
+    pub host_path: String,
+    /// Absolute guest mount point.
+    #[serde(deserialize_with = "deserialize_abs_path")]
+    pub guest_path: String,
+    pub kind: ShareKind,
+    pub read_only: bool,
+    /// Disk-only: in-guest encryption requested (Plan 101). Always
+    /// false for a directory share.
+    #[serde(default)]
+    pub encrypted: bool,
+}
+
+/// Reject a non-absolute or empty guest path at deserialize time.
+fn deserialize_abs_path<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    if !s.starts_with('/') {
+        return Err(serde::de::Error::custom(format!(
+            "guest_path must be absolute (start with '/'), got {s:?}"
+        )));
+    }
+    Ok(s)
+}
+
+#[cfg(test)]
+mod host_share_grant_tests {
+    use super::*;
+
+    fn sample() -> HostShareGrant {
+        HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/host/src".into(),
+            guest_path: "/work2".into(),
+            kind: ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+        }
+    }
+
+    #[test]
+    fn roundtrips_through_json() {
+        let g = sample();
+        let json = serde_json::to_string(&g).unwrap();
+        // snake_case for the kind discriminant.
+        assert!(json.contains("\"dir_share\""), "{json}");
+        let back: HostShareGrant = serde_json::from_str(&json).unwrap();
+        assert_eq!(g, back);
+    }
+
+    #[test]
+    fn disk_kind_serializes_snake_case() {
+        let json = serde_json::to_string(&ShareKind::Disk).unwrap();
+        assert_eq!(json, "\"disk\"");
+    }
+
+    #[test]
+    fn rejects_relative_guest_path() {
+        let json = r#"{"tag":"uvol0","host_path":"/h","guest_path":"work2",
+            "kind":"dir_share","read_only":false}"#;
+        let err = serde_json::from_str::<HostShareGrant>(json).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_field() {
+        let json = r#"{"tag":"uvol0","host_path":"/h","guest_path":"/g",
+            "kind":"disk","read_only":false,"bogus":1}"#;
+        assert!(serde_json::from_str::<HostShareGrant>(json).is_err());
+    }
+
+    #[test]
+    fn encrypted_defaults_false_when_absent() {
+        let json = r#"{"tag":"uvol0","host_path":"/h","guest_path":"/g",
+            "kind":"disk","read_only":false}"#;
+        let g: HostShareGrant = serde_json::from_str(json).unwrap();
+        assert!(!g.encrypted);
+    }
+}

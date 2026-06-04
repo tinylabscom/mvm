@@ -62,6 +62,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         nonce: Nonce::from_bytes(nonce),
         bundle: None,
         deps_volume: None,
+        shares: Vec::new(),
     }
 }
 

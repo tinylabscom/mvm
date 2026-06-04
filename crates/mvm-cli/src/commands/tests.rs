@@ -662,30 +662,39 @@ fn test_run_volume_persistent() {
 }
 
 #[test]
-fn test_parse_volume_spec_dir_inject() {
+fn test_parse_volume_spec_dir_share() {
     let spec = parse_volume_spec("/tmp/config:/mnt/config").unwrap();
     match spec {
-        VolumeSpec::DirInject {
+        VolumeSpec::DirShare {
             host_dir,
             guest_mount,
+            read_only,
         } => {
             assert_eq!(host_dir, "/tmp/config");
             assert_eq!(guest_mount, "/mnt/config");
+            assert!(!read_only);
         }
-        _ => panic!("Expected DirInject"),
+        _ => panic!("Expected DirShare"),
     }
 }
 
 #[test]
-fn test_parse_volume_spec_persistent() {
+fn test_parse_volume_spec_disk() {
     let spec = parse_volume_spec("/data:/mnt/data:4G").unwrap();
     match spec {
-        VolumeSpec::Persistent(vol) => {
-            assert_eq!(vol.host, "/data");
-            assert_eq!(vol.guest, "/mnt/data");
-            assert_eq!(vol.size, "4G");
+        VolumeSpec::Disk {
+            host,
+            guest,
+            size,
+            encrypted,
+            ..
+        } => {
+            assert_eq!(host, "/data");
+            assert_eq!(guest, "/mnt/data");
+            assert_eq!(size, "4G");
+            assert!(!encrypted);
         }
-        _ => panic!("Expected Persistent"),
+        _ => panic!("Expected Disk"),
     }
 }
 
@@ -696,14 +705,15 @@ fn test_parse_volume_spec_invalid() {
 }
 
 #[test]
-fn test_parse_volume_spec_unsupported_mount() {
+fn test_parse_volume_spec_generic_dir_share() {
+    // A generic guest mount (not /mnt/config|secrets) now parses as a
+    // dir share — the old "unsupported mount" bail is gone.
     let spec = parse_volume_spec("/tmp/foo:/mnt/custom").unwrap();
-    // The spec itself parses fine — the error happens at routing time in cmd_run
     match spec {
-        VolumeSpec::DirInject { guest_mount, .. } => {
+        VolumeSpec::DirShare { guest_mount, .. } => {
             assert_eq!(guest_mount, "/mnt/custom");
         }
-        _ => panic!("Expected DirInject"),
+        _ => panic!("Expected DirShare"),
     }
 }
 

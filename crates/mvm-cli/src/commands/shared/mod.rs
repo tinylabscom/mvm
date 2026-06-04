@@ -20,8 +20,9 @@ pub(super) use event::PhaseEvent;
 pub(super) use format::{human_age_secs, human_bytes};
 pub(super) use hints::with_hints;
 pub(super) use parse::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_port_spec,
-    parse_port_specs, parse_volume_spec,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
+    materialize_disk_volume, materialize_disk_volumes, merge_volume_specs, parse_port_spec,
+    parse_port_specs, parse_volume_spec, vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
     ManifestArgRef, resolve_flake_ref, resolve_manifest_arg, resolve_network_policy,
@@ -29,4 +30,6 @@ pub(super) use resolve::{
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
-pub(super) use vsock::{emit_vsock_rpc_audit, request_port_forward, wait_for_guest_agent};
+pub(super) use vsock::{
+    emit_vsock_rpc_audit, mount_user_dir_shares, request_port_forward, wait_for_guest_agent,
+};

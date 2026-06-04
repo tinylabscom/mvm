@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-verify"
-version = "0.14.0"
+version = "0.15.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

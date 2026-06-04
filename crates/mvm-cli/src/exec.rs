@@ -529,6 +529,8 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
             guest: dir.guest_path.clone(),
             size: String::new(),
             read_only: dir.read_only,
+            // `--add-dir` builds an RO ext4 image, so this is a disk.
+            ..Default::default()
         });
         add_dir_labels.push(label);
     }
@@ -576,6 +578,8 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
                 guest: v.guest.clone(),
                 size: v.size.clone(),
                 read_only: v.read_only,
+                kind: v.kind,
+                encrypted: v.encrypted,
             })
             .collect(),
         config_files: Vec::new(),

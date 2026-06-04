@@ -271,6 +271,7 @@ mod tests {
             nonce: mvm_plan::Nonce::from_bytes([0xab; 16]),
             bundle: None,
             deps_volume: None,
+            shares: Vec::new(),
         };
 
         let spec = launcher

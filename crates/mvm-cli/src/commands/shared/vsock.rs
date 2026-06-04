@@ -57,6 +57,43 @@ pub fn request_port_forward(vm_id: &str, guest_port: u16) -> Result<u32> {
     mvm_guest::vsock::start_port_forward_on(&mut stream, guest_port)
 }
 
+/// Post-boot mount of user directory-share volumes on a workload VM
+/// (path b). The backend already attached each as virtio-fs tag
+/// `uvol{idx}`; this issues the in-guest `mount` via the agent's
+/// `MountVolume` RPC. `shares` is `(tag, guest_path, read_only)` for
+/// the dir-share volumes only (disk images mount differently / later).
+///
+/// Best-effort + warned per share: the VM is already running, so one
+/// failed mount must not abort the boot. The guest enforces its
+/// `MountPathPolicy` (allow-roots `/mnt`, `/data`, `/work`), so a guest
+/// path outside those surfaces as a per-share warning here.
+pub fn mount_user_dir_shares(vm_id: &str, shares: &[(String, String, bool)]) {
+    if shares.is_empty() {
+        return;
+    }
+    let transport = match vsock_transport::for_vm(vm_id) {
+        Ok(t) => t,
+        Err(e) => {
+            crate::ui::warn(&format!(
+                "Could not reach guest agent to mount {} volume(s): {e}",
+                shares.len()
+            ));
+            return;
+        }
+    };
+    for (tag, guest_path, read_only) in shares {
+        let result = transport
+            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .and_then(|mut s| {
+                mvm_guest::vsock::mount_volume_on(&mut s, tag, guest_path, *read_only)
+            });
+        match result {
+            Ok(path) => crate::ui::info(&format!("Mounted volume at {path} in guest.")),
+            Err(e) => crate::ui::warn(&format!("Volume mount {guest_path} failed: {e}")),
+        }
+    }
+}
+
 /// Plan 74 W2 / Plan 51 W6 — emit a `LocalAuditKind::NetworkPolicyAllow`
 /// audit record for one host→guest vsock RPC. Pairs with
 /// `GuestRequest::kind_name()`; the verb name lands in the audit
