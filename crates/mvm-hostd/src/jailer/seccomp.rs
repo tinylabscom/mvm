@@ -155,7 +155,7 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
                 "unknown syscall name {name:?}; extend BRIDGE_SYSCALLS in mvm-jailer-lite::seccomp"
             ))
         })?;
-        rules.insert(i64::from(nr), vec![]);
+        rules.insert(nr, vec![]);
     }
     // SeccompAction::Trap (vs Errno(EACCES)) is intentional: the
     // bridge sidecar is expected to be killed by SIGSYS on a forbidden
