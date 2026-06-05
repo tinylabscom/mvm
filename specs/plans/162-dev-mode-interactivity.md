@@ -99,6 +99,36 @@ marker, not a force-attach. Without a TTY, dev commands boot the VM and
 return (with the `dev shell` hint), exactly as the non-interactive path does
 today.
 
+## Part 3 — Guest: dev VM PID 1 must idle, not run `/bin/sh` on the console (the Vz blocker)
+
+**Found while verifying Parts 1+2 on Vz (2026-06-05):** `dev up` on the
+macOS-26 Vz-default host *started* the dev VM and then died — `console.log`
+empty, `vz.pid` dead, no agent vsock socket ever appeared. Root cause:
+mkGuest `/init`'s dev variant ran the `/etc/mvm/entrypoint` `/bin/sh` as
+**PID 1 on `/dev/console`**. Vz's serial console is **input-less**
+(output-capture only), so the shell's read hits EOF → the shell exits →
+PID 1 dies → the VM powers off ~5 s after boot. (Vz-specific: libkrun's
+console *blocks* on read, so its dev VM survived — which is why core_demo
+is green on libkrun.) This makes Parts 1+2 moot on Vz: the VM is dead
+before anything can `openpty()` into it.
+
+Key realization: the interactive shell does **not** come from PID 1's
+`/dev/console` shell. `console_interactive` / `dev shell` go through the
+**agent**, which `openpty()`s and forks its OWN `/bin/sh -i`
+(`crates/mvm-guest/src/console.rs:159-184`), independent of PID 1. So PID 1
+never needed to be a shell.
+
+Fix (`nix/lib/mk-guest.nix` `/init`, dev variant): after the agent fork,
+**PID 1 idles** (busybox-portable `while :; do sleep …; done`) instead of
+running the entrypoint `/bin/sh` on `/dev/console`. The dev VM stays alive
+on both backends; the agent serves the interactive shell. Workload/prod
+variants are unchanged (PID 1 is still the workload; its exit/poweroff
+handling is Plan 152 WS-A — the *opposite* variant at the same `/init`
+edit site: a finished workload should poweroff + propagate `$?`).
+
+- [x] Dev-variant `/init` idles PID 1 (agent serves the shell); don't `exec`/source `/bin/sh` on the input-less Vz console.
+- [ ] Verify on Vz: `dev up` keeps the dev VM alive (`vz.pid` stays up, agent reachable) and `dev shell` attaches. Needs the Swift Vz supervisor built; libkrun verified separately (`dev up` → VM stays up → `dev shell`).
+
 ## Verification
 
 - [ ] **Live (manual, needs a real terminal):** `mvmctl dev up` from a TTY drops into a working shell on the dev VM; `exit` returns cleanly. Repeat with `MVM_ENV=dev mvmctl dev up`.
