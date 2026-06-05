@@ -103,7 +103,7 @@ ADR-066 §5 — the encrypted volume impl lives here and calls 122's engine. Pla
 
 ### Task B3: content-addressed + snapshot-upper volumes
 
-- [ ] **Step 1:** Failing tests — a content-addressed volume dedups identical content by digest; a snapshot-upper volume (COW over a read-only base) writes only the delta. Commit after green. (This is the storage half of the warm-start diff-snapshot in Phase C.)
+- [x] **Step 1:** `ContentAddressedStore` (`content_addressed.rs`) dedups identical content by SHA-256 digest (one on-disk object, atomic put); `SnapshotUpper` (`snapshot.rs`) is COW over a read-only base — writes land in the upper, the base stays immutable, and `..`/absolute paths are rejected via `VolumePath` (claim-1 no-escape). Tests: `content_addressed_dedups_identical_content_by_digest`, `snapshot_upper_writes_only_delta_over_readonly_base`, `snapshot_upper_rejects_path_traversal`. (Storage half of the Phase C diff-snapshot; on Linux the production overlay is overlayfs/dm — same COW semantics.)
 
 ### Task B4: `MountProvider` — pluggable mount sources
 

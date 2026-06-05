@@ -15,6 +15,8 @@ bytes = "1"
 chrono.workspace = true
 mvm-core.workspace = true
 serde.workspace = true
+# Content-addressed volume digests (B3).
+sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "macros"] }
 tracing.workspace = true
 # DEK held in the EncryptedStorage struct is zeroized on drop.

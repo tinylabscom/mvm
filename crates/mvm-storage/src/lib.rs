@@ -20,9 +20,11 @@
 //! re-uses it for `ObjectStoreBackend` and `EncryptedBackend<B>`.
 
 pub mod backend;
+pub mod content_addressed;
 pub mod contract;
 pub mod local;
 pub mod provider;
+pub mod snapshot;
 
 // Non-Linux at-rest arm: wraps mvm-core's per-file AEAD volume sealer. The
 // Linux LUKS2 block-device arm is a tracked follow-up (plan 123 B2).
@@ -30,8 +32,10 @@ pub mod provider;
 pub mod encrypted;
 
 pub use backend::VolumeBackend;
+pub use content_addressed::{ContentAddressedStore, ContentDigest};
 pub use local::LocalBackend;
 pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
+pub use snapshot::SnapshotUpper;
 
 #[cfg(not(target_os = "linux"))]
 pub use encrypted::EncryptedStorage;
