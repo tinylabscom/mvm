@@ -45,6 +45,18 @@ gated by `macos_supports_vz_snapshots()`. So the snapshot lever splits:
       seed over vsock) and `RNDADDENTROPY` into `/dev/random`. Add an on-resume
       agent action; host provides a unique seed per wake.
 
+  > **Substrate already shipped (plan 122 D):** `mvm_guest::genid::GenIdReseeder`
+  > *is* the on-resume agent action — it tracks the host's per-wake
+  > `mvm_core::crypto::vmgenid::GenerationToken` (content-bound, fresh per
+  > resume) and reseeds on a change. It currently stirs `/dev/urandom` with the
+  > token, so this gap is to **extend the reseed source** to virtio-rng (or a
+  > vsock-delivered seed) + `RNDADDENTROPY` into `/dev/random` — `GenIdReseeder`
+  > isolates the reseed source from the change-detection, so swap the source,
+  > don't rebuild the detector. The host→guest **delivery** (send
+  > `GuestRequest::PostRestore` carrying the token; call `GenIdReseeder::on_genid`
+  > in the guest handler) is unwired today — no host `PostRestore` sender exists —
+  > and lands with plan 123 C2/C3's restore round-trip.
+
 ### 3. No clock resync — frozen wallclock
 - [ ] Restored VM resumes at snapshot wallclock. On resume the guest agent reads
       host time over vsock and `settimeofday()` (pairs with #2 in one on-resume
