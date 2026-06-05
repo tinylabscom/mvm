@@ -26,15 +26,18 @@
 - [x] **Step 2:** `xtask check-guest-agent-runtime-free` mirrors `check-core-runtime-free`: `cargo tree -p mvm-guest -e no-dev --prefix none --locked --target aarch64-unknown-linux-musl`, fails if `{tokio, async-trait, rtnetlink, netlink-packet-route}` appear. Parser unit tests green; the live gate is **RED now** (exit 1, all four present) — the real failing test A3 drives to green.
 - [x] **Step 3 (landed with A3):** the gate is wired into `ci.yml` in the A3 commit — the same commit that flips it green, so no knowingly-red required check ever sat in the tree.
 
-### Task A2: `serde_json` → hand-rolled framing in `vsock`
+### Task A2: `serde_json` → hand-rolled framing in `vsock` — **NOT VIABLE AS WRITTEN (deferred 2026-06-05)**
 
-ADR-066 §9. The wire format is a small fixed set of typed messages; a hand-rolled length-delimited codec removes `serde_json` from the guest. **Claim 5: the fuzz target moves with it, not away.**
+ADR-066 §9 wanted a hand-rolled length-delimited codec to "remove `serde_json` from the guest." **Verified against the worktree: A2 cannot remove `serde_json` from `mvm-guest`'s tree, so its dep-graph benefit is zero.** Two findings:
 
-**Files:** `crates/mvm-guest/src/vsock.rs`; `crates/mvm-guest/fuzz/` (the `GuestRequest`/`AuthenticatedFrame` targets).
+1. **`serde_json` is a *transitive* dep via `mvm-core`** — `cargo tree -i serde_json` shows `serde_json → mvm-core → mvm-guest`. `mvm-core` uses it load-bearingly (signed `ExecutionPlan`/bundle/policy/audit JSON), so it stays in `mvm-guest`'s closure no matter what the guest crate does. Hand-rolling the vsock codec removes **0 crates**.
+2. **`serde_json` is load-bearing in 7 guest modules + 3 bins** (non-test): `vsock`, `worker_protocol`, `integrations`, `probes`, `runtime_config`, `runner/config`, `builder_agent`, plus the agent/builder-agent/netinit bins. Even a full guest-wide de-serde would still leave it in the tree via (1).
 
-- [ ] **Step 1:** Failing tests — every `GuestRequest`/response round-trips through the new codec byte-for-byte; a truncated/oversized/garbage frame is rejected (the fuzz corpus cases as unit tests); `deny_unknown_fields` semantics preserved (unknown tag → reject).
-- [ ] **Step 2:** Implement the codec (tag byte + length-prefixed fields; the existing `AuthenticatedFrame` envelope stays). Repoint the two fuzz harnesses at the new codec — claim 5 must keep covering the parser.
-- [ ] **Step 3:** Drop `serde_json` from `mvm-guest` if no other module needs it (`integrations`/`runtime_config` may — keep only where load-bearing). `cargo tree` delta. Commit.
+**Cost/benefit:** hand-rolling encode/decode for `GuestRequest` (~35 variants) + `GuestResponse` + the `AuthenticatedFrame` envelope, re-implementing serde's `deny_unknown_fields` by hand, and **repointing the claim-5 fuzz targets onto a bespoke parser** — i.e. trading battle-tested serde for hand-written parsing on the security-critical host↔guest boundary claim 5 protects — buys **nothing** in the dep graph and *enlarges* the hand-written attack surface. Net-negative.
+
+**Decision:** deferred. Genuinely shedding `serde_json` from the guest closure is gated on de-serde'ing **`mvm-core`** (a separate, cross-cutting effort, and dubious — `mvm-core` serializes signed plans as JSON by design). Revisit only if/when that lands. The lean-agent win this plan promised is delivered by A1+A3 (the `tokio`/`async-trait`/`rtnetlink` cut); `serde_json` was never removable here.
+
+**Files (if ever revived):** `crates/mvm-guest/src/vsock.rs`; `crates/mvm-guest/fuzz/`.
 
 ### Task A3: `rtnetlink` → `linux-raw-sys` in `netinit`
 
@@ -52,7 +55,7 @@ ADR-066 §9. The wire format is a small fixed set of typed messages; a hand-roll
 
 ### Task A4: confirm the cut
 
-- [ ] **Step 1:** `cargo tree -p mvm-guest -e no-dev | wc -l` total delta recorded (target ~25–35 crates removed); prod-agent binary size before/after. `prod-agent-no-exec` (claim 4) still green — assert `do_exec` absent without `dev-shell`. Commit a `docs/investigations/` note with the numbers (don't silently claim the reduction — show it).
+- [x] **Step 1:** Delta recorded in [`docs/investigations/plan-124-lean-agent-dep-cut.md`](../../docs/investigations/plan-124-lean-agent-dep-cut.md): `mvm-guest`'s Linux no-dev closure went **126 → 99 unique crates (−27, 0 added)** — the whole `tokio`/`futures`/`netlink` ecosystem, right in the ~25–35 target. (The async stack was `cfg(linux)`-gated, so the cut only shows on the guest's real target, not the host.) Claim 4 (`prod-agent-no-exec`) untouched — A3 never touched the agent bin or `do_exec` (empty diff); claim 5 untouched (A2 deferred, vsock + fuzz unchanged); claim 10's `REPORT_MARKER` audit path preserved.
 
 ## Phase B — universal agent (every VM type)
 
@@ -108,7 +111,7 @@ ADR-066 §"survey" — deliver the signed-plan-derived runtime config to the gue
 
 ## Acceptance
 
-- [ ] `mvm-guest` sheds `tokio` + `async-trait` + `serde_json` (guest) + `rtnetlink`; `cargo tree -p mvm-guest -e no-dev` is ~25–35 crates lighter, recorded in a `docs/investigations/` note; prod-agent binary smaller.
+- [x] `mvm-guest` sheds `tokio` + `async-trait` + `rtnetlink` (and the `futures`/`netlink` ecosystems they dragged in) — **−27 unique crates** on the Linux closure (126 → 99), recorded in [`docs/investigations/plan-124-lean-agent-dep-cut.md`](../../docs/investigations/plan-124-lean-agent-dep-cut.md). **`serde_json` is NOT shed** (A2): it enters transitively via `mvm-core`, so it's unremovable from the guest tree — deferred, see Task A2.
 - [ ] Claim 4 (`prod-agent-no-exec`) and claim 5 (vsock fuzz, repointed) stay green; claim 10's netinit audit marker preserved.
 - [ ] The same `mvm-guest-agent` runs in builder/dev (forked by `mvm-host-vm-init`) and workload VMs; `check-guest-agent-in-all-images` enforces it.
 - [ ] The agent runs from the verity-sealed `/mvm/runtime` overlay; a tampered overlay fails the roothash.
