@@ -104,6 +104,16 @@ pub const DEFAULT_MEMORY_MIB: u32 = 16384;
 /// runaway build can't fill the host disk.
 pub const DEFAULT_NIX_STORE_MIB: u32 = 65536;
 
+/// Builder persistent /nix store auto-GC threshold (GiB of *used* space).
+/// When the in-guest store exceeds this after a build, the build script runs
+/// `nix-collect-garbage --delete-older-than 14d`. Override: MVM_BUILDER_STORE_GC_GIB.
+/// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB sparse cap). #630
+///
+/// Canonical definition lives in `builder_vm_runtime` (always compiled;
+/// `render_flake_cmd_sh` bakes the resolved cap into the in-guest script).
+/// Re-exported here next to [`DEFAULT_NIX_STORE_MIB`] for discoverability.
+pub use crate::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, builder_store_gc_cap_kib};
+
 /// Where the workspace gets mounted inside the builder VM
 /// (read-only virtio-fs). Plan 72 W4 wires this.
 pub const GUEST_WORK_DIR: &str = "/work";
