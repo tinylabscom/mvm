@@ -403,6 +403,21 @@ pub fn is_production_mode() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if running in dev mode (`MVM_ENV=dev`). Dev-mode commands default
+/// to interactive (drop into the dev VM shell when a TTY is present) and run
+/// at the dev security tier. `dev` subcommands are inherently dev mode
+/// regardless of this var; `MVM_ENV=dev` marks a whole session so other
+/// commands can opt into the dev experience. If `MVM_PRODUCTION` is also set,
+/// production wins (fail-safe — never silently relax the prod tier). Note:
+/// interactivity still requires a host TTY (the console bridges raw-mode
+/// stdin) — this marks intent, it does not conjure a terminal. Plan 162.
+pub fn is_dev_mode() -> bool {
+    !is_production_mode()
+        && std::env::var("MVM_ENV")
+            .map(|v| v.eq_ignore_ascii_case("dev") || v.eq_ignore_ascii_case("development"))
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +444,32 @@ mod tests {
     #[test]
     fn test_not_production_by_default() {
         let _ = is_production_mode();
+    }
+
+    #[test]
+    fn test_is_dev_mode() {
+        let _g = env_lock();
+        unsafe { std::env::remove_var("MVM_PRODUCTION") };
+
+        unsafe { std::env::remove_var("MVM_ENV") };
+        assert!(!is_dev_mode(), "unset MVM_ENV is not dev mode");
+
+        for v in ["dev", "DEV", "Development"] {
+            unsafe { std::env::set_var("MVM_ENV", v) };
+            assert!(is_dev_mode(), "MVM_ENV={v} should be dev mode");
+        }
+
+        unsafe { std::env::set_var("MVM_ENV", "prod") };
+        assert!(!is_dev_mode(), "MVM_ENV=prod is not dev mode");
+
+        // Production wins (fail-safe): never relax the prod tier even if dev
+        // is also requested.
+        unsafe { std::env::set_var("MVM_ENV", "dev") };
+        unsafe { std::env::set_var("MVM_PRODUCTION", "1") };
+        assert!(!is_dev_mode(), "MVM_PRODUCTION=1 overrides MVM_ENV=dev");
+
+        unsafe { std::env::remove_var("MVM_ENV") };
+        unsafe { std::env::remove_var("MVM_PRODUCTION") };
     }
 
     #[test]

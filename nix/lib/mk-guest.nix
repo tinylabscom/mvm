@@ -253,6 +253,18 @@ let
     /bin/busybox mount -t sysfs    sysfs    /sys
     /bin/busybox mount -t devtmpfs devtmpfs /dev
 
+    # devpts is required for openpty(3): the guest agent allocates a PTY per
+    # interactive `dev` console session (mvm-guest::console). devtmpfs gives
+    # /dev/ptmx the node but not the /dev/pts slave fs, so without this
+    # openpty() fails ("openpty() failed") and the interactive dev shell
+    # can't open even from a real terminal (Plan 162). Harmless for sealed
+    # workload guests (they never openpty); 0620,gid=5 is the standard
+    # tty-group layout. Best-effort (`|| true`): a kernel without
+    # CONFIG_DEVPTS_* falls back to the current non-interactive behavior
+    # rather than wedging PID 1.
+    /bin/busybox mkdir -p /dev/pts
+    /bin/busybox mount -t devpts -o mode=0620,gid=5,nosuid,noexec devpts /dev/pts || true
+
     # /dev/fd → /proc/self/fd is what bash process substitution
     # (`< <(...)`, `mapfile -t x < <(...)`) needs to open the
     # subshell's pipe FD at /dev/fd/N. devtmpfs creates device
