@@ -46,12 +46,12 @@ Ordered by leverage + readiness. Highest value that's unblocked first.
       the 152 rewrite. Close 141's Q8 (`Modify` failure modes) + Q9
       (per-direction observers) via a short brainstorm, then writing-plans
       → TDD. No Vz changes (that's S3). Highest near-term value.
-- [ ] **S2 — Plan 152 WS-A (BUILD). Gate: confirm Plan 134.**
+- [ ] **S2 — Plan 152 WS-A (BUILD). Gates satisfied — unblocked.**
       Guest `/init` exit-code → `poweroff -f` parity (fixes the
       function-workload reboot; the exit channel is vsock). Small, concrete
-      — implement directly with TDD. Gate: Plan 120 (`core_demo_e2e`) is
-      green; **confirm Plan 134 (artifact model)** is far enough along
-      before starting (152 is sequenced after it).
+      — implement directly with TDD. Gate: Plan 120 (`core_demo_e2e`)
+      green ✓ and Plan 134 (artifact model) slice-1 merged to main ✓
+      (`a57f2548`) — sequenced after it, now landed.
 - [ ] **S3 — Plan 152 WS-B (PLAN FIRST, then build).**
       The Rust-`objc2` VZ supervisor rewrite — a separate per-VM
       codesigned `[[bin]]` in `mvm-vm-host`, sibling to
@@ -78,7 +78,7 @@ Ordered by leverage + readiness. Highest value that's unblocked first.
 | Unit | Depends on | Gate state (2026-06-05) |
 |---|---|---|
 | S1 — 141 core | Plan 113 (merged) | **ready** (close Q8/Q9 first) |
-| S2 — 152 WS-A | Plan 120 green; Plan 134 | 120 green; **confirm 134** |
+| S2 — 152 WS-A | Plan 120 green; Plan 134 | **ready** — 120 green ✓; Plan 134 slice-1 merged to main ✓ (`a57f2548`) |
 | S3 — 152 WS-B | S2; ADR-064 §8 reconciliation | plan-first; after S2 |
 | S4 — 152 WS-D | S3 (Rust supervisor sets the flag); M3+/macOS-26 | spike anytime; needs S3 to land |
 | S5 — 159 DX | Plan 152; Plans 157/148/140 for primitives | after 152 |
