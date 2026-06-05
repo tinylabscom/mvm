@@ -42,6 +42,7 @@ pub mod flow_count;
 // Plan 141 / ADR-064 — backend-agnostic packet-observer core.
 pub mod latency;
 pub mod packet;
+pub mod pipeline;
 
 /// Maximum number of observers per VM. ADR-064 §Decision: hard cap of 8
 /// (each observer is a synchronous callback in the signer task's hot path;
