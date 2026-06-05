@@ -67,7 +67,9 @@ Observers are resolved through `~/.mvm/observers/allowlist.toml` (per-user) or `
 
 ### 8. Vz payload tap: not supported in this plan; capability-gated refusal
 
-`mvm-vz-drainer` returns `Err(PayloadTapUnsupported)` from `attach_tap`. Observers that require `payload_tap` (future egress-redactor) refuse construction on the Vz backend at `Pipeline::observe` time with a clear "switch backend or change policy" message. **Vz catches up in a focused follow-up plan** that extends Swift's `Config.swift` deny-unknown-fields schema with an optional `payload_tap_socket_path` and adds a Swift-side payload tee + control channel from Rust.
+`mvm-vz-drainer` returns `Err(PayloadTapUnsupported)` from `attach_tap`. Observers that require `payload_tap` (future egress-redactor) refuse construction on the Vz backend at `Pipeline::observe` time with a clear "switch backend or change policy" message.
+
+**Vz payload-tap is delivered by the Rust-`objc2` VZ supervisor (Plan 152), not a Swift extension** (decision 2026-06-04, superseding the earlier "Swift-side payload tee" sketch). Once the supervisor is Rust-native it owns the VZ device *and* the gateway bridge in one process, so the packet shuffle + observer pipeline (Plan 141's backend-agnostic core) run **in-process** against the socketpair Rust attaches to `VZFileHandleNetworkDeviceAttachment` — no Swift tee, no SCM_RIGHTS fd-handoff, no NDJSON ingest hop. **Plan 141 is rescoped to the libkrun + Firecracker `payload_tap` core**; Vz keeps this capability-gated refusal until Plan 152 lands. Rationale: a Swift-side tee / fd-handoff would be throwaway under the already-decided drop-Swift direction, and it would put cross-process fd-passing on the egress path only to delete it — see `project_vz_strong_support_direction`.
 
 ### 9. Tenant value resolution
 

@@ -6,6 +6,18 @@
 > brainstorm to close Q7–Q10, then re-render the Tasks section through
 > `superpowers:writing-plans`. The shape below is what the locked
 > decisions imply.
+>
+> **RESOLVED with Plan 152 (2026-06-04 brainstorm) — scope split.** The
+> Vz arm of this plan is **superseded by Plan 152**. 152 makes the VZ
+> supervisor Rust-native (`objc2`), so Rust owns the VZ device *and* the
+> bridge in one process — the SCM_RIGHTS fd-handoff to a *surviving* Swift
+> supervisor (this plan's Q1–Q6 Vz mechanism) is unnecessary and would be
+> throwaway. **This plan is rescoped to its backend-agnostic core**
+> (`on_packet`/`Verdict`/etherparse observer pipeline) for **libkrun +
+> Firecracker** `payload_tap`; **Vz `payload_tap` is delivered in-process
+> by Plan 152.** The Swift-side files + Vz-specific Rust arm below are
+> retained for reference but **move to Plan 152**. Decision record:
+> ADR-064 §8. See [[project_vz_strong_support_direction]].
 
 **Goal:** Close ADR-064 §Decision 8's "Vz catches up later" carve-out and
 land the Rust-owned-shuffle architecture across all production
@@ -124,6 +136,16 @@ plan's task list is renderable. The brainstorm context is captured at
 ---
 
 ## Files (planned — derived from the locked decisions above)
+
+> **Scope (2026-06-04):** the **Swift side** + the **Vz-specific Rust
+> bits** (the `VzIngest`→`VzManaged` arm, `parse.rs` rename, `vz.rs`
+> `rust_managed` shape) are **superseded by Plan 152** (Vz goes
+> Rust-native; the bridge runs in-process, no fd-handoff) — retained below
+> for reference only. **In scope for this plan:** the backend-agnostic
+> `Observer` / `gateway_bridge` core (`on_packet`/`Verdict`/`ParsedPacket`,
+> etherparse pipeline, `killed_flows`, flow-byte-log, Prometheus) applied
+> to **libkrun + Firecracker**. Q10 (`mvm-vz-drainer` deletion) and the Vz
+> part of Q7 move to Plan 152; Q8/Q9 stay here.
 
 ### Swift side (Vz supervisor)
 
