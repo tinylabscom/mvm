@@ -636,11 +636,15 @@ impl Supervisor {
             return Err(SupervisorError::from(e));
         }
 
+        // Withdraw the host enforcement through the EgressEnforcer seam (A2.3),
+        // symmetric with the enforce-on-launch path. The adapter delegates to
+        // the same firewall.teardown.
         if let Some(spec) = self.installed_firewalls.remove(plan_id)
-            && let Err(e) = self.firewall.teardown(&spec.vm_id)
+            && let Err(e) =
+                SupervisorEgressEnforcer::new(self.firewall.clone()).withdraw(&spec.vm_id)
         {
             self.transition_or_warn(PlanState::Failed);
-            return Err(SupervisorError::from(e));
+            return Err(SupervisorError::EgressEnforcement(e));
         }
 
         self.state.transition(PlanState::Stopped).map_err(|e| {
@@ -661,10 +665,12 @@ impl Supervisor {
     }
 
     fn teardown_firewall_for_plan(&mut self, plan_id: &PlanId) {
+        // Best-effort withdraw through the seam (A2.3).
         if let Some(spec) = self.installed_firewalls.remove(plan_id)
-            && let Err(e) = self.firewall.teardown(&spec.vm_id)
+            && let Err(e) =
+                SupervisorEgressEnforcer::new(self.firewall.clone()).withdraw(&spec.vm_id)
         {
-            warn!(?e, vm_id = %spec.vm_id, "firewall teardown after launch failure failed");
+            warn!(?e, vm_id = %spec.vm_id, "egress teardown after launch failure failed");
         }
     }
 
