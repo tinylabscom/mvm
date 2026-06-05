@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use mvm_core::plan::ExecutionPlan;
-use mvm_core::policy::PolicyBundle;
+use mvm_core::policy::{EmergencyDeny, PolicyBundle};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::supervisor::audit::{AuditEntry, AuditSigner, FlowCloseReason, FlowDirection};
@@ -70,8 +70,9 @@ use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
 // ObserverWiring (default no-op) so plan 129 sets them without touching the
 // call sites.
 use crate::supervisor::network::stages::{
-    MandatoryDenyEgressScan, NoopSubstitution, ScanStage, SubstitutionStage,
+    NoopSubstitution, ScanStage, SubstitutionStage, build_egress_scan,
 };
+use crate::supervisor::proxy::l4::LiveL4Gate;
 use std::collections::HashSet;
 
 // ============================================================================
@@ -470,6 +471,26 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
         // Subscriber-sink accept loop.
         let sink_handle = tokio::task::spawn_local(sink.run());
 
+        // Plan 123 Slice 3 — resolve the tenant's L4 egress policy from the
+        // admitted policy bundle, if one reached the bridge, so the per-tenant
+        // filter composes under mandatory-deny. No bundle (the common case
+        // today: bundle_json carries a PlanArtifact pin, not resolved content)
+        // → None → mandatory-deny only, the prior live default. A bundle whose
+        // L4 specs fail to translate (admission should have rejected it) fails
+        // CLOSED to deny-all, never open. Emergency/now only gate the tool
+        // policy, so the network resolution is stable.
+        let egress_policy = cfg.bundle.as_deref().map(|bundle| {
+            let net = mvm_core::policy::resolve(
+                bundle,
+                &cfg.plan.tenant,
+                chrono::Utc::now(),
+                &EmergencyDeny::default(),
+            )
+            .network;
+            LiveL4Gate::from_specs(&net.l4)
+                .map(|gate| gate.policy)
+                .unwrap_or_else(|_| crate::supervisor::proxy::l4::L4Policy::deny_all())
+        });
         // Plan 141 — packet-observer wiring shared across both directions.
         let wiring = ObserverWiring {
             observers: cfg.observers.clone(),
@@ -480,11 +501,10 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
             substitution: Arc::new(NoopSubstitution),
-            // Default scan = host-side mandatory-deny (link-local + cloud
-            // metadata), unbypassable from inside a compromised guest that
-            // strips its netinit routes. Per-tenant allow-list / DNS sink-hole
-            // scans compose on top once policy threading lands.
-            scan: Arc::new(MandatoryDenyEgressScan),
+            // Host-side mandatory-deny (link-local + cloud metadata), always on
+            // and unbypassable from inside a compromised guest; the per-tenant
+            // L4 filter composes under it when a bundle is present.
+            scan: build_egress_scan(egress_policy),
         };
 
         // Bridge task — variant-specific.

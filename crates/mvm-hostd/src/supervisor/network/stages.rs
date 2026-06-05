@@ -9,10 +9,13 @@
 //! existing `Verdict::Modify` rebuild path; a scan `Drop` maps to the same
 //! fail-closed kill the observers use).
 
+use std::sync::Arc;
+
 use mvm_core::network_policy::{NetworkPolicy, is_mandatory_deny};
 
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
+use crate::supervisor::proxy::l4::{L4Decision, L4Policy, Protocol};
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
 /// flow — the same fail-closed path as `Verdict::Drop`.
@@ -239,12 +242,107 @@ impl ScanStage for NetworkPolicyScan {
     }
 }
 
+/// Runs an ordered list of [`ScanStage`]s **fail-closed**: the packet passes
+/// only if every stage passes; the first stage that returns `Drop` short-
+/// circuits. This is how the egress scans compose on the single
+/// `ObserverWiring.scan` slot — `[MandatoryDenyEgressScan, NetworkPolicyScan]`
+/// so mandatory-deny always wins and the per-tenant L4 filter runs under it.
+pub struct ScanChain {
+    stages: Vec<Arc<dyn ScanStage>>,
+}
+
+impl ScanChain {
+    pub fn new(stages: Vec<Arc<dyn ScanStage>>) -> Self {
+        Self { stages }
+    }
+}
+
+impl ScanStage for ScanChain {
+    fn name(&self) -> &'static str {
+        "scan-chain"
+    }
+
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+        for stage in &self.stages {
+            if stage.scan(ctx, pkt) == ScanOutcome::Drop {
+                return ScanOutcome::Drop;
+            }
+        }
+        ScanOutcome::Pass
+    }
+}
+
+/// Enforces the policy bundle's L4 [`L4Policy`] (proto + dst CIDR + port range)
+/// on the egress packet path (plan 123 Slice 3 / claim 10), reusing the
+/// supervisor's tested `L4Policy::evaluate` (first-match-wins, default-deny).
+///
+/// This is the per-tenant filter the bundle actually carries
+/// (`mvm_core::policy::NetworkPolicy.l4`). Its rules are CIDRs, so they match a
+/// packet's destination IP directly — no hostname-resolution gap (that concern
+/// belongs to [`DnsSinkholeScan`] at the DNS layer; the iptables-typed
+/// [`NetworkPolicyScan`] is the host:port allow-list variant for that path).
+/// Egress-only; an ingress frame's L3 dst is the guest. Compose it *under*
+/// [`MandatoryDenyEgressScan`] via a [`ScanChain`].
+pub struct L4PolicyScan {
+    policy: L4Policy,
+}
+
+impl L4PolicyScan {
+    pub fn new(policy: L4Policy) -> Self {
+        Self { policy }
+    }
+}
+
+impl ScanStage for L4PolicyScan {
+    fn name(&self) -> &'static str {
+        "l4-policy"
+    }
+
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+        match ctx.direction {
+            FlowDirection::Egress => {}
+            _ => return ScanOutcome::Pass,
+        }
+        let proto = match pkt.five_tuple.proto {
+            L4Proto::Tcp => Protocol::Tcp,
+            L4Proto::Udp => Protocol::Udp,
+        };
+        match self
+            .policy
+            .evaluate(proto, pkt.five_tuple.dst_ip, pkt.five_tuple.dst_port)
+        {
+            L4Decision::Allow => ScanOutcome::Pass,
+            L4Decision::Deny { .. } => ScanOutcome::Drop,
+        }
+    }
+}
+
+/// Build the egress `ScanStage` for a VM's gateway bridge: always the host-side
+/// mandatory-deny ranges, plus the per-tenant [`L4PolicyScan`] when the tenant's
+/// bundle L4 policy was resolved. `None` (no policy bundle reached the bridge) →
+/// mandatory-deny only, i.e. the current live default — so wiring this is a
+/// no-op until a bundle's resolved `L4Policy` reaches the bridge.
+pub fn build_egress_scan(policy: Option<L4Policy>) -> Arc<dyn ScanStage> {
+    match policy {
+        Some(p) => {
+            let stages: Vec<Arc<dyn ScanStage>> = vec![
+                Arc::new(MandatoryDenyEgressScan),
+                Arc::new(L4PolicyScan::new(p)),
+            ];
+            Arc::new(ScanChain::new(stages))
+        }
+        None => Arc::new(MandatoryDenyEgressScan),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::supervisor::network::FlowDirection;
     use crate::supervisor::network::packet::{FiveTuple, L4Proto};
+    use crate::supervisor::proxy::l4::LiveL4Gate;
     use mvm_core::network_policy::{HostPort, NetworkPolicy};
+    use mvm_core::policy::L4RuleSpec;
 
     #[test]
     fn noop_stages_pass_through_and_never_drop() {
@@ -497,5 +595,137 @@ mod tests {
         let scan = NetworkPolicyScan::new(NetworkPolicy::deny_all());
         let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
         assert_eq!(scan.scan(&ingress_ctx(), &pkt), ScanOutcome::Pass);
+    }
+
+    #[test]
+    fn scan_chain_drops_if_any_stage_drops() {
+        // Fail-closed composition: mandatory-deny passes a public IP, but the
+        // chained deny_all NetworkPolicyScan drops it → the chain drops.
+        let chain = ScanChain::new(vec![
+            Arc::new(MandatoryDenyEgressScan) as Arc<dyn ScanStage>,
+            Arc::new(NetworkPolicyScan::new(NetworkPolicy::deny_all())),
+        ]);
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(chain.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+    }
+
+    #[test]
+    fn scan_chain_passes_when_every_stage_passes() {
+        // mandatory-deny passes a public IP + an allow-list permitting it →
+        // the whole chain passes.
+        let chain = ScanChain::new(vec![
+            Arc::new(MandatoryDenyEgressScan) as Arc<dyn ScanStage>,
+            Arc::new(NetworkPolicyScan::new(NetworkPolicy::allow_list(vec![
+                HostPort::new("1.1.1.1", 443),
+            ]))),
+        ]);
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(chain.scan(&egress_ctx(), &pkt), ScanOutcome::Pass);
+    }
+
+    #[test]
+    fn scan_chain_empty_passes() {
+        // A chain of no stages is vacuously pass — the safe default before any
+        // scan is composed in.
+        let chain = ScanChain::new(vec![]);
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(chain.scan(&egress_ctx(), &pkt), ScanOutcome::Pass);
+    }
+
+    #[test]
+    fn scan_chain_mandatory_deny_wins_over_a_permissive_policy() {
+        // Even unrestricted (pass-all) composed with mandatory-deny still drops
+        // the metadata IP: mandatory-deny is not overridable by a per-tenant
+        // policy, whatever the order.
+        let chain = ScanChain::new(vec![
+            Arc::new(NetworkPolicyScan::new(NetworkPolicy::unrestricted())) as Arc<dyn ScanStage>,
+            Arc::new(MandatoryDenyEgressScan),
+        ]);
+        let pkt = tcp_packet("169.254.169.254".parse().unwrap(), 80);
+        assert_eq!(chain.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+    }
+
+    #[test]
+    fn build_egress_scan_none_is_mandatory_deny_only() {
+        // No per-tenant policy → mandatory-deny only — identical to the current
+        // live default. A metadata IP drops; a public IP passes (no L4 filter).
+        let scan = build_egress_scan(None);
+        assert_eq!(scan.name(), "mandatory-deny-egress");
+        assert_eq!(
+            scan.scan(
+                &egress_ctx(),
+                &tcp_packet("169.254.169.254".parse().unwrap(), 80)
+            ),
+            ScanOutcome::Drop
+        );
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_some_chains_policy_under_mandatory_deny() {
+        // A deny_all L4 policy → the chain drops every egress packet; the
+        // metadata IP is dropped by the mandatory-deny stage too.
+        let scan = build_egress_scan(Some(L4Policy::deny_all()));
+        assert_eq!(scan.name(), "scan-chain");
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
+            ScanOutcome::Drop
+        );
+    }
+
+    /// An `L4Policy` permitting tcp to `cidr:port` only, built via the
+    /// supervisor's `from_specs` translator (proto + CIDR parsing).
+    fn l4_allow(cidr: &str, port: u16) -> L4Policy {
+        LiveL4Gate::from_specs(&[L4RuleSpec {
+            proto: "tcp".into(),
+            dst_cidr: cidr.into(),
+            port_lo: port,
+            port_hi: port,
+        }])
+        .unwrap()
+        .policy
+    }
+
+    #[test]
+    fn l4_policy_deny_all_drops_every_egress() {
+        // An empty L4Policy is default-deny → every egress packet drops.
+        let scan = L4PolicyScan::new(L4Policy::deny_all());
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
+            ScanOutcome::Drop
+        );
+    }
+
+    #[test]
+    fn l4_policy_allows_only_matching_proto_ip_port() {
+        let scan = L4PolicyScan::new(l4_allow("1.2.3.4/32", 443));
+        // Exact (tcp, ip, port) match → pass.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 443)),
+            ScanOutcome::Pass
+        );
+        // Wrong port and wrong IP → no rule matches → default-deny drop.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 80)),
+            ScanOutcome::Drop
+        );
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("9.9.9.9".parse().unwrap(), 443)),
+            ScanOutcome::Drop
+        );
+    }
+
+    #[test]
+    fn l4_policy_ignores_ingress() {
+        // Egress-only: deny_all would drop everything on ingress, but the
+        // direction gate lets it pass (ingress dst is the guest).
+        let scan = L4PolicyScan::new(L4Policy::deny_all());
+        assert_eq!(
+            scan.scan(&ingress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
+            ScanOutcome::Pass
+        );
     }
 }
