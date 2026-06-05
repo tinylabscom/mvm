@@ -66,9 +66,12 @@ use crate::supervisor::network::PacketCtx;
 use crate::supervisor::network::latency::ObserverLatency;
 use crate::supervisor::network::packet::{self, FlowKey};
 use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
-// plan 123 A3.2: no-op egress stages wired into the live pipeline. A3.3 will
-// thread real (plan 129) stages from ObserverWiring; today they're no-op.
-use crate::supervisor::network::stages::{NoopScan, NoopSubstitution};
+// plan 123 A3.2/A3.3: egress stages wired into the live pipeline, carried on
+// ObserverWiring (default no-op) so plan 129 sets them without touching the
+// call sites.
+use crate::supervisor::network::stages::{
+    NoopScan, NoopSubstitution, ScanStage, SubstitutionStage,
+};
 use std::collections::HashSet;
 
 // ============================================================================
@@ -254,6 +257,10 @@ pub struct ObserverWiring {
     pub latency: Arc<ObserverLatency>,
     pub killed_flows: Arc<tokio::sync::Mutex<HashSet<FlowKey>>>,
     pub mtu: usize,
+    /// Plan 129 egress stages (A3.3). Default no-op; Plan 129 sets these so its
+    /// substitution/leak-scan run on the live egress path without a code edit.
+    pub substitution: Arc<dyn SubstitutionStage>,
+    pub scan: Arc<dyn ScanStage>,
 }
 
 /// Per-subscriber NDJSON wire shape. Stable contract for `nc -U`
@@ -472,6 +479,8 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             )),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
+            substitution: Arc::new(NoopSubstitution),
+            scan: Arc::new(NoopScan),
         };
 
         // Bridge task — variant-specific.
@@ -645,6 +654,8 @@ async fn bridge_copy_bidirectional(
     let latency = wiring.latency;
     let killed_flows = wiring.killed_flows;
     let mtu = wiring.mtu;
+    let substitution = wiring.substitution;
+    let scan = wiring.scan;
 
     // Egress: guest → internet. Read framed from b, observe, write to a.
     let egress = async {
@@ -698,8 +709,8 @@ async fn bridge_copy_bidirectional(
             };
             match run_packet_pipeline(
                 &observers,
-                &NoopSubstitution,
-                &NoopScan,
+                substitution.as_ref(),
+                scan.as_ref(),
                 ctx,
                 &frame,
                 mtu,
@@ -785,8 +796,8 @@ async fn bridge_copy_bidirectional(
             };
             match run_packet_pipeline(
                 &observers,
-                &NoopSubstitution,
-                &NoopScan,
+                substitution.as_ref(),
+                scan.as_ref(),
                 ctx,
                 &frame,
                 mtu,
@@ -949,6 +960,8 @@ async fn run_libkrun_gvproxy_bridge(
     let observers_a = wiring.observers.clone();
     let latency_a = wiring.latency.clone();
     let killed_flows_a = wiring.killed_flows.clone();
+    let substitution_a = wiring.substitution.clone();
+    let scan_a = wiring.scan.clone();
     let vm_name_a = vm_name.clone();
     let tenant_a = tenant.clone();
 
@@ -1012,8 +1025,8 @@ async fn run_libkrun_gvproxy_bridge(
             };
             match run_packet_pipeline(
                 &observers_a,
-                &NoopSubstitution,
-                &NoopScan,
+                substitution_a.as_ref(),
+                scan_a.as_ref(),
                 ctx,
                 raw,
                 mtu,
@@ -1056,6 +1069,8 @@ async fn run_libkrun_gvproxy_bridge(
     let observers_b = wiring.observers.clone();
     let latency_b = wiring.latency.clone();
     let killed_flows_b = wiring.killed_flows.clone();
+    let substitution_b = wiring.substitution.clone();
+    let scan_b = wiring.scan.clone();
     let vm_name_b = vm_name.clone();
     let tenant_b = tenant.clone();
 
@@ -1113,8 +1128,8 @@ async fn run_libkrun_gvproxy_bridge(
             };
             match run_packet_pipeline(
                 &observers_b,
-                &NoopSubstitution,
-                &NoopScan,
+                substitution_b.as_ref(),
+                scan_b.as_ref(),
                 ctx,
                 raw,
                 mtu,
@@ -1883,7 +1898,18 @@ mod tests {
             latency: Arc::new(ObserverLatency::new("vm-test", "t")),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
+            substitution: Arc::new(NoopSubstitution),
+            scan: Arc::new(NoopScan),
         }
+    }
+
+    #[test]
+    fn observer_wiring_defaults_to_noop_stages() {
+        // A3.3: the bridge wiring carries the egress stages; the default is
+        // no-op, so Plan 129 opts in by setting them — never the reverse.
+        let w = wiring_with(vec![]);
+        assert_eq!(w.substitution.name(), "noop-substitution");
+        assert_eq!(w.scan.name(), "noop-scan");
     }
 
     /// Connect a libkrun-side datagram socket to the bridge's listener,
