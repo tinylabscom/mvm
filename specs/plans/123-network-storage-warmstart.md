@@ -97,8 +97,9 @@ The IR `NetworkMode` is a closed enum (`None`/`Bridge`/`Host`) — a mesh/VPN mo
 
 ADR-066 §5 — the encrypted volume impl lives here and calls 122's engine. Platform split: LUKS2 (Linux), per-file AEAD (macOS, 122 Task A2).
 
-- [ ] **Step 1:** Failing test — an `encrypted` volume's on-disk bytes are ciphertext; the guest mount sees plaintext; a flipped byte fails to open (122's AEAD tag).
-- [ ] **Step 2:** Wire `EncryptedStorage` over `mvm_core::crypto::{aead, volume}` (122) + the DEK/KEK envelope; select LUKS2 vs the macOS arm by `target_os`. The per-volume DEK binds to the content hash + plan + audit head (122 B2). Commit.
+- [x] **Step 1 (macOS arm):** test — a detached `EncryptedStorage` volume is ciphertext at rest (plaintext marker gone), re-attach shows plaintext, a flipped tag byte fails open. (`encrypted::tests::{encrypted_volume_is_ciphertext_at_rest_and_roundtrips, tampered_ciphertext_fails_to_open}`)
+- [x] **Step 2 (macOS arm):** `EncryptedStorage` (`crates/mvm-storage/src/encrypted.rs`, `#[cfg(not(target_os = "linux"))]`) seals on detach / opens on attach via `mvm_core::crypto::volume::{seal_dir,open_dir}` (122). It's the non-Linux arm, gated like the engine it wraps; selection by `target_os`. The per-volume DEK→content-hash+plan+audit-head binding (`WrappedKey.bound`, 122 B2) is verified at the **admit gate before unlock**, not re-checked here.
+- [ ] **Step 2 (Linux LUKS2 arm) — DEFERRED (see follow-ups):** block-level LUKS2 over a loop device. Un-buildable + un-verifiable on a macOS dev host (needs Linux + root + loop devices; `cargo zigbuild`/zig 0.16 can't even compile the crate here). Land on Linux CI per the `mvm_core::rotate_luks_slot` precedent (direct `cryptsetup`, `MVM_LIVE_LUKS=1`-gated).
 
 ### Task B3: content-addressed + snapshot-upper volumes
 
@@ -166,6 +167,7 @@ The wireable macOS live-memory path. Coarser than UFFD (a full save/restore), bu
 
 ### deferred follow-ups
 
+- [ ] **B2 Linux LUKS2 arm** — block-level `EncryptedStorage` (`cryptsetup luksFormat`/`luksOpen` + `mkfs`/`mount` over a loop device), gated `#[cfg(target_os = "linux")]`, with an `MVM_LIVE_LUKS=1`-gated live test. Deferred from B2: a macOS dev host can neither build nor verify it (no Linux/root/loop devices; local cross-tooling can't compile the crate). Do it on Linux. While there, dedup the cryptsetup shell-out with `mvm/src/security/encryption.rs` (the `run_in_vm` builder-VM path) and `mvm_core::rotate_luks_slot` (the direct-`Command` runtime path).
 - [ ] Cloud-Hypervisor snapshot parity (if CH stays a backend).
 - [ ] Soften the gap-analysis "live-memory resume" line to the per-backend matrix (Firecracker + Vz live-memory; libkrun disk-only).
 - [ ] The diff-snapshot fast-resume on Vz (UFFD-equivalent) — VZ's save/restore is coarse; a faster macOS path is its own investigation.

@@ -24,9 +24,17 @@ pub mod contract;
 pub mod local;
 pub mod provider;
 
+// Non-Linux at-rest arm: wraps mvm-core's per-file AEAD volume sealer. The
+// Linux LUKS2 block-device arm is a tracked follow-up (plan 123 B2).
+#[cfg(not(target_os = "linux"))]
+pub mod encrypted;
+
 pub use backend::VolumeBackend;
 pub use local::LocalBackend;
 pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
+
+#[cfg(not(target_os = "linux"))]
+pub use encrypted::EncryptedStorage;
 
 use std::sync::Arc;
 

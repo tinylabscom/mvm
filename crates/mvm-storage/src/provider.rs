@@ -42,6 +42,10 @@ pub struct VolumeHandle {
 }
 
 impl VolumeHandle {
+    pub(crate) fn new(name: VolumeName, backing: PathBuf) -> Self {
+        Self { name, backing }
+    }
+
     pub fn name(&self) -> &VolumeName {
         &self.name
     }
@@ -62,6 +66,10 @@ pub struct AttachedVolume {
 }
 
 impl AttachedVolume {
+    pub(crate) fn new(name: VolumeName, host_path: PathBuf) -> Self {
+        Self { name, host_path }
+    }
+
     pub fn name(&self) -> &VolumeName {
         &self.name
     }
@@ -112,17 +120,14 @@ impl StorageProvider for LocalStorage {
     fn provision(&self, spec: &VolumeSpec) -> Result<VolumeHandle, VolumeError> {
         let backing = self.root.join(spec.name().as_str());
         std::fs::create_dir_all(&backing)?;
-        Ok(VolumeHandle {
-            name: spec.name().clone(),
-            backing,
-        })
+        Ok(VolumeHandle::new(spec.name().clone(), backing))
     }
 
     fn attach(&self, handle: &VolumeHandle) -> Result<AttachedVolume, VolumeError> {
-        Ok(AttachedVolume {
-            name: handle.name.clone(),
-            host_path: handle.backing.clone(),
-        })
+        Ok(AttachedVolume::new(
+            handle.name.clone(),
+            handle.backing.clone(),
+        ))
     }
 
     fn detach(&self, _attached: AttachedVolume) -> Result<(), VolumeError> {

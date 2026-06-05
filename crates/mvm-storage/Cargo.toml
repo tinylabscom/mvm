@@ -17,6 +17,8 @@ mvm-core.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "macros"] }
 tracing.workspace = true
+# DEK held in the EncryptedStorage struct is zeroized on drop.
+zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
