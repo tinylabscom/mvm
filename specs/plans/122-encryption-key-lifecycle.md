@@ -146,9 +146,9 @@ ADR-066 §5: a per-volume DEK rides the rebuild cycle and binds to the artifact 
 
 **Files:** extend `WrappedKey` metadata in `key_rotation.rs`; the admit path that already verifies plans (`mvm-cli` up / supervisor).
 
-- [ ] **Step 1:** Failing test — a `WrappedKey` whose bound `content_hash` differs from the volume it's presented with is refused at admit.
-- [ ] **Step 2:** Add `bound: { content_hash, plan_id, audit_head }` to `WrappedKey`; mint a fresh DEK per rebuild and record the binding. Verify it in the admit path next to the existing plan check.
-- [ ] **Step 3:** Tests green; commit.
+- [x] **Step 1:** Failing test — a `WrappedKey` whose bound `content_hash` differs from the volume it's presented with is refused at admit.
+- [x] **Step 2:** Add `bound: Option<DekBinding{ content_hash, plan_id, audit_head }>` to `WrappedKey` (Option B). mvm populates+verifies `content_hash` (local volume ciphertext) at the unlock/mount admit gate; `plan_id`/`audit_head` are reserved for the mvmd rebuild path (it owns `EncryptedBackend` + the signed plan/audit chain). Distinct layer from the existing `DepsVolumeBinding` (deps-volume → signed plan).
+- [x] **Step 3:** Tests green; commit.
 
 ## Phase C — snapshots content-addressed + signed
 

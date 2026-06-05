@@ -411,6 +411,32 @@ pub enum WrapAlgorithm {
     Aes256Gcm,
 }
 
+/// Plan 122 B2 — binds a wrapped DEK to the artifact it protects, so a DEK
+/// can't be lifted onto a different volume than it was minted for.
+///
+/// `content_hash` is the only field mvm populates today (the sha256 of the
+/// local volume's ciphertext archive, re-checked before the DEK is
+/// unwrapped). `plan_id` / `audit_head` are reserved for the workload
+/// rebuild path, which mvmd owns — it runs the per-rebuild `EncryptedBackend`
+/// and holds the signed plan + audit chain. They stay `None` for local
+/// volumes, which have no plan at create time. (The deps-volume → signed-plan
+/// binding for workloads already exists separately as
+/// [`crate::plan::DepsVolumeBinding`]; this is the distinct DEK-envelope ↔
+/// artifact layer.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DekBinding {
+    /// sha256-hex of the bound artifact (the local volume's ciphertext
+    /// archive).
+    pub content_hash: String,
+    /// Signed-plan id this DEK was minted for. mvmd-populated; `None` local.
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// Audit-chain head at mint. mvmd-populated; `None` local.
+    #[serde(default)]
+    pub audit_head: Option<String>,
+}
+
 /// A per-volume AEAD key, wrapped under a versioned master key.
 /// Stored in the volume registry record alongside the volume metadata.
 ///
@@ -430,6 +456,41 @@ pub struct WrappedKey {
     pub wrapped: Vec<u8>,
 
     pub algorithm: WrapAlgorithm,
+
+    /// Plan 122 B2 — optional binding to the artifact this DEK protects.
+    /// `None` for pre-B2 / unbound keys (accepted, treated as "no binding
+    /// to check").
+    #[serde(default)]
+    pub bound: Option<DekBinding>,
+}
+
+impl WrappedKey {
+    /// True when this key is unbound, or its binding's `content_hash`
+    /// matches `actual_content_hash`. The admit/unlock gate: a DEK presented
+    /// against a different artifact than it was minted for is refused.
+    pub fn binding_matches_content(&self, actual_content_hash: &str) -> bool {
+        match &self.bound {
+            None => true,
+            Some(b) => b.content_hash == actual_content_hash,
+        }
+    }
+
+    /// Re-point the binding at a new artifact `content_hash`, preserving any
+    /// `plan_id` / `audit_head`. A mutable local volume is re-sealed on every
+    /// lock, so its ciphertext — and thus its hash — changes; the binding
+    /// must follow.
+    pub fn rebind_content(&mut self, content_hash: String) {
+        let (plan_id, audit_head) = self
+            .bound
+            .take()
+            .map(|b| (b.plan_id, b.audit_head))
+            .unwrap_or((None, None));
+        self.bound = Some(DekBinding {
+            content_hash,
+            plan_id,
+            audit_head,
+        });
+    }
 }
 
 // allow(secret-debug): hand-written Debug below redacts the wrapped
@@ -440,6 +501,7 @@ impl std::fmt::Debug for WrappedKey {
             .field("master_key_version", &self.master_key_version)
             .field("wrapped", &format_args!("<{} bytes>", self.wrapped.len()))
             .field("algorithm", &self.algorithm)
+            .field("bound", &self.bound)
             .finish()
     }
 }
@@ -675,10 +737,49 @@ mod tests {
             master_key_version: 7,
             wrapped: vec![1, 2, 3, 4, 5, 6, 7, 8],
             algorithm: WrapAlgorithm::AesKwp,
+            bound: None,
         };
         let json = serde_json::to_string(&w).unwrap();
         let w2: WrappedKey = serde_json::from_str(&json).unwrap();
         assert_eq!(w, w2);
+    }
+
+    #[test]
+    fn wrapped_key_without_bound_field_deserializes_as_unbound() {
+        // Pre-B2 records carried no `bound` key; `#[serde(default)]` must
+        // load them as unbound rather than failing the deny_unknown_fields
+        // envelope.
+        let legacy = r#"{"master_key_version":1,"wrapped":[1,2,3],"algorithm":"aes256-gcm"}"#;
+        let w: WrappedKey = serde_json::from_str(legacy).unwrap();
+        assert!(w.bound.is_none());
+        assert!(w.binding_matches_content("anything"), "unbound matches all");
+    }
+
+    #[test]
+    fn binding_refuses_mismatched_content_hash() {
+        let mut w = WrappedKey {
+            master_key_version: 1,
+            wrapped: vec![9, 9, 9],
+            algorithm: WrapAlgorithm::Aes256Gcm,
+            bound: None,
+        };
+        w.rebind_content("aaaa".to_string());
+        assert!(w.binding_matches_content("aaaa"));
+        assert!(
+            !w.binding_matches_content("bbbb"),
+            "different artifact refused"
+        );
+
+        // rebind preserves plan_id / audit_head while moving the content hash.
+        if let Some(b) = w.bound.as_mut() {
+            b.plan_id = Some("plan-1".into());
+            b.audit_head = Some("head-1".into());
+        }
+        w.rebind_content("cccc".to_string());
+        let b = w.bound.as_ref().unwrap();
+        assert_eq!(b.content_hash, "cccc");
+        assert_eq!(b.plan_id.as_deref(), Some("plan-1"));
+        assert_eq!(b.audit_head.as_deref(), Some("head-1"));
     }
 
     #[test]

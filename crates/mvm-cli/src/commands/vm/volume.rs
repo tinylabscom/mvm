@@ -309,9 +309,11 @@ fn create_mvm_managed(volume_name: &str, root: Option<&str>) -> Result<()> {
         );
     }
 
-    let (wrapped_key, dek) = generate_wrapped_volume_key()?;
+    let (mut wrapped_key, dek) = generate_wrapped_volume_key()?;
     let scratch = tempfile::tempdir_in(&root).context("creating empty volume scratch dir")?;
     write_encrypted_volume_archive(scratch.path(), &ciphertext_path, dek.expose_secret())?;
+    // Plan 122 B2 — bind the DEK to the ciphertext archive it now protects.
+    wrapped_key.rebind_content(ciphertext_content_hash(&ciphertext_path)?);
 
     let mut catalog = LocalVolumeCatalog::load()?;
     catalog.add(LocalVolumeEntry {
@@ -429,9 +431,19 @@ fn generate_wrapped_volume_key() -> Result<(WrappedKey, secrecy::SecretBox<Vec<u
             master_key_version: version,
             wrapped,
             algorithm: WrapAlgorithm::Aes256Gcm,
+            // Bound to the ciphertext archive once it exists (the caller sets
+            // this via `rebind_content` after writing the archive). Plan 122 B2.
+            bound: None,
         },
         secrecy::SecretBox::new(Box::new(dek)),
     ))
+}
+
+/// sha256-hex of a ciphertext archive — the per-volume content-hash a DEK
+/// binds to (plan 122 B2).
+fn ciphertext_content_hash(path: &Path) -> Result<String> {
+    mvm_core::crypto::image_verify::sha256_file(path)
+        .with_context(|| format!("hashing ciphertext archive {}", path.display()))
 }
 
 fn unwrap_volume_key(entry: &LocalVolumeEntry) -> Result<secrecy::SecretBox<Vec<u8>>> {
@@ -444,6 +456,17 @@ fn unwrap_volume_key(entry: &LocalVolumeEntry) -> Result<secrecy::SecretBox<Vec<
             )
         }
     };
+    // Plan 122 B2 — admit gate: refuse a DEK presented against a different
+    // ciphertext than it was bound to (a swapped archive). Unbound (pre-B2)
+    // keys pass. Runs before the master is even loaded.
+    let actual = ciphertext_content_hash(Path::new(&enc.ciphertext_path))?;
+    if !enc.wrapped_key.binding_matches_content(&actual) {
+        bail!(
+            "volume {:?} DEK binding mismatch: ciphertext content_hash does not \
+             match the artifact this key was bound to; refusing to unwrap",
+            entry.volume_name
+        );
+    }
     let master =
         key_rotation::load_master_key(&local_master_key_dir(), enc.wrapped_key.master_key_version)
             .with_context(|| format!("loading master key for volume {:?}", entry.volume_name))?;
@@ -634,11 +657,15 @@ fn lock(volume_name: &str) -> Result<()> {
     })?;
     fs::remove_dir_all(&host_path)
         .with_context(|| format!("removing plaintext volume dir {}", host_path.display()))?;
+    // Re-sealing rewrote the ciphertext, so its hash changed — move the DEK
+    // binding to the new archive (plan 122 B2) before persisting.
+    let new_hash = ciphertext_content_hash(&ciphertext_path)?;
     let entry = catalog
         .get_mut(volume_name)
         .expect("entry existed before lock mutation");
     if let LocalVolumeEncryption::MvmManaged(enc) = &mut entry.encryption {
         enc.state = LocalVolumeState::Locked;
+        enc.wrapped_key.rebind_content(new_hash);
     }
     catalog.save()?;
     println!("locked volume {volume_name:?}");
@@ -917,9 +944,37 @@ mod tests {
         bytes[last] ^= 0xff;
         fs::write(&ciphertext, bytes).unwrap();
         let err = unlock("work").unwrap_err();
+        // Plan 122 B2: the DEK binding now catches a flipped byte at admit
+        // (the ciphertext hash no longer matches the bound artifact), before
+        // the archive is even decrypted. Either gate is a valid rejection.
         assert!(
-            err.to_string().contains("decrypting volume archive")
+            err.to_string().contains("DEK binding mismatch")
+                || err.to_string().contains("decrypting volume archive")
                 || err.to_string().contains("authentication failure"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn mvm_managed_unlock_rejects_dek_bound_to_different_artifact() {
+        // A DEK whose recorded binding points at a different content_hash than
+        // the on-disk ciphertext is refused at admit (plan 122 B2 Step 1).
+        let guard = DataDirGuard::new();
+        let root = guard.path().join("vol-root");
+        create("work", Some(root.to_str().unwrap()), false).unwrap();
+
+        // Corrupt only the binding, leaving the ciphertext intact.
+        let mut catalog = LocalVolumeCatalog::load().unwrap();
+        if let LocalVolumeEncryption::MvmManaged(enc) =
+            &mut catalog.get_mut("work").unwrap().encryption
+        {
+            enc.wrapped_key.rebind_content("0".repeat(64)); // a hash the archive can't have
+        }
+        catalog.save().unwrap();
+
+        let err = unlock("work").unwrap_err();
+        assert!(
+            err.to_string().contains("DEK binding mismatch"),
             "got: {err}"
         );
     }

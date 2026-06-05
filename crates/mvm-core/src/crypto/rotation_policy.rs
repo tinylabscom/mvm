@@ -142,6 +142,7 @@ mod tests {
             master_key_version: version,
             wrapped: snapshot_crypto::encrypt(dek, master.expose_secret().as_slice()).unwrap(),
             algorithm: WrapAlgorithm::Aes256Gcm,
+            bound: None,
         }
     }
 

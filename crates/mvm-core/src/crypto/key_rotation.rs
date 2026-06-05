@@ -120,6 +120,9 @@ pub fn rewrap_dek(
                 master_key_version: new_version,
                 wrapped: new_ct,
                 algorithm: WrapAlgorithm::Aes256Gcm,
+                // Re-wrapping changes only the master that protects the DEK,
+                // not the artifact it's bound to (plan 122 B2) — carry it.
+                bound: wrapped.bound.clone(),
             })
         }
         algo @ WrapAlgorithm::AesKwp => Err(RotationError::UnsupportedAlgorithm { algo }.into()),
@@ -477,6 +480,7 @@ mod tests {
             master_key_version: version,
             wrapped: ct,
             algorithm: WrapAlgorithm::Aes256Gcm,
+            bound: None,
         }
     }
 
@@ -498,6 +502,23 @@ mod tests {
         // Underlying plaintext DEK must be recoverable under m2.
         let recovered = snapshot_crypto::decrypt(&rewrapped.wrapped, &m2).unwrap();
         assert_eq!(recovered, dek);
+    }
+
+    #[test]
+    fn rewrap_dek_preserves_binding() {
+        // Plan 122 B2 — re-wrapping rolls the master, not the artifact, so
+        // the DEK's binding must survive a rotation.
+        let dek = [0x5u8; 32];
+        let m1 = random_master_key();
+        let m2 = random_master_key();
+        let mut wrapped = wrap_with_aes256gcm(&dek, &m1, 1);
+        wrapped.bound = Some(crate::domain::volume::DekBinding {
+            content_hash: "deadbeef".into(),
+            plan_id: Some("plan-9".into()),
+            audit_head: None,
+        });
+        let rewrapped = rewrap_dek(&wrapped, &m1, &m2, 2).unwrap();
+        assert_eq!(rewrapped.bound, wrapped.bound);
     }
 
     #[test]
@@ -525,6 +546,7 @@ mod tests {
             master_key_version: 1,
             wrapped: vec![0u8; 40], // arbitrary; rewrap won't reach decode
             algorithm: WrapAlgorithm::AesKwp,
+            bound: None,
         };
         let m1 = random_master_key();
         let m2 = random_master_key();
