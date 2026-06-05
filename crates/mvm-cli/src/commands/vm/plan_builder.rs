@@ -205,6 +205,11 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         name: input.image_name.to_string(),
         sha256: input.image_sha256.to_string(),
         cosign_bundle: input.image_cosign_bundle.map(str::to_string),
+        // Plan 165 WS-B B4: the CLI only ever synthesizes plans for
+        // images that carry an entrypoint (the SDK's B3 compile gate
+        // refuses to produce one without). The supervisor's admission
+        // gate rejects entrypoint_present == false as defense in depth.
+        entrypoint_present: true,
     };
 
     Ok(ExecutionPlan {

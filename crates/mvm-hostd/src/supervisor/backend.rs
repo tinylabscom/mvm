@@ -232,6 +232,7 @@ mod tests {
                 name: "tenant-worker-aarch64".to_string(),
                 sha256: "a".repeat(64),
                 cosign_bundle: None,
+                entrypoint_present: true,
             },
             resources: mvm_core::plan::Resources {
                 cpus: 2,

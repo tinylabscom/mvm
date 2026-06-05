@@ -323,6 +323,7 @@ mod tests {
                 name: "tenant-worker-aarch64".to_string(),
                 sha256: "ABC123".to_string(), // mixed case → entry should normalise
                 cosign_bundle: None,
+                entrypoint_present: true,
             },
             resources: Resources {
                 cpus: 2,
