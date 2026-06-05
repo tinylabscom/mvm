@@ -119,7 +119,7 @@ The honest matrix from the capability check. `VmBackend` already carries a pause
 
 ADR-066 §7 — the ~1s resume recipe. Builds on `instance_snapshot.rs` (`vmstate.bin`/`mem.bin`/`PostRestore`).
 
-- [ ] **Step 1:** Failing test (live-KVM gated) — a snapshot + restore round-trips: the guest resumes, vsock re-auths via `PostRestore`, and **the VMGenID rotates + the guest CSPRNG reseeds** (122 Phase D — composes here).
+- [ ] **Step 1:** Failing test (live-KVM gated) — a snapshot + restore round-trips: the guest resumes, vsock re-auths via `PostRestore`, and **the VMGenID rotates + the guest CSPRNG reseeds** (122 Phase D — composes here). 122 D shipped the *substrate* (`vmgenid::fresh_generation_token` host mint; `mvm_guest::genid::GenIdReseeder` guest reseed); the piece to build here is the **delivery** — send `GuestRequest::PostRestore` carrying the `GenerationToken` and call `GenIdReseeder::on_genid` in the guest handler (no host `PostRestore` sender exists today). Entropy-source note: 122 D stirs `/dev/urandom`; 140 gap #2 may swap that for virtio-rng + `RNDADDENTROPY` — `GenIdReseeder` isolates the reseed source from the change-detection, so either composes.
 - [ ] **Step 2:** Wire: diff/layered snapshots (one read-only golden base + a COW per-VM delta — Phase B3's snapshot-upper), a `userfaultfd` page-fault handler streaming from a content-addressed memfile, an NBD-served rootfs, 2 MB hugepages. Evaluate `userfaultfd` crate vs raw `libc` ioctls (dep budget). Snapshot artifacts are content-addressed + signed (122 Phase C). Commit per sub-piece.
 - [ ] **Step 3:** SIGUSR1 ready-barrier — a workload signals "primed"; the host snapshots at that point for a deterministic warm base. Test the barrier. Commit.
 
