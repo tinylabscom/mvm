@@ -25,6 +25,13 @@ path = "src/bin/mvm-host-vm-init.rs"
 name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
 
+# Plan 160 — PID 1 of the nix-tarball Stage 0 seed (replaces the Alpine
+# init.sh). Same cross-compile + embed treatment as mvm-host-vm-init once
+# the seed path is proven; not yet registered in build.rs / the manifest.
+[[bin]]
+name = "stage0-init"
+path = "src/bin/stage0-init.rs"
+
 [dependencies]
 # Plan 74 W1.3 — OCI layer unpack to a staging rootfs. `tar` and
 # `flate2` are workspace deps already (used by `mvm-sdk`'s addon
