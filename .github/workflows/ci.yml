@@ -166,6 +166,23 @@ jobs:
       - name: Build mvmctl + run MCP roundtrip smoke
         run: ./scripts/test-mcp-roundtrip.sh
 
+  passt-framing:
+    name: Passt framing (real passt, no KVM)
+    runs-on: ubuntu-latest
+    # Plan 141 — lock in the gateway bridge's qemu-socket framing assumption
+    # against the real passt binary. passt is userspace (no KVM, no microVM),
+    # so this is a fast per-PR regression gate: it confirms passt's `--fd`
+    # transport frames each ethernet frame with a 4-byte big-endian length
+    # (what `gateway_bridge::{read,write}_one_frame` assume) by round-tripping
+    # a DHCP DISCOVER -> OFFER. The full Firecracker-boot E2E (needs /dev/kvm)
+    # remains a tracked deferred follow-up in specs/plans/141.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install passt
+        run: sudo apt-get update && sudo apt-get install -y passt
+      - name: Confirm real passt uses the 4-byte-BE qemu-socket framing
+        run: python3 scripts/passt-framing-check.py
+
   nix-flake-check:
     name: Nix flake check (Linux eval)
     runs-on: ubuntu-latest

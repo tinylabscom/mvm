@@ -228,17 +228,23 @@ extension-header rebuild, async/ring-buffered execution,
 
 ### Deferred follow-ups
 
-- [ ] **Passt/Firecracker live KVM validation.** The gvproxy arm is now
-  live-validated against the real gateway (PR #614); the Passt arm is
-  protocol-confirmed + unit-tested but has never run a real
-  Firecracker+passt packet round-trip. Closing it needs a Linux host with
-  `/dev/kvm`. **Route A (no extra infra):** a CI lane on a KVM-capable
+- [x] **Passt framing confirmed against real passt + CI-gated.** The
+  gvproxy arm is live-validated against the real gateway (PR #614); the
+  Passt arm's qemu-socket framing is now confirmed against the real passt
+  binary by `scripts/passt-framing-check.py` (spawns `passt --fd`, sends a
+  4-byte-BE-framed DHCP DISCOVER, asserts a 4-byte-BE-framed OFFER comes
+  back — no KVM, passt is userspace). Wired as the per-PR `passt-framing`
+  job in `ci.yml`. This locks in the framing assumption behind
+  `gateway_bridge::{read,write}_one_frame`.
+- [ ] **Full Firecracker-boot E2E on `/dev/kvm`.** A real microVM boot +
+  passt + the bridge, end-to-end, still hasn't run — it needs a Linux host
+  with `/dev/kvm`. **Route A (no extra infra):** a lane on a KVM-capable
   runner — GitHub `ubuntu-latest` exposes `/dev/kvm` and `ci-full.yml`'s
   `workload-spawn-smoke-linux` already boots Firecracker there; add a
   passt+bridge DHCP/observer assertion. **Route B:** a remote `/dev/kvm`
-  box for interactive runs. Low risk (the framing is the documented
-  qemu-socket 4-byte-BE format; the reframer is duplex-unit-tested) — the
-  gap is a live KVM environment, not code.
+  box for interactive runs. Low marginal value now that the framing
+  (the actual risk) is confirmed + CI-gated — the boot mostly re-confirms
+  it; intentionally left deferred.
 
 ---
 
@@ -270,9 +276,14 @@ flow-byte-log, metrics filter, cache sweep). `fuzz_packet_parse` runs in
   is documented in rvproxy's `docs/gvproxy-conformance.md` (rvproxy PR #7);
   the same test is rvproxy's drop-in conformance gate (gvproxy passes;
   rvproxy fails only at the `-listen-vfkit` CLI surface).
-- **Passt (Firecracker) arm — protocol-confirmed, live test deferred.**
-  passt uses the qemu-socket protocol (4-byte-BE length prefix, confirmed
-  via passt.top); the reframer is duplex-unit-tested and Linux CI
-  builds/tests it. A real Firecracker+passt round-trip on `/dev/kvm` has
-  not run — tracked under [§Deferred follow-ups](#deferred-follow-ups).
-  Low risk; the gap is a live KVM environment, not code.
+- **Passt (Firecracker) arm — framing confirmed against real passt +
+  CI-gated; full boot deferred.** passt uses the qemu-socket protocol
+  (4-byte-BE length prefix). This is now confirmed against the **real
+  passt binary** by `scripts/passt-framing-check.py` (DHCP DISCOVER→OFFER
+  round-trip over `passt --fd`, no KVM), wired as the per-PR
+  `passt-framing` job in `ci.yml` — locking in the assumption behind
+  `gateway_bridge::{read,write}_one_frame`. The reframer is also
+  duplex-unit-tested. The only thing not run is a full Firecracker microVM
+  boot on `/dev/kvm` — tracked under
+  [§Deferred follow-ups](#deferred-follow-ups); low marginal value now,
+  the gap is a live KVM environment, not code.
