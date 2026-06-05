@@ -24,11 +24,15 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
-          # macos-latest is Apple Silicon; an x86_64 mvmctl links libkrun
-          # (Plan 87 W5) and can't link the host's arm64 dylib, so build
-          # the Intel binary on an Intel runner where libkrun is native.
-          - target: x86_64-apple-darwin
-            os: macos-13
+          # x86_64-apple-darwin (Intel mac) is DEFERRED. The macOS mvmctl
+          # links libkrun (Plan 87 W5), so an x86_64 binary must build on a
+          # native Intel runner — but GitHub's macos-13 Intel runners are
+          # unavailable to this org (jobs sit queued for hours, never
+          # starting), which blocked the whole release. Apple Silicon is the
+          # product baseline (macOS 26+); restore this when an Intel runner
+          # is available (hosted capacity or self-hosted) or via a libkrun
+          # cross-link. install.sh / the Homebrew on_intel arm still point at
+          # the (currently absent) asset.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
@@ -89,7 +93,7 @@ jobs:
         run: cargo build --release --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
       - name: Smoke test binary (native targets only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
