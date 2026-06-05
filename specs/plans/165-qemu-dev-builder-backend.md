@@ -6,7 +6,11 @@
 >
 > **Sibling task (macOS, separate):** the Vz *builder* VM is `network: None` today → cold nix builds fail to resolve hosts (same class of bug as the Linux path). Wire the Vz builder to **gvproxy** (the Vz dev/workload VM already uses it). That's the macOS half of "give the builder VM networking"; this plan is the Linux half (QEMU + slirp).
 
-> **Boot foundation PROVEN on the x86_64 box (2026-06-05):** `qemu-system-x86_64 -enable-kvm -kernel /boot/vmlinuz -initrd /boot/initrd.img -append "root=/dev/vda init=/init" -drive seed.ext4` boots the nix seed via the **stock Debian kernel + its initramfs** (which carry the modular virtio/ext4 drivers) and runs `stage0-init` — no libkrun, no libkrunfw, no custom kernel. The remaining work is `stage0-init` QEMU-awareness (shares + networking), below.
+> **Phase 1 core PROVEN end-to-end on the x86_64 box (2026-06-05) — the validated recipe `qemu_builder.rs` must codify:**
+> - **Boot:** `qemu-system-x86_64 -enable-kvm -m 8G -smp 6 -kernel /boot/vmlinuz-$(uname -r) -initrd /boot/initrd.img-$(uname -r) -append "console=ttyS0 root=/dev/vda rw init=/init mvm.backend=qemu panic=-1" -display none -serial file:console.log -monitor none -no-reboot`. The **stock Debian kernel + its initramfs** carry the modular virtio/ext4 drivers, mount the ext4 seed at `/dev/vda`, and exec `/init` (`stage0-init`). No libkrun, no libkrunfw, no custom kernel, no 9p/virtiofs.
+> - **Disks (all ext4/virtio-blk, built into the initramfs):** `vda`=seed (nix store + `stage0-init` as `/init`, sized ~25G sparse so the build closure fits), `vdb`=`/work` (repo, target/.git excluded), `vdc`=`/out` (+ `stage0-build.conf`), `vdd`=`/mvm-bins`. `stage0-init` (QEMU branch) mounts vdb/vdc/vdd as ext4; `/nix` is the writable ext4 root directly — **no tmpfs copy, no EMFILE**.
+> - **Networking = slirp (the passt-killer):** `-netdev user,id=n0 -device virtio-net-pci,netdev=n0`. slirp's addresses are fixed; `stage0-init` statically sets the (renamed `ensN`) interface to `10.0.2.15/24`, gw `10.0.2.2`, resolv `10.0.2.3` over ioctls. **No DHCP, no passt, no priv-drop, no DNS guessing.**
+> - **Result:** `net default_route=true` → nix resolved DNS, downloaded from cache.nixos.org/github, **compiled the kernel (bzImage, 5m42s)**, installed it, and `stage0-init` copied **`vmlinux` (10 MB) to `/out`** + halted clean. This is the complete build the libkrun+passt path could not finish. The guest-side `stage0-init` QEMU branch (Task: shares + slirp net) is **done + committed**; Tasks 1.1/1.3 codify the host-side launcher.
 
 ## Why (short)
 
