@@ -2171,8 +2171,7 @@ fn run_stage0_rootfs_with_external_kernel(
     external_kernel: &std::path::Path,
     source_fingerprint: &str,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_vm::BuilderVm;
-    use mvm_build::libkrun_builder::LibkrunBuilderVm;
+    use mvm_build::builder_backend_select::resolve_stage0_backend;
 
     // Build only the rootfs (`stage0-rootfs`, no kernel in $out).
     std::fs::write(
@@ -2186,7 +2185,7 @@ fn run_stage0_rootfs_with_external_kernel(
         )
     })?;
 
-    let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+    let backend = resolve_stage0_backend(false);
     backend
         .run_stage0(
             guest_root_dir,
@@ -2339,8 +2338,7 @@ pub(crate) fn build_kernel_via_stage0(
     ));
 
     {
-        use mvm_build::builder_vm::BuilderVm;
-        use mvm_build::libkrun_builder::LibkrunBuilderVm;
+        use mvm_build::builder_backend_select::resolve_stage0_backend;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2366,7 +2364,7 @@ pub(crate) fn build_kernel_via_stage0(
             }))
         };
 
-        let backend: &dyn BuilderVm = &LibkrunBuilderVm::default().with_verbose(verbose);
+        let backend = resolve_stage0_backend(verbose);
         let result = backend.run_stage0(
             &root_dir,
             "/init",
@@ -2414,16 +2412,15 @@ fn run_stage0_root_dir(
     host_bin_dir: &std::path::Path,
     source_fingerprint: &str,
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
-    use mvm_build::builder_vm::BuilderVm;
-    use mvm_build::libkrun_builder::LibkrunBuilderVm;
+    use mvm_build::builder_backend_select::resolve_stage0_backend;
 
-    // ADR-068: dispatch Stage 0 through the `BuilderVm` trait, the same
-    // seam `run_build` uses. Only the libkrun backend implements
-    // `run_stage0` today, so bind it concretely here rather than routing
-    // through the libkrun/Vz builder-backend selector — that keeps macOS
-    // 26+ (Vz-default) hosts bootstrapping via libkrun until a Vz Stage 0
-    // lands (ADR-068 §"Backend gaps").
-    let backend: &dyn BuilderVm = &LibkrunBuilderVm::default();
+    // ADR-068 + Plan 166: dispatch Stage 0 through the `BuilderVm` trait.
+    // `resolve_stage0_backend` uses QEMU when explicitly chosen
+    // (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including the
+    // Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
+    // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
+    // invariant while adding QEMU as the second implemented backend.
+    let backend = resolve_stage0_backend(false);
     backend
         .run_stage0(
             guest_root_dir,

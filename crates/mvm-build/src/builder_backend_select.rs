@@ -30,6 +30,7 @@
 
 use crate::builder_vm::{BuilderVm, BuilderVmError};
 use crate::libkrun_builder::LibkrunBuilderVm;
+use crate::qemu_builder::QemuBuilderVm;
 use crate::vz_builder::VzBuilderVm;
 use mvm_core::platform::{Platform, current};
 
@@ -62,6 +63,10 @@ pub enum BuilderBackendChoice {
     Libkrun,
     /// Vz-backed builder VM. Opt-in via `MVM_BUILDER_BACKEND=vz`.
     Vz,
+    /// QEMU-backed builder VM (Linux dev/builder substrate, Plan 166 /
+    /// ADR-072). Opt-in via `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
+    /// auto-detect never picks it (the default-flip is evidence-gated).
+    Qemu,
 }
 
 impl BuilderBackendChoice {
@@ -70,6 +75,7 @@ impl BuilderBackendChoice {
         match self {
             BuilderBackendChoice::Libkrun => "libkrun",
             BuilderBackendChoice::Vz => "vz",
+            BuilderBackendChoice::Qemu => "qemu",
         }
     }
 }
@@ -116,6 +122,7 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
         "" => None,
         "libkrun" => Some(BuilderBackendChoice::Libkrun),
         "vz" => Some(BuilderBackendChoice::Vz),
+        "qemu" => Some(BuilderBackendChoice::Qemu),
         other => {
             tracing::warn!(
                 value = %other,
@@ -165,6 +172,24 @@ pub fn resolve_builder_backend_with_override(
     match resolve_choice_with_override(flag) {
         BuilderBackendChoice::Libkrun => Box::new(LibkrunBuilderVm::default()),
         BuilderBackendChoice::Vz => Box::new(VzBuilderVm::new()),
+        BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
+    }
+}
+
+/// Builder driver for the **Stage 0** bootstrap (ADR-068 + Plan 166).
+///
+/// Stage 0 is implemented for **libkrun** and **QEMU**; Vz and Firecracker
+/// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
+/// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
+/// everything else — including the Vz auto-detect default on macOS-26+ — falls
+/// back to **libkrun**, preserving the long-standing "Stage 0 is libkrun even
+/// on Vz-default hosts" invariant (CLAUDE.md) rather than hitting the Vz gap.
+/// `verbose` streams the libkrun console; the QEMU path always logs to
+/// `console.log`.
+pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
+    match resolve_choice() {
+        BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
+        _ => Box::new(LibkrunBuilderVm::default().with_verbose(verbose)),
     }
 }
 

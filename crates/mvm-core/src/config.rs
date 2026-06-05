@@ -4,7 +4,13 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
     None => "v1.14.1",
 };
 
-pub const ARCH: &str = "aarch64";
+/// Host CPU architecture for arch-tagged downloads (the Firecracker release
+/// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch
+/// mvmctl was compiled for == the arch it runs on, so the downloaded binaries
+/// match the host. (Was hardcoded `"aarch64"` — wrong on x86_64: `dev up`
+/// fetched the aarch64 firecracker on an x86_64 host → "Exec format error".
+/// Plan 166 Task 3.1.)
+pub const ARCH: &str = std::env::consts::ARCH;
 
 /// Normalize Firecracker version strings to a canonical form (e.g., "Firecracker v1.14.1" -> "v1.14.1").
 pub fn normalize_fc_version(raw: &str) -> String {

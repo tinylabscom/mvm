@@ -61,6 +61,12 @@ pub mod libkrun_builder;
 #[cfg(feature = "builder-vm")]
 pub mod libkrun_network_provider;
 
+/// Plan 166 / ADR-072 — QEMU-backed builder VM (the Linux dev/builder
+/// substrate). Boots the nix-tarball Stage 0 seed on the stock distro
+/// kernel + initramfs with ext4 disks + slirp networking. Linux-only at
+/// runtime; compiles everywhere (the selection only picks it on Linux).
+pub mod qemu_builder;
+
 /// Plan 97 Phase C — Vz-backed builder VM (gated by
 /// `builder-vm` for symmetry with `libkrun_builder`). Implements
 /// the second [`builder_vm::VmBackendForBuilder`] impl alongside

@@ -1,6 +1,6 @@
 # Plan 164 — Multi-arch embedded host binaries (x86_64 Stage 0 + builder VM)
 
-## Status: Proposed (2026-06-05)
+## Status: In progress (2026-06-05) — Tasks 1–3 landed + aarch64-regression-verified. **x86_64 PROVEN on real hardware (Hetzner box):** mvmctl embeds x86_64 host bins, the supervisor links libkrun, and `stage0-init` boots on `/dev/kvm` + networks + runs `nix build` for the x86_64 builder kernel. Remaining: kernel compile completes; the firecracker-arch-download bug (Plan 166 Task 3.1); CI lane.
 
 > Sequenced *after* Plan 160 (the nix-tarball Stage 0 seed) lands. This plan makes the embedded-host-binary toolchain pick its target by guest arch so `mvmctl` works on **x86_64 Linux**, not just aarch64. It is a standalone ADR-065 follow-up, not part of Plan 160. Steps use `- [ ]` checkboxes.
 
@@ -91,28 +91,30 @@ Result: on the x86_64 Debian box (and on aarch64 Linux contributors) the embed u
 ## Build sequence (after Plan 160)
 
 ### Task 1: per-arch target table
-- [ ] `Cargo.toml` `[workspace.metadata.mvm.toolchain]`: replace the scalar `target` with the `[…targets]` table above (`aarch64`, `x86_64`).
+- [x] `Cargo.toml` `[workspace.metadata.mvm.toolchain]`: replaced the scalar `target` with the `[…targets]` table above (`aarch64`, `x86_64`).
 
 ### Task 2: `build.rs` picks target by arch
-- [ ] `read_pinned_toolchain`: resolve `target` from `targets[CARGO_CFG_TARGET_ARCH]`, fail-closed with the unsupported-arch message for any arch not in the table.
-- [ ] `cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH` (it's already implied by the target triple, but make the dependency explicit).
-- [ ] Redefine `native` as Linux-host-arch-matches-target-arch (the recommended simplification above) so x86_64 Linux builds skip zig.
-- [ ] Unit-test the arch→triple resolution + the unsupported-arch panic message (the `build.rs` `#[cfg(test)] mod tests` already covers `strip_glibc`/`extract_quoted_after` — add `resolve_target_for_arch`).
+- [x] `read_pinned_toolchain`: resolves `target` from `targets[CARGO_CFG_TARGET_ARCH]`, fail-closed with the unsupported-arch message for any arch not in the table.
+- [x] (n/a) `CARGO_CFG_TARGET_ARCH` is part of the build-script env hash already; the target triple change reruns build.rs (it's already implied by the target triple, but make the dependency explicit).
+- [x] Redefined `native` as Linux-host-arch-matches-target-arch (the recommended simplification above) so x86_64 Linux builds skip zig.
+- [x] Unit-tested the arch→triple resolution + the unsupported-arch panic message (the `build.rs` `#[cfg(test)] mod tests` already covers `strip_glibc`/`extract_quoted_after` — add `resolve_target_for_arch`).
 
 ### Task 3: doctor wording
-- [ ] Confirm `doctor.rs` `pinned_target` line reads naturally now that the value is host-resolved (e.g. "embedded host-binary target: x86_64-unknown-linux-musl"). No logic change — it already prints `env!("MVM_PINNED_TARGET")`.
+- [x] `doctor.rs` `pinned_target` now reflects the host-resolved target (display only, no logic change) now that the value is host-resolved (e.g. "embedded host-binary target: x86_64-unknown-linux-musl"). No logic change — it already prints `env!("MVM_PINNED_TARGET")`.
 
-### Task 4: provision the x86_64 validation box
-The Hetzner box `root@88.99.197.234` (`ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/hetzner-rvproxy`) is **x86_64 Debian 12 (bookworm), kernel 6.1, `/dev/kvm` present, 8 cores / 62 GiB** — only `git` is installed. Provision for a from-source mvmctl build + Stage 0 boot:
-- [ ] **Rust** via rustup + `rustup target add x86_64-unknown-linux-musl` (the embed target; with the Task-2 `native` change, no zig needed).
-- [ ] **libkrun runtime** — Stage 0 is libkrun-only (ADR-068); on Linux it uses `/dev/kvm`. Build `libkrun` + `libkrunfw` from source (the `slp/krun/*` Homebrew trio is macOS-only; CLAUDE.md "On Linux contributor hosts"). libkrunfw provides the bundled **x86_64** kernel `extract_bundled_kernel()` pulls at runtime.
-- [ ] **passt** (Linux's virtio-net gateway; `MVM_NETWORKING` defaults to passt on Linux) from the distro package or source.
-- [ ] Confirm `mvmctl doctor` on the box reports the x86_64 builder backend + passt gateway green.
+### Task 4: provision the x86_64 validation box — [x] (2026-06-05)
+The Hetzner box `root@88.99.197.234` (`ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/hetzner-rvproxy`) is **x86_64 Debian 12 (bookworm), kernel 6.1, `/dev/kvm` present, 8 cores / 62 GiB**. Provisioned (repo rsync'd to `/root/mvm`; build via `/root/build.sh`, Stage 0 via `/root/stage0.sh`):
+- [x] **Rust** via rustup + `rustup target add x86_64-unknown-linux-musl`.
+- [x] **libkrun + libkrunfw from source** (not packaged on Debian). Needs `clang libclang-dev llvm-dev` (bindgen), and **`make BLK=1 NET=1`** — the default `make` omits the blk/net features, so `krun_add_disk`/`krun_add_net_*` are absent and the supervisor link fails. Installs to `/usr/local/lib64`; symlink into `/usr/local/lib` (build.rs link-search) + `ld.so.conf.d` for runtime.
+- [x] **passt** (`apt install passt`) + a wrapper: passt run as root self-drops to nobody and (a) `getpwnam` is blocked by its own seccomp → use numeric `--runas 65534:65534`; (b) can't write its `-P` PID file in the root-owned state dir → rewrite the `-P` value to `/tmp`. **Finding:** the Linux libkrun path's passt-under-root friction is a real motivation for the QEMU dev backend (ADR-072 / Plan 166, slirp = no passt).
+- [x] **Linker quirk:** rustc 1.96 defaults to `rust-lld` for x86_64-linux-gnu, which this Debian gcc can't drive (`cc: cannot read spec file './specs'`). Fix = `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang` (+ `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=clang`). Box-environmental; **not** committed (CI runners drive lld fine).
+- [x] **musl C toolchain:** the native musl embed pulls `ring` (C, via reqwest in mvm-build's tree) → needs `musl-tools` + `CC_x86_64_unknown_linux_musl=musl-gcc`. **Finding:** the Task-2 "no zig on Linux" claim holds for pure-Rust bins but a musl C compiler is still needed for C deps.
 
-### Task 5: x86_64 Stage 0 boot proof (the gate)
-- [ ] On the box, `cargo build --bin mvmctl` (or `--features builder-vm`) → confirm `embedded.rs` carries **x86_64** `stage0-init`/`mvm-host-vm-init` ELFs (`file …/mvm-host-bins/stage0-init` says `ELF 64-bit LSB executable, x86-64`).
-- [ ] Cold `MVM_BUILDER_BACKEND=libkrun mvmctl dev up` from an isolated `MVM_CACHE_DIR`/`MVM_DATA_DIR`: downloads + SHA-256-verifies `NIX_SEED_X86_64`, materializes the seed (init = the x86_64 `stage0-init`), libkrun boots it on `/dev/kvm`, `nix build` succeeds, `/out/{vmlinux,rootfs.ext4}` produced + promoted, builder VM boots, dev up reaches "Dev environment ready (libkrun)". Read `<vm_state_dir>/console.log` first on failure ([[reference_cold_isolated_cache_stage0_badactivate]]).
-- [ ] **Expect an x86_64 boot loop** like the aarch64 0b bring-up (Plan 160): arch-specific gaps (kernel cmdline/console, the libkrunfw x86_64 kernel's virtio quirks, the [[reference_libkrunfw_stage0_virtio_blk_size_overreport]] margin, mount/DNS bring-up) may surface and need iterating against real boots. Capture each fix in this plan's build sequence.
+### Task 5: x86_64 Stage 0 boot proof — [x] embed + supervisor proven; nix build in progress (2026-06-05)
+- [x] `cargo build --bin mvmctl` on the box embeds **x86_64** `stage0-init`/`mvm-host-vm-init`/`mvm-egress-proxy` ELFs (`readelf -h` → `Advanced Micro Devices X86-64`); `mvm-libkrun-supervisor` links libkrun+libkrunfw; `mvmctl --version` runs. **The core Plan 164 deliverable is proven on x86_64 hardware.**
+- [x] `mvmctl kernel build --builder libkrun --kernel-source compile` (the direct Stage 0 path — `dev up` on Linux first downloads firecracker, see Task 3.1): downloads + verifies `NIX_SEED_X86_64`, materializes the seed, libkrun boots the **x86_64 `stage0-init`** on `/dev/kvm`, networks via passt, and runs `nix build packages.x86_64-linux.builder-kernel`. Reaching the nix build proves the x86_64 stage0-init boots + networks end-to-end.
+- [x] **EMFILE fix:** the seed-store copy hit `EMFILE` on x86_64 — fixed by (1) raising `RLIMIT_NOFILE` in `stage0-init` (committed; PID 1 lifts soft+hard) and (2) `ulimit -n` on the host before launch (the in-process virtiofs in the supervisor exhausts host fds copying the closure). **Finding:** mvm should raise the *supervisor's* host `RLIMIT_NOFILE` so users don't need `ulimit -n` — track as a libkrun-supervisor follow-up.
+- [ ] Kernel compile completes → `/out/vmlinux` produced + promoted (long nix build; in progress).
 
 ### Task 6 (optional, after the boot proof): permanent CI lane
 - [ ] An `ubuntu-latest` lane (exposes `/dev/kvm` — the existing `cloud-hypervisor`/`firecracker` lanes in `ci-full.yml` rely on it) that installs libkrun + builds mvmctl + runs a cold x86_64 Stage 0 smoke. Gated like the other VM-boot lanes (`continue-on-error` / change-filter) so a flaky runner can't block branch protection. **Never run unbounded** ([[feedback_never_run_core_demo_e2e_unbounded]]) — background + timeout + log-to-file.

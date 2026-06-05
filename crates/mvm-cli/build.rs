@@ -40,8 +40,17 @@ fn main() {
     manifest.extend(read_seed_binaries(&workspace_root));
     let mut entries = Vec::new();
 
-    let host_triple = std::env::var("HOST").unwrap();
-    let native = host_triple.contains("linux") && host_triple.contains(strip_glibc(&pin.target));
+    // The host-vm bins are statically musl-linked and embedded for the host
+    // arch (`pin.target`, picked from CARGO_CFG_TARGET_ARCH — Plan 164). They
+    // are always cross-compiled with cargo-zigbuild, even when host arch ==
+    // target arch: `ring` (pulled transitively) compiles C, so the musl target
+    // needs a musl *C* cross-compiler. zig supplies it; a plain
+    // `cargo build --target <arch>-musl` would instead demand a system
+    // `<arch>-linux-musl-gcc`, which neither CI nor the documented contributor
+    // setup carries (both standardize on zig + cargo-zigbuild — see CLAUDE.md
+    // "Host dependencies"). zigbuild is the single portable path. (Plan 164
+    // briefly added a same-arch plain-`cargo build` fast-path on the false
+    // premise that the bins are C-free; it broke CI, which has no musl-gcc.)
 
     // Fast path for local test/dev iteration: skip the nested
     // `cargo zigbuild --release` cross-compile of the host-vm binaries and
@@ -68,14 +77,6 @@ fn main() {
         if skip_embed {
             std::fs::write(&out_file, b"")
                 .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
-        } else if native {
-            run_cargo_build(
-                &workspace_root,
-                &host_target_dir,
-                name,
-                &pin.target,
-                &out_file,
-            );
         } else {
             run_cargo_zigbuild(
                 &workspace_root,
@@ -117,11 +118,35 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
     let toml_str = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     let v: toml::Value = toml::from_str(&toml_str).unwrap();
     let p = &v["workspace"]["metadata"]["mvm"]["toolchain"];
+    // The embed target follows the arch mvmctl is built for: the local
+    // builder/Stage 0 VM is always same-arch as the host, so an x86_64
+    // mvmctl must embed x86_64 bins and an aarch64 mvmctl aarch64 bins
+    // (Plan 164). `CARGO_CFG_TARGET_ARCH` is set by cargo for build scripts.
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH")
+        .expect("CARGO_CFG_TARGET_ARCH is set by cargo for build scripts");
     Pin {
         zig: p["zig"].as_str().unwrap().to_string(),
         cargo_zigbuild: p["cargo-zigbuild"].as_str().unwrap().to_string(),
-        target: p["target"].as_str().unwrap().to_string(),
+        target: resolve_target_for_arch(p, &arch),
     }
+}
+
+/// Resolve the pinned musl target triple for `arch` from the
+/// `[workspace.metadata.mvm.toolchain.targets]` table. Fails closed on an
+/// arch with no pinned target (mvmctl doesn't support that guest arch yet).
+fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
+    toolchain
+        .get("targets")
+        .and_then(|t| t.get(arch))
+        .and_then(|t| t.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "no embedded-host-binary target pinned for arch `{arch}` in \
+                 [workspace.metadata.mvm.toolchain.targets] — mvmctl does not yet \
+                 support this guest arch (Plan 164). Add a `{arch} = \"...-musl\"` entry."
+            )
+        })
+        .to_string()
 }
 
 /// Parse `name:` fields from the Rust struct literals in
@@ -215,41 +240,6 @@ fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, o
              and `brew install zig` (or equivalent)",
         );
     assert!(status.success(), "cargo zigbuild failed for {pkg}");
-    let built = target_dir
-        .join(strip_glibc(target))
-        .join("release")
-        .join(pkg);
-    std::fs::copy(&built, out)
-        .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
-}
-
-fn run_cargo_build(root: &Path, target_dir: &Path, pkg: &str, target: &str, out: &Path) {
-    eprintln!(
-        "[build.rs] cargo build --release --target {t} -p mvm-build --bin {pkg}",
-        t = strip_glibc(target)
-    );
-    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
-    let status = Command::new(&cargo)
-        .args([
-            "build",
-            "--release",
-            "--target",
-            strip_glibc(target),
-            "-p",
-            "mvm-build",
-            "--bin",
-            pkg,
-        ])
-        .env("RUSTC", &rustc)
-        // Dedicated target dir — see the deadlock note in main().
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .current_dir(root)
-        .status()
-        .expect("spawn `cargo build`");
-    assert!(status.success(), "cargo build failed for {pkg}");
     let built = target_dir
         .join(strip_glibc(target))
         .join("release")
@@ -370,5 +360,33 @@ mod tests {
             Some("mvm-host-vm-init".to_string())
         );
         assert_eq!(extract_quoted_after("no key here", "name:"), None);
+    }
+
+    #[test]
+    fn resolve_target_for_arch_picks_pinned_triple() {
+        let toolchain: toml::Value = toml::from_str(
+            "zig = \"0.13.0\"\n\
+             cargo-zigbuild = \"0.20.0\"\n\
+             [targets]\n\
+             aarch64 = \"aarch64-unknown-linux-musl\"\n\
+             x86_64 = \"x86_64-unknown-linux-musl\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_target_for_arch(&toolchain, "aarch64"),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            resolve_target_for_arch(&toolchain, "x86_64"),
+            "x86_64-unknown-linux-musl"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "does not yet")]
+    fn resolve_target_for_arch_unsupported_arch_panics() {
+        let toolchain: toml::Value =
+            toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
+        let _ = resolve_target_for_arch(&toolchain, "riscv64");
     }
 }

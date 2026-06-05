@@ -1,23 +1,24 @@
 //! PID 1 of the Stage 0 bootstrap VM — the **nix-tarball seed** (plan 160).
+//! Boots under **two** builder backends (selected by the `mvm.backend=qemu`
+//! kernel cmdline marker), carrying the official Nix release tarball's
+//! `/nix/store` + this binary as `/init` — no Alpine, no apk, no busybox.
 //!
-//! libkrun mounts the materialized seed rootfs (the official Nix release
-//! tarball's `/nix/store` + this binary as `/init`) as the guest root over
-//! virtiofs (`krun_set_root`) and boots libkrunfw's bundled kernel; the
-//! seed carries `nix` + `bash` + `curl` + `xz` + `nss-cacert` (CA certs) in
-//! its closure — no Alpine, no apk, no external busybox.
+//! **libkrun** (macOS/aarch64, plan 160): the seed root arrives over virtiofs
+//! (`krun_set_root`) on libkrunfw's bundled kernel; shares are virtio-fs; we
+//! copy the seed `/nix/store` into a tmpfs and bind it over `/nix` (virtiofs
+//! writes fail under FUSE); eth0 + DHCP come from libkrun, so we just point
+//! `/etc/resolv.conf` at gvproxy's gateway. Proven E2E on aarch64.
 //!
-//! What it does: mount the pseudo-filesystems + the host virtio-fs shares;
-//! make `/nix` a writable, non-virtiofs store (copy the seed closure into a
-//! tmpfs and bind it over `/nix` — overlayfs-over-virtiofs writes fail in
-//! libkrun, and nix needs a writable store); write `/etc/resolv.conf`
-//! (libkrun's `NET_FLAG_DHCP_CLIENT` brings up eth0 but NOT DNS, so point it
-//! at gvproxy's gateway); then `nix build` the in-repo builder-VM flake,
-//! copy the artifacts to `/out`, and power off. (Proven end-to-end on
-//! aarch64; the persistent ext4 store is an optional RAM optimization —
-//! plan 160 0b/follow-up.)
+//! **QEMU** (Linux/x86_64, plan 166 / ADR-072): the stock distro kernel +
+//! initramfs mount the seed as an **ext4** root (`/dev/vda`, writable — so
+//! `/nix` needs no tmpfs copy), shares are ext4 block disks (`vdb`/`vdc`/`vdd`),
+//! and networking is QEMU slirp's fixed addresses configured statically over
+//! ioctls (no DHCP, no passt). Proven E2E on x86_64 (kernel built + copied to
+//! `/out`).
 //!
-//! The host side (`stage0::materialize_root_dir`) lays down the seed and
-//! writes this binary as `/init`; libkrun's launch supplies eth0 + DHCP.
+//! Either way: `nix build` the in-repo builder-VM flake, copy the artifacts to
+//! `/out`, and power off. The host side (`stage0::materialize_root_dir` /
+//! `qemu_builder`) lays down the seed and writes this binary as `/init`.
 
 use std::process::ExitCode;
 
@@ -49,6 +50,11 @@ mod linux {
     const NIX_SEED_RO: &str = "/nix-seed-ro";
 
     pub fn run() -> ExitCode {
+        // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
+        // arches (x86_64 hit EMFILE copying the seed store to tmpfs). As PID 1
+        // / root we can raise both soft and hard limits; do it before any
+        // fd-heavy work.
+        raise_fd_limit();
         if let Err(e) = setup() {
             eprintln!("stage0-init: FATAL: {e}");
             // Best-effort power off so the host sees the VM exit rather than
@@ -67,8 +73,48 @@ mod linux {
         }
     }
 
-    /// Mounts the pseudo-filesystems + the virtio-fs shares, then makes
-    /// `/nix` a writable store. No apk, no networking (libkrun supplies eth0).
+    /// Raise `RLIMIT_NOFILE` so the recursive seed-store copy (and `nix`
+    /// itself) don't hit `EMFILE` under the bundled kernel's low default.
+    /// Best-effort: as PID 1/root we can lift the hard limit, but a kernel
+    /// ceiling below 65536 just clamps — we then take whatever the hard
+    /// limit allows. Never fatal.
+    fn raise_fd_limit() {
+        // SAFETY: getrlimit/setrlimit with a valid resource id + struct ptr.
+        unsafe {
+            let want = libc::rlimit {
+                rlim_cur: 65536,
+                rlim_max: 65536,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+                return;
+            }
+            // Hard ceiling below 65536: raise the soft limit to the hard limit.
+            let mut cur = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut cur) == 0 {
+                cur.rlim_cur = cur.rlim_max;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &cur);
+            }
+        }
+    }
+
+    /// True when stage0-init runs under the **QEMU** builder backend (Plan
+    /// 166, Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
+    /// on the kernel cmdline; libkrun does not. This drives every host-vs-VMM
+    /// difference: share transport (ext4 block disks vs virtiofs), the nix
+    /// store layout (writable ext4 root vs tmpfs copy), and networking
+    /// (QEMU slirp's fixed addresses vs libkrun's DHCP gateway).
+    fn is_qemu() -> bool {
+        std::fs::read_to_string("/proc/cmdline")
+            .map(|c| c.contains("mvm.backend=qemu"))
+            .unwrap_or(false)
+    }
+
+    /// Mounts the pseudo-filesystems + the host shares, then makes `/nix` a
+    /// writable store. libkrun supplies eth0 (DHCP); under QEMU the Debian
+    /// initramfs brings up eth0 from the `ip=` cmdline.
     fn setup() -> Result<(), String> {
         mount_pseudofs()?;
         // `/dev/null` insurance — some libkrun set_root boots reach
@@ -78,33 +124,183 @@ mod linux {
             mknod_null();
         }
 
-        // Host virtio-fs shares. Tags match `add_virtio_fs(tag, ...)` in
-        // `LibkrunBuilderVm::run_stage0`.
-        for (tag, target, required) in [
-            ("work", "/work", true),
-            ("out", "/out", true),
-            ("mvm-bins", "/mvm-bins", true),
-        ] {
+        let qemu = is_qemu();
+        eprintln!(
+            "stage0-init: backend = {}",
+            if qemu { "qemu" } else { "libkrun" }
+        );
+
+        // Host shares. libkrun presents them over virtio-fs by tag; QEMU as
+        // ext4 block disks (the initramfs already loaded virtio_blk for the
+        // ext4 root, so vdb/vdc/vdd enumerate with no extra modules — no
+        // virtiofsd, no 9p). Order matches the device order on the QEMU
+        // cmdline (vda=seed root, then work/out/mvm-bins).
+        let shares: &[(&str, &str, &str)] = if qemu {
+            &[
+                ("/dev/vdb", "/work", "ext4"),
+                ("/dev/vdc", "/out", "ext4"),
+                ("/dev/vdd", "/mvm-bins", "ext4"),
+            ]
+        } else {
+            &[
+                ("work", "/work", "virtiofs"),
+                ("out", "/out", "virtiofs"),
+                ("mvm-bins", "/mvm-bins", "virtiofs"),
+            ]
+        };
+        for (source, target, fstype) in shares {
             std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
-            mount_fs(tag, target, "virtiofs")?;
-            if required && !is_mountpoint(target) {
-                return Err(format!("{target} virtiofs mount did not take"));
+            mount_fs(source, target, fstype)?;
+            if !is_mountpoint(target) {
+                return Err(format!("{target} ({fstype}) mount did not take"));
             }
         }
 
-        setup_nix_store()?;
-        configure_nix_runtime()?;
+        if qemu {
+            // The QEMU root is a writable ext4 seed, so `/nix` is already a
+            // writable store — no virtiofs-over-FUSE problem, no tmpfs copy
+            // (and no EMFILE). nix writes directly to `/nix/store`.
+            configure_network_qemu()?;
+            log_qemu_net_state();
+        } else {
+            setup_nix_store()?;
+        }
+        configure_nix_runtime(qemu)?;
         Ok(())
     }
 
-    /// DNS + nix store state the seed rootfs doesn't ship. libkrun's
-    /// `NET_FLAG_DHCP_CLIENT` brings eth0 up but doesn't write
-    /// `/etc/resolv.conf`, so point it at gvproxy's default gateway/DNS
-    /// (`192.168.127.1`); nix needs it to reach cache.nixos.org. Also seed
-    /// the local store dirs so nix runs single-user (no daemon).
-    fn configure_nix_runtime() -> Result<(), String> {
+    /// Statically configure the guest NIC for QEMU user-mode networking
+    /// (slirp), which hands out fixed addresses: guest `10.0.2.15/24`,
+    /// gateway `10.0.2.2`, DNS `10.0.2.3`. There's no DHCP and no passt, and
+    /// the kernel passes `ip=` to userspace (modular virtio_net), so we set
+    /// the address + default route over ioctls ourselves. The interface name
+    /// is detected (the kernel renames eth0→ensN under predictable naming).
+    fn configure_network_qemu() -> Result<(), String> {
+        let iface = find_net_iface().ok_or("no non-loopback interface present")?;
+        eprintln!("stage0-init: net config {iface} = 10.0.2.15/24 gw 10.0.2.2 (slirp)");
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            return Err(format!("socket: {}", std::io::Error::last_os_error()));
+        }
+        let res = net_ioctls(sock, &iface);
+        unsafe { libc::close(sock) };
+        res
+    }
+
+    /// The non-loopback interface name from `/sys/class/net` (e.g. `ens3`).
+    fn find_net_iface() -> Option<String> {
+        std::fs::read_dir("/sys/class/net")
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .find(|n| n != "lo")
+    }
+
+    /// SAFETY-scoped wrapper: standard `SIOCSIF*` / `SIOCADDRT` ioctls on an
+    /// AF_INET socket with correctly-sized `ifreq`/`rtentry` structs. The
+    /// `as _` casts adapt each request constant to `ioctl`'s request type
+    /// (differs gnu vs musl).
+    fn net_ioctls(sock: libc::c_int, iface: &str) -> Result<(), String> {
+        unsafe {
+            // address
+            let mut ifr = ifreq_for(iface);
+            set_sockaddr_in(&mut ifr.ifr_ifru.ifru_addr, [10, 0, 2, 15]);
+            if libc::ioctl(sock, libc::SIOCSIFADDR as _, &ifr) < 0 {
+                return Err(format!("SIOCSIFADDR: {}", std::io::Error::last_os_error()));
+            }
+            // netmask
+            let mut ifr = ifreq_for(iface);
+            set_sockaddr_in(&mut ifr.ifr_ifru.ifru_netmask, [255, 255, 255, 0]);
+            if libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &ifr) < 0 {
+                return Err(format!(
+                    "SIOCSIFNETMASK: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // flags |= UP|RUNNING (read-modify-write)
+            let mut ifr = ifreq_for(iface);
+            if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) < 0 {
+                return Err(format!("SIOCGIFFLAGS: {}", std::io::Error::last_os_error()));
+            }
+            ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+            if libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) < 0 {
+                return Err(format!("SIOCSIFFLAGS: {}", std::io::Error::last_os_error()));
+            }
+            // default route via 10.0.2.2
+            let mut rt: libc::rtentry = std::mem::zeroed();
+            set_sockaddr_in(&mut rt.rt_dst, [0, 0, 0, 0]);
+            set_sockaddr_in(&mut rt.rt_genmask, [0, 0, 0, 0]);
+            set_sockaddr_in(&mut rt.rt_gateway, [10, 0, 2, 2]);
+            rt.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
+            if libc::ioctl(sock, libc::SIOCADDRT as _, &rt) < 0 {
+                return Err(format!("SIOCADDRT: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+    }
+
+    fn ifreq_for(iface: &str) -> libc::ifreq {
+        // SAFETY: ifreq is a plain C struct; zeroed is a valid empty request.
+        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+        for (i, b) in iface.bytes().enumerate().take(libc::IFNAMSIZ - 1) {
+            ifr.ifr_name[i] = b as libc::c_char;
+        }
+        ifr
+    }
+
+    /// Write an IPv4 `sockaddr_in` into a `sockaddr`-typed ioctl field.
+    fn set_sockaddr_in(dst: *mut libc::sockaddr, addr: [u8; 4]) {
+        let sin = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_ne_bytes(addr),
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: dst points at a `sockaddr`-sized field; sockaddr_in is the
+        // same 16 bytes. Caller passes a valid, writable field pointer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &sin as *const libc::sockaddr_in as *const u8,
+                dst as *mut u8,
+                std::mem::size_of::<libc::sockaddr_in>(),
+            );
+        }
+    }
+
+    /// Diagnostic dump of the guest's network state under QEMU — so a boot log
+    /// shows whether the initramfs `ip=` autoconfig brought eth0 up (address +
+    /// default route) before we rely on it for the nix fetch.
+    fn log_qemu_net_state() {
+        let ifaces = std::fs::read_dir("/sys/class/net")
+            .map(|d| {
+                d.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|_| "<none>".into());
+        let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+        let default_route = route
+            .lines()
+            .skip(1)
+            .any(|l| l.split_whitespace().nth(1) == Some("00000000"));
+        eprintln!("stage0-init: net ifaces=[{ifaces}] default_route={default_route}");
+    }
+
+    /// DNS + nix store state the seed rootfs doesn't ship. Neither VMM writes
+    /// `/etc/resolv.conf`, so point it at the gateway's resolver — `192.168.127.1`
+    /// for libkrun/gvproxy, and QEMU user-mode networking's built-in DNS at
+    /// `10.0.2.3` (fixed; no DHCP, no passt). nix needs it to reach
+    /// cache.nixos.org. Also seed the local store dirs so nix runs single-user.
+    fn configure_nix_runtime(qemu: bool) -> Result<(), String> {
         std::fs::create_dir_all("/etc").map_err(|e| format!("create /etc: {e}"))?;
-        std::fs::write("/etc/resolv.conf", b"nameserver 192.168.127.1\n")
+        let resolver: &[u8] = if qemu {
+            b"nameserver 10.0.2.3\n"
+        } else {
+            b"nameserver 192.168.127.1\n"
+        };
+        std::fs::write("/etc/resolv.conf", resolver)
             .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
         for d in ["/nix/var", "/nix/var/nix", "/nix/var/log/nix"] {
             std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
