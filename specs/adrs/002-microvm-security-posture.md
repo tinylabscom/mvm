@@ -2,7 +2,7 @@
 title: "ADR-002: microVM security posture — explicit guarantees, layered defenses"
 status: Accepted
 date: 2026-04-30
-revised: 2026-05-10
+revised: 2026-06-05
 supersedes: none
 related: ADR-001 (multi-backend execution); plan 25-microvm-hardening; plan 53-cross-platform-roadmap
 ---
@@ -14,6 +14,8 @@ Accepted. Implementation tracked in `specs/plans/25-microvm-hardening.md`. Works
 The 2026-05-07 revision adds the **Trust layers (Matryoshka model)** section, names the seven CI-enforced claims explicitly, and adds a **per-backend tier matrix** showing which claims hold for each backend in `AnyBackend`. None of the original decisions or surfaces change — the revision is a re-framing for legibility, motivated by plan 53 (cross-platform roadmap) where multiple backends with different tier coverage now coexist.
 
 The 2026-05-10 revision adds the **Framework references** subsection (MITRE ATT&CK / D3FEND / CREF mapping for each of the seven claims). Doc-only; no code, CI, or test impact.
+
+The 2026-06-05 revision reframes the **cold-state guarantee** as a property *being promoted* to a witnessed claim (Plan 166), pending its catalog witness. Doc-only; no code, CI, or test impact yet — the witness and numbered-table entry land in a follow-up implementation PR.
 
 ## Context
 
@@ -201,11 +203,22 @@ only — the CI gate is the source of truth, not the framework code.
 | 13 | T1078 (Valid Accounts — unauthorized audit attribution), T1565 (Data Manipulation — audit-chain variant) | D3FEND: Authentication, Authorization · CREF: Substantiated Integrity (workload-emitted entries chain-signed under distinct `WorkloadAudit` category; workload-id mismatch refused at admission; chain verifier displays category alongside entry so operators can tell workload-asserted from supervisor-observed) |
 
 The cold-state guarantee (per-workload fresh boot, no warm pools — see
-CLAUDE.md and the `mvmctl run` lifecycle) is not in the seven-claim
-table because it is not a single CI gate; it is a structural property
-of the runtime. In framework terms it is **CREF: Non-Persistence**, and
-denies T1546 (Event-Triggered Execution) / T1547 (Boot or Logon
-Autostart) classes of persistence outright.
+CLAUDE.md and the `mvmctl run` lifecycle) is today a structural property
+of the runtime rather than a single CI gate. In framework terms it is
+**CREF: Non-Persistence**, and denies T1546 (Event-Triggered Execution) /
+T1547 (Boot or Logon Autostart) classes of persistence outright.
+
+It is being **promoted to a witnessed claim** (Plan 166): a workload's
+runtime state must not survive its own teardown, and the next boot on the
+same host must be fresh. The promotion is *pending its witness* — the
+catalog entry and `fn:` tests do not exist yet, so this property is not
+yet in the numbered claim table and `check-claim-catalog` does not name
+it. Scope is strictly **per-workload** (one guest = one workload). It is
+not a between-tenant/concurrent-session isolation claim — that multiplexing
+lives in mvmd — and it is not a claim about hypervisor/DRAM memory
+scrubbing (the host is trusted; physical RAM sanitization on VMM exit is
+out of scope). The witness covers state-dir / overlay / warm-pool
+destruction at the mvm layer only.
 
 Frameworks intentionally referenced:
 
