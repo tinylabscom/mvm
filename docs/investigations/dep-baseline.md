@@ -80,6 +80,40 @@ provider-pinning can compile-green yet fail at connect), **not** the
 (it already pins ring via `mvmd-proxy`/`certs.rs` + installs it, and keeps
 its own aws-lc transitively through `iroh → hickory → rustls`).
 
+### Blocker: `oci-client` hardcodes aws-lc-rs (no ring path in any version)
+
+Drilled into the fix and hit a wall. `oci-client` **0.16.1** and **0.17.0**
+both wire their only rustls option to aws-lc, via **two** hardcoded paths:
+
+```toml
+# oci-client 0.16/0.17 [features]
+rustls-tls = ["reqwest/rustls", "jsonwebtoken/aws_lc_rs"]
+# reqwest 0.13 [features]
+rustls = ["__rustls-aws-lc-rs", "dep:rustls-platform-verifier", "__rustls"]
+```
+
+There is **no ring/webpki feature** — the only alternative oci-client
+offers is `native-tls` (OpenSSL, a system dep — worse). Cargo feature
+unification is additive, so a workspace-level rustls/ring pin **cannot
+remove** the aws-lc that oci-client's features force on. So B4 is **not
+achievable by configuration**. Removing aws-lc requires one of:
+
+1. **Fork/patch `oci-client`** (bounded vendor) to add a ring path:
+   `reqwest`'s webpki-roots-ring feature + `jsonwebtoken`'s `rust_crypto`
+   provider. Plus unify the reqwest major. Moderate effort + a runtime
+   TLS smoke. (Allowed per "vendoring as a bounded bridge is OK".)
+2. **Replace `oci-client`** with a registry client that supports ring (or
+   a minimal in-repo client). Large.
+3. **Upstream a `rustls-tls-ring` feature to `oci-client`**, then bump.
+   Slow (depends on maintainers).
+4. **Defer B4** — accept aws-lc while we use `oci-client`.
+
+**Net conclusion for Phase B:** there are **no quick mechanical cuts
+left**. The real reductions are (a) **B3** `pgp` −168 (a *security
+decision* — drop/gate the Alpine PGP verify), and (b) **B4** −16 + the C
+build (an *upstream fork/replace* of `oci-client`). Everything else is
+already feature-gated out of the default binary.
+
 ## B3 re-scope: `pgp` is Alpine-tarball verification, not release signing
 
 `mvm-build/src/stage0.rs` fetches Alpine's official minirootfs and verifies

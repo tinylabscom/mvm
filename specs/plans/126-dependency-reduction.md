@@ -58,10 +58,11 @@ See `docs/investigations/dep-baseline.md` for the full rationale.
 
 ### Task B4: `aws-lc-rs` → `ring` — MERGE WITH C1 (not a standalone cut)
 
-> **A1 finding (see `docs/investigations/dep-baseline.md`):** mvm's own `reqwest 0.12` is **already** on `ring` (`default-features = false` rustls + `__rustls-ring`). aws-lc-rs enters **only** via `oci-client 0.16 → reqwest 0.13.3 → rustls-platform-verifier`. So B4 = **C1** (collapse the two reqwest majors) + steer `oci-client` onto ring + webpki roots (drop platform-verifier). Do them as one task.
+> **A1 finding (see `docs/investigations/dep-baseline.md`):** mvm's own `reqwest 0.12` is **already** on `ring`. aws-lc-rs enters **only** via `oci-client → reqwest 0.13 → rustls-platform-verifier` (+ `jsonwebtoken/aws_lc_rs`). **BLOCKED UPSTREAM:** `oci-client` 0.16 **and** 0.17 hardcode aws-lc in their only rustls option (`rustls-tls = ["reqwest/rustls", "jsonwebtoken/aws_lc_rs"]`); no ring feature exists, and feature unification can't remove it. So B4 is **not a config change** — it needs a **fork/replace of `oci-client`** (+ reqwest-major unify + a runtime TLS smoke). Decide before starting.
 
-- [ ] **Step 1:** Find an `oci-client` feature/version whose TLS uses ring + webpki and **not** `rustls-platform-verifier` (verify against oci-client's manifest — may need a version bump). Unify mvm-direct + oci-client on **one reqwest major**.
-- [ ] **Step 2:** Set every rustls consumer to `default-features = false` + ring. Failing test — `cargo tree -i aws-lc-rs` is empty; **a real HTTPS connect succeeds** (provider-pinning compiles green but can fail at handshake); `cargo tree -d | grep reqwest` shows one major. The native cmake build is gone (note the cold-build delta). Commit.
+- [ ] **Step 0 (decision):** fork/patch `oci-client` (add a `reqwest` webpki-ring path + `jsonwebtoken/rust_crypto`), or replace it, or upstream a `rustls-tls-ring` feature, or defer. See the baseline doc's four options.
+- [ ] **Step 1:** Once oci-client has a ring path, unify mvm-direct + oci-client on **one reqwest major** and set every rustls consumer to `default-features = false` + ring.
+- [ ] **Step 2:** Failing test — `cargo tree -i aws-lc-rs` empty; **a real HTTPS connect succeeds**; `cargo tree -d | grep reqwest` shows one major; the cmake build is gone (note the cold-build delta). Commit.
 
 ### Task B5: drop `tokio` from `mvm-core`'s default closure (folds in plan 121's "runtime-free core" follow-up)
 
