@@ -10,13 +10,13 @@ class Mvmctl < Formula
   license "Apache-2.0"
 
   on_macos do
+    # Apple Silicon only. Intel mac (x86_64-apple-darwin) is deferred — no
+    # release asset is published for it yet (Intel-macOS CI runners are
+    # unavailable to this org). On an Intel mac Homebrew reports no bottle,
+    # which is the honest state until the target is restored.
     on_arm do
       url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-aarch64-apple-darwin.tar.gz"
       sha256 "@@SHA_AARCH64_DARWIN@@"
-    end
-    on_intel do
-      url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-x86_64-apple-darwin.tar.gz"
-      sha256 "@@SHA_X86_64_DARWIN@@"
     end
   end
 
