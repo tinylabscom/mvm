@@ -109,12 +109,31 @@ fn run_stage0_qemu(
     let vdb = work.join("work.ext4");
     let vdc = work.join("out.ext4");
     let vdd = work.join("mvm-bins.ext4");
+    // The Debian initramfs's init-bottom *moves* the early-boot pseudo-fs
+    // mounts (/dev, /run, /sys, /proc) into the new root before exec'ing
+    // /init, which needs those mountpoint dirs to already exist in the seed.
+    // libkrun never hits this (it has no initramfs), so the shared
+    // materialize doesn't create them — do it here for the QEMU boot.
+    for d in ["dev", "proc", "sys", "run", "tmp", "etc"] {
+        let p = guest_root_dir.join(d);
+        std::fs::create_dir_all(&p).map_err(|e| io_err("creating seed mountpoint", &p, e))?;
+    }
     pack_ext4(guest_root_dir, &vda, SEED_IMG_BYTES)?;
-    pack_ext4(
+    // /work: pack a filtered copy that drops the heavy build/VCS dirs the nix
+    // workspace filter ignores anyway (`target/`, `.git`, …) — otherwise a
+    // multi-GB `target/` would bloat the disk + pack time for nothing.
+    let work_src = work.join("work-src");
+    copy_tree_filtered(
         workspace_dir,
-        &vdb,
-        dir_size_bytes(workspace_dir) + 512 * 1024 * 1024,
+        &work_src,
+        &["target", ".git", ".claude", "node_modules"],
     )?;
+    pack_ext4(
+        &work_src,
+        &vdb,
+        dir_size_bytes(&work_src) + 256 * 1024 * 1024,
+    )?;
+    let _ = std::fs::remove_dir_all(&work_src);
     pack_ext4(artifact_out, &vdc, OUT_IMG_BYTES)?;
     pack_ext4(host_bin_dir, &vdd, 256 * 1024 * 1024)?;
 
@@ -179,8 +198,46 @@ fn run_stage0_qemu(
     //    (debugfs rdump — no mount). The caller validates + promotes them.
     extract_out_artifacts(&vdc, artifact_out)?;
 
-    // Best-effort: drop the large seed image now the build is done.
-    let _ = std::fs::remove_file(&vda);
+    // Best-effort: drop the (large) disk images now the build is done. Keep
+    // console.log in `work` for post-mortem.
+    for img in [&vda, &vdb, &vdc, &vdd] {
+        let _ = std::fs::remove_file(img);
+    }
+    Ok(())
+}
+
+/// Recursively copy `src` into `dst`, skipping any directory whose name is in
+/// `exclude` (at any depth). Files copied, symlinks recreated. Used to stage a
+/// `/work` tree without the heavy `target/`/`.git` dirs before packing it.
+fn copy_tree_filtered(src: &Path, dst: &Path, exclude: &[&str]) -> Result<(), BuilderVmError> {
+    std::fs::create_dir_all(dst).map_err(|e| io_err("creating staging dir", dst, e))?;
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((from, to)) = stack.pop() {
+        for entry in std::fs::read_dir(&from).map_err(|e| io_err("reading", &from, e))? {
+            let entry = entry.map_err(|e| io_err("reading entry", &from, e))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| io_err("file_type", &from, e))?;
+            let name = entry.file_name();
+            let src_p = entry.path();
+            let dst_p = to.join(&name);
+            if ft.is_dir() {
+                if exclude.contains(&name.to_string_lossy().as_ref()) {
+                    continue;
+                }
+                std::fs::create_dir_all(&dst_p).map_err(|e| io_err("mkdir", &dst_p, e))?;
+                stack.push((src_p, dst_p));
+            } else if ft.is_symlink() {
+                let target =
+                    std::fs::read_link(&src_p).map_err(|e| io_err("readlink", &src_p, e))?;
+                let _ = std::fs::remove_file(&dst_p);
+                std::os::unix::fs::symlink(&target, &dst_p)
+                    .map_err(|e| io_err("symlink", &dst_p, e))?;
+            } else {
+                std::fs::copy(&src_p, &dst_p).map_err(|e| io_err("copy", &src_p, e))?;
+            }
+        }
+    }
     Ok(())
 }
 

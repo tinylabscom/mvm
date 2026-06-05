@@ -1,6 +1,8 @@
 # Plan 165 — QEMU dev/builder backend (portable dev substrate; Firecracker stays prod)
 
-## Status: Proposed (2026-06-05)
+## Status: Phase 1 DONE + CLI-proven (2026-06-05). Phase 2/3 proposed.
+
+**Phase 1 complete on the x86_64 box:** `MVM_BUILDER_BACKEND=qemu mvmctl kernel build` drives the full codified path — `QemuBuilderVm::run_stage0` packs the seed + shares as ext4 disks (`mkfs.ext4 -d`, **no root**), boots the stock Debian kernel + initramfs with slirp networking, `stage0-init` (QEMU branch) configures the NIC + mounts + runs `nix build`, the **kernel compiles**, `debugfs rdump` extracts `vmlinux`, and it's **promoted to the cache** (`builder/vmlinux`, 9.7 MiB). Exit 0, no passt, no libkrun, no libkrunfw. Committed: guest side (`2262faf4`), host side + wiring (`5f238362`), + the seed-mountpoint/cleanup fixes.
 
 > Implements **ADR-072**. Adds QEMU as the **Linux** dev/builder-tier backend (KVM-accelerated where present, TCG fallback where not). **macOS already has its built-in equivalent — Vz** (Virtualization.framework, no third-party install); QEMU is *not* for macOS. **Firecracker remains the sole production runtime**, `/dev/kvm`-gated and favored whenever KVM is available. QEMU never ships as a production runtime. Steps use `- [ ]` checkboxes.
 >
