@@ -13,6 +13,18 @@ fn main() {
     let bins_out = out_dir.join("mvm-host-bins");
     std::fs::create_dir_all(&bins_out).expect("create OUT_DIR/mvm-host-bins");
 
+    // The nested `cargo {build,zigbuild}` that compiles the host-vm binaries
+    // MUST use its own target dir. The outer `cargo build` (mvmctl) holds an
+    // exclusive lock on the workspace `target/` for its whole run, including
+    // while this build script executes; a nested cargo aimed at the same
+    // `target/` blocks on that lock forever — the outer build waits on this
+    // script, this script waits on the nested cargo, the nested cargo waits
+    // on the outer's lock. That deadlock is why cold release builds hung
+    // (warm builds slip through because the nested step does almost nothing).
+    // A separate target dir under OUT_DIR has its own lock → no contention,
+    // and it persists across rebuilds for incremental reuse.
+    let host_target_dir = out_dir.join("host-vm-target");
+
     let pin = read_pinned_toolchain(&workspace_root);
     println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
     println!(
@@ -53,9 +65,21 @@ fn main() {
             std::fs::write(&out_file, b"")
                 .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
         } else if native {
-            run_cargo_build(&workspace_root, name, &pin.target, &out_file);
+            run_cargo_build(
+                &workspace_root,
+                &host_target_dir,
+                name,
+                &pin.target,
+                &out_file,
+            );
         } else {
-            run_cargo_zigbuild(&workspace_root, name, &pin.target, &out_file);
+            run_cargo_zigbuild(
+                &workspace_root,
+                &host_target_dir,
+                name,
+                &pin.target,
+                &out_file,
+            );
         }
         let sha = sha256_hex(&out_file);
         entries.push((name.clone(), out_file.clone(), sha));
@@ -131,7 +155,7 @@ fn strip_glibc(t: &str) -> &str {
     t.split('.').next().unwrap()
 }
 
-fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
+fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, out: &Path) {
     eprintln!("[build.rs] cargo zigbuild --release --target {target} -p mvm-build --bin {pkg}");
     // We need the rustup-managed cargo, not the Homebrew one. The Homebrew
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
@@ -150,6 +174,8 @@ fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
             pkg,
         ])
         .env("RUSTC", &rustc)
+        // Dedicated target dir — see the deadlock note in main().
+        .env("CARGO_TARGET_DIR", target_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
@@ -161,8 +187,7 @@ fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
              and `brew install zig` (or equivalent)",
         );
     assert!(status.success(), "cargo zigbuild failed for {pkg}");
-    let built = root
-        .join("target")
+    let built = target_dir
         .join(strip_glibc(target))
         .join("release")
         .join(pkg);
@@ -170,7 +195,7 @@ fn run_cargo_zigbuild(root: &Path, pkg: &str, target: &str, out: &Path) {
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
 }
 
-fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
+fn run_cargo_build(root: &Path, target_dir: &Path, pkg: &str, target: &str, out: &Path) {
     eprintln!(
         "[build.rs] cargo build --release --target {t} -p mvm-build --bin {pkg}",
         t = strip_glibc(target)
@@ -188,6 +213,8 @@ fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
             pkg,
         ])
         .env("RUSTC", &rustc)
+        // Dedicated target dir — see the deadlock note in main().
+        .env("CARGO_TARGET_DIR", target_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
@@ -195,8 +222,7 @@ fn run_cargo_build(root: &Path, pkg: &str, target: &str, out: &Path) {
         .status()
         .expect("spawn `cargo build`");
     assert!(status.success(), "cargo build failed for {pkg}");
-    let built = root
-        .join("target")
+    let built = target_dir
         .join(strip_glibc(target))
         .join("release")
         .join(pkg);

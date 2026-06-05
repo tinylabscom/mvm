@@ -32,7 +32,9 @@ detect_target() {
   case "$os" in
     Darwin) case "$arch" in
         arm64|aarch64) echo "aarch64-apple-darwin" ;;
-        x86_64) echo "x86_64-apple-darwin" ;;
+        # Intel mac is deferred — no x86_64-apple-darwin asset is published
+        # yet (Intel-macOS CI runners unavailable). Apple Silicon only.
+        x86_64) die "Intel macOS is not supported yet — Apple Silicon macs and Linux only" ;;
         *) die "unsupported macOS arch: $arch" ;;
       esac ;;
     Linux) case "$arch" in

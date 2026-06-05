@@ -13,8 +13,8 @@ fn render_formula_fills_all_placeholders() {
     let checks = tmp.path().join("checksums-sha256.txt");
     std::fs::write(
         &checks,
+        // No x86_64-apple-darwin (Intel mac) — that target is deferred.
         "aaaa  mvmctl-aarch64-apple-darwin.tar.gz\n\
-         bbbb  mvmctl-x86_64-apple-darwin.tar.gz\n\
          cccc  mvmctl-aarch64-unknown-linux-gnu.tar.gz\n\
          dddd  mvmctl-x86_64-unknown-linux-gnu.tar.gz\n",
     )
