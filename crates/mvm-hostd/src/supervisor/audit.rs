@@ -130,6 +130,32 @@ impl AuditEntry {
             ],
         )
     }
+
+    /// Construct a chain entry recording that a host-allowlisted observer
+    /// forced a fail-closed flow kill (Plan 141 / ADR-064 Q8). `reason` is
+    /// one of `drop` / `modify_over_mtu` / `modify_unserializable`. The
+    /// entry attributes the `observer` so an operator can answer "which
+    /// observer killed this flow and why?" from the signed chain alone.
+    pub fn flow_observer_fault(
+        plan: &ExecutionPlan,
+        bundle: Option<&PolicyBundle>,
+        flow_id: &str,
+        direction: FlowDirection,
+        observer: &str,
+        reason: &str,
+    ) -> Self {
+        Self::for_plan(
+            plan,
+            bundle,
+            FLOW_OBSERVER_FAULT_EVENT,
+            [
+                ("flow_id".to_string(), flow_id.to_string()),
+                ("direction".to_string(), direction.as_str().to_string()),
+                ("observer".to_string(), observer.to_string()),
+                ("reason".to_string(), reason.to_string()),
+            ],
+        )
+    }
 }
 
 /// Canonical `event` string for a `FlowOpened` chain entry. Pinned
@@ -139,6 +165,11 @@ pub const FLOW_OPENED_EVENT: &str = "gateway.flow_opened";
 
 /// Canonical `event` string for a `FlowClosed` chain entry.
 pub const FLOW_CLOSED_EVENT: &str = "gateway.flow_closed";
+
+/// Canonical `event` string for a `FlowObserverFault` chain entry —
+/// emitted when a host-allowlisted observer's `Modify`/`Drop` forced a
+/// fail-closed flow kill (Plan 141 / ADR-064 Q8).
+pub const FLOW_OBSERVER_FAULT_EVENT: &str = "gateway.flow_observer_fault";
 
 /// Per-direction flow label for [`AuditEntry::flow_opened`] /
 /// [`AuditEntry::flow_closed`]. Egress = guest → internet,
@@ -541,6 +572,31 @@ mod tests {
             emitted.insert(entry.labels.get("reason").cloned().unwrap());
         }
         assert_eq!(emitted.len(), 4, "all four reasons must be distinguishable");
+    }
+
+    #[test]
+    fn flow_observer_fault_helper_attributes_observer_and_reason() {
+        let plan = sample_plan();
+        let entry = AuditEntry::flow_observer_fault(
+            &plan,
+            None,
+            "vm-egress",
+            FlowDirection::Egress,
+            "egress-redactor",
+            "modify_over_mtu",
+        );
+        assert_eq!(entry.event, FLOW_OBSERVER_FAULT_EVENT);
+        assert_eq!(entry.event, "gateway.flow_observer_fault");
+        assert_eq!(entry.labels.get("flow_id"), Some(&"vm-egress".to_string()));
+        assert_eq!(
+            entry.labels.get("observer"),
+            Some(&"egress-redactor".to_string())
+        );
+        assert_eq!(
+            entry.labels.get("reason"),
+            Some(&"modify_over_mtu".to_string())
+        );
+        assert_eq!(entry.labels.get("direction"), Some(&"egress".to_string()));
     }
 
     #[test]
