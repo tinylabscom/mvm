@@ -35,6 +35,10 @@ jobs:
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
+    # Backstop: a cold release build is ~15-25 min. Without a cap a hung
+    # build (e.g. the nested-cargo target-lock deadlock fixed in build.rs)
+    # runs to the 6h default, burning runner minutes silently.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v6
