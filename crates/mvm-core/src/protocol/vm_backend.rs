@@ -408,6 +408,25 @@ pub struct VmCapabilities {
     pub balloon: bool,
 }
 
+/// How thoroughly a backend can warm-start a VM from a snapshot. Distinct
+/// from `VmCapabilities::snapshots` (a coarse "can checkpoint" bool): this is
+/// the honest per-backend warm-start *tier* (plan 123 Phase C). No path
+/// silently degrades — a request beyond the reported tier returns a typed
+/// error (ADR-053) once the snapshot RPC is wired (C2/C3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapshotCapability {
+    /// Full live-memory snapshot + fast resume (Firecracker: UFFD/NBD/hugepages).
+    LiveMemory,
+    /// Coarse save/restore of machine state (Vz `saveMachineState`, macOS 26+).
+    SaveRestore,
+    /// No memory snapshot — warm-start is a fast reboot from a disk/overlay
+    /// snapshot (libkrun).
+    DiskOnly,
+    /// No snapshot/warm-start support.
+    #[default]
+    Unsupported,
+}
+
 /// Snapshot of a VM's virtio-balloon state, returned by
 /// [`VmBackend::balloon_state`].
 ///
@@ -601,6 +620,15 @@ pub trait VmBackend: Send + Sync {
     /// Capabilities supported by this backend.
     fn capabilities(&self) -> VmCapabilities;
 
+    /// Warm-start snapshot tier — `LiveMemory` (Firecracker), `SaveRestore`
+    /// (Vz, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
+    /// `Unsupported` so a backend opts in explicitly; consumers check this
+    /// before requesting a snapshot rather than discovering a silent
+    /// degrade (plan 123 C1 / ADR-053).
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        SnapshotCapability::Unsupported
+    }
+
     /// Start a new VM from the given configuration.
     ///
     /// Returns the [`VmId`] assigned to the running VM.
@@ -775,6 +803,16 @@ pub trait VmBackend: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_capability_defaults_to_unsupported() {
+        // The trait method defaults to this, so a backend that forgets to opt
+        // in fails closed (no silent live-memory claim).
+        assert_eq!(
+            SnapshotCapability::default(),
+            SnapshotCapability::Unsupported
+        );
+    }
 
     #[test]
     fn test_vm_id_display() {

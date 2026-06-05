@@ -33,8 +33,8 @@
 
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, StartMode, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
+    StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -181,6 +181,18 @@ impl VmBackend for VzBackend {
             // supervisor; live adjustment goes through the control
             // socket's BALLOON verb.
             balloon: true,
+        }
+    }
+
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        // Vz is the macOS live-memory path: coarse `saveMachineState` /
+        // `restoreMachineState` (plan 123 C3), keyed off the same macOS
+        // version gate as the `snapshots` flag so older hosts report
+        // honestly rather than degrade silently.
+        if macos_supports_vz_snapshots() {
+            SnapshotCapability::SaveRestore
+        } else {
+            SnapshotCapability::Unsupported
         }
     }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, LayerCoverage, StartMode, VmBackend, VmCapabilities, VmId,
-    VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode, VmBackend,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 // W8: every backend variant + the FC support modules live in this
@@ -135,6 +135,12 @@ impl VmBackend for FirecrackerBackend {
             tap_networking: true,
             balloon: true,
         }
+    }
+
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        // Firecracker is the live-memory fast-resume backend (UFFD / NBD /
+        // hugepages) — plan 123 C2.
+        SnapshotCapability::LiveMemory
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
@@ -481,6 +487,10 @@ impl AnyBackend {
 
     pub fn capabilities(&self) -> VmCapabilities {
         self.inner().capabilities()
+    }
+
+    pub fn snapshot_capability(&self) -> SnapshotCapability {
+        self.inner().snapshot_capability()
     }
 
     /// Start a VM using the backend-agnostic config.
@@ -870,6 +880,41 @@ mod tests {
             AnyBackend::from_hypervisor("apple-container"),
             "apple-container",
         );
+    }
+
+    #[test]
+    fn snapshot_capability_live_memory_on_firecracker() {
+        assert_eq!(
+            AnyBackend::from_hypervisor("firecracker").snapshot_capability(),
+            SnapshotCapability::LiveMemory
+        );
+    }
+
+    #[test]
+    fn snapshot_capability_disk_only_on_libkrun() {
+        assert_eq!(
+            AnyBackend::from_hypervisor("libkrun").snapshot_capability(),
+            SnapshotCapability::DiskOnly
+        );
+    }
+
+    #[test]
+    fn snapshot_capability_unsupported_on_microvm_nix() {
+        assert_eq!(
+            AnyBackend::from_hypervisor("qemu").snapshot_capability(),
+            SnapshotCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn snapshot_capability_vz_tracks_macos_support() {
+        // SaveRestore on macOS 26+, Unsupported elsewhere — never silently
+        // LiveMemory/DiskOnly. (Runs on Linux CI, where it's Unsupported.)
+        let cap = AnyBackend::from_hypervisor("vz").snapshot_capability();
+        assert!(matches!(
+            cap,
+            SnapshotCapability::SaveRestore | SnapshotCapability::Unsupported
+        ));
     }
 
     #[test]

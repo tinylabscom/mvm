@@ -25,8 +25,8 @@
 
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, StartMode, VmBackend,
-    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
+    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -213,6 +213,13 @@ impl VmBackend for LibkrunBackend {
             // builder. Declared `false` until wiring lands.
             balloon: false,
         }
+    }
+
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        // libkrun has no memory snapshot — warm-start is a fast reboot from
+        // the overlay/rootfs disk snapshot (plan 123 C4). A live-memory
+        // request is refused with a typed error, not silently degraded.
+        SnapshotCapability::DiskOnly
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {

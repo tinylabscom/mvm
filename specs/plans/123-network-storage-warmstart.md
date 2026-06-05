@@ -132,10 +132,12 @@ The IR `MountSource` is a closed enum (`Volume`/`HostPath`/`Tmpfs`) — a new so
 
 The honest matrix from the capability check. `VmBackend` already carries a pause/resume capability flag; extend it to snapshot/restore with the same per-backend disposition.
 
+> **Status (2026-06-05, branch `feat/plan-123c-warmstart`):** **C1 (the capability enum + per-backend disposition) is landed.** C2–C4 are **deferred**: they need gated lanes this dev host can't run (live-KVM for Firecracker UFFD/NBD, macOS-26 for Vz save/restore) **and a host `PostRestore` sender that doesn't exist yet** (the same gap that deferred plan 122's VMGenID-token delivery — C2's reseed-on-resume depends on it). C1 is the additive scaffolding the rest hangs off.
+
 ### Task C1: extend the `VmBackend` snapshot capability
 
-- [ ] **Step 1:** Failing test — `backend.snapshot_capability()` returns `LiveMemory` for Firecracker, `SaveRestore` for Vz (macOS 26+), `DiskOnly` for libkrun, `Unsupported` for microvm_nix — mirroring the existing `pause_resume_*` tests. No path silently degrades; an unsupported request returns a typed error (ADR-053).
-- [ ] **Step 2:** Add the capability enum + per-backend disposition next to the existing pause/resume flag. Commit.
+- [x] **Step 1:** Tests in `backend.rs` (mirroring `pause_resume_unsupported_*`): `snapshot_capability_{live_memory_on_firecracker,disk_only_on_libkrun,unsupported_on_microvm_nix,vz_tracks_macos_support}` + a runnable `mvm-core` `snapshot_capability_defaults_to_unsupported`. (mvm-backend test binary is SIGKILL'd by macОS codesign — compiled here, run on Linux CI.)
+- [x] **Step 2:** Added `SnapshotCapability {LiveMemory,SaveRestore,DiskOnly,Unsupported}` + a `VmBackend::snapshot_capability()` trait method (default `Unsupported` — fail-closed) in `mvm-core/src/protocol/vm_backend.rs`, dispatched by `AnyBackend`. Per-backend: FC `LiveMemory`, Vz `SaveRestore`(macos-gated)/`Unsupported`, libkrun `DiskOnly`, mock `LiveMemory`, rest default `Unsupported`. The typed-error-on-over-request (ADR-053) lands with the snapshot RPC (C2/C3 — not wired yet).
 
 ### Task C2: Firecracker fast-resume substrate (Linux)
 

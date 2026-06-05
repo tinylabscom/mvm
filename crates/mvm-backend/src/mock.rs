@@ -26,8 +26,9 @@ use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, StartMode, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig, VmStatus,
+    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
+    StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig,
+    VmStatus,
 };
 
 use crate::mock_guest_agent::MockGuestAgent;
@@ -97,6 +98,11 @@ impl VmBackend for MockBackend {
             tap_networking: false,
             balloon: false,
         }
+    }
+
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        // The mock is the fully-capable test double.
+        SnapshotCapability::LiveMemory
     }
 
     fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
