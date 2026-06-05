@@ -1,3 +1,5 @@
+// `anyhow` is used only by the hostd-transport async fns below.
+#[cfg(feature = "hostd-transport")]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,7 @@ use crate::tenant::TenantNet;
 pub const HOSTD_SOCKET_PATH: &str = "/run/mvm/hostd.sock";
 
 /// Maximum frame size for hostd IPC (1 MiB).
+#[cfg(feature = "hostd-transport")]
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
 /// Wire-protocol version for hostd IPC (mvmd ↔ mvm-hostd Unix-socket
@@ -138,9 +141,15 @@ pub enum HostdResponse {
 
 // ============================================================================
 // Frame protocol (length-prefixed JSON over Unix socket)
+//
+// The hostd IPC async transport (plan 126 B5). Gated behind
+// `hostd-transport` so the default `mvm-core` build carries no tokio; the
+// `HostdRequest`/`HostdResponse` types above stay unconditional. mvmd
+// consumes these via the `mvmctl::core::protocol` facade.
 // ============================================================================
 
 /// Read a length-prefixed JSON frame from a tokio AsyncRead.
+#[cfg(feature = "hostd-transport")]
 pub async fn read_frame<R: tokio::io::AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     reader
@@ -163,6 +172,7 @@ pub async fn read_frame<R: tokio::io::AsyncReadExt + Unpin>(reader: &mut R) -> R
 }
 
 /// Write a length-prefixed JSON frame to a tokio AsyncWrite.
+#[cfg(feature = "hostd-transport")]
 pub async fn write_frame<W: tokio::io::AsyncWriteExt + Unpin>(
     writer: &mut W,
     data: &[u8],
@@ -184,6 +194,7 @@ pub async fn write_frame<W: tokio::io::AsyncWriteExt + Unpin>(
 }
 
 /// Serialize and send a request.
+#[cfg(feature = "hostd-transport")]
 pub async fn send_request<W: tokio::io::AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &HostdRequest,
@@ -193,6 +204,7 @@ pub async fn send_request<W: tokio::io::AsyncWriteExt + Unpin>(
 }
 
 /// Read and deserialize a request.
+#[cfg(feature = "hostd-transport")]
 pub async fn recv_request<R: tokio::io::AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<HostdRequest> {
@@ -201,6 +213,7 @@ pub async fn recv_request<R: tokio::io::AsyncReadExt + Unpin>(
 }
 
 /// Serialize and send a response.
+#[cfg(feature = "hostd-transport")]
 pub async fn send_response<W: tokio::io::AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &HostdResponse,
@@ -210,6 +223,7 @@ pub async fn send_response<W: tokio::io::AsyncWriteExt + Unpin>(
 }
 
 /// Read and deserialize a response.
+#[cfg(feature = "hostd-transport")]
 pub async fn recv_response<R: tokio::io::AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<HostdResponse> {
@@ -622,6 +636,7 @@ mod tests {
         assert_eq!(HOSTD_SOCKET_PATH, "/run/mvm/hostd.sock");
     }
 
+    #[cfg(feature = "hostd-transport")]
     #[tokio::test]
     async fn test_frame_roundtrip() {
         let data = b"hello hostd";
@@ -633,6 +648,7 @@ mod tests {
         assert_eq!(read_back, data);
     }
 
+    #[cfg(feature = "hostd-transport")]
     #[tokio::test]
     async fn test_request_send_recv_roundtrip() {
         let req = HostdRequest::Ping;
@@ -644,6 +660,7 @@ mod tests {
         assert!(matches!(parsed, HostdRequest::Ping));
     }
 
+    #[cfg(feature = "hostd-transport")]
     #[tokio::test]
     async fn test_response_send_recv_roundtrip() {
         let resp = HostdResponse::Ok;

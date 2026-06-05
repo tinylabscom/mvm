@@ -54,11 +54,32 @@ Release signing. `pgp`/`sequoia` is a large closure for a sign-and-verify a rele
 
 ### Task B5: drop `tokio` from `mvm-core`'s default closure (folds in plan 121's "runtime-free core" follow-up)
 
-`mvm-core` carries `tokio` (`io-util` base + feature-gated `rt`/`net`/`fs`/`sync`) and has since the first workspace import — so CLAUDE.md's "mvm-core is runtime-free" was untrue (plan 121 reconciled the *wording*; this task makes it *true*). The only unconditional async surface in core is `core::framing`'s `read_json_frame`/`write_json_frame` (`tokio::io`), whose **only callers are the 4 `mvm-hostd` UDS channels** (supervisor proxy + broker / host-signer / audit-signer).
+`mvm-core` carries `tokio` (`io-util` base + feature-gated `rt`/`net`/`fs`/`sync`) and has since the first workspace import — so CLAUDE.md's "mvm-core is runtime-free" was untrue (plan 121 reconciled the *wording*; this task makes it *true*).
 
-- [ ] **Step 1:** Audit core's `tokio` users — `cargo tree -i tokio` + grep `tokio::` under `crates/mvm-core/src`: `core::framing` (unconditional) plus whatever the feature-gated `rt`/`net`/`fs`/`sync` features serve. Write down each + its consumer.
-- [ ] **Step 2:** Move `core::framing` → `mvm-hostd` (`mvm_hostd::framing`), where its only callers live; update the 4 channel call sites + the `services/frame.rs` adapter. Relocate or feature-gate any remaining core `tokio` users so the **default** `mvm-core` build pulls no runtime. (Coordinate with **plan 122 Task A0**, which extends `framing` with the auth+encryption seam — whichever lands first, the other operates on framing's then-current home.)
-- [ ] **Step 3:** Failing test → gate: `cargo tree -p mvm-core -e no-dev | grep -q tokio` must be **empty**; fold the assertion into D1's `check-forbidden-deps` so core can't silently re-acquire a runtime. Flip CLAUDE.md's `mvm-core` line back to the now-true "no async/runtime deps in the default build." Commit.
+**Scope correction (the Step-1 audit found B5's premise wrong).** There are **two** unconditional async surfaces in core's default build, not one:
+
+1. **`core::framing`** (`read_json_frame`/`write_json_frame`, `tokio::io`) — the live transport for the 4 `mvm-hostd` UDS channels (supervisor proxy + broker / host-signer / audit-signer). mvmd does not use it.
+2. **`protocol::protocol`'s hostd IPC transport** (`read_frame`/`write_frame`/`send_request`/`recv_request`/`send_response`/`recv_response`, `tokio::io`) — the live **mvm↔mvmd** wire contract. mvmd's `mvmd-agent` (client) and `mvmd-runtime` (server + `mvm-hostd` bin) consume it via the `mvmctl::core::protocol` facade. The `HostdRequest`/`HostdResponse` types are sync serde and stay in core unconditionally; only the async fns need gating.
+
+The mvm-repo's apparent third consumer — a local `mvm-hostd` daemon at `crates/mvm/src/bin/mvm-hostd.rs` + `crates/mvm/src/hostd/` — was **dead source**: git-tracked but excluded from every build target (`autobins = false` + no `[[bin]]`; no `mod hostd` in `mvm/src/lib.rs`). `cargo build -p mvm` emitted no such binary. Deleted in PR-1. So after PR-1 the protocol transport has **zero compiled in-repo consumers** — mvmd is the sole one, which is why surface 2 can't simply move or delete, only feature-gate + cross-repo opt-in.
+
+**Sequencing — three PRs, because surface 2's de-default touches mvmd.** Workspace feature unification means `cargo tree -p mvm-core` reflects any member that enables `hostd-transport`; so the gate can only pass once no mvm-repo member enables it (mvmd is a separate workspace and doesn't count).
+
+**PR-1 (this branch — DONE):**
+- [x] **Step 1:** Audited core's `tokio` users (`cargo tree -i tokio` + grep `tokio::` under `crates/mvm-core/src`). Found the two surfaces above; confirmed framing's 4 callers and the protocol transport's mvmd-only consumer; confirmed the local `mvm-hostd` daemon is uncompiled dead source.
+- [x] **Step 2a — framing:** moved `core::framing` → `mvm_hostd::framing`; updated the 4 channel call sites + the `services/frame.rs` adapter. (Coordinate with **plan 122 Task A0**, which extends `framing` with the auth+encryption seam — A0 is unstarted as of 2026-06-04 and operates on framing's new `mvm-hostd` home.)
+- [x] **Step 2b — protocol transport:** gated the 6 async fns + `MAX_FRAME_SIZE` + their 3 `#[tokio::test]`s behind a new `hostd-transport` feature; `HostdRequest`/`HostdResponse`/`HOSTD_SOCKET_PATH`/`PROTOCOL_VERSION` stay unconditional. Made `mvm-core`'s `tokio` `optional`, pulled by `hostd-transport` + `manifest-verify`. `hostd-transport` is **in `default`** for now so mvmd keeps building unchanged; added a dev-dep `tokio` (`macros`/`rt`/`io-util`) so the gated tests build regardless of features.
+- [x] **Step 2c — dead code:** deleted `crates/mvm/src/bin/mvm-hostd.rs` + `crates/mvm/src/hostd/`.
+- [x] **Step 2d — facade feature:** added `hostd-transport = ["mvm-core/hostd-transport"]` to the root `mvmctl` package. Inert here (mvm-core still defaults the feature on), but it makes the feature reachable through the facade so mvmd can opt in **before** PR-2 de-defaults it — keeping the cross-repo rollout acyclic.
+- [x] Verified: `mvm-core --no-default-features` compiles **and `cargo tree -p mvm-core --no-default-features -e no-dev` carries no tokio**; `manifest-verify` alone builds; workspace build + `clippy -D warnings` + nightly fmt + 4424 tests + doctests green (4 known macOS-dev env failures only).
+
+**mvmd PR (cross-repo, BEFORE PR-2):**
+- [ ] In mvmd, enable `mvm-core/hostd-transport` explicitly where mvmd depends on the facade (mvmd-agent + mvmd-runtime; one feature line each — they already use these symbols unconditionally).
+
+**PR-2 (mvm, AFTER mvmd opts in):**
+- [ ] Remove `hostd-transport` from `mvm-core`'s `default`. Now the default `mvm-core` build is runtime-free.
+- [ ] Gate: `cargo tree -p mvm-core -e no-dev | grep -q tokio` must be **empty**; fold the assertion into D1's `check-forbidden-deps` so core can't silently re-acquire a runtime. Ensure CI exercises the `hostd-transport` tests via `--all-features` (or an explicit `-p mvm-core --features hostd-transport` lane) so the gated transport tests don't silently stop running.
+- [ ] Flip CLAUDE.md's `mvm-core` line back to the now-true "no async/runtime deps in the default build."
 
 ## Phase C — unify duplicate majors
 

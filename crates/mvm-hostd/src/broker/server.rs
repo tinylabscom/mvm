@@ -122,21 +122,21 @@ async fn handle_connection(
 /// Read a length-prefixed JSON frame. Enforces the max-frame-bytes cap
 /// before allocating the body buffer (Plan 104 §"Capability gating"
 /// gate 1).
-// Length-prefixed JSON framing lives in `mvm_core::framing` (plan 121
-// B4); these wrappers keep the broker error context on the shared
-// transport. The cap-before-alloc gate is enforced in core.
+// Length-prefixed JSON framing lives in `crate::framing` (plan 126 B5;
+// was `mvm_core::framing`); these wrappers keep the broker error context
+// on the shared transport. The cap-before-alloc gate is enforced there.
 pub async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,
 ) -> Result<T> {
-    mvm_core::framing::read_json_frame(stream, max_frame_bytes)
+    crate::framing::read_json_frame(stream, max_frame_bytes)
         .await
         .context("mvm-broker frame read failed")
 }
 
 /// Write a length-prefixed JSON frame.
 pub async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
-    mvm_core::framing::write_json_frame(stream, value)
+    crate::framing::write_json_frame(stream, value)
         .await
         .context("mvm-broker frame write failed")
 }

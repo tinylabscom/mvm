@@ -18,6 +18,11 @@
 
 pub mod audit_signer;
 pub mod broker;
+/// Length-prefixed message framing (4-byte BE length + body,
+/// cap-before-alloc) for the same-uid UDS control channels. Relocated
+/// from `mvm_core::framing` (plan 126 B5) so `mvm-core`'s default build
+/// pulls no async runtime. ADR-066 §5.
+pub mod framing;
 pub mod host_signer;
 pub mod jailer;
 pub mod supervisor;
