@@ -99,10 +99,12 @@ impl App {
     /// a `Command` argv or a `Function` dispatch target. The IR cannot
     /// represent "no declared entrypoint" (validate() rejects empty
     /// `entrypoints`), so for any validated SDK app this is true; the
-    /// predicate is the single named signal the compile gate (B3) and the
-    /// admission gate (B4) read instead of each re-deriving "is there a
-    /// command?" inline. An idle image (`["sleep","infinity"]`) IS a
-    /// declared command, so it is unaffected.
+    /// predicate is the single named signal the compile gate (B3) reads
+    /// instead of re-deriving "is there a command?" inline. The admission
+    /// gate (B4) enforces the same property one layer down, via the
+    /// `SignedImageRef.entrypoint_present` wire field (a different crate —
+    /// no shared symbol crosses the boundary). An idle image
+    /// (`["sleep","infinity"]`) IS a declared command, so it is unaffected.
     pub fn has_declared_entrypoint(&self) -> bool {
         !self.entrypoints.is_empty()
     }
