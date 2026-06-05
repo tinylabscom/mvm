@@ -82,6 +82,20 @@ ship it is sealed completely for production.*
 
 ## WS-A — Conforming per-call wrapper (make `RunEntrypoint` work)
 
+> **STATUS (2026-06-05): conformance is already satisfied on `main`** — this
+> is a *verify*, not a *build*. Investigation found the factory
+> (`nix/lib/factories/mkFunctionService.nix:160-173`) already bakes
+> `/etc/mvm/entrypoint` = the absolute path `/usr/lib/mvm/wrappers/runner`
+> (0555) + the python wrapper carries `#!/usr/bin/env python3`; the ext4 is
+> **root:root** (confirmed via debugfs on the shipped image); the PID-1↔marker
+> overload is resolved by the `bootCommand` split; and the generated function
+> flake wires `isFunction → mkFunctionService → bootCommand + marker`
+> correctly. Corroborated by memory `project_function_workload_entrypoint_collision`
+> (**RESOLVED 2026-06-02, `core_demo_e2e` green**). **The only open WS-A item
+> is A4**: assert a full `RunEntrypoint` round-trip (`invoke greet("ari") →
+> "hello ari"`), since `core_demo_e2e` pings the agent but may not exercise
+> the function dispatch. A0/A1/A2/A3/A5 are satisfied by existing code.
+
 Bring the factory-baked wrapper into conformance with
 `EntrypointPolicy::production()` so a sealed function image serves calls.
 
