@@ -17,12 +17,18 @@ env:
 jobs:
   build:
     strategy:
+      # Each target publishes independently — one target's failure must not
+      # cancel the others, or a single flaky job strands the whole release.
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+          # macos-latest is Apple Silicon; an x86_64 mvmctl links libkrun
+          # (Plan 87 W5) and can't link the host's arm64 dylib, so build
+          # the Intel binary on an Intel runner where libkrun is native.
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
@@ -45,6 +51,15 @@ jobs:
       # same as the ci.yml Lint job. Without this the release binary build
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
+
+      # macOS mvmctl links libkrun directly (Plan 87 W5): build.rs runs
+      # bindgen against libkrun.h and emits `-lkrun`, and the runtime
+      # kernel-extraction path needs libkrunfw. Both ship via the slp/krun
+      # Homebrew tap. Without them the build panics in libkrun-sys/build.rs
+      # ("libkrun.h was not found"). Linux uses Firecracker — no libkrun.
+      - name: Install libkrun (macOS backend FFI)
+        if: runner.os == 'macOS'
+        run: brew install slp/krun/libkrun slp/krun/libkrunfw
 
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
