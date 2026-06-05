@@ -482,6 +482,42 @@ fn nsurl(path: &str) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(path))
 }
 
+/// Ensure `writable_rootfs` is a writable per-instance disk holding the
+/// rootfs at `rootfs_path`, for Virtualization.framework to attach.
+///
+/// The production caller (`apple_container::start`) already CoW-clones the
+/// source into this exact per-instance path via `prepare_instance_rootfs`,
+/// so here `rootfs_path` *is* `writable_rootfs`. The old "copy the read-only
+/// source to a writable location" logic then deleted the source (its
+/// stale-file guard) and failed `copy rootfs: ENOENT` copying a file onto
+/// itself — the default-microvm download path never booted. Skip the copy
+/// when the source already is the destination; otherwise copy the (typically
+/// read-only) source in. Either way leave the result writable: VZ needs
+/// read-write access and a CoW clone can inherit a read-only source's mode.
+fn ensure_writable_rootfs(rootfs_path: &str, writable_rootfs: &Path) -> Result<(), String> {
+    let already_in_place = matches!(
+        (
+            Path::new(rootfs_path).canonicalize(),
+            writable_rootfs.canonicalize(),
+        ),
+        (Ok(a), Ok(b)) if a == b
+    );
+    if !already_in_place {
+        // A previous run may have left a (possibly locked) copy — replace it.
+        if writable_rootfs.exists() {
+            let _ = std::fs::remove_file(writable_rootfs);
+        }
+        std::fs::copy(rootfs_path, writable_rootfs).map_err(|e| format!("copy rootfs: {e}"))?;
+    }
+    let mut perms = std::fs::metadata(writable_rootfs)
+        .map_err(|e| format!("metadata: {e}"))?
+        .permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(writable_rootfs, perms).map_err(|e| format!("chmod: {e}"))?;
+    Ok(())
+}
+
 pub fn start_vm(
     id: &str,
     kernel_path: &str,
@@ -513,25 +549,15 @@ pub fn start_vm(
         }
     }
 
-    // Copy rootfs to a writable location — the Nix store copy is read-only
-    // but Virtualization.framework needs read-write access for the disk.
+    // Per-instance writable disk for Virtualization.framework to attach.
+    // The production caller already CoW-cloned the source into this exact
+    // path (`apple_container::prepare_instance_rootfs`); `ensure_writable_rootfs`
+    // handles that (skip the redundant copy) and the fresh-read-only-source
+    // case alike.
     let vm_dir = vms_root().join(id);
     std::fs::create_dir_all(&vm_dir).map_err(|e| format!("create vm dir: {e}"))?;
     let writable_rootfs = vm_dir.join("rootfs.ext4");
-    // Always create a fresh copy — previous runs may have left a locked file
-    if writable_rootfs.exists() {
-        let _ = std::fs::remove_file(&writable_rootfs);
-    }
-    {
-        std::fs::copy(rootfs_path, &writable_rootfs).map_err(|e| format!("copy rootfs: {e}"))?;
-        // Ensure writable
-        let mut perms = std::fs::metadata(&writable_rootfs)
-            .map_err(|e| format!("metadata: {e}"))?
-            .permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-        std::fs::set_permissions(&writable_rootfs, perms).map_err(|e| format!("chmod: {e}"))?;
-    }
+    ensure_writable_rootfs(rootfs_path, &writable_rootfs)?;
     let rootfs_path = writable_rootfs.to_str().unwrap_or(rootfs_path);
 
     unsafe {
@@ -1028,6 +1054,44 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn ensure_writable_rootfs_in_place_when_source_is_destination() {
+        // Regression: the default-microvm download path pre-clones the rootfs
+        // into the per-instance path and hands THAT to start_vm. Copying it
+        // onto itself used to delete the source then fail `copy rootfs: ENOENT`.
+        let dir = std::path::PathBuf::from(format!("/tmp/mvmac-{}", unique_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rootfs = dir.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"disk-bits").unwrap();
+        // Read-only source, to prove the helper restores read-write.
+        let mut ro = std::fs::metadata(&rootfs).unwrap().permissions();
+        ro.set_readonly(true);
+        std::fs::set_permissions(&rootfs, ro).unwrap();
+
+        ensure_writable_rootfs(rootfs.to_str().unwrap(), &rootfs).expect("in-place ok");
+
+        assert!(rootfs.exists(), "source must survive the in-place case");
+        assert_eq!(std::fs::read(&rootfs).unwrap(), b"disk-bits");
+        assert!(!std::fs::metadata(&rootfs).unwrap().permissions().readonly());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_writable_rootfs_copies_distinct_source() {
+        let dir = std::path::PathBuf::from(format!("/tmp/mvmac-{}", unique_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.ext4");
+        std::fs::write(&src, b"source").unwrap();
+        let dst = dir.join("vms/x/rootfs.ext4");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+
+        ensure_writable_rootfs(src.to_str().unwrap(), &dst).expect("copy ok");
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"source");
+        assert!(src.exists(), "distinct source must be preserved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Run `body` with `$HOME` pointed at a short temp dir so the listener
     /// and readiness probes don't touch the real `~/.mvm/vms/`.
