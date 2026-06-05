@@ -30,7 +30,7 @@ const TARGET_ARCH: TargetArch = TargetArch::aarch64;
 /// asserted-absent in `lib.rs::tests` as defense-in-depth.
 ///
 /// Architecture divergence: `stat` / `lstat` map to `SYS_stat` /
-/// `SYS_lstat` on x86_64 and are folded into `SYS_fstatat` on aarch64
+/// `SYS_lstat` on x86_64 and are folded into `SYS_newfstatat` on aarch64
 /// (aarch64 doesn't expose the path-stat syscalls separately).
 /// `epoll_wait` maps to `SYS_epoll_wait` on x86_64 and is folded into
 /// `SYS_epoll_pwait` on aarch64 for the same reason. The fold happens
@@ -91,10 +91,11 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("openat", libc::SYS_openat),
     ("close", libc::SYS_close),
     // arch divergence: aarch64 does not expose `stat` / `lstat` as
-    // their own syscalls — both fold into `fstatat`. The policy layer
-    // still references the names `stat` / `lstat` for readability.
-    ("stat", libc::SYS_fstatat),
-    ("lstat", libc::SYS_fstatat),
+    // their own syscalls — both fold into `newfstatat` (syscall 79; libc
+    // exposes no bare `SYS_fstatat` on aarch64). The policy layer still
+    // references the names `stat` / `lstat` for readability.
+    ("stat", libc::SYS_newfstatat),
+    ("lstat", libc::SYS_newfstatat),
     ("fstat", libc::SYS_fstat),
     ("socket", libc::SYS_socket),
     ("bind", libc::SYS_bind),
