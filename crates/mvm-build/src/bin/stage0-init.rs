@@ -7,15 +7,15 @@
 //! seed carries `nix` + `bash` + `curl` + `xz` + `nss-cacert` (CA certs) in
 //! its closure — no Alpine, no apk, no external busybox.
 //!
-//! Networking is **not** our job: Stage 0's libkrun launch sets
-//! `NET_FLAG_DHCP_CLIENT` (`libkrun_builder::apply_networking_mode` →
-//! `configure_with_gateway`), so the guest comes up with a fully-configured
-//! eth0 + DHCP + DNS. We only: mount the pseudo-filesystems + the host
-//! virtiofs shares, make `/nix` writable (overlay the read-only seed store
-//! with a tmpfs upper — plan 160 0a; the persistent ext4 disk is a later
-//! refinement that needs mkfs, which the seed gets from `nix build
-//! e2fsprogs` once this path is proven), then run `nix build` of the
-//! in-repo builder-VM flake, copy the artifacts to `/out`, and power off.
+//! What it does: mount the pseudo-filesystems + the host virtio-fs shares;
+//! make `/nix` a writable, non-virtiofs store (copy the seed closure into a
+//! tmpfs and bind it over `/nix` — overlayfs-over-virtiofs writes fail in
+//! libkrun, and nix needs a writable store); write `/etc/resolv.conf`
+//! (libkrun's `NET_FLAG_DHCP_CLIENT` brings up eth0 but NOT DNS, so point it
+//! at gvproxy's gateway); then `nix build` the in-repo builder-VM flake,
+//! copy the artifacts to `/out`, and power off. (Proven end-to-end on
+//! aarch64; the persistent ext4 store is an optional RAM optimization —
+//! plan 160 0b/follow-up.)
 //!
 //! Mirrors the contract of `crates/mvm-build/src/stage0/init.sh` (the
 //! Alpine variant) minus apk/networking; the host (`stage0::run_stage0`)

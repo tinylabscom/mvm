@@ -66,7 +66,11 @@ Most of it is already written in `crates/mvm-build/src/bin/mvm-host-vm-init.rs` 
 
 So `stage0-init` = `mount_pseudofs` + virtiofs shares + the (already-written) overlay nix-store on `/dev/vda` + env + `nix build <flake>` + copy `/out` + `poweroff` (nix `reboot`). The `e2fsprogs` worry is gone too — the overlay upper is formatted with the same `format_ext4` mvm-host-vm-init already uses (no external mkfs). **Architecture choice:** factor the shared mount/overlay/nix-store helpers out of `mvm-host-vm-init.rs` into a `mvm-build` module both bins use (preferred, avoids duplication) — but extract carefully (that bin is validated/working).
 
-#### 0b boot loop progress (2026-06-05) — proven end-to-end except the store FS
+#### 0b ACHIEVED (2026-06-05) ✅ — nix-seed Stage 0 boots + builds end-to-end
+
+A cold `MVM_STAGE0_SEED=nix MVM_BUILDER_BACKEND=libkrun mvmctl dev up` on this aarch64 host **completed successfully**: downloaded the pinned nix tarball → materialized the seed (`/init`=stage0-init ELF) → `stage0-init` ran nix → substituted the toolchain from cache.nixos.org → **built the builder-VM image (`vmlinux` 31M + `rootfs.ext4` 743M)** → the builder VM booted from it → `[mvm] Dev environment ready (libkrun)`. No Alpine, no apk, no pgp. The **tmpfs store did NOT OOM** on the full build, so the simple copy-to-tmpfs holds for now (the persistent ext4 disk is an optimization, not a blocker). The store-FS fix below (copy-to-tmpfs, option a) is what landed; option b (ext4 disk) is the optional follow-up.
+
+#### 0b boot loop progress (2026-06-05) — the iteration that got there
 
 Drove a real `MVM_STAGE0_SEED=nix MVM_BUILDER_BACKEND=libkrun` Stage-0 boot on this aarch64 host. Confirmed working: nix tarball download (sha-pinned) → seed materialize (`/init` = the static `stage0-init` ELF, `/nix/store` = the nix closure) → libkrun boot → **`stage0-init` runs as PID 1**: pseudo-fs + virtiofs mounts ✓, finds nix ✓, **`nix --version` runs ✓** (`nix (Nix) 2.31.1`). Fixed three real bugs along the way (the minimal seed rootfs lacks dirs the Alpine minirootfs had): create every mount target before `mount(2)` (`/tmp`,`/run`,`/run/nix-upper`); write `/etc/resolv.conf` (gvproxy DNS `192.168.127.1` — `NET_FLAG_DHCP_CLIENT` brings up eth0 but doesn't write resolv.conf, so "networking is free" was half-right); `NIX_REMOTE=` for single-user.
 
@@ -77,9 +81,9 @@ Drove a real `MVM_STAGE0_SEED=nix MVM_BUILDER_BACKEND=libkrun` Stage-0 boot on t
 #### De-risk-first sequence (do NOT rip out Alpine until the new path boots)
 
 Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep Alpine as the fallback until proven:
-- [ ] **0a:** write `stage0-init` (reusing mvm-host-vm-init's mount + eth0-up; new net-config); cross-compile + embed via `mvm-cli/build.rs` (ADR-065 pattern).
-- [ ] **0b:** add the nix-tarball seed asset *alongside* Alpine behind a flag/env (`MVM_STAGE0_SEED=nix|alpine`); prove a real Stage-0 libkrun boot on aarch64 with the nix seed gets networking + completes `nix build` + emits `/out/{vmlinux,rootfs.ext4}`. **This is the gate.**
-- [ ] **0c:** ADR for the bootstrap trust model; then Tasks 1–4 below rip out Alpine/apk/pgp and make the nix seed the only path.
+- [x] **0a:** wrote `stage0-init`; cross-compiled + embedded via `SEED_BINARIES` + `mvm-cli/build.rs`.
+- [x] **0b:** added the nix-tarball seed *alongside* Alpine behind `MVM_STAGE0_SEED=nix|alpine`; **proved a full cold `dev up` on aarch64 builds the builder VM via the nix seed + reaches "Dev environment ready"** (no Alpine/apk/pgp). ✅
+- [ ] **0c:** keep BOTH paths (nix behind the flag, **Alpine default**) until nix is validated in CI + on x86_64 — only THEN flip the default + rip out Alpine/apk/pgp/init.sh/the Alpine key (Tasks 1–4) under an ADR for the bootstrap trust model. The rip-out is no longer "after one boot" — it needs broader validation first; this is its own staged follow-up, not part of the boot-proof.
 
 ## Build sequence (after Phase 0)
 
