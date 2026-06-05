@@ -17,11 +17,14 @@ runs:
         ZIG_VERSION=0.13.0
         OS=$(uname -s)
         ARCH=$(uname -m)
+        # macOS `uname -m` reports arm64; zig's release tarballs are named aarch64.
+        [ "$ARCH" = "arm64" ] && ARCH=aarch64
         if [ "$OS" = "Darwin" ]; then
           TARBALL="zig-macos-${ARCH}-${ZIG_VERSION}.tar.xz"
         else
           TARBALL="zig-linux-${ARCH}-${ZIG_VERSION}.tar.xz"
         fi
+        sudo mkdir -p /opt
         curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}" \
           | sudo tar xJ -C /opt
         DIR="${TARBALL%.tar.xz}"
