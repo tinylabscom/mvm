@@ -40,20 +40,17 @@ fn main() {
     manifest.extend(read_seed_binaries(&workspace_root));
     let mut entries = Vec::new();
 
-    // A Linux host whose arch matches the target arch builds the musl bins
-    // natively (`cargo build --target <arch>-musl` — these are libc-only and
-    // statically musl-linked, so no zig, no musl-gcc). Cross cases (macOS →
-    // Linux, or a future x-arch guest) fall through to zigbuild. Plan 164:
-    // the previous check compared the *whole* gnu host triple against the
-    // musl target, so it was always false on Linux and forced zigbuild
-    // everywhere — needlessly requiring zig on Linux contributor hosts.
-    let host_triple = std::env::var("HOST").unwrap();
-    let host_arch = host_triple.split('-').next().unwrap_or_default();
-    let target_arch = strip_glibc(&pin.target)
-        .split('-')
-        .next()
-        .unwrap_or_default();
-    let native = host_triple.contains("linux") && host_arch == target_arch;
+    // The host-vm bins are statically musl-linked and embedded for the host
+    // arch (`pin.target`, picked from CARGO_CFG_TARGET_ARCH — Plan 164). They
+    // are always cross-compiled with cargo-zigbuild, even when host arch ==
+    // target arch: `ring` (pulled transitively) compiles C, so the musl target
+    // needs a musl *C* cross-compiler. zig supplies it; a plain
+    // `cargo build --target <arch>-musl` would instead demand a system
+    // `<arch>-linux-musl-gcc`, which neither CI nor the documented contributor
+    // setup carries (both standardize on zig + cargo-zigbuild — see CLAUDE.md
+    // "Host dependencies"). zigbuild is the single portable path. (Plan 164
+    // briefly added a same-arch plain-`cargo build` fast-path on the false
+    // premise that the bins are C-free; it broke CI, which has no musl-gcc.)
 
     // Fast path for local test/dev iteration: skip the nested
     // `cargo zigbuild --release` cross-compile of the host-vm binaries and
@@ -80,14 +77,6 @@ fn main() {
         if skip_embed {
             std::fs::write(&out_file, b"")
                 .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
-        } else if native {
-            run_cargo_build(
-                &workspace_root,
-                &host_target_dir,
-                name,
-                &pin.target,
-                &out_file,
-            );
         } else {
             run_cargo_zigbuild(
                 &workspace_root,
@@ -251,41 +240,6 @@ fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, o
              and `brew install zig` (or equivalent)",
         );
     assert!(status.success(), "cargo zigbuild failed for {pkg}");
-    let built = target_dir
-        .join(strip_glibc(target))
-        .join("release")
-        .join(pkg);
-    std::fs::copy(&built, out)
-        .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
-}
-
-fn run_cargo_build(root: &Path, target_dir: &Path, pkg: &str, target: &str, out: &Path) {
-    eprintln!(
-        "[build.rs] cargo build --release --target {t} -p mvm-build --bin {pkg}",
-        t = strip_glibc(target)
-    );
-    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
-    let status = Command::new(&cargo)
-        .args([
-            "build",
-            "--release",
-            "--target",
-            strip_glibc(target),
-            "-p",
-            "mvm-build",
-            "--bin",
-            pkg,
-        ])
-        .env("RUSTC", &rustc)
-        // Dedicated target dir — see the deadlock note in main().
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .current_dir(root)
-        .status()
-        .expect("spawn `cargo build`");
-    assert!(status.success(), "cargo build failed for {pkg}");
     let built = target_dir
         .join(strip_glibc(target))
         .join("release")
