@@ -109,6 +109,10 @@ exclude = [
     # targets on release-tag pushes + nightly cron + manual
     # dispatch only (not on every PR — the lane is heavy).
     "crates/mvm-vm-host/fuzz",
+    # Plan 141 / ADR-064 — gateway packet parse + payload-rebuild fuzz
+    # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
+    # CI gate at `.github/workflows/security.yml::fuzz`.
+    "crates/mvm-hostd/fuzz",
     # ADR-070 — browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
     # it depends on the in-workspace `mvm-verify` crate by path and is
@@ -227,6 +231,11 @@ notify-debouncer-mini = "0.5"
 # the canonical CIDR string ("10.0.0.0/24"), which is the wire
 # format the policy bundle TOML uses.
 ipnet = { version = "2", features = ["serde"] }
+# Plan 141 / ADR-064 — EthernetII/IPv4/IPv6/TCP/UDP parse + payload rebuild
+# for the gateway packet-observer pipeline. Pure-Rust, zero transitive
+# deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
+# so a mature parser beats a hand-rolled one.
+etherparse = "0.20"
 # Plan 74 W2 — mvm-guest-netinit installs kernel blackhole routes
 # for `MANDATORY_DENY_RANGES` inside every microVM. rtnetlink wraps
 # the AF_NETLINK socket and the RTM_NEWROUTE message construction;

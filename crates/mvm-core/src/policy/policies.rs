@@ -50,6 +50,33 @@ pub struct NetworkPolicy {
     /// pre-Plan-113 (no fan-out, chain entries unchanged).
     #[serde(default)]
     pub observers: Vec<String>,
+    /// Plan 141 / ADR-064 — opt-in per-VM flow-byte log. `None` (default)
+    /// = off. When set, the bridge appends length-prefixed payload records
+    /// to `~/.mvm/audit/flow-bytes/<tenant>/<vm>-<utc>.bin`; the signed
+    /// chain references each record by `(file, record_id, sha256)` without
+    /// inlining payload bytes.
+    #[serde(default)]
+    pub flow_byte_log: Option<FlowByteLogSpec>,
+}
+
+/// Retention + scope for the opt-in flow-byte log (Plan 141 / ADR-064).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowByteLogSpec {
+    /// Hard cap on bytes-on-disk per VM before rotation drops oldest.
+    pub max_disk_bytes: u64,
+    /// Records older than this are swept by `mvmctl cache prune`.
+    pub max_age_days: u32,
+    /// Which directions to log.
+    pub directions: FlowByteLogDirections,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowByteLogDirections {
+    Egress,
+    Ingress,
+    Both,
 }
 
 /// Wire-format L4 rule row inside `[[network.l4]]`. The supervisor's
@@ -236,5 +263,27 @@ port_hi  = 443
         let p: NetworkPolicy = toml::from_str(toml).expect("parse v1 bundle");
         assert_eq!(p.l4.len(), 1);
         assert!(p.observers.is_empty());
+    }
+
+    #[test]
+    fn network_policy_flow_byte_log_defaults_off() {
+        // A bundle without the field still parses and logging is off.
+        let np = NetworkPolicy::default();
+        assert!(np.flow_byte_log.is_none());
+        let p: NetworkPolicy = toml::from_str("preset = \"open\"\n").expect("parse without field");
+        assert!(p.flow_byte_log.is_none());
+    }
+
+    #[test]
+    fn flow_byte_log_spec_serde_roundtrip() {
+        let spec = FlowByteLogSpec {
+            max_disk_bytes: 1_000_000,
+            max_age_days: 7,
+            directions: FlowByteLogDirections::Egress,
+        };
+        let toml_str = toml::to_string(&spec).unwrap();
+        let back: FlowByteLogSpec = toml::from_str(&toml_str).unwrap();
+        assert_eq!(spec, back);
+        assert!(toml_str.contains("directions = \"egress\""));
     }
 }

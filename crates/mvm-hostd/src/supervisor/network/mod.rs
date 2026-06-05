@@ -32,11 +32,18 @@
 //! in Plan 102 W6.A's original commit) so external observer impls can
 //! receive `&FlowEvent` references through the Observer trait.
 
+use crate::supervisor::audit::FlowDirection;
 use crate::supervisor::gateway_bridge::FlowEvent;
+use crate::supervisor::network::packet::ParsedPacket;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod flow_count;
+// Plan 141 / ADR-064 — backend-agnostic packet-observer core.
+pub mod flow_byte_log;
+pub mod latency;
+pub mod packet;
+pub mod pipeline;
 
 /// Maximum number of observers per VM. ADR-064 §Decision: hard cap of 8
 /// (each observer is a synchronous callback in the signer task's hot path;
@@ -72,11 +79,57 @@ impl ProviderCapabilities {
     }
 }
 
+/// Per-direction registration filter (Plan 141 / ADR-064 Q9). An observer
+/// that only inspects outbound traffic declares `Directions::Egress` so
+/// the runner never hands it inbound bytes — least-privilege blast-radius
+/// containment (claim 1), not just a perf win.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Directions {
+    Egress,
+    Ingress,
+    Both,
+}
+
+impl Directions {
+    pub fn includes(self, dir: FlowDirection) -> bool {
+        matches!(self, Directions::Both)
+            || matches!(
+                (self, dir),
+                (Directions::Egress, FlowDirection::Egress)
+                    | (Directions::Ingress, FlowDirection::Ingress)
+            )
+    }
+}
+
+/// Verdict an observer returns from `on_packet` (Plan 141 / ADR-064).
+/// `Modify` carries the **new L4 payload** (not a raw frame); the bridge
+/// rebuilds IP length + L4 checksum around it via
+/// `packet::rebuild_with_payload`. First `Drop` wins and kills the flow;
+/// any `Modify` the bridge cannot safely emit also kills the flow
+/// (fail-closed, Q8).
+#[derive(Debug)]
+pub enum Verdict {
+    Forward,
+    Drop,
+    Modify(Vec<u8>),
+}
+
+/// Context the bridge presents to `on_packet`. Borrowed; cheap to build
+/// per packet. `tenant` mirrors ADR-064 §Decision 9's single-tenant
+/// invariant (one guest = one workload).
+#[derive(Debug, Clone, Copy)]
+pub struct PacketCtx<'a> {
+    pub vm_name: &'a str,
+    pub tenant: &'a str,
+    pub direction: FlowDirection,
+    pub flow_id: &'a str,
+}
+
 /// Synchronous observer callback. Implementations MUST NOT panic in hot
-/// path (the signer task wraps each call in `catch_unwind`, but a panic
-/// per event is wasteful). Implementations MUST be cheap (microseconds);
-/// expensive work should buffer + defer to a background task the observer
-/// owns.
+/// path (the signer task / packet runner wrap each call in `catch_unwind`,
+/// but a panic per event is wasteful). Implementations MUST be cheap
+/// (microseconds); expensive work should buffer + defer to a background
+/// task the observer owns.
 ///
 /// Visibility is `pub` because Task 3 exposes observer references through
 /// `BridgeConfig.observers` (a `pub` field on a `pub` struct), and
@@ -87,6 +140,22 @@ pub trait Observer: Send + Sync {
     fn name(&self) -> &'static str;
     fn required_capabilities(&self) -> RequiredCapabilities;
     fn on_flow_event(&self, event: &FlowEvent);
+
+    /// Directions this observer wants `on_packet` for (Plan 141 Q9).
+    /// Default `Both` keeps flow-event-only observers untouched.
+    fn directions(&self) -> Directions {
+        Directions::Both
+    }
+
+    /// Per-packet hook (Plan 141 / ADR-064). Default `Forward` so an
+    /// observer that only implements `on_flow_event` is a pass-through on
+    /// the payload path. MUST be cheap + MUST NOT block; a panic is caught
+    /// by the runner and treated as `Forward` for this observer. Requires
+    /// `RequiredCapabilities { payload_tap: true }` to be admitted on the
+    /// payload path (capability-gated at `Pipeline::observe`).
+    fn on_packet(&self, _ctx: &PacketCtx<'_>, _pkt: &ParsedPacket<'_>) -> Verdict {
+        Verdict::Forward
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -569,6 +638,46 @@ mod tests {
             flow_events: true,
             payload_tap: true,
         }
+    }
+
+    #[test]
+    fn directions_includes_matches_expected() {
+        use crate::supervisor::audit::FlowDirection::{Egress, Ingress};
+        assert!(Directions::Both.includes(Egress));
+        assert!(Directions::Both.includes(Ingress));
+        assert!(Directions::Egress.includes(Egress));
+        assert!(!Directions::Egress.includes(Ingress));
+        assert!(Directions::Ingress.includes(Ingress));
+        assert!(!Directions::Ingress.includes(Egress));
+    }
+
+    #[test]
+    fn default_observer_methods_are_forward_and_both() {
+        // An observer overriding nothing new gets Both + Forward, so
+        // flow-event-only observers keep working unchanged.
+        let obs = CountingObserver {
+            n: AtomicU32::new(0),
+            req: RequiredCapabilities::default(),
+        };
+        assert!(matches!(obs.directions(), Directions::Both));
+        let pkt = crate::supervisor::network::packet::ParsedPacket {
+            five_tuple: crate::supervisor::network::packet::FiveTuple {
+                proto: crate::supervisor::network::packet::L4Proto::Tcp,
+                src_ip: std::net::Ipv4Addr::LOCALHOST.into(),
+                dst_ip: std::net::Ipv4Addr::LOCALHOST.into(),
+                src_port: 1,
+                dst_port: 2,
+            },
+            l4_payload: b"abc",
+            raw_frame: b"abc",
+        };
+        let ctx = PacketCtx {
+            vm_name: "vm",
+            tenant: "t",
+            direction: crate::supervisor::audit::FlowDirection::Egress,
+            flow_id: "vm-egress",
+        };
+        assert!(matches!(obs.on_packet(&ctx, &pkt), Verdict::Forward));
     }
 
     #[test]

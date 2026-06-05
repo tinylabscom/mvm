@@ -174,6 +174,10 @@ impl Observer for FlowCountMetrics {
                 let key = reason.as_str().to_string();
                 *g.entry(key).or_insert(0) += 1;
             }
+            // Plan 141 — observer faults are a packet-path kill, not a flow
+            // lifecycle transition; this lifecycle-counting observer ignores
+            // them (the chain records the fault separately).
+            FlowEventKind::ObserverFault { .. } => {}
         }
         self.write_scrape_file();
     }

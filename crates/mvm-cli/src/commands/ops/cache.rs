@@ -169,6 +169,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Plan 141 — flow-byte-log retention sweep. Per-tenant subdirs
+            // under `<audit>/flow-bytes/` hold opt-in payload records;
+            // remove files older than the default window. No tenant policy
+            // is in scope at prune time, so use the conservative default.
+            const FLOW_BYTE_LOG_MAX_AGE_DAYS: u32 = 7;
+            let flow_bytes_dir = mvm_core::config::mvm_audit_dir().join("flow-bytes");
+            if dry_run {
+                if flow_bytes_dir.exists() {
+                    ui::info("(dry-run) Would sweep expired flow-byte-log records.");
+                }
+            } else {
+                match mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(
+                    &flow_bytes_dir,
+                    FLOW_BYTE_LOG_MAX_AGE_DAYS,
+                ) {
+                    Ok(n) => removed += n,
+                    Err(e) => ui::warn(&format!("flow-byte-log sweep failed: {e}")),
+                }
+            }
+
             for entry in walkdir(path)? {
                 let entry_path = entry.path();
                 // Remove temp files (mvm-lima-*, .tmp)
@@ -391,6 +411,29 @@ fn walkdir(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flow_byte_log_sweep_targets_audit_flow_bytes_dir() {
+        // The cache-prune wiring sweeps `<audit>/flow-bytes/`; assert that
+        // path contract (the supervisor writer must agree) and that the
+        // sweep helper removes an aged record while keeping a fresh one.
+        let dir = mvm_core::config::mvm_audit_dir().join("flow-bytes");
+        assert!(dir.ends_with("audit/flow-bytes"));
+
+        let root = tempfile::tempdir().unwrap();
+        let tenant = root.path().join("acme");
+        std::fs::create_dir_all(&tenant).unwrap();
+        std::fs::write(tenant.join("vm.bin"), b"x").unwrap();
+        // age = 0 (cutoff = now) removes the just-written file; large window keeps it.
+        let removed =
+            mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(root.path(), 0).unwrap();
+        assert_eq!(removed, 1);
+        std::fs::write(tenant.join("vm.bin"), b"x").unwrap();
+        let kept =
+            mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(root.path(), 3650)
+                .unwrap();
+        assert_eq!(kept, 0);
+    }
 
     #[test]
     fn stage0_cache_report_surfaces_blobs_and_builder_artifacts() {

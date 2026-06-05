@@ -1,271 +1,247 @@
-# Plan 141 — Vz payload tap + Rust-owned shuffle (closes ADR-064 §Decision 8)
+# Plan 141 — Backend-agnostic packet-observer core (`on_packet` / `Verdict`) for libkrun + Firecracker
 
-> **Status: design captured mid-brainstorm.** Q1–Q6 are owner-confirmed
-> architectural decisions; Q7 is drafted but unconfirmed; Q8–Q10 are
-> open. **This plan is not ready for execution** — resume the
-> brainstorm to close Q7–Q10, then re-render the Tasks section through
-> `superpowers:writing-plans`. The shape below is what the locked
-> decisions imply.
->
-> **RESOLVED with Plan 152 (2026-06-04 brainstorm) — scope split.** The
-> Vz arm of this plan is **superseded by Plan 152**. 152 makes the VZ
-> supervisor Rust-native (`objc2`), so Rust owns the VZ device *and* the
-> bridge in one process — the SCM_RIGHTS fd-handoff to a *surviving* Swift
-> supervisor (this plan's Q1–Q6 Vz mechanism) is unnecessary and would be
-> throwaway. **This plan is rescoped to its backend-agnostic core**
-> (`on_packet`/`Verdict`/etherparse observer pipeline) for **libkrun +
-> Firecracker** `payload_tap`; **Vz `payload_tap` is delivered in-process
-> by Plan 152.** The Swift-side files + Vz-specific Rust arm below are
-> retained for reference but **move to Plan 152**. Decision record:
-> ADR-064 §8. See [[project_vz_strong_support_direction]].
+> **For agentic workers:** REQUIRED SUB-SKILL: use
+> `superpowers:subagent-driven-development` (recommended) or
+> `superpowers:executing-plans`. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Close ADR-064 §Decision 8's "Vz catches up later" carve-out and
-land the Rust-owned-shuffle architecture across all production
-hypervisor backends. Vz post-this-plan reports
-`ProviderCapabilities { flow_events: true, payload_tap: true }`;
-observers that require `payload_tap` (egress redactor, hostname
-filter, rate limiter, future egress secret detector) work identically
-on libkrun, Firecracker, and Vz with one Rust implementation.
+**Goal:** Give the gateway audit bridge a synchronous packet-observation
+pipeline — `Observer::on_packet(ctx, pkt) -> Verdict { Forward | Drop |
+Modify(Vec<u8>) }`, parsed once per frame via `etherparse`, fanned out in
+policy order, with first-Drop-wins, per-VM `killed_flows`, fail-closed
+`Modify`, an opt-in flow-byte log, and per-observer Prometheus latency —
+wired into the **Passt (Firecracker)** and **LibkrunGvproxy (libkrun)**
+bridge variants. **No Vz changes** (delivered in-process by Plan 152).
 
-**Architecture (Q1–Q6 confirmed):**
+**Architecture:** A pure, socket-free `packet` module (parse + payload
+rebuild) and a pure `run_packet_pipeline` fan-out runner form the
+backend-agnostic core; each bridge variant feeds raw frames into that one
+runner. The runner reuses Plan 113's `catch_unwind` panic-isolation from
+`signer_task`. Observers stay **host-allowlisted, never tenant-shipped**
+(ADR-064 §7) — the existing `ObserverAllowlist` is untouched. Security
+spine: claim 1 (least-privilege `directions()` blast-radius containment),
+claim 10 (no untrusted bytes leave unobserved; `Modify` fails closed so a
+redactor can never leak).
 
-- **Rust owns the packet shuffle on every backend.** Per-backend code
-  becomes the smallest possible adapter that hands a data fd to
-  `gateway_bridge::run_bridge_inner`. Firecracker is already there.
-  Vz changes here: Swift's `BridgeWorker` deletes; Swift accepts an
-  SCM_RIGHTS fd-handoff from Rust and wraps the fd in `FileHandle` for
-  `VZFileHandleNetworkDeviceAttachment`. Future QEMU / AppleContainer /
-  Hyper-V backends inherit the pattern.
-- **Observer trait gains `on_packet(&self, ctx, pkt) -> Verdict`.**
-  `gateway_bridge` parses each frame once via `etherparse` (a workspace
-  dep) and hands observers `ParsedPacket { five_tuple, l4_payload,
-  raw_frame }`. The `raw_frame` slice is the escape hatch for the rare
-  L2-aware observer.
-- **`Verdict = Forward | Drop | Modify(Vec<u8>)` with first-Drop-wins
-  chaining.** Observers run in `NetworkPolicy.observers` array order;
-  observer N sees the output of observer N-1's `Modify`; first `Drop`
-  adds the flow to the bridge's per-VM `killed_flows: HashSet<FlowId>`
-  and short-circuits subsequent packets on that flow. RST injection,
-  `Defer`, and `DropPacket`-vs-`KillFlow` distinctions are deferred to
-  future plans.
-- **fd-handoff handshake.** New dedicated `fd_handoff_socket_path`
-  field on `Config.swift`'s `NetworkConfig` variant (no multiplex onto
-  `events_ingest_socket_path` or `control_socket_path`). The existing
-  `gvproxy` variant is **replaced** (no backwards-compat shim per
-  `feedback_no_backcompat_first_version`) with:
-  ```swift
-  case rustManaged(mac: MacAddress, fdHandoffSocketPath: String)
-  ```
-  Swift `bind`/`listen`/`accept`s the socket (mode 0700); Rust
-  connects when ready to hand off the Vz-side fd via SCM_RIGHTS.
-- **Per-VM flow-byte log, opt-in.**
-  `NetworkPolicy.flow_byte_log: FlowByteLogSpec | None`. Default off.
-  When enabled, bridge writes append-only length-prefixed records to
-  `~/.mvm/audit/flow-bytes/<tenant>/<vm>-<utc_iso>.bin`; audit-chain
-  entries reference records as `(file_name, record_id, sha256)`. Rotation
-  + retention sweep integrate with `mvmctl cache prune`. The audit
-  chain itself stays small (no payload bytes inline). Encryption-at-rest
-  is its own follow-up plan.
-- **Strict-sync observer execution + Prometheus latency observability.**
-  Per-VM bridge thread runs the `recv → parse → observers → send` loop
-  synchronously; each `on_packet` call is wrapped in
-  `std::panic::catch_unwind` (matches Plan 113's `signer_task` pattern)
-  and bracketed with `Instant::now()` measurements feeding
-  `mvm_observer_latency_us{observer, vm, direction}` via the existing
-  per-VM `.prom` scrape file convention. **No timeout enforcement in
-  V1** — that policy ships in its own plan if a real observer needs it.
-- **Per-flow state stays inside the observer impl.**
-  `Mutex<HashMap<FlowId, FlowState>>` keyed off the existing
-  `on_flow_event(FlowOpened/FlowClosed)` callbacks. No bridge-managed
-  blackboard.
-
-**Tech Stack:** Swift `crates/mvm-vz-supervisor/Sources/...`
-(`Config.swift`, `Network.swift`); Rust `crates/mvm-bridge`
-(rewrites `VzIngest` arm into `VzManaged`); `mvm-supervisor::network::Observer`
-(new `on_packet` method, new `Verdict` enum); `mvm-supervisor::gateway_bridge`
-(per-VM `killed_flows`, etherparse fan-in); `mvm-policy::NetworkPolicy`
-(new `flow_byte_log` field); `mvm-backend::vz.rs` (producer side of
-the new config shape). New `mvm-audit::flow_byte_log` module for the
-append-only writer + retention sweep. `etherparse` (existing workspace
-dep). No new third-party Rust crates.
-
-**Prereqs:** Plan 113 merged (PR #512). Plan 121's crate consolidation
-does not block but should ship first if its timeline allows — it
-relocates `mvm-bridge` into the consolidated layout, making this plan's
-file paths cleaner.
+**Tech Stack:** Rust, `etherparse` 0.20 (NEW workspace dep — Task 1),
+`tokio` (existing), `mvm-hostd::supervisor::{gateway_bridge,network,audit}`,
+`mvm-core::policy::NetworkPolicy`, `mvm-cli::metrics_server`.
 
 ---
 
-## Open design questions (resolve before executing)
+## Context
 
-The following must close in a follow-up brainstorm session before this
-plan's task list is renderable. The brainstorm context is captured at
-`/Users/auser/.claude/plans/context-for-resuming-plan-robust-brook.md`.
+ADR-064 §Decision 8 carved out "Vz catches up later" for payload-tap. The
+original Plan 141 tried to close that with an SCM_RIGHTS fd-handoff to a
+*surviving* Swift supervisor. The **2026-06-04 rescope** (ADR-064 §8 +
+memory `project_vz_strong_support_direction`) made the VZ supervisor
+Rust-native (Plan 152), so Vz owns its device *and* bridge in-process —
+the Swift handoff is throwaway. **Plan 141 is rescoped to its
+backend-agnostic core** for **libkrun + Firecracker only**. It now depends
+only on Plan 113 (merged, PR #512), so it is unblocked.
 
-- **Q7 — Capability advertisement post-refactor (drafted, unconfirmed).**
-  Recommended shape:
-  - **7a:** Plan 141 stays **Vz-only**. AppleContainer (whose
-    `containerization` network layer is undocumented) lands as its own
-    plan when Apple's API is clearer. Memory
-    `project_gateway_audit_substrate_backend_coverage` already records
-    that boundary.
-  - **7b:** Lift `ProviderCapabilities { flow_events: true, payload_tap:
-    true }` into a `const BRIDGE_CAPS` in `mvm-bridge`. Every backend
-    funnelling through the bridge advertises the same constant —
-    duplication-driven drift becomes impossible.
-- **Q8 — `Modify` failure modes.** What happens when an observer
-  returns `Modify(bytes)` with `bytes.len() > MTU` and the bridge can't
-  re-fragment? When the modified payload would produce an invalid
-  TCP/UDP checksum? Options: drop the packet with a chain entry
-  attributing the observer; fail closed and kill the flow; refuse the
-  Modify at trait validation time. Needs a per-failure-mode decision
-  matrix.
-- **Q9 — Per-direction observer registration.** Today's `Observer`
-  trait has no direction filter — every observer sees every packet
-  in every direction. Performance optimization: let observers declare
-  `required_directions: { egress, ingress, both }` at registration.
-  The four V1 use cases skew strongly toward egress-only; the
-  optimization is meaningful but adds API surface. Confirm V1 scope.
-- **Q10 — `mvm-vz-drainer` deletion / VzIngest arm rename.** After the
-  unification, the `BridgeEndpoints::VzIngest` arm inside `mvm-bridge`
-  (the NDJSON ingest path Plan 113 shipped) deletes too — Rust owns
-  the shuffle for Vz, so there's no Swift-side NDJSON to drain. The
-  replacement is a new `BridgeEndpoints::VzManaged` arm carrying the
-  fd-handoff socket path. Confirm this is the destination state.
+The bridge today (`gateway_bridge.rs`) does opaque byte-copy and never
+parses L3/L4 (`FlowDecisionCtx.dest_ip/dest_port` hardcoded `None`, "no
+parser yet"). This plan introduces the first real parse on that path.
+
+**`etherparse` correction:** prior prose claimed it was already a
+workspace dep. It is **not** (verified 2026-06-04 — zero repo references;
+absent from `[workspace.dependencies]`; latest published is 0.20). Task 1
+adds it. Rationale (memory `reference_etherparse_not_yet_workspace_dep`):
+it lands on the untrusted-guest-bytes path where claim 5 fuzzes parsers,
+so a mature fuzzed-upstream parser beats a hand-rolled one
+(`feedback_limit_dependencies` tolerates this profile).
 
 ---
 
-## Files (planned — derived from the locked decisions above)
+## Resolved design questions
 
-> **Scope (2026-06-04):** the **Swift side** + the **Vz-specific Rust
-> bits** (the `VzIngest`→`VzManaged` arm, `parse.rs` rename, `vz.rs`
-> `rust_managed` shape) are **superseded by Plan 152** (Vz goes
-> Rust-native; the bridge runs in-process, no fd-handoff) — retained below
-> for reference only. **In scope for this plan:** the backend-agnostic
-> `Observer` / `gateway_bridge` core (`on_packet`/`Verdict`/`ParsedPacket`,
-> etherparse pipeline, `killed_flows`, flow-byte-log, Prometheus) applied
-> to **libkrun + Firecracker**. Q10 (`mvm-vz-drainer` deletion) and the Vz
-> part of Q7 move to Plan 152; Q8/Q9 stay here.
+- **Q7 — capability advertisement.** Moved to Plan 152 (concerns the Vz
+  leaf's `payload_tap` flip). libkrun + Firecracker already report
+  `payload_tap: true`. No change here.
+- **Q8 — `Modify` failure modes (RESOLVED: uniform fail-closed).** Any
+  `Modify` the bridge cannot safely emit → kill the flow (insert
+  five-tuple into `killed_flows`, drop this + all subsequent packets on
+  that flow) + emit `gateway.flow_observer_fault` attributing the
+  observer + reason. Matrix:
 
-### Swift side (Vz supervisor)
+  | Failure | Behavior |
+  |---|---|
+  | Modified frame exceeds MTU (no re-frag in V1) | kill + fault, reason `modify_over_mtu` |
+  | Rebuild fails (etherparse can't re-serialize) | kill + fault, reason `modify_unserializable` |
+  | `Modify(bytes)` where `bytes == original` | treat as `Forward` (skip rebuild) |
+  | Observer panics | `catch_unwind` → warn → `Forward` for that observer, siblings continue |
 
-- **Modify** `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/Config.swift`
-  — replace `NetworkConfig.gvproxy(...)` with `NetworkConfig.rustManaged(mac, fdHandoffSocketPath)`. Update strict-keys allowlist. Delete the `events_ingest_socket_path` field (Rust now writes the audit chain directly; Swift doesn't emit NDJSON).
-- **Rewrite** `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/Network.swift`
-  — delete `BridgeWorker` class, `makeBridgedGvproxyDevice`,
-  `formatFlowOpenedLine`, `formatFlowClosedLine`,
-  `VZ_BRIDGE_HANDSHAKE`. Replace `makeAttachment` body with a
-  ~30-line "bind+listen, accept one connection, recv one SCM_RIGHTS
-  fd, wrap in `FileHandle`, attach to
-  `VZVirtioNetworkDeviceConfiguration`" implementation.
-- **Delete** `crates/mvm-vz-supervisor/Tests/MvmVzSupervisorTests/BridgeWorkerTests.swift`.
-- **Add** Swift XCTest covering the fd-handoff handshake (the
-  socket-listener happy path; the connection-aborted-before-fd path).
+  Rationale: on TCP a silent single-packet drop just stalls (retransmit →
+  re-modify → re-fail loop), so drop-packet degrades to a dead flow
+  anyway without an audit trail. One fail-closed terminal state is
+  simpler and secure.
 
-### Rust side
-
-- **Rewrite** `crates/mvm-bridge/src/endpoints.rs` — `BridgeEndpoints::VzIngest` becomes `BridgeEndpoints::VzManaged { fd_handoff_socket_path }`. The new arm runs the SCM_RIGHTS dial against Swift's listener, receives the Vz-side fd (closes it; Vz keeps the other half), opens its own gvproxy socket, runs the shuffle on the (gvproxy_fd, supervisor_socketpair_fd) pair.
-- **Modify** `crates/mvm-bridge/src/parse.rs` — `EndpointSpec::VzIngest`
-  variant renames to `VzManaged` with the new field shape.
-- **Modify** `crates/mvm-backend/src/vz.rs` — emit the new
-  `rust_managed { mac, fd_handoff_socket_path }` JSON shape into
-  `SupervisorConfig.network`. Drop the
-  `events_ingest_socket_path` field from the producer side.
-- **Modify** `crates/mvm-supervisor/src/network/mod.rs` — extend the
-  `Observer` trait with `on_packet(&self, ctx: &PacketCtx, pkt: &ParsedPacket<'_>) -> Verdict`. Add `Verdict` enum, `ParsedPacket` struct, `PacketCtx` struct. Default impl: `Verdict::Forward` (so existing observers continue to work unchanged).
-- **Modify** `crates/mvm-supervisor/src/gateway_bridge.rs` —
-  add `killed_flows: HashSet<FlowId>` per VM. In the shuffle loop:
-  etherparse the inbound frame, build `ParsedPacket`, run the
-  pipeline under `catch_unwind` + `Instant::now()` brackets, apply the
-  verdict, re-serialize headers after `Modify` (with new IP length +
-  TCP/UDP checksum via etherparse's `set_payload`), emit a
-  `flow_byte_event` chain entry referencing the flow-byte log record
-  when the flow-byte log is enabled.
-- **Modify** `crates/mvm-policy/src/policies.rs` — add
-  `NetworkPolicy.flow_byte_log: Option<FlowByteLogSpec>`. New
-  `FlowByteLogSpec` struct (max_disk_bytes, max_age_days, directions).
-- **Create** `crates/mvm-supervisor/src/audit/flow_byte_log.rs` —
-  append-only writer (length-prefixed records, atomic rename for
-  rotation). Sweep helper invoked from `mvmctl cache prune`.
-- **Modify** `crates/mvm-cli/src/commands/cache.rs` (or wherever
-  `cache prune` dispatches) — wire the flow-byte-log retention sweep.
-
-### Tests + CI
-
-- New `mvm-bridge/tests/scm_rights_handoff.rs` covering the
-  fd-handoff handshake (Linux only; macOS XCTest covers the Swift
-  side).
-- Extend the existing `mvm-bridge/fuzz` harness to cover the
-  `on_packet` parser surface.
-- New CI lane `vz-payload-tap-property` mirroring the
-  `jailer-lite-property` shape — self-hosted Apple Silicon runner,
-  exercises the live Vz fd-handoff + observer chain end-to-end.
+- **Q9 — per-direction registration (RESOLVED: include, minimal).**
+  `Directions { Egress | Ingress | Both }`; `fn directions(&self) ->
+  Directions { Directions::Both }` default (keeps every flow-event
+  observer unchanged); runner skips `on_packet` when direction excluded.
+  Least-privilege: egress observer never sees inbound bytes.
+- **Q10 — `VzIngest` arm.** Untouched; deletion/rename → Plan 152.
 
 ---
 
-## Tasks (placeholder — to be rendered by `superpowers:writing-plans` after Q7–Q10 close)
+## Scope decision: both backends, gvproxy-first
 
-The tasks will roughly follow Plan 113's shape — observer-trait
-extension first, Swift refactor second, producer wiring third, audit
-chain integration fourth, CI lanes fifth, plan-doc tick last. Holding
-off on the per-task breakdown until the open questions resolve so the
-task bodies don't drift.
+Both production backends wired here, sequenced: LibkrunGvproxy datagram
+path first (one `recv` = one frame → clean insertion exercising the whole
+core), then Passt (`SOCK_STREAM` `bridge_copy_bidirectional` has no frame
+boundaries — needs a length-prefix-aware rewrite feeding the *same*
+runner). Localizes Passt-reframing bugs away from pipeline bugs.
+
+**Backend-agnostic core = Tasks 1–7. Backend wiring = Tasks 8–10. Fuzz +
+tick = Task 11.**
 
 ---
 
-## Out of scope (deferred follow-ups)
+## File structure
 
-- **AppleContainer payload tap** — its own plan when Apple's
-  `containerization` network API is clearer. Memory
-  `project_gateway_audit_substrate_backend_coverage` documents the
-  carve-out.
-- **Encryption-at-rest for the flow-byte log** — own ADR (keyring
-  sourcing, per-tenant key, rotation) + own plan. V1 flow-byte log
-  files are mode 0600 with the parent dir at 0700, consistent with
-  `~/.mvm` posture.
-- **Per-observer timeout enforcement** — Q6 deliberately ships
-  measurement without enforcement. The enforcement policy (fail-open
-  vs fail-closed per-observer) is its own design.
-- **TCP RST injection on `Drop`** — Q3 deliberately ships silent drop
-  only. RST injection requires per-flow sequence-number tracking;
-  meaningful on its own design merits.
-- **Async / ring-buffered observer execution (Q6's option C)** — TCP
-  reordering complexity for a problem V1 doesn't have. Defer.
-- **`Defer` and `DropPacket`-vs-`KillFlow` verdict variants** — Q3
-  deliberately minimal.
-- **Bridge restart policy variants** — Plan 113's `BridgeRestartPolicy`
-  schema reservation covers this; new variants land in their own plan
-  + ADR.
+| File | Responsibility | Action |
+|---|---|---|
+| `Cargo.toml` (root) | add `etherparse` to `[workspace.dependencies]` | Modify |
+| `crates/mvm-hostd/Cargo.toml` | consume `etherparse` (+ `hex` if absent) | Modify |
+| `crates/mvm-hostd/src/supervisor/network/packet.rs` | pure parse + payload rebuild | Create |
+| `crates/mvm-hostd/src/supervisor/network/pipeline.rs` | pure `run_packet_pipeline` | Create |
+| `crates/mvm-hostd/src/supervisor/network/latency.rs` | per-observer latency + `.prom` writer | Create |
+| `crates/mvm-hostd/src/supervisor/network/mod.rs` | extend `Observer`; add `Verdict`/`Directions`/`PacketCtx`; register submodules | Modify |
+| `crates/mvm-hostd/src/supervisor/audit.rs` | `flow_observer_fault` + `FLOW_OBSERVER_FAULT_EVENT` | Modify |
+| `crates/mvm-hostd/src/supervisor/gateway_bridge.rs` | `FlowEventKind::ObserverFault`; per-VM `killed_flows`; wire runner into both loops | Modify |
+| `crates/mvm-core/src/policy/policies.rs` | `NetworkPolicy.flow_byte_log` + `FlowByteLogSpec` | Modify |
+| `crates/mvm-hostd/src/supervisor/network/flow_byte_log.rs` | append-only writer + retention sweep | Create |
+| `crates/mvm-cli/src/metrics_server.rs` | broaden scrape discovery to `metrics-*.prom` | Modify |
+| `crates/mvm-cli/src/commands/cache.rs` | flow-byte-log sweep in `cache prune` | Modify |
+| `crates/mvm-hostd/fuzz` | `fuzz_packet_parse` target | Modify |
+
+Verified anchor points (read 2026-06-04):
+- `Observer` trait: `network/mod.rs:86-90`; `RequiredCapabilities`/`ProviderCapabilities` 46-73; `Pipeline` 119-166; `ObserverAllowlist` 174-343; `MAX_OBSERVERS=8`.
+- `signer_task` fan-out + `catch_unwind`: `gateway_bridge.rs:266-333` (pattern to reuse).
+- gvproxy loop: `run_libkrun_gvproxy_bridge` `gateway_bridge.rs:654-823` (one datagram = one frame).
+- Passt loop: `bridge_copy_bidirectional` `gateway_bridge.rs:494-648` (opaque 8 KiB copy; needs reframe).
+- `FlowEvent`/`FlowEventKind`: `gateway_bridge.rs:200-211`; `FlowEventWire` 221-249.
+- `AuditEntry::flow_opened/flow_closed`: `audit.rs:94-132`; `FlowDirection` 149-166; `FlowCloseReason` 178-197.
+- `NetworkPolicy`: `mvm-core/src/policy/policies.rs:32-53` (already has `observers: Vec<String>`).
+- metrics discovery: `mvm-cli/src/metrics_server.rs:140` matches `starts_with("metrics-") && ends_with("-flow-count.prom")` — must broaden.
+
+---
+
+# Phase A — backend-agnostic core
+
+### Task 1: Add the `etherparse` workspace dependency
+
+- [x] Add to root `[workspace.dependencies]` (after `ipnet`): `etherparse = "0.20"` with a comment (untrusted-guest-bytes path; claim 5).
+- [x] In `crates/mvm-hostd/Cargo.toml` `[dependencies]`: `etherparse = { workspace = true }`.
+- [x] Verify `cargo tree -p mvm-hostd -i etherparse`.
+- [x] Commit `build(mvm-hostd): add etherparse for the packet-observer pipeline`.
+
+### Task 2: Pure packet parse + payload rebuild (`packet.rs`)
+
+- [x] **Failing tests first:** `parse` five-tuple+payload; `parse` None on non-IP/truncated; `rebuild_with_payload` same-length + shorter success; over-MTU → `RebuildError::ExceedsMtu`; non-IP original → `RebuildError::Unparseable`. Build frames with `etherparse::PacketBuilder`.
+- [x] Implement: `L4Proto`, `FlowKey` (Hash+Eq), `FiveTuple::flow_key()`, `ParsedPacket<'a> { five_tuple, l4_payload: &'a [u8], raw_frame: &'a [u8] }`, `RebuildError { ExceedsMtu{len,mtu}, Unparseable, Serialize(String) }`, `parse() -> Option`, `rebuild_with_payload(raw,new_payload,mtu) -> Result<Vec<u8>>` (fix IP len + IP/L4 checksums; refuse over-MTU). **Confirm 0.20 API names by compiling.** V1 shortcut: refuse on IP extension headers (`Unparseable`).
+- [x] `pub mod packet;` in `network/mod.rs`. Tests PASS. Commit.
+
+### Task 3: Extend `Observer` — `Verdict`, `Directions`, `PacketCtx`, `on_packet`
+
+- [x] Failing tests: `Directions::includes` truth table; default observer → `Both` + `Verdict::Forward`.
+- [x] Implement `Directions{Egress,Ingress,Both}::includes`, `Verdict{Forward,Drop,Modify(Vec<u8>)}`, `PacketCtx<'a>{vm_name,tenant,direction,flow_id}`, and two **defaulted** trait methods `directions()` + `on_packet()`. Tests PASS. Commit.
+
+### Task 4: `flow_observer_fault` audit entry
+
+- [x] Failing test: helper sets event `gateway.flow_observer_fault` + labels flow_id/direction/observer/reason.
+- [x] Implement `FLOW_OBSERVER_FAULT_EVENT` const + `flow_observer_fault(plan,bundle,flow_id,direction,observer,reason)`. PASS. Commit.
+
+### Task 5: Per-observer latency recorder (`latency.rs`)
+
+- [x] Failing tests: `record` accumulates; `prometheus_format` emits `mvm_observer_latency_us_{sum,count}{observer,vm,direction}`; scrape-file name is `metrics-<vm>-observer-latency.prom`.
+- [x] Implement `ObserverLatency` (Mutex<BTreeMap<(name,dir),(sum,count)>>) with tmp+rename writer (mirror `FlowCountMetrics`). `pub mod latency;`. PASS. Commit.
+
+### Task 6: The pure fan-out runner (`pipeline.rs`)
+
+- [x] Failing tests: empty→Forward(Borrowed); non-IP→Forward,key None; Modify rebuilds + chains; first Drop wins→Kill{Drop}; over-MTU→Kill{ModifyOverMtu}; direction filter skips; panic isolated→Forward; Modify==original→Forward(Borrowed).
+- [x] Implement `KillReason{Drop,ModifyOverMtu,ModifyUnserializable}::as_str`, `PacketDecision<'a>{Forward{frame:Cow,flow_key},Kill{observer,reason,flow_key}}`, `run_packet_pipeline(observers,ctx,raw_frame,mtu,latency)` reusing the `catch_unwind` pattern. `pub mod pipeline;`. PASS. Commit.
+
+### Task 7: Flow-byte-log policy field + append-only writer
+
+- [x] Policy (mvm-core): default-off + serde tests → `NetworkPolicy.flow_byte_log: Option<FlowByteLogSpec>` (`#[serde(default)]`) + `FlowByteLogSpec{max_disk_bytes:u64,max_age_days:u32,directions:FlowByteLogDirections}` + `FlowByteLogDirections{Egress,Ingress,Both}`.
+- [x] Writer (mvm-hostd `flow_byte_log.rs`): append/read-back test → `RecordRef{record_id,sha256}`, `FlowByteLogWriter::{create(0600),append}`, `read_all_records`, `sweep_retention(root,max_age_days)`. `pub mod flow_byte_log;`. PASS. Commit.
+
+---
+
+# Phase B — backend wiring
+
+### Task 8: Wire runner into LibkrunGvproxy datagram loop
+
+- [x] `FlowEventKind::ObserverFault{observer,reason}` + `signer_task` arm (`flow_observer_fault`) + `FlowEventWire::FlowObserverFault` variant/From (wire roundtrip test first).
+- [x] Thread `observers`, `Arc<ObserverLatency>`, `mtu=1514`, `killed_flows: Arc<Mutex<HashSet<FlowKey>>>` into `run_libkrun_gvproxy_bridge`. Both directions: killed-flow short-circuit → `run_packet_pipeline` → `latency.write_scrape_file()` → Forward sends (possibly rebuilt) frame / Kill inserts flow + emits ObserverFault + drops.
+- [x] Integration tests (UnixDatagram pair): redactor → modified bytes downstream; drop → nothing + ObserverFault event. PASS. Commit.
+
+### Task 9: Wire runner into Passt frame-aware loop + broaden metrics filter
+
+- [x] Pure `read_one_frame`/`write_one_frame` (4-byte BE length prefix; cap ≤ 65535) with duplex roundtrip test.
+- [x] Replace `bridge_copy_bidirectional`'s opaque loops with frame-aware loops feeding the runner (preserve first-frame `FlowOpened` + EOF `FlowClosed`). Update the existing socketpair test to length-prefixed frames; add redactor + drop tests.
+- [x] Broaden `metrics_server.rs:140` to `ends_with(".prom")`; update filter test (latency file now picked up). PASS. Commit.
+
+### Task 10: Flow-byte-log retention sweep in `cache prune`
+
+- [x] `cache.rs` prune calls `flow_byte_log::sweep_retention(<audit-dir>/flow-bytes, 7)` via `mvm-core::config` path helper. Old-removed/fresh-kept test. Commit.
+
+### Task 11: Fuzz target + plan-doc tick + claim catalog
+
+- [x] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_packet_parse.rs` (parse→rebuild round-trip, no panic); registered in `security.yml` `fuzz` job + root `Cargo.toml` exclude. Boxes ticked.
+- [x] Claim catalog: **left unchanged by design.** The packet-observer pipeline strengthens existing claim 10's no-bytes-leave-unobserved enforcement; it is not a new numbered claim (numbering is ADR-002-governed). Promotion to a catalog witness row belongs with the ADR-002 update, mirroring claim 14's "promotion queued" pattern — and editing the catalog risks the `check-claim-catalog` gate. The new tests back the existing claim 10 posture.
+
+---
+
+## Verification (end-to-end)
+
+```bash
+rustup run nightly cargo fmt --all -- --check
+cargo nextest run -E 'not package(mvm-backend)'   # mvm-backend test bin SIGKILLed by macOS codesign (env-only)
+cargo test --workspace --doc
+cargo clippy --workspace -- -D warnings
+```
+
+Live (libkrun/gvproxy arm; force libkrun + isolate caches per memory
+`project_dev_host_runs_builder_via_vz`): run a workload with an
+allowlisted payload-tap observer; confirm modification on the wire,
+`mvmctl audit verify` green, kill-flow emits `gateway.flow_observer_fault`,
+`/metrics` shows `mvm_observer_latency_us_*`. Passt arm verified on
+Linux/KVM CI (or a Lima KVM test env — memory `project_lima_removed`).
+
+---
+
+## Out of scope (deferred)
+
+All Vz changes (Swift refactor, fd-handoff, `VzIngest`→`VzManaged`, Vz
+`payload_tap` flip Q7, `mvm-vz-drainer` deletion Q10) → **Plan 152**.
+AppleContainer payload tap → own plan. Flow-byte-log encryption-at-rest →
+own ADR. Per-observer timeout enforcement, TCP RST on kill, IP
+extension-header rebuild, async/ring-buffered execution,
+`Defer`/`DropPacket`-vs-`KillFlow` variants → all deferred.
 
 ---
 
 ## Status
 
-🟡 **Design captured 2026-06-01; brainstorm paused mid-Q7.** Resume
-via the brainstorm context at
-`/Users/auser/.claude/plans/context-for-resuming-plan-robust-brook.md`,
-close Q7–Q10, then re-render Tasks via `superpowers:writing-plans`.
-Not yet on a branch.
+🟢 **Implemented (2026-06-04)** on branch `feat/plan-141-packet-observer-core`
+(worktree `../mvm-plan-141`), not yet pushed/PR'd. All 11 tasks landed in
+9 commits. Q8/Q9 closed via brainstorm; Q7/Q10 moved to Plan 152.
+`etherparse 0.20` added (was absent).
 
----
+Verification: clippy `-D warnings` clean (mvm-hostd, mvm-core, mvm-cli);
+nightly `fmt --all --check` clean; `cargo test --doc` clean; full
+mvm-hostd + mvm-core suites green (1786+ tests) plus the new unit +
+integration tests (packet parse/rebuild, runner fan-out, gvproxy +
+framed-Passt redaction/drop, latency, flow-byte-log, metrics filter,
+cache sweep). The `fuzz_packet_parse` target typechecks on stable; full
+ASAN/sancov fuzzing runs in CI (local `cargo fuzz` is blocked by the
+repo's `rust-toolchain.toml` stable pin).
 
-## Self-review
-
-- **Scope coverage** vs ADR-064 §Decision 8: closes the carve-out (Vz
-  reports `payload_tap: true`), achieves cross-backend parity (Rust
-  owns shuffle), establishes the architectural template AppleContainer
-  inherits.
-- **No placeholders** of the "engineer adapts" / "TBD" variety in the
-  Files or Architecture sections — every field, struct, and call site
-  named is real. The Tasks section is intentionally a placeholder
-  pending Q7–Q10 closure; the **placeholder is named as such**, not
-  hidden as fake content.
-- **Plan numbering:** 141 is the next free slot — confirmed via
-  `ls specs/plans/14[1-9]-*.md` (no matches). Plan 132's
-  brainstorm-context guess was stale (132 became
-  programmable-storage-io).
-- **No backwards-compat shim** for the deleted
-  `NetworkConfig.gvproxy` variant — matches memory
-  `feedback_no_backcompat_first_version`.
-- **References the existing memory + ADR base correctly:** ADR-064 for
-  the architectural anchor, memory `project_gateway_audit_substrate_backend_coverage` for the AppleContainer carve-out, memory `feedback_no_placeholders_in_plans_or_code` for the no-placeholder discipline.
+**Live-host caveat:** the **gvproxy (libkrun)** arm is exercised by the
+in-process integration tests; the **Passt (Firecracker)** arm is
+Linux-only and its 4-byte-BE qemu-socket wire framing is validated on
+Linux/KVM CI, not this macOS host — the reframing *logic* is unit-tested
+via an in-memory duplex.
