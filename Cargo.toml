@@ -109,6 +109,10 @@ exclude = [
     # targets on release-tag pushes + nightly cron + manual
     # dispatch only (not on every PR — the lane is heavy).
     "crates/mvm-vm-host/fuzz",
+    # Plan 141 / ADR-064 — gateway packet parse + payload-rebuild fuzz
+    # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
+    # CI gate at `.github/workflows/security.yml::fuzz`.
+    "crates/mvm-hostd/fuzz",
     # ADR-070 — browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
     # it depends on the in-workspace `mvm-verify` crate by path and is

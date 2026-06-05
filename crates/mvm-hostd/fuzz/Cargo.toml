@@ -1,0 +1,35 @@
+[package]
+name = "mvm-hostd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detach from the parent workspace — `crates/mvm-hostd/fuzz` is listed
+# under `workspace.exclude` in the repo root Cargo.toml because
+# `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper (which
+# injects sanitizer + linker flags). An empty `[workspace]` table
+# self-identifies this manifest as standalone.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mvm-hostd]
+path = ".."
+
+# Plan 141 / ADR-064 — fuzz the gateway packet parser + payload rebuilder.
+# `packet::parse` runs on every frame the guest puts on the wire (the
+# first real parse on that path); `rebuild_with_payload` re-serializes
+# observer-modified frames. Both sit on the untrusted-guest-bytes surface
+# (claim 5). Harness goal: never panic on any input. Re-parsing the
+# original payload through `rebuild_with_payload` must round-trip without
+# panicking for any frame `parse` accepted.
+[[bin]]
+name = "fuzz_packet_parse"
+path = "fuzz_targets/fuzz_packet_parse.rs"
+test = false
+doc = false
+bench = false

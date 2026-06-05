@@ -132,41 +132,41 @@ Verified anchor points (read 2026-06-04):
 
 ### Task 1: Add the `etherparse` workspace dependency
 
-- [ ] Add to root `[workspace.dependencies]` (after `ipnet`): `etherparse = "0.20"` with a comment (untrusted-guest-bytes path; claim 5).
-- [ ] In `crates/mvm-hostd/Cargo.toml` `[dependencies]`: `etherparse = { workspace = true }`.
-- [ ] Verify `cargo tree -p mvm-hostd -i etherparse`.
-- [ ] Commit `build(mvm-hostd): add etherparse for the packet-observer pipeline`.
+- [x] Add to root `[workspace.dependencies]` (after `ipnet`): `etherparse = "0.20"` with a comment (untrusted-guest-bytes path; claim 5).
+- [x] In `crates/mvm-hostd/Cargo.toml` `[dependencies]`: `etherparse = { workspace = true }`.
+- [x] Verify `cargo tree -p mvm-hostd -i etherparse`.
+- [x] Commit `build(mvm-hostd): add etherparse for the packet-observer pipeline`.
 
 ### Task 2: Pure packet parse + payload rebuild (`packet.rs`)
 
-- [ ] **Failing tests first:** `parse` five-tuple+payload; `parse` None on non-IP/truncated; `rebuild_with_payload` same-length + shorter success; over-MTU → `RebuildError::ExceedsMtu`; non-IP original → `RebuildError::Unparseable`. Build frames with `etherparse::PacketBuilder`.
-- [ ] Implement: `L4Proto`, `FlowKey` (Hash+Eq), `FiveTuple::flow_key()`, `ParsedPacket<'a> { five_tuple, l4_payload: &'a [u8], raw_frame: &'a [u8] }`, `RebuildError { ExceedsMtu{len,mtu}, Unparseable, Serialize(String) }`, `parse() -> Option`, `rebuild_with_payload(raw,new_payload,mtu) -> Result<Vec<u8>>` (fix IP len + IP/L4 checksums; refuse over-MTU). **Confirm 0.20 API names by compiling.** V1 shortcut: refuse on IP extension headers (`Unparseable`).
-- [ ] `pub mod packet;` in `network/mod.rs`. Tests PASS. Commit.
+- [x] **Failing tests first:** `parse` five-tuple+payload; `parse` None on non-IP/truncated; `rebuild_with_payload` same-length + shorter success; over-MTU → `RebuildError::ExceedsMtu`; non-IP original → `RebuildError::Unparseable`. Build frames with `etherparse::PacketBuilder`.
+- [x] Implement: `L4Proto`, `FlowKey` (Hash+Eq), `FiveTuple::flow_key()`, `ParsedPacket<'a> { five_tuple, l4_payload: &'a [u8], raw_frame: &'a [u8] }`, `RebuildError { ExceedsMtu{len,mtu}, Unparseable, Serialize(String) }`, `parse() -> Option`, `rebuild_with_payload(raw,new_payload,mtu) -> Result<Vec<u8>>` (fix IP len + IP/L4 checksums; refuse over-MTU). **Confirm 0.20 API names by compiling.** V1 shortcut: refuse on IP extension headers (`Unparseable`).
+- [x] `pub mod packet;` in `network/mod.rs`. Tests PASS. Commit.
 
 ### Task 3: Extend `Observer` — `Verdict`, `Directions`, `PacketCtx`, `on_packet`
 
-- [ ] Failing tests: `Directions::includes` truth table; default observer → `Both` + `Verdict::Forward`.
-- [ ] Implement `Directions{Egress,Ingress,Both}::includes`, `Verdict{Forward,Drop,Modify(Vec<u8>)}`, `PacketCtx<'a>{vm_name,tenant,direction,flow_id}`, and two **defaulted** trait methods `directions()` + `on_packet()`. Tests PASS. Commit.
+- [x] Failing tests: `Directions::includes` truth table; default observer → `Both` + `Verdict::Forward`.
+- [x] Implement `Directions{Egress,Ingress,Both}::includes`, `Verdict{Forward,Drop,Modify(Vec<u8>)}`, `PacketCtx<'a>{vm_name,tenant,direction,flow_id}`, and two **defaulted** trait methods `directions()` + `on_packet()`. Tests PASS. Commit.
 
 ### Task 4: `flow_observer_fault` audit entry
 
-- [ ] Failing test: helper sets event `gateway.flow_observer_fault` + labels flow_id/direction/observer/reason.
-- [ ] Implement `FLOW_OBSERVER_FAULT_EVENT` const + `flow_observer_fault(plan,bundle,flow_id,direction,observer,reason)`. PASS. Commit.
+- [x] Failing test: helper sets event `gateway.flow_observer_fault` + labels flow_id/direction/observer/reason.
+- [x] Implement `FLOW_OBSERVER_FAULT_EVENT` const + `flow_observer_fault(plan,bundle,flow_id,direction,observer,reason)`. PASS. Commit.
 
 ### Task 5: Per-observer latency recorder (`latency.rs`)
 
-- [ ] Failing tests: `record` accumulates; `prometheus_format` emits `mvm_observer_latency_us_{sum,count}{observer,vm,direction}`; scrape-file name is `metrics-<vm>-observer-latency.prom`.
-- [ ] Implement `ObserverLatency` (Mutex<BTreeMap<(name,dir),(sum,count)>>) with tmp+rename writer (mirror `FlowCountMetrics`). `pub mod latency;`. PASS. Commit.
+- [x] Failing tests: `record` accumulates; `prometheus_format` emits `mvm_observer_latency_us_{sum,count}{observer,vm,direction}`; scrape-file name is `metrics-<vm>-observer-latency.prom`.
+- [x] Implement `ObserverLatency` (Mutex<BTreeMap<(name,dir),(sum,count)>>) with tmp+rename writer (mirror `FlowCountMetrics`). `pub mod latency;`. PASS. Commit.
 
 ### Task 6: The pure fan-out runner (`pipeline.rs`)
 
-- [ ] Failing tests: empty→Forward(Borrowed); non-IP→Forward,key None; Modify rebuilds + chains; first Drop wins→Kill{Drop}; over-MTU→Kill{ModifyOverMtu}; direction filter skips; panic isolated→Forward; Modify==original→Forward(Borrowed).
-- [ ] Implement `KillReason{Drop,ModifyOverMtu,ModifyUnserializable}::as_str`, `PacketDecision<'a>{Forward{frame:Cow,flow_key},Kill{observer,reason,flow_key}}`, `run_packet_pipeline(observers,ctx,raw_frame,mtu,latency)` reusing the `catch_unwind` pattern. `pub mod pipeline;`. PASS. Commit.
+- [x] Failing tests: empty→Forward(Borrowed); non-IP→Forward,key None; Modify rebuilds + chains; first Drop wins→Kill{Drop}; over-MTU→Kill{ModifyOverMtu}; direction filter skips; panic isolated→Forward; Modify==original→Forward(Borrowed).
+- [x] Implement `KillReason{Drop,ModifyOverMtu,ModifyUnserializable}::as_str`, `PacketDecision<'a>{Forward{frame:Cow,flow_key},Kill{observer,reason,flow_key}}`, `run_packet_pipeline(observers,ctx,raw_frame,mtu,latency)` reusing the `catch_unwind` pattern. `pub mod pipeline;`. PASS. Commit.
 
 ### Task 7: Flow-byte-log policy field + append-only writer
 
-- [ ] Policy (mvm-core): default-off + serde tests → `NetworkPolicy.flow_byte_log: Option<FlowByteLogSpec>` (`#[serde(default)]`) + `FlowByteLogSpec{max_disk_bytes:u64,max_age_days:u32,directions:FlowByteLogDirections}` + `FlowByteLogDirections{Egress,Ingress,Both}`.
-- [ ] Writer (mvm-hostd `flow_byte_log.rs`): append/read-back test → `RecordRef{record_id,sha256}`, `FlowByteLogWriter::{create(0600),append}`, `read_all_records`, `sweep_retention(root,max_age_days)`. `pub mod flow_byte_log;`. PASS. Commit.
+- [x] Policy (mvm-core): default-off + serde tests → `NetworkPolicy.flow_byte_log: Option<FlowByteLogSpec>` (`#[serde(default)]`) + `FlowByteLogSpec{max_disk_bytes:u64,max_age_days:u32,directions:FlowByteLogDirections}` + `FlowByteLogDirections{Egress,Ingress,Both}`.
+- [x] Writer (mvm-hostd `flow_byte_log.rs`): append/read-back test → `RecordRef{record_id,sha256}`, `FlowByteLogWriter::{create(0600),append}`, `read_all_records`, `sweep_retention(root,max_age_days)`. `pub mod flow_byte_log;`. PASS. Commit.
 
 ---
 
@@ -174,23 +174,24 @@ Verified anchor points (read 2026-06-04):
 
 ### Task 8: Wire runner into LibkrunGvproxy datagram loop
 
-- [ ] `FlowEventKind::ObserverFault{observer,reason}` + `signer_task` arm (`flow_observer_fault`) + `FlowEventWire::FlowObserverFault` variant/From (wire roundtrip test first).
-- [ ] Thread `observers`, `Arc<ObserverLatency>`, `mtu=1514`, `killed_flows: Arc<Mutex<HashSet<FlowKey>>>` into `run_libkrun_gvproxy_bridge`. Both directions: killed-flow short-circuit → `run_packet_pipeline` → `latency.write_scrape_file()` → Forward sends (possibly rebuilt) frame / Kill inserts flow + emits ObserverFault + drops.
-- [ ] Integration tests (UnixDatagram pair): redactor → modified bytes downstream; drop → nothing + ObserverFault event. PASS. Commit.
+- [x] `FlowEventKind::ObserverFault{observer,reason}` + `signer_task` arm (`flow_observer_fault`) + `FlowEventWire::FlowObserverFault` variant/From (wire roundtrip test first).
+- [x] Thread `observers`, `Arc<ObserverLatency>`, `mtu=1514`, `killed_flows: Arc<Mutex<HashSet<FlowKey>>>` into `run_libkrun_gvproxy_bridge`. Both directions: killed-flow short-circuit → `run_packet_pipeline` → `latency.write_scrape_file()` → Forward sends (possibly rebuilt) frame / Kill inserts flow + emits ObserverFault + drops.
+- [x] Integration tests (UnixDatagram pair): redactor → modified bytes downstream; drop → nothing + ObserverFault event. PASS. Commit.
 
 ### Task 9: Wire runner into Passt frame-aware loop + broaden metrics filter
 
-- [ ] Pure `read_one_frame`/`write_one_frame` (4-byte BE length prefix; cap ≤ 65535) with duplex roundtrip test.
-- [ ] Replace `bridge_copy_bidirectional`'s opaque loops with frame-aware loops feeding the runner (preserve first-frame `FlowOpened` + EOF `FlowClosed`). Update the existing socketpair test to length-prefixed frames; add redactor + drop tests.
-- [ ] Broaden `metrics_server.rs:140` to `ends_with(".prom")`; update filter test (latency file now picked up). PASS. Commit.
+- [x] Pure `read_one_frame`/`write_one_frame` (4-byte BE length prefix; cap ≤ 65535) with duplex roundtrip test.
+- [x] Replace `bridge_copy_bidirectional`'s opaque loops with frame-aware loops feeding the runner (preserve first-frame `FlowOpened` + EOF `FlowClosed`). Update the existing socketpair test to length-prefixed frames; add redactor + drop tests.
+- [x] Broaden `metrics_server.rs:140` to `ends_with(".prom")`; update filter test (latency file now picked up). PASS. Commit.
 
 ### Task 10: Flow-byte-log retention sweep in `cache prune`
 
-- [ ] `cache.rs` prune calls `flow_byte_log::sweep_retention(<audit-dir>/flow-bytes, 7)` via `mvm-core::config` path helper. Old-removed/fresh-kept test. Commit.
+- [x] `cache.rs` prune calls `flow_byte_log::sweep_retention(<audit-dir>/flow-bytes, 7)` via `mvm-core::config` path helper. Old-removed/fresh-kept test. Commit.
 
 ### Task 11: Fuzz target + plan-doc tick + claim catalog
 
-- [ ] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_packet_parse.rs` (parse→rebuild round-trip, no panic); register in `security.yml` + root `Cargo.toml` exclude. Tick boxes; note `on_packet` fail-closed under claim 10 in `specs/claims/catalog.md`. Commit.
+- [x] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_packet_parse.rs` (parse→rebuild round-trip, no panic); registered in `security.yml` `fuzz` job + root `Cargo.toml` exclude. Boxes ticked.
+- [x] Claim catalog: **left unchanged by design.** The packet-observer pipeline strengthens existing claim 10's no-bytes-leave-unobserved enforcement; it is not a new numbered claim (numbering is ADR-002-governed). Promotion to a catalog witness row belongs with the ADR-002 update, mirroring claim 14's "promotion queued" pattern — and editing the catalog risks the `check-claim-catalog` gate. The new tests back the existing claim 10 posture.
 
 ---
 
@@ -225,6 +226,22 @@ extension-header rebuild, async/ring-buffered execution,
 
 ## Status
 
-🟢 Execution-ready (2026-06-04). Q8/Q9 closed via brainstorm; Q7/Q10 →
-Plan 152. `etherparse` confirmed absent → Task 1 adds it (0.20). Tasks 1–7
-core, 8–10 wiring, 11 fuzz+tick. Branch `feat/plan-141-packet-observer-core`.
+🟢 **Implemented (2026-06-04)** on branch `feat/plan-141-packet-observer-core`
+(worktree `../mvm-plan-141`), not yet pushed/PR'd. All 11 tasks landed in
+9 commits. Q8/Q9 closed via brainstorm; Q7/Q10 moved to Plan 152.
+`etherparse 0.20` added (was absent).
+
+Verification: clippy `-D warnings` clean (mvm-hostd, mvm-core, mvm-cli);
+nightly `fmt --all --check` clean; `cargo test --doc` clean; full
+mvm-hostd + mvm-core suites green (1786+ tests) plus the new unit +
+integration tests (packet parse/rebuild, runner fan-out, gvproxy +
+framed-Passt redaction/drop, latency, flow-byte-log, metrics filter,
+cache sweep). The `fuzz_packet_parse` target typechecks on stable; full
+ASAN/sancov fuzzing runs in CI (local `cargo fuzz` is blocked by the
+repo's `rust-toolchain.toml` stable pin).
+
+**Live-host caveat:** the **gvproxy (libkrun)** arm is exercised by the
+in-process integration tests; the **Passt (Firecracker)** arm is
+Linux-only and its 4-byte-BE qemu-socket wire framing is validated on
+Linux/KVM CI, not this macOS host — the reframing *logic* is unit-tested
+via an in-memory duplex.

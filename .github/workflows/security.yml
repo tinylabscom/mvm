@@ -316,6 +316,21 @@ jobs:
         # suite.
         run: cargo fuzz run fuzz_passt_hashes_toml -- -max_total_time="$DURATION"
 
+      - name: Fuzz gateway packet parse + rebuild (host-side)
+        working-directory: crates/mvm-hostd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly
+        # Plan 141 / ADR-064 — `packet::parse` is the first real parse on
+        # the guest's network path (the bridge byte-copied opaquely before
+        # this plan); `rebuild_with_payload` re-serializes observer-modified
+        # frames. Both run on attacker-influenced bytes (claim 5). "Never
+        # panic on any input": parse fails closed to None on garbage, and
+        # re-emitting an accepted frame's own payload round-trips without
+        # panicking (Err on extension/over-MTU frames is the fail-closed
+        # path, not a panic).
+        run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
+
       - name: Upload corpus on failure
         if: failure()
         uses: actions/upload-artifact@v7
