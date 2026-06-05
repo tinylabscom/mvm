@@ -174,16 +174,16 @@ Resuming two copies of one snapshot leaves both guests with identical CSPRNG sta
 
 ## Phase E — reconcile the ADR
 
-- [ ] **Step 1:** Edit ADR-066 §5: replace the "Noise vsock + mTLS" paragraph with the trust-model reasoning from the design note above (authenticated cleartext on host-local channels; confidentiality only across untrusted boundaries). Record VMGenID reseed as a numbered claim candidate in the §7/claims area. Commit.
+- [x] **Step 1:** ADR-066 §5 reconciled (it already carried the authenticated-cleartext supersede note; tightened it — the encryption seam is *deferred* per A0, macOS at-rest is per-file AES-256-GCM per A2, rotation cites B1/B2). Fixed the stale "+ Noise" in the "Diverged on purpose" section. §7 VMGenID note reframed as a numbered claim candidate citing plan 122 C (signed snapshots) + D (reseed substrate; delivery deferred). Commit.
 
 ## Acceptance
 
-- [ ] One AEAD entry point (`mvm_core::crypto::aead`); both platforms have an at-rest volume path (LUKS2 Linux, per-file AES-256-GCM macOS).
-- [ ] KEK rotation runs on a 90-day policy; per-rebuild DEKs bind to content-hash + plan + audit head and are refused on mismatch.
-- [ ] Snapshots are content-addressed + Ed25519-signed; a flipped byte or wrong-key signature is rejected at resume admit.
-- [ ] A changed VMGenID token reseeds the guest CSPRNG and resets the vsock session; unchanged is a no-op.
-- [ ] `cargo test --workspace`, `clippy -D warnings`, `fmt --check` green. **No new dependency** entered any `Cargo.toml` (diff the lockfile; the only deltas should be features already pulled).
-- [ ] ADR-066 §5 matches the shipped channel posture.
+- [x] One AEAD entry point (`mvm_core::crypto::aead`); both platforms have an at-rest volume path (LUKS2 Linux, per-file AES-256-GCM macOS).
+- [x] KEK rotation runs on a 90-day policy; per-rebuild DEKs bind to content-hash + plan + audit head and are refused on mismatch.
+- [x] Snapshots are content-addressed + Ed25519-signed; a flipped byte or wrong-key signature is rejected at resume admit.
+- [x] A changed VMGenID token reseeds the guest CSPRNG and resets the vsock session; unchanged is a no-op.
+- [x] `cargo test --workspace`, `clippy -D warnings`, `fmt --check` green. **No new dependency** entered any `Cargo.toml` (diff the lockfile; the only deltas should be features already pulled).
+- [x] ADR-066 §5 matches the shipped channel posture.
 
 ### deferred follow-ups
 
