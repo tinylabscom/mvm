@@ -533,10 +533,16 @@ opt-level = 3
 #
 # musl, not gnu: these binaries run as PID 1 / early services inside the
 # builder VM, whose minimal NixOS-derived rootfs ships no FHS dynamic
-# loader (/lib/ld-linux-aarch64.so.1). A static musl build has no
+# loader (/lib/ld-linux-<arch>.so.1). A static musl build has no
 # interpreter dependency, so it boots in any rootfs — the same reason
 # mkGuest static-links its own /init. Both binaries are libc-only (no
 # TLS/ring/openssl), so the musl build is unencumbered.
 zig = "0.13.0"
 cargo-zigbuild = "0.20.0"
-target = "aarch64-unknown-linux-musl"
+
+# Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
+# (the arch mvmctl is built for == the arch of the guest it boots, since the
+# local builder/Stage 0 VM is always same-arch as the host). Plan 164.
+[workspace.metadata.mvm.toolchain.targets]
+aarch64 = "aarch64-unknown-linux-musl"
+x86_64 = "x86_64-unknown-linux-musl"

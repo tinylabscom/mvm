@@ -1,6 +1,6 @@
 # Plan 164 — Multi-arch embedded host binaries (x86_64 Stage 0 + builder VM)
 
-## Status: Proposed (2026-06-05)
+## Status: In progress (2026-06-05) — Tasks 1–3 landed + aarch64-regression-verified; x86_64 box provisioning underway (Tasks 4–5).
 
 > Sequenced *after* Plan 160 (the nix-tarball Stage 0 seed) lands. This plan makes the embedded-host-binary toolchain pick its target by guest arch so `mvmctl` works on **x86_64 Linux**, not just aarch64. It is a standalone ADR-065 follow-up, not part of Plan 160. Steps use `- [ ]` checkboxes.
 
@@ -91,16 +91,16 @@ Result: on the x86_64 Debian box (and on aarch64 Linux contributors) the embed u
 ## Build sequence (after Plan 160)
 
 ### Task 1: per-arch target table
-- [ ] `Cargo.toml` `[workspace.metadata.mvm.toolchain]`: replace the scalar `target` with the `[…targets]` table above (`aarch64`, `x86_64`).
+- [x] `Cargo.toml` `[workspace.metadata.mvm.toolchain]`: replaced the scalar `target` with the `[…targets]` table above (`aarch64`, `x86_64`).
 
 ### Task 2: `build.rs` picks target by arch
-- [ ] `read_pinned_toolchain`: resolve `target` from `targets[CARGO_CFG_TARGET_ARCH]`, fail-closed with the unsupported-arch message for any arch not in the table.
-- [ ] `cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH` (it's already implied by the target triple, but make the dependency explicit).
-- [ ] Redefine `native` as Linux-host-arch-matches-target-arch (the recommended simplification above) so x86_64 Linux builds skip zig.
-- [ ] Unit-test the arch→triple resolution + the unsupported-arch panic message (the `build.rs` `#[cfg(test)] mod tests` already covers `strip_glibc`/`extract_quoted_after` — add `resolve_target_for_arch`).
+- [x] `read_pinned_toolchain`: resolves `target` from `targets[CARGO_CFG_TARGET_ARCH]`, fail-closed with the unsupported-arch message for any arch not in the table.
+- [x] (n/a) `CARGO_CFG_TARGET_ARCH` is part of the build-script env hash already; the target triple change reruns build.rs (it's already implied by the target triple, but make the dependency explicit).
+- [x] Redefined `native` as Linux-host-arch-matches-target-arch (the recommended simplification above) so x86_64 Linux builds skip zig.
+- [x] Unit-tested the arch→triple resolution + the unsupported-arch panic message (the `build.rs` `#[cfg(test)] mod tests` already covers `strip_glibc`/`extract_quoted_after` — add `resolve_target_for_arch`).
 
 ### Task 3: doctor wording
-- [ ] Confirm `doctor.rs` `pinned_target` line reads naturally now that the value is host-resolved (e.g. "embedded host-binary target: x86_64-unknown-linux-musl"). No logic change — it already prints `env!("MVM_PINNED_TARGET")`.
+- [x] `doctor.rs` `pinned_target` now reflects the host-resolved target (display only, no logic change) now that the value is host-resolved (e.g. "embedded host-binary target: x86_64-unknown-linux-musl"). No logic change — it already prints `env!("MVM_PINNED_TARGET")`.
 
 ### Task 4: provision the x86_64 validation box
 The Hetzner box `root@88.99.197.234` (`ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/hetzner-rvproxy`) is **x86_64 Debian 12 (bookworm), kernel 6.1, `/dev/kvm` present, 8 cores / 62 GiB** — only `git` is installed. Provision for a from-source mvmctl build + Stage 0 boot:

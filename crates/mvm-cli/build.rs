@@ -40,8 +40,20 @@ fn main() {
     manifest.extend(read_seed_binaries(&workspace_root));
     let mut entries = Vec::new();
 
+    // A Linux host whose arch matches the target arch builds the musl bins
+    // natively (`cargo build --target <arch>-musl` — these are libc-only and
+    // statically musl-linked, so no zig, no musl-gcc). Cross cases (macOS →
+    // Linux, or a future x-arch guest) fall through to zigbuild. Plan 164:
+    // the previous check compared the *whole* gnu host triple against the
+    // musl target, so it was always false on Linux and forced zigbuild
+    // everywhere — needlessly requiring zig on Linux contributor hosts.
     let host_triple = std::env::var("HOST").unwrap();
-    let native = host_triple.contains("linux") && host_triple.contains(strip_glibc(&pin.target));
+    let host_arch = host_triple.split('-').next().unwrap_or_default();
+    let target_arch = strip_glibc(&pin.target)
+        .split('-')
+        .next()
+        .unwrap_or_default();
+    let native = host_triple.contains("linux") && host_arch == target_arch;
 
     // Fast path for local test/dev iteration: skip the nested
     // `cargo zigbuild --release` cross-compile of the host-vm binaries and
@@ -117,11 +129,35 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
     let toml_str = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     let v: toml::Value = toml::from_str(&toml_str).unwrap();
     let p = &v["workspace"]["metadata"]["mvm"]["toolchain"];
+    // The embed target follows the arch mvmctl is built for: the local
+    // builder/Stage 0 VM is always same-arch as the host, so an x86_64
+    // mvmctl must embed x86_64 bins and an aarch64 mvmctl aarch64 bins
+    // (Plan 164). `CARGO_CFG_TARGET_ARCH` is set by cargo for build scripts.
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH")
+        .expect("CARGO_CFG_TARGET_ARCH is set by cargo for build scripts");
     Pin {
         zig: p["zig"].as_str().unwrap().to_string(),
         cargo_zigbuild: p["cargo-zigbuild"].as_str().unwrap().to_string(),
-        target: p["target"].as_str().unwrap().to_string(),
+        target: resolve_target_for_arch(p, &arch),
     }
+}
+
+/// Resolve the pinned musl target triple for `arch` from the
+/// `[workspace.metadata.mvm.toolchain.targets]` table. Fails closed on an
+/// arch with no pinned target (mvmctl doesn't support that guest arch yet).
+fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
+    toolchain
+        .get("targets")
+        .and_then(|t| t.get(arch))
+        .and_then(|t| t.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "no embedded-host-binary target pinned for arch `{arch}` in \
+                 [workspace.metadata.mvm.toolchain.targets] — mvmctl does not yet \
+                 support this guest arch (Plan 164). Add a `{arch} = \"...-musl\"` entry."
+            )
+        })
+        .to_string()
 }
 
 /// Parse `name:` fields from the Rust struct literals in
@@ -370,5 +406,33 @@ mod tests {
             Some("mvm-host-vm-init".to_string())
         );
         assert_eq!(extract_quoted_after("no key here", "name:"), None);
+    }
+
+    #[test]
+    fn resolve_target_for_arch_picks_pinned_triple() {
+        let toolchain: toml::Value = toml::from_str(
+            "zig = \"0.13.0\"\n\
+             cargo-zigbuild = \"0.20.0\"\n\
+             [targets]\n\
+             aarch64 = \"aarch64-unknown-linux-musl\"\n\
+             x86_64 = \"x86_64-unknown-linux-musl\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_target_for_arch(&toolchain, "aarch64"),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            resolve_target_for_arch(&toolchain, "x86_64"),
+            "x86_64-unknown-linux-musl"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "does not yet")]
+    fn resolve_target_for_arch_unsupported_arch_panics() {
+        let toolchain: toml::Value =
+            toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
+        let _ = resolve_target_for_arch(&toolchain, "riscv64");
     }
 }

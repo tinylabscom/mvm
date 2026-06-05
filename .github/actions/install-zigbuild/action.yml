@@ -35,6 +35,10 @@ runs:
       shell: bash
       run: cargo install cargo-zigbuild --version 0.20.0 --locked
 
-    - name: Add aarch64-unknown-linux-musl target
+    - name: Add musl targets (both arches)
       shell: bash
-      run: rustup target add aarch64-unknown-linux-musl
+      # Plan 164 — mvm-cli/build.rs picks the embed target by
+      # CARGO_CFG_TARGET_ARCH. On an x86_64 runner it builds the bins
+      # natively for x86_64-musl (no zig); a cross path zigbuilds. Add both
+      # musl targets so either path resolves regardless of runner arch.
+      run: rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
