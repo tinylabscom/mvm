@@ -93,21 +93,22 @@ fn dispatch(req: &SignRequest, keystore: &SharedKeystore) -> SignResponse {
 }
 
 /// Read a length-prefixed JSON frame.
-// Length-prefixed JSON framing lives in `mvm_core::framing` (plan 121
-// B4); these wrappers keep the host-signer error context on the shared
-// transport. The cap-before-alloc gate is enforced in core.
+// Length-prefixed JSON framing lives in `crate::framing` (plan 126 B5;
+// was `mvm_core::framing`); these wrappers keep the host-signer error
+// context on the shared transport. The cap-before-alloc gate is enforced
+// there.
 async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,
 ) -> Result<T> {
-    mvm_core::framing::read_json_frame(stream, max_frame_bytes)
+    crate::framing::read_json_frame(stream, max_frame_bytes)
         .await
         .context("mvm-host-signer frame read failed")
 }
 
 /// Write a length-prefixed JSON frame.
 async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
-    mvm_core::framing::write_json_frame(stream, value)
+    crate::framing::write_json_frame(stream, value)
         .await
         .context("mvm-host-signer frame write failed")
 }

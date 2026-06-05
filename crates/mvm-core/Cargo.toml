@@ -24,7 +24,11 @@ sha2.workspace = true
 # tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
 tar = "0.4"
 thiserror = "1"
-tokio = { workspace = true, features = ["io-util"] }
+# Optional (plan 126 B5): the only default-build async surface left is
+# `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
+# `manifest-verify` (sigstore) pulls the rest. With both off, the default
+# `mvm-core` build is runtime-free.
+tokio = { workspace = true, optional = true }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -55,14 +59,27 @@ rand.workspace = true
 # the default mvm-core build stays async/runtime-free.
 sigstore = { version = "0.13", default-features = false, features = ["bundle", "sigstore-trust-root", "rustls-tls"], optional = true }
 
+# `hostd-transport` is in `default` for now so existing consumers
+# (mvmd via the `mvmctl::core::protocol` facade) keep building unchanged.
+# Plan 126 B5 PR-2 removes it from `default` once mvmd opts in explicitly,
+# at which point the default `mvm-core` build is runtime-free and the
+# `check-forbidden-deps` gate asserts `cargo tree -p mvm-core -e no-dev`
+# carries no `tokio`.
 [features]
-default = []
+default = ["hostd-transport"]
+# The hostd IPC async transport in `protocol` (mvmd ↔ mvm-hostd control
+# channel: read/write_frame + send/recv request/response). The only
+# unconditional async surface left in mvm-core; gated so the default
+# closure can drop tokio. Pulls tokio's `io-util`.
+hostd-transport = ["dep:tokio", "tokio/io-util"]
 # Cosign-keyless manifest verification via sigstore (folded from
 # mvm-security, plan 121 B3). sigstore uses a blocking verifier backed
-# by a tokio runtime, so enable the tokio features it needs on top of
-# mvm-core's default `io-util`.
+# by a tokio runtime; enable the tokio features it needs (independent of
+# `hostd-transport` — `manifest-verify` alone must build).
 manifest-verify = [
     "dep:sigstore",
+    "dep:tokio",
+    "tokio/io-util",
     "tokio/rt",
     "tokio/rt-multi-thread",
     "tokio/macros",
@@ -83,6 +100,10 @@ attestation-tdx = []
 # crypto module; kept here so a future dep-trim of the main `rand` does
 # not silently break the signed_config tests.)
 rand.workspace = true
+# The `protocol` hostd-transport `#[tokio::test]`s need a runtime +
+# macros regardless of which non-dev features pull tokio. Dev-only, so
+# the `-e no-dev` runtime-free gate (plan 126 B5) ignores it.
+tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
 
 [lints]
 workspace = true

@@ -1,12 +1,13 @@
 //! Length-prefixed JSON framing for the four supervisor proxies.
 //!
-//! Thin adapter over [`mvm_core::framing`] (plan 121 B4): the on-wire
-//! format (4-byte big-endian length + JSON body, cap-before-alloc) and
-//! its tests live in `mvm-core`; this module only maps the shared
-//! [`FrameError`] onto the path-carrying [`ProxyError`] the proxy call
-//! sites surface, and keeps the UDS [`connect`] helper.
+//! Thin adapter over [`crate::framing`] (plan 126 B5; was
+//! `mvm_core::framing`): the on-wire format (4-byte big-endian length +
+//! JSON body, cap-before-alloc) and its tests live in [`crate::framing`];
+//! this module only maps the shared [`FrameError`] onto the
+//! path-carrying [`ProxyError`] the proxy call sites surface, and keeps
+//! the UDS [`connect`] helper.
 
-use mvm_core::framing::{self, FrameError};
+use crate::framing::{self, FrameError};
 use serde::ser::Error as _;
 use tokio::net::UnixStream;
 

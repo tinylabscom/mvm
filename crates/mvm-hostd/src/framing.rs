@@ -1,4 +1,8 @@
-//! core::framing — length-prefixed message framing (plan 121 B4).
+//! mvm_hostd::framing — length-prefixed message framing.
+//!
+//! Was `mvm_core::framing` (plan 121 B4); relocated here (plan 126 B5)
+//! because its only callers are mvm-hostd's same-uid UDS channels, and
+//! the move drops `tokio` from `mvm-core`'s default dependency closure.
 //!
 //! Wire format: a 4-byte big-endian length prefix followed by the body.
 //! The cap is enforced on read **before** allocating the body buffer —

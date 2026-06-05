@@ -438,6 +438,13 @@ builder-vm = [
 ]
 custom-dns = ["mvm-cli/custom-dns"]
 dev-watch = ["mvm-cli/dev-watch"]
+# Forward `mvm-core`'s gated hostd IPC transport (plan 126 B5). Added
+# here in PR-1 (where it's inert — mvm-core still defaults the feature
+# on) so mvmd — the sole consumer, via `mvmctl::core::protocol` with
+# `default-features = false` — can opt in *before* PR-2 drops the feature
+# from `mvm-core`'s default. Keeping these in separate PRs is what makes
+# the cross-repo rollout acyclic and free of any broken-build window.
+hostd-transport = ["mvm-core/hostd-transport"]
 manifest-verify = [
     "mvm/manifest-verify",
     "mvm-cli/manifest-verify",
