@@ -24,6 +24,8 @@ use thiserror::Error;
 
 #[cfg(any(target_os = "linux", test))]
 pub mod linux_nft;
+/// plan 123 A2.1 — adapts `FirewallEnforcer` to `mvm_network::EgressEnforcer`.
+pub mod seam;
 
 /// Runtime VM firewall wiring. The TAP interface is the VM-facing
 /// device; the proxy interface is the only allowed egress path.

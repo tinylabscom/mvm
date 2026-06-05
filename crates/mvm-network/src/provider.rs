@@ -3,6 +3,8 @@
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
 
+use crate::enforcement::EgressEnforcer;
+
 /// Host-side description of the network to provision for a VM.
 ///
 /// `policy` is the per-VM host egress policy the provider enforces (iptables
@@ -73,6 +75,15 @@ pub trait NetworkProvider: Send + Sync {
 
     /// Tear the VM's network down, consuming its handle.
     fn teardown(&self, handle: NetHandle) -> Result<(), NetworkError>;
+
+    /// The host-egress enforcer this provider drives, if any. `None` (default)
+    /// means the provider self-enforces inside `provision` — the Firecracker
+    /// iptables path (`BridgeTapNetworkProvider`). A libkrun gvproxy/passt
+    /// provider (L3) returns `Some(..)` so the supervisor's firewall/L4/L7
+    /// enforce on the gateway bridge (plan 123 A2).
+    fn egress_enforcer(&self) -> Option<&dyn EgressEnforcer> {
+        None
+    }
 }
 
 #[cfg(test)]
