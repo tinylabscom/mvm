@@ -39,7 +39,8 @@ use mvm::vm::volume_registry::{
 };
 use mvm_core::crypto::key_rotation;
 use mvm_core::crypto::policy::validate_mount_path;
-use mvm_core::domain::volume::{OrgId, WrapAlgorithm, WrappedKey};
+use mvm_core::crypto::rotation_policy;
+use mvm_core::domain::volume::{MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use rand::RngCore;
@@ -337,7 +338,79 @@ fn create_mvm_managed(volume_name: &str, root: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Plan 122 B1 — opportunistically roll the local master KEK when it is
+/// past its 90-day lifetime, re-wrapping the catalog's mvm-managed volume
+/// keys onto the new KEK. Invoked whenever a managed volume key is minted —
+/// the closest thing to a periodic "on use" trigger the local CLI has.
+///
+/// Cheap and non-destructive: re-wrapping leaves the underlying DEK (and
+/// the on-disk ciphertext) untouched, so an existing volume keeps
+/// decrypting. Best-effort scope — only keys already at the current active
+/// version are swept (a single re-wrap can't span mixed versions); a volume
+/// wrapped under an older legacy KEK keeps unlocking via its recorded
+/// version and the retained legacy key file. The age check itself lives in
+/// `rotation_policy` and is fully unit-tested there.
+fn maybe_rotate_local_master_key() -> Result<()> {
+    let active_dir = local_master_key_dir();
+    let manifest = key_rotation::load_manifest(&active_dir)?;
+    let Some(active_version) = manifest
+        .entries
+        .iter()
+        .find(|e| e.state == MasterKeyState::Active)
+        .map(|e| e.version)
+    else {
+        return Ok(()); // nothing minted yet — the first key isn't a rotation
+    };
+
+    let mut catalog = LocalVolumeCatalog::load()?;
+    let mut names: Vec<String> = Vec::new();
+    let mut sweep: Vec<WrappedKey> = Vec::new();
+    for (name, entry) in catalog.volumes.iter() {
+        if let LocalVolumeEncryption::MvmManaged(enc) = &entry.encryption
+            && enc.wrapped_key.master_key_version == active_version
+        {
+            names.push(name.clone());
+            sweep.push(enc.wrapped_key.clone());
+        }
+    }
+
+    let org = OrgId::new("local").context("constructing local org id")?;
+    let decision = rotation_policy::rotate_if_due(
+        &active_dir,
+        &org,
+        &mut sweep,
+        rotation_policy::default_interval(),
+        chrono::Utc::now(),
+    )?;
+
+    if let rotation_policy::RotationDecision::Rotated {
+        from_version,
+        to_version,
+        migrated,
+    } = decision
+    {
+        for (name, rewrapped) in names.into_iter().zip(sweep) {
+            if let Some(LocalVolumeEntry {
+                encryption: LocalVolumeEncryption::MvmManaged(enc),
+                ..
+            }) = catalog.volumes.get_mut(&name)
+            {
+                enc.wrapped_key = rewrapped;
+            }
+        }
+        catalog.save()?;
+        eprintln!(
+            "rotated local master KEK v{from_version} → v{to_version}; \
+             re-wrapped {migrated} volume key(s)"
+        );
+    }
+    Ok(())
+}
+
 fn generate_wrapped_volume_key() -> Result<(WrappedKey, secrecy::SecretBox<Vec<u8>>)> {
+    // Roll the KEK first if it's past its lifetime, then mint under the
+    // (possibly fresh) active version.
+    maybe_rotate_local_master_key()?;
     let active_dir = local_master_key_dir();
     let manifest = key_rotation::load_manifest(&active_dir)?;
     let version = if manifest.latest_version() == 0 {
@@ -859,6 +932,43 @@ mod tests {
         fs::remove_dir_all(local_master_key_dir()).unwrap();
         let err = unlock("work").unwrap_err();
         assert!(err.to_string().contains("loading master key"), "got: {err}");
+    }
+
+    #[test]
+    fn create_rotates_stale_local_master_key_and_rewraps_catalog() {
+        let guard = DataDirGuard::new();
+        let root = guard.path().join("vol-root");
+        // First volume mints master v1 and wraps "work" under it.
+        create("work", Some(root.to_str().unwrap()), false).unwrap();
+
+        // Backdate the active KEK to 91 days old so the next mint trips the
+        // 90-day rotation policy.
+        let active_dir = local_master_key_dir();
+        let mut manifest = key_rotation::load_manifest(&active_dir).unwrap();
+        manifest.entries[0].created_at = chrono::Utc::now() - chrono::Duration::days(91);
+        fs::write(
+            active_dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Creating a second volume runs the rotation check.
+        create("work2", Some(root.to_str().unwrap()), false).unwrap();
+
+        // KEK advanced v1 → v2.
+        let manifest = key_rotation::load_manifest(&active_dir).unwrap();
+        assert_eq!(manifest.latest_version(), 2);
+
+        // The pre-existing "work" volume was re-wrapped onto v2 …
+        let catalog = LocalVolumeCatalog::load().unwrap();
+        match &catalog.get("work").unwrap().encryption {
+            LocalVolumeEncryption::MvmManaged(enc) => {
+                assert_eq!(enc.wrapped_key.master_key_version, 2);
+            }
+            LocalVolumeEncryption::HostBacked => panic!("expected mvm-managed"),
+        }
+        // … and still unlocks, proving the DEK survived the re-wrap.
+        unlock("work").unwrap();
     }
 
     #[test]

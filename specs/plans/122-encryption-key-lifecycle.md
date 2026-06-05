@@ -126,7 +126,7 @@ LUKS2 is Linux-only. macOS volumes have no at-rest encryption today. Add a per-f
 
 **Files:** `crates/mvm-core/src/crypto/rotation_policy.rs` (new); reads the master-key manifest.
 
-- [ ] **Step 1:** Failing test — a KEK whose `created_at` is older than the interval is due; a fresh one is not.
+- [x] **Step 1:** Failing test — a KEK whose `created_at` is older than the interval is due; a fresh one is not.
   ```rust
   #[test]
   fn kek_due_for_rotation_past_interval() {
@@ -136,9 +136,9 @@ LUKS2 is Linux-only. macOS volumes have no at-rest encryption today. Add a per-f
       assert!(!rotation_due(&fresh, DEFAULT_INTERVAL));
   }
   ```
-- [ ] **Step 2:** Implement `rotation_due(&MasterKeyManifest, interval) -> bool` (interval configurable, default 90d) and `rotate_if_due()` that calls `rotate_master_key` then sweeps with `migrate_wrapped_keys`. Time comes in as a parameter — no wall-clock read inside the pure check, so it stays testable.
-- [ ] **Step 3:** Wire `rotate_if_due` into the host startup path (where the supervisor already loads keys). KEK rotation only re-wraps DEKs, so it's cheap and safe to run on boot.
-- [ ] **Step 4:** Tests green; commit.
+- [x] **Step 2:** Implement `rotation_due(&MasterKeyManifest, interval) -> bool` (interval configurable, default 90d) and `rotate_if_due()` that calls `rotate_master_key` then sweeps with `migrate_wrapped_keys`. Time comes in as a parameter — no wall-clock read inside the pure check, so it stays testable.
+- [x] **Step 3:** Wire `rotate_if_due` into the local master-key mint path. (No supervisor-boot key-load exists in this repo; the real local consumer is `mvm-cli` `volume.rs::generate_wrapped_volume_key`, which now rolls the KEK if due and re-wraps the volume catalog. Fleet/multi-tenant scheduling calls the same substrate from mvmd — out of scope here.)
+- [x] **Step 4:** Tests green; commit.
 
 ### Task B2: per-rebuild DEK binding
 
