@@ -22,9 +22,11 @@
 pub mod backend;
 pub mod contract;
 pub mod local;
+pub mod provider;
 
 pub use backend::VolumeBackend;
 pub use local::LocalBackend;
+pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
 
 use std::sync::Arc;
 
