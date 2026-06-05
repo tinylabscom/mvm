@@ -109,10 +109,10 @@ ADR-066 §5 — the encrypted volume impl lives here and calls 122's engine. Pla
 
 The IR `MountSource` is a closed enum (`Volume`/`HostPath`/`Tmpfs`) — a new source means a core-enum edit. Add the seam so external sources (S3, Hetzner Volume, NFS) are "implement + register," and the cloud-SDK deps stay off the default build (dep budget). Lives in `mvm-storage` (no new crate).
 
-**Files:** `crates/mvm-storage/src/mount_provider.rs` (new); `crates/mvm-ir/src/workload.rs` (the `MountSource` enum ~line 418).
+**Files:** `crates/mvm-storage/src/mount_provider.rs` (new); `crates/mvm-sdk/src/ir/workload.rs:418` (the `MountSource` enum — post-121 home, not `mvm-ir`).
 
-- [ ] **Step 1:** Failing test — a `MountProvider` registry resolves `HostPath` → a host path and `Volume` → a block device (via `StorageProvider`); an unknown `External { provider }` returns a typed `UnknownFsProvider` (no silent default).
-- [ ] **Step 2:** Define the trait + registry:
+- [x] **Step 1:** `MountRegistry` resolves `HostPath` → `Mountable::HostPath` and `Volume` → an attached `StorageProvider` host path; an unknown `External { provider: "s3" }` returns `MountError::UnknownFsProvider` (no silent default). Tests `registry_resolves_host_path`, `registry_resolves_volume_via_storage_provider`, `registry_rejects_unknown_external_provider`. (Note: with `LocalStorage` a volume is a directory → `HostPath`; the `BlockDev` arm lands with the LUKS block provider.)
+- [x] **Step 2:** Defined `MountProvider` trait + `Mountable {HostPath, Tmpfs}` + hand-written `MountError` (no thiserror dep) + `MountRegistry`; built-ins `HostPathFs`, `VolumeFs` (delegates to `StorageProvider`), `TmpfsFs`. `Mountable::{BlockDev,Fuse}` are declared only when their producers exist (LUKS arm / lazy-FUSE S3) — avoids dead-variant warnings. Original sketch:
   ```rust
   // Resolves a mount's *source* into something VmBackend can attach. The share
   // mechanism (virtiofs / virtio-blk) stays VmBackend's job; this is only "where
@@ -125,7 +125,7 @@ The IR `MountSource` is a closed enum (`Volume`/`HostPath`/`Tmpfs`) — a new so
   }
   ```
   Built-ins: `HostPathFs`, `VolumeFs` (delegates to `StorageProvider`), `TmpfsFs`. VmBackend attaches the `Mountable` (virtiofs for a path, virtio-blk for a device).
-- [ ] **Step 3:** Extend the IR `MountSource` with an open `External { provider: String, config: serde_json::Value }` variant (keep the built-ins); the inner `config` is the provider's to validate. Serde round-trip + an unknown-provider rejection test.
+- [x] **Step 3:** Added the open `External { provider: String, config: serde_json::Value }` variant to the IR `MountSource` (`mvm-sdk`, internally-tagged, `deny_unknown_fields`); the variant broke no `match` anywhere (only the IR file references it). `mount_source_external_roundtrips_json` covers serde; the registry test covers unknown-provider rejection.
 - [ ] **Step 4: Build a real S3 `MountProvider`** (the one external impl), feature-gated `s3` via the lean `object_store` crate — **not `aws-sdk-s3`** (the official AWS SDK pulls the `aws-config`/`aws-smithy-*` closure + `aws-lc-rs`, the C crypto dep the budget rejects). Pin `object_store`'s TLS to the **`ring`** provider (rustls 0.23+ defaults to `aws-lc-rs` — don't reinforce it; ADR-066 drives `aws-lc-rs`→`ring`). `resolve` reads bucket + prefix from `MountSource::External { provider: "s3", config }`, syncs the prefix **read-only** to a local cache volume (reuse `StorageProvider`), and returns it as the `Mountable`. Failing test against `object_store`'s in-memory backend (no network): a seeded object lands in the mounted cache path; and `s3` off → `object_store` absent from the default `cargo tree`. Read-write / lazy-FUSE S3 + a Hetzner-Volume impl are follow-ups — the registry makes them drop-in. **One S3 client for the whole repo:** 126 replaces the existing optional `opendal` (`crates/mvm/Cargo.toml`, template-registry-s3, ~70 crates) with this same `object_store`, dropping opendal. Commit.
 
 ## Phase C — warm-start (per-backend capability matrix)

@@ -3591,11 +3591,14 @@ dependencies = [
  "bytes",
  "chrono",
  "mvm-core",
+ "mvm-sdk",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

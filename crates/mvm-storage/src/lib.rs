@@ -23,6 +23,7 @@ pub mod backend;
 pub mod content_addressed;
 pub mod contract;
 pub mod local;
+pub mod mount_provider;
 pub mod provider;
 pub mod snapshot;
 
@@ -34,6 +35,9 @@ pub mod encrypted;
 pub use backend::VolumeBackend;
 pub use content_addressed::{ContentAddressedStore, ContentDigest};
 pub use local::LocalBackend;
+pub use mount_provider::{
+    HostPathFs, MountError, MountProvider, MountRegistry, Mountable, TmpfsFs, VolumeFs,
+};
 pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
 pub use snapshot::SnapshotUpper;
 
