@@ -25,18 +25,15 @@
 > referred to obliquely per repo naming policy; an oblique-reference key
 > lives in auto-memory (`reference_objc2_vz_external_references`).
 >
-> **Reconcile with Plan 141 before execution (needs a brainstorm).**
-> Plan 141 (`vz-payload-tap-and-rust-owned-shuffle`, ADR-064 §Decision 8)
-> already plans to delete Swift's `BridgeWorker` and have Rust own the Vz
-> network shuffle — but via an **SCM_RIGHTS fd-handoff to a surviving
-> Swift supervisor** that wraps the fd in `FileHandle` for
-> `VZFileHandleNetworkDeviceAttachment`. This plan **deletes Swift
-> entirely** (Rust owns the VZ device directly), which removes the process
-> 141 hands the fd to. The two are in direct tension and must be settled
-> in a dedicated brainstorm (does 152 supersede 141's Vz arm, or does 141
-> land first and 152 fold it in?) **before either executes.** WS-D
-> (nested-virt `/dev/kvm`) similarly overlaps Plan 147's Lima carve-out —
-> reconcile there too.
+> **Plan 141 reconciliation RESOLVED (2026-06-04 brainstorm) — this plan
+> absorbs 141's Vz arm.** 141 keeps only its backend-agnostic
+> `payload_tap` core (libkrun + Firecracker); **Vz `payload_tap` is
+> delivered here** (WS-B). Because this plan makes Rust own the VZ device,
+> the bridge runs **in-process** against the socketpair Rust attaches to
+> `VZFileHandleNetworkDeviceAttachment` — no SCM_RIGHTS fd-handoff, no
+> surviving Swift, no NDJSON ingest hop (the cleanest form of 141's "Rust
+> owns the shuffle"). Decision record: ADR-064 §8. **Still open:** WS-D
+> (nested-virt `/dev/kvm`) ↔ Plan 147's Lima carve-out.
 
 ## Context
 
@@ -260,6 +257,14 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       virtio block/fs/net (gvproxy file-handle attachment), vsock device,
       console, cpu/memory, balloon, entropy. Call `validateWithError()`
       **then** `validateSaveRestoreSupportWithError()`; pin the NAT MAC.
+- [ ] **Vz `payload_tap` (absorbs Plan 141's Vz arm).** Attach the guest
+      net device to a socketpair Rust owns; run the gateway bridge + Plan
+      141 observer pipeline (`on_packet`/`Verdict`/etherparse) **in-process**
+      against it — no SCM_RIGHTS, no Swift, no NDJSON ingest. Advertise
+      `ProviderCapabilities { flow_events: true, payload_tap: true }` for
+      Vz; delete the `mvm-vz-drainer` + `BridgeEndpoints::VzIngest` NDJSON
+      path (Plan 141 Q10). Reuses 141's backend-agnostic
+      `Observer`/`gateway_bridge` core unchanged (ADR-064 §8).
 - [ ] Lifecycle: private serial dispatch queue, `declare_class!`
       delegate for terminal events, `RcBlock` completion handlers,
       `QueueBound<Send>` for the non-`Send` `Retained` handles. No
