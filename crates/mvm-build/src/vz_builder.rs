@@ -41,6 +41,7 @@ use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job,
     finalize_install_job, stage_job_dir, supervisor_exit_error,
 };
+use crate::host_gvproxy;
 use crate::libkrun_builder::{
     BuilderVmImage, DISPATCH_SOCK_MARKER, builder_vm_cache_dir, ensure_builder_vm_image,
     ensure_utf8_path, host_arch_tag, unique_job_id,
@@ -56,6 +57,26 @@ use crate::libkrun_builder::{
 /// precedence when non-empty; this constant is the fallback so
 /// callers that pass an empty cmdline get a sensible boot.
 pub const DEFAULT_VZ_BUILDER_CMDLINE: &str = "console=hvc0 root=/dev/vda ro init=/init panic=1";
+
+/// Tear-down guard for the host-side gvproxy the Vz builder VM uses
+/// for egress. Stops the detached gvproxy via its PID-sidecar file on
+/// `Drop` so a build that times out or errors out doesn't leak the
+/// daemon. Mirrors `mvm_backend::vz::AttachedGvproxyGuard`.
+struct BuilderGvproxyGuard {
+    state_dir: PathBuf,
+}
+
+impl Drop for BuilderGvproxyGuard {
+    fn drop(&mut self) {
+        if let Err(e) = host_gvproxy::stop_by_pid_file(&self.state_dir) {
+            tracing::warn!(
+                state_dir = %self.state_dir.display(),
+                error = %e,
+                "BuilderGvproxyGuard: host_gvproxy stop failed on drop"
+            );
+        }
+    }
+}
 
 /// Vz parallel of [`libkrun_builder::LibkrunBuilderBackend`]. Holds
 /// the resolved supervisor binary path + cached builder VM image so
@@ -98,13 +119,21 @@ impl VzBuilderBackend {
     }
 }
 
-impl VmBackendForBuilder for VzBuilderBackend {
-    fn run_attached_with_mounts(
+impl VzBuilderBackend {
+    /// `run_attached_with_mounts` with an optional host-side gvproxy.
+    /// The trait method delegates here with `None`; `run_build` calls
+    /// it with `Some` so the Vz builder VM gets egress for cold
+    /// `nix build`s. Kept inherent (not on the trait) so the libkrun
+    /// backend — which spawns gvproxy in-process via
+    /// `libkrun_sys::gvproxy::spawn` — doesn't inherit a param it
+    /// can't use.
+    fn run_attached_with_mounts_gvproxy(
         &self,
         config: &BuilderVmRunConfig,
         mounts: &[BuilderVmMount],
         extra_disks: &[BuilderVmDisk],
         timeout: Duration,
+        gvproxy: Option<&host_gvproxy::HostGvproxyInfo>,
     ) -> Result<BuilderVmExitInfo, BuilderVmError> {
         if !mvm_core::platform::current().has_vz() {
             return Err(BuilderVmError::ExtractionFailed(
@@ -121,7 +150,7 @@ impl VmBackendForBuilder for VzBuilderBackend {
             ))
         })?;
 
-        let cfg = build_vz_supervisor_config(config, &self.image, mounts, extra_disks)?;
+        let cfg = build_vz_supervisor_config(config, &self.image, mounts, extra_disks, gvproxy)?;
         let json = cfg.to_json().map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("serialize SupervisorConfig: {e}"))
         })?;
@@ -167,6 +196,21 @@ impl VmBackendForBuilder for VzBuilderBackend {
             ))),
         }
     }
+}
+
+impl VmBackendForBuilder for VzBuilderBackend {
+    fn run_attached_with_mounts(
+        &self,
+        config: &BuilderVmRunConfig,
+        mounts: &[BuilderVmMount],
+        extra_disks: &[BuilderVmDisk],
+        timeout: Duration,
+    ) -> Result<BuilderVmExitInfo, BuilderVmError> {
+        // No gvproxy via the bare trait path — offline / cached
+        // builds only. `run_build` calls the inherent _gvproxy variant
+        // with a live gateway.
+        self.run_attached_with_mounts_gvproxy(config, mounts, extra_disks, timeout, None)
+    }
 
     fn console_log_path(&self, vm_state_dir: &Path) -> PathBuf {
         // Same path the libkrun backend uses + the Vz supervisor
@@ -187,6 +231,7 @@ fn build_vz_supervisor_config(
     image: &BuilderVmImage,
     mounts: &[BuilderVmMount],
     extra_disks: &[BuilderVmDisk],
+    gvproxy: Option<&host_gvproxy::HostGvproxyInfo>,
 ) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
     let BuilderVmImage::Rootfs {
         kernel_path,
@@ -274,12 +319,20 @@ fn build_vz_supervisor_config(
             socket_dir: vsock_dir,
         },
         console_output_path: Some(console_log),
-        // Network wiring (gvproxy) lands with the high-level
-        // VzBuilderVm driver; bare run_attached_with_mounts callers
-        // accept no-network builds (works for offline / cached
-        // derivations only). Plan 88 §"Cross-platform backends"
-        // is the follow-up.
-        network: None,
+        // gvproxy gives a cold `nix build` egress to fetch nixpkgs.
+        // `None` keeps the offline / cached-derivation path (the
+        // caller passes `None` to opt out). Plan 88 §"Cross-platform
+        // backends".
+        //
+        // events_ingest_socket_path stays None on purpose: the builder
+        // VM is a TRUSTED dev-tier build VM whose only egress is
+        // fetching nixpkgs — NOT a workload subject to the claim-10
+        // gateway flow-audit. So no flow-audit drainer; plain gvproxy.
+        network: gvproxy.map(|g| crate::vz::NetworkConfig::Gvproxy {
+            socket_path: g.socket_path.to_string_lossy().into_owned(),
+            mac: host_gvproxy::derive_mac(&config.name),
+            events_ingest_socket_path: None,
+        }),
         balloon: None,
         control_socket_path: None,
         startup_mode: crate::vz::StartupMode::Boot,
@@ -637,6 +690,17 @@ impl BuilderVm for VzBuilderVm {
             ))
         })?;
 
+        // 7b. Spawn host-side gvproxy so the builder VM has egress for a
+        //     cold `nix build` (fetching nixpkgs). The guard stops it on
+        //     every exit path below — including the timeout/error arms —
+        //     so a failed build doesn't leak the daemon.
+        let gvproxy = host_gvproxy::spawn_detached(&vm_state_dir).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("spawn gvproxy for Vz builder VM: {e}"))
+        })?;
+        let _gvproxy_guard = BuilderGvproxyGuard {
+            state_dir: vm_state_dir.clone(),
+        };
+
         // 8. Hand the resolved supervisor + image to the seam.
         //    Construction enforces the Rootfs-only invariant a
         //    second time (defense in depth — we already checked
@@ -726,8 +790,13 @@ impl BuilderVm for VzBuilderVm {
         // 13. Hand off to the seam. The backend spawns the
         //     `mvm-vz-supervisor`, pipes the JSON config to stdin,
         //     and blocks until the supervisor exits.
-        let exit_info =
-            backend.run_attached_with_mounts(&run_config, &virtio_mounts, &extra_disks, timeout)?;
+        let exit_info = backend.run_attached_with_mounts_gvproxy(
+            &run_config,
+            &virtio_mounts,
+            &extra_disks,
+            timeout,
+            Some(&gvproxy),
+        )?;
 
         // 14. Branch on the exit info. The Vz supervisor exits 0
         //     for clean guest power-off, 1 for guest error, 2 for
@@ -1186,9 +1255,12 @@ fn build_vz_persistent_supervisor_config(
             socket_dir: vsock_dir,
         },
         console_output_path: Some(console_log),
-        // Networking lands with Phase 2 Slice 2C (cross-backend
-        // Install parity test needs egress for `uv pip install`).
-        // For Slice 2A construction-only, no virtio-net.
+        // No virtio-net on the persistent driver yet. gvproxy is wired
+        // into the one-shot `run_build` path (the one
+        // `builder_backend_select` actually picks); this persistent
+        // driver isn't selected, so it stays offline until it is — at
+        // which point it gets the same trusted-builder gvproxy
+        // (no flow-audit drainer) as the one-shot path.
         network: None,
         balloon: None,
         control_socket_path: None,
@@ -1385,7 +1457,7 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_maps_run_config_fields() {
-        let cfg = build_vz_supervisor_config(&run_config(), &rootfs_image(), &[], &[])
+        let cfg = build_vz_supervisor_config(&run_config(), &rootfs_image(), &[], &[], None)
             .expect("build supervisor config");
         assert_eq!(cfg.name, "builder-vz-test");
         assert_eq!(cfg.resources.cpu_count, 4);
@@ -1400,6 +1472,39 @@ mod tests {
         // pid_file_name must be set so concurrent builder VMs don't
         // race on a shared PID file inside the state dir.
         assert_eq!(cfg.pid_file_name.as_deref(), Some("builder.pid"));
+        // No gvproxy passed → offline / cached-build posture.
+        assert!(cfg.network.is_none());
+    }
+
+    #[test]
+    fn build_supervisor_config_wires_gvproxy_without_flow_audit() {
+        // Slice 2C — passing a gvproxy info turns on virtio-net so a
+        // cold `nix build` can fetch nixpkgs. The builder VM is a
+        // TRUSTED dev-tier build VM (only egress is fetching nixpkgs),
+        // NOT a claim-10 workload, so events_ingest_socket_path stays
+        // None: plain gvproxy, no flow-audit drainer.
+        let gvproxy = host_gvproxy::HostGvproxyInfo {
+            socket_path: PathBuf::from("/tmp/mvm-test/builder-vz/gvproxy.sock"),
+            pid: 4242,
+        };
+        let cfg =
+            build_vz_supervisor_config(&run_config(), &rootfs_image(), &[], &[], Some(&gvproxy))
+                .expect("build supervisor config");
+        match cfg.network {
+            Some(crate::vz::NetworkConfig::Gvproxy {
+                socket_path,
+                mac,
+                events_ingest_socket_path,
+            }) => {
+                assert_eq!(socket_path, "/tmp/mvm-test/builder-vz/gvproxy.sock");
+                assert_eq!(mac, host_gvproxy::derive_mac("builder-vz-test"));
+                assert_eq!(
+                    events_ingest_socket_path, None,
+                    "trusted builder VM gets no flow-audit drainer"
+                );
+            }
+            other => panic!("expected Gvproxy network, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1409,8 +1514,8 @@ mod tests {
             rootfs_path: PathBuf::from("/tmp/rootfs.ext4"),
             cmdline: String::new(),
         };
-        let cfg =
-            build_vz_supervisor_config(&run_config(), &image, &[], &[]).expect("build with empty");
+        let cfg = build_vz_supervisor_config(&run_config(), &image, &[], &[], None)
+            .expect("build with empty");
         assert_eq!(cfg.kernel.cmdline, DEFAULT_VZ_BUILDER_CMDLINE);
         assert!(
             cfg.kernel.cmdline.contains("init=/init"),
@@ -1438,7 +1543,7 @@ mod tests {
             host_path: PathBuf::from("/host/nix-store.img"),
             read_only: false,
         }];
-        let cfg = build_vz_supervisor_config(&run_config(), &rootfs_image(), &mounts, &disks)
+        let cfg = build_vz_supervisor_config(&run_config(), &rootfs_image(), &mounts, &disks, None)
             .expect("build supervisor config");
 
         // Rootfs is disks[0]; nix-store rides as disks[1] with the
@@ -1762,7 +1867,7 @@ mod tests {
                 rootfs_path: PathBuf::from("/tmp/rootfs"),
                 cmdline: "x".to_string(),
             };
-            let err = build_vz_supervisor_config(&run_config(), &image, &[], &[])
+            let err = build_vz_supervisor_config(&run_config(), &image, &[], &[], None)
                 .expect_err("non-UTF-8 path must reject");
             assert!(format!("{err}").contains("not valid UTF-8"), "got: {err}");
         }
@@ -1891,7 +1996,9 @@ mod tests {
         );
         assert!(cfg.vsock.socket_dir.ends_with("vsock"));
 
-        // Network is None for Slice 2A — Slice 2C wires gvproxy.
+        // Persistent driver is still offline (not yet selected by
+        // builder_backend_select); gvproxy is wired into the one-shot
+        // run_build path instead. See build_vz_persistent_supervisor_config.
         assert!(cfg.network.is_none());
         // Boot startup; persistent Vz doesn't restore from a saved
         // snapshot (that's Phase E territory).

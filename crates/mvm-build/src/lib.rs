@@ -41,6 +41,15 @@ pub mod template_reuse;
 /// via `mvm_build::vz`.
 pub mod vz;
 
+/// Plan 102 W6.A.5 — host-side gvproxy lifecycle (detached spawn +
+/// PID-sidecar tear-down). Moved down from mvm-backend so the Vz
+/// *builder* (`vz_builder`) can reach it for cold-`nix build` egress;
+/// mvm-backend's `VzBackend` consumes it via `mvm_build::host_gvproxy`.
+/// Gated by `builder-vm` because it links `libkrun_sys::gvproxy` for
+/// the binary locator + free-port reservation.
+#[cfg(feature = "builder-vm")]
+pub mod host_gvproxy;
+
 /// Plan 72 W1 — libkrun-backed builder VM (gated by
 /// `builder-vm`). Currently scaffolding; the actual
 /// VM launch lands in Plan 72 W2–W4. See module-level docs.

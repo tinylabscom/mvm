@@ -38,8 +38,8 @@ use mvm_core::vm_backend::{
 };
 
 use crate::base::ui;
-use crate::host_gvproxy;
 use crate::vz_control;
+use mvm_build::host_gvproxy;
 use mvm_build::vz;
 use std::io::Write;
 use std::path::{Path, PathBuf};
