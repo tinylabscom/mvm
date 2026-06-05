@@ -204,12 +204,16 @@ cargo test --workspace --doc
 cargo clippy --workspace -- -D warnings
 ```
 
-Live (libkrun/gvproxy arm; force libkrun + isolate caches per memory
+Live gvproxy arm (no KVM): `MVM_GATEWAY_DHCP_E2E=1 cargo test -p mvm-hostd
+--lib gvproxy_dhcp_offer_roundtrips_through_bridge` drives a real DHCP
+`DISCOVER → OFFER` through the bridge against the installed gvproxy binary
+(PR #614). Fuller workload check (force libkrun + isolate caches per memory
 `project_dev_host_runs_builder_via_vz`): run a workload with an
 allowlisted payload-tap observer; confirm modification on the wire,
 `mvmctl audit verify` green, kill-flow emits `gateway.flow_observer_fault`,
-`/metrics` shows `mvm_observer_latency_us_*`. Passt arm verified on
-Linux/KVM CI (or a Lima KVM test env — memory `project_lima_removed`).
+`/metrics` shows `mvm_observer_latency_us_*`. **Passt arm: a live
+Firecracker+passt KVM round-trip is a deferred follow-up** (see
+[§Deferred follow-ups](#deferred-follow-ups)) — needs a `/dev/kvm` host.
 
 ---
 
@@ -222,26 +226,53 @@ own ADR. Per-observer timeout enforcement, TCP RST on kill, IP
 extension-header rebuild, async/ring-buffered execution,
 `Defer`/`DropPacket`-vs-`KillFlow` variants → all deferred.
 
+### Deferred follow-ups
+
+- [ ] **Passt/Firecracker live KVM validation.** The gvproxy arm is now
+  live-validated against the real gateway (PR #614); the Passt arm is
+  protocol-confirmed + unit-tested but has never run a real
+  Firecracker+passt packet round-trip. Closing it needs a Linux host with
+  `/dev/kvm`. **Route A (no extra infra):** a CI lane on a KVM-capable
+  runner — GitHub `ubuntu-latest` exposes `/dev/kvm` and `ci-full.yml`'s
+  `workload-spawn-smoke-linux` already boots Firecracker there; add a
+  passt+bridge DHCP/observer assertion. **Route B:** a remote `/dev/kvm`
+  box for interactive runs. Low risk (the framing is the documented
+  qemu-socket 4-byte-BE format; the reframer is duplex-unit-tested) — the
+  gap is a live KVM environment, not code.
+
 ---
 
 ## Status
 
-🟢 **Implemented (2026-06-04)** on branch `feat/plan-141-packet-observer-core`
-(worktree `../mvm-plan-141`), not yet pushed/PR'd. All 11 tasks landed in
-9 commits. Q8/Q9 closed via brainstorm; Q7/Q10 moved to Plan 152.
+🟢 **Closed — merged to `main`.** The backend-agnostic core + both backend
+wirings (all 11 tasks) shipped in **PR #609**; the live-validation
+follow-up (real-gateway DHCP test + a bridge bug fix) shipped in
+**PR #614**. Q8/Q9 closed via brainstorm; Q7/Q10 moved to Plan 152.
 `etherparse 0.20` added (was absent).
 
-Verification: clippy `-D warnings` clean (mvm-hostd, mvm-core, mvm-cli);
-nightly `fmt --all --check` clean; `cargo test --doc` clean; full
-mvm-hostd + mvm-core suites green (1786+ tests) plus the new unit +
-integration tests (packet parse/rebuild, runner fan-out, gvproxy +
-framed-Passt redaction/drop, latency, flow-byte-log, metrics filter,
-cache sweep). The `fuzz_packet_parse` target typechecks on stable; full
-ASAN/sancov fuzzing runs in CI (local `cargo fuzz` is blocked by the
-repo's `rust-toolchain.toml` stable pin).
+Verification (CI + local): clippy `-D warnings` clean; nightly
+`fmt --all --check` clean; doctests clean; full mvm-hostd + mvm-core
+suites green plus the new unit + integration tests (packet parse/rebuild,
+runner fan-out, gvproxy + framed-Passt redaction/drop, latency,
+flow-byte-log, metrics filter, cache sweep). `fuzz_packet_parse` runs in
+`security.yml`'s fuzz job.
 
-**Live-host caveat:** the **gvproxy (libkrun)** arm is exercised by the
-in-process integration tests; the **Passt (Firecracker)** arm is
-Linux-only and its 4-byte-BE qemu-socket wire framing is validated on
-Linux/KVM CI, not this macOS host — the reframing *logic* is unit-tested
-via an in-memory duplex.
+**Live-validation status:**
+
+- **gvproxy (libkrun) arm — live-validated.** PR #614 added an opt-in
+  real-gateway DHCP round-trip test
+  (`gvproxy_dhcp_offer_roundtrips_through_bridge`, gate
+  `MVM_GATEWAY_DHCP_E2E=1`): drives a real DHCP `DISCOVER → OFFER` through
+  the bridge against the installed gvproxy binary — no microVM, no KVM. It
+  surfaced and fixed a **pre-existing** bug: the gvproxy-facing socket was
+  unbound, which real gvproxy rejects (`vfkit accept error: vfkit socket
+  address is empty`); it now binds `<listen>.gw-out`. The gateway contract
+  is documented in rvproxy's `docs/gvproxy-conformance.md` (rvproxy PR #7);
+  the same test is rvproxy's drop-in conformance gate (gvproxy passes;
+  rvproxy fails only at the `-listen-vfkit` CLI surface).
+- **Passt (Firecracker) arm — protocol-confirmed, live test deferred.**
+  passt uses the qemu-socket protocol (4-byte-BE length prefix, confirmed
+  via passt.top); the reframer is duplex-unit-tested and Linux CI
+  builds/tests it. A real Firecracker+passt round-trip on `/dev/kvm` has
+  not run — tracked under [§Deferred follow-ups](#deferred-follow-ups).
+  Low risk; the gap is a live KVM environment, not code.
