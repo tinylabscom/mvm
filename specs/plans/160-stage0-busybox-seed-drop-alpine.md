@@ -27,6 +27,26 @@ Stage 0 is a chicken-and-egg: you cannot Nix-build the first Nix. Alpine solves 
 
 - [ ] **Phase 0 exit:** one chosen source, a working `nix build` proven from that seed inside a real Stage-0 libkrun boot on aarch64 (this host) — **and** an **ADR** capturing the new bootstrap trust model (what we download, how it's pinned/verified, why dropping the Alpine PGP layer is safe — the seed is hash-pinned, same as the tarball is today). Coordinates with ADR-046 (two-artifact-layers / contributor path doesn't download mvm artifacts) and ADR-002.
 
+### Phase 0 spike results (2026-06-05) — source A chosen, with a refinement
+
+Measured against the official Nix release tarball (`releases.nixos.org/nix/nix-2.31.1/nix-2.31.1-<arch>-linux.tar.xz`):
+
+- ✅ **Available + pinnable** for both `aarch64-linux` and `x86_64-linux` (HTTP 206). aarch64 2.31.1 `sha256 = 4ae8cb26dada33765f3068d185b36dcfe23efba2ba678048b70d36d8b1553850`, ~23 MiB.
+- ✅ **Self-contained store** bundling `nix-2.31.1`, **`bash-5.2p37`**, `curl-8.14.1`, `xz-5.8.1`, **`nss-cacert-3.113.1`** (CA certs), glibc, openssl. So a shell + TLS trust come free; no separate ca-cert sourcing.
+- ⚠️ **The bundled `busybox-1.36.1` is `busyboxMinimal`** — ships only `sh`/`ash`/`busybox` symlinks, **no `mount`/`ip`/`udhcpc`/`mountpoint`/`mkfs`**. nix uses it purely as the builder shell.
+- ⚠️ **No `e2fsprogs`** in the closure (expected).
+
+So the tarball is the right **Nix source**, but the seed still needs a **`/init` userland** for: mount pseudo-fs, bring up eth0 + get a lease (so nix can reach substituters), then `mkfs.ext4` + mount the persistent `/nix` disk. `mkfs.ext4` is **not** a sourcing problem — once the net is up, `nix build nixpkgs#e2fsprogs` (into a tmpfs/overlay store) provides it. The hard part is the **mount + network** bring-up, and:
+
+- **busybox.net prebuilt binaries**: x86_64-only, stale (newest 1.35.0), **no reliable aarch64** → not a clean full-busybox source.
+- A full `pkgsStatic.busybox` would have to be Nix-built → chicken-and-egg (need nix+net first).
+
+**The design fork (decide in Phase 0):**
+1. **Static Rust `stage0-init`** (recommended) — a small `aarch64-musl` PID-1 that does the mounts (libc `mount()`), brings up eth0 (static IP from the known gvproxy range, or a minimal DHCP), then `exec`s nix from the seed store. Reuses the repo's existing static-musl-init machinery (`mvm-host-vm-init` is already cross-compiled + embedded via `mvm-cli/build.rs` / ADR-065). Replaces `init.sh` entirely. No external busybox to source. Networking detail is the main work (today's `init.sh` leans on busybox `udhcpc`).
+2. **Full static busybox companion** — pin a second download. Blocked by the aarch64 sourcing gap above; not clean.
+
+So **the seed = the official Nix tarball + an in-repo static `stage0-init` binary** (no Alpine, no apk, no external busybox). This is bigger than "swap the asset" (it turns `init.sh` into a Rust binary) but it's the only path that doesn't reintroduce an external userland dependency. Needs the user's nod before implementing.
+
 ## Build sequence (after Phase 0)
 
 ### Task 1: assemble the seed
