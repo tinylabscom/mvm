@@ -93,9 +93,9 @@ pub const DEFAULT_VCPUS: u8 = 4;
 /// in-VM nix builds peak ~5-6 GiB). Raised to 16 GiB for headroom
 /// when several derivations' build working sets overlap. Before the
 /// persistent-store cutover this also had to cover a 14 GiB in-RAM
-/// `/nix` tmpfs in `stage0/init.sh`; the Stage 0 store now lives on a
-/// virtio-blk ext4 disk (`nix-store-stage0-<arch>.img`), so this RAM
-/// only has to cover the compiles themselves, not the store.
+/// `/nix` tmpfs; the Stage 0 store now lives on a virtio-blk ext4 disk
+/// (`nix-store-stage0-<arch>.img`), so this RAM only has to cover the
+/// compiles themselves, not the store.
 pub const DEFAULT_MEMORY_MIB: u32 = 16384;
 
 /// Default size of the persistent `/nix`-store virtio-blk image,
@@ -424,9 +424,11 @@ impl LibkrunBuilderVm {
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
-            // Persistent /nix store. The only block device on a RootDir
-            // guest, so it enumerates as /dev/vda; init.sh formats it on
-            // first boot and mounts it at /nix.
+            // Persistent /nix store disk — the only block device on a RootDir
+            // guest, so it enumerates as /dev/vda. Attached for the production
+            // persistent-store path; `stage0-init` currently copies the seed
+            // closure into a tmpfs `/nix` (overlay-over-virtiofs writes fail in
+            // libkrun), so the disk is a plan-160 follow-up, not yet formatted.
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
@@ -434,8 +436,8 @@ impl LibkrunBuilderVm {
             )
             .add_virtio_fs("work", path_to_str(workspace_dir, "workspace_dir")?)
             .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
-            // /mvm-bins inside the guest — init.sh sets MVM_HOST_BIN_DIR to
-            // it so the flake picks up the pre-built host-vm binaries.
+            // /mvm-bins inside the guest — stage0-init sets MVM_HOST_BIN_DIR
+            // to it so the flake picks up the pre-built host-vm binaries.
             .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?);
 
         krun = apply_networking_mode(krun, &vm_state_dir)?;

@@ -30,3 +30,12 @@ pub const HOST_BINARIES: &[HostBinary] = &[
         mode: 0o755,
     },
 ];
+
+/// Host-side-only embedded `mvm-build` binaries. Cross-compiled +
+/// embedded by `mvm-cli/build.rs` exactly like [`HOST_BINARIES`], but
+/// **not** installed into any VM rootfs — they carry no `install_path`
+/// and are absent from `nix/lib/mvm-host-binaries.nix` (the
+/// `check-mvm-host-binaries-sync` xtask only mirrors `HOST_BINARIES`).
+/// The host extracts these by name and lays them down directly:
+/// `stage0-init` becomes the Stage 0 nix-seed's `/init` (plan 160).
+pub const SEED_BINARIES: &[&str] = &["stage0-init"];

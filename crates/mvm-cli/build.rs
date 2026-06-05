@@ -33,7 +33,11 @@ fn main() {
     );
     println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
 
-    let manifest = read_rust_manifest(&workspace_root);
+    // HOST_BINARIES (installed into the builder/dev VM rootfs) + SEED_BINARIES
+    // (host-side only, e.g. the Stage 0 nix-seed's /init — plan 160). Both are
+    // `mvm-build` `[[bin]]`s; both get cross-compiled + embedded the same way.
+    let mut manifest = read_rust_manifest(&workspace_root);
+    manifest.extend(read_seed_binaries(&workspace_root));
     let mut entries = Vec::new();
 
     let host_triple = std::env::var("HOST").unwrap();
@@ -134,6 +138,30 @@ fn read_rust_manifest(root: &Path) -> Vec<String> {
         if let Some(n) = extract_quoted_after(line, "name:") {
             out.push(n);
         }
+    }
+    out
+}
+
+/// Parse the bare-string array `pub const SEED_BINARIES: &[&str] = &[ ... ]`
+/// from `manifest.rs`. These are host-side-only embedded binaries (no VM
+/// install_path, absent from the nix attrset) — plan 160.
+fn read_seed_binaries(root: &Path) -> Vec<String> {
+    let src =
+        std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
+    let Some(start) = src.find("SEED_BINARIES") else {
+        return Vec::new();
+    };
+    // Everything from the declaration to the array terminator `];`.
+    let rest = &src[start..];
+    let end = rest.find("];").map(|i| i + 2).unwrap_or(rest.len());
+    let block = &rest[..end];
+    let mut out = Vec::new();
+    let mut s = block;
+    while let Some(q1) = s.find('"') {
+        let after = &s[q1 + 1..];
+        let Some(q2) = after.find('"') else { break };
+        out.push(after[..q2].to_string());
+        s = &after[q2 + 1..];
     }
     out
 }

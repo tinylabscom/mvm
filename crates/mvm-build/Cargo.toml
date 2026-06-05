@@ -25,6 +25,14 @@ path = "src/bin/mvm-host-vm-init.rs"
 name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
 
+# Plan 160 — PID 1 of the nix-tarball Stage 0 seed. Cross-compiled to
+# static aarch64-musl + embedded by mvm-cli/build.rs (via SEED_BINARIES),
+# same treatment as mvm-host-vm-init. Host-side only — never installed in a
+# VM, absent from the nix attrset + the host-binaries sync gate.
+[[bin]]
+name = "stage0-init"
+path = "src/bin/stage0-init.rs"
+
 [dependencies]
 # Plan 74 W1.3 — OCI layer unpack to a staging rootfs. `tar` and
 # `flate2` are workspace deps already (used by `mvm-sdk`'s addon
@@ -35,15 +43,11 @@ path = "src/bin/mvm-egress-proxy.rs"
 # pulling a decompressor in for each test.
 flate2.workspace = true
 tar.workspace = true
-# Plan 91 W1 — Stage 0 bootstrap fetches Alpine's official
-# minirootfs and verifies it against Alpine's release-signing key
-# (Natanael Copa, RSA fingerprint
-# 0482D84022F52DF1C4E7CD43293ACD0907D9495A). `pgp` (rpgp) is
-# pure-Rust, supports detached signature verification, and stays
-# within our deny.toml-licensed dep set. Default features include
-# bzip2 which we don't need for armored ASCII signatures — disable
-# them to keep the dep closure tight.
-pgp = { version = "0.17", default-features = false }
+# Plan 160 — in-process xz decode of the Nix-tarball Stage 0 seed
+# (`stage0::extract_nix_store_tarball`), replacing a shell-out to host
+# `tar -xJf`. Pure Rust (no liblzma C dep) so host-side seed
+# materialization stays self-contained on every contributor host.
+lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-guest.workspace = true

@@ -443,7 +443,7 @@ mod tests {
 
     fn populate_cache(root: &Path) {
         touch(&root.join("builder-vm/nix-store-aarch64.img"), 16384);
-        touch(&root.join("stage0/alpine.tar.gz"), 4096);
+        touch(&root.join("stage0/nix-seed-aarch64.tar.xz"), 4096);
     }
 
     #[test]
