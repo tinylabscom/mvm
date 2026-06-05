@@ -9,8 +9,10 @@
 //! existing `Verdict::Modify` rebuild path; a scan `Drop` maps to the same
 //! fail-closed kill the observers use).
 
-use crate::supervisor::network::PacketCtx;
+use mvm_core::network_policy::is_mandatory_deny;
+
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
+use crate::supervisor::network::{FlowDirection, PacketCtx};
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
 /// flow — the same fail-closed path as `Verdict::Drop`.
@@ -150,6 +152,38 @@ fn dns_query_qname(payload: &[u8]) -> Option<String> {
     Some(labels.join("."))
 }
 
+/// Host-side enforcement of the mandatory-deny egress ranges (link-local,
+/// cloud-metadata `169.254.169.254`, …) as a `ScanStage` (plan 123 A2 /
+/// claim 10). Drops any **egress** packet whose L3 destination is in
+/// `mvm_core::network_policy::mandatory_deny_ranges()`, at the gateway-bridge
+/// chokepoint every guest byte transits.
+///
+/// Defense-in-depth, not the primary control: the guest's `netinit` installs
+/// the same ranges as kernel routes, but a compromised guest can delete those
+/// routes — the host-side drop here can't be stripped from inside the guest.
+/// Applies to every tenant regardless of the admitted policy (mandatory = not
+/// opt-out), so it composes *under* any per-tenant allow-list scan. Ingress is
+/// ignored: an ingress frame's L3 dst is the guest itself, not a remote host.
+pub struct MandatoryDenyEgressScan;
+
+impl ScanStage for MandatoryDenyEgressScan {
+    fn name(&self) -> &'static str {
+        "mandatory-deny-egress"
+    }
+
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+        match ctx.direction {
+            FlowDirection::Egress => {}
+            _ => return ScanOutcome::Pass,
+        }
+        if is_mandatory_deny(pkt.five_tuple.dst_ip) {
+            ScanOutcome::Drop
+        } else {
+            ScanOutcome::Pass
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +319,64 @@ mod tests {
         let scan = DnsSinkholeScan::new(vec![]);
         let truncated = dns_packet(b"\x12\x34\x01");
         assert_eq!(scan.scan(&egress_ctx(), &truncated), ScanOutcome::Pass);
+    }
+
+    fn ingress_ctx() -> PacketCtx<'static> {
+        PacketCtx {
+            vm_name: "vm",
+            tenant: "t",
+            direction: FlowDirection::Ingress,
+            flow_id: "vm-ingress",
+        }
+    }
+
+    /// A TCP packet to `dst_ip:dst_port` with an empty payload.
+    fn tcp_packet(dst_ip: std::net::IpAddr, dst_port: u16) -> ParsedPacket<'static> {
+        ParsedPacket {
+            five_tuple: FiveTuple {
+                proto: L4Proto::Tcp,
+                src_ip: "10.0.0.2".parse().unwrap(),
+                dst_ip,
+                src_port: 5000,
+                dst_port,
+            },
+            l4_payload: b"",
+            raw_frame: b"",
+        }
+    }
+
+    #[test]
+    fn mandatory_deny_drops_egress_to_metadata_ip() {
+        // Host-side defense-in-depth: the cloud-metadata IP (link-local
+        // 169.254.0.0/16) is always denied at the gateway chokepoint, whatever
+        // the tenant policy. The guest-side netinit route-deny is strippable by
+        // a compromised guest; this host-side drop is not.
+        let pkt = tcp_packet("169.254.169.254".parse().unwrap(), 80);
+        assert_eq!(
+            MandatoryDenyEgressScan.scan(&egress_ctx(), &pkt),
+            ScanOutcome::Drop
+        );
+    }
+
+    #[test]
+    fn mandatory_deny_passes_egress_to_public_ip() {
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(
+            MandatoryDenyEgressScan.scan(&egress_ctx(), &pkt),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn mandatory_deny_ignores_ingress() {
+        // Egress-only: an ingress frame's L3 dst is the guest, not a remote
+        // host, so the mandatory-deny ranges don't apply. Constructed with a
+        // metadata dst to prove the direction gate (not the IP check) is what
+        // lets it pass.
+        let pkt = tcp_packet("169.254.169.254".parse().unwrap(), 80);
+        assert_eq!(
+            MandatoryDenyEgressScan.scan(&ingress_ctx(), &pkt),
+            ScanOutcome::Pass
+        );
     }
 }
