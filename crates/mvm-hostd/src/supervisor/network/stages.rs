@@ -9,7 +9,7 @@
 //! existing `Verdict::Modify` rebuild path; a scan `Drop` maps to the same
 //! fail-closed kill the observers use).
 
-use mvm_core::network_policy::is_mandatory_deny;
+use mvm_core::network_policy::{NetworkPolicy, is_mandatory_deny};
 
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
@@ -184,11 +184,67 @@ impl ScanStage for MandatoryDenyEgressScan {
     }
 }
 
+/// Enforces a resolved [`NetworkPolicy`] on the egress packet path (plan 123 A2
+/// / claim 10): the L4 allow-list backstop. `unrestricted` passes everything;
+/// an allow-list (including `deny_all`, the empty list) passes only packets
+/// whose `dst ip:port` matches an **IP-literal** rule and drops the rest —
+/// fail-closed.
+///
+/// Hostname rules can't be matched here (an L4 packet carries no name), so they
+/// match nothing and the packet drops. That's deliberate: hostname allow-listing
+/// is the DNS layer's job ([`DnsSinkholeScan`] sink-holes denied lookups; DNS
+/// pinning maps an allowed name to its IPs). This scan is the IP/port backstop
+/// that catches a guest dialing a raw IP. Compose it *under*
+/// [`MandatoryDenyEgressScan`] (mandatory-deny always wins) via a scan chain.
+pub struct NetworkPolicyScan {
+    policy: NetworkPolicy,
+}
+
+impl NetworkPolicyScan {
+    pub fn new(policy: NetworkPolicy) -> Self {
+        Self { policy }
+    }
+}
+
+impl ScanStage for NetworkPolicyScan {
+    fn name(&self) -> &'static str {
+        "network-policy"
+    }
+
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+        match ctx.direction {
+            FlowDirection::Egress => {}
+            _ => return ScanOutcome::Pass,
+        }
+        let rules = match self.policy.resolve_rules() {
+            None => return ScanOutcome::Pass, // unrestricted — no filtering
+            Some(rules) => rules,
+        };
+        let dst_ip = pkt.five_tuple.dst_ip;
+        let dst_port = pkt.five_tuple.dst_port;
+        // An IP-literal rule matches when both the literal IP and the port equal
+        // the packet's destination. Hostname rules never parse as an IP here, so
+        // they match nothing — the packet drops (fail-closed).
+        let allowed = rules.iter().any(|r| {
+            r.port == dst_port
+                && r.host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip == dst_ip)
+        });
+        if allowed {
+            ScanOutcome::Pass
+        } else {
+            ScanOutcome::Drop
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::supervisor::network::FlowDirection;
     use crate::supervisor::network::packet::{FiveTuple, L4Proto};
+    use mvm_core::network_policy::{HostPort, NetworkPolicy};
 
     #[test]
     fn noop_stages_pass_through_and_never_drop() {
@@ -378,5 +434,68 @@ mod tests {
             MandatoryDenyEgressScan.scan(&ingress_ctx(), &pkt),
             ScanOutcome::Pass
         );
+    }
+
+    #[test]
+    fn network_policy_deny_all_drops_every_egress() {
+        // deny_all resolves to an empty allow-list → nothing matches → every
+        // egress packet drops. The strictest claim-10 posture.
+        let scan = NetworkPolicyScan::new(NetworkPolicy::deny_all());
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(scan.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+    }
+
+    #[test]
+    fn network_policy_unrestricted_passes_egress() {
+        let scan = NetworkPolicyScan::new(NetworkPolicy::unrestricted());
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(scan.scan(&egress_ctx(), &pkt), ScanOutcome::Pass);
+    }
+
+    #[test]
+    fn network_policy_allow_list_passes_matching_ip_literal() {
+        let scan = NetworkPolicyScan::new(NetworkPolicy::allow_list(vec![HostPort::new(
+            "1.2.3.4", 443,
+        )]));
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 443)),
+            ScanOutcome::Pass
+        );
+        // Same IP, different port → no rule matches → drop (fail-closed).
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 80)),
+            ScanOutcome::Drop
+        );
+        // Different IP → drop.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("9.9.9.9".parse().unwrap(), 443)),
+            ScanOutcome::Drop
+        );
+    }
+
+    #[test]
+    fn network_policy_allow_list_hostname_rule_drops_fail_closed() {
+        // A hostname rule can't be matched at L4 (the packet has no name), so it
+        // matches nothing and the packet drops. Hostname allow-listing is the
+        // DNS layer's job; this L4 scan must never fail *open* on a name it
+        // can't resolve.
+        let scan = NetworkPolicyScan::new(NetworkPolicy::allow_list(vec![HostPort::new(
+            "api.example.com",
+            443,
+        )]));
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 443)),
+            ScanOutcome::Drop
+        );
+    }
+
+    #[test]
+    fn network_policy_ignores_ingress() {
+        // Egress-only: an ingress frame's L3 dst is the guest, not a remote
+        // host. deny_all would drop everything if it ran on ingress; the
+        // direction gate is what lets this pass.
+        let scan = NetworkPolicyScan::new(NetworkPolicy::deny_all());
+        let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        assert_eq!(scan.scan(&ingress_ctx(), &pkt), ScanOutcome::Pass);
     }
 }
