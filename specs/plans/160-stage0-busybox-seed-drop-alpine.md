@@ -1,6 +1,6 @@
 # Plan 160 — Drop Alpine from Stage 0; seed the bootstrap with busybox + static Nix
 
-## Status: Proposed (2026-06-05)
+## Status: Rip-out landed (2026-06-05) — nix seed is the ONLY Stage 0 path; Alpine/apk/pgp/`init.sh`/the Alpine release key deleted; `pgp` dropped from the tree (`cargo tree -i pgp` empty). Bootstrap trust model captured in **ADR-071**. Remaining (own follow-ups, not blockers): x86_64 + CI validation of the nix seed, persistent ext4 `/nix` store (a RAM optimization — tmpfs holds today), in-process xz decode.
 
 > **For agentic workers:** brainstorm/validate Phase 0 (the seed-source spike) BEFORE writing any code — the whole plan hinges on it. Steps use `- [ ]` checkboxes.
 
@@ -83,40 +83,42 @@ Drove a real `MVM_STAGE0_SEED=nix MVM_BUILDER_BACKEND=libkrun` Stage-0 boot on t
 Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep Alpine as the fallback until proven:
 - [x] **0a:** wrote `stage0-init`; cross-compiled + embedded via `SEED_BINARIES` + `mvm-cli/build.rs`.
 - [x] **0b:** added the nix-tarball seed *alongside* Alpine behind `MVM_STAGE0_SEED=nix|alpine`; **proved a full cold `dev up` on aarch64 builds the builder VM via the nix seed + reaches "Dev environment ready"** (no Alpine/apk/pgp). ✅
-- [ ] **0c:** keep BOTH paths (nix behind the flag, **Alpine default**) until nix is validated in CI + on x86_64 — only THEN flip the default + rip out Alpine/apk/pgp/init.sh/the Alpine key (Tasks 1–4) under an ADR for the bootstrap trust model. The rip-out is no longer "after one boot" — it needs broader validation first; this is its own staged follow-up, not part of the boot-proof.
+- [x] **0c:** **rip-out landed (2026-06-05).** The user directed settling on one userland *now* ("go back to busybox entirely … depend upon a single one"). `MVM_STAGE0_SEED` + the `Stage0Seed` enum are gone; the nix seed is the only path. Deleted: `init.sh`, `alpine-ncopa-release-key.asc`, all `ALPINE_*`/`ASSETS_*`/`alpine_minirootfs_for_host_arch`/`verify_alpine_pgp_signature`/`extract_alpine_tarball`/`fetch_signature`/`VendorBlobPgp`, and the `pgp` dep (`cargo tree -i pgp` empty; 379 unique crates vs 407 baseline). Bootstrap trust model → **ADR-071**. The x86_64 + CI validation that 0c originally gated *before* the rip-out is now an **after-the-fact follow-up** (below) — the aarch64/libkrun boot proof + the user directive were judged sufficient to drop the fallback.
 
-## Build sequence (after Phase 0)
+## Build sequence (as landed — the Phase-0 spike refined the original tasks)
 
-### Task 1: assemble the seed
-- [ ] Produce the seed tarball(s) per the Phase-0 choice: static **busybox** (`/bin/sh`, `mount`, `ip`, `udhcpc`, `mountpoint`, `mkdir`, …), static **nix** (`nix build`, `nix daemon`), **e2fsprogs** (`mkfs.ext4` — busybox's `mke2fs` lacks reliable ext4), **CA certs**. Pin by URL + SHA-256.
-- [ ] Keep size sane (target < ~25 MiB uncompressed; Alpine is ~4 MiB compressed today — note the delta).
+> The original Task 1/3 assumed a static-**busybox** companion download + a *modified* `init.sh`. Phase 0 showed busybox can't be sourced cleanly for aarch64, so the seed is the **official Nix tarball's closure + a Rust `stage0-init`** that *replaces* `init.sh`. Tasks below reflect what actually shipped.
 
-### Task 2: `stage0.rs` — swap the asset + drop PGP
-- [ ] Replace `ALPINE_MINIROOTFS_{AARCH64,X86_64}` / `ASSETS_*` / `alpine_minirootfs_for_host_arch` with the new seed asset table (`BootstrapAsset` already models URL + sha256 + mode — reuse it).
-- [ ] Delete `ALPINE_VERSION`/`ALPINE_BRANCH`/`ALPINE_RELEASE_KEY_ASC`/`ALPINE_RELEASE_KEY_FINGERPRINT`, `verify_alpine_pgp_signature`, `VendorBlobPgp`'s PGP arm (or repurpose to a plain hash outcome), and `crates/mvm-build/src/stage0/alpine-ncopa-release-key.asc`.
-- [ ] `prepare_assets` / `materialize_root_dir`: keep the SHA-256 verify (the binding integrity check); remove the PGP path. Materialize the seed rootfs layout (`/bin`, `/nix`, `/etc/ssl`, `/work`, `/out`, `/mvm-bins`, `/init`).
-- [ ] **Remove `pgp` from `crates/mvm-build/Cargo.toml`.** Confirm `cargo tree -i pgp` is empty.
+### Task 1: the seed source — [x] official Nix release tarball
+- [x] Pin `nix-<ver>-<arch>-linux.tar.xz` by URL + SHA-256 for both arches (`NIX_SEED_AARCH64`/`NIX_SEED_X86_64`/`NIX_SEED_VERSION`). Its `store/` is a self-contained `/nix/store` (nix + bash + curl + xz + nss-cacert). No separate busybox/e2fsprogs/CA-cert download — `stage0-init` provides the userland; e2fsprogs is a runtime `nix build` (deferred to the persistent-store follow-up).
 
-### Task 3: `init.sh` — apk → direct binaries
-- [ ] Drop the `/etc/apk/repositories` write + all `apk update`/`apk add`. Keep the mount/`ip link`/`udhcpc` lines (busybox provides them, same as today).
-- [ ] `mkfs.ext4` on `/dev/vda` from the seed's e2fsprogs (was `apk add e2fsprogs`).
-- [ ] Start `nix` from the seed (`/nix/var` + daemon-socket + `NIX_SSL_CERT_FILE` setup) instead of `apk add nix`; run the same `nix build path:/work/nix/images/builder-vm#…` invocation.
-- [ ] Update the file header comment (no Alpine).
+### Task 2: `stage0.rs` — swap the asset + drop PGP — [x]
+- [x] Removed `ALPINE_MINIROOTFS_*`/`ASSETS_*`/`ALPINE_VERSION`/`ALPINE_BRANCH`/`ALPINE_RELEASE_KEY_*`/`alpine_minirootfs_for_host_arch`/`Stage0Seed`. The nix-seed table (`assets_for_host_arch`/`asset_for_host_arch`) is the only one.
+- [x] Deleted `verify_alpine_pgp_signature`, `extract_alpine_tarball`, `fetch_signature`, the `VendorBlobPgp` enum, and `signature_url`. `VendorBlobReport` is hash-only (`audit_detail` drops `pgp=`).
+- [x] `materialize_root_dir(_in)` re-verifies the SHA-256 (fetch + extract), extracts `store/` → `<dest>/nix/store`, writes the embedded `stage0-init` as `/init`, creates `/work /out /mvm-bins`.
+- [x] **Removed `pgp` from `crates/mvm-build/Cargo.toml`.** `cargo tree -i pgp` is empty.
 
-### Task 4: docs + tests
-- [ ] `nix/images/builder-vm/flake.nix` header + any Alpine references in docs/comments.
-- [ ] Update/replace `stage0.rs` tests that pin Alpine hashes/fingerprint with the new seed's hash + a "no pgp / no apk" assertion.
-- [ ] Grep sweep: no `apk`, `alpine`, `minirootfs`, `ncopa`, `pgp` left in `crates/mvm-build` (except historical changelog).
+### Task 3: PID 1 — [x] `stage0-init` replaces `init.sh`
+- [x] `init.sh` deleted. `crates/mvm-build/src/bin/stage0-init.rs` (static `aarch64-musl`, embedded via `SEED_BINARIES` + `mvm-cli/build.rs`) does mounts + virtio-fs shares + tmpfs `/nix` (copy seed closure; overlay-over-virtiofs fails in libkrun) + `/etc/resolv.conf` (gvproxy DNS) + the same `nix build path:/work/nix/images/builder-vm#…` + copy to `/out` + poweroff. No apk, no networking code (libkrun `NET_FLAG_DHCP_CLIENT` supplies eth0).
+
+### Task 4: docs + tests — [x]
+- [x] Stage 0 + builder-VM-launch doc comments de-Alpine'd (`stage0.rs`, `stage0-init.rs`, `apple_container.rs`, `libkrun_builder.rs`). ADR-071 written.
+- [x] `stage0.rs` tests replaced: nix-seed table/hash assertions + missing/tampered-tarball rejection; `cache.rs` fixture renamed to `nix-seed-*`.
+- [x] Grep sweep: no `apk`/`alpine`/`minirootfs`/`ncopa`/`pgp` in `crates/mvm-build` live code (only the header note explaining what was removed).
 
 ## Verification
 
-- [ ] **End-to-end Stage 0 boot on this aarch64 host** (the real gate — Stage 0 is finicky; [[reference_cold_isolated_cache_stage0_badactivate]]): `mvmctl dev up` from a cold isolated `MVM_CACHE_DIR`/`MVM_DATA_DIR` builds the builder VM from the new seed, no Alpine fetched, `nix build` succeeds, `/out/{vmlinux,rootfs.ext4}` produced + promoted. Read `<vm_state_dir>/console.log` first on failure.
-- [ ] `cargo tree -i pgp` empty; re-measure the default closure vs the 407 baseline (expect ~−168 minus overlap).
-- [ ] `cargo nextest run -p mvm-build` + workspace build + `clippy -D warnings` + nightly fmt.
+- [x] `cargo tree -i pgp` empty; 379 unique crates vs the 407 Plan 126 A1 baseline.
+- [x] `cargo test -p mvm-build --lib stage0` (12 pass) + `cargo test -p mvm-cli --lib cache` (pass); `cargo build -p mvm-build -p mvm-cli` + `clippy -p mvm-build -p mvm-cli -D warnings` clean.
+- [x] **End-to-end Stage 0 boot on this aarch64 host** (0b): cold `dev up` built the builder VM from the nix seed (`vmlinux` 31M + `rootfs.ext4` 743M) and reached "Dev environment ready (libkrun)" — no Alpine/apk/pgp.
+- [ ] **x86_64 + CI** Stage 0 boot (the pin is in source, unbooted). Follow-up — see Status.
+- [ ] nightly fmt + full `cargo nextest run --workspace` on CI (local mvm-backend test SIGKILL is environmental — [[reference_mvm_backend_test_binary_macos_codesign_sigkill]]).
 
 ## Why this beats the plan-126 B3 alternatives
 
 Plan 126 B3 considered *gating* or *dropping* the Alpine PGP verify to shed `pgp`. This is strictly better: it removes the **reason** `pgp` exists (the Alpine seed) rather than working around it, and it resolves the busybox-vs-Alpine incoherence. Supersedes the B3 task. Net dep win is the same headline (−168) but the architecture is cleaner and we lose an external trust dependency instead of a defense-in-depth layer.
 
 ## Deferred follow-ups
-- [ ] If Phase 0 picks source B (project-built seed), the seed-publish pipeline + its ADR are their own workstream.
+- [ ] **x86_64 + CI validation** of the nix-seed Stage 0. The x86_64 pin (`NIX_SEED_X86_64`) is in source but unbooted; the boot proof is aarch64/libkrun only. Until this lands, the seed is validated on one arch.
+- [ ] **Persistent ext4 `/nix` store.** `stage0-init` copies the seed closure into tmpfs each boot; the host attaches `nix-store-stage0-<arch>.img` (`/dev/vda`) but `stage0-init` doesn't yet bootstrap e2fsprogs + format + use it. RAM optimization (build once, reuse the closure), not correctness — tmpfs holds the full build. See ADR-071 "Status of work".
+- [ ] **In-process xz decode.** `extract_nix_store_tarball` shells to host `tar -xJf` (first cut); a pure-Rust xz decoder removes the host-`tar` dependency.

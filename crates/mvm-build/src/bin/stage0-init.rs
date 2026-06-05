@@ -1,5 +1,4 @@
-//! PID 1 of the Stage 0 bootstrap VM — **nix-tarball seed** variant
-//! (plan 160). Replaces the Alpine `init.sh`.
+//! PID 1 of the Stage 0 bootstrap VM — the **nix-tarball seed** (plan 160).
 //!
 //! libkrun mounts the materialized seed rootfs (the official Nix release
 //! tarball's `/nix/store` + this binary as `/init`) as the guest root over
@@ -17,9 +16,8 @@
 //! aarch64; the persistent ext4 store is an optional RAM optimization —
 //! plan 160 0b/follow-up.)
 //!
-//! Mirrors the contract of `crates/mvm-build/src/stage0/init.sh` (the
-//! Alpine variant) minus apk/networking; the host (`stage0::run_stage0`)
-//! drives both behind `MVM_STAGE0_SEED`.
+//! The host side (`stage0::materialize_root_dir`) lays down the seed and
+//! writes this binary as `/init`; libkrun's launch supplies eth0 + DHCP.
 
 use std::process::ExitCode;
 
@@ -69,13 +67,13 @@ mod linux {
         }
     }
 
-    /// Mounts + a writable `/nix`. Order mirrors `init.sh` minus apk/net.
+    /// Mounts the pseudo-filesystems + the virtio-fs shares, then makes
+    /// `/nix` a writable store. No apk, no networking (libkrun supplies eth0).
     fn setup() -> Result<(), String> {
         mount_pseudofs()?;
         // `/dev/null` insurance — some libkrun set_root boots reach
         // userspace without it, which then masks every `2>/dev/null`
-        // downstream (see init.sh's note). `|| Ok` it: devtmpfs usually
-        // creates it.
+        // downstream. `|| Ok` it: devtmpfs usually creates it.
         if !Path::new("/dev/null").exists() {
             mknod_null();
         }
@@ -192,14 +190,13 @@ mod linux {
     }
 
     /// `nix build` the builder-VM flake, then copy kernel + rootfs to /out.
-    /// Invocation matches init.sh (the Alpine variant) byte-for-byte so the
-    /// host-side contract (`/out/stage0-build.conf`, output modes) is
-    /// unchanged.
+    /// The host-side contract (`/out/stage0-build.conf`, output modes) is the
+    /// same one `dev up` / `kernel build` write.
     fn build_and_copy() -> Result<(), String> {
         let nix = find_seed_bin("nix")?;
         let cacert = find_seed_cacert()?;
 
-        // Env (init.sh §"export HOME / MVM_WORKSPACE_PATH / MVM_HOST_BIN_DIR").
+        // Env: HOME / MVM_WORKSPACE_PATH / MVM_HOST_BIN_DIR for the nix build.
         std::fs::create_dir_all("/root").ok();
         let nix_path = nix
             .parent()
@@ -241,7 +238,7 @@ mod linux {
         }
 
         // Optional host-dropped build config (single-attr / kernel-only
-        // modes). Mirrors init.sh's `. /out/stage0-build.conf` + defaults.
+        // modes); absent it, build the full image.
         let conf = read_build_conf("/out/stage0-build.conf");
         let attr = conf
             .get("MVM_STAGE0_BUILD_ATTR")
@@ -285,8 +282,8 @@ mod linux {
             .map_err(|e| format!("spawn nix build: {e}"))?;
         // nix's --print-build-logs go to stderr; surface them to the console.
         std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
-        // Persist the full log to /out for host-side post-mortem (init.sh
-        // writes /out/nix-stderr.log).
+        // Persist the full log to /out (a virtio-fs share) for host-side
+        // post-mortem at ~/.cache/mvm/builder-vm/.../nix-stderr.log.
         let _ = std::fs::write("/out/nix-stderr.log", &out.stderr);
         if !out.status.success() {
             return Err(format!(
@@ -301,8 +298,8 @@ mod linux {
         copy_artifacts(Path::new(&store_path), &mode)
     }
 
-    /// Output by mode (matches init.sh): image = kernel + rootfs.ext4 +
-    /// cmdline; kernel = kernel only; rootfs = rootfs + cmdline only.
+    /// Output by mode: image = kernel + rootfs.ext4 + cmdline; kernel =
+    /// kernel only; rootfs = rootfs + cmdline only.
     fn copy_artifacts(out: &Path, mode: &str) -> Result<(), String> {
         if mode != "rootfs" {
             let kernel = ["vmlinux", "Image", "bzImage"]
@@ -341,8 +338,8 @@ mod linux {
     }
 
     fn mount_fs_idempotent(source: &str, target: &str, fstype: &str) -> Result<(), String> {
-        // The nix seed rootfs is minimal (no /tmp, /run, … like Alpine's
-        // minirootfs had), and `mount(2)` needs the target dir to exist.
+        // The nix seed rootfs is minimal (no /tmp, /run, …) and `mount(2)`
+        // needs the target dir to exist — create it first.
         let _ = std::fs::create_dir_all(target);
         match mount_fs(source, target, fstype) {
             Ok(()) => Ok(()),
@@ -439,8 +436,8 @@ mod linux {
     }
 
     /// Minimal `KEY=VALUE` / `KEY="VALUE"` reader for the optional
-    /// host-dropped build conf (init.sh sourced it as shell; we only ever
-    /// set two plain assignments there).
+    /// host-dropped build conf — the host only ever writes two plain
+    /// assignments (`MVM_STAGE0_BUILD_ATTR`, `MVM_STAGE0_OUTPUT_MODE`).
     fn read_build_conf(path: &str) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         let Ok(text) = std::fs::read_to_string(path) else {

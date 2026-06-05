@@ -443,7 +443,7 @@ mod tests {
         // Vendored Stage 0 blob present (one) + one we ask about that's absent.
         let stage0 = root.join("stage0");
         std::fs::create_dir_all(&stage0).unwrap();
-        std::fs::write(stage0.join("alpine-minirootfs-aarch64.tar.gz"), b"hello").unwrap();
+        std::fs::write(stage0.join("nix-seed-aarch64.tar.xz"), b"hello").unwrap();
 
         // builder-vm/<arch>/ with an assembled rootfs + fingerprint sidecar.
         let arch = root.join("builder-vm").join("aarch64");
@@ -453,10 +453,10 @@ mod tests {
         // A per-VM scratch dir that must be skipped.
         std::fs::create_dir_all(root.join("builder-vm").join("vms").join("v1")).unwrap();
 
-        let blobs = ["alpine-minirootfs-aarch64.tar.gz", "missing-blob.tar.gz"];
+        let blobs = ["nix-seed-aarch64.tar.xz", "missing-blob.tar.gz"];
         let joined = stage0_cache_report(root, &stage0, &blobs).join("\n");
 
-        assert!(joined.contains("alpine-minirootfs-aarch64.tar.gz: "));
+        assert!(joined.contains("nix-seed-aarch64.tar.xz: "));
         assert!(joined.contains("missing-blob.tar.gz: (absent)"));
         assert!(joined.contains("aarch64/rootfs.ext4: "));
         assert!(joined.contains("last Stage 0 fingerprint: abcd1234"));

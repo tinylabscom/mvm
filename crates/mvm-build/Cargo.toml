@@ -42,15 +42,6 @@ path = "src/bin/stage0-init.rs"
 # pulling a decompressor in for each test.
 flate2.workspace = true
 tar.workspace = true
-# Plan 91 W1 — Stage 0 bootstrap fetches Alpine's official
-# minirootfs and verifies it against Alpine's release-signing key
-# (Natanael Copa, RSA fingerprint
-# 0482D84022F52DF1C4E7CD43293ACD0907D9495A). `pgp` (rpgp) is
-# pure-Rust, supports detached signature verification, and stays
-# within our deny.toml-licensed dep set. Default features include
-# bzip2 which we don't need for armored ASCII signatures — disable
-# them to keep the dep closure tight.
-pgp = { version = "0.17", default-features = false }
 
 mvm-core.workspace = true
 mvm-guest.workspace = true

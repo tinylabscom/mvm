@@ -1906,24 +1906,20 @@ fn resolve_builder_vm_bootstrap_action(
     }
 }
 
-/// Stage 0 bootstrap via libkrun's `krun_set_root` mode — extract
-/// Alpine Linux's official minirootfs (hash + PGP-verified against
-/// the embedded Alpine release key in mvm source) into a host
-/// directory, layer our `/init` on top, and hand the directory to
-/// libkrun. libkrun mounts it as the guest root via virtiofs
-/// against libkrunfw's bundled TSI-patched kernel. The init script
-/// runs `apk add nix`, builds the in-repo `nix/images/builder-vm`
-/// flake against `/work`, and writes the steady-state artifacts
-/// (`vmlinux`, `rootfs.ext4`, `cmdline.txt`) to `/out`, then
-/// powers off.
+/// Stage 0 bootstrap via libkrun's `krun_set_root` mode — extract the
+/// official Nix release tarball's `/nix/store` (hash-pinned, plan 160) into
+/// a host directory, layer the embedded `stage0-init` PID 1 on as `/init`,
+/// and hand the directory to libkrun. libkrun mounts it as the guest root
+/// via virtiofs against libkrunfw's bundled TSI-patched kernel. `stage0-init`
+/// builds the in-repo `nix/images/builder-vm` flake against `/work` and
+/// writes the steady-state artifacts (`vmlinux`, `rootfs.ext4`,
+/// `cmdline.txt`) to `/out`, then powers off. One userland — busybox; no
+/// Alpine, no apk, no pgp.
 ///
 /// Replaces the previous initramfs-cpio dispatch shape: libkrunfw's
 /// kernel ships with `CONFIG_BLK_DEV_INITRD=n`, so cpio initramfs
 /// cannot unpack. `set_root` mode is libkrun's intended container
-/// boot path and uses the same kernel without modification. Plan 91
-/// further replaced the `nix-portable` bootstrap (which served a
-/// macOS Mach-O binary under the `aarch64` name upstream) with the
-/// Alpine path.
+/// boot path and uses the same kernel without modification.
 #[cfg(feature = "builder-vm")]
 fn bootstrap_builder_vm_image_via_root_dir_stage0(
     builder_flake_dir: &str,
@@ -1935,15 +1931,10 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // Plan 93 Phase 3: time each host-visible Stage 0 step and print a
     // one-line `[mvm] <step> … <secs>s` so perceived speed matches the
     // actual per-step wall-clock.
-    // Plan 160: `MVM_STAGE0_SEED=nix` swaps the Alpine minirootfs seed for
-    // the official Nix tarball + the embedded `stage0-init` PID 1. Default
-    // stays Alpine until the nix path is proven (0b).
-    let seed = mvm_build::stage0::Stage0Seed::from_env();
+    // Plan 160: the seed is the official Nix release tarball + the embedded
+    // `stage0-init` PID 1 — one userland (busybox), no Alpine/apk/pgp.
     let fetch_started = std::time::Instant::now();
-    let stage0_assets = match seed {
-        mvm_build::stage0::Stage0Seed::Alpine => mvm_build::stage0::assets_for_host_arch(),
-        mvm_build::stage0::Stage0Seed::Nix => mvm_build::stage0::nix_seed_assets_for_host_arch(),
-    };
+    let stage0_assets = mvm_build::stage0::assets_for_host_arch();
     let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
         .context("preparing Stage 0 bootstrap assets")?;
     ui::timed_step("Fetching Stage 0 bootstrap assets", fetch_started.elapsed());
@@ -1968,34 +1959,20 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         })?;
     }
     let materialize_started = std::time::Instant::now();
-    match seed {
-        mvm_build::stage0::Stage0Seed::Alpine => {
-            mvm_build::stage0::materialize_root_dir(&root_dir)
-                .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
-        }
-        mvm_build::stage0::Stage0Seed::Nix => {
-            // The seed's PID 1 is the embedded `stage0-init` binary. Pull its
-            // bytes from the embed table (refuse a zero-byte stub build).
-            let stage0_init = crate::host_binaries::embedded::EMBEDDED
-                .iter()
-                .find(|b| b.name == "stage0-init")
-                .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
-            if stage0_init.bytes.is_empty() {
-                anyhow::bail!(
-                    "embedded stage0-init is a zero-byte stub — this mvmctl was built with \
-                     MVM_SKIP_EMBED_BINARIES=1 and cannot seed a nix Stage 0; rebuild without it"
-                );
-            }
-            mvm_build::stage0::materialize_nix_seed(&root_dir, stage0_init.bytes).with_context(
-                || {
-                    format!(
-                        "materializing nix-seed Stage 0 root at {}",
-                        root_dir.display()
-                    )
-                },
-            )?;
-        }
+    // The seed's PID 1 is the embedded `stage0-init` binary. Pull its bytes
+    // from the embed table (refuse a zero-byte stub build).
+    let stage0_init = crate::host_binaries::embedded::EMBEDDED
+        .iter()
+        .find(|b| b.name == "stage0-init")
+        .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
+    if stage0_init.bytes.is_empty() {
+        anyhow::bail!(
+            "embedded stage0-init is a zero-byte stub — this mvmctl was built with \
+             MVM_SKIP_EMBED_BINARIES=1 and cannot seed Stage 0; rebuild without it"
+        );
     }
+    mvm_build::stage0::materialize_root_dir(&root_dir, stage0_init.bytes)
+        .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
     ui::timed_step(
         "Materializing Stage 0 root dir",
         materialize_started.elapsed(),
@@ -2251,11 +2228,11 @@ fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
 }
 
 /// `mvmctl kernel build --source compile`: compile a single kernel attr
-/// through the Stage 0 Alpine bootstrap and land its `vmlinux` in the
+/// through the Stage 0 nix-seed bootstrap and land its `vmlinux` in the
 /// per-arch builder-VM cache. Returns the cached kernel path.
 ///
 /// Reuses the exact Stage 0 boot path `mvmctl dev up` uses, but writes a
-/// `/out/stage0-build.conf` pointing `init.sh` at the kernel attr in
+/// `/out/stage0-build.conf` pointing `stage0-init` at the kernel attr in
 /// kernel-only output mode (no rootfs). The persistent
 /// `nix-store-stage0` image is shared — and locked — with the full
 /// image build, so a freshly compiled kernel is *substituted*, not
@@ -2296,7 +2273,7 @@ pub(crate) fn build_kernel_via_stage0(
 
     let stage0_assets = mvm_build::stage0::assets_for_host_arch();
     let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
-        .context("preparing Stage 0 bootstrap assets (Alpine minirootfs + signature)")?;
+        .context("preparing Stage 0 bootstrap assets (nix-tarball seed)")?;
     for report in &vendor_reports {
         mvm_core::policy::audit::emit(
             mvm_core::policy::audit::LocalAuditKind::VendorBlobFetched,
@@ -2310,7 +2287,19 @@ pub(crate) fn build_kernel_via_stage0(
         std::fs::remove_dir_all(&root_dir)
             .with_context(|| format!("clearing Stage 0 root dir {}", root_dir.display()))?;
     }
-    mvm_build::stage0::materialize_root_dir(&root_dir)
+    // The seed's PID 1 is the embedded `stage0-init` binary (refuse a
+    // zero-byte stub build that can't seed Stage 0).
+    let stage0_init = crate::host_binaries::embedded::EMBEDDED
+        .iter()
+        .find(|b| b.name == "stage0-init")
+        .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
+    if stage0_init.bytes.is_empty() {
+        anyhow::bail!(
+            "embedded stage0-init is a zero-byte stub — this mvmctl was built with \
+             MVM_SKIP_EMBED_BINARIES=1 and cannot seed Stage 0; rebuild without it"
+        );
+    }
+    mvm_build::stage0::materialize_root_dir(&root_dir, stage0_init.bytes)
         .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
 
     // Workspace root = three dirs above the flake.nix
@@ -2326,8 +2315,8 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::create_dir_all(&staging_dir)
         .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
 
-    // Point init.sh at the kernel attr + kernel-only output. Absent this
-    // file (the `dev up` path), init.sh builds the full image.
+    // Point stage0-init at the kernel attr + kernel-only output. Absent this
+    // file (the `dev up` path), stage0-init builds the full image.
     let conf = format!(
         "MVM_STAGE0_BUILD_ATTR={}\nMVM_STAGE0_OUTPUT_MODE=kernel\n",
         variant.attr()
