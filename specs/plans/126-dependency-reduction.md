@@ -73,13 +73,13 @@ The mvm-repo's apparent third consumer — a local `mvm-hostd` daemon at `crates
 - [x] **Step 2d — facade feature:** added `hostd-transport = ["mvm-core/hostd-transport"]` to the root `mvmctl` package. Inert here (mvm-core still defaults the feature on), but it makes the feature reachable through the facade so mvmd can opt in **before** PR-2 de-defaults it — keeping the cross-repo rollout acyclic.
 - [x] Verified: `mvm-core --no-default-features` compiles **and `cargo tree -p mvm-core --no-default-features -e no-dev` carries no tokio**; `manifest-verify` alone builds; workspace build + `clippy -D warnings` + nightly fmt + 4424 tests + doctests green (4 known macOS-dev env failures only).
 
-**mvmd PR (cross-repo, BEFORE PR-2):**
-- [ ] In mvmd, enable `mvm-core/hostd-transport` explicitly where mvmd depends on the facade (mvmd-agent + mvmd-runtime; one feature line each — they already use these symbols unconditionally).
+**mvmd PR (cross-repo, BEFORE PR-2) — drafted as mvmd plan 54 (`mvmd/specs/plans/54-enable-mvm-core-hostd-transport-feature.md`):**
+- [ ] In mvmd, enable `hostd-transport` on the `mvmctl` facade dep (`mvmd/Cargo.toml`: `mvmctl = { path = "../mvm", default-features = false, features = ["hostd-transport"] }`). One line — `mvmd-agent` + `mvmd-runtime` pull the facade via `mvmctl.workspace = true`. The root `mvmctl` package forwards it as `hostd-transport = ["mvm-core/hostd-transport"]` (added in **PR-1**, Step 2d). Safe to land while mvm-core still defaults the feature on (enabling an already-on feature is a no-op), so there's no broken window.
 
-**PR-2 (mvm, AFTER mvmd opts in):**
-- [ ] Remove `hostd-transport` from `mvm-core`'s `default`. Now the default `mvm-core` build is runtime-free.
-- [ ] Gate: `cargo tree -p mvm-core -e no-dev | grep -q tokio` must be **empty**; fold the assertion into D1's `check-forbidden-deps` so core can't silently re-acquire a runtime. Ensure CI exercises the `hostd-transport` tests via `--all-features` (or an explicit `-p mvm-core --features hostd-transport` lane) so the gated transport tests don't silently stop running.
-- [ ] Flip CLAUDE.md's `mvm-core` line back to the now-true "no async/runtime deps in the default build."
+**PR-2 (mvm, branch `feat/plan-126-b5-pr2-default-off` — built; MERGE ONLY AFTER the mvmd PR):**
+- [x] Removed `hostd-transport` from `mvm-core`'s `default` (now `default = []`). The forwarding `hostd-transport = ["mvm-core/hostd-transport"]` on the root `mvmctl` facade already landed in PR-1 (Step 2d), so mvmd is opted in by the time this lands.
+- [x] Gate: new `xtask check-core-runtime-free` runs `cargo tree -p mvm-core -e no-dev` and fails if `tokio` appears. (A **separate** subcommand, not folded into `check-forbidden-deps`: that gate is lockfile-name-based and `tokio` is legitimately in `Cargo.lock` via mvm-hostd/mvm + the gated features — the runtime-free property is a feature-resolution fact, not a lockfile fact.) Wired into `ci.yml`'s Lint job. CI Test job gains a `cargo nextest run -p mvm-core --features hostd-transport` lane so the gated transport tests stay covered.
+- [x] Flipped CLAUDE.md's `mvm-core` line to "the default build has no async/runtime deps."
 
 ## Phase C — unify duplicate majors
 

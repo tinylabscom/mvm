@@ -84,6 +84,9 @@ jobs:
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
+      - name: mvm-core default build is runtime-free
+        run: cargo run -p xtask -- check-core-runtime-free
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -120,6 +123,12 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
+
+      - name: hostd-transport feature tests (mvm-core)
+        # `hostd-transport` is off by default (plan 126 B5), so the
+        # workspace run above skips the protocol transport tests. Run them
+        # explicitly so the gated surface stays covered.
+        run: cargo nextest run -p mvm-core --features hostd-transport
 
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
