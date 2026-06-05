@@ -468,6 +468,25 @@ mod accessible_gate_tests {
         });
     }
 
+    // Plan 165 WS-C / claim 15 witness: `mvmctl console` refuses to attach
+    // to a VM built from a sealed (accessible == false) production image.
+    #[test]
+    fn console_refused_on_sealed_image() {
+        with_home(|_| {
+            let name = "sealed-prod-image";
+            write_meta(
+                name,
+                &VmRuntimeMeta {
+                    mode: StartModeKind::Detached,
+                    accessible: false,
+                },
+            )
+            .expect("write");
+            let err = enforce_accessible_gate(name, false).expect_err("must refuse");
+            assert!(err.to_string().contains("sealed image"), "msg: {err}");
+        });
+    }
+
     #[test]
     fn gate_force_bypasses_sealed_refusal() {
         with_home(|_| {

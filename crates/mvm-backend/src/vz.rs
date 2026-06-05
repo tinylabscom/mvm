@@ -253,7 +253,7 @@ impl VmBackend for VzBackend {
         // gives users a fresh boot log on each start, matching what
         // most VM tools do. Best-effort.
         let console_log = state_dir.join("console.log");
-        let _ = std::fs::File::create(&console_log);
+        let _ = crate::libkrun::open_console_capture(&console_log);
 
         let json = cfg
             .to_json()
@@ -779,7 +779,7 @@ impl VzBackend {
         }
         let _ = std::fs::remove_file(&pid_file);
         let console_log = state_dir.join("console.log");
-        let _ = std::fs::File::create(&console_log);
+        let _ = crate::libkrun::open_console_capture(&console_log);
 
         ui::info(&format!(
             "Restoring Vz VM '{}' from {} via {}...",
