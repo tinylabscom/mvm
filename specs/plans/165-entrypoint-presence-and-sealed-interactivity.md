@@ -82,6 +82,20 @@ ship it is sealed completely for production.*
 
 ## WS-A — Conforming per-call wrapper (make `RunEntrypoint` work)
 
+> **STATUS (2026-06-05): conformance is already satisfied on `main`** — this
+> is a *verify*, not a *build*. Investigation found the factory
+> (`nix/lib/factories/mkFunctionService.nix:160-173`) already bakes
+> `/etc/mvm/entrypoint` = the absolute path `/usr/lib/mvm/wrappers/runner`
+> (0555) + the python wrapper carries `#!/usr/bin/env python3`; the ext4 is
+> **root:root** (confirmed via debugfs on the shipped image); the PID-1↔marker
+> overload is resolved by the `bootCommand` split; and the generated function
+> flake wires `isFunction → mkFunctionService → bootCommand + marker`
+> correctly. Corroborated by memory `project_function_workload_entrypoint_collision`
+> (**RESOLVED 2026-06-02, `core_demo_e2e` green**). **The only open WS-A item
+> is A4**: assert a full `RunEntrypoint` round-trip (`invoke greet("ari") →
+> "hello ari"`), since `core_demo_e2e` pings the agent but may not exercise
+> the function dispatch. A0/A1/A2/A3/A5 are satisfied by existing code.
+
 Bring the factory-baked wrapper into conformance with
 `EntrypointPolicy::production()` so a sealed function image serves calls.
 
@@ -91,15 +105,19 @@ location — `flake.rs:13` notes the factories are generated, not vendored),
 `nix/lib/mk-guest.nix` (rootfs hardening / `/usr/lib/mvm/wrappers/`
 placement), `crates/mvm-guest/src/entrypoint.rs` (validation, unchanged).
 
-- [ ] **A0 — fexecve-on-script spike (decides the wrapper shape).** Confirm
-      the agent's held-fd spawn (`/proc/self/fd/<n>` → `fexecve`) works on a
-      `#!/bin/sh` wrapper inside the guest. Write a throwaway test in the
-      libkrun dev VM: bake a `0555` root-owned `/usr/lib/mvm/wrappers/probe`
-      shebang script, point `/etc/mvm/entrypoint` at it, call
-      `RunEntrypoint`. If `fexecve` on the shebang fails (ENOEXEC / interp
-      re-open), fall back to a ~30-line static launcher binary
-      (`execve` of the real command) instead of a script. Record the verdict
-      in this plan before A1.
+- [x] **A0 — fexecve-on-script spike (decides the wrapper shape).**
+      **VERDICT (2026-06-05): the wrapper is a `#!/bin/sh` script — no
+      compiled launcher.** The agent already supports it: `spawn_path`
+      execs via `/proc/self/fd/<n>` and `dup_above_fd3`
+      (`crates/mvm-guest/src/entrypoint.rs:690-711`) deliberately keeps the
+      validated fd **non-CLOEXEC** so a shebang interpreter can reopen
+      `/proc/self/fd/<n>` — the comment even names the failure mode it fixed
+      ("the `mvmctl invoke` failure mode"). Ratified empirically in a Linux
+      container: `execve("/proc/self/fd/N")` on a `0555` shebang script with
+      a **non-CLOEXEC** fd runs and passes argv through; the **CLOEXEC**
+      variant fails `cannot open /proc/self/fd/3` (proving the requirement).
+      So the fexecve-on-script concern is solved upstream; WS-A reduces to
+      pure conformance (path/owner/mode/marker).
 - [ ] **A1 — Emit the wrapper at the conforming path/owner/mode.** The
       factory must write the per-call wrapper to
       `/usr/lib/mvm/wrappers/<workload_id>` (regular file), and mkGuest's
