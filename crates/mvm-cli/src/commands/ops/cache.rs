@@ -227,6 +227,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     human_bytes(freed)
                 ));
             }
+
+            // #630: make the persistent /nix store images' footprint
+            // visible at prune time. We don't boot a VM to GC on demand
+            // (out of scope); GC now runs automatically in-build past the
+            // cap. Report the sizes + the cap so the operator can see the
+            // bloat and understand the auto-reclaim behaviour.
+            for line in builder_store_gc_report(path) {
+                println!("{line}");
+            }
             // Plan 37 §6: every state-changing CLI verb emits one
             // audit record. We only mutate disk on the non-dry-run
             // path; dry-run reads only and stays out of the log.
@@ -356,6 +365,68 @@ fn stage0_cache_report(
         }
     }
 
+    lines
+}
+
+/// Report the builder VM's persistent `nix-store-*.img` footprints plus
+/// the in-build GC cap (#630). Path-injectable + side-effect-free so it's
+/// hermetically testable. `len()` is the sparse *apparent* cap; allocated
+/// blocks (`st_blocks * 512`, via [`file_allocated_bytes`]) are the real
+/// footprint that grows unbounded without GC — so we surface both.
+///
+/// We only *report* here: booting a builder VM to GC on demand is out of
+/// scope for #630. GC runs automatically at the end of every in-VM build
+/// once the store crosses the cap.
+fn builder_store_gc_report(cache_root: &std::path::Path) -> Vec<String> {
+    let builder = cache_root.join("builder-vm");
+    if !builder.is_dir() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&builder) else {
+        return Vec::new();
+    };
+    let mut imgs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .map(|n| {
+                        let n = n.to_string_lossy();
+                        n.starts_with("nix-store-") && n.ends_with(".img")
+                    })
+                    .unwrap_or(false)
+        })
+        .collect();
+    if imgs.is_empty() {
+        return Vec::new();
+    }
+    imgs.sort();
+
+    let mut lines = vec!["Builder persistent /nix store images:".to_string()];
+    for p in imgs {
+        if let Ok(m) = std::fs::metadata(&p) {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {name}: {} on disk / {} cap (sparse)",
+                human_bytes(file_allocated_bytes(&m)),
+                human_bytes(m.len())
+            ));
+        }
+    }
+    // Surface the resolved cap (honours MVM_BUILDER_STORE_GC_GIB) and note
+    // that GC is automatic — so the operator doesn't go hunting for a
+    // `cache gc` verb that intentionally doesn't exist (#630).
+    let cap_gib = mvm_build::builder_vm_runtime::builder_store_gc_cap_kib() / 1024 / 1024;
+    lines.push(format!(
+        "  auto-GC cap: {cap_gib} GiB used (override {}). \
+         Past the cap, `nix-collect-garbage --delete-older-than 14d` runs \
+         automatically at the end of each in-VM build (#630).",
+        mvm_build::builder_vm_runtime::MVM_BUILDER_STORE_GC_GIB_ENV,
+    ));
     lines
 }
 
@@ -508,5 +579,40 @@ mod tests {
         // No stage0 dir, no builder-vm dir, no blobs.
         let lines = stage0_cache_report(tmp.path(), &tmp.path().join("stage0"), &[]);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn builder_store_gc_report_empty_without_images() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No builder-vm dir at all.
+        assert!(builder_store_gc_report(tmp.path()).is_empty());
+        // builder-vm dir present but no nix-store images.
+        std::fs::create_dir_all(tmp.path().join("builder-vm")).unwrap();
+        assert!(builder_store_gc_report(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn builder_store_gc_report_surfaces_images_cap_and_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let builder = tmp.path().join("builder-vm");
+        std::fs::create_dir_all(&builder).unwrap();
+        // A sparse-looking store image + a non-matching file that must be ignored.
+        let img = builder.join("nix-store-aarch64.img");
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 * 1024)
+            .unwrap();
+        std::fs::write(builder.join("rootfs.ext4"), b"not a store img").unwrap();
+
+        let joined = builder_store_gc_report(tmp.path()).join("\n");
+        assert!(joined.contains("Builder persistent /nix store images:"));
+        assert!(joined.contains("nix-store-aarch64.img:"));
+        assert!(joined.contains("cap (sparse)"));
+        // The auto-GC note + env override name must be present (#630).
+        assert!(joined.contains("auto-GC cap:"));
+        assert!(joined.contains("MVM_BUILDER_STORE_GC_GIB"));
+        assert!(joined.contains("--delete-older-than 14d"));
+        // The non-matching file is not reported as a store image.
+        assert!(!joined.contains("rootfs.ext4"));
     }
 }

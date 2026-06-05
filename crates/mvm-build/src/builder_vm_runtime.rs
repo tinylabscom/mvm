@@ -49,6 +49,39 @@ pub const DEFAULT_BUILDER_VM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// disable the safety net.
 pub const MVM_BUILDER_VM_TIMEOUT_SECS_ENV: &str = "MVM_BUILDER_VM_TIMEOUT_SECS";
 
+/// Builder persistent `/nix` store auto-GC threshold (GiB of *used*
+/// space). When the in-guest store exceeds this after a build, the
+/// build script runs `nix-collect-garbage --delete-older-than 14d`.
+/// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB
+/// sparse cap [`DEFAULT_NIX_STORE_MIB`](crate::libkrun_builder::DEFAULT_NIX_STORE_MIB)).
+/// Override: [`MVM_BUILDER_STORE_GC_GIB_ENV`]. #630
+///
+/// Lives here (always compiled) rather than in `libkrun_builder`
+/// (feature-gated `builder-vm`) because `render_flake_cmd_sh` reads it
+/// at render time and that path compiles unconditionally;
+/// `libkrun_builder` re-exports it near `DEFAULT_NIX_STORE_MIB` for
+/// discoverability.
+pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
+
+/// Env var that overrides [`DEFAULT_BUILDER_STORE_GC_GIB`]. Plain
+/// integer GiB; a missing/garbage/zero value falls back to the
+/// default (this is a best-effort space cap, not a correctness gate —
+/// a typo must not disable the just-built-closure-preserving GC). #630
+pub const MVM_BUILDER_STORE_GC_GIB_ENV: &str = "MVM_BUILDER_STORE_GC_GIB";
+
+/// Resolve the builder-store GC cap, in KiB, for substitution into the
+/// in-guest build script's `du -k` comparison. Reads
+/// [`MVM_BUILDER_STORE_GC_GIB_ENV`]; an unset, non-integer, or zero
+/// value falls back to [`DEFAULT_BUILDER_STORE_GC_GIB`]. #630
+pub fn builder_store_gc_cap_kib() -> u64 {
+    let gib = std::env::var(MVM_BUILDER_STORE_GC_GIB_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|g| *g > 0)
+        .unwrap_or(DEFAULT_BUILDER_STORE_GC_GIB);
+    u64::from(gib) * 1024 * 1024
+}
+
 /// Per-job dir filename mvm-host-vm-init detects to dispatch
 /// through the application-dependency install pipeline (Plan 73
 /// Followup B.2). Migrated from `libkrun_builder.rs` because the
@@ -310,6 +343,9 @@ fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> 
             String::new(),
         )
     };
+    // #630: resolved on the host, baked as a literal into the script so
+    // the in-guest `du` comparison needs no env plumbing through the VM.
+    let gc_cap_kib = builder_store_gc_cap_kib();
     format!(
         r#"#!/bin/sh
 # mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime (Plan 97
@@ -448,10 +484,21 @@ else
     cat /job/sidecar-direct.log /job/sidecar-rootfs.log >&2 || true
     rm -f /out/mvm-meta.json
 fi
+
+# Bound the persistent /nix store (#630): GC stale closures once it grows
+# past the cap. `--delete-older-than 14d` keeps the just-built closure
+# (recent) so rebuilds stay warm; only old-revision garbage is freed.
+# Best-effort and POST-build so it can never fail the build or lose output.
+store_kib=$(du -s -k /nix 2>/dev/null | cut -f1 || echo 0)
+if [ "$store_kib" -gt {gc_cap_kib} ]; then
+  echo "mvm-builder: /nix store ${{store_kib}} KiB > cap {gc_cap_kib} KiB — nix-collect-garbage --delete-older-than 14d" >&2
+  nix-collect-garbage --delete-older-than 14d >&2 2>&1 || echo "mvm-builder: nix-collect-garbage failed (continuing)" >&2
+fi
 "#,
         flake_ref_assign = flake_ref_assign,
         override_flag = override_flag,
         attr_path = shell_single_quote_escape(attr_path),
+        gc_cap_kib = gc_cap_kib,
     )
 }
 
@@ -1791,6 +1838,87 @@ mod tests {
             match old {
                 Some(v) => std::env::set_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV, v),
                 None => std::env::remove_var(MVM_BUILDER_VM_TIMEOUT_SECS_ENV),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Builder persistent /nix store auto-GC (#630). The cap is resolved
+    // on the host and baked into the rendered cmd.sh; env mutation is
+    // serialised through GC_ENV_LOCK like the timeout tests above.
+    // -----------------------------------------------------------------
+
+    static GC_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[test]
+    fn render_flake_cmd_sh_embeds_gc_tail_with_default_cap() {
+        let _lock = GC_ENV_LOCK.lock().unwrap();
+        let old = std::env::var_os(MVM_BUILDER_STORE_GC_GIB_ENV);
+        // SAFETY: tests serialise env mutation via GC_ENV_LOCK.
+        unsafe {
+            std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV);
+        }
+        let body = render_flake_cmd_sh(".", "default", false);
+        // Age-based GC is required (keeps the just-built closure warm).
+        assert!(
+            body.contains("nix-collect-garbage --delete-older-than 14d"),
+            "missing GC command in:\n{body}"
+        );
+        // 24 GiB default → 24 * 1024 * 1024 = 25165824 KiB, baked literal.
+        assert!(
+            body.contains("-gt 25165824 ]"),
+            "missing default cap literal in:\n{body}"
+        );
+        // GC must be POST-build — after the mvm-meta.json emission block.
+        let meta_idx = body.find("mvm-meta.json").expect("meta block present");
+        let gc_idx = body.find("nix-collect-garbage").expect("gc present");
+        assert!(gc_idx > meta_idx, "GC tail must follow output emission");
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, v),
+                None => std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV),
+            }
+        }
+    }
+
+    #[test]
+    fn builder_store_gc_cap_kib_default_override_and_garbage() {
+        let _lock = GC_ENV_LOCK.lock().unwrap();
+        let old = std::env::var_os(MVM_BUILDER_STORE_GC_GIB_ENV);
+
+        // Unset → default 24 GiB in KiB.
+        // SAFETY: tests serialise env mutation via GC_ENV_LOCK.
+        unsafe {
+            std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV);
+        }
+        assert_eq!(
+            builder_store_gc_cap_kib(),
+            u64::from(DEFAULT_BUILDER_STORE_GC_GIB) * 1024 * 1024
+        );
+        assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
+
+        // Valid override → that many GiB in KiB.
+        unsafe {
+            std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, "8");
+        }
+        assert_eq!(builder_store_gc_cap_kib(), 8 * 1024 * 1024);
+
+        // Garbage → fall back to default (best-effort cap, never disabled).
+        unsafe {
+            std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, "not-a-number");
+        }
+        assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
+
+        // Zero → also falls back (zero would GC the just-built closure).
+        unsafe {
+            std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
+        }
+        assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
+
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var(MVM_BUILDER_STORE_GC_GIB_ENV, v),
+                None => std::env::remove_var(MVM_BUILDER_STORE_GC_GIB_ENV),
             }
         }
     }
