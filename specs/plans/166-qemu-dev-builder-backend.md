@@ -1,6 +1,11 @@
 # Plan 166 — QEMU dev/builder backend (portable dev substrate; Firecracker stays prod)
 
-## Status: Phase 1 DONE + CLI-proven (2026-06-05). Phase 2/3 proposed.
+## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05). Tasks 1.5 (`run_build`) + Phase 2 (runtime) designed + DEFERRED — fully specified below, ready to implement next session.
+
+**Deferred (with the concrete design captured here):**
+- **Task 1.5 `run_build`** — steady-state QEMU builds. Design done (boot `rootfs.ext4` directly, virtiofsd shares, slirp+`udhcpc`, shared job protocol). Not implemented: the virtiofsd/vhost-user boot is finicky + testing needs a ~30-min image-mode Stage 0 first; deferred to avoid shipping untested boot code.
+- **Phase 2 (runtime)** — `AnyBackend::Qemu` + a `VmBackend` impl + retire the `"qemu"→MicrovmNix` alias. Design below; deferred (a whole new runtime backend needing a workload boot to validate).
+- The box stays provisioned (QEMU + virtiofsd installed, repo at `/root/mvm`, `/dev/kvm`) so the next session can implement against it directly.
 
 **Phase 1 complete on the x86_64 box:** `MVM_BUILDER_BACKEND=qemu mvmctl kernel build` drives the full codified path — `QemuBuilderVm::run_stage0` packs the seed + shares as ext4 disks (`mkfs.ext4 -d`, **no root**), boots the stock Debian kernel + initramfs with slirp networking, `stage0-init` (QEMU branch) configures the NIC + mounts + runs `nix build`, the **kernel compiles**, `debugfs rdump` extracts `vmlinux`, and it's **promoted to the cache** (`builder/vmlinux`, 9.7 MiB). Exit 0, no passt, no libkrun, no libkrunfw. Committed: guest side (`2262faf4`), host side + wiring (`5f238362`), + the seed-mountpoint/cleanup fixes.
 
@@ -101,8 +106,8 @@ Lets a workload *run* for dev/test on a no-KVM host. Dev tier only.
 
 ## Phase 3: provisioning, docs, and the firecracker arch bug
 
-### Task 3.1: firecracker bootstrap arch-download bug (found in Plan 164)
-- [ ] On the x86_64 box, `mvmctl dev up` downloaded **`firecracker-v1.14.1-aarch64.tgz`** → `Exec format error`. The firecracker-binary bootstrap picks the wrong arch. Fix the arch selection (host-arch, not hardcoded aarch64). Separate from QEMU but a real x86_64 blocker on the Firecracker path.
+### Task 3.1: firecracker bootstrap arch-download bug (found in Plan 164) — [x] DONE
+- [x] On the x86_64 box, `mvmctl dev up` downloaded **`firecracker-v1.14.1-aarch64.tgz`** → `Exec format error`. Root cause: `mvm_core::config::ARCH` was **hardcoded `"aarch64"`** (`config.rs:7`), feeding `firecracker::install()`'s download URL + the firecracker-ci artifact paths. Fixed → `pub const ARCH: &str = std::env::consts::ARCH;` (the arch mvmctl is compiled for == the host it runs on). Verified on the box: the URL is now `firecracker-v1.14.1-x86_64.tgz`. aarch64 hosts unchanged. (The dead Lima-legacy `debootstrap --arch="${ARCH}"` fallback in `download_builder_artifacts.sh.tera` wants Debian names anyway — already broken with "aarch64", no regression.)
 
 ### Task 3.2: docs + doctor
 - [ ] `mvmctl doctor`: QEMU availability probe + version + KVM/TCG + install hint, alongside the existing per-OS gateway/builder probes.
