@@ -43,6 +43,11 @@ path = "src/bin/stage0-init.rs"
 # pulling a decompressor in for each test.
 flate2.workspace = true
 tar.workspace = true
+# Plan 160 — in-process xz decode of the Nix-tarball Stage 0 seed
+# (`stage0::extract_nix_store_tarball`), replacing a shell-out to host
+# `tar -xJf`. Pure Rust (no liblzma C dep) so host-side seed
+# materialization stays self-contained on every contributor host.
+lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-guest.workspace = true

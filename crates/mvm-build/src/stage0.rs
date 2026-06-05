@@ -305,27 +305,76 @@ pub fn materialize_root_dir_in(cache_dir: &Path, dest: &Path, stage0_init: &[u8]
 /// lands at `<nix_dir>/store/`. The install scripts come along harmlessly;
 /// the guest never runs them.
 ///
-/// First cut: shells to the host `tar` for the xz decode (macOS bsdtar +
-/// GNU tar both handle `.tar.xz` + `--strip-components`) to avoid adding an
-/// in-process lzma dependency. A pure-Rust xz decoder is a plan-160 polish
-/// follow-up (ADR-071 "Status of work").
+/// In-process: `lzma-rs` decodes the `.xz` stream (pure Rust — no host `tar`,
+/// no liblzma C dep) and the `tar` crate unpacks it. We unpack the whole
+/// archive (preserving the nix store's symlinks/modes via the crate's own
+/// path-safety checks) then [`lift_single_top_level`] hoists the one
+/// `nix-<ver>-<arch>-linux/` wrapper dir's children up one level — the
+/// equivalent of `tar --strip-components=1`, but without re-implementing
+/// per-entry symlink/hardlink rewriting.
 fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(nix_dir).with_context(|| format!("creating {}", nix_dir.display()))?;
-    let status = std::process::Command::new("tar")
-        .arg("-xJf")
-        .arg(tarball)
-        .arg("-C")
-        .arg(nix_dir)
-        .arg("--strip-components=1")
-        .status()
-        .with_context(|| format!("spawning tar to extract {}", tarball.display()))?;
-    if !status.success() {
+
+    let f =
+        std::fs::File::open(tarball).with_context(|| format!("opening {}", tarball.display()))?;
+    let mut tar_bytes = Vec::new();
+    lzma_rs::xz_decompress(&mut std::io::BufReader::new(f), &mut tar_bytes)
+        .map_err(|e| anyhow::anyhow!("xz-decompressing {}: {e}", tarball.display()))?;
+
+    let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+    archive.set_preserve_permissions(true);
+    // The macOS host doesn't carry the numeric uids/gids the tarball
+    // references; files land owned by the current user (libkrun + virtiofs
+    // remap inside the guest). xattrs aren't needed for the store.
+    archive.set_unpack_xattrs(false);
+    archive
+        .unpack(nix_dir)
+        .with_context(|| format!("unpacking nix seed into {}", nix_dir.display()))?;
+
+    lift_single_top_level(nix_dir).with_context(|| {
+        format!(
+            "stripping the nix-seed wrapper dir under {}",
+            nix_dir.display()
+        )
+    })
+}
+
+/// Hoist the children of the single top-level directory in `dir` up into
+/// `dir`, then remove the now-empty wrapper. Equivalent to
+/// `tar --strip-components=1` for an archive that wraps everything in one
+/// top-level component (the Nix tarball's `nix-<ver>-<arch>-linux/`).
+/// Fails closed if `dir` doesn't contain exactly one directory entry.
+fn lift_single_top_level(dir: &Path) -> Result<()> {
+    let mut top_levels: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    if top_levels.len() != 1 {
         bail!(
-            "tar exited {} extracting nix seed {}",
-            status.code().unwrap_or(-1),
-            tarball.display()
+            "expected one top-level dir in the nix seed, found {} under {}",
+            top_levels.len(),
+            dir.display()
         );
     }
+    let wrapper = top_levels.pop().unwrap();
+    if !wrapper.is_dir() {
+        bail!(
+            "nix seed top-level entry {} is not a directory",
+            wrapper.display()
+        );
+    }
+    // Same-filesystem renames — cheap even for the full store closure.
+    for child in
+        std::fs::read_dir(&wrapper).with_context(|| format!("reading {}", wrapper.display()))?
+    {
+        let child = child?.path();
+        let name = child
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("child {} has no file name", child.display()))?;
+        std::fs::rename(&child, dir.join(name))
+            .with_context(|| format!("moving {} up into {}", child.display(), dir.display()))?;
+    }
+    std::fs::remove_dir(&wrapper).with_context(|| format!("rmdir {}", wrapper.display()))?;
     Ok(())
 }
 
@@ -475,6 +524,78 @@ mod tests {
         assert!(verify_sha256(&path, expected).unwrap());
         let wrong = "0".repeat(64);
         assert!(!verify_sha256(&path, &wrong).unwrap());
+    }
+
+    /// In-process xz decode + `--strip-components=1` lift: build a `.tar.xz`
+    /// that wraps everything in one `nix-<ver>-<arch>-linux/` dir (the shape
+    /// of the official Nix release tarball), extract it, and assert the
+    /// wrapper is stripped so `store/` lands at `<nix_dir>/store/`.
+    #[test]
+    fn extract_nix_store_tarball_decodes_xz_and_strips_wrapper() {
+        let dir = TempDir::new().unwrap();
+
+        // Build the inner tar: a +x file under store/ and a sibling .reginfo,
+        // both under the single `nix-2.31.1-test-linux/` wrapper.
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let foo = b"#!/bin/sh\necho hi\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_size(foo.len() as u64);
+            h.set_mode(0o755);
+            builder
+                .append_data(
+                    &mut h,
+                    "nix-2.31.1-test-linux/store/abc-foo/bin/foo",
+                    &foo[..],
+                )
+                .unwrap();
+            let reg = b"reginfo";
+            let mut h2 = tar::Header::new_gnu();
+            h2.set_entry_type(tar::EntryType::Regular);
+            h2.set_size(reg.len() as u64);
+            h2.set_mode(0o644);
+            builder
+                .append_data(&mut h2, "nix-2.31.1-test-linux/.reginfo", &reg[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        // xz-compress it (round-trip through the same crate stage0 decodes with).
+        let mut xz_bytes = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::Cursor::new(&tar_bytes), &mut xz_bytes).unwrap();
+        let tarball = dir.path().join("seed.tar.xz");
+        std::fs::write(&tarball, &xz_bytes).unwrap();
+
+        let nix_dir = dir.path().join("root/nix");
+        extract_nix_store_tarball(&tarball, &nix_dir).unwrap();
+
+        let foo_path = nix_dir.join("store/abc-foo/bin/foo");
+        assert!(
+            foo_path.is_file(),
+            "extracted file at {}",
+            foo_path.display()
+        );
+        assert_eq!(std::fs::read(&foo_path).unwrap(), b"#!/bin/sh\necho hi\n");
+        assert!(
+            nix_dir.join(".reginfo").is_file(),
+            "sibling top-level file lifted"
+        );
+        assert!(
+            !nix_dir.join("nix-2.31.1-test-linux").exists(),
+            "the nix-<ver>-<arch>-linux wrapper dir was stripped"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&foo_path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o755,
+                "executable bit preserved through extract"
+            );
+        }
     }
 
     // ---------------- nix-tarball seed asset table (Plan 160) ----------------
