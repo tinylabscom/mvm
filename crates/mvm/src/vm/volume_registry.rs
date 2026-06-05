@@ -338,6 +338,7 @@ mod tests {
                     master_key_version: 1,
                     wrapped: vec![1, 2, 3],
                     algorithm: mvm_core::domain::volume::WrapAlgorithm::Aes256Gcm,
+                    bound: None,
                 },
             }),
             created_at: "2026-05-05T00:00:00Z".to_string(),
