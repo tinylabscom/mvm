@@ -365,8 +365,13 @@ impl AgentBootState {
 
     fn set_entrypoint(&self, state: ComponentState) {
         if let Ok(mut s) = self.inner.lock() {
-            let became_terminal =
-                matches!(state, ComponentState::Ready | ComponentState::Failed { .. });
+            // `Disabled` is terminal too — an image that offers no per-call
+            // entrypoint resolves immediately (entrypoint starts as
+            // `Starting`), same as `set_warm_pool` treats its Disabled.
+            let became_terminal = matches!(
+                state,
+                ComponentState::Ready | ComponentState::Failed { .. } | ComponentState::Disabled
+            );
             s.entrypoint = state;
             if became_terminal && s.timing.entrypoint_ready_ms.is_none() {
                 s.timing.entrypoint_ready_ms = Some(self.elapsed_ms());
@@ -1438,18 +1443,30 @@ fn run_before_stop_hook() {
 /// `ReadinessStatus` reports `Ready` (or `Failed { message }`) and
 /// stamps `entrypoint_ready_ms` for cold-path timing.
 fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
-    let result = EntrypointPolicy::production()
-        .validate()
-        .map_err(|e| e.to_string());
-    match &result {
+    let result = match EntrypointPolicy::production().validate() {
         Ok(v) => {
             eprintln!(
                 "mvm-guest-agent: entrypoint validated at {} (held open for fexecve)",
                 v.resolved.display()
             );
             boot_state.set_entrypoint(ComponentState::Ready);
+            Ok(v)
         }
-        Err(msg) => {
+        Err(e) if e.is_entrypoint_not_offered() => {
+            // Boot-script image: the entrypoint is baked as PID 1's boot
+            // command, not a per-call wrapper under /usr/lib/mvm/wrappers/.
+            // RunEntrypoint is simply not offered here — a clean state, not a
+            // failure (the default/sealed-idle image and every command/shell
+            // image today). Reported as `Disabled`, logged calmly.
+            eprintln!(
+                "mvm-guest-agent: no per-call entrypoint wrapper baked; \
+                 RunEntrypoint not offered for this image"
+            );
+            boot_state.set_entrypoint(ComponentState::Disabled);
+            Err("this image does not offer a per-call entrypoint (RunEntrypoint)".to_string())
+        }
+        Err(e) => {
+            let msg = e.to_string();
             eprintln!(
                 "mvm-guest-agent: entrypoint validation failed at boot: {msg}; \
                  RunEntrypoint requests will return EntrypointInvalid"
@@ -1457,8 +1474,9 @@ fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
             boot_state.set_entrypoint(ComponentState::Failed {
                 message: msg.clone(),
             });
+            Err(msg)
         }
-    }
+    };
     let _ = VALIDATED_ENTRYPOINT.set(result);
 }
 
