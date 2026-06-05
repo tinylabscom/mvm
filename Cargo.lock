@@ -3489,6 +3489,7 @@ dependencies = [
  "ctor",
  "ed25519-dalek",
  "etherparse",
+ "hex",
  "hickory-resolver",
  "ipnet",
  "landlock",

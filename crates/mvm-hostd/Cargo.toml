@@ -60,6 +60,8 @@ serde_json.workspace = true
 # RFC 8785 JSON Canonicalization Scheme — audit-signer stable bytes-to-sign.
 serde_jcs = "0.1"
 sha2.workspace = true
+# Plan 141 — hex digests for flow-byte-log record refs.
+hex.workspace = true
 thiserror = "1"
 toml.workspace = true
 url = "2"

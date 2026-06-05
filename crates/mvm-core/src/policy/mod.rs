@@ -22,8 +22,8 @@ pub mod toml_loader;
 
 pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
 pub use policies::{
-    ArtifactPolicy, AuditPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy, KeyPolicy, L4RuleSpec,
-    NetworkPolicy, PiiPolicy, ToolPolicy,
+    ArtifactPolicy, AuditPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy, FlowByteLogDirections,
+    FlowByteLogSpec, KeyPolicy, L4RuleSpec, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
 pub use resolver::{EffectivePolicy, EmergencyDeny, resolve};
 pub use signing::{BundleVerifyError, SignedPolicyBundle, sign_bundle, verify_bundle};

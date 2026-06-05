@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 pub mod flow_count;
 // Plan 141 / ADR-064 — backend-agnostic packet-observer core.
+pub mod flow_byte_log;
 pub mod latency;
 pub mod packet;
 pub mod pipeline;
