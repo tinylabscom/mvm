@@ -48,12 +48,37 @@ tree contradicts. What's actually true:
 | `sigstore` | **No** — gated behind `manifest-verify` (off by default) | ~62 added when on | B1's *default-build* benefit is **already realized**. Only a `manifest-verify` build pays for it. B1 is now purely the cross-repo "relocate cosign-verify to mvmd" decision (the prod/admit gate lives in mvmd), not a default-closure cut. |
 | `opendal` | **No** — gated behind `template-registry-s3` (off by default) | part of the 355 | Same as sigstore: B2's default benefit is **already realized**. B2 (→`object_store`) only helps the `template-registry-s3` build, and is coordinated with plan 123. |
 | `pgp` (rpgp 0.17) | **Yes** — unconditional dep of `mvm-build` | **168** | **B3's premise is wrong.** `pgp` is **not** our release signing. It verifies the **Alpine minirootfs tarball's upstream PGP signature** against an embedded Alpine release key in Stage 0 (`crates/mvm-build/src/stage0.rs::verify_alpine_pgp_signature`). It **cannot** move to minisign — Alpine dictates the format. See below. |
-| `aws-lc-rs` 1.16 | **Yes** — `rustls` default crypto provider | **16** + a C/cmake build | **B4 stands.** Pulled `reqwest(rustls-tls) → hyper-rustls → rustls → aws-lc-rs`. Pinning rustls to the `ring` provider removes it and kills the native cmake build. |
+| `aws-lc-rs` 1.16 | **Yes** | **16** + a C/cmake build | **B4 is entangled with C1, not a standalone cut** — see below. |
 
 ### The only two default-closure targets are `pgp` (168) and `aws-lc-rs` (16).
 
 `sigstore` and `opendal` are already out of the default binary — their
 cuts only shrink the respective *feature-on* builds.
+
+## B4 re-scope: aws-lc-rs comes from the `oci-client` / reqwest-0.13 chain (= C1)
+
+Traced where aws-lc-rs actually enters:
+
+- **mvm's own `reqwest 0.12`** is **already aws-lc-free**: reqwest 0.12.28
+  declares `rustls = { default-features = false }` and its `rustls-tls`
+  feature enables `__rustls-ring` (the `ring` provider). So mvm's direct
+  HTTP path uses ring today.
+- **aws-lc-rs enters only via `oci-client 0.16 → reqwest 0.13.3 →
+  rustls-platform-verifier 0.7`** (mvm-oci's registry client). The
+  platform-verifier path pulls aws-lc.
+
+So there are **two reqwest majors** in the tree (0.12 direct, 0.13 via
+oci-client) — that's **Task C1** — and the aws-lc-rs the plan wants gone
+(B4) is dragged in by the 0.13/oci-client/platform-verifier chain. **B4
+and C1 are the same problem.** Removing aws-lc means getting oci-client's
+TLS onto ring + webpki roots (no platform-verifier), which in practice
+means unifying on one reqwest major and pinning that stack to ring.
+
+This is a real TLS-stack-unification task (needs a runtime TLS smoke —
+provider-pinning can compile-green yet fail at connect), **not** the
+"~6 crates, mechanical" the plan estimated. mvmd is unaffected either way
+(it already pins ring via `mvmd-proxy`/`certs.rs` + installs it, and keeps
+its own aws-lc transitively through `iroh → hickory → rustls`).
 
 ## B3 re-scope: `pgp` is Alpine-tarball verification, not release signing
 
@@ -89,10 +114,21 @@ or option 3 if a feature boundary is clean — but not as a silent swap.
 
 ## Suggested task order (revised)
 
-1. **B4 (`aws-lc-rs` → `ring`)** — cleanest default-closure cut; −16 + no
-   C build. Needs a runtime TLS smoke (provider-pinning can compile-green
-   yet break at connect time).
-2. **B3 (`pgp`)** — biggest number (−168) but a security decision (above).
-3. **B1/B2** — no default-build benefit left; pursue only for the
-   feature-on builds / the cross-repo relocation, sequenced with 123.
-4. **C1** (`reqwest`/`oci-client` duplicate majors), **D1** (the gate).
+The plan's "quick mechanical cuts" mostly don't exist as written. The real
+remaining work, honestly scoped:
+
+1. **B4+C1 together (`aws-lc-rs` + the reqwest-major split)** — the only
+   *mechanical-ish* default cut, but it's a TLS-stack-unification effort:
+   collapse reqwest 0.12/0.13 to one major and steer `oci-client` onto
+   ring + webpki (drop `rustls-platform-verifier`). −16 crates + the C
+   build + one reqwest major. **Needs a real TLS-connect smoke**, and an
+   `oci-client` feature/version that avoids platform-verifier (verify
+   first — may need an oci-client bump or a fork-of-features).
+2. **B3 (`pgp`, −168)** — biggest number, but a **security decision**:
+   drop or feature-gate the Alpine-tarball PGP verify (defense-in-depth
+   over the existing SHA-256 pin). Needs owner sign-off + an ADR-002 note.
+3. **B1/B2** — no default-build benefit left (already feature-gated);
+   pursue only for feature-on builds / the cross-repo sigstore relocation,
+   sequenced with 123.
+4. **D1** — the forbidden-dep gate (sibling of `check-core-runtime-free`
+   from B5).

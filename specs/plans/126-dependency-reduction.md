@@ -56,12 +56,12 @@ The tarball is **already SHA-256 hash-pinned in source** for the pinned `ALPINE_
 
 See `docs/investigations/dep-baseline.md` for the full rationale.
 
-### Task B4: `aws-lc-rs` → `ring` (~6 + kills a C/cmake build)
+### Task B4: `aws-lc-rs` → `ring` — MERGE WITH C1 (not a standalone cut)
 
-`aws-lc-rs` is the C/cmake crypto backend; `ring` covers the same primitives without the native build. (123 already pins `object_store`'s TLS to `ring`; this removes the rest.)
+> **A1 finding (see `docs/investigations/dep-baseline.md`):** mvm's own `reqwest 0.12` is **already** on `ring` (`default-features = false` rustls + `__rustls-ring`). aws-lc-rs enters **only** via `oci-client 0.16 → reqwest 0.13.3 → rustls-platform-verifier`. So B4 = **C1** (collapse the two reqwest majors) + steer `oci-client` onto ring + webpki roots (drop platform-verifier). Do them as one task.
 
-- [ ] **Step 1:** Find what pulls `aws-lc-rs` (`cargo tree -i aws-lc-rs`) — likely rustls's default provider (rustls 0.23+) and/or a TLS stack.
-- [ ] **Step 2:** Pin rustls to the `ring` `CryptoProvider` everywhere it's constructed; set the relevant `default-features = false` + `ring` features. Failing test — `cargo tree -i aws-lc-rs` is empty; TLS still works (a smoke connect). The native cmake build is gone (faster cold build — note it). Commit.
+- [ ] **Step 1:** Find an `oci-client` feature/version whose TLS uses ring + webpki and **not** `rustls-platform-verifier` (verify against oci-client's manifest — may need a version bump). Unify mvm-direct + oci-client on **one reqwest major**.
+- [ ] **Step 2:** Set every rustls consumer to `default-features = false` + ring. Failing test — `cargo tree -i aws-lc-rs` is empty; **a real HTTPS connect succeeds** (provider-pinning compiles green but can fail at handshake); `cargo tree -d | grep reqwest` shows one major. The native cmake build is gone (note the cold-build delta). Commit.
 
 ### Task B5: drop `tokio` from `mvm-core`'s default closure (folds in plan 121's "runtime-free core" follow-up)
 
