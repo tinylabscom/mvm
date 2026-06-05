@@ -12,6 +12,27 @@
 
 **Scope note:** this is three independent subsystems (A/B/C). It is written as one plan per the brief, but the phase boundaries are clean splits if you'd rather execute it as 123a/b/c.
 
+**Execution order (chosen 2026-06-04): B → A → C.** Phase B first — cleanest continuation of plan 122 (which handed the encrypted-volume impl here), additive, no gated lanes needed. Then Phase A (`mvm-network` — unblocks plan 129). Phase C (warm-start) is **scheduled last, not dropped**: highest risk, needs the gated live-KVM + macOS-26 lanes *and* a `PostRestore` sender that does not exist yet (see below). Run as `123b` / `123a` / `123c` worktrees.
+
+## Path reconciliation (post-121)
+
+Plan 121 consolidated 32→15 crates *after* this plan was written, so several paths below are stale. Real current locations (verified 2026-06-04):
+
+| Plan 123 reference | Real current path |
+|---|---|
+| `crates/mvm-ir/src/workload.rs` (`MountSource`, `NetworkMode`) | `crates/mvm-sdk/src/ir/workload.rs` — `MountSource` :418, `NetworkMode` :489 |
+| firewall/proxy in "old `mvm-supervisor`" | `crates/mvm-hostd/src/supervisor/{firewall,proxy,l7_proxy,network}.rs` |
+| `mvm-backend/src/network.rs` | unchanged: `crates/mvm-backend/src/network.rs` |
+| egress proxy lib | `crates/mvm-build/src/egress_proxy/` (+ the builder-VM bin) |
+| `instance_snapshot.rs` (one file) | spread: `crates/mvm-backend/src/base/snapshot_integrity.rs` + `mvm_core::crypto::snapshot_*` |
+| `VmBackend` pause/resume capability flag | `VmCapabilities` (bool `pause_resume`/`snapshots`) in `crates/mvm-core/src/protocol/vm_backend.rs` — **no snapshot-capability enum yet**; C1 adds it |
+
+**Phase A — build on, don't reinvent.** Plan 141 already shipped the in-line packet-observer pipeline that A2/A3 want: `crates/mvm-hostd/src/supervisor/network/{mod,packet,pipeline}.rs` (`Observer::on_packet` → `Verdict`, etherparse parse + checksum-correct rebuild, wired into `gateway_bridge.rs`). Default-deny substrate already exists: `FirewallEnforcer::install_default_deny` + `L4Policy::deny_all()`.
+
+**Phase B — layering (confirmed 2026-06-04).** `mvm-storage` is deliberately mvm-side-minimal — its own module doc cites *plan 45 §D5, Path C*: it ships only the data-plane `VolumeBackend` + `LocalBackend`; `EncryptedBackend<B>` and `ObjectStoreBackend` live in **mvmd**. Plan 123's `StorageProvider` (provision/attach/detach/snapshot) and `MountProvider` (mount-source resolution) are **new host-side layers that sit beside** those, and do **not** re-home the mvmd backends. The `encrypted` `StorageProvider` arm (B2) wraps the *host's* volume bytes via `mvm_core::crypto::{aead,volume}` (122) — distinct from mvmd's data-plane `EncryptedBackend<B>`. The B4 S3 `MountProvider` (read-only sync-to-cache) is likewise a mount-source resolver, not the mvmd `ObjectStoreBackend`.
+
+**Phase C — the `PostRestore` sender gap.** The guest handles `GuestRequest::PostRestore`, but **nothing on the host sends it today** (the same gap that deferred plan 122's VMGenID-token *delivery*). C2's VMGenID-rotate-and-reseed-on-resume depends on that sender being built first — track it as a C prerequisite, not an afterthought.
+
 ---
 
 ## Phase A — `NetworkProvider` (new crate `mvm-network`)
@@ -67,30 +88,31 @@ The IR `NetworkMode` is a closed enum (`None`/`Bridge`/`Host`) — a mesh/VPN mo
 
 ### Task B1: the trait + `local` impl
 
-**Files:** `crates/mvm-storage/src/{provider.rs,local.rs}`.
+**Files:** `crates/mvm-storage/src/provider.rs` (new — trait + `LocalStorage`; kept separate from `local.rs`, which is the data-plane `LocalBackend`).
 
-- [ ] **Step 1:** Failing test — `LocalStorage` provisions a volume, attaches it (returns a path/handle), round-trips bytes, detaches.
-- [ ] **Step 2:** Define `trait StorageProvider { fn provision(&self, spec: &VolumeSpec) -> Result<VolumeHandle>; fn attach/detach(...); fn snapshot(&self, h: &VolumeHandle) -> Result<SnapshotRef>; }`; implement `local`. Commit.
+- [x] **Step 1:** Failing test — `LocalStorage` provisions a volume, attaches it (returns a path/handle), round-trips bytes, detaches. (`provider::tests::local_storage_provision_attach_roundtrip_detach`)
+- [x] **Step 2:** Defined sync `trait StorageProvider { kind; provision; attach; detach }` + `VolumeSpec`/`VolumeHandle`/`AttachedVolume`; implemented `LocalStorage`. `snapshot()` deferred to B3 (grow the trait when its test lands — TDD). Committed `584e2be7`.
 
 ### Task B2: the `encrypted` impl (consumes 122)
 
 ADR-066 §5 — the encrypted volume impl lives here and calls 122's engine. Platform split: LUKS2 (Linux), per-file AEAD (macOS, 122 Task A2).
 
-- [ ] **Step 1:** Failing test — an `encrypted` volume's on-disk bytes are ciphertext; the guest mount sees plaintext; a flipped byte fails to open (122's AEAD tag).
-- [ ] **Step 2:** Wire `EncryptedStorage` over `mvm_core::crypto::{aead, volume}` (122) + the DEK/KEK envelope; select LUKS2 vs the macOS arm by `target_os`. The per-volume DEK binds to the content hash + plan + audit head (122 B2). Commit.
+- [x] **Step 1 (macOS arm):** test — a detached `EncryptedStorage` volume is ciphertext at rest (plaintext marker gone), re-attach shows plaintext, a flipped tag byte fails open. (`encrypted::tests::{encrypted_volume_is_ciphertext_at_rest_and_roundtrips, tampered_ciphertext_fails_to_open}`)
+- [x] **Step 2 (macOS arm):** `EncryptedStorage` (`crates/mvm-storage/src/encrypted.rs`, `#[cfg(not(target_os = "linux"))]`) seals on detach / opens on attach via `mvm_core::crypto::volume::{seal_dir,open_dir}` (122). It's the non-Linux arm, gated like the engine it wraps; selection by `target_os`. The per-volume DEK→content-hash+plan+audit-head binding (`WrappedKey.bound`, 122 B2) is verified at the **admit gate before unlock**, not re-checked here.
+- [ ] **Step 2 (Linux LUKS2 arm) — DEFERRED (see follow-ups):** block-level LUKS2 over a loop device. Un-buildable + un-verifiable on a macOS dev host (needs Linux + root + loop devices; `cargo zigbuild`/zig 0.16 can't even compile the crate here). Land on Linux CI per the `mvm_core::rotate_luks_slot` precedent (direct `cryptsetup`, `MVM_LIVE_LUKS=1`-gated).
 
 ### Task B3: content-addressed + snapshot-upper volumes
 
-- [ ] **Step 1:** Failing tests — a content-addressed volume dedups identical content by digest; a snapshot-upper volume (COW over a read-only base) writes only the delta. Commit after green. (This is the storage half of the warm-start diff-snapshot in Phase C.)
+- [x] **Step 1:** `ContentAddressedStore` (`content_addressed.rs`) dedups identical content by SHA-256 digest (one on-disk object, atomic put); `SnapshotUpper` (`snapshot.rs`) is COW over a read-only base — writes land in the upper, the base stays immutable, and `..`/absolute paths are rejected via `VolumePath` (claim-1 no-escape). Tests: `content_addressed_dedups_identical_content_by_digest`, `snapshot_upper_writes_only_delta_over_readonly_base`, `snapshot_upper_rejects_path_traversal`. (Storage half of the Phase C diff-snapshot; on Linux the production overlay is overlayfs/dm — same COW semantics.)
 
 ### Task B4: `MountProvider` — pluggable mount sources
 
 The IR `MountSource` is a closed enum (`Volume`/`HostPath`/`Tmpfs`) — a new source means a core-enum edit. Add the seam so external sources (S3, Hetzner Volume, NFS) are "implement + register," and the cloud-SDK deps stay off the default build (dep budget). Lives in `mvm-storage` (no new crate).
 
-**Files:** `crates/mvm-storage/src/mount_provider.rs` (new); `crates/mvm-ir/src/workload.rs` (the `MountSource` enum ~line 418).
+**Files:** `crates/mvm-storage/src/mount_provider.rs` (new); `crates/mvm-sdk/src/ir/workload.rs:418` (the `MountSource` enum — post-121 home, not `mvm-ir`).
 
-- [ ] **Step 1:** Failing test — a `MountProvider` registry resolves `HostPath` → a host path and `Volume` → a block device (via `StorageProvider`); an unknown `External { provider }` returns a typed `UnknownFsProvider` (no silent default).
-- [ ] **Step 2:** Define the trait + registry:
+- [x] **Step 1:** `MountRegistry` resolves `HostPath` → `Mountable::HostPath` and `Volume` → an attached `StorageProvider` host path; an unknown `External { provider: "s3" }` returns `MountError::UnknownFsProvider` (no silent default). Tests `registry_resolves_host_path`, `registry_resolves_volume_via_storage_provider`, `registry_rejects_unknown_external_provider`. (Note: with `LocalStorage` a volume is a directory → `HostPath`; the `BlockDev` arm lands with the LUKS block provider.)
+- [x] **Step 2:** Defined `MountProvider` trait + `Mountable {HostPath, Tmpfs}` + hand-written `MountError` (no thiserror dep) + `MountRegistry`; built-ins `HostPathFs`, `VolumeFs` (delegates to `StorageProvider`), `TmpfsFs`. `Mountable::{BlockDev,Fuse}` are declared only when their producers exist (LUKS arm / lazy-FUSE S3) — avoids dead-variant warnings. Original sketch:
   ```rust
   // Resolves a mount's *source* into something VmBackend can attach. The share
   // mechanism (virtiofs / virtio-blk) stays VmBackend's job; this is only "where
@@ -103,8 +125,8 @@ The IR `MountSource` is a closed enum (`Volume`/`HostPath`/`Tmpfs`) — a new so
   }
   ```
   Built-ins: `HostPathFs`, `VolumeFs` (delegates to `StorageProvider`), `TmpfsFs`. VmBackend attaches the `Mountable` (virtiofs for a path, virtio-blk for a device).
-- [ ] **Step 3:** Extend the IR `MountSource` with an open `External { provider: String, config: serde_json::Value }` variant (keep the built-ins); the inner `config` is the provider's to validate. Serde round-trip + an unknown-provider rejection test.
-- [ ] **Step 4: Build a real S3 `MountProvider`** (the one external impl), feature-gated `s3` via the lean `object_store` crate — **not `aws-sdk-s3`** (the official AWS SDK pulls the `aws-config`/`aws-smithy-*` closure + `aws-lc-rs`, the C crypto dep the budget rejects). Pin `object_store`'s TLS to the **`ring`** provider (rustls 0.23+ defaults to `aws-lc-rs` — don't reinforce it; ADR-066 drives `aws-lc-rs`→`ring`). `resolve` reads bucket + prefix from `MountSource::External { provider: "s3", config }`, syncs the prefix **read-only** to a local cache volume (reuse `StorageProvider`), and returns it as the `Mountable`. Failing test against `object_store`'s in-memory backend (no network): a seeded object lands in the mounted cache path; and `s3` off → `object_store` absent from the default `cargo tree`. Read-write / lazy-FUSE S3 + a Hetzner-Volume impl are follow-ups — the registry makes them drop-in. **One S3 client for the whole repo:** 126 replaces the existing optional `opendal` (`crates/mvm/Cargo.toml`, template-registry-s3, ~70 crates) with this same `object_store`, dropping opendal. Commit.
+- [x] **Step 3:** Added the open `External { provider: String, config: serde_json::Value }` variant to the IR `MountSource` (`mvm-sdk`, internally-tagged, `deny_unknown_fields`); the variant broke no `match` anywhere (only the IR file references it). `mount_source_external_roundtrips_json` covers serde; the registry test covers unknown-provider rejection.
+- [x] **Step 4:** `S3MountProvider` (`s3.rs`, feature `s3`) over the lean `object_store` (`aws` feature) — **not `aws-sdk-s3`**. Verified the dep tree: `s3` off → no `object_store` in `cargo tree`; `s3` on → TLS is **`ring`**, no `aws-lc-rs` (object_store's reqwest closure already resolves to ring here — no extra pinning needed). `resolve` reads `prefix` from `MountSource::External { provider: "s3", config }`, syncs it **read-only** into a per-prefix cache dir, returns `Mountable::HostPath`. Test `s3_provider_syncs_prefix_to_cache_dir` runs against `object_store`'s `InMemory` (no network): the seeded in-prefix object lands in the cache, an out-of-prefix object does not. `from_s3_config` builds the real `AmazonS3` (network leg) — compile-checked under `--features s3`. **Not done here (deferred):** the opendal→object_store consolidation is plan 126's; live-bucket validation + the resolve-from-async-context offload are follow-ups below.
 
 ## Phase C — warm-start (per-backend capability matrix)
 
@@ -138,13 +160,16 @@ The wireable macOS live-memory path. Coarser than UFFD (a full save/restore), bu
 ## Acceptance
 
 - [ ] `mvm-network` exists (17th crate); `NetworkProvider` provisions gvproxy/passt/TAP behind the trait; ingress **and** egress default-deny; DNS + flow audit; the egress proxy carries the substitution + leak-scan seams (no-op until 129).
-- [ ] `StorageProvider` with `local` + `encrypted` (122-backed, both platforms) + content-addressed + snapshot-upper impls; encrypted on-disk bytes are ciphertext, guest sees plaintext.
-- [ ] `MountProvider` resolves host/volume/tmpfs mounts; the IR's open `MountSource::External` + a **real feature-gated S3 impl** (`object_store`, read-only sync-to-cache) prove external sources plug in without a core edit; `s3` off → no `object_store` in the default tree.
+- [x] `StorageProvider` with `local` + `encrypted` (122-backed; **macOS arm done**, Linux LUKS2 deferred) + content-addressed + snapshot-upper impls; encrypted on-disk bytes are ciphertext, guest sees plaintext.
+- [x] `MountProvider` resolves host/volume/tmpfs mounts; the IR's open `MountSource::External` + a **real feature-gated S3 impl** (`object_store`, read-only sync-to-cache) prove external sources plug in without a core edit; `s3` off → no `object_store` in the default tree.
 - [ ] Warm-start is a per-backend capability: **Firecracker** live-memory fast-resume (UFFD/NBD/hugepages, ~1s, VMGenID-reseeded), **Vz** save/restore (macOS 26+), **libkrun** disk-only — each surfaced by `doctor`, none silently degrading.
 - [ ] `cargo test --workspace` (host tiers) + the gated live-KVM/macOS lanes + clippy + fmt green.
 
 ### deferred follow-ups
 
+- [ ] **B4 S3 live-bucket validation** — exercise `S3MountProvider::from_s3_config` against a real (or minio) bucket; only the `InMemory` sync path is unit-tested. Plus: `resolve` owns a current-thread runtime and `block_on`s, so calling it from inside another tokio runtime (mvm-backend async context) would panic — give it a `block_in_place`/offload path when wiring it into the backend.
+- [ ] **B4 opendal → object_store consolidation** — plan 126 swaps the existing optional `opendal` (`crates/mvm/Cargo.toml`, `template-registry-s3`) for this same `object_store`, dropping opendal. Not done here (this plan only *adds* the first object_store consumer).
+- [ ] **B2 Linux LUKS2 arm** — block-level `EncryptedStorage` (`cryptsetup luksFormat`/`luksOpen` + `mkfs`/`mount` over a loop device), gated `#[cfg(target_os = "linux")]`, with an `MVM_LIVE_LUKS=1`-gated live test. Deferred from B2: a macOS dev host can neither build nor verify it (no Linux/root/loop devices; local cross-tooling can't compile the crate). Do it on Linux. While there, dedup the cryptsetup shell-out with `mvm/src/security/encryption.rs` (the `run_in_vm` builder-VM path) and `mvm_core::rotate_luks_slot` (the direct-`Command` runtime path).
 - [ ] Cloud-Hypervisor snapshot parity (if CH stays a backend).
 - [ ] Soften the gap-analysis "live-memory resume" line to the per-backend matrix (Firecracker + Vz live-memory; libkrun disk-only).
 - [ ] The diff-snapshot fast-resume on Vz (UFFD-equivalent) — VZ's save/restore is coarse; a faster macOS path is its own investigation.

@@ -416,9 +416,25 @@ pub struct Mount {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MountSource {
-    Volume { name: String },
-    HostPath { path: String },
-    Tmpfs { size_mb: u32 },
+    Volume {
+        name: String,
+    },
+    HostPath {
+        path: String,
+    },
+    Tmpfs {
+        size_mb: u32,
+    },
+    /// Open extension point: a mount source resolved by a registered
+    /// `MountProvider` (S3, Hetzner Volume, NFS, …). `config` is the
+    /// provider's own schema — the IR doesn't interpret it, so new sources
+    /// plug in without a core-enum edit. An unregistered provider is
+    /// rejected at resolve time (`MountError::UnknownFsProvider`), never
+    /// silently defaulted. See plan 123 B4 / `mvm_storage::mount_provider`.
+    External {
+        provider: String,
+        config: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
