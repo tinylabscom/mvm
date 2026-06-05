@@ -14,8 +14,8 @@
 //!
 //! Kernel-side blackhole routes are universal — every Linux kernel
 //! supports `RTN_BLACKHOLE` since 2.0, no userspace tool required.
-//! `rtnetlink` talks directly to the kernel via `AF_NETLINK`; the
-//! only dependency is a Linux kernel.
+//! We talk directly to the kernel over a synchronous `AF_NETLINK`
+//! socket (Plan 124 A3); the only dependency is a Linux kernel.
 //!
 //! ## Why this is defense-in-depth, not the sole defense
 //!
@@ -52,7 +52,6 @@
 //! report carries any failures, so `/init` can fail-closed
 //! (refuse to fork the workload entrypoint).
 
-use async_trait::async_trait;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
@@ -129,7 +128,7 @@ pub struct RouteFailed {
     pub cidr: IpNet,
     pub category: String,
     /// Stringified error. Kept opaque so the JSON shape is stable
-    /// even if the underlying rtnetlink error type changes.
+    /// even if the underlying netlink error representation changes.
     pub reason: String,
 }
 
@@ -168,16 +167,21 @@ impl Report {
     }
 }
 
-/// Abstraction over the actual rtnetlink call so tests can use a
+/// Abstraction over the actual netlink call so tests can use a
 /// `MockInstaller` without a real `AF_NETLINK` socket. Production
-/// uses [`RtnetlinkInstaller`].
-#[async_trait]
+/// uses [`RawNetlinkInstaller`].
+///
+/// Synchronous (Plan 124 A3): the previous `rtnetlink`-backed impl was
+/// `async`, which forced `#[async_trait]` here and dragged `tokio` into
+/// the guest closure for a one-shot, fire-and-wait netlink exchange that
+/// never needed a runtime. The raw installer does a blocking
+/// `send`/`recv` on a socket it owns.
 pub trait RouteInstaller: Send + Sync {
     /// Add a blackhole route for `cidr`. Idempotent at the kernel
     /// level — if the route already exists, returning `Ok(())` is
     /// the correct semantics (the entry is the desired state, not
     /// a write-once operation).
-    async fn install_blackhole(&self, cidr: IpNet) -> Result<(), String>;
+    fn install_blackhole(&self, cidr: IpNet) -> Result<(), String>;
 }
 
 /// Categorize a CIDR for the audit category field. Pure function;
@@ -221,7 +225,7 @@ fn categorize_v4(cidr: &IpNet) -> &'static str {
 /// The loop is fault-tolerant: a per-route failure is recorded in
 /// `report.failed` but doesn't abort. Callers branch on
 /// `report.has_failures()` for the overall verdict.
-pub async fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
+pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
     let mut report = Report::empty();
     for cidr in mvm_core::network_policy::mandatory_deny_ranges() {
         if !cidr.network().is_ipv4() {
@@ -229,7 +233,7 @@ pub async fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report 
             continue;
         }
         let category = categorize_v4(&cidr).to_string();
-        match installer.install_blackhole(cidr).await {
+        match installer.install_blackhole(cidr) {
             Ok(()) => report.installed.push(RouteInstalled { cidr, category }),
             Err(reason) => report.failed.push(RouteFailed {
                 cidr,
@@ -242,89 +246,258 @@ pub async fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report 
 }
 
 // ============================================================================
-// Production installer — rtnetlink (Linux-only)
+// Raw netlink wire format (cross-platform — no socket, pure bytes)
+// ============================================================================
+
+/// Netlink `RTM_NEWROUTE` wire encoding for blackhole routes.
+///
+/// Plan 124 A3 replaced the async `rtnetlink` crate (which dragged
+/// `tokio` and `async-trait` into the guest closure) with a hand-rolled
+/// message over a synchronous `AF_NETLINK` socket. The message is ~36
+/// bytes of stable kernel UAPI; building it needs no dependency. The
+/// encoding
+/// lives off the `cfg(linux)` socket code so its byte layout is
+/// unit-tested on any host — and the module is gated to `linux`-or-`test`
+/// so a macOS production build (where only the Linux installer would call
+/// it) doesn't carry it as dead code.
+///
+/// Constants are duplicated from `<linux/rtnetlink.h>` / `<linux/netlink.h>`
+/// — frozen kernel ABI, never renumbered. `constants_match_libc` (a
+/// Linux-only test) pins each to `libc`'s value so a typo can't slip past
+/// CI even though we don't link a netlink crate.
+#[cfg(any(target_os = "linux", test))]
+mod wire {
+    use std::net::Ipv4Addr;
+
+    /// `RTM_NEWROUTE` — create/modify a routing table entry.
+    pub const RTM_NEWROUTE: u16 = 24;
+    /// `NLM_F_REQUEST` — this message is a request.
+    pub const NLM_F_REQUEST: u16 = 0x01;
+    /// `NLM_F_CREATE` — create the object if it doesn't exist.
+    pub const NLM_F_CREATE: u16 = 0x400;
+    /// `NLM_F_ACK` — ask the kernel for an explicit ACK (an `nlmsgerr`
+    /// with `error == 0`), so the installer can confirm the route landed
+    /// instead of fire-and-forget.
+    pub const NLM_F_ACK: u16 = 0x04;
+    /// `AF_INET` — `rtm_family` for an IPv4 route.
+    pub const AF_INET_U8: u8 = 2;
+    /// `RT_TABLE_MAIN` — the main routing table.
+    pub const RT_TABLE_MAIN: u8 = 254;
+    /// `RTPROT_BOOT` — installed by the boot process (us, from `/init`).
+    pub const RTPROT_BOOT: u8 = 3;
+    /// `RT_SCOPE_UNIVERSE` — global scope (a blackhole applies everywhere).
+    pub const RT_SCOPE_UNIVERSE: u8 = 0;
+    /// `RTN_BLACKHOLE` — drop matching packets, no ICMP unreachable.
+    pub const RTN_BLACKHOLE: u8 = 6;
+    /// `RTA_DST` — the route's destination-prefix attribute.
+    pub const RTA_DST: u16 = 1;
+
+    /// Encode an `RTM_NEWROUTE` netlink message installing a blackhole
+    /// route for `addr/prefix_len`. Pure: returns the exact wire bytes
+    /// the kernel expects on an `AF_NETLINK`/`NETLINK_ROUTE` socket, no
+    /// I/O.
+    ///
+    /// Layout (all multi-byte header fields native-endian per the
+    /// netlink ABI; the `RTA_DST` payload is the address in network
+    /// order): `nlmsghdr`(16) + `rtmsg`(12) + `rtattr`(4) + dst(4) = 36.
+    ///
+    /// `seq` is echoed back in the ACK so the caller can match request
+    /// to reply on a socket it owns exclusively.
+    pub fn encode_blackhole_route_v4(addr: Ipv4Addr, prefix_len: u8, seq: u32) -> Vec<u8> {
+        // Fixed total: no optional attributes, so we can stamp nlmsg_len
+        // up front rather than back-patch it. 16 + 12 + 8.
+        const TOTAL_LEN: u32 = 36;
+        let mut msg = Vec::with_capacity(TOTAL_LEN as usize);
+
+        // struct nlmsghdr — fields are host-endian per the netlink ABI.
+        msg.extend_from_slice(&TOTAL_LEN.to_ne_bytes()); // nlmsg_len
+        msg.extend_from_slice(&RTM_NEWROUTE.to_ne_bytes()); // nlmsg_type
+        msg.extend_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+        msg.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid — 0: kernel fills it
+
+        // struct rtmsg — single-byte fields need no endian handling.
+        msg.push(AF_INET_U8); // rtm_family
+        msg.push(prefix_len); // rtm_dst_len — the prefix being blackholed
+        msg.push(0); // rtm_src_len
+        msg.push(0); // rtm_tos
+        msg.push(RT_TABLE_MAIN); // rtm_table
+        msg.push(RTPROT_BOOT); // rtm_protocol
+        msg.push(RT_SCOPE_UNIVERSE); // rtm_scope
+        msg.push(RTN_BLACKHOLE); // rtm_type — drop, no ICMP unreachable
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // rtm_flags
+
+        // struct rtattr { rta_len, rta_type } + 4-byte IPv4 destination.
+        // The address is already network-order in `octets()`, which is
+        // what the kernel wants in RTA_DST.
+        msg.extend_from_slice(&8u16.to_ne_bytes()); // rta_len = 4 (hdr) + 4 (addr)
+        msg.extend_from_slice(&RTA_DST.to_ne_bytes()); // rta_type
+        msg.extend_from_slice(&addr.octets()); // destination prefix
+
+        debug_assert_eq!(msg.len(), TOTAL_LEN as usize);
+        msg
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+use wire::*;
+
+// ============================================================================
+// Production installer — raw netlink (Linux-only)
 // ============================================================================
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
 
-    /// Production [`RouteInstaller`] that talks to the kernel via
-    /// `AF_NETLINK`. Requires CAP_NET_ADMIN in the current user
-    /// namespace — the binary expects to run as root from `/init`
-    /// BEFORE the agent setpriv's down to uid 901.
+    use std::io;
+    use std::mem::zeroed;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// `NLMSG_ERROR` — the kernel's ACK/error reply type. Carries an
+    /// `i32` error immediately after its `nlmsghdr`: `0` = success ACK,
+    /// `-errno` = failure.
+    const NLMSG_ERROR: u16 = 2;
+
+    /// Production [`RouteInstaller`] that talks to the kernel directly
+    /// over a `NETLINK_ROUTE` socket — synchronous `sendto`/`recv`, no
+    /// runtime (Plan 124 A3). Requires CAP_NET_ADMIN in the current
+    /// user namespace; the binary runs as root from `/init` BEFORE the
+    /// agent setpriv's down to uid 901.
     ///
-    /// Construction is fallible because opening the netlink socket
-    /// can fail (e.g. on a kernel built without `CONFIG_RTNETLINK`,
-    /// which is rare but not impossible for stripped-down embedded
-    /// kernels).
-    pub struct RtnetlinkInstaller {
-        handle: rtnetlink::Handle,
+    /// Owns the socket fd for its lifetime (`OwnedFd` closes it on
+    /// drop). `seq` numbers requests so each ACK can be matched to its
+    /// send on this exclusively-owned socket.
+    pub struct RawNetlinkInstaller {
+        fd: OwnedFd,
+        seq: AtomicU32,
     }
 
-    impl RtnetlinkInstaller {
-        /// Connect to the kernel's rtnetlink service. Spawns the
-        /// rtnetlink connection background task on the current
-        /// tokio runtime. Drop semantics: the handle keeps the
-        /// connection alive until the installer is dropped.
-        pub async fn connect() -> Result<Self, String> {
-            let (connection, handle, _) =
-                rtnetlink::new_connection().map_err(|e| format!("rtnetlink connect: {e}"))?;
-            tokio::spawn(connection);
-            Ok(Self { handle })
-        }
-    }
-
-    #[async_trait]
-    impl RouteInstaller for RtnetlinkInstaller {
-        async fn install_blackhole(&self, cidr: IpNet) -> Result<(), String> {
-            // rtnetlink's v4 route builder takes the destination
-            // prefix (address + length) and the
-            // scope/protocol/kind fields. The `kind` field is what
-            // makes it a blackhole — RTN_BLACKHOLE means "the
-            // kernel drops packets matching this route without
-            // sending ICMP unreachable", which is the strongest
-            // form of "this destination is forbidden".
-            match cidr {
-                IpNet::V4(v4) => {
-                    use netlink_packet_route::route::{RouteProtocol, RouteScope, RouteType};
-                    self.handle
-                        .route()
-                        .add()
-                        .v4()
-                        .destination_prefix(v4.network(), v4.prefix_len())
-                        .kind(RouteType::BlackHole)
-                        .scope(RouteScope::Universe)
-                        .protocol(RouteProtocol::Boot)
-                        .execute()
-                        .await
-                        .map_err(|e| format!("route add {cidr}: {e}"))?;
-                }
-                IpNet::V6(_) => {
-                    // Should never reach here because
-                    // `install_mandatory_deny` skips v6 before
-                    // calling the installer; defending against a
-                    // future refactor.
-                    return Err(format!(
-                        "internal: install_blackhole called with IPv6 cidr {cidr} \
-                         (v6 not supported yet)"
-                    ));
-                }
+    impl RawNetlinkInstaller {
+        /// Open and bind a `NETLINK_ROUTE` socket. Fallible: the socket
+        /// open can fail on a kernel built without netlink (rare, but
+        /// possible on stripped-down embedded kernels) — the binary
+        /// maps this to a distinct exit code so `/init` can tell a
+        /// systemic netlink failure from a per-route one.
+        pub fn open() -> Result<Self, String> {
+            // SAFETY: socket() with constant args; we check the return.
+            let raw =
+                unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE) };
+            if raw < 0 {
+                return Err(format!(
+                    "open AF_NETLINK socket: {}",
+                    io::Error::last_os_error()
+                ));
             }
-            Ok(())
+            // SAFETY: raw is a fresh, owned, valid fd (checked >= 0).
+            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+            // Bind with nl_pid = 0 so the kernel assigns a unique port
+            // id; nl_groups = 0 (we send unicast requests, want no
+            // multicast). zeroed() gives nl_pad = 0 as required.
+            let mut addr: libc::sockaddr_nl = unsafe { zeroed() };
+            addr.nl_family = libc::AF_NETLINK as u16;
+            // SAFETY: addr is a valid sockaddr_nl for the bind's len.
+            let rc = unsafe {
+                libc::bind(
+                    fd.as_raw_fd(),
+                    &addr as *const libc::sockaddr_nl as *const libc::sockaddr,
+                    size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+                )
+            };
+            if rc < 0 {
+                return Err(format!(
+                    "bind AF_NETLINK socket: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            Ok(Self {
+                fd,
+                seq: AtomicU32::new(0),
+            })
+        }
+
+        /// Send one encoded request to the kernel (nl_pid = 0) and wait
+        /// for its ACK. Returns the kernel's `nlmsgerr` code: `0` for
+        /// success, otherwise the positive errno.
+        fn send_and_ack(&self, msg: &[u8]) -> Result<i32, String> {
+            let fd = self.fd.as_raw_fd();
+            let mut dst: libc::sockaddr_nl = unsafe { zeroed() };
+            dst.nl_family = libc::AF_NETLINK as u16; // nl_pid = 0 → the kernel
+            // SAFETY: msg is a valid slice; dst is a valid sockaddr_nl.
+            let sent = unsafe {
+                libc::sendto(
+                    fd,
+                    msg.as_ptr() as *const libc::c_void,
+                    msg.len(),
+                    0,
+                    &dst as *const libc::sockaddr_nl as *const libc::sockaddr,
+                    size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+                )
+            };
+            if sent < 0 {
+                return Err(format!("netlink send: {}", io::Error::last_os_error()));
+            }
+
+            // The ACK is a single NLMSG_ERROR: nlmsghdr(16) + i32 error
+            // + the echoed request header. 1 KiB is ample.
+            let mut buf = [0u8; 1024];
+            // SAFETY: buf is a valid, sized destination.
+            let r = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+            if r < 0 {
+                return Err(format!("netlink recv: {}", io::Error::last_os_error()));
+            }
+            let r = r as usize;
+            // Need at least nlmsghdr(16) + error(4) to read the verdict.
+            if r < 20 {
+                return Err(format!("short netlink ACK: {r} bytes"));
+            }
+            let nlmsg_type = u16::from_ne_bytes([buf[4], buf[5]]);
+            if nlmsg_type != NLMSG_ERROR {
+                return Err(format!("unexpected netlink reply type {nlmsg_type}"));
+            }
+            // nlmsgerr.error sits right after the 16-byte nlmsghdr.
+            let err = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+            Ok(-err) // kernel reports -errno; flip to a positive errno (0 = ACK)
         }
     }
 
-    /// Convenience: connect to rtnetlink and run the install in
-    /// one call. The `mvm-guest-netinit` binary uses this.
-    pub async fn install_mandatory_deny_via_rtnetlink() -> Result<Report, String> {
-        let installer = RtnetlinkInstaller::connect().await?;
-        Ok(install_mandatory_deny(&installer).await)
+    impl RouteInstaller for RawNetlinkInstaller {
+        fn install_blackhole(&self, cidr: IpNet) -> Result<(), String> {
+            let IpNet::V4(v4) = cidr else {
+                // `install_mandatory_deny` skips v6 before calling us;
+                // this defends against a future refactor.
+                return Err(format!(
+                    "internal: install_blackhole called with IPv6 cidr {cidr} (v6 not supported yet)"
+                ));
+            };
+            // Start seq at 1 (0 reads as "no seq" in some tooling).
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            let msg = encode_blackhole_route_v4(v4.network(), v4.prefix_len(), seq);
+            match self.send_and_ack(&msg)? {
+                0 => Ok(()),
+                // EEXIST: the blackhole is already installed. The route
+                // is desired state, not a write-once op — idempotent Ok.
+                e if e == libc::EEXIST => Ok(()),
+                e => Err(format!(
+                    "route add {cidr}: {}",
+                    io::Error::from_raw_os_error(e)
+                )),
+            }
+        }
+    }
+
+    /// Convenience: open the netlink socket and run the full install.
+    /// The `mvm-guest-netinit` binary uses this.
+    pub fn install_mandatory_deny_via_netlink() -> Result<Report, String> {
+        let installer = RawNetlinkInstaller::open()?;
+        Ok(install_mandatory_deny(&installer))
     }
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{RtnetlinkInstaller, install_mandatory_deny_via_rtnetlink};
+pub use linux::{RawNetlinkInstaller, install_mandatory_deny_via_netlink};
 
 // ============================================================================
 // Tests
@@ -334,6 +507,7 @@ pub use linux::{RtnetlinkInstaller, install_mandatory_deny_via_rtnetlink};
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::net::Ipv4Addr;
     use std::sync::Mutex;
 
     /// In-memory mock that records every `install_blackhole` call.
@@ -365,9 +539,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl RouteInstaller for MockInstaller {
-        async fn install_blackhole(&self, cidr: IpNet) -> Result<(), String> {
+        fn install_blackhole(&self, cidr: IpNet) -> Result<(), String> {
             self.calls.lock().unwrap().push(cidr);
             if self.fail_on.contains(&cidr) {
                 Err(format!("forced failure for {cidr}"))
@@ -377,10 +550,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn install_calls_installer_for_every_ipv4_entry() {
+    #[test]
+    fn install_calls_installer_for_every_ipv4_entry() {
         let mock = MockInstaller::new();
-        let report = install_mandatory_deny(&mock).await;
+        let report = install_mandatory_deny(&mock);
         // Every IPv4 entry in `MANDATORY_DENY_RANGES` should have
         // exactly one call. Mirror the const's IPv4 entry count
         // exactly so a future const edit that adds a v4 entry
@@ -394,10 +567,10 @@ mod tests {
         assert!(report.failed.is_empty());
     }
 
-    #[tokio::test]
-    async fn install_skips_ipv6_entries_and_reports_them() {
+    #[test]
+    fn install_skips_ipv6_entries_and_reports_them() {
         let mock = MockInstaller::new();
-        let report = install_mandatory_deny(&mock).await;
+        let report = install_mandatory_deny(&mock);
         let v6_count = mvm_core::network_policy::mandatory_deny_ranges()
             .iter()
             .filter(|n| !n.network().is_ipv4())
@@ -412,14 +585,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn install_records_cloud_metadata_explicitly() {
+    #[test]
+    fn install_records_cloud_metadata_explicitly() {
         // The metadata `/32` is the highest-stakes entry. Asserting
         // it shows up in `installed` with category=cloud-metadata
         // means a regression that drops the entry from the const,
         // or skips it in the install loop, fails loudly here.
         let mock = MockInstaller::new();
-        let report = install_mandatory_deny(&mock).await;
+        let report = install_mandatory_deny(&mock);
         let metadata: IpNet = "169.254.169.254/32".parse().unwrap();
         let entry = report
             .installed
@@ -429,13 +602,13 @@ mod tests {
         assert_eq!(entry.category, "cloud-metadata");
     }
 
-    #[tokio::test]
-    async fn install_continues_past_failures_and_records_them() {
+    #[test]
+    fn install_continues_past_failures_and_records_them() {
         // Force one specific CIDR to fail. The loop must still
         // attempt every other entry; the failed CIDR lands in
         // `report.failed`, the rest in `report.installed`.
         let mock = MockInstaller::new().fail_on(&["100.64.0.0/10"]);
-        let report = install_mandatory_deny(&mock).await;
+        let report = install_mandatory_deny(&mock);
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].cidr.to_string(), "100.64.0.0/10");
         assert!(report.failed[0].reason.contains("forced failure"));
@@ -445,20 +618,20 @@ mod tests {
         assert!(report.has_failures());
     }
 
-    #[tokio::test]
-    async fn install_marks_clean_run_no_failures() {
+    #[test]
+    fn install_marks_clean_run_no_failures() {
         let mock = MockInstaller::new();
-        let report = install_mandatory_deny(&mock).await;
+        let report = install_mandatory_deny(&mock);
         assert!(!report.has_failures());
     }
 
-    #[tokio::test]
-    async fn install_serializes_to_stable_json_shape() {
+    #[test]
+    fn install_serializes_to_stable_json_shape() {
         // The binary's stdout is `serde_json::to_string(&report)`.
         // Pin the load-bearing field names so a downstream audit
         // consumer can deserialize across mvmctl versions.
         let mock = MockInstaller::new();
-        let report = install_mandatory_deny(&mock).await;
+        let report = install_mandatory_deny(&mock);
         let json = serde_json::to_value(&report).unwrap();
         let obj = json.as_object().unwrap();
         for key in ["installed", "failed", "skipped_ipv6"] {
@@ -471,6 +644,99 @@ mod tests {
             .expect("at least one installed entry in clean run");
         assert!(first.get("cidr").is_some());
         assert!(first.get("category").is_some());
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // Raw netlink wire-format tests (no socket — pure bytes)
+    // ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn encode_blackhole_route_v4_produces_exact_netlink_bytes() {
+        // The cloud-metadata /32 — highest-stakes entry. Pin every
+        // load-bearing field of the RTM_NEWROUTE message so a wrong
+        // offset, constant, or endianness surfaces here, not as a
+        // silent kernel EINVAL on a host we can't boot in this test.
+        let msg = encode_blackhole_route_v4(Ipv4Addr::new(169, 254, 169, 254), 32, 1);
+
+        assert_eq!(msg.len(), 36, "nlmsghdr(16)+rtmsg(12)+rtattr(4)+dst(4)");
+
+        // nlmsghdr (offsets 0..16)
+        assert_eq!(
+            u32::from_ne_bytes(msg[0..4].try_into().unwrap()),
+            36,
+            "nlmsg_len must equal total message length"
+        );
+        assert_eq!(
+            u16::from_ne_bytes(msg[4..6].try_into().unwrap()),
+            RTM_NEWROUTE,
+            "nlmsg_type"
+        );
+        assert_eq!(
+            u16::from_ne_bytes(msg[6..8].try_into().unwrap()),
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK,
+            "nlmsg_flags"
+        );
+        assert_eq!(
+            u32::from_ne_bytes(msg[8..12].try_into().unwrap()),
+            1,
+            "nlmsg_seq is echoed in the ACK"
+        );
+
+        // rtmsg (offsets 16..28)
+        assert_eq!(msg[16], AF_INET_U8, "rtm_family");
+        assert_eq!(msg[17], 32, "rtm_dst_len = prefix");
+        assert_eq!(msg[18], 0, "rtm_src_len");
+        assert_eq!(msg[20], RT_TABLE_MAIN, "rtm_table");
+        assert_eq!(msg[21], RTPROT_BOOT, "rtm_protocol");
+        assert_eq!(msg[22], RT_SCOPE_UNIVERSE, "rtm_scope");
+        assert_eq!(msg[23], RTN_BLACKHOLE, "rtm_type — the blackhole");
+
+        // rtattr RTA_DST (offsets 28..36)
+        assert_eq!(
+            u16::from_ne_bytes(msg[28..30].try_into().unwrap()),
+            8,
+            "rta_len = 4 (header) + 4 (addr)"
+        );
+        assert_eq!(
+            u16::from_ne_bytes(msg[30..32].try_into().unwrap()),
+            RTA_DST,
+            "rta_type"
+        );
+        assert_eq!(
+            &msg[32..36],
+            &[169, 254, 169, 254],
+            "destination address in network byte order"
+        );
+    }
+
+    #[test]
+    fn encode_blackhole_route_v4_carries_prefix_and_addr() {
+        // A /10 (the CGNAT range) — different prefix + address, to prove
+        // the encoder isn't hardcoded to the metadata /32.
+        let msg = encode_blackhole_route_v4(Ipv4Addr::new(100, 64, 0, 0), 10, 7);
+        assert_eq!(msg[17], 10, "rtm_dst_len tracks the supplied prefix");
+        assert_eq!(&msg[32..36], &[100, 64, 0, 0], "destination address");
+        assert_eq!(u32::from_ne_bytes(msg[8..12].try_into().unwrap()), 7, "seq");
+    }
+
+    /// We duplicate the netlink constants from `<linux/rtnetlink.h>`
+    /// rather than depend on a netlink crate (Plan 124 A3 dep budget).
+    /// This Linux-only test pins each one to `libc`'s value so a typo
+    /// can't reach the kernel — it runs on CI, where libc exposes the
+    /// real UAPI numbers. (macOS dev hosts skip it; libc has no netlink.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn constants_match_libc() {
+        assert_eq!(RTM_NEWROUTE, libc::RTM_NEWROUTE);
+        assert_eq!(NLM_F_REQUEST, libc::NLM_F_REQUEST as u16);
+        assert_eq!(NLM_F_CREATE, libc::NLM_F_CREATE as u16);
+        assert_eq!(NLM_F_ACK, libc::NLM_F_ACK as u16);
+        assert_eq!(AF_INET_U8, libc::AF_INET as u8);
+        assert_eq!(RT_TABLE_MAIN, libc::RT_TABLE_MAIN);
+        assert_eq!(RTPROT_BOOT, libc::RTPROT_BOOT);
+        assert_eq!(RT_SCOPE_UNIVERSE, libc::RT_SCOPE_UNIVERSE);
+        assert_eq!(RTN_BLACKHOLE, libc::RTN_BLACKHOLE);
+        assert_eq!(RTA_DST, libc::RTA_DST);
     }
 
     // ────────────────────────────────────────────────────────────

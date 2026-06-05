@@ -22,8 +22,8 @@ pub mod lifecycle_hooks;
 /// binary calls into this module at boot to install kernel blackhole
 /// routes for `MANDATORY_DENY_RANGES` before any workload code runs.
 /// The module's types + install loop + tests build everywhere; the
-/// `RtnetlinkInstaller` (which talks to `AF_NETLINK`) is Linux-only
-/// and gated inside the module.
+/// `RawNetlinkInstaller` (a synchronous `AF_NETLINK` socket via libc,
+/// Plan 124 A3) is Linux-only and gated inside the module.
 pub mod netinit;
 pub mod probes;
 /// In-guest entrypoint runtime for function-call workloads (ADR-0009 /
