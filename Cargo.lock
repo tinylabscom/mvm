@@ -3044,7 +3044,7 @@ checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "bindgen",
  "libc",
@@ -3250,7 +3250,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "mvm"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3280,7 +3280,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backend"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "block2",
@@ -3312,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3425,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest-helpers"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "hickory-proto 0.26.1",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostd"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3505,7 +3505,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-mcp"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3516,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-oci"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -3538,7 +3538,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3563,11 +3563,11 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk-macros"
-version = "0.15.2"
+version = "0.16.0"
 
 [[package]]
 name = "mvm-storage"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-verify"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -3594,7 +3594,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-vm-host"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3613,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.15.2"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
