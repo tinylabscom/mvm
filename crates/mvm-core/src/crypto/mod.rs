@@ -7,6 +7,7 @@ pub mod keystore;
 pub mod policy;
 pub mod posture;
 pub mod rate_limiter;
+pub mod rotation_policy;
 pub mod seccomp;
 pub mod secret_store;
 pub mod snapshot_crypto;
