@@ -77,10 +77,12 @@ pub trait NetworkProvider: Send + Sync {
     fn teardown(&self, handle: NetHandle) -> Result<(), NetworkError>;
 
     /// The host-egress enforcer this provider drives, if any. `None` (default)
-    /// means the provider self-enforces inside `provision` — the Firecracker
-    /// iptables path (`BridgeTapNetworkProvider`). A libkrun gvproxy/passt
-    /// provider (L3) returns `Some(..)` so the supervisor's firewall/L4/L7
-    /// enforce on the gateway bridge (plan 123 A2).
+    /// means egress is enforced by a mechanism the provider does not own as a
+    /// separate object: the Firecracker `BridgeTapNetworkProvider` self-enforces
+    /// iptables inside `provision`, and the libkrun gvproxy/passt provider (L3)
+    /// relies on the supervisor's in-process gateway-bridge `FlowPolicy`
+    /// chokepoint. A provider returns `Some(..)` only when it drives a distinct
+    /// [`EgressEnforcer`] object (plan 123 A2's `SupervisorEgressEnforcer`).
     fn egress_enforcer(&self) -> Option<&dyn EgressEnforcer> {
         None
     }

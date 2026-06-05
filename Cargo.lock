@@ -3098,6 +3098,7 @@ dependencies = [
  "lzma-rs",
  "mvm-core",
  "mvm-guest",
+ "mvm-network",
  "mvm-sdk",
  "nix 0.29.0",
  "rand 0.8.6",

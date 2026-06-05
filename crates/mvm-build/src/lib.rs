@@ -56,6 +56,11 @@ pub mod host_gvproxy;
 #[cfg(feature = "builder-vm")]
 pub mod libkrun_builder;
 
+/// plan 123 Phase A / L3 — the libkrun gvproxy/passt `NetworkProvider` impl.
+/// Gated with `libkrun_builder`: it wraps that module's gateway selection.
+#[cfg(feature = "builder-vm")]
+pub mod libkrun_network_provider;
+
 /// Plan 97 Phase C — Vz-backed builder VM (gated by
 /// `builder-vm` for symmetry with `libkrun_builder`). Implements
 /// the second [`builder_vm::VmBackendForBuilder`] impl alongside
