@@ -6,6 +6,18 @@
 > brainstorm to close Q7–Q10, then re-render the Tasks section through
 > `superpowers:writing-plans`. The shape below is what the locked
 > decisions imply.
+>
+> **Conflict with Plan 152 (drop Swift entirely) — settle before
+> executing the Vz arm.** Plan 152 (Rust-native `objc2` VZ supervisor)
+> proposes deleting the Swift supervisor outright. This plan's Q1–Q6
+> assume a *surviving* Swift supervisor that receives an SCM_RIGHTS
+> fd-handoff and wraps it in `FileHandle` for
+> `VZFileHandleNetworkDeviceAttachment` — but if Swift is gone, Rust owns
+> the VZ network device directly and there is no process to hand the fd
+> to. The two are mutually exclusive on the Vz network path. Resolve in a
+> joint brainstorm (does 152 supersede this plan's Vz arm, or does 141
+> land first and 152 fold it in?) **before either executes.** See
+> Plan 152's header for the reciprocal note.
 
 **Goal:** Close ADR-064 §Decision 8's "Vz catches up later" carve-out and
 land the Rust-owned-shuffle architecture across all production
