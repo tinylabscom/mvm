@@ -45,7 +45,25 @@ So the tarball is the right **Nix source**, but the seed still needs a **`/init`
 1. **Static Rust `stage0-init`** (recommended) — a small `aarch64-musl` PID-1 that does the mounts (libc `mount()`), brings up eth0 (static IP from the known gvproxy range, or a minimal DHCP), then `exec`s nix from the seed store. Reuses the repo's existing static-musl-init machinery (`mvm-host-vm-init` is already cross-compiled + embedded via `mvm-cli/build.rs` / ADR-065). Replaces `init.sh` entirely. No external busybox to source. Networking detail is the main work (today's `init.sh` leans on busybox `udhcpc`).
 2. **Full static busybox companion** — pin a second download. Blocked by the aarch64 sourcing gap above; not clean.
 
-So **the seed = the official Nix tarball + an in-repo static `stage0-init` binary** (no Alpine, no apk, no external busybox). This is bigger than "swap the asset" (it turns `init.sh` into a Rust binary) but it's the only path that doesn't reintroduce an external userland dependency. Needs the user's nod before implementing.
+So **the seed = the official Nix tarball + an in-repo static `stage0-init` binary** (no Alpine, no apk, no external busybox). This is bigger than "swap the asset" (it turns `init.sh` into a Rust binary) but it's the only path that doesn't reintroduce an external userland dependency. **Approved 2026-06-05.**
+
+#### `stage0-init` design (grounded in the existing `mvm-host-vm-init`)
+
+Most of it is already written in `crates/mvm-build/src/bin/mvm-host-vm-init.rs` and is directly reusable:
+- **Mounts** — `mount_pseudofs()` (`:1766`) + `mount_user_virtiofs(tag,target,ro)` (`:1957`) use `nix::mount::mount` for proc/sys/dev + virtiofs (`/work`,`/out`) + the `/dev/vda`→`/nix` ext4 mount. **No busybox needed for mounts.**
+- **`eth0` up** — already done via a Rust `SIOCSIFFLAGS|IFF_UP` ioctl (`:2008` notes "modern busybox expects the caller to" bring it up, and mvm-host-vm-init does).
+- **The one new piece: DHCP.** Today's `init.sh` shells to busybox `udhcpc`, which the seed lacks. Replace with either (a) a **static IP** — gvproxy hands out a deterministic lease (fixed subnet/gateway), so the seed can hardcode/derive eth0's address + write `/etc/resolv.conf` with no DHCP at all (simplest, preferred); or (b) a ~100-line raw-socket DHCPDISCOVER/REQUEST in Rust if a lease is required. Validate gvproxy's actual range first.
+
+**Constraint found:** the libkrun RootDir Stage 0 path carries **no kernel cmdline** (`libkrun_builder.rs:1154`), so the kernel-`ip=`-autoconfig lever is unavailable there — the init configures the net itself.
+
+**mkfs.ext4 ordering:** with networking up, the init runs `nix` from the seed store (writable via a tmpfs overlay upper) to `nix build nixpkgs#e2fsprogs`, uses its `mkfs.ext4` to format `/dev/vda`, mounts it at `/nix`, then runs the real `nix build path:/work/nix/images/builder-vm#…`.
+
+#### De-risk-first sequence (do NOT rip out Alpine until the new path boots)
+
+Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep Alpine as the fallback until proven:
+- [ ] **0a:** write `stage0-init` (reusing mvm-host-vm-init's mount + eth0-up; new net-config); cross-compile + embed via `mvm-cli/build.rs` (ADR-065 pattern).
+- [ ] **0b:** add the nix-tarball seed asset *alongside* Alpine behind a flag/env (`MVM_STAGE0_SEED=nix|alpine`); prove a real Stage-0 libkrun boot on aarch64 with the nix seed gets networking + completes `nix build` + emits `/out/{vmlinux,rootfs.ext4}`. **This is the gate.**
+- [ ] **0c:** ADR for the bootstrap trust model; then Tasks 1–4 below rip out Alpine/apk/pgp and make the nix seed the only path.
 
 ## Build sequence (after Phase 0)
 
