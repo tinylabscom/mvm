@@ -16,7 +16,8 @@
 
 use crate::supervisor::network::latency::ObserverLatency;
 use crate::supervisor::network::packet::{self, FlowKey};
-use crate::supervisor::network::{Observer, PacketCtx, Verdict};
+use crate::supervisor::network::stages::{ScanOutcome, ScanStage, SubstitutionStage};
+use crate::supervisor::network::{FlowDirection, Observer, PacketCtx, Verdict};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,6 +62,8 @@ pub enum PacketDecision<'a> {
 /// verdict semantics. `latency` records each `on_packet` wall time.
 pub fn run_packet_pipeline<'a>(
     observers: &[Arc<dyn Observer>],
+    substitution: &dyn SubstitutionStage,
+    scan: &dyn ScanStage,
     ctx: PacketCtx<'_>,
     raw_frame: &'a [u8],
     mtu: usize,
@@ -80,6 +83,40 @@ pub fn run_packet_pipeline<'a>(
 
     // `owned` holds the live frame once an observer has rebuilt it.
     let mut owned: Option<Vec<u8>> = None;
+
+    // Plan 129 egress stages (A3.2): outbound leak controls that run before the
+    // observer chain, so a substituted payload is what the observers + the wire
+    // see. Egress only. Scan first — a drop short-circuits before rewrite work.
+    if ctx.direction == FlowDirection::Egress {
+        if scan.scan(&ctx, &parsed) == ScanOutcome::Drop {
+            return PacketDecision::Kill {
+                observer: scan.name(),
+                reason: KillReason::Drop,
+                flow_key,
+            };
+        }
+        if let Some(new_payload) = substitution.substitute(&ctx, &parsed)
+            && new_payload != parsed.l4_payload
+        {
+            match packet::rebuild_with_payload(raw_frame, &new_payload, mtu) {
+                Ok(new_frame) => owned = Some(new_frame),
+                Err(packet::RebuildError::ExceedsMtu { .. }) => {
+                    return PacketDecision::Kill {
+                        observer: substitution.name(),
+                        reason: KillReason::ModifyOverMtu,
+                        flow_key,
+                    };
+                }
+                Err(_) => {
+                    return PacketDecision::Kill {
+                        observer: substitution.name(),
+                        reason: KillReason::ModifyUnserializable,
+                        flow_key,
+                    };
+                }
+            }
+        }
+    }
 
     for obs in observers {
         if !obs.directions().includes(ctx.direction) {
@@ -177,6 +214,7 @@ mod tests {
     use crate::supervisor::audit::FlowDirection;
     use crate::supervisor::network::latency::ObserverLatency;
     use crate::supervisor::network::packet::{ParsedPacket, parse};
+    use crate::supervisor::network::stages::{NoopScan, NoopSubstitution};
     use crate::supervisor::network::{
         Directions, Observer, PacketCtx, RequiredCapabilities, Verdict,
     };
@@ -235,7 +273,15 @@ mod tests {
     fn empty_observers_forwards_unmodified() {
         let f = frame(b"hello-SECRET");
         let obs: Vec<Arc<dyn Observer>> = vec![];
-        match run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat()) {
+        match run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        ) {
             PacketDecision::Forward { frame, flow_key } => {
                 assert_eq!(&*frame, &f[..]);
                 assert!(flow_key.is_some());
@@ -248,7 +294,15 @@ mod tests {
     fn non_ip_frame_forwards_unchanged_with_no_flow_key() {
         let arp = [0xffu8; 14];
         let obs: Vec<Arc<dyn Observer>> = vec![];
-        match run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &arp, 1514, &lat()) {
+        match run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &arp,
+            1514,
+            &lat(),
+        ) {
             PacketDecision::Forward { flow_key, .. } => assert!(flow_key.is_none()),
             other => panic!("got {other:?}"),
         }
@@ -276,7 +330,15 @@ mod tests {
                 Directions::Egress,
             )),
         ];
-        match run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat()) {
+        match run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        ) {
             PacketDecision::Forward { frame, .. } => {
                 let p = parse(&frame).unwrap();
                 assert!(p.l4_payload.windows(6).any(|w| w == b"XXXXXX"));
@@ -295,7 +357,15 @@ mod tests {
                 Directions::Egress,
             )),
         ];
-        match run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat()) {
+        match run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        ) {
             PacketDecision::Kill {
                 observer,
                 reason,
@@ -316,7 +386,15 @@ mod tests {
             |_| Verdict::Modify(vec![0u8; 4096]),
             Directions::Egress,
         ))];
-        let d = run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat());
+        let d = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
         assert!(matches!(
             d,
             PacketDecision::Kill {
@@ -333,7 +411,15 @@ mod tests {
             |_| panic!("ingress observer ran on egress packet"),
             Directions::Ingress,
         ))];
-        let d = run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat());
+        let d = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
         assert!(matches!(d, PacketDecision::Forward { .. }));
     }
 
@@ -344,7 +430,15 @@ mod tests {
             Arc::new(PayloadObs(|_| panic!("boom"), Directions::Egress)),
             Arc::new(PayloadObs(|_| Verdict::Forward, Directions::Egress)),
         ];
-        let d = run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat());
+        let d = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
         assert!(
             matches!(d, PacketDecision::Forward { .. }),
             "panic must be isolated -> Forward"
@@ -359,12 +453,145 @@ mod tests {
             move |_| Verdict::Modify(original_payload.clone()),
             Directions::Egress,
         ))];
-        match run_packet_pipeline(&obs, ctx(FlowDirection::Egress), &f, 1514, &lat()) {
+        match run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        ) {
             // Borrowed (not Owned) proves no rebuild happened.
             PacketDecision::Forward { frame, .. } => {
                 assert!(matches!(frame, std::borrow::Cow::Borrowed(_)))
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    // ---- plan 129 egress stages (A3.2) ----
+
+    struct SubstFn<F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>(F);
+    impl<F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync> SubstitutionStage for SubstFn<F> {
+        fn name(&self) -> &'static str {
+            "subst-fn"
+        }
+        fn substitute(&self, _c: &PacketCtx<'_>, p: &packet::ParsedPacket<'_>) -> Option<Vec<u8>> {
+            (self.0)(p.l4_payload)
+        }
+    }
+
+    struct ScanFn<F: Fn(&[u8]) -> ScanOutcome + Send + Sync>(F);
+    impl<F: Fn(&[u8]) -> ScanOutcome + Send + Sync> ScanStage for ScanFn<F> {
+        fn name(&self) -> &'static str {
+            "scan-fn"
+        }
+        fn scan(&self, _c: &PacketCtx<'_>, p: &packet::ParsedPacket<'_>) -> ScanOutcome {
+            (self.0)(p.l4_payload)
+        }
+    }
+
+    #[test]
+    fn noop_stages_forward_unchanged() {
+        let f = frame(b"hello-world");
+        let obs: Vec<Arc<dyn Observer>> = vec![];
+        let d = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
+        match d {
+            PacketDecision::Forward { frame, .. } => {
+                assert!(matches!(frame, Cow::Borrowed(_)), "no-op must not rebuild");
+                assert_eq!(&*frame, &f[..]);
+            }
+            other => panic!("expected unchanged Forward, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_stage_drop_kills_the_flow() {
+        let f = frame(b"leak-SECRET");
+        let obs: Vec<Arc<dyn Observer>> = vec![];
+        let scan = ScanFn(|p: &[u8]| {
+            if p.windows(6).any(|w| w == b"SECRET") {
+                ScanOutcome::Drop
+            } else {
+                ScanOutcome::Pass
+            }
+        });
+        let d = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &scan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
+        assert!(matches!(
+            d,
+            PacketDecision::Kill {
+                reason: KillReason::Drop,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn substitution_stage_rewrites_outbound_payload() {
+        let f = frame(b"token=REAL");
+        let obs: Vec<Arc<dyn Observer>> = vec![];
+        let subst = SubstFn(|p: &[u8]| {
+            if p == b"token=REAL" {
+                Some(b"token=XXXX".to_vec())
+            } else {
+                None
+            }
+        });
+        let d = run_packet_pipeline(
+            &obs,
+            &subst,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
+        match d {
+            PacketDecision::Forward { frame, .. } => {
+                assert!(matches!(frame, Cow::Owned(_)), "substitution must rebuild");
+                let parsed = packet::parse(&frame).expect("rebuilt frame parses");
+                assert_eq!(parsed.l4_payload, b"token=XXXX");
+            }
+            other => panic!("expected rewritten Forward, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn egress_stages_skip_on_ingress() {
+        // A scan that would drop must not fire on ingress — these are
+        // outbound-only leak controls.
+        let f = frame(b"leak-SECRET");
+        let obs: Vec<Arc<dyn Observer>> = vec![];
+        let scan = ScanFn(|_| ScanOutcome::Drop);
+        let d = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &scan,
+            ctx(FlowDirection::Ingress),
+            &f,
+            1514,
+            &lat(),
+        );
+        assert!(
+            matches!(d, PacketDecision::Forward { .. }),
+            "stages are egress-only"
+        );
     }
 }
