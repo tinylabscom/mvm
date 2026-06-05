@@ -17,7 +17,7 @@
 //! network leg — compile-checked under `--features s3`, exercised against a
 //! live bucket in higher tiers.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -85,6 +85,30 @@ fn io_err(e: std::io::Error) -> MountError {
     MountError::Volume(VolumeError::Io(e))
 }
 
+/// Join `rel` onto `root`, rejecting any component that could escape the
+/// cache root — `..` (`ParentDir`), an absolute/root component, or a
+/// Windows prefix. The mount-spec `prefix` is untrusted input, and
+/// object-store keys come from a potentially-untrusted remote store, so a
+/// `..` would let synced bytes land outside `cache_root` (an arbitrary
+/// host-path write primitive). A leading `/` is harmless — `trim_matches`
+/// neutralizes it to a contained relative path — but `..` is refused
+/// outright. `resolve` adds a canonicalize backstop on top of this to
+/// also defend against symlinks in the cache tree.
+fn contained_join(root: &Path, rel: &str) -> Result<PathBuf, MountError> {
+    let trimmed = rel.trim_matches('/');
+    for comp in Path::new(trimmed).components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => {
+                return Err(MountError::Volume(VolumeError::InvalidPath(format!(
+                    "path escapes cache root: {rel:?}"
+                ))));
+            }
+        }
+    }
+    Ok(root.join(trimmed))
+}
+
 /// Copy every object under `prefix` into `dest`, mirroring the key layout
 /// (prefix-relative). Read-only — never writes back to `store`.
 async fn sync_prefix(store: &dyn ObjectStore, prefix: &str, dest: &Path) -> Result<(), MountError> {
@@ -104,7 +128,7 @@ async fn sync_prefix(store: &dyn ObjectStore, prefix: &str, dest: &Path) -> Resu
             .strip_prefix(prefix)
             .unwrap_or(key)
             .trim_start_matches('/');
-        let target = dest.join(rel);
+        let target = contained_join(dest, rel)?;
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(io_err)?;
         }
@@ -132,9 +156,21 @@ impl MountProvider for S3MountProvider {
                 });
             }
         };
-        // Per-prefix cache dir so distinct mounts don't collide.
-        let dest = self.cache_root.join(prefix.trim_matches('/'));
+        // Per-prefix cache dir so distinct mounts don't collide. `prefix`
+        // is untrusted mount-spec input; reject components that would
+        // escape the cache root before creating anything on disk.
+        let dest = contained_join(&self.cache_root, &prefix)?;
         std::fs::create_dir_all(&dest).map_err(io_err)?;
+        // Backstop against symlinks in cache_root or an intermediate dir:
+        // canonicalize both and assert the resolved dest stays under the
+        // resolved cache root.
+        let real_root = self.cache_root.canonicalize().map_err(io_err)?;
+        let real_dest = dest.canonicalize().map_err(io_err)?;
+        if !real_dest.starts_with(&real_root) {
+            return Err(MountError::Volume(VolumeError::InvalidPath(format!(
+                "s3 prefix {prefix:?} escapes cache root after canonicalization"
+            ))));
+        }
         self.rt
             .block_on(sync_prefix(self.store.as_ref(), &prefix, &dest))?;
         Ok(Mountable::HostPath(dest))
@@ -192,5 +228,34 @@ mod tests {
             }
             other => panic!("expected HostPath cache dir, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn s3_provider_rejects_prefix_path_traversal() {
+        // A `..` in the (untrusted) mount-spec prefix must not let synced
+        // bytes escape the cache root. Each of these must be refused with
+        // InvalidPath before any directory is created or object fetched.
+        let store = Arc::new(InMemory::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = S3MountProvider::new(store, tmp.path()).unwrap();
+        for evil in [
+            "../escape",
+            "../../etc",
+            "data/../../../etc",
+            "/etc/passwd/..",
+        ] {
+            let src = MountSource::External {
+                provider: "s3".into(),
+                config: serde_json::json!({ "bucket": "b", "prefix": evil }),
+            };
+            match provider.resolve(&src) {
+                Err(MountError::Volume(VolumeError::InvalidPath(_))) => {}
+                other => panic!("prefix {evil:?} must be rejected as InvalidPath, got {other:?}"),
+            }
+        }
+        // A leading slash with no `..` is contained (neutralized to a
+        // relative path under the cache root), not an escape.
+        let contained = contained_join(tmp.path(), "/data/sub").unwrap();
+        assert!(contained.starts_with(tmp.path()));
     }
 }
