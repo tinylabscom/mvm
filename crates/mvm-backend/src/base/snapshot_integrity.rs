@@ -59,6 +59,15 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         secrecy::ExposeSecret::expose_secret(&key),
     )
     .with_context(|| format!("sealing snapshot at {snap_dir}"))?;
+    // Plan 122 C — additionally content-address + Ed25519-sign the snapshot.
+    // The signature (not the symmetric HMAC, which anyone holding the host
+    // key could forge) is the authentication gate at resume admit.
+    let signer = mvm_core::crypto::snapshot_sign::load_or_init_signer(
+        &mvm_core::crypto::snapshot_sign::default_signer_path(),
+    )
+    .context("loading snapshot signing key")?;
+    mvm_core::crypto::snapshot_sign::sign(snap_path, &files, next_epoch, &signer)
+        .with_context(|| format!("signing snapshot at {snap_dir}"))?;
     Ok(())
 }
 
@@ -105,7 +114,7 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     let epoch_store = mvm_core::crypto::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
     let min_epoch = epoch_store.load();
 
-    match mvm_core::crypto::snapshot_hmac::verify(
+    let hmac_sidecar = match mvm_core::crypto::snapshot_hmac::verify(
         snap_path,
         &files,
         min_epoch,
@@ -113,7 +122,7 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         secrecy::ExposeSecret::expose_secret(&key),
         allow_stale,
     ) {
-        Ok(_) => Ok(()),
+        Ok(sidecar) => sidecar,
         Err(VerifyError::VersionMismatch { sealed, current }) => {
             audit_snapshot_integrity_failure(
                 snap_dir,
@@ -133,9 +142,61 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         }
         Err(other) => {
             audit_snapshot_integrity_failure(snap_dir, &format!("variant=other detail={other}"));
-            Err(anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "snapshot at {snap_dir} integrity check failed: {other}"
-            ))
+            ));
+        }
+    };
+
+    // Plan 122 C — the Ed25519 signature is the authentication gate. The
+    // HMAC above is cheap local integrity; this proves the host signed these
+    // exact bytes at this epoch.
+    verify_snapshot_signature(snap_dir, snap_path, &files, hmac_sidecar.epoch)
+}
+
+/// Verify the `snapshot.sig` Ed25519 sidecar. Missing signatures are a
+/// non-fatal warning by default (preserves restorability of snapshots
+/// sealed before plan 122 C); `MVM_SNAPSHOT_HMAC_STRICT=1` makes them a
+/// hard error. A present-but-invalid signature is always fatal.
+fn verify_snapshot_signature(
+    snap_dir: &str,
+    snap_path: &std::path::Path,
+    files: &mvm_core::crypto::snapshot_hmac::SnapshotFiles,
+    epoch: u64,
+) -> Result<()> {
+    let sig_path = snap_path.join(mvm_core::crypto::snapshot_sign::SIGNATURE_FILENAME);
+    if !sig_path.exists() {
+        if std::env::var("MVM_SNAPSHOT_HMAC_STRICT").as_deref() == Ok("1") {
+            anyhow::bail!(
+                "snapshot at {snap_dir} has no Ed25519 signature sidecar and \
+                 MVM_SNAPSHOT_HMAC_STRICT=1 forbids resume"
+            );
+        }
+        ui::warn(&format!(
+            "snapshot at {snap_dir} has no Ed25519 signature sidecar \
+             (sealed before plan 122 C); resuming on HMAC integrity only. \
+             Re-build the template to sign it."
+        ));
+        return Ok(());
+    }
+
+    let signer = mvm_core::crypto::snapshot_sign::load_or_init_signer(
+        &mvm_core::crypto::snapshot_sign::default_signer_path(),
+    )
+    .context("loading snapshot signing key for verification")?;
+    match mvm_core::crypto::snapshot_sign::verify_signature(
+        snap_path,
+        files,
+        epoch,
+        &signer.verifying_key(),
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            audit_snapshot_integrity_failure(snap_dir, &format!("variant=signature detail={e}"));
+            anyhow::bail!(
+                "snapshot at {snap_dir} failed Ed25519 signature verification: {e}. \
+                 Refusing to resume."
+            )
         }
     }
 }
