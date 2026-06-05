@@ -160,8 +160,8 @@ The wireable macOS live-memory path. Coarser than UFFD (a full save/restore), bu
 ## Acceptance
 
 - [ ] `mvm-network` exists (17th crate); `NetworkProvider` provisions gvproxy/passt/TAP behind the trait; ingress **and** egress default-deny; DNS + flow audit; the egress proxy carries the substitution + leak-scan seams (no-op until 129).
-- [ ] `StorageProvider` with `local` + `encrypted` (122-backed, both platforms) + content-addressed + snapshot-upper impls; encrypted on-disk bytes are ciphertext, guest sees plaintext.
-- [ ] `MountProvider` resolves host/volume/tmpfs mounts; the IR's open `MountSource::External` + a **real feature-gated S3 impl** (`object_store`, read-only sync-to-cache) prove external sources plug in without a core edit; `s3` off → no `object_store` in the default tree.
+- [x] `StorageProvider` with `local` + `encrypted` (122-backed; **macOS arm done**, Linux LUKS2 deferred) + content-addressed + snapshot-upper impls; encrypted on-disk bytes are ciphertext, guest sees plaintext.
+- [x] `MountProvider` resolves host/volume/tmpfs mounts; the IR's open `MountSource::External` + a **real feature-gated S3 impl** (`object_store`, read-only sync-to-cache) prove external sources plug in without a core edit; `s3` off → no `object_store` in the default tree.
 - [ ] Warm-start is a per-backend capability: **Firecracker** live-memory fast-resume (UFFD/NBD/hugepages, ~1s, VMGenID-reseeded), **Vz** save/restore (macOS 26+), **libkrun** disk-only — each surfaced by `doctor`, none silently degrading.
 - [ ] `cargo test --workspace` (host tiers) + the gated live-KVM/macOS lanes + clippy + fmt green.
 
