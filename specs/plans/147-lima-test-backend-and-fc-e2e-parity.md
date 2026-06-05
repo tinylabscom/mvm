@@ -4,6 +4,15 @@
 > Captured to de-orphan three deferred bullets from Plan 120 (core demo) that
 > no plan currently owns. Sequence after the rearchitecture (Plans 117/121) and
 > the active builder-VM/backend churn settle — coordinate to avoid collisions.
+>
+> **Complemented by Plan 152 WS-D (2026-06-05): native nested-virt `/dev/kvm`.**
+> On **M3+ / macOS 26**, Plan 152's Rust VZ supervisor can expose `/dev/kvm`
+> inside a VZ guest natively (`setNestedVirtualizationEnabled`), giving
+> Firecracker-on-macOS with no Lima dependency. That does **not** retire
+> this plan: Lima stays the **portable / CI** `/dev/kvm` provider (GitHub
+> runners, Intel, older macOS, M1/M2). Design the `MVM_E2E_BACKEND`-style
+> selector (bullet 2 below) so both register as providers and capability
+> detection prefers nested-virt where available, falling back to Lima.
 
 ## Context
 

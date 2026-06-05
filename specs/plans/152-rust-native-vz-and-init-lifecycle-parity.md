@@ -32,8 +32,11 @@
 > the bridge runs **in-process** against the socketpair Rust attaches to
 > `VZFileHandleNetworkDeviceAttachment` — no SCM_RIGHTS fd-handoff, no
 > surviving Swift, no NDJSON ingest hop (the cleanest form of 141's "Rust
-> owns the shuffle"). Decision record: ADR-064 §8. **Still open:** WS-D
-> (nested-virt `/dev/kvm`) ↔ Plan 147's Lima carve-out.
+> owns the shuffle"). Decision record: ADR-064 §8. **WS-D ↔ Plan 147
+> reconciled (2026-06-05):** complementary, not competing — nested-virt is
+> the *native* `/dev/kvm` provider on M3+/macOS-26; Lima (Plan 147) stays
+> the *portable/CI* provider. Both register behind one Firecracker-E2E
+> selector; nested-virt is preferred where available.
 
 ## Context
 
@@ -305,7 +308,7 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       TAP entirely; weigh against gvproxy + the claim-10 flow-audit
       splice, which the SLIRP path would have to re-host. Note only.
 
-### WS-D — Nested-virt `/dev/kvm` in a VZ guest (investigate; could retire the Lima test carve-out)
+### WS-D — Nested-virt `/dev/kvm` in a VZ guest (native `/dev/kvm` provider; complements Plan 147's Lima)
 
 Two references expose `/dev/kvm` to a Linux VZ guest via Apple's nested
 virtualization (macOS 26 / Apple Silicon M3+) — one behind a
@@ -315,12 +318,26 @@ kernel config that surfaces `/dev/kvm`) specifically to host Firecracker
 *inside* the VZ guest.
 
 Why this matters: our architecture has no `/dev/kvm` on macOS, so the
-Firecracker/Linux-KVM path is Linux-only and we lean on **Lima purely as
-a test-env KVM provider** (the one surviving Lima carve-out — see
+Firecracker/Linux-KVM path is Linux-only and we lean on **Lima as a
+test-env KVM provider** (the one surviving Lima carve-out — see
 `project_lima_removed` / AGENTS.md). A nested-virt VZ guest gives us a
-real `/dev/kvm` on a Mac, letting us run the Firecracker backend inside
-our own VZ builder VM — exercising the Linux path on macOS dev/CI
-**without Lima**, and converging the two host stories.
+real `/dev/kvm` *natively*, letting us run Firecracker inside our own VZ
+VM on capable Macs.
+
+**Reconciliation with Plan 147 (2026-06-05): complementary, not
+competing.** Both deliver a virtual `/dev/kvm` for the Firecracker E2E
+that can't run on the builder VM or GitHub runners — at different reach:
+- **Lima (Plan 147)** — the **portable / CI** provider. Works where
+  nested virt doesn't: GitHub macOS runners, Intel, older macOS, M1/M2.
+  Stays the fallback + CI vehicle. Plan 147 owns the `MVM_E2E_BACKEND`-style
+  selector + the `default-microvm` admit blocker.
+- **Nested-virt VZ (this WS-D)** — the **native** provider on **M3+ /
+  macOS 26**, no extra dependency, and the long-term macOS/Linux
+  convergence story. *Preferred where available*; it does **not** delete
+  Lima.
+
+Both register as `/dev/kvm` providers behind Plan 147's shared selector;
+capability detection picks nested-virt on a capable host, else Lima.
 
 - [ ] Capability probe on the dev host: `isNestedVirtualizationSupported`
       + the `VZGenericPlatformConfiguration` nested flag; confirm the new
@@ -328,8 +345,9 @@ our own VZ builder VM — exercising the Linux path on macOS dev/CI
 - [ ] Spike: a VZ Linux guest with nested virt on, booting Firecracker
       against `/dev/kvm` inside it, running an existing Firecracker
       workload E2E.
-- [ ] If it holds, scope retiring the Lima test-env carve-out and
-      document the M3+/macOS-26 floor.
+- [ ] Register nested-virt as a `/dev/kvm` provider behind Plan 147's
+      selector (preferred on capable hosts; Lima the fallback) and
+      document the M3+/macOS-26 floor. Coordinate the selector with 147.
 
 Dev/test convenience only — not a posture change; the workload security
 tier is unaffected.
