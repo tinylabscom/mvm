@@ -412,6 +412,7 @@ mod tests {
                 name: "vm-test".to_string(),
                 sha256: "a".repeat(64),
                 cosign_bundle: None,
+                entrypoint_present: true,
             },
             resources: Resources {
                 cpus: 1,

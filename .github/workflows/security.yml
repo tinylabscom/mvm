@@ -102,6 +102,34 @@ jobs:
       - name: Build prod agent and assert symbol contract
         run: ./scripts/check-prod-agent-no-exec.sh
 
+  # ── Lane 1b: No interactive console in a sealed prod agent ────────
+  # claim 15 / Plan 165 WS-C. The PTY-over-vsock console is the single
+  # dev-only interactive path; it's gated behind `dev-shell`, so a prod
+  # agent must not link it. Asserts the relay symbol is ABSENT (with a
+  # handle_run_entrypoint canary against a stripped table) and a
+  # positive control that it IS detectable WITH dev-shell.
+  prod-agent-no-console:
+    name: Guest agent — no interactive console (claim 15, Plan 165 WS-C)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-prodagent-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-prodagent-
+
+      - name: Build prod agent and assert no console symbols
+        run: ./scripts/check-prod-agent-no-console.sh
+
   # ── Lane 2b: Seccomp tier functional denial (ADR-002 §W2.4) ───────
   # Tier-structure unit tests in `mvm-security` cover cumulative-subset
   # and serde shapes; they don't exercise the BPF program at runtime.

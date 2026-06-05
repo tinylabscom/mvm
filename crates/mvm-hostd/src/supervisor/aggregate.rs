@@ -141,6 +141,13 @@ pub enum SupervisorError {
         #[source]
         source: VolumeError,
     },
+
+    /// Plan 165 WS-B B4: the plan's sealed image asserted it carries no
+    /// workload entrypoint. The SDK's B3 compile gate refuses to
+    /// produce such an image; this admission-time refusal is defense in
+    /// depth if one reaches the supervisor anyway.
+    #[error("sealed image declares no entrypoint (entrypoint.absent)")]
+    EntrypointAbsent,
 }
 
 pub struct Supervisor {
@@ -367,6 +374,22 @@ impl Supervisor {
             self.emit_audit_then_fail(&plan, "plan.rejected.deps_volume", &e.to_string())
                 .await?;
             return Err(e);
+        }
+
+        // Plan 165 WS-B B4: fail closed if a sealed image reached us with
+        // no declared entrypoint. The SDK's B3 compile gate refuses to
+        // produce such an image; this is the admission-time defense in
+        // depth. The wire field defaults to true (skip-serialized), so
+        // every legacy plan admits unchanged — the guard only fires when
+        // a plan explicitly carries entrypoint_present == false.
+        if !plan.image.entrypoint_present {
+            // NB: spec-mandated `plan.failed` (Plan 165 B4), NOT the
+            // `plan.rejected.*` shape the sibling admission rejects use — the
+            // machine reason lives in the `entrypoint.absent` label. Don't
+            // "consistency-fix" this to plan.rejected.entrypoint.
+            self.emit_audit_then_fail(&plan, "plan.failed", "entrypoint.absent")
+                .await?;
+            return Err(SupervisorError::EntrypointAbsent);
         }
 
         // Plan is fully admitted at this point — signature, window,
@@ -1158,6 +1181,7 @@ mod tests {
                 name: "tenant-worker-aarch64".to_string(),
                 sha256: "a".repeat(64),
                 cosign_bundle: None,
+                entrypoint_present: true,
             },
             resources: Resources {
                 cpus: 2,
@@ -1699,6 +1723,62 @@ mod tests {
                 "plan.rejected.nonce_replay",
             ]
         );
+    }
+
+    /// Plan 165 WS-B B4: a sealed image asserting no entrypoint is
+    /// refused at admission with `EntrypointAbsent` and the plan lands
+    /// in `Failed`.
+    #[tokio::test]
+    async fn admission_refuses_sealed_plan_with_absent_entrypoint() {
+        let mut plan = sample_plan();
+        plan.image.entrypoint_present = false;
+        let (signed, _sk, vk) = sign_sample(&plan);
+        let backend = Arc::new(MockBackend::new());
+        let (mut s, _audit) = make_supervisor_with_audit(backend.clone());
+
+        let err = s.launch(&signed, &[("test", &vk)]).await.unwrap_err();
+        assert!(matches!(err, SupervisorError::EntrypointAbsent), "{err:?}");
+        assert_eq!(s.state.current(), PlanState::Failed);
+        // The B4 guard fires before backend dispatch — no launch attempt.
+        assert!(backend.launches().is_empty());
+    }
+
+    /// Plan 165 WS-B B4: the refusal is on the claim-8 audit chain as a
+    /// `plan.failed` entry whose reason label is `entrypoint.absent`.
+    #[tokio::test]
+    async fn admission_emits_plan_failed_entrypoint_absent_audit_entry() {
+        let mut plan = sample_plan();
+        plan.image.entrypoint_present = false;
+        let (signed, _sk, vk) = sign_sample(&plan);
+        let backend = Arc::new(MockBackend::new());
+        let (mut s, audit) = make_supervisor_with_audit(backend.clone());
+
+        let _ = s.launch(&signed, &[("test", &vk)]).await;
+
+        assert_eq!(audit_events(&audit), vec!["plan.failed"]);
+        let entry = &audit.entries()[0];
+        assert_eq!(
+            entry.labels.get("reason").map(String::as_str),
+            Some("entrypoint.absent"),
+            "labels: {:?}",
+            entry.labels
+        );
+        assert_eq!(entry.plan_id, plan.plan_id);
+    }
+
+    /// Plan 165 WS-B B4: a normal plan (field defaulted to true) sails
+    /// past the B4 gate — it must NOT trip `EntrypointAbsent`.
+    #[tokio::test]
+    async fn admission_accepts_plan_with_entrypoint_present_default() {
+        let plan = sample_plan();
+        assert!(plan.image.entrypoint_present, "sample defaults to present");
+        let (signed, _sk, vk) = sign_sample(&plan);
+        let backend = Arc::new(MockBackend::new());
+        let (mut s, audit) = make_supervisor_with_audit(backend.clone());
+
+        s.launch(&signed, &[("test", &vk)]).await.unwrap();
+
+        assert_eq!(audit_events(&audit), vec!["plan.admitted", "plan.running"]);
     }
 
     #[tokio::test]

@@ -117,6 +117,11 @@ let
     if dev == null then entrypointKind == "shell"
     else dev;
   isSealed = !isDev;
+  # Whether the agent is compiled with the `dev-shell` Cargo feature.
+  # Identical to `isDev` today, named separately because it is the
+  # console-wiring fact (see `mvmMeta.withDevShell`) — distinct from the
+  # accessible/sealed classification it happens to track.
+  withDevShell = isDev;
 
   # ── Guest agent build (W6.1.2) ─────────────────────────────────
   #
@@ -138,8 +143,7 @@ let
   #
   # Either way the binary is the production Rust build, not a stub.
   guestAgentPkg = pkgs.callPackage ../packages/mvm-guest-agent.nix {
-    inherit mvmSrc;
-    withDevShell = isDev;
+    inherit mvmSrc withDevShell;
   };
 
   # ── mvm-addon-dns — in-guest loopback DNS resolver ─────────────
@@ -979,6 +983,13 @@ let
     accessible = isDev;
     sealed = isSealed;
     entrypointKind = entrypointKind;
+    # Plan 165 WS-B/WS-C: true iff the agent is built with the `dev-shell`
+    # Cargo feature — which gates BOTH `do_exec` AND the PTY-over-vsock
+    # interactive console (ADR-002 §W4.3, claim 15). `withDevShell == true`
+    # means a dev image whose console is wired; `false` is a sealed prod
+    # agent with no interactive surface. mvmctl / admission gates read this
+    # to refuse interactive access to a sealed image.
+    withDevShell = withDevShell;
     initSystem = "busybox";
     # ADR-013 §"Per-backend boot budgets" — single 300ms floor across
     # every backend. Custom /init + trimmed kernel + direct vmlinux

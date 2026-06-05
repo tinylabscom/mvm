@@ -2277,6 +2277,7 @@ mod tests {
                 name: "img".into(),
                 sha256: "0".repeat(64),
                 cosign_bundle: None,
+                entrypoint_present: true,
             },
             resources: Resources {
                 cpus: 1,

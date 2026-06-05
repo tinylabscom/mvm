@@ -62,6 +62,20 @@ const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// means `mvmctl stop` returns in 2 s instead of 5 s.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
+/// construction (write-only, create+truncate): the guest console
+/// streams here and NO host-readable fd is ever attached as console
+/// input. The sole interactive path into a guest is the dev-shell-gated
+/// agent vsock console (Plan 165 WS-C / claim 15), absent from sealed
+/// prod agents. Centralized so the write-only invariant lives in one place.
+pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+}
+
 /// Default kernel cmdline for libkrun-launched guests.
 /// `console=hvc0` matches libkrun's virtio-console wiring (plan 57 W3
 /// finding); `root=/dev/vda rw init=/init` matches Apple Container's
@@ -277,7 +291,7 @@ impl VmBackend for LibkrunBackend {
         // per-VM log so a boot failure / kernel panic is diagnosable
         // (mirrors firecracker.log). Best-effort: fall back to null if
         // the file can't be created.
-        let console_log = std::fs::File::create(vm_console_log(&config.name))
+        let console_log = open_console_capture(&vm_console_log(&config.name))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
         let mut child = Command::new(&supervisor_path)
@@ -618,6 +632,26 @@ fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prod_console_attachment_has_no_input() {
+        // claim 15 / Plan 165 WS-C: the backend captures the guest console
+        // to a WRITE-ONLY sink — there is no host fd from which the guest
+        // could read console input. The only interactive path is the
+        // dev-shell-gated agent vsock console, which a sealed prod agent
+        // does not link.
+        use std::io::{Read, Write};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("console.log");
+        let mut f = open_console_capture(&p).expect("open sink");
+        f.write_all(b"boot log line\n")
+            .expect("console capture must accept output");
+        let mut buf = String::new();
+        assert!(
+            f.read_to_string(&mut buf).is_err(),
+            "console capture sink must be write-only — no guest console input path"
+        );
+    }
 
     #[test]
     fn libkrun_backend_name() {

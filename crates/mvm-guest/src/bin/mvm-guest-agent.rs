@@ -2236,6 +2236,13 @@ fn handle_client(
             }
         }
 
+        // PTY-over-vsock console — the single dev-only interactive path. The
+        // relay lives behind `#[cfg(feature = "dev-shell")]` so its symbols are
+        // absent from a sealed production agent (Plan 165 WS-C, claim 15;
+        // mirrors the `do_exec` gate, ADR-002 §W4.3). The protocol profile gate
+        // above already rejects these verbs in sealed-prod, but the compile-time
+        // gate is the load-bearing guarantee — no console code is even linked.
+        #[cfg(feature = "dev-shell")]
         GuestRequest::ConsoleOpen { cols, rows } => {
             // Check security policy — console requires access.console = true.
             // When no policy file is provisioned (dev mode), use permissive defaults.
@@ -2276,6 +2283,13 @@ fn handle_client(
             }
         }
 
+        #[cfg(not(feature = "dev-shell"))]
+        GuestRequest::ConsoleOpen { .. } => GuestResponse::Error {
+            message: "console not available: guest agent built without dev-shell feature"
+                .to_string(),
+        },
+
+        #[cfg(feature = "dev-shell")]
         GuestRequest::ConsoleClose { session_id: _ } => {
             // Console sessions end when the shell exits or the host disconnects.
             // Explicit close is a no-op if already closed.
@@ -2292,6 +2306,13 @@ fn handle_client(
             }
         }
 
+        #[cfg(not(feature = "dev-shell"))]
+        GuestRequest::ConsoleClose { .. } => GuestResponse::Error {
+            message: "console not available: guest agent built without dev-shell feature"
+                .to_string(),
+        },
+
+        #[cfg(feature = "dev-shell")]
         GuestRequest::ConsoleResize {
             session_id,
             cols,
@@ -2306,6 +2327,12 @@ fn handle_client(
                 }
             }
         }
+
+        #[cfg(not(feature = "dev-shell"))]
+        GuestRequest::ConsoleResize { .. } => GuestResponse::Error {
+            message: "console not available: guest agent built without dev-shell feature"
+                .to_string(),
+        },
 
         // ADR-007 / plan 41 W5 — report whether boot-time entrypoint
         // validation succeeded. Used by `mvmctl doctor` against a

@@ -46,6 +46,26 @@ pub struct SignedImageRef {
     /// Cosign-keyless `.bundle` reference. Path on disk or URL
     /// resolvable by the supervisor. Stub in dev.
     pub cosign_bundle: Option<String>,
+    /// Plan 165 WS-B B4: false iff the sealed image declares no workload
+    /// entrypoint. Defaults to true (every legacy plan + every dev image),
+    /// and is skip-serialized when true so existing signed-plan fixtures
+    /// stay byte-identical (the field is inside the signed payload). The
+    /// supervisor refuses a plan whose image asserts entrypoint_present ==
+    /// false — admission-time defense in depth behind the SDK's B3 compile
+    /// gate.
+    #[serde(
+        default = "default_entrypoint_present",
+        skip_serializing_if = "is_entrypoint_present"
+    )]
+    pub entrypoint_present: bool,
+}
+
+fn default_entrypoint_present() -> bool {
+    true
+}
+
+fn is_entrypoint_present(v: &bool) -> bool {
+    *v
 }
 
 /// Resource budget. Hard caps; the supervisor refuses to start a VM
@@ -607,5 +627,51 @@ mod host_share_grant_tests {
             "kind":"disk","read_only":false}"#;
         let g: HostShareGrant = serde_json::from_str(json).unwrap();
         assert!(!g.encrypted);
+    }
+}
+
+#[cfg(test)]
+mod signed_image_ref_tests {
+    use super::*;
+
+    /// Byte-identity guard (Plan 165 WS-B B4): a default-true
+    /// `entrypoint_present` must NOT serialize, so every existing
+    /// signed-plan fixture (which never carried the field) hashes the
+    /// same bytes and its Ed25519 signature stays valid.
+    #[test]
+    fn serde_omits_entrypoint_present_when_true() {
+        let r = SignedImageRef {
+            name: "img".into(),
+            sha256: "a".repeat(64),
+            cosign_bundle: None,
+            entrypoint_present: true,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("entrypoint_present"),
+            "default-true field leaked into wire: {json}"
+        );
+
+        // A plan JSON without the key round-trips to true (default).
+        let back: SignedImageRef =
+            serde_json::from_str(r#"{"name":"img","sha256":"deadbeef","cosign_bundle":null}"#)
+                .unwrap();
+        assert!(back.entrypoint_present);
+    }
+
+    /// The guard field is serialized only when false — the one case the
+    /// supervisor's B4 admission gate must see on the wire.
+    #[test]
+    fn serde_emits_entrypoint_present_when_false() {
+        let r = SignedImageRef {
+            name: "img".into(),
+            sha256: "a".repeat(64),
+            cosign_bundle: None,
+            entrypoint_present: false,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"entrypoint_present\":false"), "{json}");
+        let back: SignedImageRef = serde_json::from_str(&json).unwrap();
+        assert!(!back.entrypoint_present);
     }
 }

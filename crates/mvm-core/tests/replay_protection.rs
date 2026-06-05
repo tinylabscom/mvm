@@ -26,6 +26,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
             name: "test".to_string(),
             sha256: "0".repeat(64),
             cosign_bundle: None,
+            entrypoint_present: true,
         },
         resources: Resources {
             cpus: 1,

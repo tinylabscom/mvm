@@ -1,6 +1,9 @@
 # Plan 165 — Entrypoint-presence policy + sealed-prod interactivity prohibition
 
-> **Status (2026-06-05):** Designed (brainstorm settled); not started.
+> **Status (2026-06-05):** WS-B (no-entrypoint policy) and WS-C (sealed-prod
+> interactivity prohibition + CI-gated claim 15) **implemented** on
+> `feat/plan-165-entrypoint-sealed-interactivity`. WS-A is verified done on
+> `main` except A4 (E2E invoke witness), which is deferred (see below).
 > Sequenced after the artifact-model line (Plan 134) and the default-image
 > work (Plan 158, shipped in v0.16.1). Builds directly on the
 > `is_entrypoint_not_offered` classification merged in PR #631.
@@ -118,7 +121,7 @@ placement), `crates/mvm-guest/src/entrypoint.rs` (validation, unchanged).
       variant fails `cannot open /proc/self/fd/3` (proving the requirement).
       So the fexecve-on-script concern is solved upstream; WS-A reduces to
       pure conformance (path/owner/mode/marker).
-- [ ] **A1 — Emit the wrapper at the conforming path/owner/mode.** The
+- [x] **A1 — Emit the wrapper at the conforming path/owner/mode.** The
       factory must write the per-call wrapper to
       `/usr/lib/mvm/wrappers/<workload_id>` (regular file), and mkGuest's
       rootfs-hardening pass must leave it **root:root `0555`** on the verity
@@ -127,12 +130,12 @@ placement), `crates/mvm-guest/src/entrypoint.rs` (validation, unchanged).
       --regid=<uid> --clear-groups --no-new-privs -- <command> "$@"` (uid 0
       wrapper that drops to the entrypoint uid — matches ADR-002 W2.3 and
       the existing `setprivWrap`).
-- [ ] **A2 — Write the marker as the wrapper's absolute path.**
+- [x] **A2 — Write the marker as the wrapper's absolute path.**
       `/etc/mvm/entrypoint` contains exactly
       `/usr/lib/mvm/wrappers/<workload_id>\n` (an absolute path, not a
       script). For function workloads this is the factory's `extraFiles`
       entry; assert it is consistent with the wrapper A1 bakes.
-- [ ] **A3 — Pass-through of call args/stdin.** The wrapper appends `"$@"`
+- [x] **A3 — Pass-through of call args/stdin.** The wrapper appends `"$@"`
       so `RunEntrypoint`'s argv reaches the command; stdin/stdout/stderr are
       already wired by the agent's spawn. Add a function fixture that echoes
       argv + stdin and assert round-trip.
@@ -141,7 +144,13 @@ placement), `crates/mvm-guest/src/entrypoint.rs` (validation, unchanged).
       image, boots it, and asserts `EntrypointPolicy::production().validate()`
       returns `Ok` and a `RunEntrypoint` call returns the function's output +
       exit code. This is the standing proof the collision is resolved.
-- [ ] **A5 — Host-side runner.** Confirm `mvmctl` invokes `RunEntrypoint`
+      **DEFERRED** (see Deferred follow-ups): a full function-image
+      build+boot E2E lane is environmentally fragile on the current dev
+      host (Vz dev VM exits ~5s on input-less console; libkrun core_demo is
+      flaky). `crates/mvm-cli/examples/agent_invoke.rs` already drives a
+      real `RunEntrypoint` by VM name and `core_demo_e2e` proves the agent
+      path; A4 only adds the function-dispatch assertion on top.
+- [x] **A5 — Host-side runner.** Confirm `mvmctl` invokes `RunEntrypoint`
       against a sealed function image end-to-end (no console, no exec) and
       surfaces the exit code; extend `examples/` with a function fixture.
 
@@ -155,29 +164,29 @@ entrypoint, split by tier.
 `crates/mvm-hostd/src/supervisor/` (admission-time refusal + audit),
 `crates/mvm-guest/src/bin/mvm-guest-agent.rs` (boot-state reporting).
 
-- [ ] **B1 — Define "no entrypoint."** It means *no declared workload
+- [x] **B1 — Define "no entrypoint."** It means *no declared workload
       command*: the SDK IR carries neither a function nor a command/service
       entrypoint. (`sleep infinity` / the default idle image *is* a declared
       command and is unaffected — it boots.) Encode the predicate once in
       `mvm-sdk` IR (`crates/mvm-sdk/src/ir/workload.rs`) so both the compile
       path and admission read the same signal.
-- [ ] **B2 — Dev: drop to the interactive console.** A **dev** image with no
+- [x] **B2 — Dev: drop to the interactive console.** A **dev** image with no
       declared entrypoint boots and idles PID 1 (as today), and the agent's
       console serves `/bin/sh -i` — i.e., the developer lands in the
       interactive console (WS-C's single method). No new code beyond
       ensuring classification routes an empty-entrypoint dev build to the
       console-capable dev `/init` variant.
-- [ ] **B3 — Prod: fail closed at compile time.** `mvm-sdk` compile **must
+- [x] **B3 — Prod: fail closed at compile time.** `mvm-sdk` compile **must
       refuse** to produce a *sealed* image with no declared entrypoint —
       a sealed workload that does nothing is a misconfiguration. Emit a clear
       `CompileError` ("sealed/prod workloads must declare an entrypoint;
       `dev` images may omit it for an interactive shell").
-- [ ] **B4 — Prod: fail closed at admission (defense in depth).** If a
+- [x] **B4 — Prod: fail closed at admission (defense in depth).** If a
       sealed image with no valid entrypoint reaches the supervisor anyway,
       `admit_for_run` refuses it and emits a chain-signed audit entry
       (`plan.failed` with reason `entrypoint.absent`). Reuses the existing
       admission audit path (claim 8).
-- [ ] **B5 — Tests.** compile-refusal unit test (B3), admission-refusal +
+- [x] **B5 — Tests.** compile-refusal unit test (B3), admission-refusal +
       audit-entry test (B4), and a dev-empty-entrypoint build that asserts
       the console path is wired (B2).
 
@@ -193,7 +202,7 @@ gate), `crates/mvm-cli/src/commands/vm/console.rs` (host gate),
 `specs/adrs/002-microvm-security-posture.md`, `.github/workflows/`,
 `xtask`.
 
-- [ ] **C1 — Audit the five existing barriers; close any gaps.**
+- [x] **C1 — Audit the five existing barriers; close any gaps.**
       (1) only the **dev** `/init` variant runs/relays a shell
       (`mk-guest.nix:485` `variant=dev` branch); (2) prod rootfs is
       dm-verity sealed (claim 3); (3) prod VMM console attaches a
@@ -205,11 +214,11 @@ gate), `crates/mvm-cli/src/commands/vm/console.rs` (host gate),
       console symbol (mirror the `do_exec` / `prod-agent-no-exec` gate).
       Fix whichever of these is not currently true (item 5 is the most
       likely gap — confirm and gate it if not).
-- [ ] **C2 — Prod console is input-less by construction.** In the backend
+- [x] **C2 — Prod console is input-less by construction.** In the backend
       VM-launch path, a sealed image's guest console is wired output-only
       (to `console.log`); never attach a readable host fd. Add a unit/assert
       that the prod console attachment carries no input side.
-- [ ] **C3 — New claim 15 + witnesses.** Add to
+- [x] **C3 — New claim 15 + witnesses.** Add to
       `specs/claims/catalog.md`:
       `| 15 | No interactive access to a sealed production microVM |
       fn:console_refused_on_sealed_image, ci:prod-agent-no-console,
@@ -220,11 +229,11 @@ gate), `crates/mvm-cli/src/commands/vm/console.rs` (host gate),
       `prod-agent-no-console` CI lane asserting the console symbol is absent
       from a prod agent build (mirror `prod-agent-no-exec`), and a
       `prod_console_attachment_has_no_input` backend test.
-- [ ] **C4 — ADR-002 update.** Add claim 15 to the numbered table + the
+- [x] **C4 — ADR-002 update.** Add claim 15 to the numbered table + the
       threat-model note (keep §"Out of scope" discipline — this is the same
       interactive-access threat as claim 4 / `do_exec`; co-locate the
       narrative). Update CLAUDE.md §"Security model" to fourteen→fifteen.
-- [ ] **C5 — `xtask check-claim-catalog` passes** with the new row; run the
+- [x] **C5 — `xtask check-claim-catalog` passes** with the new row; run the
       Lint gate locally.
 
 ---
@@ -292,3 +301,22 @@ background + `gtimeout` + reap):
       host-binaries build (Plan 164) rather than per-image.
 - [ ] Multiplex/queue concurrent `mvmctl console` attaches (today: one
       session at a time) — DX nicety, not security.
+- [ ] **A4 — `RunEntrypoint` invoke round-trip witness** (`invoke
+      greet("ari") → "hello ari"`), gated behind the libkrun/Vz E2E lane.
+      Deferred from WS-A: a function-image build+boot E2E is environmentally
+      fragile on the current dev host (Vz dev VM exits ~5s on the input-less
+      console; libkrun `core_demo_e2e` is flaky and must never run unbounded),
+      so it can't be validated locally and a flaky/red lane is worse than a
+      tracked deferral. Building blocks already exist:
+      `crates/mvm-cli/examples/agent_invoke.rs` drives a real `RunEntrypoint`
+      by VM name, and `core_demo_e2e` proves the agent path — A4 only adds the
+      function-dispatch output+exit-code assertion. Land it once the E2E lane
+      is stable (KVM runner / hardened libkrun boot).
+- [ ] **B4 admission gate is currently latent** — no non-test producer sets
+      `SignedImageRef.entrypoint_present = false`. By design: the SDK's B3
+      compile gate refuses to *produce* a sealed image with no entrypoint
+      (never emitting a `false`-flagged plan), so B4 is pure defense-in-depth
+      for "if a malformed sealed plan reaches the supervisor anyway." If a
+      future producer path can legitimately synthesize a no-entrypoint sealed
+      plan, wire it to set `entrypoint_present = false` so the gate fires on a
+      real signal rather than only in tests.

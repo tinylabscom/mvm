@@ -141,7 +141,8 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ## Security model
 
-mvm makes thirteen CI-enforced security claims. Each one is backed by
+mvm makes fifteen CI-enforced security claims (numbered 1–15 in
+`specs/claims/catalog.md`, the contiguous ledger). Each one is backed by
 a test or a workflow gate. **ADR-002
 (`specs/adrs/002-microvm-security-posture.md`) is the source of truth**
 for the claim numbering, threat model, and per-backend tier matrix;
@@ -168,6 +169,10 @@ Claim lineage:
   no raw secret over broker channel) were added by Plan 104 / ADR-059
   (`specs/adrs/059-host-services-broker.md`) /
   ADR-049 (`specs/adrs/049-vsock-substitution-service.md`).
+- Claim 15 (no interactive access to a sealed production microVM) was
+  added by Plan 165 WS-C
+  (`specs/plans/165-entrypoint-presence-and-sealed-interactivity.md`) —
+  the same interactive-access threat family as claim 4 / `do_exec`.
 
 A fourteenth property — **OCI image provenance recorded in the
 chain-signed audit log** — has its own claim doc at
@@ -330,6 +335,26 @@ the source gap analysis is at
     `oci-reproducibility`, and `oci-image-runner-smoke` lanes in
     `.github/workflows/ci.yml` gate every PR that touches the OCI
     surface.
+15. **No interactive access to a sealed production microVM.** The sole
+    interactive path into a guest is the agent-served PTY-over-vsock
+    console (`crates/mvm-guest/src/console.rs`), which is gated behind
+    the `dev-shell` Cargo feature — so a sealed prod agent (built
+    `--no-default-features`, `withDevShell = false` in `mkGuest`) links
+    no console symbol, exactly mirroring claim 4's `do_exec` exclusion.
+    Plan 165 WS-C. Five independent layers: (1) only the dev `/init`
+    variant serves a shell; (2) the prod rootfs is dm-verity sealed
+    (claim 3); (3) the backend captures the guest console **write-only**
+    to `console.log` with no host input fd
+    (`mvm_backend::libkrun::open_console_capture` /
+    `prod_console_attachment_has_no_input`); (4) the host
+    `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
+    (`console_refused_on_sealed_image`); (5) the agent console + `do_exec`
+    are `dev-shell`-gated. CI: the `prod-agent-no-console` symbol-grep job
+    in `.github/workflows/security.yml` (`scripts/check-prod-agent-no-console.sh`)
+    asserts the console symbol is absent from a production agent build,
+    sibling to `prod-agent-runentry-contract`. Serial-console passthrough
+    was considered and rejected (fatal on Vz's input-less console); there
+    is exactly one interactive transport and it is dev-only.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

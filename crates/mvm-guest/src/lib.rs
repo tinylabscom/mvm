@@ -2,6 +2,12 @@
 // Depends on mvm-core
 
 pub mod builder_agent;
+/// PTY-over-vsock interactive console — the single dev-only interactive path
+/// into a guest. Gated behind `dev-shell` so the relay symbols are absent from
+/// a sealed production agent (Plan 165 WS-C, claim 15), mirroring `do_exec`
+/// (ADR-002 §W4.3). The host-side console client talks to it over vsock and is
+/// unaffected by this gate.
+#[cfg(feature = "dev-shell")]
 pub mod console;
 pub mod entrypoint;
 pub mod fs_rpc;
