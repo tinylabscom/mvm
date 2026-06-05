@@ -2,7 +2,7 @@
 
 **Status**: Proposed
 **Date**: 2026-06-05
-**Cross-refs**: ADR-001 (Firecracker-only *execution* — the production runtime path), ADR-002 (security posture / per-backend tier matrix), ADR-055 (passt/gvproxy virtio-net), ADR-066 §1 (name by role, front with a trait, hide impls), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), Plan 98 (`98-vz-builder-vm.md` — builder-backend selection libkrun/vz). Planning input: Plan 164 (multi-arch embed — surfaced the Linux provisioning pain that motivated this) + Plan 165 (this ADR's implementation).
+**Cross-refs**: ADR-001 (Firecracker-only *execution* — the production runtime path), ADR-002 (security posture / per-backend tier matrix), ADR-055 (passt/gvproxy virtio-net), ADR-066 §1 (name by role, front with a trait, hide impls), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), Plan 98 (`98-vz-builder-vm.md` — builder-backend selection libkrun/vz). Planning input: Plan 164 (multi-arch embed — surfaced the Linux provisioning pain that motivated this) + Plan 166 (this ADR's implementation).
 
 ## Context
 
@@ -64,10 +64,10 @@ Neither tier is ever promoted to production. The security claims (1–14) remain
 - **No change to the production path or ADR-001.** Firecracker remains the only runtime that executes admitted workloads; ADR-001 governs that path and is untouched. The builder VM already uses a non-Firecracker VMM (libkrun), so a QEMU builder is consistent, not novel.
 - **One more backend to maintain** — QEMU argv/console(serial-or-vsock)/networking/lifecycle behind the existing trait. Bounded, but real.
 - **TCG is slow.** Heavy nix builds under pure emulation are painful; the rule is KVM-where-present, TCG-only-as-fallback, with a loud "running unaccelerated" warning so the slowness is never a surprise.
-- **libkrun stays supported** as a Linux builder option; QEMU becomes the recommended default for portability + provisioning ease (the default-flip is decided in Plan 165, behind doctor visibility).
+- **libkrun stays supported** as a Linux builder option; QEMU becomes the recommended default for portability + provisioning ease (the default-flip is decided in Plan 166, behind doctor visibility).
 
 ## Alternatives considered
 
 - **Keep libkrun-only on Linux.** Rejected: leaves no-KVM hosts unable to dev and keeps the from-source provisioning tax.
 - **QEMU as a production runtime too.** Rejected: forks the security story (TCG has no isolation; KVM-QEMU is unaudited vs ADR-002) and contradicts ADR-001. QEMU is dev/test only; production favors Firecracker.
-- **Reuse the existing `MicrovmNix` ("qemu") path.** Rejected as the primary mechanism: it boots via a microvm.nix runner script, not a directly-driven QEMU process, so it can't offer the KVM/TCG portability or the zero-config dev networking. Plan 165 retires the `"qemu" → MicrovmNix` alias in favor of the real backend.
+- **Reuse the existing `MicrovmNix` ("qemu") path.** Rejected as the primary mechanism: it boots via a microvm.nix runner script, not a directly-driven QEMU process, so it can't offer the KVM/TCG portability or the zero-config dev networking. Plan 166 retires the `"qemu" → MicrovmNix` alias in favor of the real backend.

@@ -2414,7 +2414,7 @@ fn run_stage0_root_dir(
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
     use mvm_build::builder_backend_select::resolve_stage0_backend;
 
-    // ADR-068 + Plan 165: dispatch Stage 0 through the `BuilderVm` trait.
+    // ADR-068 + Plan 166: dispatch Stage 0 through the `BuilderVm` trait.
     // `resolve_stage0_backend` uses QEMU when explicitly chosen
     // (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including the
     // Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.

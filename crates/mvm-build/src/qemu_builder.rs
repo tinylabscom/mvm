@@ -1,4 +1,4 @@
-//! QEMU builder backend (Plan 165 / ADR-072) — the **Linux** dev/builder VMM.
+//! QEMU builder backend (Plan 166 / ADR-072) — the **Linux** dev/builder VMM.
 //!
 //! QEMU is the portable, apt-installable Linux builder substrate: it uses
 //! `/dev/kvm` when present (fast) and TCG software emulation otherwise (slow,
@@ -12,7 +12,7 @@
 //! carry the modular virtio/ext4 drivers) mount the seed as an **ext4** root,
 //! the shares are ext4 block disks, and networking is QEMU user-mode (slirp)
 //! configured statically by `stage0-init` — no libkrun, no libkrunfw, no
-//! custom kernel, no passt. Proven end-to-end on x86_64 (Plan 165 Phase 1:
+//! custom kernel, no passt. Proven end-to-end on x86_64 (Plan 166 Phase 1:
 //! the builder kernel compiled + `vmlinux` landed in `/out`).
 //!
 //! Host-side packing/extraction uses `mkfs.ext4 -d` + `debugfs rdump` rather
@@ -42,11 +42,11 @@ impl BuilderVm for QemuBuilderVm {
         _mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
         // Phase 1 implements Stage 0 (the from-source builder-VM bootstrap).
-        // Steady-state `run_build` on QEMU is Plan 165 Phase 2.
+        // Steady-state `run_build` on QEMU is Plan 166 Phase 2.
         Err(BuilderVmError::VmmUnavailable {
             requested: "qemu-run-build".to_string(),
             reason: "the QEMU builder backend implements Stage 0 today; \
-                     steady-state run_build is Plan 165 Phase 2."
+                     steady-state run_build is Plan 166 Phase 2."
                 .to_string(),
         })
     }
@@ -137,7 +137,7 @@ fn run_stage0_qemu(
     pack_ext4(artifact_out, &vdc, OUT_IMG_BYTES)?;
     pack_ext4(host_bin_dir, &vdd, 256 * 1024 * 1024)?;
 
-    // 2. Launch QEMU (the Plan 165 validated recipe), serial → console.log.
+    // 2. Launch QEMU (the Plan 166 validated recipe), serial → console.log.
     let append =
         format!("console=ttyS0 root=/dev/vda rw init={entry_path} mvm.backend=qemu panic=-1");
     let mut cmd = Command::new("timeout");

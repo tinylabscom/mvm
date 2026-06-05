@@ -9,7 +9,7 @@
 //! writes fail under FUSE); eth0 + DHCP come from libkrun, so we just point
 //! `/etc/resolv.conf` at gvproxy's gateway. Proven E2E on aarch64.
 //!
-//! **QEMU** (Linux/x86_64, plan 165 / ADR-072): the stock distro kernel +
+//! **QEMU** (Linux/x86_64, plan 166 / ADR-072): the stock distro kernel +
 //! initramfs mount the seed as an **ext4** root (`/dev/vda`, writable — so
 //! `/nix` needs no tmpfs copy), shares are ext4 block disks (`vdb`/`vdc`/`vdd`),
 //! and networking is QEMU slirp's fixed addresses configured statically over
@@ -101,7 +101,7 @@ mod linux {
     }
 
     /// True when stage0-init runs under the **QEMU** builder backend (Plan
-    /// 165, Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
+    /// 166, Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
     /// on the kernel cmdline; libkrun does not. This drives every host-vs-VMM
     /// difference: share transport (ext4 block disks vs virtiofs), the nix
     /// store layout (writable ext4 root vs tmpfs copy), and networking

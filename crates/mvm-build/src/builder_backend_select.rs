@@ -63,7 +63,7 @@ pub enum BuilderBackendChoice {
     Libkrun,
     /// Vz-backed builder VM. Opt-in via `MVM_BUILDER_BACKEND=vz`.
     Vz,
-    /// QEMU-backed builder VM (Linux dev/builder substrate, Plan 165 /
+    /// QEMU-backed builder VM (Linux dev/builder substrate, Plan 166 /
     /// ADR-072). Opt-in via `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
     /// auto-detect never picks it (the default-flip is evidence-gated).
     Qemu,
@@ -176,7 +176,7 @@ pub fn resolve_builder_backend_with_override(
     }
 }
 
-/// Builder driver for the **Stage 0** bootstrap (ADR-068 + Plan 165).
+/// Builder driver for the **Stage 0** bootstrap (ADR-068 + Plan 166).
 ///
 /// Stage 0 is implemented for **libkrun** and **QEMU**; Vz and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
