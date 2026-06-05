@@ -26,8 +26,10 @@ use mvm_sdk::compile::deps_audit::{VolumeError, verify_sealed_volume};
 use thiserror::Error;
 use tracing::warn;
 
+use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::Variant;
 use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
+use mvm_network::{EgressEnforcer, EgressWiring, EnforcementError};
 
 use crate::supervisor::artifact::{ArtifactCollector, NoopArtifactCollector};
 use crate::supervisor::audit::{AuditSigner, NoopAuditSigner};
@@ -35,6 +37,7 @@ use crate::supervisor::backend::{BackendError, BackendLauncher, NoopBackendLaunc
 use crate::supervisor::circuit_breaker::{CircuitBreaker, InspectorReporter};
 use crate::supervisor::destination::DestinationPolicy;
 use crate::supervisor::egress::{EgressProxy, NoopEgressProxy};
+use crate::supervisor::firewall::seam::SupervisorEgressEnforcer;
 use crate::supervisor::firewall::{
     FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer,
 };
@@ -84,6 +87,9 @@ pub enum SupervisorError {
 
     #[error("firewall error: {0}")]
     Firewall(#[from] FirewallError),
+
+    #[error("egress enforcement error: {0}")]
+    EgressEnforcement(#[from] EnforcementError),
 
     #[error("firewall proxy interface not configured")]
     FirewallProxyIfaceMissing,
@@ -422,10 +428,22 @@ impl Supervisor {
                 .await?;
             return Err(SupervisorError::from(e));
         }
-        if let Err(e) = self.firewall.install_default_deny(&firewall_spec) {
+        // Install host-side default-deny *through the EgressEnforcer seam*
+        // (plan 123 A2.2): the supervisor enforces behind the trait instead of
+        // calling the firewall directly. `SupervisorEgressEnforcer` delegates
+        // to the same `install_default_deny`, so behaviour + the fail-closed
+        // `NotWired` posture are unchanged.
+        let egress_wiring = EgressWiring {
+            vm_id: firewall_spec.vm_id.clone(),
+            tap_iface: firewall_spec.tap_iface.clone(),
+            proxy_iface: firewall_spec.proxy_iface.clone(),
+        };
+        if let Err(e) = SupervisorEgressEnforcer::new(self.firewall.clone())
+            .enforce(&egress_wiring, &NetworkPolicy::deny_all())
+        {
             self.emit_audit_then_fail(&plan, "plan.rejected.firewall", &e.to_string())
                 .await?;
-            return Err(SupervisorError::from(e));
+            return Err(SupervisorError::EgressEnforcement(e));
         }
         self.installed_firewalls
             .insert(plan.plan_id.clone(), firewall_spec);
@@ -1443,7 +1461,10 @@ mod tests {
 
         let result = s.launch(&signed, &[("test", &vk)]).await;
 
-        assert!(matches!(result, Err(SupervisorError::Firewall(_))));
+        // The install now flows through the EgressEnforcer seam (A2.2), so a
+        // firewall failure surfaces as `Egress` — but the underlying
+        // `install_default_deny` is still invoked (asserted below).
+        assert!(matches!(result, Err(SupervisorError::EgressEnforcement(_))));
         assert_eq!(s.state.current(), PlanState::Failed);
         assert_eq!(backend.prepares(), vec![plan.plan_id.clone()]);
         assert!(backend.launches().is_empty());
