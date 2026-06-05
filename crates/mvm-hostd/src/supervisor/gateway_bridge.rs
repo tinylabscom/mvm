@@ -1395,6 +1395,8 @@ mod tests {
     // The live default scan is MandatoryDenyEgressScan; the bridge tests want a
     // pass-through default, so wiring_with keeps NoopScan (test-scoped import).
     use crate::supervisor::network::stages::NoopScan;
+    use crate::supervisor::proxy::l4::{L4Policy, LiveL4Gate};
+    use mvm_core::policy::L4RuleSpec;
 
     // -----------------------------------------------------------------
     // FlowPolicy
@@ -2042,6 +2044,128 @@ mod tests {
             }
         }
         assert!(saw_fault, "an ObserverFault event must be emitted on drop");
+        bridge.abort();
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Plan 123 Slice 3 — per-tenant L4 egress enforcement exercised
+    // through the LIVE libkrun gvproxy bridge (real Unix datagram
+    // sockets, no VM). Drives the production scan (`build_egress_scan`)
+    // over `run_libkrun_gvproxy_bridge`: a denied flow is withheld from
+    // gvproxy, an allowed flow is forwarded.
+    // ───────────────────────────────────────────────────────────────
+
+    /// A bridge `ObserverWiring` whose egress scan is the real Slice 3 scan for
+    /// `policy` (mandatory-deny + the L4 filter), no observers.
+    fn wiring_with_egress_scan(policy: Option<L4Policy>) -> ObserverWiring {
+        ObserverWiring {
+            observers: vec![],
+            latency: Arc::new(ObserverLatency::new("vm-test", "t")),
+            killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            mtu: BRIDGE_MTU,
+            substitution: Arc::new(NoopSubstitution),
+            scan: build_egress_scan(policy),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l4_policy_denied_flow_is_dropped_through_the_live_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
+        // deny_all L4 policy → the egress frame to 93.184.216.34:443 has no
+        // matching rule → L4PolicyScan drops it at the chokepoint.
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(Some(L4Policy::deny_all())),
+        ));
+
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun.send(&tcp_egress_frame(b"payload")).await.unwrap();
+
+        // The denied packet must NOT reach gvproxy.
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "an L4-denied egress packet must not reach gvproxy"
+        );
+
+        // The scan-chain kill surfaces as an ObserverFault on the flow stream.
+        let mut saw_fault = false;
+        for _ in 0..4 {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(ev)) => {
+                    if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
+                        assert_eq!(observer, "scan-chain");
+                        assert_eq!(reason, "drop");
+                        saw_fault = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            saw_fault,
+            "an ObserverFault must be emitted when the L4 policy drops"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l4_policy_allowed_flow_is_forwarded_through_the_live_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
+        // Allow tcp to exactly 93.184.216.34:443 — the frame's destination.
+        let allow = LiveL4Gate::from_specs(&[L4RuleSpec {
+            proto: "tcp".into(),
+            dst_cidr: "93.184.216.34/32".into(),
+            port_lo: 443,
+            port_hi: 443,
+        }])
+        .unwrap()
+        .policy;
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(Some(allow)),
+        ));
+
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun.send(&tcp_egress_frame(b"payload")).await.unwrap();
+
+        // The allowed packet is forwarded to gvproxy.
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+            .await
+            .expect("an L4-allowed egress packet must reach gvproxy")
+            .expect("recv ok");
+        let parsed = crate::supervisor::network::packet::parse(&buf[..n])
+            .expect("forwarded frame re-parses");
+        assert_eq!(parsed.five_tuple.dst_port, 443);
         bridge.abort();
     }
 
