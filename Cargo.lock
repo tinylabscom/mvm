@@ -3532,6 +3532,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-network"
+version = "0.16.0"
+dependencies = [
+ "mvm-core",
+ "mvm-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "mvm-oci"
 version = "0.16.0"
 dependencies = [

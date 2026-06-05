@@ -1,0 +1,21 @@
+[package]
+name = "mvm-network"
+version.workspace = true
+edition.workspace = true
+description = "NetworkProvider trait + provisioning/policy/registry seam for mvm (plan 123 Phase A). The TAP/bridge/gvproxy/passt impl lives in mvm-backend; the WireGuard/Tailscale mesh impl is mvmd's."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-core.workspace = true
+# IR `NetworkMode` the registry resolves (A5). Acyclic: mvm-sdk does not
+# depend on mvm-network; its only mvm-* normal dep is mvm-core.
+mvm-sdk.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

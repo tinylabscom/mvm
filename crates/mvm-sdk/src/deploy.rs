@@ -215,10 +215,12 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
         rootfs_size_mb: app.resources.rootfs_size_mb,
     };
     let network = app.network.as_ref().map(|n| NetworkSpec {
-        mode: match n.mode {
+        mode: match &n.mode {
             crate::ir::NetworkMode::None => "none".into(),
             crate::ir::NetworkMode::Bridge => "bridge".into(),
             crate::ir::NetworkMode::Host => "host".into(),
+            // A custom mesh deploys under its provider's name (wireguard, …).
+            crate::ir::NetworkMode::Custom { provider, .. } => provider.clone(),
         },
         ports: n
             .ports
