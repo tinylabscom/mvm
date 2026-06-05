@@ -55,6 +55,21 @@ warmup executor with a ready-probe, and a provenance chain for the warmed artifa
 and it is the consumer-facing counterpart that Plan 148's primitive needs to be
 useful.
 
+**Second prior-art point (oblique): page-cache warmth, not just disk warmth.** A
+*commercial* macOS fast-boot sibling — the **pooled OCI-microVM runtime** (referred
+to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory
+`reference_objc2_vz_external_references`; design boundary recorded in
+[ADR-072](../adrs/072-warm-snapshot-prior-art-adoption-boundary.md)) — bakes a warm
+snapshot by running the workload *once during the bake* and capturing a snapshot
+whose **guest page cache is already populated**. That is a distinct lever from this
+plan's warmup, which primes **disk** state (`initdb` output into a warm overlay). Its
+hot-pool reuse model (a released worker kept dirty across cycles) is **refused** under
+mvm's one-guest-one-workload + claim-8 posture (ADR-072 §3); only the page-cache-at-
+freeze idea is adopted, as a Phase C follow-up below. The other thing it validates is
+that this whole warm-path direction is achievable on Apple Silicon (it hits ~10–50 ms
+boot, sub-100 ms cold restore) — we just have to reach it without surrendering the
+verity/provenance/audit chain.
+
 **Core decision, stated up front: mvm does not warm the rootfs.** A warmed parent is
 an immutable verity rootfs (already built) + a sealed warm overlay/volume (disk) + a
 memory snapshot (RAM). forkd's "bake into one writable rootfs" model is rejected as a
@@ -256,6 +271,22 @@ Expressed as mvm catalog entries with a `WarmupSpec`, drawn from forkd's recipe 
 (just `apt install python3-numpy`); only `postgres-fixture` truly warms — so this is a
 **target list, not a borrowed design**. `postgres-fixture` is the natural first
 recipe (it exercises the full disk + memory freeze).
+
+## Deferred follow-ups
+
+- [ ] **Page-cache priming at freeze (ADR-072 §1).** Extend Task C1's freeze so the
+      memory snapshot captures a *warm guest page cache*, not just a quiesced one:
+      before taking the snapshot, touch the entry's declared working set (a new
+      optional `WarmupSpec` field, e.g. `prime_paths` / a prime command) so the
+      restored child does not pay cold page-fault cost on first access. This is a
+      property of the **memory-snapshot layer** (distinct from the disk warm overlay
+      Phase B already produces) and only applies on `caps.snapshots == true` backends
+      (FC/CH/Vz); on `snapshots == false` it is a silent no-op (the parent is
+      disk-only anyway, Phase D). Sequences behind the same memory-snapshot substrate
+      as Task C1 (Plan 123 Phase C / Plan 140). Plan 140's restore inherits the
+      warmth for free. Borrowed *design-level only* from the pooled OCI-microVM
+      runtime's `with_warmup` (ADR-072) — no code adopted, and its hot-pool reuse is
+      explicitly **not** taken.
 
 ## Success criteria
 
