@@ -88,10 +88,10 @@ The IR `NetworkMode` is a closed enum (`None`/`Bridge`/`Host`) — a mesh/VPN mo
 
 ### Task B1: the trait + `local` impl
 
-**Files:** `crates/mvm-storage/src/{provider.rs,local.rs}`.
+**Files:** `crates/mvm-storage/src/provider.rs` (new — trait + `LocalStorage`; kept separate from `local.rs`, which is the data-plane `LocalBackend`).
 
-- [ ] **Step 1:** Failing test — `LocalStorage` provisions a volume, attaches it (returns a path/handle), round-trips bytes, detaches.
-- [ ] **Step 2:** Define `trait StorageProvider { fn provision(&self, spec: &VolumeSpec) -> Result<VolumeHandle>; fn attach/detach(...); fn snapshot(&self, h: &VolumeHandle) -> Result<SnapshotRef>; }`; implement `local`. Commit.
+- [x] **Step 1:** Failing test — `LocalStorage` provisions a volume, attaches it (returns a path/handle), round-trips bytes, detaches. (`provider::tests::local_storage_provision_attach_roundtrip_detach`)
+- [x] **Step 2:** Defined sync `trait StorageProvider { kind; provision; attach; detach }` + `VolumeSpec`/`VolumeHandle`/`AttachedVolume`; implemented `LocalStorage`. `snapshot()` deferred to B3 (grow the trait when its test lands — TDD). Committed `584e2be7`.
 
 ### Task B2: the `encrypted` impl (consumes 122)
 
