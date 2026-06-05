@@ -59,18 +59,18 @@ rand.workspace = true
 # the default mvm-core build stays async/runtime-free.
 sigstore = { version = "0.13", default-features = false, features = ["bundle", "sigstore-trust-root", "rustls-tls"], optional = true }
 
-# `hostd-transport` is in `default` for now so existing consumers
-# (mvmd via the `mvmctl::core::protocol` facade) keep building unchanged.
-# Plan 126 B5 PR-2 removes it from `default` once mvmd opts in explicitly,
-# at which point the default `mvm-core` build is runtime-free and the
-# `check-forbidden-deps` gate asserts `cargo tree -p mvm-core -e no-dev`
-# carries no `tokio`.
+# `default` is empty: the default `mvm-core` build is runtime-free
+# (plan 126 B5 PR-2). The hostd IPC transport pulls tokio only behind
+# `hostd-transport`, which mvmd enables via the `mvmctl` facade
+# (`mvmctl/hostd-transport`); `manifest-verify` pulls it independently.
+# `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core
+# -e no-dev` carries no `tokio` so this can't silently regress.
 [features]
-default = ["hostd-transport"]
+default = []
 # The hostd IPC async transport in `protocol` (mvmd ↔ mvm-hostd control
 # channel: read/write_frame + send/recv request/response). The only
-# unconditional async surface left in mvm-core; gated so the default
-# closure can drop tokio. Pulls tokio's `io-util`.
+# async surface in mvm-core besides `manifest-verify`; gated so the
+# default closure carries no tokio. Pulls tokio's `io-util`.
 hostd-transport = ["dep:tokio", "tokio/io-util"]
 # Cosign-keyless manifest verification via sigstore (folded from
 # mvm-security, plan 121 B3). sigstore uses a blocking verifier backed

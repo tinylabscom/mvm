@@ -5,6 +5,7 @@ mod build_dev_image;
 mod check_adr_coverage;
 mod check_audit_positional;
 mod check_claim_catalog;
+mod check_core_runtime_free;
 mod check_doc_claims;
 mod check_forbidden_deps;
 mod check_mvm_host_binaries_sync;
@@ -41,6 +42,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_forbidden_deps::run(&workspace)
         }
+        Some("check-core-runtime-free") => {
+            let workspace = workspace_root();
+            check_core_runtime_free::run(&workspace)
+        }
         Some("check-no-overclaim") => {
             let workspace = workspace_root();
             check_no_overclaim::run(&workspace)
@@ -71,7 +76,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-no-overclaim, check-spec-numbers, check-claim-catalog, check-mvm-host-binaries-sync, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-no-overclaim, check-spec-numbers, check-claim-catalog, check-mvm-host-binaries-sync, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -94,6 +99,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-forbidden-deps                    Reject sea-* and mysql crates in Cargo.lock"
+            );
+            eprintln!(
+                "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
             );
             eprintln!(
                 "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from specs/claims/ outside exempt paths"
