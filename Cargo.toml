@@ -124,7 +124,7 @@ resolver = "3"
 # functionally different software. Bumping the minor signals "0.x
 # breaking changes" without prematurely committing to a 1.0 stability
 # promise.
-version = "0.15.2"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -290,33 +290,33 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-mvm-core = { path = "crates/mvm-core", version = "0.15.1" }
-mvm-guest = { path = "crates/mvm-guest", version = "0.15.1" }
-mvm-build = { path = "crates/mvm-build", version = "0.15.1", default-features = false }
-mvm = { path = "crates/mvm", version = "0.15.1", default-features = false }
-mvm-oci = { path = "crates/mvm-oci", version = "0.15.1" }
-mvm-storage = { path = "crates/mvm-storage", version = "0.15.1" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.15.1", default-features = false }
-mvm-hostd = { path = "crates/mvm-hostd", version = "0.15.1" }
+mvm-core = { path = "crates/mvm-core", version = "0.16.0" }
+mvm-guest = { path = "crates/mvm-guest", version = "0.16.0" }
+mvm-build = { path = "crates/mvm-build", version = "0.16.0", default-features = false }
+mvm = { path = "crates/mvm", version = "0.16.0", default-features = false }
+mvm-oci = { path = "crates/mvm-oci", version = "0.16.0" }
+mvm-storage = { path = "crates/mvm-storage", version = "0.16.0" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.16.0", default-features = false }
+mvm-hostd = { path = "crates/mvm-hostd", version = "0.16.0" }
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-mvm-sdk = { path = "crates/mvm-sdk", version = "0.15.1" }
-mvm-sdk-macros = { path = "crates/mvm-sdk-macros", version = "0.15.1" }
-mvm-mcp = { path = "crates/mvm-mcp", version = "0.15.1" }
+mvm-sdk = { path = "crates/mvm-sdk", version = "0.16.0" }
+mvm-sdk-macros = { path = "crates/mvm-sdk-macros", version = "0.16.0" }
+mvm-mcp = { path = "crates/mvm-mcp", version = "0.16.0" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the Apple-VZ objc2
 # stack. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
-libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.15.1" }
+libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.16.0" }
 # Plan 97 Phase B — type-safe interface to `mvm-vz-supervisor`. No FFI,
 # Linux-safe (compiles everywhere; `Platform::has_vz()` short-circuits
 # on non-macOS).
-mvm-backend = { path = "crates/mvm-backend", version = "0.15.1", default-features = false }
+mvm-backend = { path = "crates/mvm-backend", version = "0.16.0", default-features = false }
 
 # Plan 73 Followup B.2.x — builder-VM egress allowlist proxy.
 # mvm-host-vm-init spawns this as a subprocess before the
 # installer + tears it down after.
-mvm-egress-proxy = { path = "crates/mvm-egress-proxy", version = "0.15.1" }
+mvm-egress-proxy = { path = "crates/mvm-egress-proxy", version = "0.16.0" }
 
 # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper (seccompiler +
 # landlock). Consumed by the per-VM `mvm-firecracker-bridge` sidecar.
