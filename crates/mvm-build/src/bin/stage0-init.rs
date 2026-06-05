@@ -44,14 +44,11 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
 
-    /// Read-only seed store (the nix tarball's `/nix`) — the overlay lower.
+    /// Where nix runs from (its store paths are absolute `/nix/store/...`).
     const NIX_TARGET: &str = "/nix";
-    /// tmpfs that backs the overlay upper + work on first boot (no mkfs;
-    /// the persistent ext4 disk replaces this in a follow-up — plan 160).
-    const NIX_UPPER_TMPFS: &str = "/run/nix-upper";
-    const NIX_OVERLAY_UPPER: &str = "/run/nix-upper/upper";
-    const NIX_OVERLAY_WORK: &str = "/run/nix-upper/work";
-    const NIX_OVERLAY_MERGED: &str = "/run/nix-merged";
+    /// Bind of the original (virtiofs) seed `/nix` so we can still read the
+    /// seed store after mounting a fresh tmpfs over `/nix`.
+    const NIX_SEED_RO: &str = "/nix-seed-ro";
 
     pub fn run() -> ExitCode {
         if let Err(e) = setup() {
@@ -97,7 +94,23 @@ mod linux {
             }
         }
 
-        setup_nix_overlay()?;
+        setup_nix_store()?;
+        configure_nix_runtime()?;
+        Ok(())
+    }
+
+    /// DNS + nix store state the seed rootfs doesn't ship. libkrun's
+    /// `NET_FLAG_DHCP_CLIENT` brings eth0 up but doesn't write
+    /// `/etc/resolv.conf`, so point it at gvproxy's default gateway/DNS
+    /// (`192.168.127.1`); nix needs it to reach cache.nixos.org. Also seed
+    /// the local store dirs so nix runs single-user (no daemon).
+    fn configure_nix_runtime() -> Result<(), String> {
+        std::fs::create_dir_all("/etc").map_err(|e| format!("create /etc: {e}"))?;
+        std::fs::write("/etc/resolv.conf", b"nameserver 192.168.127.1\n")
+            .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
+        for d in ["/nix/var", "/nix/var/nix", "/nix/var/log/nix"] {
+            std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
+        }
         Ok(())
     }
 
@@ -117,32 +130,65 @@ mod linux {
         Ok(())
     }
 
-    /// Make `/nix` writable: overlay the read-only seed store (lower) with a
-    /// tmpfs upper. nix sees its own closure from the lower and writes new
-    /// store paths to the upper. (init.sh's persistent ext4 `/dev/vda` is
-    /// the production upper; that needs mkfs, which the seed lacks until
-    /// `nix build e2fsprogs` — a plan-160 follow-up. tmpfs is case-sensitive
-    /// like ext4, so substituters that fail on case-insensitive APFS work.)
-    fn setup_nix_overlay() -> Result<(), String> {
-        mount_fs("tmpfs", NIX_UPPER_TMPFS, "tmpfs")?;
-        for d in [NIX_OVERLAY_UPPER, NIX_OVERLAY_WORK, NIX_OVERLAY_MERGED] {
-            std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
+    /// Make `/nix` a writable, non-virtiofs store. The seed `/nix` arrives on
+    /// the libkrun virtiofs RootDir; overlayfs-over-virtiofs writes fail
+    /// (`nix build` → `creating /nix/store/.links: ECONNRESET` — a FUSE
+    /// backend error). So instead: bind the original (virtiofs) `/nix` aside,
+    /// mount a fresh **tmpfs** at `/nix`, and copy the seed closure into it.
+    /// nix then runs entirely on tmpfs (case-sensitive, writable, no FUSE).
+    ///
+    /// First cut for the boot proof: a full-tmpfs store can exhaust RAM on
+    /// the full builder-VM build — the persistent ext4 `/dev/vda` (bootstrap
+    /// e2fsprogs via nix, mkfs, copy the store onto it) is the production
+    /// follow-up (plan 160).
+    fn setup_nix_store() -> Result<(), String> {
+        // Copy BEFORE hiding the seed: mount a tmpfs at NIX_SEED_RO, copy the
+        // seed `/nix/store` (still directly readable on the virtiofs root)
+        // into it, then bind it over `/nix`. nix then runs from the tmpfs.
+        std::fs::create_dir_all(NIX_SEED_RO).map_err(|e| format!("create {NIX_SEED_RO}: {e}"))?;
+        mount_fs("tmpfs", NIX_SEED_RO, "tmpfs")?;
+        let seed_store = Path::new(NIX_TARGET).join("store");
+        let dst_store = Path::new(NIX_SEED_RO).join("store");
+        std::fs::create_dir_all(&dst_store)
+            .map_err(|e| format!("create {}: {e}", dst_store.display()))?;
+        let n_src = std::fs::read_dir(&seed_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        copy_tree(&seed_store, &dst_store)
+            .map_err(|e| format!("copying seed nix store to tmpfs: {e}"))?;
+        let n_dst = std::fs::read_dir(&dst_store)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        eprintln!("stage0-init: copied seed store: {n_src} -> {n_dst} entries");
+        // Now make the tmpfs copy be `/nix`.
+        bind_mount(NIX_SEED_RO, NIX_TARGET)?;
+        Ok(())
+    }
+
+    /// Recursively copy `src` -> `dst` preserving symlinks + file modes
+    /// (the seed has no `cp`). Iterative to avoid deep-tree recursion limits.
+    /// Hardlinks degrade to copies — fine for a one-shot bootstrap store.
+    fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+        let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+        while let Some((from_dir, to_dir)) = stack.pop() {
+            std::fs::create_dir_all(&to_dir)?;
+            for entry in std::fs::read_dir(&from_dir)? {
+                let entry = entry?;
+                let ft = entry.file_type()?;
+                let from = entry.path();
+                let to = to_dir.join(entry.file_name());
+                if ft.is_symlink() {
+                    let target = std::fs::read_link(&from)?;
+                    let _ = std::fs::remove_file(&to);
+                    std::os::unix::fs::symlink(&target, &to)?;
+                } else if ft.is_dir() {
+                    stack.push((from, to));
+                } else {
+                    std::fs::copy(&from, &to)?; // preserves permissions
+                }
+            }
         }
-        let data = format!(
-            "lowerdir={NIX_TARGET},upperdir={NIX_OVERLAY_UPPER},workdir={NIX_OVERLAY_WORK}"
-        );
-        {
-            use nix::mount::{MsFlags, mount};
-            mount(
-                Some("mvm-nix"),
-                NIX_OVERLAY_MERGED,
-                Some("overlay"),
-                MsFlags::empty(),
-                Some(data.as_str()),
-            )
-            .map_err(|e| format!("mount overlay {NIX_OVERLAY_MERGED}: {e}"))?;
-        }
-        bind_mount(NIX_OVERLAY_MERGED, NIX_TARGET)
+        Ok(())
     }
 
     /// `nix build` the builder-VM flake, then copy kernel + rootfs to /out.
@@ -173,9 +219,25 @@ mod linux {
             std::env::set_var("MVM_WORKSPACE_PATH", "/work");
             std::env::set_var("MVM_HOST_BIN_DIR", "/mvm-bins");
             std::env::set_var("NIX_SSL_CERT_FILE", &cacert);
+            // Force single-user (local store) — the seed has no nix-daemon;
+            // an empty NIX_REMOTE makes nix build directly as root.
+            std::env::set_var("NIX_REMOTE", "");
             if !nix_path.is_empty() {
                 std::env::set_var("PATH", nix_path);
             }
+        }
+
+        // Console diagnostics (the console.log persists across the power-off;
+        // /out gets cleaned up on failure). Confirms the seed nix is runnable
+        // before the long build.
+        eprintln!("stage0-init: nix = {}", nix.display());
+        match Command::new(&nix).arg("--version").output() {
+            Ok(o) => eprintln!(
+                "stage0-init: nix --version: {}{}",
+                String::from_utf8_lossy(&o.stdout).trim(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("stage0-init: nix --version failed to spawn: {e}"),
         }
 
         // Optional host-dropped build config (single-attr / kernel-only
@@ -199,6 +261,15 @@ mod linux {
                 &flake_ref,
                 "--extra-experimental-features",
                 "nix-command flakes",
+                // Single-user root bootstrap: the seed has no `nixbld` build
+                // users + no daemon, so build directly as root (empty
+                // build-users-group). Keep the DEFAULT sandbox — it gives
+                // each build a clean env (its own /bin/sh + toolchain),
+                // independent of the minimal seed rootfs; disabling it makes
+                // builds fail on the seed's missing `/bin`, `gcc`, etc.
+                "--option",
+                "build-users-group",
+                "",
                 "--option",
                 "connect-timeout",
                 "30",
@@ -270,6 +341,9 @@ mod linux {
     }
 
     fn mount_fs_idempotent(source: &str, target: &str, fstype: &str) -> Result<(), String> {
+        // The nix seed rootfs is minimal (no /tmp, /run, … like Alpine's
+        // minirootfs had), and `mount(2)` needs the target dir to exist.
+        let _ = std::fs::create_dir_all(target);
         match mount_fs(source, target, fstype) {
             Ok(()) => Ok(()),
             Err(e) if e.contains("EBUSY") => {

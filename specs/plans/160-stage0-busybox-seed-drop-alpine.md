@@ -66,6 +66,14 @@ Most of it is already written in `crates/mvm-build/src/bin/mvm-host-vm-init.rs` 
 
 So `stage0-init` = `mount_pseudofs` + virtiofs shares + the (already-written) overlay nix-store on `/dev/vda` + env + `nix build <flake>` + copy `/out` + `poweroff` (nix `reboot`). The `e2fsprogs` worry is gone too — the overlay upper is formatted with the same `format_ext4` mvm-host-vm-init already uses (no external mkfs). **Architecture choice:** factor the shared mount/overlay/nix-store helpers out of `mvm-host-vm-init.rs` into a `mvm-build` module both bins use (preferred, avoids duplication) — but extract carefully (that bin is validated/working).
 
+#### 0b boot loop progress (2026-06-05) — proven end-to-end except the store FS
+
+Drove a real `MVM_STAGE0_SEED=nix MVM_BUILDER_BACKEND=libkrun` Stage-0 boot on this aarch64 host. Confirmed working: nix tarball download (sha-pinned) → seed materialize (`/init` = the static `stage0-init` ELF, `/nix/store` = the nix closure) → libkrun boot → **`stage0-init` runs as PID 1**: pseudo-fs + virtiofs mounts ✓, finds nix ✓, **`nix --version` runs ✓** (`nix (Nix) 2.31.1`). Fixed three real bugs along the way (the minimal seed rootfs lacks dirs the Alpine minirootfs had): create every mount target before `mount(2)` (`/tmp`,`/run`,`/run/nix-upper`); write `/etc/resolv.conf` (gvproxy DNS `192.168.127.1` — `NET_FLAG_DHCP_CLIENT` brings up eth0 but doesn't write resolv.conf, so "networking is free" was half-right); `NIX_REMOTE=` for single-user.
+
+**The one remaining blocker — overlay-over-virtiofs:** `nix build` fails at `creating directory '/nix/store/.links': Network dropped connection on reset` (ECONNRESET). That errno on a local mkdir = a **virtiofs/FUSE backend error**: my `/nix` overlay uses the **virtiofs seed store as the overlay lower**, and overlayfs writes over a virtiofs lower fail in libkrun. (`mvm-host-vm-init`'s proven overlay uses an **ext4 block-device** lower — that's why it works.)
+
+**Fix (the remaining 0b work):** get the seed store onto a **non-virtiofs writable** fs before nix writes. Either (a) copy the seed `/nix/store` (virtiofs) → a tmpfs `/nix` in `stage0-init` (simple; but the full builder-VM build may exhaust RAM — the very reason the persistent ext4 disk exists), or (b) the proper path: bootstrap nix in a small tmpfs, `nix build nixpkgs#e2fsprogs`, `mkfs.ext4 /dev/vda`, copy the store to the ext4 disk, build there (this also restores the persistent-store optimization). (b) is the real answer; it's the "persistent ext4 disk" follow-up, now required (not deferrable) because of the overlay-virtiofs finding. The seed has no `cp`, so the copy is a small recursive Rust walk (symlinks + modes).
+
 #### De-risk-first sequence (do NOT rip out Alpine until the new path boots)
 
 Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep Alpine as the fallback until proven:
