@@ -3,7 +3,8 @@
 //! Run as PID >1, uid 0 inside every microVM at boot, before the
 //! main `mvm-guest-agent` is forked under setpriv. Installs kernel
 //! blackhole routes for `mvm_core::network_policy::MANDATORY_DENY_RANGES`
-//! via rtnetlink — the defense layer that catches:
+//! over a synchronous `NETLINK_ROUTE` socket — the defense layer that
+//! catches:
 //!
 //! - The macOS Apple Container path where `mvm` has no host firewall.
 //! - Any backend where the host iptables/nftables rules don't apply.
@@ -18,8 +19,8 @@
 //!   the kernel message).
 //! - 1 — one or more routes failed to install. `/init` should
 //!   fail-closed and refuse to fork the workload.
-//! - 2 — could not connect to rtnetlink (kernel built without
-//!   `CONFIG_RTNETLINK`, or some other systemic failure). Same
+//! - 2 — could not open/bind the `NETLINK_ROUTE` socket (kernel built
+//!   without netlink, or some other systemic failure). Same
 //!   fail-closed behaviour at `/init`.
 //!
 //! ## Output
@@ -46,12 +47,11 @@
 //! [`Report`]: mvm_guest::netinit::Report
 
 #[cfg(target_os = "linux")]
-#[tokio::main]
-async fn main() {
-    let report = match mvm_guest::netinit::install_mandatory_deny_via_rtnetlink().await {
+fn main() {
+    let report = match mvm_guest::netinit::install_mandatory_deny_via_netlink() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("mvm-guest-netinit: rtnetlink connect failed: {e}");
+            eprintln!("mvm-guest-netinit: netlink socket open failed: {e}");
             // Exit 2 distinguishes systemic netlink failure from
             // per-route failures so `/init` can branch (the
             // systemic case usually means a kernel feature is
@@ -87,7 +87,7 @@ async fn main() {
 fn main() {
     eprintln!(
         "mvm-guest-netinit: not supported on this host \
-         (rtnetlink is Linux-only; this binary ships in the runtime \
+         (AF_NETLINK is Linux-only; this binary ships in the runtime \
          overlay for Linux microVM guests only)"
     );
     std::process::exit(2);

@@ -24,7 +24,7 @@
 
 - [x] **Step 1:** Baseline recorded — `cargo tree -p mvm-guest -e no-dev` = **203 crates** (host target); the async stack (`tokio`/`rtnetlink`/`async-trait`/`netlink-packet-route`) is `cfg(linux)`-gated, so it only surfaces under `--target aarch64-unknown-linux-musl`.
 - [x] **Step 2:** `xtask check-guest-agent-runtime-free` mirrors `check-core-runtime-free`: `cargo tree -p mvm-guest -e no-dev --prefix none --locked --target aarch64-unknown-linux-musl`, fails if `{tokio, async-trait, rtnetlink, netlink-packet-route}` appear. Parser unit tests green; the live gate is **RED now** (exit 1, all four present) — the real failing test A3 drives to green.
-- [ ] **Step 3 (lands with A3):** wire the gate into `ci.yml` in the same commit that makes it pass (no knowingly-red required check in the tree). Coordinate with 128.
+- [x] **Step 3 (landed with A3):** the gate is wired into `ci.yml` in the A3 commit — the same commit that flips it green, so no knowingly-red required check ever sat in the tree.
 
 ### Task A2: `serde_json` → hand-rolled framing in `vsock`
 
@@ -38,13 +38,17 @@ ADR-066 §9. The wire format is a small fixed set of typed messages; a hand-roll
 
 ### Task A3: `rtnetlink` → `linux-raw-sys` in `netinit`
 
-`netinit` configures the guest's interface/routes via `rtnetlink` (async, pulls tokio). Raw netlink over `linux-raw-sys` is a few dozen lines and no_std-friendly.
+`netinit` installs blackhole routes via `rtnetlink` (async, pulls tokio). Raw netlink over a synchronous `AF_NETLINK` socket is a few dozen lines.
 
-**Files:** `crates/mvm-guest/src/netinit.rs`, `bin/mvm-guest-netinit.rs`.
+**Dep deviation (2026-06-05):** the brief said add `linux-raw-sys`. Done **dep-free instead** — the rtnetlink constants are frozen kernel UAPI, so they're inlined (cross-platform, in a `#[cfg(any(target_os = "linux", test))] mod wire`) and the socket syscalls use `libc` (already a dep). Net deps added: **0** (vs +1); removed: 4. `constants_match_libc` (a `cfg(linux)` test) pins each inlined constant to `libc`'s value on CI.
 
-- [ ] **Step 1:** Failing test (gated, needs netns) — netinit brings the interface up + sets the route, asserted via `/proc/net` or a netns probe, with no `rtnetlink`/`tokio`. Also: make `RouteInstaller` a *synchronous* trait (drop `#[async_trait]`) so removing rtnetlink also removes `tokio` + `async-trait`. The cross-platform trait + install-loop + `MockInstaller` tests run on a macOS dev host; the raw-netlink installer itself is `cfg(target_os = "linux")` and rides Linux CI.
-- [ ] **Step 2:** Hand-roll the `RTM_NEWADDR`/`RTM_NEWROUTE` messages over a raw `AF_NETLINK` socket (`linux-raw-sys`). Keep the `NetworkMandatoryDeny` audit marker (claim 10). Drop `tokio` (dep + dev-dep), `async-trait`, `rtnetlink`, `netlink-packet-route` from `Cargo.toml`.
-- [ ] **Step 3:** The A1 gate (`check-guest-agent-runtime-free`) now passes — add its lane to `ci.yml` in this commit. Commit.
+**Scope note:** the current `netinit` only installs `RTM_NEWROUTE` blackholes (the `MANDATORY_DENY_RANGES` floor); it never did `RTM_NEWADDR`/interface-up. A3 is a faithful port of *that* surface — no new interface-config behaviour.
+
+**Files:** `crates/mvm-guest/src/netinit.rs`, `bin/mvm-guest-netinit.rs`, `Cargo.toml`.
+
+- [x] **Step 1:** `RouteInstaller` is now a *synchronous* trait (dropped `#[async_trait]`); `install_mandatory_deny` + `MockInstaller` + the six former `#[tokio::test]`s are sync and green on macOS. TDD RED→GREEN landed on the risky new bit — `encode_blackhole_route_v4` (pure netlink-message byte layout), pinned by `encode_blackhole_route_v4_produces_exact_netlink_bytes` + `…_carries_prefix_and_addr`. The live netns route test stays gated for Linux CI.
+- [x] **Step 2:** `RawNetlinkInstaller` (`cfg(linux)`) opens/binds a `NETLINK_ROUTE` socket and does a blocking `sendto`+`recv` ACK (EEXIST → idempotent Ok), keeping the `REPORT_MARKER` audit path (claim 10). Dropped `tokio` (dep + dev-dep), `async-trait`, `rtnetlink`, `netlink-packet-route` — Cargo.lock shed ~20 crates.
+- [x] **Step 3:** A1 gate (`check-guest-agent-runtime-free`) is GREEN; its lane is wired into `ci.yml` in this commit.
 
 ### Task A4: confirm the cut
 

@@ -87,6 +87,9 @@ jobs:
       - name: mvm-core default build is runtime-free
         run: cargo run -p xtask -- check-core-runtime-free
 
+      - name: mvm-guest agent closure is runtime-free
+        run: cargo run -p xtask -- check-guest-agent-runtime-free
+
   test:
     name: Test
     runs-on: ubuntu-latest
