@@ -73,8 +73,10 @@ pub fn run_packet_pipeline<'a>(
             flow_key: None,
         };
     };
+    // `parsed` borrows raw_frame immutably; the per-observer loop below
+    // re-parses the current frame so a chained Modify is visible to the
+    // next observer.
     let flow_key = Some(parsed.five_tuple.flow_key());
-    drop(parsed); // re-parsed per observer below so chained Modify is visible
 
     // `owned` holds the live frame once an observer has rebuilt it.
     let mut owned: Option<Vec<u8>> = None;

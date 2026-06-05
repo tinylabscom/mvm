@@ -103,12 +103,12 @@ pub fn sweep_retention(root: &Path, max_age_days: u32) -> std::io::Result<u64> {
             continue;
         };
         for f in files.flatten() {
-            if let Ok(meta) = f.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if modified < cutoff && std::fs::remove_file(f.path()).is_ok() {
-                        removed += 1;
-                    }
-                }
+            let Ok(meta) = f.metadata() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if modified < cutoff && std::fs::remove_file(f.path()).is_ok() {
+                removed += 1;
             }
         }
     }
