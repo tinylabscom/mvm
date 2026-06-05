@@ -177,4 +177,25 @@ in
   overlay_aware_metadata_set_on_shell = (meta shellGuest).overlayAware == true;
   overlay_aware_metadata_set_on_command = (meta commandGuest).overlayAware == true;
   overlay_aware_metadata_set_on_services = (meta servicesGuest).overlayAware == true;
+
+  # ── Plan 165 WS-B B2: dev console wiring ──────────────────────
+  #
+  # `withDevShell` is the console-wiring fact: it gates the agent's
+  # PTY-over-vsock relay (and `do_exec`) via the `dev-shell` Cargo
+  # feature. A dev image wires the interactive console; a sealed
+  # image has no console symbol. These assert the surfaced metadata
+  # tracks the entrypoint classification AND its dev/sealed override.
+
+  dev_shell_image_wires_console = (meta shellGuest).withDevShell == true
+    && (meta shellGuest).accessible == true
+    && (meta shellGuest).entrypointKind == "shell";
+
+  sealed_command_image_has_no_console = (meta commandGuest).withDevShell == false
+    && (meta commandGuest).sealed == true;
+
+  # dev=true on a command entrypoint still wires the console
+  dev_override_command_wires_console = (meta commandAccessibleGuest).withDevShell == true;
+
+  # dev=false on a shell entrypoint drops the console
+  sealed_override_shell_has_no_console = (meta shellSealedGuest).withDevShell == false;
 }
