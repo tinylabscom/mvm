@@ -181,6 +181,92 @@ pub fn alpine_minirootfs_for_host_arch() -> Option<&'static BootstrapAsset> {
     }
 }
 
+// ============================================================================
+// Plan 160 — nix-tarball seed (the busybox/static-Nix replacement for the
+// Alpine minirootfs seed). The official Nix release tarball is a
+// self-contained `/nix/store` (nix + bash + curl + xz + nss-cacert) — no
+// apk, no Alpine, no external busybox, **no PGP** (SHA-256 pin only; the
+// hash is the binding integrity check, same as the Alpine tarball's).
+// ============================================================================
+
+/// Nix release we seed from. Bump in lockstep with the SHA-256 pins below.
+pub const NIX_SEED_VERSION: &str = "2.31.1";
+
+/// Official Nix release tarball for aarch64-linux guests (~23 MiB). When
+/// extracted, its `store/` IS a populated `/nix/store` carrying the `nix`
+/// binary + its runtime closure. `signature_url: None` — SHA-256 only.
+pub const NIX_SEED_AARCH64: BootstrapAsset = BootstrapAsset {
+    cache_filename: "nix-seed-aarch64.tar.xz",
+    url: "https://releases.nixos.org/nix/nix-2.31.1/nix-2.31.1-aarch64-linux.tar.xz",
+    sha256_hex: "4ae8cb26dada33765f3068d185b36dcfe23efba2ba678048b70d36d8b1553850",
+    signature_url: None,
+    mode: 0o644,
+};
+
+/// Official Nix release tarball for x86_64-linux guests (Linux KVM path).
+pub const NIX_SEED_X86_64: BootstrapAsset = BootstrapAsset {
+    cache_filename: "nix-seed-x86_64.tar.xz",
+    url: "https://releases.nixos.org/nix/nix-2.31.1/nix-2.31.1-x86_64-linux.tar.xz",
+    sha256_hex: "75f18f5d567bb8c7b5d62155f8c852e62ffac0c81acda02f52b998281e3603ce",
+    signature_url: None,
+    mode: 0o644,
+};
+
+/// The nix-seed asset table for the host's target arch (parallel to
+/// [`assets_for_host_arch`]; one asset, fed to [`prepare_assets`]).
+pub fn nix_seed_assets_for_host_arch() -> &'static [&'static BootstrapAsset] {
+    #[cfg(target_arch = "aarch64")]
+    {
+        &[&NIX_SEED_AARCH64]
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        &[&NIX_SEED_X86_64]
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        &[]
+    }
+}
+
+/// Resolve the nix-seed tarball asset for the host's target arch.
+pub fn nix_seed_for_host_arch() -> Option<&'static BootstrapAsset> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        Some(&NIX_SEED_AARCH64)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        Some(&NIX_SEED_X86_64)
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        None
+    }
+}
+
+/// Which Stage 0 seed to use: the legacy Alpine minirootfs (`alpine`,
+/// default) or the nix tarball (`nix`, plan 160). Selected by
+/// `MVM_STAGE0_SEED`; unknown values warn + fall back to `alpine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage0Seed {
+    Alpine,
+    Nix,
+}
+
+impl Stage0Seed {
+    pub fn from_env() -> Self {
+        match std::env::var("MVM_STAGE0_SEED").ok().as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("nix") => Stage0Seed::Nix,
+            Some(other) if !other.is_empty() && !other.eq_ignore_ascii_case("alpine") => {
+                eprintln!("mvm: unrecognized MVM_STAGE0_SEED={other:?}; using `alpine`");
+                Stage0Seed::Alpine
+            }
+            _ => Stage0Seed::Alpine,
+        }
+    }
+}
+
 /// `~/.cache/mvm/stage0/`. Materialized by [`prepare_assets`].
 pub fn stage0_cache_dir() -> PathBuf {
     // Honors MVM_CACHE_DIR / XDG_CACHE_HOME (parallel sessions isolate
@@ -453,6 +539,99 @@ pub fn materialize_root_dir_in(cache_dir: &Path, dest: &Path) -> Result<()> {
     write_file_mode(&dest.join("init"), INIT_SCRIPT.as_bytes(), 0o755)
         .context("writing Stage 0 /init")?;
 
+    Ok(())
+}
+
+/// Materialize a Stage 0 guest root from the **nix tarball seed** (plan
+/// 160). Parallel to [`materialize_root_dir`], but lays down the official
+/// Nix release tarball's `/nix/store` + the embedded `stage0-init` binary
+/// as `/init` — no Alpine, no apk, no shell `init.sh`. `stage0_init` is the
+/// extracted host-vm binary's bytes (the caller pulls it from
+/// `mvm_cli::host_binaries`); `mvm-build` can't reach the embed table
+/// itself (mvm-cli depends on mvm-build, not the reverse).
+pub fn materialize_nix_seed(dest: &Path, stage0_init: &[u8]) -> Result<()> {
+    materialize_nix_seed_in(&stage0_cache_dir(), dest, stage0_init)
+}
+
+/// Like [`materialize_nix_seed`] but reads the cached tarball from
+/// `cache_dir` (tests).
+pub fn materialize_nix_seed_in(cache_dir: &Path, dest: &Path, stage0_init: &[u8]) -> Result<()> {
+    let asset = nix_seed_for_host_arch().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Stage 0 has no nix-seed tarball pinned for this host's target arch \
+             (expected aarch64 or x86_64)"
+        )
+    })?;
+    let tarball = cache_dir.join(asset.cache_filename);
+    if !tarball.is_file() {
+        bail!(
+            "Stage 0 nix-seed asset missing: {} (run `prepare_assets` first)",
+            tarball.display()
+        );
+    }
+    if !verify_sha256(&tarball, asset.sha256_hex)? {
+        bail!(
+            "Stage 0 nix-seed sha256 mismatch at {} — refusing to extract a tampered \
+             tarball. Delete it and re-run `prepare_assets`.",
+            tarball.display()
+        );
+    }
+
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("creating Stage 0 root dir {}", dest.display()))?;
+
+    // The tarball is `nix-<ver>-<arch>-linux/{install,store/,.reginfo}`.
+    // Strip the top-level component so `store/` lands at `<dest>/nix/store/`.
+    extract_nix_store_tarball(&tarball, &dest.join("nix")).with_context(|| {
+        format!(
+            "extracting nix seed {} into {}/nix",
+            tarball.display(),
+            dest.display()
+        )
+    })?;
+
+    // Virtio-fs mount targets the init needs. `/nix` already exists from the
+    // extraction above.
+    for stub in ["work", "out", "mvm-bins"] {
+        let p = dest.join(stub);
+        std::fs::create_dir_all(&p)
+            .with_context(|| format!("creating Stage 0 stub dir {}", p.display()))?;
+    }
+
+    // The seed's PID 1 is the embedded `stage0-init` binary (not a shell
+    // script). `krun_set_exec` runs `/init`.
+    write_file_mode(&dest.join("init"), stage0_init, 0o755)
+        .context("writing Stage 0 /init (stage0-init binary)")?;
+
+    Ok(())
+}
+
+/// Extract the official Nix release tarball into `nix_dir` (= `<root>/nix`),
+/// stripping the leading `nix-<ver>-<arch>-linux/` component so `store/`
+/// lands at `<nix_dir>/store/`. The install scripts come along harmlessly;
+/// the guest never runs them.
+///
+/// First cut: shells to the host `tar` for the xz decode (macOS bsdtar +
+/// GNU tar both handle `.tar.xz` + `--strip-components`) to avoid adding an
+/// in-process lzma dependency. A pure-Rust xz decoder (matching the Alpine
+/// path's in-process extraction) is a plan-160 polish follow-up.
+fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(nix_dir).with_context(|| format!("creating {}", nix_dir.display()))?;
+    let status = std::process::Command::new("tar")
+        .arg("-xJf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(nix_dir)
+        .arg("--strip-components=1")
+        .status()
+        .with_context(|| format!("spawning tar to extract {}", tarball.display()))?;
+    if !status.success() {
+        bail!(
+            "tar exited {} extracting nix seed {}",
+            status.code().unwrap_or(-1),
+            tarball.display()
+        );
+    }
     Ok(())
 }
 

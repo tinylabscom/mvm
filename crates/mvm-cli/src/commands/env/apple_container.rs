@@ -1935,10 +1935,17 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // Plan 93 Phase 3: time each host-visible Stage 0 step and print a
     // one-line `[mvm] <step> … <secs>s` so perceived speed matches the
     // actual per-step wall-clock.
+    // Plan 160: `MVM_STAGE0_SEED=nix` swaps the Alpine minirootfs seed for
+    // the official Nix tarball + the embedded `stage0-init` PID 1. Default
+    // stays Alpine until the nix path is proven (0b).
+    let seed = mvm_build::stage0::Stage0Seed::from_env();
     let fetch_started = std::time::Instant::now();
-    let stage0_assets = mvm_build::stage0::assets_for_host_arch();
+    let stage0_assets = match seed {
+        mvm_build::stage0::Stage0Seed::Alpine => mvm_build::stage0::assets_for_host_arch(),
+        mvm_build::stage0::Stage0Seed::Nix => mvm_build::stage0::nix_seed_assets_for_host_arch(),
+    };
     let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
-        .context("preparing Stage 0 bootstrap assets (Alpine minirootfs + signature)")?;
+        .context("preparing Stage 0 bootstrap assets")?;
     ui::timed_step("Fetching Stage 0 bootstrap assets", fetch_started.elapsed());
     // One VendorBlobFetched audit entry per vendored blob (covers both
     // fresh fetch and cache revalidation), so every supply-chain trust
@@ -1952,9 +1959,8 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         );
     }
 
-    // Materialize the guest root tree (Alpine minirootfs + /init +
-    // stubs) under a stable per-host location. libkrun mounts this
-    // directory as the guest root via virtiofs.
+    // Materialize the guest root tree under a stable per-host location.
+    // libkrun mounts this directory as the guest root via virtiofs.
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
     if root_dir.exists() {
         std::fs::remove_dir_all(&root_dir).with_context(|| {
@@ -1962,8 +1968,34 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         })?;
     }
     let materialize_started = std::time::Instant::now();
-    mvm_build::stage0::materialize_root_dir(&root_dir)
-        .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
+    match seed {
+        mvm_build::stage0::Stage0Seed::Alpine => {
+            mvm_build::stage0::materialize_root_dir(&root_dir)
+                .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
+        }
+        mvm_build::stage0::Stage0Seed::Nix => {
+            // The seed's PID 1 is the embedded `stage0-init` binary. Pull its
+            // bytes from the embed table (refuse a zero-byte stub build).
+            let stage0_init = crate::host_binaries::embedded::EMBEDDED
+                .iter()
+                .find(|b| b.name == "stage0-init")
+                .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
+            if stage0_init.bytes.is_empty() {
+                anyhow::bail!(
+                    "embedded stage0-init is a zero-byte stub — this mvmctl was built with \
+                     MVM_SKIP_EMBED_BINARIES=1 and cannot seed a nix Stage 0; rebuild without it"
+                );
+            }
+            mvm_build::stage0::materialize_nix_seed(&root_dir, stage0_init.bytes).with_context(
+                || {
+                    format!(
+                        "materializing nix-seed Stage 0 root at {}",
+                        root_dir.display()
+                    )
+                },
+            )?;
+        }
+    }
     ui::timed_step(
         "Materializing Stage 0 root dir",
         materialize_started.elapsed(),
