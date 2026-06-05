@@ -100,7 +100,8 @@ jobs:
           "$BIN" metrics --json | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
-          assert 'requests_total' in d, 'metrics JSON missing requests_total'
+          # metrics JSON is sectioned: counters live under 'global'.
+          assert 'requests_total' in d.get('global', {}), 'metrics JSON missing global.requests_total'
           print('smoke test passed')
           "
 
