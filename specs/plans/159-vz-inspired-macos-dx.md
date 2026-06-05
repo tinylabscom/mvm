@@ -193,6 +193,8 @@ snapshots to the `apple_container` runtime tier (currently
 - [ ] First-class **fork**: branch a new sandbox lineage from a
       checkpoint (`fork <ckpt> [--new-id]`), reusing the per-instance CoW
       clone we already do.
+- [ ] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
+      (the reference's `diff` verb), for inspecting what a fork changed.
 - [ ] `--tag` to pin a checkpoint against GC; untagged ones follow cache
       retention (`cache prune` already exists — extend it).
 - [ ] Flip `apple_container` `capabilities()` to advertise the supported
@@ -240,6 +242,12 @@ artifacts are still locally built per ADR-046; this is only about how
       everywhere a machine-readable shape is useful (inspect/list/status).
 - [ ] Verb-vocabulary consistency pass (list/inspect/rm/logs/exec)
       across vm/image/network surfaces. Polish, not new capability.
+- [ ] Resume ergonomics: `-c/--continue` (re-attach the most recent
+      sandbox), `-r/--resume <id>`, and `--ephemeral` (auto-clean when
+      safe) — the reference's session-continuity flags.
+- [ ] Streamed `exec`: confirm `mvmctl exec` streams stdout/stderr/exit
+      in source order (the reference's `StreamExecOutput`), not just
+      capture-then-return.
 
 ### WS-6 — Decision-gated (notes only; each needs sign-off before work)
 
@@ -263,6 +271,40 @@ invariants**; capture them so the decision is explicit, don't start them.
       design. A multi-service `stack` is an orchestration concept that
       lives in **mvmd**, not mvmctl (`feedback_prod_gate_lives_in_mvmd`).
       Decide the boundary before cloning any compose UX.
+
+## vz DX/UX parity checklist
+
+Every DX/UX feature from the reference, mapped to its disposition — so
+coverage is auditable and nothing falls through. "exists" = we already
+have it; "WS-n" = owned by a workstream above; a plan number = owned
+elsewhere; "candidate" = not yet owned, decision needed.
+
+| Reference DX/UX feature | Disposition |
+|---|---|
+| Resident warm daemon → "instant" feel | **WS-1** (warm pool; mvmd-routed, idle-evicting local manager) |
+| `run` / `run -i` one-shot in project VM | exists (`mvmctl up`/`run`/`console`) + **WS-5** polish |
+| No-SSH vsock `exec` | exists (guest agent, vsock 5252) |
+| Streamed `exec` (stdout/stderr/exit in order) | **WS-5** (confirm streaming) |
+| Interactive `attach` / shell | exists (`mvmctl console`, PTY-over-vsock) |
+| `checkpoint create/restore/fork`, tiered `fs_quick`/`vm_full` | **WS-2** |
+| `checkpoint diff` (versioned) | **WS-2** |
+| `--tag` pin against GC | **WS-2** |
+| `self-sign` entitlement repair | **WS-3** (`mvmctl sign`) |
+| `--json` everywhere + docker-style verb parity | **WS-5** |
+| `-c/--continue` / `-r/--resume` / `--ephemeral` | **WS-5** (resume ergonomics) |
+| Honest one-time-cost + local-first + resumable downloads | **WS-4** |
+| Install one-liner (`curl \| sh`) for CLI/agent | **WS-4** (release-install path) |
+| Reach host services (`host.*.internal`) | **Plan 104** — brokered `host.fetch.v1`/`host.endpoint.v1` (not raw NAT) |
+| Published ~1s boot metric | **Plan 127** bench (WS-1 publishes warm-vs-cold) |
+| Background-daemon `logs` | **WS-1** (`dev status`/`doctor` + logs) |
+| `init` project autodetect → config file | **WS-6** (decision-gated vs hermetic-Nix `--flake`) |
+| macOS guests (IPSW / `VZMacOSBootLoader`) | **WS-6** (decision-gated; needs ADR) |
+| OCI / Compose `stack` | **WS-6** + `mvm-oci` for images; multi-service `stack` is mvmd's domain |
+| **Signed patch / binary-delta image distribution** (`vm patch create-delta`/`apply-delta`) | **candidate — not yet owned.** Overlaps `mvm-oci` provenance + Plan 155 (portable artifacts) / 156 (binary size). Decide whether to route there or spec separately before claiming DX parity. |
+
+The only **uncaptured** item is signed patch/delta image distribution
+(last row). Everything else is either already in mvm, owned by a
+workstream here, or owned by a named neighbor plan.
 
 ## Non-goals
 
