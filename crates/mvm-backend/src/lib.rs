@@ -60,6 +60,8 @@ pub mod mock;
 pub mod mock_guest_agent;
 pub mod netinit_audit;
 pub mod network;
+/// plan 123 A1 step 2 — `NetworkProvider` impl over the bridge+TAP path.
+pub mod network_provider;
 /// Apple Container / Apple Virtualization.framework runtime interface
 /// (objc2 + Swift bridge, process spawn + verity wiring) — folded in
 /// from the former `mvm-providers` crate (plan 121 C2). The

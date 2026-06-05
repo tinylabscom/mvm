@@ -35,6 +35,9 @@ authors.workspace = true
 # previous `mvm-backend` → `mvm` re-export façade is gone.
 [dependencies]
 mvm-core.workspace = true
+# plan 123 A1 step 2 — the NetworkProvider seam this crate implements
+# (BridgeTapNetworkProvider). Acyclic: mvm-network deps only mvm-core + mvm-sdk.
+mvm-network.workspace = true
 mvm-guest.workspace = true
 # `mvm-build` for the W2 overlay-aware admission gate
 # (`builder_vm::admit_overlay_aware`) called from every backend's

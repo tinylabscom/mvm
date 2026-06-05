@@ -3066,6 +3066,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
+ "mvm-network",
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",
