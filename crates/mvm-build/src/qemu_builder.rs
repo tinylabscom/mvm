@@ -38,17 +38,17 @@ impl QemuBuilderVm {
 impl BuilderVm for QemuBuilderVm {
     fn run_build(
         &self,
-        _job: &BuilderJob,
-        _mounts: &BuilderMounts,
+        job: &BuilderJob,
+        mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
-        // Phase 1 implements Stage 0 (the from-source builder-VM bootstrap).
-        // Steady-state `run_build` on QEMU is Plan 166 Phase 2.
-        Err(BuilderVmError::VmmUnavailable {
-            requested: "qemu-run-build".to_string(),
-            reason: "the QEMU builder backend implements Stage 0 today; \
-                     steady-state run_build is Plan 166 Phase 2."
-                .to_string(),
-        })
+        // Steady-state builds (Plan 166 Task 1.5). The real impl lives in
+        // `run_build_qemu` behind the `builder-vm` feature (it reaches into
+        // `libkrun_builder`'s cache/image helpers, which link `libkrun-sys`).
+        // `qemu_builder` itself is ungated so it compiles everywhere; the
+        // backend is only ever *constructed* under `builder-vm` (via
+        // `builder_backend_select`), so the non-feature arm is dead in
+        // practice but keeps the default build green.
+        run_build_qemu(job, mounts)
     }
 
     fn run_stage0(
@@ -394,4 +394,448 @@ fn tail(s: &str, n: usize) -> String {
 
 fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
     BuilderVmError::ExtractionFailed(format!("{ctx} {}: {e}", path.display()))
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Task 1.5 — steady-state QEMU builds (`run_build`).
+//
+// Stage 0 boots the stock distro kernel + initramfs to *produce* the
+// builder image. `run_build` boots the image Stage 0 emitted — the mvm
+// builder `vmlinux` + `rootfs.ext4`. That kernel carries
+// virtio-blk/net/pci/console + virtio-fs + ext4 *built-in*, so it mounts
+// the ext4 rootfs directly with no initramfs and no ext4-disk-share
+// workaround, and `mvm-host-vm-init` (PID 1, UNCHANGED) mounts the same
+// virtio-fs tags + persistent `/dev/vdb` nix store it does under
+// libkrun/Vz, runs `/job/cmd.sh`, writes `/job/result`, and powers off.
+//
+// Devices, matched to what the unchanged guest expects:
+//   - vda  virtio-blk  the builder `rootfs.ext4` (mounted `ro`)
+//   - vdb  virtio-blk  the persistent nix-store image (`/nix` overlay upper)
+//   - virtio-fs tags `work` `out` `job` `mvm-bins` over vhost-user/virtiofsd
+//   - virtio-net-pci + user-mode (slirp); slirp's DHCP feeds the guest's
+//     `udhcpc -i eth0` (we force `net.ifnames=0` so the NIC comes up `eth0`)
+//
+// The job protocol is the shared one (`stage_job_dir` writes /job/cmd.sh;
+// `finalize_flake_job` reads /job/result), so `BuilderArtifacts` is
+// byte-identical regardless of which VMM ran the build.
+
+/// Guest RAM (MiB) + vCPUs for a QEMU steady-state build. Mirror the
+/// values Plan 166 Phase 1 proved on the x86_64 box for Stage 0 — same
+/// build class on the same hardware. The `memory-backend-memfd` is lazily
+/// backed, so the figure is a ceiling, not a reservation.
+#[cfg(feature = "builder-vm")]
+const QEMU_BUILD_MEMORY_MIB: u32 = 8192;
+#[cfg(feature = "builder-vm")]
+const QEMU_BUILD_VCPUS: u8 = 6;
+
+#[cfg(not(feature = "builder-vm"))]
+fn run_build_qemu(
+    job: &BuilderJob,
+    mounts: &BuilderMounts,
+) -> Result<BuilderArtifacts, BuilderVmError> {
+    let _ = (job, mounts);
+    Err(BuilderVmError::VmmUnavailable {
+        requested: "qemu-run-build".to_string(),
+        reason: "the QEMU builder backend requires the `builder-vm` feature".to_string(),
+    })
+}
+
+#[cfg(feature = "builder-vm")]
+fn run_build_qemu(
+    job: &BuilderJob,
+    mounts: &BuilderMounts,
+) -> Result<BuilderArtifacts, BuilderVmError> {
+    use crate::builder_vm_runtime::{
+        acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job, finalize_install_job,
+        stage_job_dir,
+    };
+    use crate::libkrun_builder::{
+        BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
+        host_arch_tag, unique_job_id,
+    };
+
+    // 1. Validate caller inputs early — clearer than a QEMU launch failure.
+    validate_build_mounts(mounts)?;
+    validate_build_job(job)?;
+
+    // 2. Locate the host tooling up front.
+    let qemu_bin = locate_qemu()?;
+    let virtiofsd_bin = locate_virtiofsd()?;
+
+    // 3. Resolve the cached builder image (kernel + rootfs + cmdline) the
+    //    Stage 0 path promoted. `run_build` never takes the RootDir shape.
+    let (kernel, rootfs, image_cmdline) = match ensure_builder_vm_image()? {
+        BuilderVmImage::Rootfs {
+            kernel_path,
+            rootfs_path,
+            cmdline,
+        } => (kernel_path, rootfs_path, cmdline),
+        BuilderVmImage::RootDir { .. } => {
+            return Err(BuilderVmError::ExtractionFailed(
+                "QEMU run_build requires a steady-state Rootfs builder image but got a RootDir \
+                 (Stage 0) image. Re-bootstrap the builder VM."
+                    .to_string(),
+            ));
+        }
+    };
+
+    // 4. Allocate / lock the persistent `/nix-store` virtio-blk image
+    //    (vdb). Shared with the libkrun/Vz builders via the same flock so
+    //    a warm store carries across backends; the lock serialises writers.
+    let nix_store_lock = acquire_nix_store_image_lock(
+        &builder_vm_cache_dir(),
+        host_arch_tag(),
+        u64::from(DEFAULT_NIX_STORE_MIB),
+    )?;
+
+    // 5. Stage the per-build job dir (Flake → cmd.sh; Install → spec).
+    let job_id = unique_job_id();
+    let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
+    stage_job_dir(
+        &job_dir,
+        job,
+        mounts.staged_user_flake.as_deref(),
+        // Override mode mounts the workspace at /work; stage its filtered
+        // cargo tree so the build can pin `mvm/mvm-workspace` to it.
+        mounts
+            .staged_user_flake
+            .as_ref()
+            .map(|_| mounts.flake_src.as_path()),
+    )?;
+
+    // 6. Per-VM state dir + serial console log (the same console.log
+    //    convention the libkrun path uses for post-mortem).
+    let vm_name = format!("mvm-builder-qemu-{job_id}");
+    let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
+    std::fs::create_dir_all(&vm_state_dir)
+        .map_err(|e| io_err("creating QEMU builder VM state dir", &vm_state_dir, e))?;
+    let console_log = vm_state_dir.join("console.log");
+
+    // 7. KVM vs TCG.
+    let kvm = kvm_available();
+    if !kvm {
+        eprintln!("[mvm] QEMU running unaccelerated (TCG) — no /dev/kvm; this build will be slow.");
+    }
+
+    // 8. Bring up one virtiofsd per share BEFORE QEMU (QEMU connects to
+    //    their sockets as a client at launch, so they must be ready). The
+    //    guest mounts each by tag; `work`/`mvm-bins` are inputs it mounts
+    //    read-only (`virtiofs_tag_is_read_only`), `out`/`job` read-write.
+    let shares = [
+        ("work", mounts.flake_src.as_path()),
+        ("out", mounts.artifact_out.as_path()),
+        ("job", job_dir.as_path()),
+        ("mvm-bins", mounts.host_bin_dir.as_path()),
+    ];
+    let mut virtiofsd = VirtiofsdGuard::default();
+    for (tag, dir) in shares {
+        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        virtiofsd.spawn(&virtiofsd_bin, tag, &sock, dir)?;
+    }
+
+    // 9. Build the QEMU cmdline from the image's (swap hvc0→ttyS0, force
+    //    eth0, mark the backend); `root=/dev/vda ro init=…` ride unchanged.
+    let cmdline = qemu_build_cmdline(&image_cmdline);
+
+    // 10. Launch QEMU, serial → console.log, wrapped in `timeout`.
+    let timeout_secs = builder_vm_timeout()?.as_secs();
+    let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
+    let mut cmd = Command::new("timeout");
+    cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
+    cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    if kvm {
+        cmd.args(["-enable-kvm", "-cpu", "host"]);
+    } else {
+        cmd.args(["-cpu", "max"]);
+    }
+    cmd.arg("-kernel").arg(&kernel);
+    cmd.arg("-append").arg(&cmdline);
+    // Root disk (vda) + persistent nix store (vdb). The guest mounts vda
+    // `ro`, so the cached `rootfs.ext4` stays pristine across builds even
+    // though the block device is attached writable (mirrors libkrun). vdb
+    // lands at `/dev/vdb`, exactly where mvm-host-vm-init expects it.
+    cmd.arg("-drive")
+        .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw",
+        nix_store_lock.path().display()
+    ));
+    // Shared memory backend required by vhost-user-fs (virtiofs). Its size
+    // MUST equal `-m`.
+    cmd.args([
+        "-object",
+        &format!("memory-backend-memfd,id=mem,size={mem_arg},share=on"),
+        "-numa",
+        "node,memdev=mem",
+    ]);
+    for (tag, _) in shares {
+        let sock = vm_state_dir.join(format!("vfs-{tag}.sock"));
+        cmd.arg("-chardev")
+            .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
+        cmd.arg("-device").arg(format!(
+            "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
+        ));
+    }
+    cmd.args([
+        "-netdev",
+        "user,id=n0",
+        "-device",
+        "virtio-net-pci,netdev=n0",
+    ]);
+    cmd.args(["-display", "none"]);
+    cmd.arg("-serial")
+        .arg(format!("file:{}", console_log.display()));
+    cmd.args(["-monitor", "none", "-no-reboot"]);
+
+    let status = cmd
+        .status()
+        .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
+
+    // 11. virtiofsd is no longer needed once QEMU has exited.
+    drop(virtiofsd);
+
+    if !status.success() && status.code() == Some(124) {
+        return Err(BuilderVmError::NixBuildFailed(format!(
+            "QEMU builder VM timed out after {timeout_secs}s; console at {}",
+            console_log.display()
+        )));
+    }
+
+    // 12. Per-variant finalize via the shared job protocol — identical to
+    //     the libkrun/Vz paths, so the BuilderArtifacts is byte-identical
+    //     regardless of VMM. Flake reads /job/result + validates
+    //     /out/rootfs.ext4; Install reads /out/result.json.
+    let artifacts = match job {
+        BuilderJob::Flake { .. } => finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id),
+        BuilderJob::Install { .. } => finalize_install_job(&mounts.artifact_out),
+    }?;
+    drop(nix_store_lock);
+    Ok(artifacts)
+}
+
+/// Validate the caller's mount paths before launching QEMU. Mirrors
+/// `LibkrunBuilderVm::validate_mounts` minus the libkrun-specific
+/// non-UTF-8/CString guard (QEMU takes paths as process args).
+#[cfg(feature = "builder-vm")]
+fn validate_build_mounts(mounts: &BuilderMounts) -> Result<(), BuilderVmError> {
+    if !mounts.flake_src.is_dir() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "flake source must be an existing directory: {}",
+            mounts.flake_src.display()
+        )));
+    }
+    if !mounts.host_bin_dir.is_dir() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "host_bin_dir must be an existing directory: {}",
+            mounts.host_bin_dir.display()
+        )));
+    }
+    std::fs::create_dir_all(&mounts.artifact_out)
+        .map_err(|e| io_err("creating artifact_out", &mounts.artifact_out, e))?;
+    Ok(())
+}
+
+/// Validate the job description. Same checks as
+/// `LibkrunBuilderVm::validate_job`.
+#[cfg(feature = "builder-vm")]
+fn validate_build_job(job: &BuilderJob) -> Result<(), BuilderVmError> {
+    match job {
+        BuilderJob::Flake {
+            flake_ref,
+            attr_path,
+        } => {
+            if flake_ref.trim().is_empty() {
+                return Err(BuilderVmError::NixBuildFailed(
+                    "BuilderJob.flake_ref is empty".to_string(),
+                ));
+            }
+            if attr_path.trim().is_empty() {
+                return Err(BuilderVmError::NixBuildFailed(
+                    "BuilderJob.attr_path is empty".to_string(),
+                ));
+            }
+        }
+        BuilderJob::Install { spec_path } => {
+            if !spec_path.is_file() {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "BuilderJob::Install spec_path does not exist or is not a file: {}",
+                    spec_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `virtiofsd` on the host. Distro packages drop it outside `$PATH`, so
+/// probe the common locations before falling back to a PATH lookup.
+#[cfg(feature = "builder-vm")]
+fn locate_virtiofsd() -> Result<PathBuf, BuilderVmError> {
+    for cand in [
+        "/usr/lib/qemu/virtiofsd",
+        "/usr/libexec/virtiofsd",
+        "/usr/lib/virtiofsd",
+    ] {
+        let p = Path::new(cand);
+        if p.is_file() {
+            return Ok(p.to_path_buf());
+        }
+    }
+    which::which("virtiofsd").map_err(|_| BuilderVmError::VmmUnavailable {
+        requested: "virtiofsd".to_string(),
+        reason: "`virtiofsd` not found (looked in /usr/lib/qemu, /usr/libexec, /usr/lib, and \
+                 $PATH). Install it (`apt install virtiofsd`; it also ships alongside \
+                 qemu-system on many distros)."
+            .to_string(),
+    })
+}
+
+/// Owns the per-share `virtiofsd` child processes for one build and kills
+/// them (and removes their sockets) on drop, so a failed build never
+/// leaks daemons. Load-bearing: the guard must outlive the QEMU child.
+#[cfg(feature = "builder-vm")]
+#[derive(Default)]
+struct VirtiofsdGuard {
+    procs: Vec<(std::process::Child, PathBuf)>,
+}
+
+#[cfg(feature = "builder-vm")]
+impl VirtiofsdGuard {
+    /// Spawn a `virtiofsd` exporting `dir` on the unix socket `sock`, then
+    /// block until the socket exists (QEMU connects to it as a client at
+    /// launch). Read-only enforcement is the guest's job
+    /// (`virtiofs_tag_is_read_only`), matching the libkrun path.
+    fn spawn(
+        &mut self,
+        bin: &Path,
+        tag: &str,
+        sock: &Path,
+        dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        let _ = std::fs::remove_file(sock);
+        let child = Command::new(bin)
+            .arg(format!("--socket-path={}", sock.display()))
+            .arg(format!("--shared-dir={}", dir.display()))
+            // No user-namespace sandbox: the builder VM *is* the isolation
+            // boundary (dev tier, ADR-072), and `--sandbox none` avoids the
+            // CAP_SYS_ADMIN pivot_root virtiofsd would otherwise need.
+            .args(["--sandbox", "none"])
+            .spawn()
+            .map_err(|e| BuilderVmError::VmmUnavailable {
+                requested: "virtiofsd".to_string(),
+                reason: format!("spawning {} for tag {tag}: {e}", bin.display()),
+            })?;
+        self.procs.push((child, sock.to_path_buf()));
+        wait_for_socket(sock, std::time::Duration::from_secs(10)).map_err(|e| {
+            BuilderVmError::VmmUnavailable {
+                requested: "virtiofsd".to_string(),
+                reason: format!(
+                    "virtiofsd for tag {tag} never created its socket {}: {e}",
+                    sock.display()
+                ),
+            }
+        })
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+impl Drop for VirtiofsdGuard {
+    fn drop(&mut self) {
+        for (child, sock) in &mut self.procs {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&*sock);
+        }
+    }
+}
+
+/// Poll until `sock` appears or `timeout` elapses.
+#[cfg(feature = "builder-vm")]
+fn wait_for_socket(sock: &Path, timeout: std::time::Duration) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if sock.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(format!("timed out after {timeout:?}"))
+}
+
+/// Adapt the cached builder-image kernel cmdline for a QEMU boot. The
+/// image cmdline is libkrun-flavoured (`console=hvc0 root=/dev/vda ro
+/// rootfstype=ext4 init=/sbin/mvm-host-vm-init`); for QEMU we swap the
+/// virtio-console for the serial line QEMU captures to `console.log`,
+/// force `net.ifnames=0` so the slirp NIC comes up as `eth0`
+/// (mvm-host-vm-init's `udhcpc -i eth0` is unchanged), mark
+/// `mvm.backend=qemu`, and set `panic=-1` so a guest panic reboots →
+/// `-no-reboot` makes QEMU exit (the host then surfaces the missing
+/// `/job/result` as a crash).
+///
+/// `root=/dev/vda ro init=…` are preserved from the image verbatim — the
+/// guest mounts the rootfs **read-only** (matching libkrun's proven
+/// contract), so the shared cached image stays pristine across builds.
+/// (Plan 166 Task 1.5 sketched `rw`; `ro` is the proven guest contract
+/// and protects the cache, so we keep it — the guest writes only to the
+/// `/dev/vdb` overlay, the virtio-fs shares, and tmpfs.)
+///
+/// Idempotent: running it on its own output is a no-op.
+#[cfg(any(feature = "builder-vm", test))]
+fn qemu_build_cmdline(image_cmdline: &str) -> String {
+    let mut s = image_cmdline.trim().to_string();
+    if s.contains("console=hvc0") {
+        s = s.replace("console=hvc0", "console=ttyS0");
+    } else if !s.split_whitespace().any(|t| t == "console=ttyS0") {
+        s = format!("console=ttyS0 {s}");
+    }
+    for tok in ["mvm.backend=qemu", "net.ifnames=0", "panic=-1"] {
+        if !s.split_whitespace().any(|t| t == tok) {
+            s.push(' ');
+            s.push_str(tok);
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cmdline_swaps_hvc0_for_serial_and_adds_qemu_markers() {
+        let img = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init";
+        let out = qemu_build_cmdline(img);
+        assert!(out.contains("console=ttyS0"), "got: {out}");
+        assert!(!out.contains("hvc0"), "got: {out}");
+        // init + root + ro are preserved from the image verbatim.
+        assert!(out.contains("init=/sbin/mvm-host-vm-init"), "got: {out}");
+        assert!(out.contains("root=/dev/vda"), "got: {out}");
+        assert!(out.split_whitespace().any(|t| t == "ro"), "got: {out}");
+        // QEMU markers appended.
+        assert!(
+            out.split_whitespace().any(|t| t == "mvm.backend=qemu"),
+            "got: {out}"
+        );
+        assert!(
+            out.split_whitespace().any(|t| t == "net.ifnames=0"),
+            "got: {out}"
+        );
+        assert!(
+            out.split_whitespace().any(|t| t == "panic=-1"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn cmdline_is_idempotent() {
+        let once = qemu_build_cmdline("console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init");
+        let twice = qemu_build_cmdline(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn cmdline_adds_serial_when_no_console_present() {
+        let out = qemu_build_cmdline("root=/dev/vda ro init=/sbin/mvm-host-vm-init");
+        assert!(out.starts_with("console=ttyS0 "), "got: {out}");
+    }
 }
