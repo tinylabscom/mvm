@@ -51,6 +51,11 @@ lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-guest.workspace = true
+# plan 123 A/L3 — `LibkrunNetworkProvider` impls the `NetworkProvider`
+# seam. mvm-network deps only mvm-core + mvm-sdk, so this edge is acyclic.
+# Optional + folded into `builder-vm`: the provider is gated with
+# `libkrun_builder`, so a default build pulls neither.
+mvm-network = { workspace = true, optional = true }
 # Plan 73 Followup B.1 — `install_app_deps` reuses
 # `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
 # for cache-hit verification. The orchestrator owns the cache
@@ -129,7 +134,7 @@ dev-shell = []
 # `mvm-libkrun` FFI crate which itself gates the underlying
 # `libkrun-sys` bindings.
 contributor-bootstrap = []
-builder-vm = ["dep:libkrun-sys"]
+builder-vm = ["dep:libkrun-sys", "dep:mvm-network"]
 
 [lints]
 workspace = true
