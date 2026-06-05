@@ -401,6 +401,38 @@ pub fn resolve_supervisor_components_with_dir(
     }
 }
 
+/// Load the tenant `PolicyBundle` a plan resolves to, for delivery to the
+/// supervisor's L4 gate + observers via `VmStartConfig.bundle_json` (plan 123
+/// Slice 3 (b)). `None` for a local-default plan — no per-tenant policy, so the
+/// bridge enforces mandatory-deny only. Errors identically to
+/// [`resolve_supervisor_components`] on a missing or malformed bundle, so
+/// admission fails closed before boot.
+pub fn resolve_policy_bundle(
+    plan: &ExecutionPlan,
+) -> Result<Option<mvm_core::policy::PolicyBundle>, ResolveError> {
+    resolve_policy_bundle_with_dir(plan, &default_policy_dir())
+}
+
+/// Test seam for [`resolve_policy_bundle`] — same, with a caller-supplied
+/// policy-bundle base dir instead of `$HOME/.mvm/policies`.
+pub fn resolve_policy_bundle_with_dir(
+    plan: &ExecutionPlan,
+    base_dir: &std::path::Path,
+) -> Result<Option<mvm_core::policy::PolicyBundle>, ResolveError> {
+    let PolicyRef(network) = &plan.network_policy;
+    let FsPolicyRef(fs) = &plan.fs_policy;
+    let PolicyRef(egress) = &plan.egress_policy;
+    let PolicyRef(tool) = &plan.tool_policy;
+
+    match classify_plan_refs(network, fs, egress, tool)? {
+        RefShape::LocalDefault => Ok(None),
+        RefShape::TenantWorkload { tenant, workload } => Ok(Some(load_tenant_workload(
+            base_dir, network, tenant, workload,
+        )?)),
+        RefShape::Unrecognized => unreachable!("classify_plan_refs handled Unrecognized"),
+    }
+}
+
 fn noop_slots() -> ResolvedSlots {
     ResolvedSlots {
         network: Box::new(NoopL4Gate),
@@ -1419,6 +1451,39 @@ disabled_inspectors = [{list}]
 [audit]
 "#,
         )
+    }
+
+    #[test]
+    fn resolve_policy_bundle_loads_for_a_tenant_workload_plan() {
+        // Slice 3 (b): a tenant:workload plan resolves to the on-disk
+        // PolicyBundle the supervisor's L4 gate + observers consume.
+        let tmp = tempfile::tempdir().unwrap();
+        write_bundle(
+            tmp.path(),
+            "acme",
+            "web-worker",
+            &fixture_bundle_with_tool_allow("web_search"),
+        );
+        let mut plan = fixture_plan();
+        set_all_refs(&mut plan, "acme:web-worker");
+
+        let bundle = resolve_policy_bundle_with_dir(&plan, tmp.path())
+            .expect("resolve ok")
+            .expect("a tenant:workload plan yields a bundle");
+        let expected =
+            mvm_core::policy::toml_loader::load_bundle_from_path(tmp.path(), "acme", "web-worker")
+                .unwrap();
+        assert_eq!(bundle, expected);
+    }
+
+    #[test]
+    fn resolve_policy_bundle_is_none_for_local_default() {
+        // A local-default plan has no per-tenant policy → None (the bridge
+        // enforces mandatory-deny only); the policy dir is never touched.
+        let plan = fixture_plan();
+        let result = resolve_policy_bundle_with_dir(&plan, std::path::Path::new("/nonexistent"))
+            .expect("resolve ok");
+        assert!(result.is_none());
     }
 
     #[test]

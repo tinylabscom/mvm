@@ -25,8 +25,8 @@ use super::plan_admission::{
 };
 use super::plan_builder::SynthesisInput;
 use super::policy_resolver::{
-    LOCAL_DEFAULT, ResolveError, resolve_supervisor_components,
-    resolve_supervisor_components_with_dir,
+    LOCAL_DEFAULT, ResolveError, resolve_policy_bundle, resolve_policy_bundle_with_dir,
+    resolve_supervisor_components, resolve_supervisor_components_with_dir,
 };
 use super::shared::{
     VmStartParams, VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
@@ -34,6 +34,7 @@ use super::shared::{
     parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files, request_port_forward,
     resolve_flake_ref, resolve_network_policy, vm_volume_from_spec_validated, wait_for_guest_agent,
 };
+use mvm_core::policy::PolicyBundle;
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
 /// the workspace `clippy::too_many_arguments = "deny"` ceiling and so
@@ -191,6 +192,9 @@ fn plan_seccomp_tier(
 pub(super) struct AdmissionContext {
     pub(super) admitted: AdmittedPlan,
     pub(super) emitter: AuditEmitter,
+    /// The resolved tenant `PolicyBundle` (Slice 3 (b)) the bridge enforces
+    /// per-tenant L4 egress against; `None` for a local-default plan.
+    pub(super) policy_bundle: Option<PolicyBundle>,
 }
 
 // allow(secret-debug): hand-written Debug elides the AuditEmitter's
@@ -387,7 +391,22 @@ fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<Admission
     // loudly *now* instead of silently passing through with Noops.
     emit_policy_resolved(&admitted.plan, &emitter, resolved.slots_mode);
 
-    Ok(Some(AdmissionContext { admitted, emitter }))
+    // Slice 3 (b) — load the resolved tenant PolicyBundle (None for a
+    // local-default plan) so populate_audit_substrate can deliver it to the
+    // bridge for per-tenant L4 egress enforcement. resolve_policy_for_admission
+    // above already validated the refs, so a well-formed bundle won't surface a
+    // new error class here.
+    let policy_bundle = match p.policy_dir {
+        Some(dir) => resolve_policy_bundle_with_dir(&admitted.plan, dir),
+        None => resolve_policy_bundle(&admitted.plan),
+    }
+    .context("loading the tenant policy bundle for the bridge")?;
+
+    Ok(Some(AdmissionContext {
+        admitted,
+        emitter,
+        policy_bundle,
+    }))
 }
 
 #[derive(Debug)]
@@ -1393,7 +1412,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // the bridge-factory path. None keeps the legacy supervisor path
         // for no-admission flows.
         if let Some(ctx) = admission.as_ref() {
-            populate_audit_substrate(&mut start_config, &ctx.admitted)?;
+            populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
             // Plan 113 §Task 13 — Firecracker bridge sidecar reads
             // plan.json + bundle.json from the per-VM state dir at
             // spawn time. Stash them now (mode 0600, tmp+rename).
@@ -1874,7 +1893,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             .map(|v| v == "1")
             .unwrap_or(false);
         if gateway_bridge_enabled && let Some(ctx) = admission_main.as_ref() {
-            populate_audit_substrate(&mut start_config, &ctx.admitted)?;
+            populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
             // Plan 113 §Task 13 — stash plan.json + bundle.json for the
             // Firecracker bridge sidecar to read at spawn time.
             stash_plan_for_bridge(&start_config)?;
@@ -2254,7 +2273,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             // admission (watch_admission); same substrate threading as the
             // main path. None → legacy supervisor path.
             if let Some(ctx) = watch_admission.as_ref() {
-                populate_audit_substrate(&mut w_start_config, &ctx.admitted)?;
+                populate_audit_substrate(
+                    &mut w_start_config,
+                    &ctx.admitted,
+                    ctx.policy_bundle.as_ref(),
+                )?;
                 // Plan 113 §Task 13 — re-stash plan.json + bundle.json
                 // for the Firecracker bridge sidecar on every watch-loop
                 // re-boot; the prior admission's files are stale.
