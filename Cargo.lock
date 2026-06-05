@@ -3255,6 +3255,7 @@ dependencies = [
  "mvm",
  "mvm-backend",
  "mvm-core",
+ "mvm-network",
  "mvm-sdk",
  "mvm-verify",
  "rand 0.8.6",
