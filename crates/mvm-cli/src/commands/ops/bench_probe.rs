@@ -129,7 +129,7 @@ pub fn boot_measure_once(vm_name: &str) -> Result<BootMarks> {
         memory_mib: 512,
         ..Default::default()
     };
-    populate_audit_substrate(&mut cfg, &admitted)?;
+    populate_audit_substrate(&mut cfg, &admitted, None)?;
 
     let backend = mvm_backend::LibkrunBackend;
     let start = Instant::now();

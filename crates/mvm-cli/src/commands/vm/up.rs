@@ -1393,7 +1393,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // the bridge-factory path. None keeps the legacy supervisor path
         // for no-admission flows.
         if let Some(ctx) = admission.as_ref() {
-            populate_audit_substrate(&mut start_config, &ctx.admitted)?;
+            populate_audit_substrate(&mut start_config, &ctx.admitted, None)?;
             // Plan 113 §Task 13 — Firecracker bridge sidecar reads
             // plan.json + bundle.json from the per-VM state dir at
             // spawn time. Stash them now (mode 0600, tmp+rename).
@@ -1874,7 +1874,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             .map(|v| v == "1")
             .unwrap_or(false);
         if gateway_bridge_enabled && let Some(ctx) = admission_main.as_ref() {
-            populate_audit_substrate(&mut start_config, &ctx.admitted)?;
+            populate_audit_substrate(&mut start_config, &ctx.admitted, None)?;
             // Plan 113 §Task 13 — stash plan.json + bundle.json for the
             // Firecracker bridge sidecar to read at spawn time.
             stash_plan_for_bridge(&start_config)?;
@@ -2254,7 +2254,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             // admission (watch_admission); same substrate threading as the
             // main path. None → legacy supervisor path.
             if let Some(ctx) = watch_admission.as_ref() {
-                populate_audit_substrate(&mut w_start_config, &ctx.admitted)?;
+                populate_audit_substrate(&mut w_start_config, &ctx.admitted, None)?;
                 // Plan 113 §Task 13 — re-stash plan.json + bundle.json
                 // for the Firecracker bridge sidecar on every watch-loop
                 // re-boot; the prior admission's files are stale.

@@ -50,6 +50,7 @@ use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
     sign_plan, verify_plan, verify_plan_bundle,
 };
+use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
 
 use super::host_signer::host_signer_id;
@@ -246,6 +247,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub fn populate_audit_substrate(
     cfg: &mut mvm_core::vm_backend::VmStartConfig,
     admitted: &AdmittedPlan,
+    policy_bundle: Option<&PolicyBundle>,
 ) -> Result<()> {
     cfg.tenant_id = Some(admitted.plan.tenant.0.clone());
 
@@ -260,10 +262,17 @@ pub fn populate_audit_substrate(
     }
     cfg.plan_json = Some(plan_json);
 
-    cfg.bundle_json = match admitted.plan.bundle.as_ref() {
-        Some(pin) => {
-            let bj = serde_json::to_string(pin)
-                .context("serializing PlanArtifact bundle pin for VmStartConfig.bundle_json")?;
+    // `bundle_json` carries the resolved tenant **PolicyBundle** (network /
+    // egress / tool policy) that the supervisor's L4 gate + observers consume.
+    // It is NOT the ExecutionPlan's `.mvmpkg` artifact pin
+    // (`admitted.plan.bundle`, a `PlanArtifact` — content-addressed
+    // kernel/rootfs, verified separately at admit time via `verify_plan_bundle`).
+    // Feeding the pin here was a conflation the supervisor's PolicyBundle decode
+    // would reject. `None` until a policy-bundle source is wired (Slice 3 (b)).
+    cfg.bundle_json = match policy_bundle {
+        Some(bundle) => {
+            let bj = serde_json::to_string(bundle)
+                .context("serializing PolicyBundle for VmStartConfig.bundle_json")?;
             if bj.len() > BUNDLE_JSON_MAX_BYTES {
                 anyhow::bail!(
                     "bundle_json exceeds {} byte cap (got {}); refusing",
@@ -844,7 +853,7 @@ mod tests {
         .expect("happy admit");
 
         let mut cfg = VmStartConfig::default();
-        populate_audit_substrate(&mut cfg, &admitted).expect("populate");
+        populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
         assert_eq!(
             cfg.tenant_id.as_deref(),
             Some(admitted.plan.tenant.0.as_str())
@@ -862,6 +871,53 @@ mod tests {
         assert_eq!(recovered.plan_id, admitted.plan_id);
         // fixture has no bundle pin, so bundle_json stays None
         assert!(cfg.bundle_json.is_none());
+    }
+
+    #[test]
+    fn bundle_json_carries_a_policy_bundle_not_the_artifact_pin() {
+        // Slice 3 (a) de-conflation: bundle_json is the tenant PolicyBundle the
+        // supervisor's L4 gate + observers consume — sourced from the
+        // policy_bundle arg, NOT from `admitted.plan.bundle` (the .mvmpkg
+        // PlanArtifact pin, a different bundle verified separately).
+        use mvm_core::vm_backend::VmStartConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let clock = SystemClock;
+        let ledger = InMemoryNonceLedger::new();
+        let admitted = admit_for_run(
+            &fixture_input("vm-policy-bundle"),
+            &clock,
+            &ledger,
+            Some(dir.path()),
+            None,
+        )
+        .expect("happy admit");
+
+        let bundle = mvm_core::policy::PolicyBundle {
+            schema_version: mvm_core::policy::SCHEMA_VERSION,
+            bundle_id: mvm_core::policy::PolicyId("test".into()),
+            bundle_version: 1,
+            network: Default::default(),
+            egress: Default::default(),
+            pii: Default::default(),
+            tool: Default::default(),
+            artifact: Default::default(),
+            keys: Default::default(),
+            audit: Default::default(),
+            tenant_overlays: std::collections::BTreeMap::new(),
+        };
+
+        let mut cfg = VmStartConfig::default();
+        populate_audit_substrate(&mut cfg, &admitted, Some(&bundle)).expect("populate");
+        let bj = cfg.bundle_json.expect("bundle_json populated");
+        let roundtrip: mvm_core::policy::PolicyBundle =
+            serde_json::from_str(&bj).expect("bundle_json deserializes as a PolicyBundle");
+        assert_eq!(roundtrip, bundle);
+
+        // No policy bundle → None (the de-conflated default; a pinned artifact
+        // no longer leaks into this field).
+        let mut cfg2 = VmStartConfig::default();
+        populate_audit_substrate(&mut cfg2, &admitted, None).expect("populate none");
+        assert!(cfg2.bundle_json.is_none());
     }
 
     // ───────────────────────────────────────────────────────────────
