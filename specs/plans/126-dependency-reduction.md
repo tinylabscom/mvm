@@ -10,22 +10,26 @@
 
 **Prereqs:** 121 (final crate homes). Coordinates with 123 (the `object_store` S3 client), 127 (the dep-count dashboard consumes the re-baselined methodology), and 156 (binary-size reduction — these cuts are its primary size driver; its `check-binary-size` gate is the sibling of D1's `check-forbidden-deps`).
 
-**Re-baseline (measured 2026-05-31; re-confirmed 2026-06-03):** `Cargo.lock` was **735 packages** on 2026-05-31 (the brief's "723" was stale) and per-crate closures ~170 *lower* than an earlier count. As of 2026-06-03 the lock has drifted to **739** and this plan is still **unstarted** — all four targets (`sigstore`, `opendal`, `pgp`, `aws-lc-rs`) remain present; `minisign`/`object_store` not yet introduced; `docs/investigations/dep-baseline.md` not yet created. Lock the `cargo tree` methodology in Phase A against the live count before tracking any delta.
+**Baseline (A1 DONE 2026-06-05, `main` @ `bb1cbcbe`):** default binary closure = **407** unique packages; full lockfile = **722**. Method + per-target table in `docs/investigations/dep-baseline.md`. **A1 corrected the Phase-B premises:** `sigstore` + `opendal` are already gated out of the default binary (no default-build cut left); the only default-closure targets are **`pgp` (168)** and **`aws-lc-rs` (16 + a C build)**; and `pgp` is Alpine-tarball verification, not release signing (B3 re-scoped). **Recommended order: B4 first** (cleanest default cut), then the B3 decision.
 
 ---
 
 ## Phase A — re-baseline the methodology
 
-### Task A1: one measurement method, written down
+### Task A1: one measurement method, written down — DONE 2026-06-05
 
-- [ ] **Step 1:** Define the canonical commands: total = `cargo tree --workspace -e no-dev --prefix none | sort -u | wc -l`; per-crate = `cargo tree -p <c> -e no-dev`; default-vs-full-feature = with and without the optional features. Record the **735** baseline + the per-crate closures of the targets below.
-- [ ] **Step 2:** Commit a `docs/investigations/dep-baseline.md` with the method + the numbers. 127's dashboard reads from here. Every later task appends its delta.
+- [x] **Step 1:** Canonical commands defined. Two distinct numbers (don't conflate): **default binary closure** = `cargo tree --workspace -e no-dev --prefix none | sed 's/ (.*)//' | sort -u | wc -l` = **407**; **full lockfile** = `grep -c '^name = ' Cargo.lock` = **722**. Per-crate + feature-on closures recorded in the doc.
+- [x] **Step 2:** `docs/investigations/dep-baseline.md` committed with the method + numbers + the corrected per-target findings below.
+
+> **A1 corrected the Phase-B premises.** `sigstore` + `opendal` are **already gated out of the default binary** (their default-build benefit is realized; only feature-on builds pay). The only two targets in the **default** closure are **`pgp` (168 crates)** and **`aws-lc-rs` (16 + a C build)**. And **B3's premise is wrong** — `pgp` is Alpine-tarball verification, not release signing (see B3). See the baseline doc for the full table + the revised task order (B4 first).
 
 ## Phase B — prune the heavy optional features
 
-### Task B1: `sigstore` (~120–150) — relocate or drop `manifest-verify`
+### Task B1: `sigstore` — relocate or drop `manifest-verify`
 
-The biggest single closure. It backs cosign verification for claim 14 (OCI provenance). Options: move the verification to **mvmd** (the control plane verifies before admit) or drop the in-`mvmctl` path.
+> **A1 finding:** `sigstore` is **already off the default binary** (gated behind `manifest-verify`; adds ~62 crates only when that feature is on). So there is **no default-closure cut left here** — B1 is now purely the cross-repo decision to relocate cosign-verify to mvmd (the `--prod`/admit gate lives in mvmd). Sequence with mvmd; not a quick win.
+
+It backs cosign verification for claim 14 (OCI provenance). Options: move the verification to **mvmd** (the control plane verifies before admit) or drop the in-`mvmctl` path.
 
 - [ ] **Step 1:** Measure `cargo tree -p <crate that pulls sigstore> --features manifest-verify` closure.
 - [ ] **Step 2:** Decide with the claim owner: claim 14's cosign verify is a *prod/admit* concern, and `--prod` admission policy lives in mvmd (memory: prod gate is mvmd's). So **relocate cosign verify to mvmd**; `mvmctl` keeps recording the OCI provenance label (the audit entry) but does not link sigstore. If a local verify is still wanted, gate it behind an off-by-default feature.
@@ -33,17 +37,24 @@ The biggest single closure. It backs cosign verification for claim 14 (OCI prove
 
 ### Task B2: `opendal` (~70) → `object_store`
 
+> **A1 finding:** `opendal` is **already off the default binary** (gated behind `template-registry-s3`). No default-closure cut left; this only shrinks the `template-registry-s3` build. Still worth doing for repo-wide single-S3-client hygiene, coordinated with 123 — but not a default-build win.
+
 Pre-decided with 123: one lean S3 client for the repo.
 
 - [ ] **Step 1:** Replace `opendal` (`crates/mvm/Cargo.toml`, optional, template-registry-s3) with `object_store` (the same crate 123's S3 `MountProvider` uses, TLS pinned to `ring`). Failing test — the template-registry-s3 round-trips against `object_store`'s in-memory backend.
 - [ ] **Step 2:** Drop `opendal` from the workspace; re-measure (expect ~70 gone, minus `object_store`'s own small closure). Commit.
 
-### Task B3: `pgp` (~80) → `minisign`
+### Task B3: `pgp` (168 crates) — re-scoped (NOT a minisign swap)
 
-Release signing. `pgp`/`sequoia` is a large closure for a sign-and-verify a release artifact.
+> **A1 corrected this task.** `pgp` (rpgp 0.17, unconditional dep of `mvm-build`, **168-crate** closure — the single biggest target) is **not** our release signing. It verifies the **Alpine minirootfs tarball's upstream PGP signature** against the embedded `ALPINE_RELEASE_KEY_ASC` in Stage 0 (`crates/mvm-build/src/stage0.rs::verify_alpine_pgp_signature`). It **cannot** move to minisign — Alpine dictates the format.
 
-- [ ] **Step 1:** Measure the `pgp` closure + find its call sites (release signing/verify).
-- [ ] **Step 2:** Replace with `minisign` (tiny, Ed25519). Failing test — a release artifact signs + verifies under the new keypair; an old-format signature is *not* silently accepted (no back-compat — first version). Re-measure. Commit.
+The tarball is **already SHA-256 hash-pinned in source** for the pinned `ALPINE_VERSION` (`verify_sha256`), so PGP is **defense-in-depth** whose distinct value is mainly at version-bump time. Reducing the 168 crates is a **decision**, not a swap:
+
+- [ ] **Option 1 (biggest, −168):** drop the PGP verify, keep the SHA-256 pin. Removes a defense layer → needs security-owner sign-off + an ADR-002 note + a documented version-bump procedure (verify a new tarball's PGP sig out-of-band before pinning its hash).
+- [ ] **Option 3:** gate `verify_alpine_pgp_signature` behind a contributor-only feature if no default/published path reaches it. Audit the call graph first.
+- [ ] **Option 2 (low payoff):** lighter OpenPGP verifier — rpgp already *is* the lean choice; sequoia is heavier; no smaller RSA-OpenPGP-verify crate exists. Likely not worth it.
+
+See `docs/investigations/dep-baseline.md` for the full rationale.
 
 ### Task B4: `aws-lc-rs` → `ring` (~6 + kills a C/cmake build)
 
