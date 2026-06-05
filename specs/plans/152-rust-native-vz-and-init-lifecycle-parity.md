@@ -1,11 +1,11 @@
 # Plan 152 — Rust-native `Virtualization.framework` supervisor + guest `/init` lifecycle parity
 
-> **Status (2026-06-04):** Findings recorded; not yet started. Sequenced
-> **after the current artifact-model refactor and the core-demo bring-up
-> land** — depends on Plan 120 (`core_demo_e2e` green) and Plan 134
-> (architecture-aware artifact model). Do not start WS-A until the
-> function-workload boot path is stable on `feat/artifact-model`, or the
-> `/init` diff is measured against a moving target.
+> **Status (2026-06-05):** Findings recorded; not yet started. **Both
+> gates satisfied — WS-A is unblocked (roadmap S2).** Plan 120 green
+> (`core_demo_e2e` COMPLETE 2026-06-03); Plan 134 (architecture-aware
+> artifact model, slice 1) merged to main (via `feat/artifact-model-impl`,
+> tip `a57f2548`). Boot path is now on main, so the `/init` diff is no
+> longer measured against a moving target.
 >
 > **Numbering caveat:** picked 152 as next-after-highest from local
 > `specs/plans/`. Reconcile against open PRs before merge — the
@@ -126,8 +126,9 @@ not an Objective-C shim.
 
 ### External prior art (2026-06-04 review)
 
-Five adjacent projects were reviewed (named obliquely per repo policy;
-keyed by trait in the auto-memory `reference_objc2_vz_external_references`). The decisive
+Five adjacent projects were reviewed here (a sixth added 2026-06-05,
+below; named obliquely per repo policy, keyed by trait in the auto-memory
+`reference_objc2_vz_external_references`). The decisive
 observation: **process-separation and implementation language are
 orthogonal, and no reviewed project combines both of the choices we
 want.**
@@ -139,14 +140,31 @@ want.**
 | multi-crate runtime (the DX reference) | in-process (entitled CLI) | Rust + objc2 | nested-virt end-to-end (WS-D); `validateSaveRestoreSupport`, pinned-MAC, tiered checkpoints (WS-E); vsock fd→dup→`AsyncFd` (WS-B); **its DX surface → Plan 159** |
 | agent-microVM tool | in-process (entitled CLI) | Rust + objc2 | sub-second snapshot/restore + fork; vsock session-secret auth; smoltcp SLIRP (note only) |
 | CLI + helper tool | **separate** entitled helper | Rust CLI + **Swift** helper | confirms the separate-process model — but kept Swift; APFS-clone CoW forks |
+| minimal two-backend launcher | in-process (entitled CLI) | Rust + objc2 (+ a Hypervisor.framework PoC) | main-thread-`CFRunLoop` supervisor model (no delegate, no `QueueBound`) → WS-B threading-model decision; vsock-agent exit-code contract → WS-A; confirmed `pause→save` / `restore→resume` call order → WS-B snapshot |
 
 The "CLI + helper" tool is architecturally **us today**: an unprivileged
 Rust CLI driving a separate entitled helper — but the helper is Swift.
-The four Rust-objc2 projects prove Rust drives VZ fully — but all put it
+The five Rust-objc2 projects prove Rust drives VZ fully — but all put it
 in-process, entitling the whole CLI. The combination we adopt —
 **separate per-VM helper *and* Rust-objc2** — is the unfilled square in
-this matrix. (A sixth candidate in the original list turned out to be a
+this matrix. (Another candidate in the original list turned out to be a
 container-orchestration tool with no VZ surface; discarded.)
+
+A later project reviewed (2026-06-05) is a **minimal two-backend
+launcher**: a `VZVirtualMachine` path *and* a low-level
+Hypervisor.framework PoC, ~6 Rust modules on the `objc2-virtualization`
+stack already in our tree, with no security spine. Two things stand out.
+First, it is the strongest evidence yet that the WS-B Rust supervisor is
+**small** — full boot, networking, EFI + direct-kernel, ~0.5s live
+save/restore, a vsock guest agent with exit-code propagation, and CoW
+forking all fit in that footprint with zero Swift. Second, its VZ path
+runs **entirely on the process main thread's `CFRunLoop`** — completion
+handlers flip atomics and call `CFRunLoopStop`, SIGINT→stop, **no
+`VZVirtualMachineDelegate`, no private serial queue, no `QueueBound`.**
+This *contradicts* the serial-queue/no-runloop model attributed to the
+on-device sandbox above: both are viable, and because our supervisor is
+one-VM-per-process the main-thread model may be all we need (see the
+WS-B threading-model decision).
 
 What the references do **not** have, and we keep: signed/audited
 `ExecutionPlan`s (claim 8), dm-verity verified boot (claim 3),
@@ -229,7 +247,11 @@ the current reboot that strands the agent (Plan 120 root cause).
       have a writable virtio-fs control share on every backend; pick
       between (a) a dedicated control vsock port the supervisor reads,
       or (b) a small control share, and document why. Prefer vsock —
-      it already exists on libkrun + Vz and avoids a new mount.
+      it already exists on libkrun + Vz and avoids a new mount. A minimal
+      reference implements this as a persistent **vsock guest agent**
+      (JSON `{command,timeout}` in → `{stdout,stderr,exit_code}` out,
+      connect with retry/backoff) — a concrete model for the vsock option,
+      complementary to the `/init` writes-`.exit`-then-`poweroff -f` contract.
 - [ ] Implement `poweroff -f` (not reboot) as the workload PID-1
       terminal action, with the exit code emitted on the chosen
       channel first.
@@ -247,6 +269,16 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
 `objc2-virtualization`, kept as a separate per-VM codesigned process.
 ~70% of the substrate is already shared Rust (exploration verdict).
 
+- [ ] **Threading-model decision (do this first).** Evaluate the simplest
+      viable shape: the supervisor process's **main thread runs the VM's
+      `CFRunLoop`**, `block2::RcBlock` completion handlers write a terminal
+      atomic + `CFRunLoopStop`, SIGINT→stop — no `declare_class!` delegate,
+      no `QueueBound<Send>`, no dispatch-queue plumbing (proven viable by
+      the minimal two-backend reference for a one-VM-per-process model).
+      Compare against the private-serial-queue model (this plan's original
+      Findings) on one axis: cleanly servicing the control socket + vsock
+      proxy on **worker threads** while a runloop owns the main thread.
+      Pick one and record the rationale; the rest of WS-B follows from it.
 - [ ] New `[[bin]]` `mvm-vz-supervisor` in `mvm-vm-host`, sibling to
       `mvm-libkrun-supervisor` / `mvm-vz-drainer`, cfg-gated macOS. Reads
       the same `SupervisorConfig` JSON on stdin.
@@ -268,10 +300,10 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       Vz; delete the `mvm-vz-drainer` + `BridgeEndpoints::VzIngest` NDJSON
       path (Plan 141 Q10). Reuses 141's backend-agnostic
       `Observer`/`gateway_bridge` core unchanged (ADR-064 §8).
-- [ ] Lifecycle: private serial dispatch queue, `declare_class!`
-      delegate for terminal events, `RcBlock` completion handlers,
-      `QueueBound<Send>` for the non-`Send` `Retained` handles. No
-      `CFRunLoop`.
+- [ ] Lifecycle: **per the threading-model decision above** — either the
+      main-thread `CFRunLoop` shape, or a private serial dispatch queue +
+      `declare_class!` delegate + `QueueBound<Send>` for the non-`Send`
+      `Retained` handles. `RcBlock` completion handlers either way.
 - [ ] Reimplement `VsockProxy.swift` in Rust: per-port UDS listeners at
       `<socketDir>/vsock-<port>.sock` (mode 0700) ↔
       `VZVirtioSocketDevice.connect(toPort:)`, fd→`dup`→`AsyncFd`. Mine
@@ -283,7 +315,11 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       extract a shared `vz::control` codec.
 - [ ] Snapshot: `saveMachineStateToURL` / `restoreMachineStateFromURL`
       (macOS 14+) with the `<snapshot>.machine-id` sidecar, matching the
-      Swift behaviour exactly.
+      Swift behaviour exactly. Call order (confirmed against prior art):
+      save = `pauseWithCompletionHandler` →
+      `saveMachineStateToURL_completionHandler`; restore =
+      `restoreMachineStateFromURL_completionHandler` →
+      `resumeWithCompletionHandler` (~0.5s restore observed).
 - [ ] Codesign: extend `mvm_backend::providers::apple_container::
       ensure_signed()` to sign the new binary with
       `com.apple.security.virtualization`.
