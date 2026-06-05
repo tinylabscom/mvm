@@ -1,4 +1,4 @@
-# Plan 166 — Promote the cold-state guarantee to a witnessed non-persistence claim
+# Plan 167 — Promote the cold-state guarantee to a witnessed non-persistence claim
 
 **Source post:** *MicroVMs for Agent Sandboxing in Regulated Environments*
 (kondasamy.com, 2026). The post argues the single thing microVMs give you
@@ -114,7 +114,7 @@ This pass writes **docs only** — `specs/plans/` (this file) and
 
 - This plan.
 - An ADR-002 amendment that records the **decision** to promote cold-state
-  to a witnessed claim and marks it **pending the Plan 166 witness** — it
+  to a witnessed claim and marks it **pending the Plan 167 witness** — it
   does *not* yet assert a CI gate that does not exist (that would be a false
   claim and would not survive `xtask check-claim-catalog`). Tasks 2–3 (the
   test, the catalog row, the final numbered promotion) are deferred to an

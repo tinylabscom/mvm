@@ -15,7 +15,7 @@ The 2026-05-07 revision adds the **Trust layers (Matryoshka model)** section, na
 
 The 2026-05-10 revision adds the **Framework references** subsection (MITRE ATT&CK / D3FEND / CREF mapping for each of the seven claims). Doc-only; no code, CI, or test impact.
 
-The 2026-06-05 revision reframes the **cold-state guarantee** as a property *being promoted* to a witnessed claim (Plan 166), pending its catalog witness. Doc-only; no code, CI, or test impact yet — the witness and numbered-table entry land in a follow-up implementation PR.
+The 2026-06-05 revision reframes the **cold-state guarantee** as a property *being promoted* to a witnessed claim (Plan 167), pending its catalog witness. Doc-only; no code, CI, or test impact yet — the witness and numbered-table entry land in a follow-up implementation PR.
 
 ## Context
 
@@ -208,7 +208,7 @@ of the runtime rather than a single CI gate. In framework terms it is
 **CREF: Non-Persistence**, and denies T1546 (Event-Triggered Execution) /
 T1547 (Boot or Logon Autostart) classes of persistence outright.
 
-It is being **promoted to a witnessed claim** (Plan 166): a workload's
+It is being **promoted to a witnessed claim** (Plan 167): a workload's
 runtime state must not survive its own teardown, and the next boot on the
 same host must be fresh. The promotion is *pending its witness* — the
 catalog entry and `fn:` tests do not exist yet, so this property is not
