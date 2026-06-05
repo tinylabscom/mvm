@@ -66,6 +66,9 @@ use crate::supervisor::network::PacketCtx;
 use crate::supervisor::network::latency::ObserverLatency;
 use crate::supervisor::network::packet::{self, FlowKey};
 use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
+// plan 123 A3.2: no-op egress stages wired into the live pipeline. A3.3 will
+// thread real (plan 129) stages from ObserverWiring; today they're no-op.
+use crate::supervisor::network::stages::{NoopScan, NoopSubstitution};
 use std::collections::HashSet;
 
 // ============================================================================
@@ -693,7 +696,15 @@ async fn bridge_copy_bidirectional(
                 direction: FlowDirection::Egress,
                 flow_id: &flow_egress,
             };
-            match run_packet_pipeline(&observers, ctx, &frame, mtu, &latency) {
+            match run_packet_pipeline(
+                &observers,
+                &NoopSubstitution,
+                &NoopScan,
+                ctx,
+                &frame,
+                mtu,
+                &latency,
+            ) {
                 PacketDecision::Forward { frame: out, .. } => {
                     write_one_frame(&mut a_wr, &out).await?;
                 }
@@ -772,7 +783,15 @@ async fn bridge_copy_bidirectional(
                 direction: FlowDirection::Ingress,
                 flow_id: &flow_ingress,
             };
-            match run_packet_pipeline(&observers, ctx, &frame, mtu, &latency) {
+            match run_packet_pipeline(
+                &observers,
+                &NoopSubstitution,
+                &NoopScan,
+                ctx,
+                &frame,
+                mtu,
+                &latency,
+            ) {
                 PacketDecision::Forward { frame: out, .. } => {
                     write_one_frame(&mut b_wr, &out).await?;
                 }
@@ -991,7 +1010,15 @@ async fn run_libkrun_gvproxy_bridge(
                 direction: FlowDirection::Egress,
                 flow_id: &flow_egress_a,
             };
-            match run_packet_pipeline(&observers_a, ctx, raw, mtu, &latency_a) {
+            match run_packet_pipeline(
+                &observers_a,
+                &NoopSubstitution,
+                &NoopScan,
+                ctx,
+                raw,
+                mtu,
+                &latency_a,
+            ) {
                 PacketDecision::Forward { frame, .. } => {
                     // send (not send_to) — outbound is connected to gvproxy.
                     outbound_a.send(&frame).await?;
@@ -1084,7 +1111,15 @@ async fn run_libkrun_gvproxy_bridge(
                 direction: FlowDirection::Ingress,
                 flow_id: &flow_ingress_b,
             };
-            match run_packet_pipeline(&observers_b, ctx, raw, mtu, &latency_b) {
+            match run_packet_pipeline(
+                &observers_b,
+                &NoopSubstitution,
+                &NoopScan,
+                ctx,
+                raw,
+                mtu,
+                &latency_b,
+            ) {
                 PacketDecision::Forward { frame, .. } => {
                     // Need libkrun's peer addr to send back. If we haven't
                     // seen a packet from libkrun yet, drop this one.
