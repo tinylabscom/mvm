@@ -1813,8 +1813,8 @@ fn bootstrap_builder_vm_image() -> Result<()> {
                 "Builder VM image not in cache; building locally from {flake_dir}..."
             ));
 
-            // Plan 115 / ADR-065: the Alpine root-dir Stage 0 is the
-            // only bootstrap path. The dev-image Stage 0 path
+            // Plan 115 / ADR-065 / Plan 160: the nix-seed root-dir Stage 0 is
+            // the only bootstrap path. The dev-image Stage 0 path
             // (bootstrap_builder_vm_image_via_dev_image_stage0) has been
             // removed; `nix/images/builder/flake.nix` is deleted.
             #[cfg(feature = "builder-vm")]
@@ -2454,7 +2454,7 @@ fn run_stage0_root_dir(
 ///
 /// The `flavor=` field on `Stage0Boot` / `Stage0CachePromoted` audit
 /// detail strings carries this value so a future per-variant identifier
-/// (e.g. Plan 91's Alpine bootstrap, an experimental seed image) only
+/// (e.g. an experimental seed image alongside the nix-tarball seed) only
 /// needs to flip this single constant — not every emit site. Today
 /// there is one variant, so the value is the literal `"current"`.
 #[cfg(feature = "builder-vm")]
@@ -5674,9 +5674,9 @@ mod builder_vm_bootstrap_tests {
     fn stage0_flavor_current_wire_format_is_stable() {
         // Plan 93 Phase 0 — the `flavor=` value emitted on every
         // `Stage0Boot` / `Stage0CachePromoted` audit line. Today there
-        // is one variant (`"current"`); a future Plan 91 follow-up may
-        // introduce additional variants (e.g. `"alpine"`). Pinning the
-        // current literal here so a rename surfaces immediately.
+        // is one variant (`"current"` — the nix-tarball seed); a future
+        // change may introduce additional variants. Pinning the current
+        // literal here so a rename surfaces immediately.
         assert_eq!(STAGE0_FLAVOR_CURRENT, "current");
     }
 

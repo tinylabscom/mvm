@@ -25,9 +25,10 @@ path = "src/bin/mvm-host-vm-init.rs"
 name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
 
-# Plan 160 — PID 1 of the nix-tarball Stage 0 seed (replaces the Alpine
-# init.sh). Same cross-compile + embed treatment as mvm-host-vm-init once
-# the seed path is proven; not yet registered in build.rs / the manifest.
+# Plan 160 — PID 1 of the nix-tarball Stage 0 seed. Cross-compiled to
+# static aarch64-musl + embedded by mvm-cli/build.rs (via SEED_BINARIES),
+# same treatment as mvm-host-vm-init. Host-side only — never installed in a
+# VM, absent from the nix attrset + the host-binaries sync gate.
 [[bin]]
 name = "stage0-init"
 path = "src/bin/stage0-init.rs"

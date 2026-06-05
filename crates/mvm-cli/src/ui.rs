@@ -170,10 +170,10 @@ mod tests {
     fn format_timed_renders_label_and_one_decimal_second() {
         assert_eq!(
             format_timed(
-                "Fetching Alpine minirootfs",
+                "Fetching Stage 0 bootstrap assets",
                 std::time::Duration::from_millis(400)
             ),
-            "Fetching Alpine minirootfs … 0.4s"
+            "Fetching Stage 0 bootstrap assets … 0.4s"
         );
         assert_eq!(
             format_timed("nix build", std::time::Duration::from_millis(12_345)),

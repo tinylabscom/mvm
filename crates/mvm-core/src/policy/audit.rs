@@ -428,19 +428,19 @@ pub enum LocalAuditKind {
     // --- Plan 93 Phase 3: vendored-blob supply-chain fetch ---
     //
     // Emitted once per vendored bootstrap blob each time it is fetched
-    // or revalidated from cache, so every hash+signature trust
-    // decision in the no-prebuilt-download supply chain is auditable.
-    // Today the only such blob is the Plan 91 Alpine minirootfs; the
-    // kind is forward-compatible with any future pinned asset. Lands
-    // in the shared local audit log (not the chain-signed stream),
-    // matching the Stage 0 siblings above. Wire string is stable
-    // (`vendor_blob_fetched`) — log shippers / `mvmctl audit` filter
-    // on it.
+    // or revalidated from cache, so every hash trust decision in the
+    // no-prebuilt-download supply chain is auditable. Today the only such
+    // blob is the Plan 160 nix-tarball Stage 0 seed (SHA-256-pinned; the
+    // hash is the binding integrity check — ADR-071); the kind is
+    // forward-compatible with any future pinned asset. Lands in the shared
+    // local audit log (not the chain-signed stream), matching the Stage 0
+    // siblings above. Wire string is stable (`vendor_blob_fetched`) — log
+    // shippers / `mvmctl audit` filter on it.
     //
     /// A vendored bootstrap blob was downloaded and verified, or
     /// re-verified on a cache hit. Detail format (space-separated
     /// `key=value`, matching the Stage 0 kinds):
-    ///   `url=<url> sha256=<64hex> pgp=<verified|none|failed> bytes=<n> outcome=<fetched|cache_revalidated>`
+    ///   `url=<url> sha256=<64hex> bytes=<n> outcome=<fetched|cache_revalidated>`
     VendorBlobFetched,
 }
 

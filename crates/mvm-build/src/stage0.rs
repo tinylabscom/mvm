@@ -307,8 +307,8 @@ pub fn materialize_root_dir_in(cache_dir: &Path, dest: &Path, stage0_init: &[u8]
 ///
 /// First cut: shells to the host `tar` for the xz decode (macOS bsdtar +
 /// GNU tar both handle `.tar.xz` + `--strip-components`) to avoid adding an
-/// in-process lzma dependency. A pure-Rust xz decoder (matching the Alpine
-/// path's in-process extraction) is a plan-160 polish follow-up.
+/// in-process lzma dependency. A pure-Rust xz decoder is a plan-160 polish
+/// follow-up (ADR-071 "Status of work").
 fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(nix_dir).with_context(|| format!("creating {}", nix_dir.display()))?;
     let status = std::process::Command::new("tar")
