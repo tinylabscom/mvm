@@ -55,6 +55,12 @@ pub enum CompileError {
     ManagedSecretsNotSupported {
         targets: Vec<String>,
     },
+    /// Plan 165 WS-B B3: a sealed/prod image must declare a workload
+    /// entrypoint. The SDK only ever emits sealed images, so an app with
+    /// no declared entrypoint can never be compiled into one.
+    SealedWorkloadMissingEntrypoint {
+        app: String,
+    },
 }
 
 impl std::fmt::Display for CompileError {
@@ -93,6 +99,11 @@ impl std::fmt::Display for CompileError {
                  found secret-backed env targets: {}. Use deploy/plan flows for managed refs, or \
                  mount guest-visible files explicitly if you accept guest materialization.",
                 targets.join(", ")
+            ),
+            Self::SealedWorkloadMissingEntrypoint { app } => write!(
+                f,
+                "sealed/prod workloads must declare an entrypoint; dev images may omit it \
+                 for an interactive shell (app {app:?})"
             ),
         }
     }
@@ -135,6 +146,13 @@ pub fn compile_archive(
 /// copying the source tree into `<staging>/src/` before publishing. `path` in
 /// the IR is interpreted relative to `manifest_dir`, or absolute.
 pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(), CompileError> {
+    // Plan 165 WS-B B3: fail closed before any staging/IO. Every SDK
+    // artifact is sealed by construction, so an app with no declared
+    // entrypoint is a misconfiguration, not a request for an interactive
+    // dev shell (that path is the Nix-flake `entrypoint.shell`, never
+    // produced here).
+    check_declared_entrypoints(workload)?;
+
     if out.exists() && !out.is_dir() {
         return Err(CompileError::OutputExistsNotDir(out.to_path_buf()));
     }
@@ -266,6 +284,21 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
             Err(e)
         }
     }
+}
+
+/// Plan 165 WS-B B3: refuse to compile any app that lacks a declared
+/// workload entrypoint. Reuses the B1 predicate so the "is there a
+/// command?" signal has a single definition. Multi-app workloads fail
+/// closed on the first offender (named in the error).
+fn check_declared_entrypoints(workload: &Workload) -> Result<(), CompileError> {
+    for app in &workload.apps {
+        if !app.has_declared_entrypoint() {
+            return Err(CompileError::SealedWorkloadMissingEntrypoint {
+                app: app.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn managed_secret_targets(app: &crate::ir::App) -> Vec<String> {
@@ -789,6 +822,79 @@ mod tests {
                 assert_eq!(missing, vec!["c".to_string()]);
             }
             other => panic!("expected FunctionSchemaMismatch, got {other:?}"),
+        }
+    }
+
+    // ---------- Plan 165 WS-B B3: no-entrypoint policy --------------------
+
+    #[test]
+    fn compile_refuses_sealed_workload_with_no_declared_entrypoint() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_dir = tmp.path().join("manifest");
+        make_src(&manifest_dir);
+        let out = tmp.path().join("artifact");
+        let mut workload = sample();
+        workload.apps[0].entrypoints = vec![];
+
+        let err = compile(&workload, &out, &manifest_dir).unwrap_err();
+        match &err {
+            CompileError::SealedWorkloadMissingEntrypoint { app } => {
+                assert_eq!(app, "hello");
+            }
+            other => panic!("expected SealedWorkloadMissingEntrypoint, got {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains("sealed/prod workloads must declare an entrypoint"),
+            "message was: {err}"
+        );
+    }
+
+    #[test]
+    fn compile_refuses_second_app_missing_entrypoint_and_names_it() {
+        // Guard iterates all apps, not just the first — a valid app[0] must
+        // not mask an empty app[1]. The named offender is the second app.
+        let tmp = TempDir::new().unwrap();
+        let manifest_dir = tmp.path().join("manifest");
+        make_src(&manifest_dir);
+        let out = tmp.path().join("artifact");
+        let mut workload = sample();
+        let mut second = workload.apps[0].clone();
+        second.name = "sidecar".into();
+        second.entrypoints = vec![];
+        workload.apps.push(second);
+
+        let err = compile(&workload, &out, &manifest_dir).unwrap_err();
+        match &err {
+            CompileError::SealedWorkloadMissingEntrypoint { app } => {
+                assert_eq!(app, "sidecar");
+            }
+            other => panic!("expected SealedWorkloadMissingEntrypoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_accepts_idle_sleep_infinity_command() {
+        // An idle image declares a real command, so the B3 guard must not
+        // fire. We assert specifically on the ABSENCE of the B3 error —
+        // a bare `sleep infinity` source tree compiles cleanly here.
+        let tmp = TempDir::new().unwrap();
+        let manifest_dir = tmp.path().join("manifest");
+        make_src(&manifest_dir);
+        let out = tmp.path().join("artifact");
+        let mut workload = sample();
+        workload.apps[0].entrypoints = vec![Entrypoint::Command {
+            command: vec!["sleep".into(), "infinity".into()],
+            working_dir: "/app".into(),
+            env: Default::default(),
+        }];
+
+        match compile(&workload, &out, &manifest_dir) {
+            Ok(()) => {}
+            Err(CompileError::SealedWorkloadMissingEntrypoint { .. }) => {
+                panic!("idle sleep-infinity command must not trip the B3 guard")
+            }
+            Err(other) => panic!("unexpected unrelated compile error: {other:?}"),
         }
     }
 

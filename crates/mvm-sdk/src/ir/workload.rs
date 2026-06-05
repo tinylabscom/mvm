@@ -94,6 +94,18 @@ impl App {
             .or_else(|| self.entrypoints.first())
             .expect("App must have at least one entrypoint (validate() rejects empty)")
     }
+
+    /// B1 (Plan 165 WS-B): true iff this app declares a workload command —
+    /// a `Command` argv or a `Function` dispatch target. The IR cannot
+    /// represent "no declared entrypoint" (validate() rejects empty
+    /// `entrypoints`), so for any validated SDK app this is true; the
+    /// predicate is the single named signal the compile gate (B3) and the
+    /// admission gate (B4) read instead of each re-deriving "is there a
+    /// command?" inline. An idle image (`["sleep","infinity"]`) IS a
+    /// declared command, so it is unaffected.
+    pub fn has_declared_entrypoint(&self) -> bool {
+        !self.entrypoints.is_empty()
+    }
 }
 
 /// Per-app dependency declaration. ADR-0009 / plan-0008.
@@ -550,4 +562,66 @@ pub struct Volume {
     pub name: String,
     pub size_mb: u32,
     pub persist: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with(entrypoints: Vec<Entrypoint>) -> App {
+        App {
+            name: "hello".into(),
+            source: Source::LocalPath {
+                path: ".".into(),
+                include: vec!["**".into()],
+                exclude: vec![],
+            },
+            image: Image::NixPackages {
+                packages: vec!["python312".into()],
+            },
+            entrypoints,
+            env: Default::default(),
+            mounts: vec![],
+            network: None,
+            resources: Resources {
+                cpu_cores: 1,
+                memory_mb: 256,
+                rootfs_size_mb: 512,
+            },
+            dependencies: None,
+            threat_tier: Default::default(),
+            addons: vec![],
+            hooks: Default::default(),
+        }
+    }
+
+    #[test]
+    fn has_declared_entrypoint_true_for_command_and_function() {
+        let cmd = app_with(vec![Entrypoint::Command {
+            command: vec!["python".into(), "-m".into(), "hello".into()],
+            working_dir: "/app".into(),
+            env: Default::default(),
+        }]);
+        assert!(cmd.has_declared_entrypoint());
+
+        let func = app_with(vec![Entrypoint::Function {
+            language: "python".into(),
+            module: "adder".into(),
+            function: "add".into(),
+            format: Format::Json,
+            working_dir: "/app".into(),
+            env: Default::default(),
+            args_schema: None,
+            return_schema: None,
+            extra_imports: vec![],
+            primary: true,
+            concurrency: None,
+        }]);
+        assert!(func.has_declared_entrypoint());
+    }
+
+    #[test]
+    fn has_declared_entrypoint_false_for_empty_entrypoints() {
+        assert!(!app_with(vec![]).has_declared_entrypoint());
+    }
 }
