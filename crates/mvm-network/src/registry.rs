@@ -56,7 +56,7 @@ fn mode_kind(mode: &NetworkMode) -> &str {
 mod tests {
     use super::*;
     use crate::provider::{NetHandle, NetworkSpec};
-    use mvm_core::policy::policies::NetworkPolicy;
+    use mvm_core::network_policy::NetworkPolicy;
     use mvm_core::protocol::vm_backend::VmId;
 
     struct StubProvider {

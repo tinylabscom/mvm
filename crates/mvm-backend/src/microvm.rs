@@ -5,7 +5,9 @@ use crate::base::config::*;
 use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
 use crate::base::ui;
 use crate::image::RuntimeVolume;
+use crate::network_provider::BridgeTapNetworkProvider;
 use crate::{firecracker, network};
+use mvm_network::{NetHandle, NetworkProvider, NetworkSpec};
 
 // ============================================================================
 // RAII resource guards — prevent leaks when VM launch fails partway through
@@ -646,15 +648,21 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         return Ok(());
     }
 
-    // Ensure bridge network exists (idempotent)
-    network::bridge_ensure()?;
-
-    // Create TAP device for this VM
-    network::tap_create(slot)?;
+    // Provision the VM's bridge+TAP network + egress policy through the
+    // NetworkProvider seam (plan 123 A1 step 2). `provision` is transactional
+    // — it drops the TAP itself if the policy apply fails — and the TapGuard
+    // below re-arms to tear the TAP down if a *later* start step fails. Same
+    // operations, same order, as the direct calls this replaces.
+    BridgeTapNetworkProvider::new()
+        .provision(
+            &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
+            &NetworkSpec {
+                policy: config.network_policy.clone(),
+                slot_index: slot.index,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
     let mut tap_guard = TapGuard::new(slot);
-
-    // Apply network policy (iptables egress filtering) if not unrestricted
-    network::apply_network_policy(slot, &config.network_policy)?;
 
     // Plan 113 §Task 13 / ADR-064 — spawn `mvm-firecracker-bridge`
     // alongside the Firecracker VM. The sidecar runs under
@@ -775,15 +783,21 @@ pub fn restore_from_template_snapshot(
         return Ok(());
     }
 
-    // Ensure bridge network exists (idempotent)
-    network::bridge_ensure()?;
-
-    // Create TAP device for this VM
-    network::tap_create(slot)?;
+    // Provision the VM's bridge+TAP network + egress policy through the
+    // NetworkProvider seam (plan 123 A1 step 2). `provision` is transactional
+    // — it drops the TAP itself if the policy apply fails — and the TapGuard
+    // below re-arms to tear the TAP down if a *later* start step fails. Same
+    // operations, same order, as the direct calls this replaces.
+    BridgeTapNetworkProvider::new()
+        .provision(
+            &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
+            &NetworkSpec {
+                policy: config.network_policy.clone(),
+                slot_index: slot.index,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
     let mut tap_guard = TapGuard::new(slot);
-
-    // Apply network policy (iptables egress filtering) if not unrestricted
-    network::apply_network_policy(slot, &config.network_policy)?;
 
     // Copy snapshot files to per-VM directory
     run_in_vm(&format!(
@@ -1098,13 +1112,15 @@ pub fn stop_vm(name: &str) -> Result<()> {
     {
         // Reconstruct slot to find TAP name — scan for the index
         if let Some(idx) = read_slot_index(&abs_dir) {
-            let slot = VmSlot::new(vm_name, idx);
-            // Clean up any network policy iptables rules before destroying TAP
-            if let Err(e) = network::cleanup_network_policy(&slot) {
-                warn!("failed to clean up network policy rules: {e}");
-            }
-            if let Err(e) = network::tap_destroy(&slot) {
-                warn!("failed to destroy TAP device: {e}");
+            // Tear down through the NetworkProvider seam (plan 123 A1 step 2):
+            // best-effort drain of the iptables policy + TAP, symmetric with
+            // the provision path.
+            let handle = NetHandle {
+                vm: mvm_core::protocol::vm_backend::VmId(vm_name.clone()),
+                tag: idx.to_string(),
+            };
+            if let Err(e) = BridgeTapNetworkProvider::new().teardown(handle) {
+                warn!("network teardown: {e}");
             }
         }
     }

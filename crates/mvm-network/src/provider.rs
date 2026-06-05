@@ -1,16 +1,21 @@
 //! The `NetworkProvider` trait and its supporting types.
 
-use mvm_core::policy::policies::NetworkPolicy;
+use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
 
 /// Host-side description of the network to provision for a VM.
 ///
-/// `policy` defaults to `NetworkPolicy::default()` — the empty L4 allow-list,
-/// which the supervisor's gate reads as **deny-all** (claim 10). Opening
-/// egress means adding explicit rules, never flipping a default.
+/// `policy` is the per-VM host egress policy the provider enforces (iptables
+/// for the TAP/bridge backend; this is the `network_policy::NetworkPolicy`
+/// that `apply_network_policy` consumes, *not* the supervisor's L4 bundle).
+/// Its `Default` is `deny_all()` — the safe claim-10 posture; opening egress
+/// is opt-in. `slot_index` is the VM's network-slot ordinal: the backend
+/// derives the per-VM tap device + guest IP from it (`tap{index}`,
+/// `172.16.0.{index+2}`).
 #[derive(Debug, Clone, Default)]
 pub struct NetworkSpec {
     pub policy: NetworkPolicy,
+    pub slot_index: u8,
 }
 
 /// Opaque teardown handle returned by [`NetworkProvider::provision`].
@@ -76,13 +81,10 @@ mod tests {
 
     #[test]
     fn network_spec_default_policy_is_deny_all() {
-        // The empty L4 allow-list is the deny-all encoding (policies.rs):
-        // the supervisor gate denies any flow not matched by an explicit rule.
+        // network_policy::NetworkPolicy::default() is deny_all() — the safe
+        // claim-10 posture the provider enforces unless egress is opt-in.
         let spec = NetworkSpec::default();
-        assert!(
-            spec.policy.l4.is_empty(),
-            "default NetworkSpec must carry the deny-all (empty) L4 policy"
-        );
-        assert_eq!(spec.policy, NetworkPolicy::default());
+        assert_eq!(spec.policy, NetworkPolicy::deny_all());
+        assert!(!spec.policy.is_unrestricted());
     }
 }
