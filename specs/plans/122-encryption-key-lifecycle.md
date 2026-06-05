@@ -113,10 +113,10 @@ LUKS2 is Linux-only. macOS volumes have no at-rest encryption today. Add a per-f
 
 **Files:** `crates/mvm-core/src/crypto/volume.rs` (new) or extend `aead.rs`; cfg-gated.
 
-- [ ] **Step 1:** Failing test — a directory sealed on macOS opens back to identical bytes, and the on-disk form is ciphertext (no plaintext marker survives).
-- [ ] **Step 2:** Implement `seal_dir`/`open_dir` over `aead::seal` per file (the volume is small app-deps content, not a block device, so per-file AEAD is adequate and avoids a loopback/dm dependency on macOS).
-- [ ] **Step 3:** `#[cfg(not(target_os = "linux"))]` for this path; Linux keeps `create_encrypted_volume` (LUKS2). The selection is the StorageProvider's (123) — this task only provides the macOS arm. Test green on the dev host.
-- [ ] **Step 4:** Commit.
+- [x] **Step 1:** Failing test — a directory sealed on macOS opens back to identical bytes, and the on-disk form is ciphertext (no plaintext marker survives).
+- [x] **Step 2:** Implement `seal_dir`/`open_dir` over `aead::seal` per file (the volume is small app-deps content, not a block device, so per-file AEAD is adequate and avoids a loopback/dm dependency on macOS).
+- [x] **Step 3:** `#[cfg(not(target_os = "linux"))]` for this path; Linux keeps `create_encrypted_volume` (LUKS2). The selection is the StorageProvider's (123) — this task only provides the macOS arm. Test green on the dev host.
+- [x] **Step 4:** Commit.
 
 ## Phase B — key lifecycle
 
