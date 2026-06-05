@@ -12,6 +12,27 @@
 
 **Scope note:** this is three independent subsystems (A/B/C). It is written as one plan per the brief, but the phase boundaries are clean splits if you'd rather execute it as 123a/b/c.
 
+**Execution order (chosen 2026-06-04): B → A → C.** Phase B first — cleanest continuation of plan 122 (which handed the encrypted-volume impl here), additive, no gated lanes needed. Then Phase A (`mvm-network` — unblocks plan 129). Phase C (warm-start) is **scheduled last, not dropped**: highest risk, needs the gated live-KVM + macOS-26 lanes *and* a `PostRestore` sender that does not exist yet (see below). Run as `123b` / `123a` / `123c` worktrees.
+
+## Path reconciliation (post-121)
+
+Plan 121 consolidated 32→15 crates *after* this plan was written, so several paths below are stale. Real current locations (verified 2026-06-04):
+
+| Plan 123 reference | Real current path |
+|---|---|
+| `crates/mvm-ir/src/workload.rs` (`MountSource`, `NetworkMode`) | `crates/mvm-sdk/src/ir/workload.rs` — `MountSource` :418, `NetworkMode` :489 |
+| firewall/proxy in "old `mvm-supervisor`" | `crates/mvm-hostd/src/supervisor/{firewall,proxy,l7_proxy,network}.rs` |
+| `mvm-backend/src/network.rs` | unchanged: `crates/mvm-backend/src/network.rs` |
+| egress proxy lib | `crates/mvm-build/src/egress_proxy/` (+ the builder-VM bin) |
+| `instance_snapshot.rs` (one file) | spread: `crates/mvm-backend/src/base/snapshot_integrity.rs` + `mvm_core::crypto::snapshot_*` |
+| `VmBackend` pause/resume capability flag | `VmCapabilities` (bool `pause_resume`/`snapshots`) in `crates/mvm-core/src/protocol/vm_backend.rs` — **no snapshot-capability enum yet**; C1 adds it |
+
+**Phase A — build on, don't reinvent.** Plan 141 already shipped the in-line packet-observer pipeline that A2/A3 want: `crates/mvm-hostd/src/supervisor/network/{mod,packet,pipeline}.rs` (`Observer::on_packet` → `Verdict`, etherparse parse + checksum-correct rebuild, wired into `gateway_bridge.rs`). Default-deny substrate already exists: `FirewallEnforcer::install_default_deny` + `L4Policy::deny_all()`.
+
+**Phase B — layering (confirmed 2026-06-04).** `mvm-storage` is deliberately mvm-side-minimal — its own module doc cites *plan 45 §D5, Path C*: it ships only the data-plane `VolumeBackend` + `LocalBackend`; `EncryptedBackend<B>` and `ObjectStoreBackend` live in **mvmd**. Plan 123's `StorageProvider` (provision/attach/detach/snapshot) and `MountProvider` (mount-source resolution) are **new host-side layers that sit beside** those, and do **not** re-home the mvmd backends. The `encrypted` `StorageProvider` arm (B2) wraps the *host's* volume bytes via `mvm_core::crypto::{aead,volume}` (122) — distinct from mvmd's data-plane `EncryptedBackend<B>`. The B4 S3 `MountProvider` (read-only sync-to-cache) is likewise a mount-source resolver, not the mvmd `ObjectStoreBackend`.
+
+**Phase C — the `PostRestore` sender gap.** The guest handles `GuestRequest::PostRestore`, but **nothing on the host sends it today** (the same gap that deferred plan 122's VMGenID-token *delivery*). C2's VMGenID-rotate-and-reseed-on-resume depends on that sender being built first — track it as a C prerequisite, not an afterthought.
+
 ---
 
 ## Phase A — `NetworkProvider` (new crate `mvm-network`)
