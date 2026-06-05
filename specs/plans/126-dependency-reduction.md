@@ -44,7 +44,9 @@ Pre-decided with 123: one lean S3 client for the repo.
 - [ ] **Step 1:** Replace `opendal` (`crates/mvm/Cargo.toml`, optional, template-registry-s3) with `object_store` (the same crate 123's S3 `MountProvider` uses, TLS pinned to `ring`). Failing test — the template-registry-s3 round-trips against `object_store`'s in-memory backend.
 - [ ] **Step 2:** Drop `opendal` from the workspace; re-measure (expect ~70 gone, minus `object_store`'s own small closure). Commit.
 
-### Task B3: `pgp` (168 crates) — re-scoped (NOT a minisign swap)
+### Task B3: `pgp` (168 crates) — SUPERSEDED by plan 160
+
+> **Superseded 2026-06-05 by plan 160** (`specs/plans/160-stage0-busybox-seed-drop-alpine.md`): `pgp` exists only to verify the Stage-0 **Alpine** seed tarball. Plan 160 drops the Alpine seed entirely (busybox + static-Nix seed) — deleting `pgp` outright instead of gating it. The re-scope below is retained for context.
 
 > **A1 corrected this task.** `pgp` (rpgp 0.17, unconditional dep of `mvm-build`, **168-crate** closure — the single biggest target) is **not** our release signing. It verifies the **Alpine minirootfs tarball's upstream PGP signature** against the embedded `ALPINE_RELEASE_KEY_ASC` in Stage 0 (`crates/mvm-build/src/stage0.rs::verify_alpine_pgp_signature`). It **cannot** move to minisign — Alpine dictates the format.
 
