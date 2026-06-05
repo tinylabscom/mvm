@@ -232,6 +232,23 @@ pub enum ValidationError {
     },
 }
 
+impl ValidationError {
+    /// True when the marker shows the image simply does not expose a
+    /// per-call entrypoint *wrapper* — it bakes its entrypoint as PID 1's
+    /// boot command instead (the shape every `command`/`shell` image emits
+    /// today; mkGuest does not yet produce a `/usr/lib/mvm/wrappers/`
+    /// wrapper — see the wrapper-model plan). This is a clean "RunEntrypoint
+    /// not offered" state, NOT a failure.
+    ///
+    /// Deliberately narrow: only a non-absolute marker (a script body or a
+    /// relative path, never a wrapper path) counts. A marker that *is* an
+    /// absolute path but fails the ownership / mode / prefix / same-fs checks
+    /// is a real misconfiguration or tamper and stays a hard failure.
+    pub fn is_entrypoint_not_offered(&self) -> bool {
+        matches!(self, ValidationError::NotAbsolute { .. })
+    }
+}
+
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1022,6 +1039,48 @@ mod tests {
             Err(ValidationError::NotAbsolute { .. }) => {}
             other => panic!("expected NotAbsolute, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn script_marker_classifies_as_not_offered_not_failed() {
+        // A boot-script image bakes a shell script at /etc/mvm/entrypoint
+        // (what `command`/`shell` mkGuest images emit), not an absolute
+        // wrapper path. The agent must treat that as "RunEntrypoint not
+        // offered", never a hard validation failure.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("etc/mvm")).unwrap();
+        let marker = tmp.path().join("etc/mvm/entrypoint");
+        std::fs::write(&marker, "#!/bin/sh\nexec /bin/sleep infinity\n").unwrap();
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
+        let err = policy
+            .validate()
+            .expect_err("script marker is not a wrapper");
+        assert!(
+            err.is_entrypoint_not_offered(),
+            "script marker must classify as not-offered, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn security_failure_is_not_classified_as_not_offered() {
+        // A marker that IS an absolute path but fails an ownership/mode/prefix
+        // check is a real failure, never silently downgraded to "not offered".
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("usr/lib/mvm/wrappers")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("etc/mvm")).unwrap();
+        let outside = tmp.path().join("usr/bin/evil");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, "x").unwrap();
+        let marker = tmp.path().join("etc/mvm/entrypoint");
+        std::fs::write(&marker, format!("{}\n", outside.display())).unwrap();
+        let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
+        let err = policy
+            .validate()
+            .expect_err("path outside the allowed prefix");
+        assert!(
+            !err.is_entrypoint_not_offered(),
+            "a real security failure must stay a failure, got {err:?}"
+        );
     }
 
     #[test]
