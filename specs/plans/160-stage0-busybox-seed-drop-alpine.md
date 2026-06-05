@@ -58,6 +58,14 @@ Most of it is already written in `crates/mvm-build/src/bin/mvm-host-vm-init.rs` 
 
 **mkfs.ext4 ordering:** with networking up, the init runs `nix` from the seed store (writable via a tmpfs overlay upper) to `nix build nixpkgs#e2fsprogs`, uses its `mkfs.ext4` to format `/dev/vda`, mounts it at `/nix`, then runs the real `nix build path:/work/nix/images/builder-vm#…`.
 
+#### 0a findings (2026-06-05) — both big risks are already solved in-repo
+
+- **Networking is FREE.** Stage 0's libkrun launch (`libkrun_builder.rs::apply_networking_mode` → `with_passt`/`with_gvproxy` → `configure_with_gateway`) sets **`NET_FLAG_DHCP_CLIENT`**; `libkrun-sys/src/lib.rs:313` confirms the guest "sees a normal eth0 + DHCP + DNS… for **Stage 0**." So `stage0-init` needs **zero networking code** — the current `init.sh` `ip link`/`udhcpc` is legacy/redundant. The DHCP piece I flagged as "the one new thing" doesn't exist.
+- **The nix-store overlay is already written.** `mvm-host-vm-init::setup_nix_store()` already does exactly the seed-store problem: `nix_store_dev_needs_format` (superblock probe) → `format_ext4` → `mount_fs` → **`mount_nix_overlay`** (lower = read-only rootfs `/nix`, upper = persistent disk) → bind over `/nix`, with a `seed_nix_store` copy fallback. With the nix tarball the seed's `/nix/store` (read-only virtiofs root) is the overlay **lower**; the persistent `/dev/vda` is the **upper** → nix sees its own closure + can write builds. Same pattern, just `/dev/vda` + the tarball seed.
+- **Mounts + deps are reusable.** `mount_pseudofs()` + `mount_fs`/`mount_fs_idempotent` (via `nix = { features=["mount","reboot","signal","ioctl"] }`, already a `mvm-build` dep) cover proc/sys/dev/pts/shm + virtiofs + the ext4 mount. No busybox.
+
+So `stage0-init` = `mount_pseudofs` + virtiofs shares + the (already-written) overlay nix-store on `/dev/vda` + env + `nix build <flake>` + copy `/out` + `poweroff` (nix `reboot`). The `e2fsprogs` worry is gone too — the overlay upper is formatted with the same `format_ext4` mvm-host-vm-init already uses (no external mkfs). **Architecture choice:** factor the shared mount/overlay/nix-store helpers out of `mvm-host-vm-init.rs` into a `mvm-build` module both bins use (preferred, avoids duplication) — but extract carefully (that bin is validated/working).
+
 #### De-risk-first sequence (do NOT rip out Alpine until the new path boots)
 
 Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep Alpine as the fallback until proven:
