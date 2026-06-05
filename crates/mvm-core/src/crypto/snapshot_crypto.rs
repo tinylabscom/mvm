@@ -7,72 +7,33 @@
 //! Phase 2 proper so they can sit on `mvm-storage::VolumeBackend`
 //! (Sprint 49 / plan 45) rather than re-deriving an earlier shape.
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
+use crate::crypto::aead;
 use anyhow::Result;
 
-/// Nonce size for AES-256-GCM: 96 bits / 12 bytes.
-pub const NONCE_SIZE: usize = 12;
-
-/// Authentication tag size: 128 bits / 16 bytes.
-pub const TAG_SIZE: usize = 16;
-
-/// Required key size: 256 bits / 32 bytes.
-pub const KEY_SIZE: usize = 32;
+// The wire format and nonce discipline now live in `crypto::aead`; these
+// re-exports keep the long-standing `snapshot_crypto::{KEY_SIZE,…}` paths
+// working for downstream callers.
+pub use crate::crypto::aead::{KEY_SIZE, NONCE_SIZE, TAG_SIZE};
 
 /// Encrypt `plaintext` under `key`.
 ///
 /// Returns `[12-byte nonce || ciphertext || 16-byte tag]`. The nonce
-/// is freshly generated from `OsRng` for every call; never reuse a
-/// nonce under the same key.
+/// is freshly generated for every call; never reuse a nonce under the
+/// same key. Thin `anyhow` shim over [`aead::seal`].
 pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    if key.len() != KEY_SIZE {
-        anyhow::bail!(
-            "AES-256-GCM key must be {KEY_SIZE} bytes, got {}",
-            key.len()
-        );
-    }
-
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| anyhow::anyhow!("Failed to create cipher: {}", e))?;
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-
-    let mut out = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ciphertext);
-    Ok(out)
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(aead::seal(&key, plaintext))
 }
 
 /// Decrypt `encrypted` under `key`.
 ///
 /// `encrypted` must be `[12-byte nonce || ciphertext || 16-byte tag]`.
 /// Authentication failure (wrong key, tampered ciphertext, truncated
-/// tag) returns an error; success returns the recovered plaintext.
+/// tag) returns an error; success returns the recovered plaintext. Thin
+/// `anyhow` shim over [`aead::open`].
 pub fn decrypt(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    if key.len() != KEY_SIZE {
-        anyhow::bail!(
-            "AES-256-GCM key must be {KEY_SIZE} bytes, got {}",
-            key.len()
-        );
-    }
-    if encrypted.len() < NONCE_SIZE + TAG_SIZE {
-        anyhow::bail!(
-            "Encrypted payload too short: {} bytes (minimum {})",
-            encrypted.len(),
-            NONCE_SIZE + TAG_SIZE
-        );
-    }
-
-    let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_SIZE);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| anyhow::anyhow!("Failed to create cipher: {}", e))?;
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| anyhow::anyhow!("Decryption failed: authentication tag mismatch"))
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("{e}"))?;
+    aead::open(&key, encrypted).map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))
 }
 
 #[cfg(test)]

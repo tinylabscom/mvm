@@ -48,6 +48,13 @@ Gaps this plan fills: macOS volume-at-rest, 90-day rotation timer, per-rebuild D
 
 ### Task A0: pluggable channel layering (the encryption seam)
 
+> **DEFERRED (2026-06-04).** Skipped for now: A0 ships only an `Identity`
+> no-op and would rewrite a claims-8/12/13 fuzzed wire format for an
+> untrusted in-mvm channel that does not exist yet. Deferred until a real
+> untrusted in-mvm channel appears (the same conditional work descoped from
+> plan 121 B4). If `framing` later moves to `mvm-hostd`, coordinate with
+> plan 126 B5 — whichever crate owns `framing` then hosts the seam.
+
 **Reconciled with what plan 121 actually shipped — folds in 121 B4 "Option B".** Plan 121 (#581) shipped `core::framing` as the *simple* `read_json_frame` / `write_json_frame` (4-byte length prefix + serde body, cap-before-alloc) — **not** the `FramedMessage<T>` + pluggable-`AuthStage` structure this task originally assumed. Genericizing the host↔guest Ed25519 `AuthenticatedFrame` onto `FramedMessage<T>` was **descoped** from 121 as zero-dedup churn on a claims-8/12/13 fuzzed wire format, and parked as a 121 follow-up. It lands **here**, as the prerequisite half of this seam, because 122 is the first plan that actually needs the pluggable stage. So A0 is two stages: (1) build the `FramedMessage<T>` auth seam (the retrofit descoped from 121), then (2) add the optional encryption transform.
 
 **Gate carried from the 121 descope (do NOT skip):** the auth retrofit rewrites a claims-8/12/13 fuzzed wire format — land it only behind a dedicated cargo-fuzz pass on the unified frame parser **and** a live host↔guest boot round-trip (`examples/agent_ping`) proving the authed path is byte-for-byte unchanged. Never a pure refactor commit.
@@ -75,7 +82,7 @@ Then add the encryption transform — an optional second pluggable stage so a No
 
 **Files:** `crates/mvm-core/src/crypto/aead.rs` (new, post-121); the two existing modules become callers.
 
-- [ ] **Step 1:** Write `aead.rs` with a typed key and the existing wire format. The `Key` newtype exists so a 32-byte buffer can't be passed where a signing key is wanted, and to carry the zeroize impl in one spot.
+- [x] **Step 1:** Write `aead.rs` with a typed key and the existing wire format. The `Key` newtype exists so a 32-byte buffer can't be passed where a signing key is wanted, and to carry the zeroize impl in one spot.
   ```rust
   /// AES-256-GCM with a random 96-bit nonce per call. Wire: nonce ‖ ct ‖ tag.
   /// Nonce reuse under one key is catastrophic for GCM, so we never accept a
@@ -85,7 +92,7 @@ Then add the encryption transform — an optional second pluggable stage so a No
   pub fn seal(key: &Key, plaintext: &[u8]) -> Vec<u8>;
   pub fn open(key: &Key, framed: &[u8]) -> Result<Vec<u8>, AeadError>; // AeadError on tag mismatch / short input
   ```
-- [ ] **Step 2:** Failing test — roundtrip and tamper.
+- [x] **Step 2:** Failing test — roundtrip and tamper.
   ```rust
   #[test]
   fn seal_open_roundtrip_and_reject_tamper() {
@@ -96,9 +103,9 @@ Then add the encryption transform — an optional second pluggable stage so a No
       assert!(open(&k, &ct).is_err()); // GCM tag must catch it
   }
   ```
-- [ ] **Step 3:** Implement over `aes-gcm` (already a dep), nonce from `getrandom`.
-- [ ] **Step 4:** Re-point `snapshot_crypto::{encrypt,decrypt}` and `snapshot_encryption` at `aead::{seal,open}`; keep their public signatures so callers don't churn. `cargo test -p mvm-core aead snapshot` green.
-- [ ] **Step 5:** Commit.
+- [x] **Step 3:** Implement over `aes-gcm` (already a dep), nonce from `getrandom`.
+- [x] **Step 4:** Re-point `snapshot_crypto::{encrypt,decrypt}` and `snapshot_encryption` at `aead::{seal,open}`; keep their public signatures so callers don't churn. `cargo test -p mvm-core aead snapshot` green.
+- [x] **Step 5:** Commit.
 
 ### Task A2: macOS volume-at-rest path
 

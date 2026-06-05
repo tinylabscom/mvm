@@ -54,23 +54,16 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
+use crate::crypto::aead;
 use anyhow::{Context, Result};
-use rand::RngCore;
 
 /// Default plaintext chunk size: 1 MiB. Each on-disk encrypted
 /// chunk is `chunk_size + 28` bytes (12 nonce + 16 tag).
 pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 
-/// 12-byte nonce per AES-256-GCM convention.
-pub const NONCE_SIZE: usize = 12;
-
-/// 16-byte AES-GCM authentication tag.
-pub const TAG_SIZE: usize = 16;
-
-/// 32-byte AES-256 key.
-pub const KEY_SIZE: usize = 32;
+// The AEAD sizes live in `crypto::aead`; re-export so the
+// `snapshot_encryption::{NONCE_SIZE,…}` paths downstream keep working.
+pub use crate::crypto::aead::{KEY_SIZE, NONCE_SIZE, TAG_SIZE};
 
 /// File header magic; lets the resume path probe for "is this file
 /// encrypted?" cheaply.
@@ -104,12 +97,7 @@ pub fn encrypt_file_in_place_with_chunk_size(
     key: &[u8],
     chunk_size: usize,
 ) -> Result<()> {
-    if key.len() != KEY_SIZE {
-        anyhow::bail!(
-            "snapshot encryption key must be {KEY_SIZE} bytes, got {}",
-            key.len()
-        );
-    }
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("snapshot encryption {e}"))?;
     if chunk_size == 0 || chunk_size > u32::MAX as usize {
         anyhow::bail!("chunk_size must be in 1..=u32::MAX, got {chunk_size}");
     }
@@ -119,8 +107,6 @@ pub fn encrypt_file_in_place_with_chunk_size(
     let pt_size = plaintext_meta.len();
 
     let tmp_path = path.with_extension("enc.tmp");
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| anyhow::anyhow!("constructing AES-256-GCM cipher: {e}"))?;
 
     // Wrap the write in a closure so we can clean up on any error.
     let result: Result<()> = (|| {
@@ -150,24 +136,18 @@ pub fn encrypt_file_in_place_with_chunk_size(
 
         // Chunks.
         let mut buf = vec![0u8; chunk_size];
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
         let mut written_pt: u64 = 0;
         loop {
             let n = read_exact_up_to(&mut reader, &mut buf)?;
             if n == 0 {
                 break;
             }
-            rand::thread_rng().fill_bytes(&mut nonce_bytes);
-            let nonce = Nonce::from_slice(&nonce_bytes);
-            let ct = cipher
-                .encrypt(nonce, &buf[..n])
-                .map_err(|e| anyhow::anyhow!("AES-256-GCM encrypt chunk: {e}"))?;
+            // `seal` prepends a fresh nonce, so a sealed chunk is exactly
+            // the `nonce ‖ ct ‖ tag` the decoder reads back below.
+            let chunk = aead::seal(&key, &buf[..n]);
             writer
-                .write_all(&nonce_bytes)
-                .with_context(|| format!("writing chunk nonce to {}", tmp_path.display()))?;
-            writer
-                .write_all(&ct)
-                .with_context(|| format!("writing chunk ciphertext to {}", tmp_path.display()))?;
+                .write_all(&chunk)
+                .with_context(|| format!("writing encrypted chunk to {}", tmp_path.display()))?;
             written_pt += n as u64;
             if n < chunk_size {
                 break;
@@ -227,16 +207,9 @@ fn read_exact_up_to<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize> {
 /// Validates the magic, schema version, and stitched plaintext
 /// size against the header.
 pub fn decrypt_file_in_place(path: &Path, key: &[u8]) -> Result<()> {
-    if key.len() != KEY_SIZE {
-        anyhow::bail!(
-            "snapshot encryption key must be {KEY_SIZE} bytes, got {}",
-            key.len()
-        );
-    }
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("snapshot encryption {e}"))?;
     let header = read_header(path)?;
     let tmp_path = path.with_extension("dec.tmp");
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| anyhow::anyhow!("constructing AES-256-GCM cipher: {e}"))?;
 
     let result: Result<()> = (|| {
         let ct_file =
@@ -256,27 +229,24 @@ pub fn decrypt_file_in_place(path: &Path, key: &[u8]) -> Result<()> {
             .with_context(|| format!("creating tmp {}", tmp_path.display()))?;
         let mut writer = BufWriter::new(tmp_file);
 
-        let chunk_input_size = header.chunk_size as usize + TAG_SIZE;
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        let mut ct_buf = vec![0u8; chunk_input_size];
+        // Each on-disk chunk is `nonce ‖ ct ‖ tag`; read the whole frame
+        // and hand it to `aead::open`.
+        let framed_chunk_size = NONCE_SIZE + header.chunk_size as usize + TAG_SIZE;
+        let mut framed = vec![0u8; framed_chunk_size];
         let mut written_pt: u64 = 0;
         loop {
-            match reader.read_exact(&mut nonce_bytes) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => {
-                    return Err(anyhow::anyhow!("reading chunk nonce: {e}"));
-                }
+            let n = read_exact_up_to(&mut reader, &mut framed)?;
+            if n == 0 {
+                break; // clean EOF on a chunk boundary
             }
-            let n = read_exact_up_to(&mut reader, &mut ct_buf)?;
-            if n < TAG_SIZE {
+            if n < NONCE_SIZE + TAG_SIZE {
                 anyhow::bail!(
-                    "ciphertext chunk truncated: got {n} bytes after nonce \
-                     (minimum {TAG_SIZE} for AEAD tag)"
+                    "ciphertext chunk truncated: got {n} bytes \
+                     (minimum {} for nonce+tag)",
+                    NONCE_SIZE + TAG_SIZE
                 );
             }
-            let nonce = Nonce::from_slice(&nonce_bytes);
-            let pt = cipher.decrypt(nonce, &ct_buf[..n]).map_err(|_| {
+            let pt = aead::open(&key, &framed[..n]).map_err(|_| {
                 anyhow::anyhow!(
                     "AES-256-GCM authentication failure — wrong key or tampered ciphertext"
                 )
