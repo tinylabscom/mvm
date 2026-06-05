@@ -88,6 +88,24 @@ The IR `NetworkMode` is a closed enum (`None`/`Bridge`/`Host`) — a mesh/VPN mo
 - [x] **Step 1:** `network_mode_custom_roundtrips_json` (serde), `registry_resolves_builtin_and_custom_modes`, `registry_rejects_unregistered_custom_provider` (→ `NetworkError::UnknownProvider`). Built-in `None`/`Bridge`/`Host` resolve by kind.
 - [x] **Step 2:** Added the open `Custom { provider, config }` variant (dropping `Copy`/`Eq`; one match in `deploy.rs` fixed) + `NetworkProviderRegistry`. The guest `netinit` reading a `Custom` config off the config-device is plan 124's (E1); mvmd's WireGuard/Tailscale impl is a separate mvmd plan. Committed `4af31a45`.
 
+### The lift — remaining increments (sequenced, researched 2026-06-05)
+
+**Invariant for every increment below:** claim-10 stays *default-deny-unless-admitted* (never default-open, never silently un-filtered); claims 12/13 (broker/secrets) untouched; every path goes through the `mvm_network::NetworkProvider` trait, not direct calls.
+
+- [x] **L1 — Firecracker bridge+TAP through the seam (done, PR #626).** `BridgeTapNetworkProvider` (`mvm-backend/src/network_provider.rs`) wraps `bridge_ensure`/`tap_create`/`apply_network_policy`, transactional like the old `TapGuard`; both `microvm.rs` start sites + teardown re-pointed. `NetworkSpec.policy` is the iptables `network_policy::NetworkPolicy` (`Default`=`deny_all()`), + `slot_index`.
+
+- [ ] **L2 — microvm_nix (qemu) — RESEARCHED, BLOCKED ON A DESIGN/PRODUCT CALL.** `microvm_nix.rs:204-205` does `bridge_ensure`+`tap_create` with **no `apply_network_policy`** → that backend applies **zero egress filtering**. *Not* a quick re-point: the egress policy lives only in Firecracker's internal `FlakeRunConfig.network_policy` (`microvm.rs:581`) — it is **not** in the backend-agnostic `VmStartConfig`, and `MicrovmNixConfig` has no policy field. So there is no policy source to enforce. **Do NOT bulldoze `deny_all()`** onto it — with no admit/opt-in path that denies *all* egress (breaks legit workloads), which is not claim-10 (default-deny-*unless-admitted*). Two real options: **(a)** plumb `network_policy` into `VmStartConfig` so *every* backend enforces claim-10 uniformly (correct, but cross-cutting — touches the agnostic config + all backends + the `VmStartConfig` builders), or **(b)** document microvm_nix as a non-untrusted-workload backend (Tier-2 QEMU; CLAUDE.md is "Firecracker-only on Linux") so no enforcement is required. Needs a call on microvm_nix's role before code. **Verdict: L2 is not the clean first win it looked like — defer behind L3/A2.**
+
+- [ ] **L3 — libkrun gvproxy/passt — NEEDS A SECOND SEAM SHAPE.** libkrun's networking is declared *on the krun context* (`krun.with_gvproxy`/`with_passt`, `libkrun.rs:108`) and **the supervisor spawns the gateway** (`libkrun.rs:104-105`) — it is *not* a host-side side-effecting step like bridge/TAP. So the provider can't fit the side-effecting `provision()` shape as-is. Approach: the libkrun `NetworkProvider` **produces the gateway config** (mode + mac + scratch) that the libkrun start path feeds to `with_gvproxy`/`with_passt`, keeping the claim-10 **gateway-audit bridge (no-bypass)** intact — *not* a host-state mutation. Highest backend-coverage value (default macOS path) and **locally verifiable** (libkrun boots on this Mac → `examples/agent_ping`).
+
+- [ ] **L4 — claims-gated mvm-hostd relocation (A2 → A3 → A4) — the strategic core, Linux-CI per move.**
+  - **A2:** firewall (`mvm-hostd/.../firewall/install_default_deny`) + L4 (`proxy/l4.rs`, `L4Policy::deny_all`) + L7 enforce path behind the seam, with the `MVM_ACK_UNRESTRICTED_NETWORK` escape (claim 10).
+  - **A3:** egress proxy with the 129 `substitution_stage` + `scan_stage` hooks (no-op default) on Plan 141's shipped packet-observer pipeline — **this unblocks Plan 129** (the lift's stated purpose).
+  - **A4:** DNS sink-hole + flow audit to the chain-signed log.
+  - Each move carries its claim-10/12/13 witness; validate per move on Linux CI so `xtask check-claim-catalog` never goes red.
+
+**Recommended order (revised after L2 research):** L1 done → **L3 (libkrun, locally verifiable)** and **A2→A3 (claims-gated core, unblocks 129)** are the two real tracks; L2 is deferred behind a product call on microvm_nix.
+
 ## Phase B — `StorageProvider` (`mvm-storage`)
 
 ### Task B1: the trait + `local` impl
