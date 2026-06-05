@@ -13,5 +13,6 @@ pub mod secret_store;
 pub mod snapshot_crypto;
 pub mod snapshot_encryption;
 pub mod snapshot_hmac;
+pub mod snapshot_sign;
 pub mod threat_classifier;
 pub mod volume;

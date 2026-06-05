@@ -156,9 +156,9 @@ ADR-066 §5: a per-volume DEK rides the rebuild cycle and binds to the artifact 
 
 **Files:** `key_rotation.rs::reseal_snapshot` and the snapshot seal path; reuse `ed25519-dalek` + the host signer at `~/.mvm/keys/host-signer.ed25519`.
 
-- [ ] **Step 1:** Failing tests — a sealed snapshot carries `{ sha256, signature }`; verify passes; a flipped byte fails the content-address; a signature from the wrong key fails verify.
-- [ ] **Step 2:** On seal, compute `sha256` over the sealed bytes and sign `(sha256 ‖ epoch)` under the host signer. Keep the HMAC for cheap local integrity if useful, but make the Ed25519 signature the authentication gate at admit.
-- [ ] **Step 3:** Verify at resume admit (next to the existing snapshot epoch/replay check). Tests green; commit.
+- [x] **Step 1:** Failing tests — a sealed snapshot carries `{ sha256, signature }`; verify passes; a flipped byte fails the content-address; a signature from the wrong key fails verify.
+- [x] **Step 2:** On seal, compute `sha256` over the sealed bytes and sign `(sha256 ‖ epoch)`. HMAC kept as cheap local integrity; the Ed25519 signature is the authentication gate. **Deviation (approved):** signed by the **host attestation identity** (resolved under the data dir for `MVM_DATA_DIR` isolation), NOT the plan host-signer — that key lives behind the claim-8 subprocess moat and snapshot sealing runs host-side in mvm-backend. The attestation identity is the host key a control plane already enrols, so mvmd verifies a worker snapshot by pinning that worker's pubkey; `verify_signature` takes a trusted-signer set for exactly that.
+- [x] **Step 3:** Verify at resume admit (in `snapshot_integrity::verify_snapshot_artifacts`, after the HMAC/epoch check). Missing signature is non-fatal for pre-C snapshots unless `MVM_SNAPSHOT_HMAC_STRICT=1`; present-but-invalid is always fatal. Tests green; commit.
 
 ## Phase D — VMGenID reseed on resume
 
