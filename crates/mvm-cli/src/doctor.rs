@@ -1193,6 +1193,22 @@ fn builder_backend_check(plat: Platform) -> Check {
                 "Vz NOT available (requires macOS 13+)".to_string()
             }
         }
+        BuilderBackendChoice::Qemu => {
+            // Plan 165 / ADR-072 — Linux dev/builder backend. KVM-accelerated
+            // where /dev/kvm is present, TCG fallback otherwise.
+            if which::which("qemu-system-x86_64").is_ok()
+                || which::which("qemu-system-aarch64").is_ok()
+            {
+                let accel = if std::path::Path::new("/dev/kvm").exists() {
+                    "KVM"
+                } else {
+                    "TCG (unaccelerated)"
+                };
+                format!("QEMU available ({accel})")
+            } else {
+                "QEMU NOT available (apt install qemu-system-x86 qemu-utils)".to_string()
+            }
+        }
     };
 
     Check {
