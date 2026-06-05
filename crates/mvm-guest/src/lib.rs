@@ -5,6 +5,11 @@ pub mod builder_agent;
 pub mod console;
 pub mod entrypoint;
 pub mod fs_rpc;
+/// Plan 122 D — guest-side VMGenID reseed. On a snapshot resume the host
+/// delivers a fresh generation token; when it changes (a clone, not a
+/// normal wake) the guest reseeds its CSPRNG so two clones don't generate
+/// identical key material.
+pub mod genid;
 pub mod integrations;
 pub mod lifecycle_hooks;
 /// Plan 74 W2 — guest-side network defense. The `mvm-guest-netinit`

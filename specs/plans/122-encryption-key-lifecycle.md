@@ -166,17 +166,11 @@ Resuming two copies of one snapshot leaves both guests with identical CSPRNG sta
 
 **Files:** the resume path in the backend/supervisor (host side); `crates/mvm-guest` agent (guest side).
 
-- [ ] **Step 1 (host):** On every resume, emit a fresh 16-byte generation token bound to the snapshot's content-address (Phase C) so it can't be replayed onto a different snapshot. Failing test: two resumes of the same snapshot get distinct tokens.
-- [ ] **Step 2 (guest):** Failing test — the agent reseeds and drops its session when the token changes, and does nothing when it's unchanged.
-  ```rust
-  #[test]
-  fn changed_genid_forces_reseed_and_session_reset() {
-      let mut a = Agent::with_genid([1u8; 16]);
-      assert!(!a.on_genid([1u8; 16])); // unchanged -> no reseed
-      assert!(a.on_genid([2u8; 16]));  // changed  -> reseed + drop session
-  }
-  ```
-- [ ] **Step 3 (guest):** On a changed token, reseed the CSPRNG (`getrandom` → the agent's RNG) and drop the current vsock session so a fresh Ed25519 handshake runs (new session keys, no carried sequence numbers). Tests green; commit.
+- [x] **Step 1 (host):** Mint a fresh 16-byte generation token bound to the snapshot's content-address (Phase C). `mvm_core::crypto::vmgenid::fresh_generation_token(content_hash)` — drawn from the OS CSPRNG so two resumes of the same snapshot get distinct tokens (the test). The host computes `content_hash` via `snapshot_sign::compute_content_hash`. (The *delivery* of the token to the guest is deferred — see the follow-up below.)
+- [x] **Step 2 (guest):** `mvm_core::crypto::vmgenid::GenIdState::on_genid` (pure change-detector) + `mvm_guest::genid::GenIdReseeder` wrap it with the reseed action. Test `changed_genid_forces_reseed_and_session_reset` asserts unchanged→`Unchanged`, changed→`Reseeded`, repeat→`Unchanged`. (Implemented as a focused `GenIdReseeder` rather than on the big agent struct; same behaviour as the sketch.)
+- [x] **Step 3 (guest):** On a changed token, `GenIdReseeder::on_genid` reseeds the kernel CSPRNG by stirring `/dev/urandom` with the token (best-effort; diverges two clones' `getrandom` output) and signals `Reseeded` so the caller drops the vsock session. The session-drop is nominal today — the agent holds no persistent Ed25519 session yet (`SessionHello`/`AuthenticatedFrame` exist but aren't driven in the agent flow). Tests green; commit.
+
+**Scope note (delivery deferred):** the host→guest token *delivery* rides the resume RPC, but **nothing on the host sends `GuestRequest::PostRestore` today** (the guest handles it; no sender exists). Adding the token field to that claim-5 **fuzzed** wire format for a non-existent sender is premature — the same reasoning that deferred A0. So both halves ship as tested substrate (host mint + guest reseed action) and the delivery wiring is a follow-up, to land when the resume RPC actually sends `PostRestore`.
 
 ## Phase E — reconcile the ADR
 
@@ -196,6 +190,7 @@ Resuming two copies of one snapshot leaves both guests with identical CSPRNG sta
 - [ ] `encrypted` volume `StorageProvider` impl (selects LUKS2 vs the macOS arm) → plan 123.
 - [ ] `libcryptsetup-sys` FFI to replace the `cryptsetup` shell-out — only if the shell-out proves insufficient; not worth a native dep now (dep budget).
 - [ ] Hardware VMGenID device per backend (Firecracker ACPI table) → backend plan; the token path covers all backends in the meantime.
+- [ ] VMGenID token **delivery**: thread `vmgenid::GenerationToken` from the host resume path into the guest over the resume RPC, and call `GenIdReseeder::on_genid` from the guest's `PostRestore` handler. Blocked on the host actually sending `GuestRequest::PostRestore` (no sender today) — land the wire-format field then, not before (claim-5 fuzzed format; A0-style premature-change rule).
 - [ ] Re-add Noise to any future channel that crosses an untrusted boundary inside mvm (none today).
 
 ## Self-review
