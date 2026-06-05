@@ -44,6 +44,8 @@ pub mod flow_byte_log;
 pub mod latency;
 pub mod packet;
 pub mod pipeline;
+/// plan 123 A3 — Plan 129 substitution/scan egress-proxy seams.
+pub mod stages;
 
 /// Maximum number of observers per VM. ADR-064 §Decision: hard cap of 8
 /// (each observer is a synchronous callback in the signer task's hot path;
