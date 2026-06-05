@@ -500,12 +500,25 @@ pub enum NetworkDns {
     Resolver { host: String, port: u16 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+// `Copy`/`Eq` dropped when the open `Custom` variant arrived: its owned
+// `String` + `serde_json::Value` (Value isn't `Eq`) can't be either. Same
+// shape as `MountSource`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkMode {
     None,
     Bridge,
     Host,
+    /// Open extension point: a mesh/VPN network resolved by a registered
+    /// `NetworkProvider` (WireGuard, Tailscale, …). `config` is the
+    /// provider's own schema; the IR doesn't interpret it, so a mesh plugs
+    /// in without a core-enum edit. The guest's `netinit` reads a `Custom`
+    /// config off the config-device. mvm builds none of the mesh logic — the
+    /// impl is mvmd's; this is only the seam. See plan 123 A5.
+    Custom {
+        provider: String,
+        config: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

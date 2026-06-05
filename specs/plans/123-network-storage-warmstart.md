@@ -37,6 +37,8 @@ Plan 121 consolidated 32→15 crates *after* this plan was written, so several p
 
 ## Phase A — `NetworkProvider` (new crate `mvm-network`)
 
+> **Status (2026-06-04, branch `feat/plan-123a-network`):** the **additive seam** is landed and verified — the `mvm-network` crate + `NetworkProvider` trait + default-deny policy (A1 step 1, A2 step 1) and the IR `NetworkMode::Custom` + registry (A5). The **claims-gated relocations are deferred** (A1 step 2 full move, A2 step 2 enforce, A3, A4): they lift the firewall / L4 / L7 / packet-observer machinery out of `mvm-hostd`, which carries the claim-10/12/13 witnesses + `xtask check-claim-catalog`, so each must move with its witness rather than be rushed. Tracked in the deferred follow-ups.
+
 ### Task A1: create `mvm-network` + the trait
 
 ADR-064 generalized to provisioning. One seam an external consumer (mvmd) and the backends extend.
@@ -54,15 +56,16 @@ ADR-064 generalized to provisioning. One seam an external consumer (mvmd) and th
       fn teardown(&self, h: NetHandle) -> Result<()>;
   }
   ```
-- [ ] **Step 2:** Move the existing provisioning (`mvm-backend/network.rs`, the bridge/TAP/gvproxy/passt wiring) into `mvm-network` behind `provision`/`teardown`; re-point callers. Workspace builds.
-- [ ] **Step 3:** Commit.
+  - [x] **Step 1 done:** `NetworkProvider` (kind/provision/policy/teardown) + `NetworkSpec`/`NetHandle`/`NetworkError` in `crates/mvm-network/src/provider.rs`. `policy()` returns `mvm_core`'s `NetworkPolicy` (reused, not a new `EgressPolicy`). The crate is the 17th workspace member.
+- [ ] **Step 2 — DEFERRED:** the existing provisioning is shell-coupled (`mvm-backend/network.rs` calls `run_in_vm_visible` + `VmSlot`), so the trait is the low seam and the impl stays in `mvm-backend`. Writing that impl + re-pointing callers + lifting the `mvm-hostd` firewall/proxy is the claims-gated move (see status note) — follow-up.
+- [x] **Step 3:** Committed `4af31a45`.
 
 ### Task A2: default-deny ingress **and** egress
 
 Claim 10 is egress default-deny today; ADR-066 §"NetworkProvider owns … both ingress and egress" extends it.
 
-- [ ] **Step 1:** Failing tests — `EgressPolicy::default()` denies all; an unresolved policy denies (`policy_default_is_deny_all` style); ingress mirrors it. Keep the `MVM_ACK_UNRESTRICTED_NETWORK` escape + warning (never in CI).
-- [ ] **Step 2:** Implement the resolve + enforce (DNS allow-list + L4 filter in the gvproxy/passt bridge — the in-line wrap, not a native API; see `reference_gvproxy_passt_no_native_flow_api`). Tests green. Commit.
+- [x] **Step 1:** `network_spec_default_policy_is_deny_all` asserts `NetworkSpec::default().policy` is the empty (deny-all) `NetworkPolicy` — the seam's default fails closed (claim 10). (No new `EgressPolicy` type; reuses the existing claim-10 policy.)
+- [ ] **Step 2 — DEFERRED:** the resolve + enforce (DNS allow-list + L4 filter in the gvproxy/passt bridge, the in-line wrap) lives in `mvm-hostd`'s machinery + the `MVM_ACK_UNRESTRICTED_NETWORK` escape — part of the claims-gated lift. Follow-up.
 
 ### Task A3: the egress proxy with the 129 seams
 
@@ -79,10 +82,10 @@ Claim 10 is egress default-deny today; ADR-066 §"NetworkProvider owns … both 
 
 The IR `NetworkMode` is a closed enum (`None`/`Bridge`/`Host`) — a mesh/VPN mode can't be expressed without a core edit. Same fix as `MountSource::External`: add an open `Custom { provider, config }` + a `NetworkProvider`-registry lookup. **WireGuard/Tailscale themselves are mvmd's** (the control-plane mesh); this plan only exports the *seam* so mvmd registers a `WireGuardNetworkProvider`, expresses it in the IR, and the guest's `netinit` (124) consumes the config delivered on the config-device (124 E1). mvm builds none of the mesh logic.
 
-**Files:** `crates/mvm-ir/src/workload.rs` (`NetworkMode` ~line 489); `crates/mvm-network` (the registry).
+**Files:** `crates/mvm-sdk/src/ir/workload.rs:489` (`NetworkMode` — post-121 home, not `mvm-ir`); `crates/mvm-network/src/registry.rs`.
 
-- [ ] **Step 1:** Failing test — `NetworkMode::Custom { provider: "wireguard", config }` round-trips; an unregistered provider errors `UnknownNetworkProvider`; the built-in `None`/`Bridge`/`Host` still resolve.
-- [ ] **Step 2:** Add the open variant + the registry lookup (built-ins stay); `netinit` reads a `Custom` config from the config-device. mvmd's WireGuard/Tailscale impl is a separate mvmd plan. Commit.
+- [x] **Step 1:** `network_mode_custom_roundtrips_json` (serde), `registry_resolves_builtin_and_custom_modes`, `registry_rejects_unregistered_custom_provider` (→ `NetworkError::UnknownProvider`). Built-in `None`/`Bridge`/`Host` resolve by kind.
+- [x] **Step 2:** Added the open `Custom { provider, config }` variant (dropping `Copy`/`Eq`; one match in `deploy.rs` fixed) + `NetworkProviderRegistry`. The guest `netinit` reading a `Custom` config off the config-device is plan 124's (E1); mvmd's WireGuard/Tailscale impl is a separate mvmd plan. Committed `4af31a45`.
 
 ## Phase B — `StorageProvider` (`mvm-storage`)
 
@@ -169,6 +172,11 @@ The wireable macOS live-memory path. Coarser than UFFD (a full save/restore), bu
 
 ### deferred follow-ups
 
+- [ ] **Phase A claims-gated lift (A1 step 2, A2 step 2, A3, A4).** With the `mvm-network` seam landed, relocate the concrete machinery behind it — *each move carrying its claim witness*, so `xtask check-claim-catalog` stays green:
+  - the mvm-backend TAP/bridge/gvproxy/passt provider impl of `NetworkProvider` (re-point `mvm-backend/src/network.rs` callers).
+  - the firewall (`mvm-hostd/.../firewall/`) + L4 (`proxy/l4.rs`, `L4Policy::deny_all`) + L7 (`l7_proxy.rs`) enforce path, plus the `MVM_ACK_UNRESTRICTED_NETWORK` escape (claim 10).
+  - A3 egress proxy with the 129 `substitution_stage` + `scan_stage` hooks, built on Plan 141's shipped packet-observer pipeline (`mvm-hostd/.../network/{mod,packet,pipeline}.rs` — `Observer::on_packet`/`Verdict`).
+  - A4 DNS sink-hole + flow audit to the shared chain-signed log.
 - [ ] **B4 S3 live-bucket validation** — exercise `S3MountProvider::from_s3_config` against a real (or minio) bucket; only the `InMemory` sync path is unit-tested. Plus: `resolve` owns a current-thread runtime and `block_on`s, so calling it from inside another tokio runtime (mvm-backend async context) would panic — give it a `block_in_place`/offload path when wiring it into the backend.
 - [ ] **B4 opendal → object_store consolidation** — plan 126 swaps the existing optional `opendal` (`crates/mvm/Cargo.toml`, `template-registry-s3`) for this same `object_store`, dropping opendal. Not done here (this plan only *adds* the first object_store consumer).
 - [ ] **B2 Linux LUKS2 arm** — block-level `EncryptedStorage` (`cryptsetup luksFormat`/`luksOpen` + `mkfs`/`mount` over a loop device), gated `#[cfg(target_os = "linux")]`, with an `MVM_LIVE_LUKS=1`-gated live test. Deferred from B2: a macOS dev host can neither build nor verify it (no Linux/root/loop devices; local cross-tooling can't compile the crate). Do it on Linux. While there, dedup the cryptsetup shell-out with `mvm/src/security/encryption.rs` (the `run_in_vm` builder-VM path) and `mvm_core::rotate_luks_slot` (the direct-`Command` runtime path).

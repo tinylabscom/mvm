@@ -2,6 +2,11 @@
 members = [
     "crates/mvm-core",
     "crates/mvm-storage",
+    # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
+    # Low seam crate: the TAP/bridge/gvproxy/passt impl stays in mvm-backend
+    # (where the in-VM shell lives) and the WireGuard/Tailscale mesh impl is
+    # mvmd's; both register against this trait.
+    "crates/mvm-network",
     "crates/deps/libkrun-sys",
     # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
     # supervisor without closing the
@@ -305,6 +310,7 @@ mvm-build = { path = "crates/mvm-build", version = "0.16.0", default-features = 
 mvm = { path = "crates/mvm", version = "0.16.0", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.16.0" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.16.0" }
+mvm-network = { path = "crates/mvm-network", version = "0.16.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.16.0", default-features = false }
 mvm-hostd = { path = "crates/mvm-hostd", version = "0.16.0" }
 
