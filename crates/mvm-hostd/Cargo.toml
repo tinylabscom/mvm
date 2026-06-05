@@ -35,6 +35,9 @@ path = "src/bin/mvm-audit-signer.rs"
 [dependencies]
 mvm-core.workspace = true
 mvm-backend.workspace = true
+# plan 123 A2 — the EgressEnforcer seam this crate's SupervisorEgressEnforcer
+# implements. Acyclic HIGH->LOW: mvm-network deps only mvm-core + mvm-sdk.
+mvm-network.workspace = true
 # `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
 # admission gate (security claim 9).
 mvm-sdk.workspace = true

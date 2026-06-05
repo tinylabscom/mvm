@@ -19,8 +19,10 @@
 //! the egress-proxy substitution/scan seams plan 129 hangs on. See plan 123
 //! Phase A tasks A1-step-2 / A3 / A4.
 
+pub mod enforcement;
 pub mod provider;
 pub mod registry;
 
+pub use enforcement::{EgressEnforcer, EgressWiring, EnforcementError};
 pub use provider::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 pub use registry::NetworkProviderRegistry;
