@@ -70,7 +70,7 @@ use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
 // ObserverWiring (default no-op) so plan 129 sets them without touching the
 // call sites.
 use crate::supervisor::network::stages::{
-    NoopScan, NoopSubstitution, ScanStage, SubstitutionStage,
+    MandatoryDenyEgressScan, NoopSubstitution, ScanStage, SubstitutionStage,
 };
 use std::collections::HashSet;
 
@@ -480,7 +480,11 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
             substitution: Arc::new(NoopSubstitution),
-            scan: Arc::new(NoopScan),
+            // Default scan = host-side mandatory-deny (link-local + cloud
+            // metadata), unbypassable from inside a compromised guest that
+            // strips its netinit routes. Per-tenant allow-list / DNS sink-hole
+            // scans compose on top once policy threading lands.
+            scan: Arc::new(MandatoryDenyEgressScan),
         };
 
         // Bridge task — variant-specific.
@@ -1368,6 +1372,9 @@ async fn handle_vz_ingest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The live default scan is MandatoryDenyEgressScan; the bridge tests want a
+    // pass-through default, so wiring_with keeps NoopScan (test-scoped import).
+    use crate::supervisor::network::stages::NoopScan;
 
     // -----------------------------------------------------------------
     // FlowPolicy
