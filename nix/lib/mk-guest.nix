@@ -484,6 +484,18 @@ let
     # is the host-side gate).
     if [ -e /etc/mvm/variant ] && [ "$(/bin/busybox cat /etc/mvm/variant)" = "dev" ]; then
       exec </dev/console >/dev/console 2>&1
+      # Plan 162: the dev VM is long-lived, so PID 1 idles here instead of
+      # running the /etc/mvm/entrypoint `/bin/sh` on /dev/console. The guest
+      # agent (forked above) serves the interactive shell over vsock — it
+      # openpty()s and forks its OWN `/bin/sh -i` (mvm-guest::console),
+      # independent of PID 1 — so PID 1 doesn't need to be a shell at all.
+      # Running `/bin/sh` on /dev/console here is fatal on Vz: its serial
+      # console is input-less, the read hits EOF, the shell exits, PID 1
+      # dies, and the VM powers off ~5 s after boot (the Plan 120 symptom).
+      # On libkrun this just swaps a blocking console read for an explicit
+      # idle — same "stay alive", no change to the agent shell path. A
+      # busybox-portable loop avoids depending on `sleep infinity`.
+      while :; do /bin/busybox sleep 2147483647; done
     fi
 
     # Stage 4.5 — Plan 74 W1.4b (ADR-051) — mvm runtime overlay env.
