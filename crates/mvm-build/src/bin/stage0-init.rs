@@ -49,6 +49,11 @@ mod linux {
     const NIX_SEED_RO: &str = "/nix-seed-ro";
 
     pub fn run() -> ExitCode {
+        // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
+        // arches (x86_64 hit EMFILE copying the seed store to tmpfs). As PID 1
+        // / root we can raise both soft and hard limits; do it before any
+        // fd-heavy work.
+        raise_fd_limit();
         if let Err(e) = setup() {
             eprintln!("stage0-init: FATAL: {e}");
             // Best-effort power off so the host sees the VM exit rather than
@@ -63,6 +68,33 @@ mod linux {
             Err(e) => {
                 eprintln!("stage0-init: build failed: {e}");
                 power_off()
+            }
+        }
+    }
+
+    /// Raise `RLIMIT_NOFILE` so the recursive seed-store copy (and `nix`
+    /// itself) don't hit `EMFILE` under the bundled kernel's low default.
+    /// Best-effort: as PID 1/root we can lift the hard limit, but a kernel
+    /// ceiling below 65536 just clamps — we then take whatever the hard
+    /// limit allows. Never fatal.
+    fn raise_fd_limit() {
+        // SAFETY: getrlimit/setrlimit with a valid resource id + struct ptr.
+        unsafe {
+            let want = libc::rlimit {
+                rlim_cur: 65536,
+                rlim_max: 65536,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+                return;
+            }
+            // Hard ceiling below 65536: raise the soft limit to the hard limit.
+            let mut cur = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut cur) == 0 {
+                cur.rlim_cur = cur.rlim_max;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &cur);
             }
         }
     }
