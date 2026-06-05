@@ -1,6 +1,6 @@
 # Plan 160 — Drop Alpine from Stage 0; seed the bootstrap with busybox + static Nix
 
-## Status: Rip-out landed (2026-06-05) — nix seed is the ONLY Stage 0 path; Alpine/apk/pgp/`init.sh`/the Alpine release key deleted; `pgp` dropped from the tree (`cargo tree -i pgp` empty). Bootstrap trust model captured in **ADR-071**. Remaining (own follow-ups, not blockers): x86_64 + CI validation of the nix seed, persistent ext4 `/nix` store (a RAM optimization — tmpfs holds today), in-process xz decode.
+## Status: Rip-out landed (2026-06-05) — nix seed is the ONLY Stage 0 path; Alpine/apk/pgp/`init.sh`/the Alpine release key deleted; `pgp` dropped from the tree (`cargo tree -i pgp` empty). Bootstrap trust model captured in **ADR-071**. Remaining (own follow-ups, not blockers): **x86_64 support** (mvmctl is aarch64-guest only today — the embed toolchain is single-target, a pre-existing ADR-065 limit; its own workstream), persistent ext4 `/nix` store (a RAM optimization — tmpfs holds today), in-process xz decode.
 
 > **For agentic workers:** brainstorm/validate Phase 0 (the seed-source spike) BEFORE writing any code — the whole plan hinges on it. Steps use `- [ ]` checkboxes.
 
@@ -111,7 +111,7 @@ Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep 
 - [x] `cargo tree -i pgp` empty; 379 unique crates vs the 407 Plan 126 A1 baseline.
 - [x] `cargo test -p mvm-build --lib stage0` (12 pass) + `cargo test -p mvm-cli --lib cache` (pass); `cargo build -p mvm-build -p mvm-cli` + `clippy -p mvm-build -p mvm-cli -D warnings` clean.
 - [x] **End-to-end Stage 0 boot on this aarch64 host** (0b): cold `dev up` built the builder VM from the nix seed (`vmlinux` 31M + `rootfs.ext4` 743M) and reached "Dev environment ready (libkrun)" — no Alpine/apk/pgp.
-- [ ] **x86_64 + CI** Stage 0 boot (the pin is in source, unbooted). Follow-up — see Status.
+- [ ] **x86_64** Stage 0 boot — blocked on multi-arch embedding (aarch64-only embed toolchain today). Its own workstream — see Deferred follow-ups.
 - [ ] nightly fmt + full `cargo nextest run --workspace` on CI (local mvm-backend test SIGKILL is environmental — [[reference_mvm_backend_test_binary_macos_codesign_sigkill]]).
 
 ## Why this beats the plan-126 B3 alternatives
@@ -119,6 +119,6 @@ Stage 0 is finicky ([[reference_cold_isolated_cache_stage0_badactivate]]). Keep 
 Plan 126 B3 considered *gating* or *dropping* the Alpine PGP verify to shed `pgp`. This is strictly better: it removes the **reason** `pgp` exists (the Alpine seed) rather than working around it, and it resolves the busybox-vs-Alpine incoherence. Supersedes the B3 task. Net dep win is the same headline (−168) but the architecture is cleaner and we lose an external trust dependency instead of a defense-in-depth layer.
 
 ## Deferred follow-ups
-- [ ] **x86_64 + CI validation** of the nix-seed Stage 0. The x86_64 pin (`NIX_SEED_X86_64`) is in source but unbooted; the boot proof is aarch64/libkrun only. Until this lands, the seed is validated on one arch.
+- [ ] **x86_64 support — bigger than "boot the pin"; its own workstream.** mvmctl is **aarch64-guest only today**: the embedded host-vm binaries (`stage0-init`, `mvm-host-vm-init`, `mvm-egress-proxy`) are all cross-compiled to the single pinned `[workspace.metadata.mvm.toolchain] target = "aarch64-unknown-linux-musl"`, so an x86_64 Stage 0 VM would receive a wrong-arch `stage0-init` ELF that can't exec. The `NIX_SEED_X86_64` pin is real but unreachable until the embed toolchain picks its target from the guest arch. This is a **pre-existing ADR-065 limitation** (all three bins, predates this seed swap). Make it its own plan: `build.rs` selects the musl target per guest arch + Cargo metadata lists both + a `/dev/kvm` ubuntu-latest CI lane boots a cold x86_64 Stage 0. Supersedes the "x86_64 + CI" line above.
 - [ ] **Persistent ext4 `/nix` store.** `stage0-init` copies the seed closure into tmpfs each boot; the host attaches `nix-store-stage0-<arch>.img` (`/dev/vda`) but `stage0-init` doesn't yet bootstrap e2fsprogs + format + use it. RAM optimization (build once, reuse the closure), not correctness — tmpfs holds the full build. See ADR-071 "Status of work".
 - [ ] **In-process xz decode.** `extract_nix_store_tarball` shells to host `tar -xJf` (first cut); a pure-Rust xz decoder removes the host-`tar` dependency.
