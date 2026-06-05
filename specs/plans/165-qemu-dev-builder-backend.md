@@ -2,7 +2,11 @@
 
 ## Status: Proposed (2026-06-05)
 
-> Implements **ADR-072**. Adds QEMU as a dev/builder-tier backend so the build/dev loop runs on any host (KVM-accelerated where present, TCG fallback where not), while **Firecracker remains the sole production runtime**, `/dev/kvm`-gated and favored whenever KVM is available. QEMU never ships as a production runtime. Steps use `- [ ]` checkboxes.
+> Implements **ADR-072**. Adds QEMU as the **Linux** dev/builder-tier backend (KVM-accelerated where present, TCG fallback where not). **macOS already has its built-in equivalent — Vz** (Virtualization.framework, no third-party install); QEMU is *not* for macOS. **Firecracker remains the sole production runtime**, `/dev/kvm`-gated and favored whenever KVM is available. QEMU never ships as a production runtime. Steps use `- [ ]` checkboxes.
+>
+> **Sibling task (macOS, separate):** the Vz *builder* VM is `network: None` today → cold nix builds fail to resolve hosts (same class of bug as the Linux path). Wire the Vz builder to **gvproxy** (the Vz dev/workload VM already uses it). That's the macOS half of "give the builder VM networking"; this plan is the Linux half (QEMU + slirp).
+
+> **Boot foundation PROVEN on the x86_64 box (2026-06-05):** `qemu-system-x86_64 -enable-kvm -kernel /boot/vmlinuz -initrd /boot/initrd.img -append "root=/dev/vda init=/init" -drive seed.ext4` boots the nix seed via the **stock Debian kernel + its initramfs** (which carry the modular virtio/ext4 drivers) and runs `stage0-init` — no libkrun, no libkrunfw, no custom kernel. The remaining work is `stage0-init` QEMU-awareness (shares + networking), below.
 
 ## Why (short)
 

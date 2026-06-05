@@ -25,6 +25,14 @@ QEMU is the obvious fit for the *dev/builder* role: it is packaged everywhere (`
 
 **Add QEMU as a dev/builder-tier backend. Firecracker remains the sole production workload runtime — `/dev/kvm`-gated, and favored whenever KVM is present. QEMU never ships as a production runtime.**
 
+**Platform scope: QEMU is the *Linux* dev/builder backend.** On macOS the built-in equivalent already exists — **Vz** (Apple Virtualization.framework ships with the OS, runs on Hypervisor.framework with no `/dev/kvm`, and is the macOS-26+ builder default with no third-party install; CLAUDE.md "Builder backend selection"). So the apt-vs-build-from-source portability win that motivates QEMU is a Linux concern; macOS uses Vz. The per-OS story:
+
+- **macOS** → Vz (built-in) for dev/builder.
+- **Linux** → QEMU (apt-installable) for dev/builder; Firecracker (KVM) for the production runtime.
+- libkrun becomes optional/legacy on both (from-source pain on Linux; Vz supersedes it on macOS).
+
+**Sibling gap — the builder VM needs networking on *both* VMMs.** The Vz *builder* VM is configured `network: None` today, so a cold `nix build` on it fails with the same "Could not resolve github.com" the Linux libkrun+passt path hit (masked only by libkrun-fallback in auto-detect; the Vz dev/workload VM already uses gvproxy). So the symmetric work is: **Linux = QEMU + slirp** (this ADR), **macOS = wire the Vz builder to gvproxy** (a separate, parallel task — *not* QEMU on macOS).
+
 Two insertion points, mirroring the two roles:
 
 1. **Builder VM** — add `Qemu` to `BuilderBackendChoice` (alongside `Libkrun`, `Vz`) implementing the `BuilderVm` trait (`run_build` + `run_stage0`, ADR-068). QEMU becomes the portable, trivially-provisioned Linux builder: KVM-accelerated where available, TCG where not.
