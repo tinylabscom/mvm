@@ -59,14 +59,13 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         secrecy::ExposeSecret::expose_secret(&key),
     )
     .with_context(|| format!("sealing snapshot at {snap_dir}"))?;
-    // Plan 122 C — additionally content-address + Ed25519-sign the snapshot.
-    // The signature (not the symmetric HMAC, which anyone holding the host
-    // key could forge) is the authentication gate at resume admit.
-    let signer = mvm_core::crypto::snapshot_sign::load_or_init_signer(
-        &mvm_core::crypto::snapshot_sign::default_signer_path(),
-    )
-    .context("loading snapshot signing key")?;
-    mvm_core::crypto::snapshot_sign::sign(snap_path, &files, next_epoch, &signer)
+    // Plan 122 C — additionally content-address + Ed25519-sign the snapshot
+    // under the host attestation identity. The signature (not the symmetric
+    // HMAC, which anyone holding the host key could forge) is the
+    // authentication gate at resume admit.
+    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+        .context("loading host snapshot signing identity")?;
+    mvm_core::crypto::snapshot_sign::sign(snap_path, &files, next_epoch, &identity.signing)
         .with_context(|| format!("signing snapshot at {snap_dir}"))?;
     Ok(())
 }
@@ -180,15 +179,16 @@ fn verify_snapshot_signature(
         return Ok(());
     }
 
-    let signer = mvm_core::crypto::snapshot_sign::load_or_init_signer(
-        &mvm_core::crypto::snapshot_sign::default_signer_path(),
-    )
-    .context("loading snapshot signing key for verification")?;
+    // Standalone host: trust our own attestation identity. (Under mvmd the
+    // verifier would pin the enrolled worker identities instead — the
+    // substrate already takes a trusted set.)
+    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+        .context("loading host snapshot signing identity for verification")?;
     match mvm_core::crypto::snapshot_sign::verify_signature(
         snap_path,
         files,
         epoch,
-        &signer.verifying_key(),
+        &[identity.verifying_key()],
     ) {
         Ok(_) => Ok(()),
         Err(e) => {

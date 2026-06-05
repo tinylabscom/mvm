@@ -13,32 +13,46 @@
 //! as cheap local integrity). The Ed25519 signature is the authentication
 //! gate at resume admit.
 //!
-//! ## Signing key
+//! ## Signing identity
 //!
-//! Snapshots are signed by a **dedicated** host key
-//! (`<keys_dir>/snapshot-signer.ed25519`), *not* the plan host-signer. The
-//! plan signer lives behind a subprocess moat (claim 8) so a guest RCE in
-//! the supervisor can't forge plans; snapshot sealing runs host-side in
-//! `mvm-backend`, outside that moat. Reusing the plan key here would pull it
-//! into a process the moat deliberately keeps it out of. A separate
-//! host-trusted key gives the same signed-snapshot property without
-//! weakening the moat. (This deviates from plan 122 C's "reuse the host
-//! signer" wording — see the PR rationale.)
+//! Snapshots are signed by the **host attestation identity**
+//! ([`crate::crypto::attestation::identity`]) — the host's "I am this host"
+//! key — resolved via [`host_snapshot_identity`]. Two reasons over a
+//! dedicated key:
+//!
+//! 1. It is the identity a control plane already enrols and trusts. When
+//!    mvmd verifies a worker's snapshot it pins that worker's *attestation*
+//!    pubkey — no new per-host snapshot key to distribute.
+//! 2. It is *not* the plan host-signer, which lives behind the claim-8
+//!    subprocess moat (so a guest RCE can't forge plans). Snapshot sealing
+//!    runs host-side in `mvm-backend`, outside that moat; reusing the plan
+//!    key there would pull it into a process the moat keeps it out of. The
+//!    attestation identity is loaded in-process by design and carries no
+//!    such constraint.
+//!
+//! ## mvmd extensibility
+//!
+//! The substrate is key-source-agnostic: [`sign`] takes any `SigningKey`
+//! and [`verify_signature`] takes a **set** of trusted signer pubkeys —
+//! mvmd passes the enrolled worker identities, a standalone host passes its
+//! own. The sidecar records the signer's pubkey so a verifier can identify
+//! which enrolled key vouched for a given snapshot.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{BufReader, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::crypto::attestation::identity::IdentityKey;
 use crate::crypto::snapshot_hmac::SnapshotFiles;
 
-/// Raw Ed25519 secret/public key length.
+/// Raw Ed25519 public key length.
 const KEY_BYTES: usize = 32;
 /// Ed25519 signature length.
 const SIG_BYTES: usize = 64;
@@ -46,14 +60,24 @@ const SIG_BYTES: usize = 64;
 /// Filename of the signature sidecar written next to the snapshot.
 pub const SIGNATURE_FILENAME: &str = "snapshot.sig";
 
-/// Default snapshot-signing key path under the host keys dir.
-pub fn default_signer_path() -> PathBuf {
-    crate::config::mvm_keys_dir().join("snapshot-signer.ed25519")
+/// The host identity that signs snapshots: the attestation identity,
+/// resolved under the mvm **data dir** (`<data_dir>/attestation`) rather
+/// than the attestation module's `$HOME`-based default. This honours
+/// `MVM_DATA_DIR` isolation (so tests and parallel sessions don't share or
+/// pollute the real `~/.mvm/attestation`) while coinciding with the
+/// canonical `~/.mvm/attestation` in the default layout.
+///
+/// mvmd does not call this — it verifies a *worker's* snapshot by pinning
+/// that worker's enrolled attestation pubkey via [`verify_signature`]'s
+/// `trusted_signers`. This loader is the local host's own signing identity.
+pub fn host_snapshot_identity() -> Result<IdentityKey> {
+    let dir = PathBuf::from(crate::config::mvm_data_dir()).join("attestation");
+    crate::crypto::attestation::identity::load_or_init_at(&dir)
 }
 
 /// Signature sidecar: the snapshot's content-address + an Ed25519 signature
 /// over `(sha256 ‖ epoch)`, plus the signer's public key (pinned at verify
-/// against the trusted host key — a self-described pubkey proves nothing).
+/// against the trusted set — a self-described pubkey proves nothing).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotSignature {
@@ -81,7 +105,7 @@ pub enum SnapshotSigError {
     ContentHashMismatch,
     #[error("signed epoch {got} != expected {expected}")]
     EpochMismatch { got: u64, expected: u64 },
-    #[error("snapshot signed by an untrusted key (pubkey != the host snapshot signer)")]
+    #[error("snapshot signed by an untrusted key (signer pubkey not in the trusted set)")]
     SignerMismatch,
     #[error("Ed25519 signature does not verify")]
     SignatureInvalid,
@@ -148,14 +172,18 @@ pub fn sign(
     Ok(sidecar)
 }
 
-/// Verify `snapshot.sig`: pin the signer to `expected_pubkey`, check the
-/// epoch, recompute the content-address over the on-disk files, and verify
-/// the Ed25519 signature. The authentication gate at resume admit.
+/// Verify `snapshot.sig`: the recorded signer pubkey must be in
+/// `trusted_signers`, the epoch must match, the on-disk files must rehash
+/// to the recorded content-address, and the Ed25519 signature must verify.
+/// The authentication gate at resume admit.
+///
+/// `trusted_signers` is a set so the same routine serves a standalone host
+/// (its own identity) and mvmd (the enrolled worker identities).
 pub fn verify_signature(
     snap_dir: &Path,
     files: &SnapshotFiles,
     expected_epoch: u64,
-    expected_pubkey: &VerifyingKey,
+    trusted_signers: &[VerifyingKey],
 ) -> std::result::Result<SnapshotSignature, SnapshotSigError> {
     let path = snap_dir.join(SIGNATURE_FILENAME);
     let raw = std::fs::read(&path).map_err(|e| SnapshotSigError::Missing {
@@ -169,8 +197,11 @@ pub fn verify_signature(
         })?;
 
     // Pin the signer first — a self-described pubkey proves nothing.
-    let sidecar_pub = decode_pubkey(&sidecar.pubkey)?;
-    if sidecar_pub.to_bytes() != expected_pubkey.to_bytes() {
+    let signer = decode_pubkey(&sidecar.pubkey)?;
+    if !trusted_signers
+        .iter()
+        .any(|k| k.to_bytes() == signer.to_bytes())
+    {
         return Err(SnapshotSigError::SignerMismatch);
     }
     if sidecar.epoch != expected_epoch {
@@ -187,59 +218,10 @@ pub fn verify_signature(
     }
 
     let sig = decode_signature(&sidecar.signature)?;
-    expected_pubkey
+    signer
         .verify(&signed_message(&actual, expected_epoch), &sig)
         .map_err(|_| SnapshotSigError::SignatureInvalid)?;
     Ok(sidecar)
-}
-
-/// Load (or create on first use) the host's dedicated Ed25519 snapshot
-/// signing key at `path`, mode 0600. Refuses to load a secret half whose
-/// permissions are looser than 0600 (mirrors the attestation identity
-/// loader) rather than self-healing — a world-readable signing key is a
-/// posture failure, not a convenience to paper over.
-pub fn load_or_init_signer(path: &Path) -> Result<SigningKey> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating parent of {}", path.display()))?;
-    }
-    if !path.exists() {
-        let signing = SigningKey::generate(&mut OsRng);
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("creating {}", path.display()))?;
-        f.write_all(signing.to_bytes().as_ref())
-            .with_context(|| format!("writing {}", path.display()))?;
-        f.sync_all().ok();
-        return Ok(signing);
-    }
-
-    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
-    if mode != 0o600 {
-        bail!(
-            "{} has mode {:04o}; expected 0600. Tighten with `chmod 0600 {}` or rotate.",
-            path.display(),
-            mode,
-            path.display(),
-        );
-    }
-    if meta.len() != KEY_BYTES as u64 {
-        bail!(
-            "{} is {} bytes (expected {KEY_BYTES}); refuse to use",
-            path.display(),
-            meta.len()
-        );
-    }
-    let mut buf = [0u8; KEY_BYTES];
-    File::open(path)
-        .with_context(|| format!("open {}", path.display()))?
-        .read_exact(&mut buf)
-        .with_context(|| format!("read {}", path.display()))?;
-    Ok(SigningKey::from_bytes(&buf))
 }
 
 fn write_sig_atomic(snap_dir: &Path, sidecar: &SnapshotSignature) -> Result<()> {
@@ -318,6 +300,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::OsRng;
 
     fn make_snap(dir: &Path) -> SnapshotFiles {
         std::fs::write(dir.join("vmstate.bin"), b"vmstate-bytes-here").unwrap();
@@ -328,14 +311,18 @@ mod tests {
         }
     }
 
+    fn key() -> SigningKey {
+        SigningKey::generate(&mut OsRng)
+    }
+
     #[test]
     fn sign_then_verify_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let signer = load_or_init_signer(&tmp.path().join("snapshot-signer.ed25519")).unwrap();
+        let signer = key();
 
         let sealed = sign(tmp.path(), &files, 4, &signer).unwrap();
-        let verified = verify_signature(tmp.path(), &files, 4, &signer.verifying_key()).unwrap();
+        let verified = verify_signature(tmp.path(), &files, 4, &[signer.verifying_key()]).unwrap();
         assert_eq!(sealed, verified);
     }
 
@@ -343,36 +330,48 @@ mod tests {
     fn flipped_byte_breaks_content_address() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let signer = load_or_init_signer(&tmp.path().join("k.ed25519")).unwrap();
+        let signer = key();
         sign(tmp.path(), &files, 1, &signer).unwrap();
 
         let mut bytes = std::fs::read(&files.mem).unwrap();
         bytes[0] ^= 0xff;
         std::fs::write(&files.mem, &bytes).unwrap();
 
-        let err = verify_signature(tmp.path(), &files, 1, &signer.verifying_key()).unwrap_err();
+        let err = verify_signature(tmp.path(), &files, 1, &[signer.verifying_key()]).unwrap_err();
         assert!(matches!(err, SnapshotSigError::ContentHashMismatch));
     }
 
     #[test]
-    fn wrong_signer_is_rejected() {
+    fn untrusted_signer_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let signer = load_or_init_signer(&tmp.path().join("k.ed25519")).unwrap();
+        let signer = key();
         sign(tmp.path(), &files, 1, &signer).unwrap();
 
-        let attacker = SigningKey::generate(&mut OsRng);
-        let err = verify_signature(tmp.path(), &files, 1, &attacker.verifying_key()).unwrap_err();
+        let attacker = key();
+        let err = verify_signature(tmp.path(), &files, 1, &[attacker.verifying_key()]).unwrap_err();
         assert!(matches!(err, SnapshotSigError::SignerMismatch));
+    }
+
+    #[test]
+    fn trusted_set_accepts_any_member() {
+        // mvmd shape: several enrolled signers, the snapshot signed by one.
+        let tmp = tempfile::tempdir().unwrap();
+        let files = make_snap(tmp.path());
+        let a = key();
+        let b = key();
+        sign(tmp.path(), &files, 2, &b).unwrap();
+        let trusted = [a.verifying_key(), b.verifying_key()];
+        assert!(verify_signature(tmp.path(), &files, 2, &trusted).is_ok());
     }
 
     #[test]
     fn epoch_mismatch_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let signer = load_or_init_signer(&tmp.path().join("k.ed25519")).unwrap();
+        let signer = key();
         sign(tmp.path(), &files, 3, &signer).unwrap();
-        let err = verify_signature(tmp.path(), &files, 5, &signer.verifying_key()).unwrap_err();
+        let err = verify_signature(tmp.path(), &files, 5, &[signer.verifying_key()]).unwrap_err();
         assert!(matches!(
             err,
             SnapshotSigError::EpochMismatch {
@@ -386,7 +385,7 @@ mod tests {
     fn tampered_signature_field_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let signer = load_or_init_signer(&tmp.path().join("k.ed25519")).unwrap();
+        let signer = key();
         sign(tmp.path(), &files, 1, &signer).unwrap();
 
         // Flip a byte inside the stored signature hex but keep it valid hex
@@ -399,7 +398,7 @@ mod tests {
         v.signature = hex_encode(&sig_bytes);
         std::fs::write(&sig_path, serde_json::to_vec(&v).unwrap()).unwrap();
 
-        let err = verify_signature(tmp.path(), &files, 1, &signer.verifying_key()).unwrap_err();
+        let err = verify_signature(tmp.path(), &files, 1, &[signer.verifying_key()]).unwrap_err();
         assert!(matches!(err, SnapshotSigError::SignatureInvalid));
     }
 
@@ -407,29 +406,24 @@ mod tests {
     fn missing_sidecar_reports_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
-        let signer = load_or_init_signer(&tmp.path().join("k.ed25519")).unwrap();
-        let err = verify_signature(tmp.path(), &files, 1, &signer.verifying_key()).unwrap_err();
+        let signer = key();
+        let err = verify_signature(tmp.path(), &files, 1, &[signer.verifying_key()]).unwrap_err();
         assert!(matches!(err, SnapshotSigError::Missing { .. }));
     }
 
     #[test]
-    fn load_or_init_signer_is_stable_and_0600() {
+    fn host_snapshot_identity_is_stable_under_data_dir() {
+        // Pin MVM_DATA_DIR to a tempdir; the identity loads from
+        // <data_dir>/attestation and is stable across calls.
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("snapshot-signer.ed25519");
-        let k1 = load_or_init_signer(&path).unwrap();
-        let k2 = load_or_init_signer(&path).unwrap();
-        assert_eq!(k1.to_bytes(), k2.to_bytes(), "second load returns same key");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-    }
+        let dir = tmp.path().join("attestation");
+        let id1 = crate::crypto::attestation::identity::load_or_init_at(&dir).unwrap();
+        let id2 = crate::crypto::attestation::identity::load_or_init_at(&dir).unwrap();
+        assert_eq!(id1.verifying.to_bytes(), id2.verifying.to_bytes());
 
-    #[test]
-    fn load_or_init_signer_refuses_loose_perms() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("k.ed25519");
-        load_or_init_signer(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = load_or_init_signer(&path).unwrap_err();
-        assert!(err.to_string().contains("0644"), "got: {err}");
+        // A snapshot signed by it round-trips through verify.
+        let files = make_snap(tmp.path());
+        sign(tmp.path(), &files, 1, &id1.signing).unwrap();
+        assert!(verify_signature(tmp.path(), &files, 1, &[id1.verifying_key()]).is_ok());
     }
 }
