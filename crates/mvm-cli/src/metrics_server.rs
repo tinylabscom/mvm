@@ -137,7 +137,10 @@ fn append_per_vm_scrape_files_from(out: &mut String, dir: &std::path::Path) {
             Some(n) => n,
             None => continue,
         };
-        if !name.starts_with("metrics-") || !name.ends_with("-flow-count.prom") {
+        // Plan 141 — discover ALL supervisor-written scrape files, not just
+        // flow-count. New per-observer-latency files
+        // (`metrics-<vm>-observer-latency.prom`) are picked up automatically.
+        if !name.starts_with("metrics-") || !name.ends_with(".prom") {
             continue;
         }
         let Ok(file) = std::fs::OpenOptions::new()
@@ -231,15 +234,22 @@ mod tests {
             "mvm_flow_opened_total{tenant=\"b\"} 9\n",
         )
         .unwrap();
+        // Plan 141 — any `metrics-*.prom` is now discovered, including the
+        // new per-observer-latency files.
+        std::fs::write(
+            audit.join("metrics-vm-d-observer-latency.prom"),
+            "mvm_observer_latency_us_count{observer=\"r\",vm=\"d\",direction=\"egress\"} 3\n",
+        )
+        .unwrap();
+        // Non-`metrics-` prefix or non-`.prom` suffix must NOT match.
         std::fs::write(audit.join("other-vm.prom"), "should_not_appear 1\n").unwrap();
         std::fs::write(audit.join("metrics-vm-c.txt"), "should_not_appear 2\n").unwrap();
-        // Generic `.prom` without the `-flow-count` infix must not match.
-        std::fs::write(audit.join("metrics-vm-c.prom"), "should_not_appear 3\n").unwrap();
 
         let mut out = String::new();
         append_per_vm_scrape_files_from(&mut out, &audit);
         assert!(out.contains("mvm_flow_opened_total{tenant=\"a\"} 5"));
         assert!(out.contains("mvm_flow_opened_total{tenant=\"b\"} 9"));
+        assert!(out.contains("mvm_observer_latency_us_count"));
         assert!(!out.contains("should_not_appear"));
     }
 
