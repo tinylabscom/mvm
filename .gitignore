@@ -46,3 +46,7 @@ nix/images/dev-prebuilt/
 .worktrees/
 graphify-out/
 specs/scratch.md
+
+# Default `mvmctl compile` output dir — generated flake + bundled src,
+# regenerable, never committed (header says "re-run `mvmctl compile`").
+/out/
