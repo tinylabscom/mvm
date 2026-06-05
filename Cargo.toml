@@ -227,6 +227,11 @@ notify-debouncer-mini = "0.5"
 # the canonical CIDR string ("10.0.0.0/24"), which is the wire
 # format the policy bundle TOML uses.
 ipnet = { version = "2", features = ["serde"] }
+# Plan 141 / ADR-064 — EthernetII/IPv4/IPv6/TCP/UDP parse + payload rebuild
+# for the gateway packet-observer pipeline. Pure-Rust, zero transitive
+# deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
+# so a mature parser beats a hand-rolled one.
+etherparse = "0.20"
 # Plan 74 W2 — mvm-guest-netinit installs kernel blackhole routes
 # for `MANDATORY_DENY_RANGES` inside every microVM. rtnetlink wraps
 # the AF_NETLINK socket and the RTM_NEWROUTE message construction;

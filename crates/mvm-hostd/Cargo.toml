@@ -46,6 +46,9 @@ base64.workspace = true
 chrono.workspace = true
 # rand_core feature for the signers' Ed25519 keygen.
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
+# Plan 141 / ADR-064 — packet parse + payload rebuild for the gateway
+# observer pipeline (see workspace dep comment).
+etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
 hickory-resolver = { workspace = true, features = ["tokio-runtime"], optional = true }
