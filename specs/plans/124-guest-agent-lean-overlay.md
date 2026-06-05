@@ -4,9 +4,9 @@
 
 **Goal:** Make the guest agent small, universal, and sealed. Cut its heavy deps (`tokio`→`polling`, `serde_json`→hand-rolled framing, `rtnetlink`→`linux-raw-sys`, drop `async-trait`) — the real dep reduction in the rewrite. Run the *same* `mvm-guest-agent` in every VM type (builder/dev included). Ship it from the verity-sealed runtime overlay (ADR-051). Generate the **SDKs** (data/IR types + the RPC client surface, in every language) from one schema so they can't drift from each other or the core, and hand the runtime config to the guest on a read-only device before vsock is up.
 
-**Architecture:** The agent (`crates/mvm-guest`: `mvm-guest-agent.rs` + `vsock`/`worker_pool`/`netinit`/`fs_rpc`/`process_rpc`/…) is feature-complete but heavy. This plan keeps its behavior and shrinks its closure: the `worker_pool` async runtime, the `vsock` JSON framing, and `netinit`'s netlink are the three weight centers. The universal-agent invariant (ADR-066 §6) and the verity overlay (ADR-051) already exist as designs; this wires them. **Claim 4 (no `do_exec` in prod) and claim 5 (vsock framing fuzzed) are invariants this plan must preserve** — the dev/builder tier runs the `dev-shell`-featured agent (with `do_exec`), prod workloads run the no-exec build, and the new hand-rolled framing keeps its fuzz target.
+**Architecture:** The agent (`crates/mvm-guest`: `mvm-guest-agent.rs` + `vsock`/`worker_pool`/`netinit`/`fs_rpc`/`process_rpc`/…) is feature-complete but heavy. This plan keeps its behavior and shrinks its closure. **Reality check (2026-06-05, verified against the worktree):** the agent's request-serving path is *already* synchronous — `worker_pool.rs`, `vsock.rs`, and `mvm-guest-agent.rs` use `std::thread` + `Mutex`/`Condvar`, with no `tokio` and no `async`. The *only* async surface in the crate is `netinit`'s `rtnetlink` installer, which is the sole reason `tokio` + `async-trait` enter the closure (both `cfg(target_os = "linux")`-gated; `Cargo.toml` attributes them to Plan 74 W2, not the pool). So there are **two** real weight centers, not three: `netinit`'s async netlink (`tokio` + `async-trait` + `rtnetlink` + `netlink-packet-route` — Task A3) and `vsock`'s `serde_json` framing (Task A2). There is no async runtime to remove from `worker_pool`; A1 is therefore a **lock-in gate**, not a rewrite, and `polling` is *not* added (it would be a net dep increase with nothing to remove). Recommended order: **A1 (gate) → A3 (the tokio cut) → A2 (serde_json) → A4 (measure)**. The universal-agent invariant (ADR-066 §6) and the verity overlay (ADR-051) already exist as designs; this wires them. **Claim 4 (no `do_exec` in prod) and claim 5 (vsock framing fuzzed) are invariants this plan must preserve** — the dev/builder tier runs the `dev-shell`-featured agent (with `do_exec`), prod workloads run the no-exec build, and the new hand-rolled framing keeps its fuzz target.
 
-**Tech Stack:** Rust (`mvm-guest`), `polling` (epoll/kqueue), `linux-raw-sys` (raw netlink), the verity initramfs (`mvm-verity-init`), a protocol-codegen step (build script or `xtask`). Net **removes** ~25–35 crates; adds `polling` + `linux-raw-sys` (small, no_std-friendly).
+**Tech Stack:** Rust (`mvm-guest`), `linux-raw-sys` (raw netlink), the verity initramfs (`mvm-verity-init`), a protocol-codegen step (build script or `xtask`). Net **removes** ~25–35 crates; adds only `linux-raw-sys` (small, no_std-friendly). (`polling` was in the original sketch for a "tokio worker pool" that does not exist — the pool is already synchronous `std::thread`; dropped.)
 
 **Prereqs:** 121 (the `mvm-guest` home, the `mvm-host-vm-init` → `mvm-build` bin). The universal-agent invariant is ADR-066 §6; the overlay is ADR-051.
 
@@ -16,16 +16,15 @@
 
 ## Phase A — the lean dep cut
 
-### Task A1: `tokio` → `polling` in `worker_pool`
+### Task A1: runtime-free lock-in gate (was: `tokio` → `polling` in `worker_pool`)
 
-The agent is I/O-bound vsock dispatch; it doesn't need a full async runtime. Replace the `tokio` worker pool with a `polling`-based readiness loop + a small thread pool.
+**Premise corrected 2026-06-05.** The worker pool is *already* synchronous — `worker_pool.rs` is `std::thread` + `Mutex`/`Condvar` with zero `tokio`/`async`; `vsock.rs` and `mvm-guest-agent.rs` likewise. There is no tokio worker pool to convert and `polling` buys nothing. A1 instead delivers the **gate that locks in the property A3 achieves**: `mvm-guest`'s non-dev closure pulls no async runtime. It is RED today (the async stack is present via `netinit`'s rtnetlink) and flips GREEN when A3 lands.
 
-**Files:** `crates/mvm-guest/src/worker_pool.rs`, `worker_protocol.rs`, `bin/mvm-guest-agent.rs`; `Cargo.toml`.
+**Files:** `xtask/src/check_guest_agent_runtime_free.rs` (new), `xtask/src/main.rs`; `.github/workflows/ci.yml` (lane added in the A3 commit, where it goes green).
 
-- [ ] **Step 1:** Record baseline `cargo tree -p mvm-guest -e no-dev | wc -l`.
-- [ ] **Step 2:** Failing test — the worker pool dispatches N concurrent vsock requests and returns all responses (behavioral parity test against the current pool), with no `tokio` in the dep tree.
-- [ ] **Step 3:** Reimplement over `polling` (edge-triggered readiness on the vsock fd) + a fixed worker-thread set; drop `tokio` + `async-trait` from `mvm-guest/Cargo.toml`. Keep the public dispatch API so callers don't churn.
-- [ ] **Step 4:** Tests green; `cargo tree` delta recorded (expect tokio's closure gone — the largest single cut). Commit.
+- [x] **Step 1:** Baseline recorded — `cargo tree -p mvm-guest -e no-dev` = **203 crates** (host target); the async stack (`tokio`/`rtnetlink`/`async-trait`/`netlink-packet-route`) is `cfg(linux)`-gated, so it only surfaces under `--target aarch64-unknown-linux-musl`.
+- [x] **Step 2:** `xtask check-guest-agent-runtime-free` mirrors `check-core-runtime-free`: `cargo tree -p mvm-guest -e no-dev --prefix none --locked --target aarch64-unknown-linux-musl`, fails if `{tokio, async-trait, rtnetlink, netlink-packet-route}` appear. Parser unit tests green; the live gate is **RED now** (exit 1, all four present) — the real failing test A3 drives to green.
+- [ ] **Step 3 (lands with A3):** wire the gate into `ci.yml` in the same commit that makes it pass (no knowingly-red required check in the tree). Coordinate with 128.
 
 ### Task A2: `serde_json` → hand-rolled framing in `vsock`
 
@@ -43,8 +42,9 @@ ADR-066 §9. The wire format is a small fixed set of typed messages; a hand-roll
 
 **Files:** `crates/mvm-guest/src/netinit.rs`, `bin/mvm-guest-netinit.rs`.
 
-- [ ] **Step 1:** Failing test (gated, needs netns) — netinit brings the interface up + sets the route, asserted via `/proc/net` or a netns probe, with no `rtnetlink`/`tokio`.
-- [ ] **Step 2:** Hand-roll the `RTM_NEWADDR`/`RTM_NEWROUTE` messages over a raw `AF_NETLINK` socket (`linux-raw-sys`). Keep the `NetworkMandatoryDeny` audit marker (claim 10). Commit.
+- [ ] **Step 1:** Failing test (gated, needs netns) — netinit brings the interface up + sets the route, asserted via `/proc/net` or a netns probe, with no `rtnetlink`/`tokio`. Also: make `RouteInstaller` a *synchronous* trait (drop `#[async_trait]`) so removing rtnetlink also removes `tokio` + `async-trait`. The cross-platform trait + install-loop + `MockInstaller` tests run on a macOS dev host; the raw-netlink installer itself is `cfg(target_os = "linux")` and rides Linux CI.
+- [ ] **Step 2:** Hand-roll the `RTM_NEWADDR`/`RTM_NEWROUTE` messages over a raw `AF_NETLINK` socket (`linux-raw-sys`). Keep the `NetworkMandatoryDeny` audit marker (claim 10). Drop `tokio` (dep + dev-dep), `async-trait`, `rtnetlink`, `netlink-packet-route` from `Cargo.toml`.
+- [ ] **Step 3:** The A1 gate (`check-guest-agent-runtime-free`) now passes — add its lane to `ci.yml` in this commit. Commit.
 
 ### Task A4: confirm the cut
 
