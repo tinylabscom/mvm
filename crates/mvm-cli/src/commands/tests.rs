@@ -12,6 +12,7 @@ use super::build::compile;
 use super::catalog;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
+use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::vm::{console, cp, down, exec, forward, sandbox, up, volume};
 
@@ -1599,6 +1600,28 @@ fn tenant_orchestration_commands_are_not_mvmctl_surface() {
 }
 
 // --- Network CLI tests ---
+
+#[test]
+fn test_network_list_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "network", "list", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Network(ops::network::Args {
+            action: ops::network::NetworkAction::List { json: true }
+        })
+    ));
+}
+
+#[test]
+fn test_network_inspect_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "network", "inspect", "isolated", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Network(ops::network::Args {
+            action: ops::network::NetworkAction::Inspect { json: true, .. }
+        })
+    ));
+}
 
 #[test]
 fn test_network_list_help() {
