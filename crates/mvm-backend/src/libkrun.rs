@@ -110,18 +110,25 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         .with_cmdline(&cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
-    // Plan 87/88 / ADR-058 — configure the per-OS virtio-net gateway
-    // (macOS → gvproxy, Linux → passt), the same default the builder VM
-    // uses. TSI was removed (Plan 102 W6.A): it bypasses virtio-net, so
-    // the admitted gateway-audit bridge refuses it (claim-10 no-bypass).
-    // KrunContext defaults to TSI, so an unconfigured workload would be
-    // rejected by `run_supervisor_with_bridge`. The supervisor spawns the
-    // gateway from this declared mode.
+    // Plan 87/88 / ADR-058 — configure the virtio-net gateway. TSI was removed
+    // (Plan 102 W6.A): it bypasses virtio-net, so the admitted gateway-audit
+    // bridge refuses it (claim-10 no-bypass). KrunContext defaults to TSI, so an
+    // unconfigured workload would be rejected by `run_supervisor_with_bridge`.
+    // The supervisor spawns the gateway from this declared mode.
+    //
+    // Plan 123 L3-B — select the gateway through the SAME `resolve_networking_mode`
+    // the builder VM uses, so a workload honours `MVM_NETWORKING` consistently
+    // (previously this site hardcoded `cfg!(macos)` and ignored the override).
+    // The default is unchanged (macOS→gvproxy, Linux→passt); an explicit
+    // `MVM_NETWORKING=passt` on macOS resolves to gvproxy (passt is Linux-only).
     let scratch = state_dir.to_string_lossy().into_owned();
-    let krun = if cfg!(target_os = "macos") {
-        krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-    } else {
-        krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
+    let krun = match mvm_build::libkrun_builder::resolve_networking_mode() {
+        mvm_build::libkrun_builder::NetworkingPreference::Gvproxy => {
+            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
+        }
+        mvm_build::libkrun_builder::NetworkingPreference::Passt => {
+            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
+        }
     };
 
     // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
