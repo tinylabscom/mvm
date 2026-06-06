@@ -88,9 +88,9 @@ pub fn run_packet_pipeline<'a>(
     // observer chain, so a substituted payload is what the observers + the wire
     // see. Egress only. Scan first — a drop short-circuits before rewrite work.
     if ctx.direction == FlowDirection::Egress {
-        if scan.scan(&ctx, &parsed) == ScanOutcome::Drop {
+        if let ScanOutcome::Drop { by } = scan.scan(&ctx, &parsed) {
             return PacketDecision::Kill {
-                observer: scan.name(),
+                observer: by,
                 reason: KillReason::Drop,
                 flow_key,
             };
@@ -520,7 +520,7 @@ mod tests {
         let obs: Vec<Arc<dyn Observer>> = vec![];
         let scan = ScanFn(|p: &[u8]| {
             if p.windows(6).any(|w| w == b"SECRET") {
-                ScanOutcome::Drop
+                ScanOutcome::Drop { by: "test-scan" }
             } else {
                 ScanOutcome::Pass
             }
@@ -579,7 +579,7 @@ mod tests {
         // outbound-only leak controls.
         let f = frame(b"leak-SECRET");
         let obs: Vec<Arc<dyn Observer>> = vec![];
-        let scan = ScanFn(|_| ScanOutcome::Drop);
+        let scan = ScanFn(|_| ScanOutcome::Drop { by: "test-scan" });
         let d = run_packet_pipeline(
             &obs,
             &NoopSubstitution,
