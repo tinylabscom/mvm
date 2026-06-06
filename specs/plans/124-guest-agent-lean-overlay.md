@@ -74,8 +74,8 @@ Agent uid is **990** (CLAUDE.md's "901" is stale — the live `nix/lib/mk-guest.
 
 The enforcement gate from ADR-066 §6.
 
-- [ ] **Step 1:** Failing test — the lint fails when a bootable image's launch path omits the agent. Enumerate the images (mkGuest workload, builder-vm, dev) and assert each forks `mvm-guest-agent`.
-- [ ] **Step 2:** Implement the `xtask` check; wire into `ci.yml` (coordinate with 128). Commit.
+- [x] **Step 1:** `launcher_forks_agent` + unit tests (`present_marker_passes`, `missing_marker_is_flagged`, `every_declared_launcher_has_a_distinct_marker`) — the lint fails when a launcher drops its agent-fork marker. The two distinct **launch mechanisms** are enumerated (not three — "dev" rides one of these): mkGuest `/init` (`nix/lib/mk-guest.nix`, marker `MVM_AGENT_BIN`) for workload + dev-shell images, and `mvm-host-vm-init` (marker `fork_guest_agent`) for the builder VM's PID 1.
+- [x] **Step 2:** `xtask check-guest-agent-in-all-images` implemented (source-grep tripwire, sibling of `check-claim-catalog`/`check-guest-agent-runtime-free`); wired into the `ci.yml` Lint job. Live gate GREEN now that B1 added the builder-VM fork. Commit.
 
 ## Phase C — runtime overlay (ADR-051)
 

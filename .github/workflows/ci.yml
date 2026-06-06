@@ -90,6 +90,9 @@ jobs:
       - name: mvm-guest agent closure is runtime-free
         run: cargo run -p xtask -- check-guest-agent-runtime-free
 
+      - name: guest agent forked in every bootable image
+        run: cargo run -p xtask -- check-guest-agent-in-all-images
+
   test:
     name: Test
     runs-on: ubuntu-latest
