@@ -95,8 +95,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 return Ok(());
             }
             println!("Cache directory: {cache_dir}");
-            let path = std::path::Path::new(&cache_dir);
-            if !path.exists() {
+            if !info.exists {
                 println!("(not yet created)");
                 return Ok(());
             }
