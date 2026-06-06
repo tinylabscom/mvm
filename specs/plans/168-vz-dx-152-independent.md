@@ -1292,6 +1292,14 @@ git commit -m "feat(mvm-cli): honest one-time-cost framing for dev image downloa
 - [ ] WS-5 E — streamed `exec` (guest vsock protocol change; own slice).
 - [ ] WS-4 — `curl|sh` installer one-liner (release-pipeline work).
 - [ ] WS-5 C — `--json` audit of the remaining commands not covered here.
+      (Final review found ~15 inline `to_string_pretty` sites still
+      unmigrated, e.g. `manifest/ls.rs`, `catalog.rs`, `bundle/fetch.rs`,
+      `vm/cp.rs`, `vm/wait.rs`; `vm/session.rs:313` uses compact, not
+      pretty. No CI gate stops new inline sites — consider a lint.)
+- [ ] WS-3 — `doctor` `signing` check probes only the `mvmctl` binary,
+      not the supervisors `mvmctl sign` also signs; an unsigned
+      supervisor could still fail launch while doctor reads OK. Consider
+      probing `collect_sign_targets()` and reporting the worst case.
 
 ## Self-review notes
 
