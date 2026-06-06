@@ -14,7 +14,7 @@ use super::env::{cleanup, dev, init, uninstall};
 use super::image;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
-use super::vm::{console, cp, down, exec, forward, pause, sandbox, up, volume};
+use super::vm::{console, cp, down, exec, forward, pause, sandbox, session, up, volume};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -2786,4 +2786,35 @@ fn builder_flag_rejects_unknown_value() {
 fn builder_flag_unset_by_default() {
     let cli = Cli::try_parse_from(["mvmctl", "doctor"]).expect("parse");
     assert_eq!(cli.builder, None);
+}
+
+// --- Session attach --continue / --resume tests (Task 3.2) ---
+
+#[test]
+fn test_session_attach_continue_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "session", "attach", "--continue"]).unwrap();
+    match cli.command {
+        Commands::Session(session::Args {
+            command: session::Cmd::Attach(a),
+        }) => {
+            assert!(a.continue_latest);
+            assert!(a.session_id.is_none());
+            assert!(a.resume.is_none());
+        }
+        _ => panic!("expected session attach"),
+    }
+}
+
+#[test]
+fn test_session_attach_resume_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "session", "attach", "-r", "aaaaaaaaaaaaaaaa"]).unwrap();
+    match cli.command {
+        Commands::Session(session::Args {
+            command: session::Cmd::Attach(a),
+        }) => {
+            assert_eq!(a.resume.as_deref(), Some("aaaaaaaaaaaaaaaa"));
+        }
+        _ => panic!("expected session attach"),
+    }
 }

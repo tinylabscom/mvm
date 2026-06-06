@@ -126,8 +126,19 @@ pub(in crate::commands) struct SetTimeoutArgs {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct AttachArgs {
-    /// Session id to dispatch into.
-    pub session_id: String,
+    /// Session id to dispatch into (positional). Omit with --continue.
+    pub session_id: Option<String>,
+    /// Re-attach the most-recently-active running session.
+    #[arg(short = 'c', long = "continue", conflicts_with_all = ["session_id", "resume"])]
+    pub continue_latest: bool,
+    /// Re-attach a specific session id (alias for the positional).
+    #[arg(
+        short = 'r',
+        long = "resume",
+        value_name = "ID",
+        conflicts_with = "session_id"
+    )]
+    pub resume: Option<String>,
     /// Path to stdin payload, or `-` for mvmctl's own stdin. Default:
     /// no stdin (the wrapper sees an empty pipe).
     #[arg(long, value_name = "PATH")]
@@ -609,7 +620,17 @@ fn enforce_creator_pid_gate(
 }
 
 fn cmd_attach(args: AttachArgs) -> Result<()> {
-    let (id, record) = require_running_session(&args.session_id)?;
+    let resolved_id: String = if args.continue_latest {
+        let rec = mvm_core::session::most_recent_running_on_disk()?
+            .ok_or_else(|| anyhow::anyhow!("no running session to --continue"))?;
+        rec.id.into_string()
+    } else if let Some(id) = args.resume.or(args.session_id) {
+        id
+    } else {
+        bail!("provide a session id, --resume <id>, or --continue");
+    };
+
+    let (id, record) = require_running_session(&resolved_id)?;
 
     let stdin_bytes = super::invoke::read_stdin_payload(args.stdin.as_deref())?;
     ui::info(&format!(
@@ -1256,7 +1277,9 @@ mod tests {
         let _guard = isolated_runtime_dir();
         let id = SessionId::new().to_string();
         let err = cmd_attach(AttachArgs {
-            session_id: id,
+            session_id: Some(id),
+            continue_latest: false,
+            resume: None,
             stdin: None,
             timeout: 1,
         })
