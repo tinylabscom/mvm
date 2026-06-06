@@ -311,9 +311,18 @@ fn build_flake(
     // Linux dev path never does — so ensure it here (Stage 0 honours the
     // selected builder backend; a cached image is a no-op). Without this the
     // first `mvmctl build` on a fresh Linux host fails in `ensure_builder_vm_image`.
+    //
+    // Skip when `MVM_BUILD_STUB_OUTDIR` short-circuits the build (the test
+    // escape hatch — no builder VM is spawned), mirroring the same guard
+    // `mvm_build::dev_build::dev_build` honours.
     #[cfg(feature = "builder-vm")]
-    crate::commands::env::apple_container::bootstrap_builder_vm_image()
-        .context("ensuring the builder VM image before the flake build (Stage 0 bootstrap)")?;
+    if std::env::var("MVM_BUILD_STUB_OUTDIR")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        crate::commands::env::apple_container::bootstrap_builder_vm_image()
+            .context("ensuring the builder VM image before the flake build (Stage 0 bootstrap)")?;
+    }
 
     let resolved = resolve_flake_ref(flake_ref)?;
     let watch_enabled = watch && !resolved.contains(':');
