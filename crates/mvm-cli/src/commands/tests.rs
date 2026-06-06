@@ -2788,6 +2788,19 @@ fn builder_flag_unset_by_default() {
     assert_eq!(cli.builder, None);
 }
 
+// --- Session start --ephemeral tests (Task 3.3) ---
+
+#[test]
+fn test_session_start_ephemeral_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "session", "start", "tmpl", "--ephemeral"]).unwrap();
+    match cli.command {
+        Commands::Session(session::Args {
+            command: session::Cmd::Start(a),
+        }) => assert!(a.ephemeral),
+        _ => panic!("expected session start"),
+    }
+}
+
 // --- Session attach --continue / --resume tests (Task 3.2) ---
 
 #[test]

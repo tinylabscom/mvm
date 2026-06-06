@@ -199,6 +199,11 @@ pub struct SessionRecord {
     /// gate is implicitly disabled for this record."
     #[serde(default)]
     pub creator_pid: u32,
+    /// When true, the session is torn down automatically after an
+    /// attach completes (vz-style `--ephemeral`). Defaults false so
+    /// records written before this field still parse.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// Whether the session's wrapper is allowed to run ad-hoc code (dev)
@@ -241,6 +246,7 @@ impl SessionRecord {
             invoke_count: 0,
             state: SessionState::Running,
             creator_pid: std::process::id(),
+            ephemeral: false,
         }
     }
 }
@@ -843,5 +849,26 @@ mod tests {
             "vm-late",
             "later last_invoke_at should win"
         );
+    }
+
+    #[test]
+    fn session_record_ephemeral_defaults_false_and_roundtrips() {
+        let mut r = SessionRecord::new_running("vm", "tmpl", SessionMode::Prod);
+        assert!(!r.ephemeral);
+        r.ephemeral = true;
+        let json = serde_json::to_string(&r).unwrap();
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert!(back.ephemeral);
+    }
+
+    #[test]
+    fn session_record_legacy_without_ephemeral_parses() {
+        // A record serialized before `ephemeral` existed must still parse
+        // (serde default), despite deny_unknown_fields.
+        let r = SessionRecord::new_running("vm", "tmpl", SessionMode::Prod);
+        let mut val = serde_json::to_value(&r).unwrap();
+        val.as_object_mut().unwrap().remove("ephemeral");
+        let back: SessionRecord = serde_json::from_value(val).unwrap();
+        assert!(!back.ephemeral);
     }
 }

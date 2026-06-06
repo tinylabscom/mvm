@@ -198,6 +198,10 @@ pub(in crate::commands) struct StartArgs {
     /// minutes).
     #[arg(long, default_value_t = mvm_core::session::DEFAULT_IDLE_TIMEOUT_SECS)]
     pub idle_timeout: u64,
+    /// Tear the session down automatically after the next attach
+    /// completes (no manual `session kill` needed).
+    #[arg(long)]
+    pub ephemeral: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -655,6 +659,21 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
         tracing::warn!(err = %e, "failed to bump session invoke counter");
     }
 
+    // Ephemeral teardown runs unconditionally — before any early exit on
+    // non-zero workload exit code — so the VM is always cleaned up.
+    if record.ephemeral {
+        ui::info(&format!(
+            "ephemeral session {id}: tearing down after attach"
+        ));
+        crate::exec::tear_down_session_vm(crate::exec::SessionVm {
+            vm_name: record.vm_name.clone(),
+        });
+        let _ = mvm_core::session::update_session(&id, |r| {
+            r.state = mvm_core::session::SessionState::Reaped;
+            Ok(())
+        });
+    }
+
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -907,6 +926,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
 
     let mut record = SessionRecord::new_running(&vm.vm_name, &template_id, mode);
     record.idle_timeout_secs = args.idle_timeout;
+    record.ephemeral = args.ephemeral;
     let id = record.id.clone();
     if let Err(e) = mvm_core::session::write_session(&record) {
         // Boot succeeded but we can't persist the record. Tear down
