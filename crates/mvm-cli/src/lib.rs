@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod exec;
 pub mod host_binaries;
 pub mod http;
+pub mod json_out;
 pub mod logging;
 pub mod metrics_server;
 pub mod security_cmd;
