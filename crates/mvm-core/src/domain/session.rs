@@ -828,4 +828,20 @@ mod tests {
     fn most_recent_running_none_when_empty() {
         assert!(most_recent_running(Vec::new()).is_none());
     }
+
+    #[test]
+    fn most_recent_running_compares_two_invoked() {
+        // Both records have last_invoke_at set; the later one wins.
+        let mut earlier = SessionRecord::new_running("vm-early", "tmpl", SessionMode::Prod);
+        earlier.last_invoke_at = Some("2026-03-01T10:00:00Z".to_string());
+        let mut later = SessionRecord::new_running("vm-late", "tmpl", SessionMode::Prod);
+        later.last_invoke_at = Some("2026-03-01T11:00:00Z".to_string());
+
+        let pick = most_recent_running(vec![earlier, later]);
+        assert_eq!(
+            pick.unwrap().vm_name,
+            "vm-late",
+            "later last_invoke_at should win"
+        );
+    }
 }

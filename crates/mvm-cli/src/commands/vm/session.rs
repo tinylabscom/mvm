@@ -1291,6 +1291,25 @@ mod tests {
     }
 
     #[test]
+    fn attach_continue_with_no_sessions_errors() {
+        // Empty session store → most_recent_running_on_disk returns None
+        // → cmd_attach bails before touching any vsock.
+        let _guard = isolated_runtime_dir();
+        let err = cmd_attach(AttachArgs {
+            session_id: None,
+            continue_latest: true,
+            resume: None,
+            stdin: None,
+            timeout: 30,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no running session"),
+            "expected no-running-session error, got: {err}"
+        );
+    }
+
+    #[test]
     fn run_code_on_prod_session_is_rejected() {
         let _guard = isolated_runtime_dir();
         let rec = session::SessionRecord::new_running("vm-1", "wl", session::SessionMode::Prod);
