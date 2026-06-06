@@ -300,9 +300,114 @@ pub(crate) fn setup_dev_fd_symlinks(dev_root: &std::path::Path) -> Result<(), St
     Ok(())
 }
 
+// ============================================================================
+// Guest-agent fork (Plan 124 B1 / ADR-066 §6 — the universal-agent invariant)
+// ============================================================================
+//
+// The builder/dev VM bakes `mvm-guest-agent` (mkGuest, via the
+// `entrypoint.shell = "/bin/sh"` → dev-shell build) but PID 1 here never
+// forked it, so vsock port 5252 stayed unbound on builder/dev VMs — only
+// workload VMs ran the agent. B1 makes this init fork the agent under
+// setpriv exactly as the workload `/init` does (nix/lib/mk-guest.nix), so
+// the *same* agent runs in every VM type. The argv construction + binary
+// resolution are pure (cross-platform-testable); the spawn itself is in
+// `linux::run`.
+
+#[cfg(any(target_os = "linux", test))]
+use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", test))]
+use std::process::Command;
+
+/// The uid the guest agent is dropped to via setpriv. The agent is a
+/// long-lived RPC service, not a build step, so it gets its own uid —
+/// distinct from build commands' `BUILDER_UID` (902). Mirrors the
+/// workload `/init` fork in `nix/lib/mk-guest.nix` (ADR-002 W4.5).
+#[cfg(any(target_os = "linux", test))]
+const AGENT_UID: u32 = 990;
+
+/// Candidate paths for the baked `mvm-guest-agent`, in preference order.
+/// The verity runtime overlay (ADR-051), when attached, bind-mounts the
+/// agent at `/mvm/runtime/agent`; prefer it over the rootfs-baked copy.
+/// Same order the workload `/init` probes.
+#[cfg(any(target_os = "linux", test))]
+const AGENT_BIN_CANDIDATES: [&str; 2] = ["/mvm/runtime/agent", "/usr/local/bin/mvm-guest-agent"];
+
+/// Resolve which agent binary to launch: the first candidate `is_exec`
+/// reports runnable. `is_exec` is injected so the preference order is
+/// unit-testable without a filesystem (production passes a real
+/// executable check). `None` — neither present — means the VM boots
+/// agent-less, which is non-fatal and surfaced in `mvmctl status`,
+/// exactly as the workload path treats a missing agent.
+#[cfg(any(target_os = "linux", test))]
+fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    AGENT_BIN_CANDIDATES
+        .iter()
+        .map(Path::new)
+        .find(|p| is_exec(p))
+        .map(Path::to_path_buf)
+}
+
+/// Build the `setpriv` command that forks the guest agent under the agent
+/// uid. Mirrors the workload `/init` invocation in `nix/lib/mk-guest.nix`:
+/// `setpriv --reuid --regid --clear-groups --no-new-privs -- <agent>`. No
+/// `--bounding-set=-all` — unlike a build step the agent keeps the default
+/// bounding set (the reference + ADR-002 W4.5 do not strip it here).
+#[cfg(any(target_os = "linux", test))]
+fn agent_spawn_command(agent_bin: &Path) -> Command {
+    let mut c = Command::new("setpriv");
+    c.arg(format!("--reuid={AGENT_UID}"))
+        .arg(format!("--regid={AGENT_UID}"))
+        .arg("--clear-groups")
+        .arg("--no-new-privs")
+        .arg("--")
+        .arg(agent_bin);
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Plan 124 B1: guest-agent fork (universal-agent invariant) ──
+
+    #[test]
+    fn agent_spawn_command_mirrors_workload_init_setpriv() {
+        let cmd = agent_spawn_command(Path::new("/usr/local/bin/mvm-guest-agent"));
+        assert_eq!(cmd.get_program().to_str().unwrap(), "setpriv");
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--reuid=990",
+                "--regid=990",
+                "--clear-groups",
+                "--no-new-privs",
+                "--",
+                "/usr/local/bin/mvm-guest-agent",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_agent_binary_prefers_runtime_overlay() {
+        // Both present → the verity overlay path wins (ADR-051).
+        let got = resolve_agent_binary(|_| true);
+        assert_eq!(got, Some(PathBuf::from("/mvm/runtime/agent")));
+    }
+
+    #[test]
+    fn resolve_agent_binary_falls_back_to_baked_copy() {
+        // Overlay absent, baked copy present → the rootfs copy.
+        let got = resolve_agent_binary(|p| p == Path::new("/usr/local/bin/mvm-guest-agent"));
+        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
+    }
+
+    #[test]
+    fn resolve_agent_binary_none_when_neither_present() {
+        // Neither present → boot agent-less (non-fatal, surfaced in status).
+        let got = resolve_agent_binary(|_| false);
+        assert_eq!(got, None);
+    }
 
     /// `setup_dev_fd_symlinks` lays down all four conventional symlinks
     /// in an empty /dev so bash process substitution (`< <(...)`)
@@ -605,6 +710,58 @@ mod linux {
     /// don't carry an install_spec.json.
     const INSTALL_SPEC_FILENAME: &str = "install_spec.json";
 
+    /// Plan 124 B1 — fork `mvm-guest-agent` under setpriv to the agent
+    /// uid, mirroring the workload `/init` (`nix/lib/mk-guest.nix`). Best
+    /// effort: a missing binary or spawn error logs and returns so PID 1
+    /// proceeds to the builder dispatch loop. The agent supervises vsock
+    /// RPC on port 5252; without it the host can boot the builder VM but
+    /// can't reach the agent — exactly the pre-B1 state this fixes.
+    fn fork_guest_agent() {
+        use std::os::unix::process::CommandExt;
+
+        let Some(agent_bin) = crate::resolve_agent_binary(is_executable) else {
+            eprintln!(
+                "mvm-host-vm-init: no mvm-guest-agent found at {:?}; booting agent-less",
+                crate::AGENT_BIN_CANDIDATES
+            );
+            return;
+        };
+        let mut cmd = crate::agent_spawn_command(&agent_bin);
+        // New session so the agent isn't in PID 1's signal / controlling-
+        // terminal group — the workload /init uses `setsid` for the same
+        // reason. stdio is inherited so the agent's logs reach the console.
+        unsafe {
+            cmd.pre_exec(|| {
+                // SAFETY: async-signal-safe, no allocation, runs in the
+                // forked child before execve.
+                libc::setsid();
+                Ok(())
+            });
+        }
+        match cmd.spawn() {
+            Ok(child) => eprintln!(
+                "mvm-host-vm-init: forked mvm-guest-agent pid={} from {}",
+                child.id(),
+                agent_bin.display()
+            ),
+            Err(e) => eprintln!(
+                "mvm-host-vm-init: failed to fork mvm-guest-agent from {}: {e}; booting agent-less",
+                agent_bin.display()
+            ),
+        }
+    }
+
+    /// `[ -x <path> ]` — exists and is executable. Picks the agent binary
+    /// (overlay vs baked) the same way the workload /init's shell test does.
+    fn is_executable(p: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `c` is a valid NUL-terminated C string for access() to read.
+        unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
+    }
+
     pub fn run() -> ExitCode {
         eprintln!("mvm-host-vm-init: pid 1 starting");
 
@@ -758,6 +915,15 @@ mod linux {
                 return power_off();
             }
         }
+
+        // Plan 124 B1 / ADR-066 §6 — fork the guest agent under setpriv so
+        // the builder/dev VM runs the *same* agent every workload VM does
+        // (vsock 5252). After the egress lockdown so the agent comes up
+        // behind the same egress floor; non-fatal so a missing agent or
+        // spawn failure never wedges PID 1 — the builder protocol is the
+        // primary job, the agent is additive (mirrors the workload /init,
+        // which also never blocks on the agent).
+        fork_guest_agent();
 
         // Plan 89 W3 part 3 dispatch: if the host staged a
         // `dispatch.sock.marker` in /job, this VM is persistent

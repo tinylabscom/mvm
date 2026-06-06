@@ -65,8 +65,10 @@ ADR-066 §6. The builder/dev VM bakes the agent (via mkGuest) but PID 1 (`mvm-ho
 
 **Files:** `crates/mvm-build/src/bin/mvm-host-vm-init.rs` (post-121).
 
-- [ ] **Step 1:** Failing test — `mvm-host-vm-init` startup spawns `mvm-guest-agent` under setpriv to the agent uid (assert the child is launched + reachable on vsock 5252 in a gated boot test). The dev/builder tier runs the `dev-shell` agent (with `do_exec` — a dev-tier VM, ADR-002 tier matrix).
-- [ ] **Step 2:** Fork it alongside the builder protocol + the PTY console; the agent and the build path coexist (mkGuest's workload `/init` already does both). Commit.
+Agent uid is **990** (CLAUDE.md's "901" is stale — the live `nix/lib/mk-guest.nix` workload fork uses 990); vsock port 5252; binary at `/mvm/runtime/agent` (verity overlay, ADR-051) or `/usr/local/bin/mvm-guest-agent` (baked), same preference order the workload `/init` probes.
+
+- [x] **Step 1:** TDD'd the testable core (cross-platform, runs on macOS): `agent_spawn_command` builds the exact workload-`/init` setpriv argv (`setpriv --reuid=990 --regid=990 --clear-groups --no-new-privs -- <agent>`); `resolve_agent_binary` prefers the overlay path then the baked copy, `None` (agent-less, non-fatal) when neither. 4 tests, RED→GREEN. (The live "reachable on vsock 5252" boot assertion stays gated for a real builder-VM boot — CI / KVM host.)
+- [x] **Step 2:** `fork_guest_agent()` (in `mod linux`) resolves the binary via a real `[ -x ]` (`libc::access` X_OK), spawns it under setpriv with `pre_exec` → `setsid` (new session, like the workload `/init`'s `setsid`), and is called from `run()` **after the egress lockdown, before the dispatch loop** — non-fatal, so a missing agent never wedges PID 1. The agent coexists with the builder dispatch protocol (the fork is a detached background child; PID 1 continues to the loop). The builder/dev tier already bakes the `dev-shell` agent (`entrypoint.shell = "/bin/sh"` → `withDevShell = true`), so no agent-build change is needed. **Verified:** 111 macOS bin tests green; `cargo zigbuild --target aarch64-unknown-linux-musl` produces a static ELF with `fork_guest_agent`/`is_executable` compiled+linked (the `cfg(linux)` path builds for the real guest target).
 
 ### Task B2: `xtask check-guest-agent-in-all-images`
 
