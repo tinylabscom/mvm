@@ -2147,7 +2147,7 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
                     if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
-                        assert_eq!(observer, "scan-chain");
+                        assert_eq!(observer, "l4-policy");
                         assert_eq!(reason, "drop");
                         saw_fault = true;
                         break;
@@ -2250,7 +2250,7 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
                     if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
-                        assert_eq!(observer, "scan-chain");
+                        assert_eq!(observer, "dns-sinkhole");
                         assert_eq!(reason, "drop");
                         saw_fault = true;
                         break;

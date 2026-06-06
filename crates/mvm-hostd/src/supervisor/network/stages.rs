@@ -18,11 +18,15 @@ use crate::supervisor::network::{FlowDirection, PacketCtx};
 use crate::supervisor::proxy::l4::{L4Decision, L4Policy, Protocol};
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
-/// flow — the same fail-closed path as `Verdict::Drop`.
+/// flow — the same fail-closed path as `Verdict::Drop`. `by` names the scan that
+/// dropped (its [`ScanStage::name`]); the pipeline carries it into the
+/// `gateway.flow_observer_fault` audit entry so the chain log records the actual
+/// enforcement (`dns-sinkhole` / `l4-policy` / `mandatory-deny-egress`) rather
+/// than the generic chain wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanOutcome {
     Pass,
-    Drop,
+    Drop { by: &'static str },
 }
 
 /// Rewrites outbound L4 payload bytes when a secret binding applies (Plan 129
@@ -113,7 +117,7 @@ impl ScanStage for DnsSinkholeScan {
         }
         match dns_query_qname(pkt.l4_payload) {
             // Sink-hole a denied host; an allowed (or unparseable) query passes.
-            Some(qname) if !self.is_allowed(&qname) => ScanOutcome::Drop,
+            Some(qname) if !self.is_allowed(&qname) => ScanOutcome::Drop { by: self.name() },
             _ => ScanOutcome::Pass,
         }
     }
@@ -180,7 +184,7 @@ impl ScanStage for MandatoryDenyEgressScan {
             _ => return ScanOutcome::Pass,
         }
         if is_mandatory_deny(pkt.five_tuple.dst_ip) {
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: self.name() }
         } else {
             ScanOutcome::Pass
         }
@@ -237,7 +241,7 @@ impl ScanStage for NetworkPolicyScan {
         if allowed {
             ScanOutcome::Pass
         } else {
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: self.name() }
         }
     }
 }
@@ -264,8 +268,10 @@ impl ScanStage for ScanChain {
 
     fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
         for stage in &self.stages {
-            if stage.scan(ctx, pkt) == ScanOutcome::Drop {
-                return ScanOutcome::Drop;
+            // Propagate the dropping stage's identity, not the chain's, so the
+            // audit names the actual enforcement.
+            if let ScanOutcome::Drop { by } = stage.scan(ctx, pkt) {
+                return ScanOutcome::Drop { by };
             }
         }
         ScanOutcome::Pass
@@ -312,7 +318,7 @@ impl ScanStage for L4PolicyScan {
             .evaluate(proto, pkt.five_tuple.dst_ip, pkt.five_tuple.dst_port)
         {
             L4Decision::Allow => ScanOutcome::Pass,
-            L4Decision::Deny { .. } => ScanOutcome::Drop,
+            L4Decision::Deny { .. } => ScanOutcome::Drop { by: self.name() },
         }
     }
 }
@@ -431,7 +437,10 @@ mod tests {
         let query = dns_query("tracker.evil.example");
         let pkt = dns_packet(&query);
         let scan = DnsSinkholeScan::new(vec!["corp.internal".to_string()]);
-        assert_eq!(scan.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+        assert_eq!(
+            scan.scan(&egress_ctx(), &pkt),
+            ScanOutcome::Drop { by: "dns-sinkhole" }
+        );
     }
 
     #[test]
@@ -453,7 +462,10 @@ mod tests {
         // registrable domain that merely ends in the allowed string is denied.
         let scan = DnsSinkholeScan::new(vec!["corp.internal".to_string()]);
         let q = dns_query("evilcorp.internal");
-        assert_eq!(scan.scan(&egress_ctx(), &dns_packet(&q)), ScanOutcome::Drop);
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&q)),
+            ScanOutcome::Drop { by: "dns-sinkhole" }
+        );
     }
 
     #[test]
@@ -519,7 +531,9 @@ mod tests {
         let pkt = tcp_packet("169.254.169.254".parse().unwrap(), 80);
         assert_eq!(
             MandatoryDenyEgressScan.scan(&egress_ctx(), &pkt),
-            ScanOutcome::Drop
+            ScanOutcome::Drop {
+                by: "mandatory-deny-egress"
+            }
         );
     }
 
@@ -551,7 +565,12 @@ mod tests {
         // egress packet drops. The strictest claim-10 posture.
         let scan = NetworkPolicyScan::new(NetworkPolicy::deny_all());
         let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
-        assert_eq!(scan.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+        assert_eq!(
+            scan.scan(&egress_ctx(), &pkt),
+            ScanOutcome::Drop {
+                by: "network-policy"
+            }
+        );
     }
 
     #[test]
@@ -573,12 +592,16 @@ mod tests {
         // Same IP, different port → no rule matches → drop (fail-closed).
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 80)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop {
+                by: "network-policy"
+            }
         );
         // Different IP → drop.
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("9.9.9.9".parse().unwrap(), 443)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop {
+                by: "network-policy"
+            }
         );
     }
 
@@ -594,7 +617,9 @@ mod tests {
         )]));
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 443)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop {
+                by: "network-policy"
+            }
         );
     }
 
@@ -617,7 +642,12 @@ mod tests {
             Arc::new(NetworkPolicyScan::new(NetworkPolicy::deny_all())),
         ]);
         let pkt = tcp_packet("1.1.1.1".parse().unwrap(), 443);
-        assert_eq!(chain.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+        assert_eq!(
+            chain.scan(&egress_ctx(), &pkt),
+            ScanOutcome::Drop {
+                by: "network-policy"
+            }
+        );
     }
 
     #[test]
@@ -653,7 +683,12 @@ mod tests {
             Arc::new(MandatoryDenyEgressScan),
         ]);
         let pkt = tcp_packet("169.254.169.254".parse().unwrap(), 80);
-        assert_eq!(chain.scan(&egress_ctx(), &pkt), ScanOutcome::Drop);
+        assert_eq!(
+            chain.scan(&egress_ctx(), &pkt),
+            ScanOutcome::Drop {
+                by: "mandatory-deny-egress"
+            }
+        );
     }
 
     #[test]
@@ -667,7 +702,9 @@ mod tests {
                 &egress_ctx(),
                 &tcp_packet("169.254.169.254".parse().unwrap(), 80)
             ),
-            ScanOutcome::Drop
+            ScanOutcome::Drop {
+                by: "mandatory-deny-egress"
+            }
         );
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
@@ -683,7 +720,7 @@ mod tests {
         assert_eq!(scan.name(), "scan-chain");
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: "l4-policy" }
         );
     }
 
@@ -695,7 +732,7 @@ mod tests {
         assert_eq!(scan.name(), "scan-chain");
         assert_eq!(
             scan.scan(&egress_ctx(), &dns_packet(&dns_query("tracker.evil.test"))),
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: "dns-sinkhole" }
         );
         assert_eq!(
             scan.scan(&egress_ctx(), &dns_packet(&dns_query("api.example.com"))),
@@ -734,7 +771,7 @@ mod tests {
         let scan = L4PolicyScan::new(L4Policy::deny_all());
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: "l4-policy" }
         );
     }
 
@@ -749,11 +786,11 @@ mod tests {
         // Wrong port and wrong IP → no rule matches → default-deny drop.
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.2.3.4".parse().unwrap(), 80)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: "l4-policy" }
         );
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("9.9.9.9".parse().unwrap(), 443)),
-            ScanOutcome::Drop
+            ScanOutcome::Drop { by: "l4-policy" }
         );
     }
 
