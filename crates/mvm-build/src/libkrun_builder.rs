@@ -214,7 +214,23 @@ pub fn resolve_networking_mode() -> NetworkingPreference {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("passt") => NetworkingPreference::Passt,
+        // passt is Linux-only — the Homebrew formula refuses to build on macOS.
+        // An explicit `MVM_NETWORKING=passt` on macOS can't be honoured (the
+        // supervisor would fail to spawn the gateway), so fall back to gvproxy
+        // with a warning rather than hand it an unspawnable gateway. On Linux,
+        // passt is honoured. This keeps `resolve_networking_mode` safe to call
+        // from every gateway-selection site, macOS included.
+        Some("passt") => {
+            if cfg!(target_os = "macos") {
+                tracing::warn!(
+                    "MVM_NETWORKING=passt is not supported on macOS \
+                     (passt is Linux-only); falling back to gvproxy"
+                );
+                NetworkingPreference::Gvproxy
+            } else {
+                NetworkingPreference::Passt
+            }
+        }
         Some("gvproxy") => NetworkingPreference::Gvproxy,
         None | Some("") => default_networking_mode(),
         Some(other) => {
@@ -2202,7 +2218,15 @@ mod tests {
             assert_eq!(resolve_networking_mode(), default_networking_mode());
 
             std::env::set_var("MVM_NETWORKING", " passt ");
-            assert_eq!(resolve_networking_mode(), NetworkingPreference::Passt);
+            // passt is Linux-only (the Homebrew formula refuses to build it on
+            // macOS), so an explicit passt pin is macOS-safe: resolve falls back
+            // to gvproxy with a warning rather than handing the supervisor a
+            // gateway it can't spawn.
+            if cfg!(target_os = "macos") {
+                assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
+            } else {
+                assert_eq!(resolve_networking_mode(), NetworkingPreference::Passt);
+            }
 
             std::env::set_var("MVM_NETWORKING", "GVPROXY");
             assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
