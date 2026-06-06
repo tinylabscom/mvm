@@ -399,14 +399,47 @@ pub enum EnvValue {
     },
 }
 
-// allow(secret-debug): metadata-only — `name` is a secret-store key (not
-// the secret value), `mount` is a delivery shape (env-var name or file
-// path). No secret bytes ever live in this struct.
+// allow(secret-debug): metadata-only — `name` is a secret-store key (not the
+// secret value), `mount` is a delivery shape (env-var name or file path), and
+// `auth_type`/`allowed_hosts` say how + where the secret is used on egress. No
+// secret bytes ever live in this struct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SecretRef {
     pub name: String,
     pub mount: SecretMount,
+    /// How the keyholder uses the secret on egress (signer vs injector) — Plan
+    /// 129 / ADR-067 §4.
+    pub auth_type: AuthType,
+    /// The hosts the substituted credential may reach — the claim-12 binding.
+    /// Supports `*.` subdomain wildcards (see [`host_matches`]). An empty list
+    /// is an unbound secret, rejected at validation (`SecretWithoutBinding`).
+    pub allowed_hosts: Vec<String>,
+}
+
+/// How a secret authenticates an outbound request, so the keyholder picks the
+/// right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer);
+/// `Bearer`/`Basic` are *injected* credentials. Plan 129 / ADR-067 §4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthType {
+    Sigv4,
+    Hmac,
+    Bearer,
+    Basic,
+}
+
+/// Whether `host` is permitted by an `allowed_hosts` `pattern`. Exact match, or
+/// a `*.suffix` wildcard that matches any subdomain of `suffix` at any depth but
+/// NOT the apex `suffix` itself — the leading dot stops a registrable lookalike
+/// (`*.example.com` rejects `evilexample.com`). Case-insensitive.
+pub fn host_matches(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => host.ends_with(&format!(".{suffix}")),
+        None => pattern == host,
+    }
 }
 
 // allow(secret-debug): metadata-only — variants carry the env-var name
@@ -625,5 +658,39 @@ mod tests {
     #[test]
     fn has_declared_entrypoint_false_for_empty_entrypoints() {
         assert!(!app_with(vec![]).has_declared_entrypoint());
+    }
+
+    #[test]
+    fn secret_ref_carries_auth_type_and_hosts_never_bytes() {
+        // Plan 129 A1: the reference says HOW the secret is used (auth_type, so
+        // the keyholder picks signer vs injector) and WHERE it may go
+        // (allowed_hosts — the claim-12 binding). Still no bytes.
+        let r: SecretRef = serde_json::from_str(
+            r#"{"name":"openai","mount":{"kind":"env","var":"OPENAI_API_KEY"},"auth_type":"bearer","allowed_hosts":["api.openai.com"]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.auth_type, AuthType::Bearer);
+        assert_eq!(r.allowed_hosts, ["api.openai.com"]);
+        // deny_unknown_fields keeps a stray "value" out — no secret bytes in the IR.
+        assert!(
+            serde_json::from_str::<SecretRef>(
+                r#"{"name":"x","mount":{"kind":"env","var":"X"},"value":"sk-..."}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn host_matches_handles_wildcards_and_lookalikes() {
+        // Exact match.
+        assert!(host_matches("api.openai.com", "api.openai.com"));
+        assert!(!host_matches("api.openai.com", "evil.com"));
+        // `*.` matches any subdomain depth, case-insensitively…
+        assert!(host_matches("*.example.com", "api.example.com"));
+        assert!(host_matches("*.example.com", "a.b.example.com"));
+        assert!(host_matches("API.Example.COM", "api.example.com"));
+        // …but NOT the apex, and the leading dot guards a registrable lookalike.
+        assert!(!host_matches("*.example.com", "example.com"));
+        assert!(!host_matches("*.example.com", "evilexample.com"));
     }
 }

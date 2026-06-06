@@ -651,6 +651,8 @@ mod tests {
                     mount: SecretMount::Env {
                         var: "API_KEY".into(),
                     },
+                    auth_type: crate::ir::AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
                 },
             },
         );

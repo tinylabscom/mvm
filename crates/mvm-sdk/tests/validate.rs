@@ -1,7 +1,7 @@
 use mvm_sdk::ir::{
-    App, Concurrency, Entrypoint, EnvValue, ErrorCode, Format, HostPort, Image, InProcessMode,
-    Network, NetworkEgress, NetworkMode, PortForward, PortProto, Resources, SecretMount, SecretRef,
-    Source, Volume, WarmProcessConfig, Workload, validate,
+    App, AuthType, Concurrency, Entrypoint, EnvValue, ErrorCode, Format, HostPort, Image,
+    InProcessMode, Network, NetworkEgress, NetworkMode, PortForward, PortProto, Resources,
+    SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, validate,
 };
 
 fn base_app() -> App {
@@ -113,7 +113,9 @@ fn rejects_reserved_source_kinds() {
 }
 
 #[test]
-fn rejects_secret_ref_in_app_env() {
+fn admits_secret_ref_with_a_binding() {
+    // Plan 129 A2 — a SecretRef that declares allowed_hosts is admitted (the
+    // SecretsNotImplemented gate is gone).
     let mut w = base_workload();
     w.apps[0].env.insert(
         "TOKEN".to_string(),
@@ -123,16 +125,17 @@ fn rejects_secret_ref_in_app_env() {
                 mount: SecretMount::Env {
                     var: "TOKEN".to_string(),
                 },
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec!["api.example.com".to_string()],
             },
         },
     );
-    let errs = validate(&w).unwrap_err();
-    assert_eq!(errs[0].code, ErrorCode::SecretsNotImplemented);
-    assert_eq!(errs[0].path, ".apps[0].env.TOKEN");
+    assert!(validate(&w).is_ok());
 }
 
 #[test]
-fn rejects_secret_ref_in_entrypoint_env() {
+fn rejects_unbound_secret_ref() {
+    // claim 12 — a secret with no allowed_hosts is unbound; refuse it.
     let mut w = base_workload();
     let env = match &mut w.apps[0].entrypoints[0] {
         Entrypoint::Command { env, .. } => env,
@@ -146,11 +149,13 @@ fn rejects_secret_ref_in_entrypoint_env() {
                 mount: SecretMount::File {
                     path: "/run/k".to_string(),
                 },
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec![],
             },
         },
     );
     let errs = validate(&w).unwrap_err();
-    assert_eq!(errs[0].code, ErrorCode::SecretsNotImplemented);
+    assert_eq!(errs[0].code, ErrorCode::SecretWithoutBinding);
     assert_eq!(errs[0].path, ".apps[0].entrypoint.env.KEY");
 }
 

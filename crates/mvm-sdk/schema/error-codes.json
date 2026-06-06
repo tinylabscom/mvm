@@ -34,8 +34,8 @@
       "description": "Source.kind names a variant reserved but not implemented in v0 (nix_derivation, oci_image).",
       "applicable_fields": ["apps[*].source.kind"]
     },
-    "E_SECRETS_NOT_IMPLEMENTED": {
-      "description": "SecretRef is not supported in v0; the secrets subsystem awaits a dedicated ADR.",
+    "E_SECRET_WITHOUT_BINDING": {
+      "description": "A SecretRef declares no allowed_hosts. An unbound secret could be substituted toward any destination the egress endpoint reaches, so it is refused (claim 12). Add hosts, e.g. [\"api.example.com\"] or [\"*.example.com\"].",
       "applicable_fields": ["apps[*].env.*", "apps[*].entrypoint.env.*"]
     },
     "E_PERSIST_DEFERRED": {
