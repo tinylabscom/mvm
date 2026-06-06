@@ -1294,6 +1294,21 @@ fn test_uninstall_all_flag_parses() {
 // ---- Audit command tests ----
 
 #[test]
+fn test_audit_show_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Audit(audit::Args {
+            action: AuditAction::Show {
+                ref plan_id,
+                json: true,
+                ..
+            }
+        }) if plan_id == "plan-abc"
+    ));
+}
+
+#[test]
 fn test_audit_tail_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "audit", "tail"]).unwrap();
     match cli.command {
@@ -1377,10 +1392,16 @@ fn test_audit_show_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc"]).unwrap();
     match cli.command {
         Commands::Audit(audit::Args {
-            action: AuditAction::Show { plan_id, tenant },
+            action:
+                AuditAction::Show {
+                    plan_id,
+                    tenant,
+                    json,
+                },
         }) => {
             assert_eq!(plan_id, "plan-abc");
             assert_eq!(tenant, "local");
+            assert!(!json);
         }
         _ => panic!("Expected Audit::Show"),
     }
