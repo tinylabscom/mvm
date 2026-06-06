@@ -429,6 +429,7 @@ pub(super) fn sign_path(path: &std::path::Path) -> super::SignReport {
     super::SignReport {
         path: path.to_path_buf(),
         applied: !already,
+        // re-probe: confirm sign_binary actually applied both entitlements
         entitlements_present: entitlements_present(path),
     }
 }

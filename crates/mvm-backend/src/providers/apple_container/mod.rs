@@ -299,7 +299,7 @@ mod sign_api_tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"applied\":true"));
-        assert!(json.contains("entitlements_present"));
+        assert!(json.contains("\"entitlements_present\":true"));
     }
 
     #[cfg(not(target_os = "macos"))]
