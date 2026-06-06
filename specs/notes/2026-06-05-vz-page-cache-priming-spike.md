@@ -164,3 +164,55 @@ runs — a real deployment wouldn't either).
   shows a signal worth generalizing).
 - B (realistic workload, e.g. `python -c "import numpy"`) and C (synthetic + realistic)
   — gated on A showing a signal.
+
+## Execution findings — 2026-06-05 (BLOCKED: page-cache number NOT measured)
+
+The spike could not produce a number. It did not fail at the page-cache question — it
+ran aground on **two pre-existing host-side gaps in the Vz *workload* path**, plus one
+correction. The "cheap today on Vz" premise is invalidated: the Vz workload runtime is
+half-plumbed and needs real fixes before it can host this measurement.
+
+**Correction — Vz snapshot restore IS implemented** (an earlier investigation wrongly
+called it unimplemented from a stale doc comment). Verified in source: `snap_restore`
+(`crates/mvm-cli/src/commands/vm/pause.rs:385`) reads the persisted supervisor config,
+flips to `StartupMode::Restore`, spawns the supervisor, emits `vm.snapshot_restored`;
+Swift `restoreStart` (`crates/mvm-vz-supervisor/.../Supervisor.swift:377`) does the real
+two-step `restoreMachineStateFrom(url:)` + `resume()`. The stale "NOT YET IMPLEMENTED"
+comment at `pause.rs:187` and the deferred *live control-socket* `RESTORE` command are
+different things. Restore was never exercised E2E here (blocked below), but it is wired.
+
+**Bug A — `up --dev --hypervisor vz` kills the supervisor before the guest boots.**
+The Swift supervisor's `makeBridgedGvproxyDevice` (`Network.swift:179`, claim-10 gvproxy
+flow-audit bridge) does a **mandatory fatal `connect()`** to
+`…/audit/gateway-events-<name>.sock`. The legacy `up --dev` path leaves `plan_json`
+unset on `VmStartConfig`, so `spawn_vz_drainer` (`vz.rs:1161`) skips the `mvm-vz-drainer`
+that would bind that socket → `connect()` fails `errno=2` → `exit()` before VM
+construction (`console.log` 0 bytes, no kernel output). The guest image is *correct*
+(Plan 162 idle `/init` present, `variant=dev`); the death is entirely host-side and
+pre-boot. **Confirmed sole boot blocker** via a no-code shim (pre-bind the socket with
+`socat UNIX-LISTEN:…/gateway-events-<name>.sock` before `up`): with the socket bound the
+supervisor lives, the kernel boots, and `mvm-guest-agent` reaches "listening on vsock
+port 5252". So the fix is good to go. Fix options: make the Swift bridge tolerate a
+missing/absent ingest socket (skip/fallback), or thread `plan_json` into the `up --dev`
+path so the drainer binds it first.
+
+**Bug B — `mvmctl console` cannot reach a Vz *workload* (the measurement channel).**
+`pick_console_transport` (`crates/mvm-cli/src/commands/vm/console.rs:31`) knows only
+four transports — apple_container, a *fixed* dev-VM proxy path (`mvm-dev`), libkrun, and
+firecracker. There is **no Vz-workload transport**. A Vz workload's agent proxy socket
+lives at `vms/<name>/vsock/vsock-5252.sock`, which none of those construct, so `console
+<name>` ignores the name, falls through to the fixed dev path, and errors as `mvm-dev`.
+This blocks the spike's only measurement channel (timed in-guest read via
+`console --command`).
+
+**Runbook command corrections** (for whoever resumes): the CLI does **not** split
+`--flake '…#dev'` (whole string is a literal path) — the bundled dev image is selected
+by `up --dev`; lifecycle verbs are `up` / `down <name>` / `ls` (no `ps`/`stop`/`rm`).
+
+**Verdict.** The page-cache-priming question on Vz is **still open** — unmeasured. To
+measure it on Vz, two real fixes land first (Bug A: events-ingest tolerance; Bug B: a Vz
+console/agent transport). Both are legitimate Vz-workload-path work but are *substrate*,
+not the throwaway afternoon the spike assumed. The decision the spike was meant to
+inform (justify or kill the Plan 157 follow-up) is therefore **deferred**, with the
+honest new datum that *the Vz workload path itself needs plumbing* — relevant to the
+broader Vz warm-path effort (Plan 152 / 159), not just to page-cache priming.
