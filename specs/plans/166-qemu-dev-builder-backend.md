@@ -1,9 +1,8 @@
 # Plan 166 — QEMU dev/builder backend (portable dev substrate; Firecracker stays prod)
 
-## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05). Tasks 1.5 (`run_build`) + Phase 2 (runtime) designed + DEFERRED — fully specified below, ready to implement next session.
+## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); **Task 1.5 (`run_build`) DONE + FULLY GREEN on the x86_64 box (2026-06-06)** — `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <x>` runs end-to-end (image-mode QEMU Stage 0 → layer-2 `run_build` over virtiofs/slirp → networked nix build → `vmlinux`+`rootfs.ext4`, exit 0). Includes the option-A dev-tier egress-lockdown skip + the `iptables-legacy` builder-image fix. Phase 2 (runtime) designed + DEFERRED — fully specified below.
 
 **Deferred (with the concrete design captured here):**
-- **Task 1.5 `run_build`** — steady-state QEMU builds. Design done (boot `rootfs.ext4` directly, virtiofsd shares, slirp+`udhcpc`, shared job protocol). Not implemented: the virtiofsd/vhost-user boot is finicky + testing needs a ~30-min image-mode Stage 0 first; deferred to avoid shipping untested boot code.
 - **Phase 2 (runtime)** — `AnyBackend::Qemu` + a `VmBackend` impl + retire the `"qemu"→MicrovmNix` alias. Design below; deferred (a whole new runtime backend needing a workload boot to validate).
 - The box stays provisioned (QEMU + virtiofsd installed, repo at `/root/mvm`, `/dev/kvm`) so the next session can implement against it directly.
 
@@ -66,29 +65,68 @@ and runs a user's `nix build` job. **Design is much simpler than Stage 0**
 because the mvm builder kernel has virtio **built-in** (`base.nix`/`default.nix`:
 `VIRTIO_BLK/NET/PCI/CONSOLE`, `VIRTIO_FS`, `FUSE_FS`, `EXT4_FS` all `=y`):
 
-- [ ] **Boot directly, no initramfs**: `qemu-system-<arch> -kernel <vmlinux>
-  -append "<image cmdline> root=/dev/vda rw mvm.backend=qemu" -drive
-  file=<rootfs.ext4>,if=virtio` — virtio-blk + ext4 are built-in, so the kernel
-  mounts the rootfs and runs its PID 1 (`/sbin/mvm-host-vm-init`) with no
-  initramfs and no ext4-disk-share workaround.
-- [ ] **Shares over virtiofs** (`/usr/lib/qemu/virtiofsd` is present): one
-  `virtiofsd --socket-path=<sock> --shared-dir=<dir>` per share (`work` ro,
-  `out` rw, `job` rw) + `-object memory-backend-memfd,id=mem,share=on -numa
-  node,memdev=mem -chardev socket,id=<id>,path=<sock> -device
-  vhost-user-fs-pci,chardev=<id>,tag=<tag>`. The builder kernel has `VIRTIO_FS`
-  built-in, so **`mvm-host-vm-init` is UNCHANGED** — it mounts the same
-  virtio-fs tags it does under libkrun/Vz.
-- [ ] **Networking = slirp** (`-netdev user`): slirp's built-in DHCP feeds
-  `mvm-host-vm-init`'s existing `udhcpc` — no static config, no gvproxy, no passt.
-- [ ] **Job protocol = the shared one**: reuse `stage_job_dir` (stage `cmd.sh` +
-  `env` into `/job`) + `read_job_result` (`/job/result` JSON
-  `{exit_code, stderr_tail}`) — identical to `LibkrunBuilderVm`/`VzBuilderVm`,
-  so `BuilderArtifacts` is byte-identical regardless of VMM. Mirror their
+Implemented in `qemu_builder::run_build_qemu` (gated behind `builder-vm`,
+like its `libkrun_builder` cache-helper deps). Host side complete + unit-tested;
+the live build awaits a box E2E run (needs an image-mode QEMU Stage 0 first).
+
+- [x] **Boot directly, no initramfs**: `qemu-system-<arch> -kernel <vmlinux>
+  -append "<qemu cmdline> root=/dev/vda ro init=/sbin/mvm-host-vm-init
+  mvm.backend=qemu" -drive file=<rootfs.ext4>,if=virtio` — virtio-blk + ext4
+  built-in, so the kernel mounts the rootfs and runs PID 1 with no initramfs.
+  **Deviation from the sketch: `ro`, not `rw`.** `ro` is libkrun's proven guest
+  contract (`builderCmdline` in `nix/images/builder-vm/flake.nix` is `…ro…`) and
+  keeps the *shared cached* `rootfs.ext4` pristine across builds; the guest
+  writes only to the `/dev/vdb` overlay, the virtio-fs shares, and tmpfs.
+- [x] **Shares over virtiofs** (`/usr/lib/qemu/virtiofsd` etc.): one
+  `virtiofsd --socket-path=<sock> --shared-dir=<dir> --sandbox none` per share
+  (`work`, `out`, `job`, `mvm-bins`) + `-object
+  memory-backend-memfd,id=mem,size=<m>,share=on -numa node,memdev=mem -chardev
+  socket,…,path=<sock> -device vhost-user-fs-pci,…,tag=<tag>`. The builder
+  kernel has `VIRTIO_FS` built-in, so **`mvm-host-vm-init` is UNCHANGED** — it
+  mounts the same tags + read-only policy it does under libkrun/Vz. A
+  `VirtiofsdGuard` reaps the daemons + sockets on drop; QEMU launches only after
+  each socket is ready.
+- [x] **Networking = slirp** (`-netdev user`): slirp's built-in DHCP feeds
+  `mvm-host-vm-init`'s existing `udhcpc -i eth0` — no static config, no gvproxy,
+  no passt. The QEMU cmdline forces `net.ifnames=0` so the NIC comes up `eth0`.
+- [x] **Job protocol = the shared one**: reuse `stage_job_dir` (stage `cmd.sh`
+  into `/job`) + `finalize_flake_job` / `finalize_install_job` (`/job/result`,
+  `/out/result.json`) — identical to `LibkrunBuilderVm`/`VzBuilderVm`, so
+  `BuilderArtifacts` is byte-identical regardless of VMM. Mirrors their
   `run_build` shape (validate mounts/job, resolve cached builder image +
   `NixStoreImageLock`, stage the job dir, boot, finalize).
-- [ ] **Prove it**: an image-mode QEMU Stage 0 first (to get `rootfs.ext4`), then
-  `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <example>` runs the user build
-  in the QEMU builder VM and produces the workload artifacts.
+- [x] **Reachability wired (2026-06-06):** `dev_build_via_builder_vm` now routes
+  through `builder_backend_select::resolve_builder_backend()` and `build_flake`
+  ensures the layer-1 builder image first. So `MVM_BUILDER_BACKEND=qemu mvmctl
+  build --flake <x>` drives the QEMU builder. (Default stays libkrun on Linux;
+  macOS 26 auto-detects Vz — coordinate with Plan 152's unified dispatch.)
+- [x] **Box-proven E2E mechanism (x86_64 + KVM, 2026-06-06):**
+  - **image-mode QEMU Stage 0** builds + promotes the full builder image
+    (`<arch>/{vmlinux,rootfs.ext4,cmdline.txt}`) — Phase 1 only did `kernel build`.
+  - **`run_build`**: locates QEMU + the QEMU-bundled **C virtiofsd** (flavor
+    auto-detected vs the Rust daemon), spawns one virtiofsd per share, boots
+    `rootfs.ext4`+`vmlinux`+nix-store(vdb) over QEMU, the unchanged
+    `mvm-host-vm-init` mounts all four virtio-fs tags + `/dev/vdb`, slirp DHCP
+    gives `eth0` its lease, `cmd.sh` runs, and the egress lockdown installs.
+    Every leg of the mechanism works.
+  - **Bug fixed (VMM-agnostic):** the builder rootfs shipped nft-backed
+    `iptables` but the kernel is legacy x_tables → fatal egress-lockdown failure.
+    Switched to `iptables-legacy` (also fixes libkrun/Vz). First E2E to boot the
+    builder rootfs + run the lockdown surfaced it.
+- [x] **Networked flake build completes (box, 2026-06-06) — FULLY GREEN.**
+  `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <x>` ran end-to-end: layer-1
+  image-mode QEMU Stage 0 rebuilt + promoted the builder image; layer-2
+  `run_build` booted it, the unchanged-contract `mvm-host-vm-init` logged
+  `egress lockdown SKIPPED — dev-tier QEMU builder (mvm.backend=qemu)`, nix
+  fetched over the network (open slirp egress), built the user flake, and
+  `run_build` extracted `vmlinux` + `rootfs.ext4` to `~/.mvm/dev/builds/<rev>/`.
+  Exit 0.
+  - **Option A implemented (this is what unblocked it):** `mvm-host-vm-init`
+    skips the iptables egress lockdown when the cmdline carries
+    `mvm.backend=qemu` (dev tier, ADR-072 — no security claims). The lockdown
+    over-clamped flake builds (no proxy for `cmd.sh` → nix can't fetch under
+    `OUTPUT` DROP, even flake-input source archives). Prod backends (no marker)
+    stay fully locked — Claim 9/10 unchanged there.
 
 ## Phase 2: QEMU dev/test workload runtime
 

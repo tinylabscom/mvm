@@ -178,6 +178,17 @@ fn hex_decode_utf8(s: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// True when the kernel cmdline carries the `mvm.backend=qemu` marker —
+/// the dev-tier QEMU builder (Plan 166 / ADR-072). The host (`qemu_builder`)
+/// adds this token; libkrun/Vz/Firecracker boots don't. Used to skip the
+/// egress lockdown on the dev-tier builder, where it has no security claim
+/// and would only break networked flake builds. Pure over the cmdline
+/// string so it's unit-testable without `/proc`.
+#[cfg(any(target_os = "linux", test))]
+fn dev_tier_builder_from_cmdline(cmdline: &str) -> bool {
+    cmdline.split_whitespace().any(|t| t == "mvm.backend=qemu")
+}
+
 /// Parse the `mvm.uvols=` token out of a kernel cmdline. Format:
 /// `mvm.uvols=<tag>:<hex(path)>:<ro|rw>:<fs|blk>;...`. Best-effort:
 /// malformed entries are skipped rather than failing (a bad mount must
@@ -519,6 +530,26 @@ mod tests {
     #[test]
     fn parse_user_volumes_cmdline_absent_is_empty() {
         assert!(parse_user_volumes_cmdline("console=hvc0 root=/dev/vda rw").is_empty());
+    }
+
+    #[test]
+    fn dev_tier_marker_detected_for_qemu_backend() {
+        assert!(dev_tier_builder_from_cmdline(
+            "console=ttyS0 root=/dev/vda ro init=/sbin/mvm-host-vm-init mvm.backend=qemu net.ifnames=0"
+        ));
+    }
+
+    #[test]
+    fn dev_tier_marker_absent_for_prod_backends() {
+        // libkrun/Vz/Firecracker boots carry no `mvm.backend=qemu` — the
+        // egress lockdown stays mandatory there.
+        assert!(!dev_tier_builder_from_cmdline(
+            "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init"
+        ));
+        // Substring-but-not-token must not match (no `mvm.backend=qemufoo`).
+        assert!(!dev_tier_builder_from_cmdline(
+            "console=hvc0 mvm.backend=qemubuilder"
+        ));
     }
 
     #[test]
@@ -883,7 +914,24 @@ mod linux {
         // offline builds still need the policy in place in case
         // a substituter URL is reached via cache rather than
         // network.)
-        if let Err(e) = crate::network::install_egress_lockdown(
+        // Plan 166 / ADR-072: the QEMU builder is a dev-tier substrate
+        // with NO security claims (outside ADR-002). The egress lockdown
+        // is a Claim 9/10 defense for the prod (libkrun / Firecracker)
+        // builder; on the dev-tier QEMU builder it would only break
+        // networked flake builds — nix can't reach substituters or fetch
+        // flake-input sources under `OUTPUT` DROP, because a flake
+        // `cmd.sh` runs with no proxy (the proxy path is install-pipeline
+        // only). Skip it for `mvm.backend=qemu` so slirp gives nix open
+        // egress; every prod backend stays locked.
+        let qemu_dev_tier = crate::dev_tier_builder_from_cmdline(
+            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
+        );
+        if qemu_dev_tier {
+            eprintln!(
+                "mvm-host-vm-init: egress lockdown SKIPPED — dev-tier QEMU builder \
+                 (mvm.backend=qemu); ADR-072: no security claims, dev only"
+            );
+        } else if let Err(e) = crate::network::install_egress_lockdown(
             &crate::network::SystemIptables,
             crate::network::PROXY_UID,
         ) {

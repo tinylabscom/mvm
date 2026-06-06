@@ -479,8 +479,6 @@ fn dev_build_via_builder_vm(
     profile: Option<&str>,
     mode: BuildMode,
 ) -> Result<DevBuildResult> {
-    use crate::libkrun_builder::LibkrunBuilderVm;
-
     // Plan 89 W3 part 7: when a persistent-builder session is
     // alive AND the user hasn't opted out via
     // `MVM_NO_PERSISTENT_BUILDER=1`, route through the persistent
@@ -507,7 +505,14 @@ fn dev_build_via_builder_vm(
         }
     }
 
-    dev_build_with_builder_vm(env, flake_ref, profile, mode, &LibkrunBuilderVm::default())
+    // Plan 166 Task 1.5: the single-shot path honours the builder-backend
+    // selection (`--builder` / `MVM_BUILDER_BACKEND` / auto-detect) instead of
+    // hardcoding libkrun, so `mvmctl build` routes a steady-state build through
+    // the chosen VMM (QEMU on `MVM_BUILDER_BACKEND=qemu`). Default stays libkrun
+    // on Linux + macOS 13-25; macOS 26 auto-detects Vz. (Plan 152 will fold this
+    // into a unified backend dispatch.)
+    let builder = crate::builder_backend_select::resolve_builder_backend();
+    dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
 }
 
 /// Read `MVM_NO_PERSISTENT_BUILDER`. Any non-empty value disables
@@ -551,7 +556,7 @@ fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBu
 }
 
 #[cfg(feature = "builder-vm")]
-fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm>(
+fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     env: &dyn ShellEnvironment,
     flake_ref: &str,
     profile: Option<&str>,
