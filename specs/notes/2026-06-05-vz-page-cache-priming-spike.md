@@ -49,19 +49,29 @@ question is whether that warm cache beats a cold one **net of Vz's restore overh
    working set via `console --command`. N trials each (≥5); compare distributions, not
    single runs — we want an obvious gap, not a precise figure.
 
-### Working set — read existing immutable rootfs, no image surgery
+### Working set — a fat closure on the immutable rootfs
 
-Use a large `/nix/store` subtree the boot path never touches as the working set:
+The in-repo default dev image (`nix/images/default-tenant#dev`) is **busybox-only** — its
+`/nix/store` is too thin to be a working set. So the builder builds *one* fatter dev
+variant (add a `python3 + numpy` closure, ~200 MB) and the working set is a subtree of
+that closure in `/nix/store`:
 
 ```sh
-time sh -c 'find /nix/store/<subtree> -type f -exec cat {} + >/dev/null'
+time sh -c 'find /nix/store/<closure-subtree> -type f -exec cat {} + >/dev/null'
 ```
 
-Rationale: it's block-backed (rootfs ext4 on virtio-blk, so a cold read genuinely
-faults from the virtual disk), naturally cold (boot doesn't read it, so no root
-`drop_caches` needed), and it's *also the most representative* thing — "warm the
-binaries/libs the workload will read" is exactly what priming buys. A tmpfs file would
-be useless here (tmpfs is always RAM-resident — no cold/primed distinction).
+Rationale: block-backed (rootfs ext4 on virtio-blk, so a cold read genuinely faults from
+the virtual disk), naturally cold (boot reads `/init` + the agent, never the closure, so
+no root `drop_caches`), it sits on the **immutable rootfs** — so it already obeys the
+"prime the rootfs only, never volumes/secrets" constraint — and it's the *most
+representative* thing ("warm the binaries/libs the workload reads"). The same image's
+`python -c "import numpy"` is scope B, so one build serves both. A tmpfs file would be
+useless (always RAM-resident — no cold/primed distinction).
+
+The builder that produces this image is **job-specific and isolated** (`MVM_CACHE_DIR` /
+`MVM_DATA_DIR` at scratch paths), kept persistent across the spike's builds for a warm
+store, then shut down + removed at teardown — the shared persistent builder is never
+touched. It is build tooling only; never measured or snapshotted.
 
 ### Success threshold (judgment, stated up front)
 
