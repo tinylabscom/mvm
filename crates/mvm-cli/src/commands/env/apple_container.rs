@@ -1225,7 +1225,10 @@ fn download_dev_image_inner(kernel_path: &str, rootfs_path: &str) -> Result<(Str
     let kernel_url = format!("{base_url}/{kernel_name}");
     let rootfs_url = format!("{base_url}/{rootfs_name}");
 
-    ui::info(&format!("Downloading dev image (v{version})..."));
+    ui::info(&format!(
+        "Downloading dev image (v{version}) — one-time setup. \
+         Subsequent runs reuse the cached image and start in seconds."
+    ));
 
     // Plan 36 PR-C.2: prefer the cosign-signed manifest. Falls back
     // to the W5.1 unsigned checksum file when the manifest is 404
