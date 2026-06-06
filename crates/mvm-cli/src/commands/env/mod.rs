@@ -14,6 +14,7 @@ pub(super) mod init;
 pub(super) mod linux_native;
 pub(super) mod setup;
 pub(super) mod shell_init;
+pub(super) mod sign;
 pub(super) mod uninstall;
 pub(super) mod update;
 

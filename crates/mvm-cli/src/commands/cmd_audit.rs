@@ -148,6 +148,7 @@ impl Commands {
             Commands::Ls(_) => "ls",
             Commands::Update(_) => "update",
             Commands::Doctor(_) => "doctor",
+            Commands::Sign(_) => "sign",
             Commands::Kernel(_) => "kernel",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",

@@ -76,6 +76,8 @@ pub(in crate::commands) enum Commands {
     Update(env::update::Args),
     /// System diagnostics and dependency checks
     Doctor(env::doctor::Args),
+    /// Re-sign mvmctl + supervisors with VZ entitlements (macOS)
+    Sign(env::sign::Args),
     /// Build the custom microVM kernels (builder / workload)
     Kernel(kernel::Args),
     /// Manage built manifest slots
@@ -287,6 +289,7 @@ pub fn run() -> Result<()> {
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
+        Commands::Sign(a) => env::sign::run(&cli, a, &cfg),
         Commands::Kernel(a) => kernel::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Image(a) => image::run(&cli, a, &cfg),
