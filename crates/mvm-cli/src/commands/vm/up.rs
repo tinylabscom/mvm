@@ -1407,6 +1407,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             memory_mib: direct_mem,
             ..Default::default()
         };
+        // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
+        attach_runtime_overlay_if_cached(&mut start_config, effective_hypervisor);
         // Plan 112 Phase 3c — when admission produced an AdmissionContext,
         // thread tenant_id / plan_json / bundle_json so libkrun/Vz take
         // the bridge-factory path. None keeps the legacy supervisor path
@@ -1876,6 +1878,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             port_mappings: &port_mappings,
         }
         .into_start_config();
+        // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
+        attach_runtime_overlay_if_cached(&mut start_config, effective_hypervisor);
         // Plan 112 Phase 3c — thread audit substrate from admission_main
         // through to backend.start() so libkrun/Vz take the bridge-factory
         // path. None keeps the legacy supervisor path for no-admission flows.
@@ -2269,6 +2273,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 port_mappings: &w_port_mappings,
             }
             .into_start_config();
+            // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
+            attach_runtime_overlay_if_cached(&mut w_start_config, effective_hypervisor);
             // Plan 112 Phase 3c — watch-loop re-boot uses its own fresh
             // admission (watch_admission); same substrate threading as the
             // main path. None → legacy supervisor path.
@@ -2348,6 +2354,117 @@ fn security_banner_acknowledged() -> bool {
         return true;
     }
     mvm_core::user_config::load(None).security.ack_docker_tier
+}
+
+/// Plan 124 C1 / ADR-051 — attach the verity-sealed runtime overlay by
+/// populating `VmStartConfig`'s overlay fields from the resolver's cache
+/// probe. **Firecracker-only**: it's the sole backend that attaches the
+/// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
+/// libkrun/Vz/apple-container/docker ignore the fields, so we skip them.
+/// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
+/// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
+/// — no build, no download, no `nix` — so this is safe on every host.
+fn attach_runtime_overlay(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    resolver: &mvm_build::runtime_overlay::RuntimeOverlayResolver,
+    arch: mvm_core::arch::GuestArch,
+) {
+    if hypervisor != "firecracker" {
+        return;
+    }
+    match resolver.resolve(arch) {
+        Ok(a) => {
+            start_config.runtime_overlay_path = Some(a.overlay_ext4.display().to_string());
+            start_config.runtime_overlay_verity_path = Some(a.sidecar.display().to_string());
+            start_config.runtime_overlay_roothash = Some(a.roothash);
+        }
+        // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
+        Err(e) => tracing::debug!(error = %e, "runtime overlay not attached (firecracker)"),
+    }
+}
+
+/// Production wrapper: build the resolver from the mvm cache dir + the
+/// running mvmctl version, then attach for `hypervisor`. Called at each
+/// workload-boot `VmStartConfig` construction in [`run`].
+fn attach_runtime_overlay_if_cached(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+) {
+    let resolver = mvm_build::runtime_overlay::RuntimeOverlayResolver::new(
+        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    attach_runtime_overlay(
+        start_config,
+        hypervisor,
+        &resolver,
+        mvm_core::arch::GuestArch::host(),
+    );
+}
+
+#[cfg(test)]
+mod runtime_overlay_attach_tests {
+    use super::*;
+    use mvm_build::runtime_overlay::RuntimeOverlayResolver;
+    use mvm_core::arch::GuestArch;
+    use mvm_core::vm_backend::VmStartConfig;
+
+    /// Stage a complete overlay cache entry (the four files the resolver
+    /// validates) in the layout `resolve` expects.
+    fn seed_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
+        let layout =
+            RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string()).layout(arch);
+        std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+        std::fs::write(&layout.overlay_ext4, b"ext4-bytes").unwrap();
+        std::fs::write(&layout.sidecar, b"verity-bytes").unwrap();
+        std::fs::write(&layout.roothash_file, format!("{}\n", "a".repeat(64))).unwrap();
+        std::fs::write(&layout.version_file, format!("{version}\n")).unwrap();
+    }
+
+    #[test]
+    fn firecracker_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch);
+        assert!(sc.runtime_overlay_path.is_some(), "ext4 path set");
+        assert!(sc.runtime_overlay_verity_path.is_some(), "verity path set");
+        assert_eq!(
+            sc.runtime_overlay_roothash.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn non_firecracker_backend_never_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch); // overlay IS cached…
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch); // …but libkrun ignores it
+        assert!(sc.runtime_overlay_path.is_none());
+        assert!(sc.runtime_overlay_roothash.is_none());
+    }
+
+    #[test]
+    fn firecracker_cold_cache_leaves_fields_unset_non_fatal() {
+        let dir = tempfile::tempdir().unwrap(); // empty cache
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch);
+        assert!(
+            sc.runtime_overlay_path.is_none(),
+            "cold cache must not attach (legacy boot)"
+        );
+    }
 }
 
 #[cfg(test)]
