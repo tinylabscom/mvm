@@ -2306,6 +2306,17 @@ fn test_init_catalog_conflicts_with_preset() {
 // --- Cache CLI tests ---
 
 #[test]
+fn test_cache_info_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "info", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Cache(cache::Args {
+            action: CacheAction::Info { json: true }
+        })
+    ));
+}
+
+#[test]
 fn test_cache_info() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "info"]);
     assert!(cli.is_ok());
