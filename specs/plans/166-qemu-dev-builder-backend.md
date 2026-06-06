@@ -1,6 +1,6 @@
 # Plan 166 — QEMU dev/builder backend (portable dev substrate; Firecracker stays prod)
 
-## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); Task 1.5 (`run_build`) DONE + box-proven mechanism (2026-06-06) — wired into `mvmctl build`, image-mode QEMU Stage 0 + run_build boot/virtiofs/cmd.sh all proven E2E on the x86_64 box; a fully-green *networked* flake build is blocked by a pre-existing VMM-agnostic builder-egress issue (egress lockdown clamps flake builds — see Task 1.5 last bullet, needs its own follow-up). Phase 2 (runtime) designed + DEFERRED — fully specified below.
+## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); **Task 1.5 (`run_build`) DONE + FULLY GREEN on the x86_64 box (2026-06-06)** — `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <x>` runs end-to-end (image-mode QEMU Stage 0 → layer-2 `run_build` over virtiofs/slirp → networked nix build → `vmlinux`+`rootfs.ext4`, exit 0). Includes the option-A dev-tier egress-lockdown skip + the `iptables-legacy` builder-image fix. Phase 2 (runtime) designed + DEFERRED — fully specified below.
 
 **Deferred (with the concrete design captured here):**
 - **Phase 2 (runtime)** — `AnyBackend::Qemu` + a `VmBackend` impl + retire the `"qemu"→MicrovmNix` alias. Design below; deferred (a whole new runtime backend needing a workload boot to validate).
@@ -113,20 +113,20 @@ the live build awaits a box E2E run (needs an image-mode QEMU Stage 0 first).
     `iptables` but the kernel is legacy x_tables → fatal egress-lockdown failure.
     Switched to `iptables-legacy` (also fixes libkrun/Vz). First E2E to boot the
     builder rootfs + run the lockdown surfaced it.
-- [ ] **Networked flake build completes** — **blocked by a pre-existing,
-  VMM-agnostic builder-egress issue, NOT `run_build`:** `mvm-host-vm-init`
-  installs the egress lockdown (`OUTPUT` policy DROP; allow loopback +
-  proxy-uid) before *every* job, but `run_job` runs a flake `cmd.sh` with **no
-  egress proxy and no `HTTP_PROXY`** (the proxy path is install-pipeline-only).
-  So nix can't fetch under the lockdown — even flake *evaluation* needs the
-  nixpkgs source archive, which is blocked (`Could not resolve host:
-  github.com / cache.nixos.org`). A cold-store networked flake build therefore
-  can't complete on **any** backend; the persistent `/nix-store` is seeded from
-  the builder rootfs closure, which has runtime outputs but not nix's
-  flake-source tarball cache. → **Follow-up (separate from Task 1.5):** scope the
-  egress lockdown to the untrusted install pipeline only (don't clamp trusted
-  flake builds), or start the proxy + point nix at it for flake jobs. Touches the
-  Claim 9/10 security model + `mvm-host-vm-init`, so it needs its own decision.
+- [x] **Networked flake build completes (box, 2026-06-06) — FULLY GREEN.**
+  `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <x>` ran end-to-end: layer-1
+  image-mode QEMU Stage 0 rebuilt + promoted the builder image; layer-2
+  `run_build` booted it, the unchanged-contract `mvm-host-vm-init` logged
+  `egress lockdown SKIPPED — dev-tier QEMU builder (mvm.backend=qemu)`, nix
+  fetched over the network (open slirp egress), built the user flake, and
+  `run_build` extracted `vmlinux` + `rootfs.ext4` to `~/.mvm/dev/builds/<rev>/`.
+  Exit 0.
+  - **Option A implemented (this is what unblocked it):** `mvm-host-vm-init`
+    skips the iptables egress lockdown when the cmdline carries
+    `mvm.backend=qemu` (dev tier, ADR-072 — no security claims). The lockdown
+    over-clamped flake builds (no proxy for `cmd.sh` → nix can't fetch under
+    `OUTPUT` DROP, even flake-input source archives). Prod backends (no marker)
+    stay fully locked — Claim 9/10 unchanged there.
 
 ## Phase 2: QEMU dev/test workload runtime
 
