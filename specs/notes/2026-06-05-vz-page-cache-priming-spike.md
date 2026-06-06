@@ -65,9 +65,21 @@ be useless here (tmpfs is always RAM-resident — no cold/primed distinction).
 
 ### Success threshold (judgment, stated up front)
 
-A gain worth pursuing should be **obvious**: primed first-read consistently ≥~2× faster,
-or saving on the order of hundreds of ms on the working set, across trials. A
-difference under ~20% or inside trial-to-trial noise = no signal = kill the follow-up.
+A's job is narrow — prove the *mechanism* yields a robust, material signal on Vz at
+all; the "worth the engineering cost" magnitude call is B/C's job. Avoid a raw
+multiplier (a 2× over single-digit ms is meaningless; a 1.3× over seconds may matter).
+Two gates instead:
+
+- **Robustness (primary):** ≥5 trials each. Primed and cold first-read distributions
+  must clearly separate — slowest primed run ≤ fastest cold run (full separation), or
+  primed median clearly lower with no meaningful overlap. If they interleave → noise →
+  **kill**.
+- **Materiality (secondary):** median saving on the order of **≥100 ms** — comparable
+  to or larger than the Vz restore time itself. A robust-but-5 ms gap is real but not
+  worth a feature.
+
+Pass both → mechanism viable → run B/C to quote the real-world number. Fail either →
+kill the Plan 157 follow-up.
 
 ## Security constraints (carried into the eventual feature)
 
