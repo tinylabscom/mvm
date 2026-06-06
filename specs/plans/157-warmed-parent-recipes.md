@@ -286,7 +286,11 @@ recipe (it exercises the full disk + memory freeze).
       as Task C1 (Plan 123 Phase C / Plan 140). Plan 140's restore inherits the
       warmth for free. Borrowed *design-level only* from the pooled OCI-microVM
       runtime's `with_warmup` (ADR-073) — no code adopted, and its hot-pool reuse is
-      explicitly **not** taken.
+      explicitly **not** taken. **Scope (ADR-073 §1):** `prime_paths` resolves inside
+      the immutable verity'd **root volume** only — never mounted data/app-dep volumes,
+      never secrets (which never live in a volume anyway; claims 12/13). The primed
+      cache is shared across every fork, so priming mutable/sensitive state would leak
+      it (claim 1 / 11); the freeze step rejects a working set that escapes the rootfs.
 
 ## Success criteria
 
