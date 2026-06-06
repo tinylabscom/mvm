@@ -1,6 +1,6 @@
 # Plan 166 — QEMU dev/builder backend (portable dev substrate; Firecracker stays prod)
 
-## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); Task 1.5 (`run_build`) IMPLEMENTED (host side, awaiting box E2E). Phase 2 (runtime) designed + DEFERRED — fully specified below, ready to implement next session.
+## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); Task 1.5 (`run_build`) DONE + box-proven mechanism (2026-06-06) — wired into `mvmctl build`, image-mode QEMU Stage 0 + run_build boot/virtiofs/cmd.sh all proven E2E on the x86_64 box; a fully-green *networked* flake build is blocked by a pre-existing VMM-agnostic builder-egress issue (egress lockdown clamps flake builds — see Task 1.5 last bullet, needs its own follow-up). Phase 2 (runtime) designed + DEFERRED — fully specified below.
 
 **Deferred (with the concrete design captured here):**
 - **Phase 2 (runtime)** — `AnyBackend::Qemu` + a `VmBackend` impl + retire the `"qemu"→MicrovmNix` alias. Design below; deferred (a whole new runtime backend needing a workload boot to validate).
@@ -95,26 +95,38 @@ the live build awaits a box E2E run (needs an image-mode QEMU Stage 0 first).
   `BuilderArtifacts` is byte-identical regardless of VMM. Mirrors their
   `run_build` shape (validate mounts/job, resolve cached builder image +
   `NixStoreImageLock`, stage the job dir, boot, finalize).
-- [ ] **Prove it** (box): an image-mode QEMU Stage 0 first (to get
-  `rootfs.ext4`), then a command that routes a steady-state build through the
-  QEMU builder VM. **Blocked on a reachability gap discovered during box bring-up
-  (2026-06-06):** no Linux product command currently routes a steady-state build
-  through the *selected* builder backend:
-  - Linux `mvmctl dev up` resolves `select_dev_backend → native` (Firecracker +
-    downloaded image); it never touches a builder VM. There is no QEMU
-    `DevBackend` until Phase 2, so `MVM_BUILDER_BACKEND=qemu` can't select it.
-  - `mvmctl build` → `dev_build::dev_build_via_builder_vm` **hardcodes
-    `LibkrunBuilderVm`** (ignores `resolve_builder_backend`) and doesn't
-    bootstrap the layer-1 builder image.
-  - The only backend-selected `run_build` caller is
-    `apple_container::build_image_via_libkrun` (via `ensure_dev_image`), reached
-    only by the macOS `cmd_dev_libkrun` / `cmd_dev_vz` dev backends.
-  → To box-verify, do **one** of: (a) wire `dev_build_via_builder_vm` through
-  `builder_backend_select::resolve_builder_backend()` (note: this also flips
-  `mvmctl build`'s default builder to Vz on macOS 26 — coordinate), plus a
-  layer-1 QEMU image bootstrap; or (b) land Phase 2's QEMU `DevBackend` and drive
-  it via `dev up`. The `run_build` mechanism itself is implemented + unit-tested
-  + CI-green; only the product-level wiring + the live build remain.
+- [x] **Reachability wired (2026-06-06):** `dev_build_via_builder_vm` now routes
+  through `builder_backend_select::resolve_builder_backend()` and `build_flake`
+  ensures the layer-1 builder image first. So `MVM_BUILDER_BACKEND=qemu mvmctl
+  build --flake <x>` drives the QEMU builder. (Default stays libkrun on Linux;
+  macOS 26 auto-detects Vz — coordinate with Plan 152's unified dispatch.)
+- [x] **Box-proven E2E mechanism (x86_64 + KVM, 2026-06-06):**
+  - **image-mode QEMU Stage 0** builds + promotes the full builder image
+    (`<arch>/{vmlinux,rootfs.ext4,cmdline.txt}`) — Phase 1 only did `kernel build`.
+  - **`run_build`**: locates QEMU + the QEMU-bundled **C virtiofsd** (flavor
+    auto-detected vs the Rust daemon), spawns one virtiofsd per share, boots
+    `rootfs.ext4`+`vmlinux`+nix-store(vdb) over QEMU, the unchanged
+    `mvm-host-vm-init` mounts all four virtio-fs tags + `/dev/vdb`, slirp DHCP
+    gives `eth0` its lease, `cmd.sh` runs, and the egress lockdown installs.
+    Every leg of the mechanism works.
+  - **Bug fixed (VMM-agnostic):** the builder rootfs shipped nft-backed
+    `iptables` but the kernel is legacy x_tables → fatal egress-lockdown failure.
+    Switched to `iptables-legacy` (also fixes libkrun/Vz). First E2E to boot the
+    builder rootfs + run the lockdown surfaced it.
+- [ ] **Networked flake build completes** — **blocked by a pre-existing,
+  VMM-agnostic builder-egress issue, NOT `run_build`:** `mvm-host-vm-init`
+  installs the egress lockdown (`OUTPUT` policy DROP; allow loopback +
+  proxy-uid) before *every* job, but `run_job` runs a flake `cmd.sh` with **no
+  egress proxy and no `HTTP_PROXY`** (the proxy path is install-pipeline-only).
+  So nix can't fetch under the lockdown — even flake *evaluation* needs the
+  nixpkgs source archive, which is blocked (`Could not resolve host:
+  github.com / cache.nixos.org`). A cold-store networked flake build therefore
+  can't complete on **any** backend; the persistent `/nix-store` is seeded from
+  the builder rootfs closure, which has runtime outputs but not nix's
+  flake-source tarball cache. → **Follow-up (separate from Task 1.5):** scope the
+  egress lockdown to the untrusted install pipeline only (don't clamp trusted
+  flake builds), or start the proxy + point nix at it for flake jobs. Touches the
+  Claim 9/10 security model + `mvm-host-vm-init`, so it needs its own decision.
 
 ## Phase 2: QEMU dev/test workload runtime
 
