@@ -96,8 +96,25 @@ the live build awaits a box E2E run (needs an image-mode QEMU Stage 0 first).
   `run_build` shape (validate mounts/job, resolve cached builder image +
   `NixStoreImageLock`, stage the job dir, boot, finalize).
 - [ ] **Prove it** (box): an image-mode QEMU Stage 0 first (to get
-  `rootfs.ext4`), then `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <example>`
-  runs the user build in the QEMU builder VM and produces the workload artifacts.
+  `rootfs.ext4`), then a command that routes a steady-state build through the
+  QEMU builder VM. **Blocked on a reachability gap discovered during box bring-up
+  (2026-06-06):** no Linux product command currently routes a steady-state build
+  through the *selected* builder backend:
+  - Linux `mvmctl dev up` resolves `select_dev_backend → native` (Firecracker +
+    downloaded image); it never touches a builder VM. There is no QEMU
+    `DevBackend` until Phase 2, so `MVM_BUILDER_BACKEND=qemu` can't select it.
+  - `mvmctl build` → `dev_build::dev_build_via_builder_vm` **hardcodes
+    `LibkrunBuilderVm`** (ignores `resolve_builder_backend`) and doesn't
+    bootstrap the layer-1 builder image.
+  - The only backend-selected `run_build` caller is
+    `apple_container::build_image_via_libkrun` (via `ensure_dev_image`), reached
+    only by the macOS `cmd_dev_libkrun` / `cmd_dev_vz` dev backends.
+  → To box-verify, do **one** of: (a) wire `dev_build_via_builder_vm` through
+  `builder_backend_select::resolve_builder_backend()` (note: this also flips
+  `mvmctl build`'s default builder to Vz on macOS 26 — coordinate), plus a
+  layer-1 QEMU image bootstrap; or (b) land Phase 2's QEMU `DevBackend` and drive
+  it via `dev up`. The `run_build` mechanism itself is implemented + unit-tested
+  + CI-green; only the product-level wiring + the live build remain.
 
 ## Phase 2: QEMU dev/test workload runtime
 
