@@ -138,7 +138,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::json_out::emit_json(&rows)?;
         return Ok(());
     }
 

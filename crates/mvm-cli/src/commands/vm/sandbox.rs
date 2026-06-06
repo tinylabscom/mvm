@@ -134,10 +134,7 @@ impl GcSummary {
 
 fn emit_gc_summary(summary: &GcSummary, json: bool) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(summary).context("serializing sandbox gc JSON summary")?
-        );
+        crate::json_out::emit_json(summary)?;
         return Ok(());
     }
 
