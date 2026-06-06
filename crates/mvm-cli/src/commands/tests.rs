@@ -14,7 +14,7 @@ use super::env::{cleanup, dev, init, uninstall};
 use super::image;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
-use super::vm::{console, cp, down, exec, forward, sandbox, up, volume};
+use super::vm::{console, cp, down, exec, forward, pause, sandbox, up, volume};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -1645,6 +1645,19 @@ fn test_network_inspect_help() {
 fn test_network_remove_help() {
     let cli = Cli::try_parse_from(["mvmctl", "network", "rm", "mynet"]);
     assert!(cli.is_ok());
+}
+
+// --- Snapshot CLI tests ---
+
+#[test]
+fn test_snapshot_ls_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "snapshot", "ls", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Snapshot(pause::SnapshotArgs {
+            command: pause::SnapshotCmd::Ls { json: true }
+        })
+    ));
 }
 
 // --- Catalog CLI tests (plan 40 replaced `mvmctl image *`) ---
