@@ -1,10 +1,11 @@
-# ADR-072 — Warm-snapshot prior art: adoption boundary
+# ADR-073 — Warm-snapshot prior art: adoption boundary
 
 **Status:** Proposed
 **Date:** 2026-06-05
-**Numbering:** 072 is next-after-highest in `specs/adrs/` (main tops at 071).
+**Numbering:** 073 is next-after-highest in `specs/adrs/` (main tops at 072 —
+`072-qemu-dev-builder-backend` landed first, so this was renumbered 072 → 073).
 `xtask check-spec-numbers` (a Lint gate) hard-fails on a duplicate integer prefix —
-re-confirm 072 is free against open PRs before merge and renumber if taken.
+re-confirm 073 is free against open PRs before merge and renumber if taken.
 
 ## Context
 
