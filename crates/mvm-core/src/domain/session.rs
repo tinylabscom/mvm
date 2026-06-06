@@ -411,6 +411,26 @@ pub fn list_expired_session_ids(now: chrono::DateTime<chrono::Utc>) -> Result<Ve
     Ok(expired)
 }
 
+/// The most-recently-active Running session, ranked by
+/// `last_invoke_at` (falling back to `started_at`). Pure over the
+/// input so it can be tested without touching disk.
+pub fn most_recent_running(records: Vec<SessionRecord>) -> Option<SessionRecord> {
+    records
+        .into_iter()
+        .filter(|r| r.state == SessionState::Running)
+        .max_by(|a, b| {
+            let ka = a.last_invoke_at.as_deref().unwrap_or(&a.started_at);
+            let kb = b.last_invoke_at.as_deref().unwrap_or(&b.started_at);
+            ka.cmp(kb)
+        })
+}
+
+/// Disk-backed convenience: scan the session table and return the
+/// most-recently-active Running session.
+pub fn most_recent_running_on_disk() -> Result<Option<SessionRecord>> {
+    Ok(most_recent_running(list_sessions()?))
+}
+
 // ---------------------------------------------------------------------------
 // Base32 helpers — RFC 4648, no padding, lowercase.
 // ---------------------------------------------------------------------------
@@ -785,5 +805,27 @@ mod tests {
         let path = sessions_dir().join(format!("{id}.json"));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn most_recent_running_prefers_latest_activity() {
+        let mut a = SessionRecord::new_running("vm-a", "tmpl", SessionMode::Prod);
+        a.started_at = "2026-01-01T00:00:00Z".to_string();
+        a.last_invoke_at = Some("2026-01-01T05:00:00Z".to_string());
+        let mut b = SessionRecord::new_running("vm-b", "tmpl", SessionMode::Prod);
+        b.started_at = "2026-01-02T00:00:00Z".to_string();
+        b.last_invoke_at = None; // falls back to started_at
+        let mut killed = SessionRecord::new_running("vm-c", "tmpl", SessionMode::Prod);
+        killed.started_at = "2026-09-09T00:00:00Z".to_string();
+        killed.state = SessionState::Killed; // excluded
+
+        let pick = most_recent_running(vec![a, b, killed]);
+        // b's started_at (Jan 2) beats a's last_invoke (Jan 1 05:00).
+        assert_eq!(pick.unwrap().vm_name, "vm-b");
+    }
+
+    #[test]
+    fn most_recent_running_none_when_empty() {
+        assert!(most_recent_running(Vec::new()).is_none());
     }
 }
