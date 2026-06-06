@@ -79,6 +79,18 @@ it makes a *signed, sealed, single-workload* snapshot boot faster without touchi
 isolation, provenance, or the audit chain. The warmth lives in the snapshot the
 freeze already produces and admits.
 
+**Scope constraint — prime the immutable rootfs only, never volumes, never secrets.**
+A primed page cache becomes part of the memory snapshot that forked children
+(Plan 157 / 148) all restore from, so priming anything mutable or sensitive would
+share it across every fork — a claim-1 / claim-11 confidentiality leak. Priming is
+therefore confined to the read-only, verity'd **root volume** (binaries/libs); the
+declared working set must resolve inside it. Mounted data / app-dep volumes are never
+primed into the shared base (each fork gets its own per-instance volume disposition),
+and secrets never live in any volume to begin with — they arrive as destination-bound
+signed credentials over the host broker (`host.secrets.v1`, claims 12/13), never as
+raw bytes in the guest. The freeze step must reject a `prime_paths` that escapes the
+rootfs.
+
 ### 2. Adopt (as a data point, no direction change) — HVF-direct as a reference for the Rust-native VZ path
 
 The runtime's HVF-direct design demonstrates that driving the hypervisor a layer
