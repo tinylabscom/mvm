@@ -286,6 +286,25 @@ pub fn sign_binaries(targets: &[PathBuf]) -> Vec<SignReport> {
     }
 }
 
+/// The binaries that need VZ/Hypervisor entitlements to launch a VM:
+/// the running CLI plus whichever supervisors resolve on this host.
+/// Unresolved supervisors are silently skipped (a host may have only
+/// one backend installed).
+pub fn collect_sign_targets() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        out.push(exe);
+    }
+    if let Ok(p) = crate::vz::resolve_supervisor_path() {
+        out.push(p);
+    }
+    if let Ok(p) = crate::libkrun::resolve_supervisor_path() {
+        out.push(p);
+    }
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod sign_api_tests {
     use super::*;
@@ -313,6 +332,16 @@ mod sign_api_tests {
     fn sign_binaries_is_noop_off_macos() {
         let targets = vec![std::path::PathBuf::from("/bin/sh")];
         assert!(sign_binaries(&targets).is_empty());
+    }
+
+    #[test]
+    fn collect_sign_targets_includes_current_exe() {
+        let targets = collect_sign_targets();
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            targets.contains(&exe),
+            "targets must include the running exe"
+        );
     }
 }
 
