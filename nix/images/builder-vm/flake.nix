@@ -208,7 +208,18 @@
         # iptables — installed at boot by mvm-host-vm-init's
         # network::install_egress_lockdown (Plan 73 Followup
         # B.2.y / ADR-047). FATAL if absent.
-        iptables
+        #
+        # Must be the **legacy (x_tables)** backend, not the nixpkgs
+        # `iptables` default (nft). The builder kernel
+        # (kernel/default.nix) enables the x_tables cluster
+        # (NETFILTER_XTABLES / IP_NF_IPTABLES / …) and deliberately
+        # omits NF_TABLES, so the nft-backed `iptables` fails at boot
+        # with "Could not fetch rule set generation id: Invalid
+        # argument" and trips the FATAL egress lockdown. Plan 166
+        # surfaced this — it's the first build that actually boots the
+        # builder rootfs and runs the lockdown. iptables-legacy's
+        # `iptables` binary speaks x_tables, matching the kernel.
+        iptables-legacy
         e2fsprogs
         util-linux
         # Plan 107 A2.1 — the host VM spawns one Firecracker
