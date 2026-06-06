@@ -11,7 +11,7 @@ pub enum ErrorCode {
     EmptyApps,
     MultiAppDeferred,
     SourceKindDeferred,
-    SecretsNotImplemented,
+    SecretWithoutBinding,
     PersistDeferred,
     NetworkPortsWithNone,
     CompileOutputExistsNotDir,
@@ -80,7 +80,7 @@ impl ErrorCode {
             Self::EmptyApps => "E_EMPTY_APPS",
             Self::MultiAppDeferred => "E_MULTI_APP_DEFERRED",
             Self::SourceKindDeferred => "E_SOURCE_KIND_DEFERRED",
-            Self::SecretsNotImplemented => "E_SECRETS_NOT_IMPLEMENTED",
+            Self::SecretWithoutBinding => "E_SECRET_WITHOUT_BINDING",
             Self::PersistDeferred => "E_PERSIST_DEFERRED",
             Self::NetworkPortsWithNone => "E_NETWORK_PORTS_WITH_NONE",
             Self::CompileOutputExistsNotDir => "E_COMPILE_OUTPUT_EXISTS_NOT_DIR",
@@ -165,7 +165,7 @@ mod tests {
             ErrorCode::EmptyApps,
             ErrorCode::MultiAppDeferred,
             ErrorCode::SourceKindDeferred,
-            ErrorCode::SecretsNotImplemented,
+            ErrorCode::SecretWithoutBinding,
             ErrorCode::PersistDeferred,
             ErrorCode::NetworkPortsWithNone,
             ErrorCode::CompileOutputExistsNotDir,
@@ -223,8 +223,8 @@ mod tests {
 
     #[test]
     fn serializes_as_plain_string() {
-        let json = serde_json::to_string(&ErrorCode::SecretsNotImplemented).unwrap();
-        assert_eq!(json, "\"E_SECRETS_NOT_IMPLEMENTED\"");
+        let json = serde_json::to_string(&ErrorCode::SecretWithoutBinding).unwrap();
+        assert_eq!(json, "\"E_SECRET_WITHOUT_BINDING\"");
     }
 
     // The upstream `all_codes_match_registry` test cross-checked the

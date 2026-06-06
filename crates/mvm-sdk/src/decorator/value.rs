@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::ir::{
-    App, Dependencies, Entrypoint, EnvValue, Format, HookCmd, Hooks, Image, Mount, Network,
-    NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
+    App, AuthType, Dependencies, Entrypoint, EnvValue, Format, HookCmd, Hooks, Image, Mount,
+    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
     SecretMount, SecretRef, Source, Workload,
 };
 
@@ -638,12 +638,20 @@ fn helper_to_env_value(v: Value, path: &Path, line: usize) -> Result<EnvValue, P
                 }
             };
             let mount_var = pop_string_kwarg(&mut kwargs, "var");
+            // Plan 129 A1 — the reference declares HOW (auth_type) and WHERE
+            // (allowed_hosts) the secret is used on egress. `type` is required
+            // (no sensible default); an empty `hosts` is caught at validation as
+            // an unbound secret (claim 12), so it stays optional here.
+            let auth_type = parse_auth_type(pop_string_kwarg(&mut kwargs, "type"), path, line)?;
+            let allowed_hosts = pop_string_list_kwarg(&mut kwargs, "hosts");
             Ok(EnvValue::SecretRef {
                 reference: SecretRef {
                     name: secret_name.clone(),
                     mount: SecretMount::Env {
                         var: mount_var.unwrap_or(secret_name),
                     },
+                    auth_type,
+                    allowed_hosts,
                 },
             })
         }
@@ -774,6 +782,46 @@ fn pop_string_kwarg(map: &mut BTreeMap<String, Value>, key: &str) -> Option<Stri
     match map.remove(key) {
         Some(Value::Str(s)) => Some(s),
         _ => None,
+    }
+}
+
+/// Pop a list-of-strings kwarg (e.g. `mvm.secret(hosts=[...])`). Absent or the
+/// wrong shape yields an empty Vec; non-string list items are dropped. Emptiness
+/// is a policy concern caught at validation, not a parse error.
+fn pop_string_list_kwarg(map: &mut BTreeMap<String, Value>, key: &str) -> Vec<String> {
+    match map.remove(key) {
+        Some(Value::List(items)) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::Str(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse the `mvm.secret(type=...)` kwarg into an [`AuthType`]. Required — a
+/// secret with no declared auth type can't be used by the keyholder.
+fn parse_auth_type(raw: Option<String>, path: &Path, line: usize) -> Result<AuthType, ParseError> {
+    match raw.as_deref() {
+        Some("sigv4") => Ok(AuthType::Sigv4),
+        Some("hmac") => Ok(AuthType::Hmac),
+        Some("bearer") => Ok(AuthType::Bearer),
+        Some("basic") => Ok(AuthType::Basic),
+        Some(other) => Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.secret".to_string(),
+            kwarg: "type".to_string(),
+            detail: format!("unknown auth type {other:?}; expected sigv4 | hmac | bearer | basic"),
+        }),
+        None => Err(ParseError::HelperMissingKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.secret".to_string(),
+            kwarg: "type",
+        }),
     }
 }
 

@@ -656,7 +656,7 @@ import mvm
     image=mvm.python_image(python="3.12"),
     env={
         "MODEL_PATH": "/data/model.pt",
-        "API_KEY": mvm.secret("api-key"),
+        "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.openai.com"]),
     },
 )
 def greet(): pass
@@ -670,6 +670,8 @@ def greet(): pass
         match env.get("API_KEY") {
             Some(EnvValue::SecretRef { reference }) => {
                 assert_eq!(reference.name, "api-key");
+                assert_eq!(reference.auth_type, crate::ir::AuthType::Bearer);
+                assert_eq!(reference.allowed_hosts, ["api.openai.com"]);
                 match &reference.mount {
                     SecretMount::Env { var } => assert_eq!(var, "api-key"),
                     other => panic!("expected Env mount, got {other:?}"),

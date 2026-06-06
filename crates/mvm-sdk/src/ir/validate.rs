@@ -646,16 +646,23 @@ fn validate_source(source: &Source, base: &str, errors: &mut Vec<ValidationError
 
 fn validate_env(env: &BTreeMap<String, EnvValue>, base: &str, errors: &mut Vec<ValidationError>) {
     for (key, value) in env {
-        if matches!(value, EnvValue::SecretRef { .. }) {
+        // Plan 129 A2 — a SecretRef is admitted once it declares a destination
+        // binding. claim 12: a secret with no allowed_hosts could be substituted
+        // toward any host the egress endpoint reaches, so refuse the unbound one.
+        // `auth_type` is a typed enum (always valid); `name` is required by the
+        // decorator that produces it.
+        if let EnvValue::SecretRef { reference } = value
+            && reference.allowed_hosts.is_empty()
+        {
             errors.push(ValidationError {
-                code: ErrorCode::SecretsNotImplemented,
+                code: ErrorCode::SecretWithoutBinding,
                 path: format!("{base}.{key}"),
-                detail: "SecretRef env values are not supported until the secrets \
-                         subsystem ADR lands. \
-                         Hint: for the v0 boot path, materialize secrets out-of-band \
-                         (e.g. mount via `mounts=[mv.mount(...)]` from a pre-provisioned \
-                         volume) and read them from disk inside the wrapper."
-                    .to_string(),
+                detail: format!(
+                    "secret {:?} declares no allowed_hosts — an unbound secret is a \
+                     claim-12 violation. Add hosts (e.g. [\"api.example.com\"] or \
+                     [\"*.example.com\"]).",
+                    reference.name
+                ),
             });
         }
     }

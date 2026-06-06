@@ -27,8 +27,8 @@ pub use hooks::{HookCmd, Hooks};
 pub use validate::{ValidationError, validate};
 pub use version::{IR_MAJOR, IR_MINOR, VersionError, validate_schema_version};
 pub use workload::{
-    App, Concurrency, Dependencies, Entrypoint, EnvValue, Format, HostPort, Image, InProcessMode,
-    JsonSchemaShape, Mount, MountMode, MountSource, Network, NetworkDns, NetworkEgress,
-    NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources, SecretMount, SecretRef,
-    Source, Volume, WarmProcessConfig, Workload,
+    App, AuthType, Concurrency, Dependencies, Entrypoint, EnvValue, Format, HostPort, Image,
+    InProcessMode, JsonSchemaShape, Mount, MountMode, MountSource, Network, NetworkDns,
+    NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
+    SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, host_matches,
 };
