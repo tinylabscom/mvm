@@ -766,7 +766,7 @@ mod linux {
         // `cmd.sh` runs with no proxy (the proxy path is install-pipeline
         // only). Skip it for `mvm.backend=qemu` so slirp gives nix open
         // egress; every prod backend stays locked.
-        let qemu_dev_tier = dev_tier_builder_from_cmdline(
+        let qemu_dev_tier = crate::dev_tier_builder_from_cmdline(
             &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
         );
         if qemu_dev_tier {
