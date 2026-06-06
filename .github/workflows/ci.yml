@@ -133,6 +133,13 @@ jobs:
         # explicitly so the gated surface stays covered.
         run: cargo nextest run -p mvm-core --features hostd-transport
 
+      - name: xtask man-page tests
+        # gen-man lives behind xtask's off-by-default `man` feature (it pulls
+        # mvm-cli + its heavy build.rs out of the default xtask graph), so the
+        # workspace run above skips its tests. Exercise the man-page path here;
+        # the mvm-cli rlib it links was already built by the workspace run.
+        run: cargo nextest run -p xtask --features man
+
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
