@@ -1777,7 +1777,7 @@ fn find_builder_vm_flake() -> Result<String> {
 /// [`find_builder_vm_flake`] — only called when
 /// `builder-vm` is on.
 #[allow(dead_code)]
-fn bootstrap_builder_vm_image() -> Result<()> {
+pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     let arch = builder_vm_host_arch();
     let out_dir = format!("{}/builder-vm/{arch}", mvm_core::config::mvm_cache_dir());
     let out_dir_path = std::path::Path::new(&out_dir);
