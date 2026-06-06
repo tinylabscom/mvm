@@ -6,15 +6,24 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
-clap_mangen.workspace = true
-mvm-build.workspace = true
-mvm-cli.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+
+# Man-page generation only. mvm-cli sits at the top of the workspace tree
+# and its build.rs cross-compiles the embedded host-vm binaries via zig, so
+# pulling it into the default xtask build makes every `cargo run -p xtask`
+# (every CI lint lane + the check-sync test's nested invocation) pay that
+# tax. Gate it behind an off-by-default feature so only `gen-man` — invoked
+# solely by release.yml — drags in the heavy graph.
+clap = { workspace = true, optional = true }
+clap_mangen = { workspace = true, optional = true }
+mvm-cli = { workspace = true, optional = true }
+
+[features]
+man = ["dep:clap", "dep:clap_mangen", "dep:mvm-cli"]
 
 [dev-dependencies]
 

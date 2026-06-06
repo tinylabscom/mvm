@@ -193,6 +193,13 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
+      - name: xtask man-page tests
+        # gen-man lives behind xtask's off-by-default `man` feature (it pulls
+        # mvm-cli + its heavy build.rs out of the default xtask graph), so the
+        # workspace run above skips its tests. Exercise the man-page path here;
+        # the mvm-cli rlib it links was already built by the workspace run.
+        run: cargo nextest run -p xtask --features man
+
       # Plan 98 Phase 3 §3.4 — Linux auto-detect assertion. The
       # `auto_detect_default_for(false)` arm covers macOS 13-25, Linux,
       # and Windows; pinning it here ensures the Linux path keeps

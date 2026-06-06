@@ -1,5 +1,11 @@
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::path::PathBuf;
+
+// Only the gen-man path (gated behind `man`) uses these.
+#[cfg(feature = "man")]
+use anyhow::Context;
+#[cfg(feature = "man")]
+use std::path::Path;
 
 mod build_dev_image;
 mod check_adr_coverage;
@@ -20,8 +26,21 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("gen-man") => {
-            let output_dir = parse_output_dir(&args).unwrap_or_else(default_man_dir);
-            gen_man(&output_dir)
+            #[cfg(feature = "man")]
+            {
+                let output_dir = parse_output_dir(&args).unwrap_or_else(default_man_dir);
+                gen_man(&output_dir)
+            }
+            // Man-page generation pulls mvm-cli (and its heavy build.rs), so it
+            // lives behind the off-by-default `man` feature. release.yml is the
+            // only caller and builds with `--features man`.
+            #[cfg(not(feature = "man"))]
+            {
+                let _ = &args;
+                anyhow::bail!(
+                    "gen-man requires the `man` feature: cargo run -p xtask --features man -- gen-man"
+                )
+            }
         }
         Some("check-adr-coverage") => {
             let workspace = workspace_root();
@@ -88,7 +107,7 @@ fn main() -> Result<()> {
             eprintln!("Usage: cargo xtask <task>");
             eprintln!("Available tasks:");
             eprintln!(
-                "  gen-man [--output-dir DIR]              Generate man pages into DIR (default: man/)"
+                "  gen-man [--output-dir DIR]              Generate man pages into DIR (default: man/) — build with --features man"
             );
             eprintln!(
                 "  check-adr-coverage                      Report ADRs with no code references"
@@ -153,6 +172,7 @@ fn workspace_root() -> PathBuf {
         .unwrap_or(manifest)
 }
 
+#[cfg(feature = "man")]
 fn parse_output_dir(args: &[String]) -> Option<PathBuf> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -163,10 +183,12 @@ fn parse_output_dir(args: &[String]) -> Option<PathBuf> {
     None
 }
 
+#[cfg(feature = "man")]
 fn default_man_dir() -> PathBuf {
     workspace_root().join("man")
 }
 
+#[cfg(feature = "man")]
 pub fn gen_man(output_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(output_dir).with_context(|| {
         format!(
@@ -186,6 +208,7 @@ pub fn gen_man(output_dir: &Path) -> Result<()> {
 ///
 /// Top-level page: `<cmd_name>.1`
 /// Subcommand pages: `<cmd_name>-<sub>.1`
+#[cfg(feature = "man")]
 fn generate_man_pages(cmd: &clap::Command, output_dir: &Path) -> Result<()> {
     let cmd_name = cmd.get_name().to_string();
 
@@ -201,6 +224,7 @@ fn generate_man_pages(cmd: &clap::Command, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "man")]
 fn write_man_page(cmd: &clap::Command, path: &Path) -> Result<()> {
     let mut file = std::fs::File::create(path)
         .with_context(|| format!("Failed to create {}", path.display()))?;
@@ -211,7 +235,8 @@ fn write_man_page(cmd: &clap::Command, path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// All tests here exercise gen-man, which only exists under the `man` feature.
+#[cfg(all(test, feature = "man"))]
 mod tests {
     use super::*;
 

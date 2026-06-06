@@ -111,7 +111,9 @@ jobs:
 
       - name: Generate man pages
         shell: bash
-        run: cargo run --package xtask -- gen-man --output-dir man/
+        # gen-man lives behind xtask's off-by-default `man` feature (it pulls
+        # mvm-cli + its heavy build.rs); release is the only caller.
+        run: cargo run --package xtask --features man -- gen-man --output-dir man/
 
       - name: Package binary and generate checksums
         env:
