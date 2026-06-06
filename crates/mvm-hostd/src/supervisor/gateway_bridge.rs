@@ -471,26 +471,41 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
         // Subscriber-sink accept loop.
         let sink_handle = tokio::task::spawn_local(sink.run());
 
-        // Plan 123 Slice 3 — resolve the tenant's L4 egress policy from the
+        // Plan 123 Slice 3 — resolve the tenant's egress policy from the
         // admitted policy bundle, if one reached the bridge, so the per-tenant
-        // filter composes under mandatory-deny. No bundle (the common case
+        // filters compose under mandatory-deny. No bundle (the common case
         // today: bundle_json carries a PlanArtifact pin, not resolved content)
-        // → None → mandatory-deny only, the prior live default. A bundle whose
-        // L4 specs fail to translate (admission should have rejected it) fails
+        // → mandatory-deny only, the prior live default. A bundle whose L4
+        // specs fail to translate (admission should have rejected it) fails
         // CLOSED to deny-all, never open. Emergency/now only gate the tool
         // policy, so the network resolution is stable.
-        let egress_policy = cfg.bundle.as_deref().map(|bundle| {
-            let net = mvm_core::policy::resolve(
-                bundle,
-                &cfg.plan.tenant,
-                chrono::Utc::now(),
-                &EmergencyDeny::default(),
-            )
-            .network;
-            LiveL4Gate::from_specs(&net.l4)
-                .map(|gate| gate.policy)
-                .unwrap_or_else(|_| crate::supervisor::proxy::l4::L4Policy::deny_all())
-        });
+        let (egress_l4, dns_allow) = match cfg.bundle.as_deref() {
+            Some(bundle) => {
+                let eff = mvm_core::policy::resolve(
+                    bundle,
+                    &cfg.plan.tenant,
+                    chrono::Utc::now(),
+                    &EmergencyDeny::default(),
+                );
+                let l4 = LiveL4Gate::from_specs(&eff.network.l4)
+                    .map(|gate| gate.policy)
+                    .unwrap_or_else(|_| crate::supervisor::proxy::l4::L4Policy::deny_all());
+                // DNS hostname gating from the egress allow-list's hosts — unless
+                // egress is "open" (no host restriction). An empty list adds no
+                // sink-hole (build_egress_scan), so "open"/unset stays ungated.
+                let dns_allow: Vec<String> = if eff.egress.mode.as_deref() == Some("open") {
+                    Vec::new()
+                } else {
+                    eff.egress
+                        .allow_list
+                        .iter()
+                        .map(|(host, _port)| host.clone())
+                        .collect()
+                };
+                (Some(l4), dns_allow)
+            }
+            None => (None, Vec::new()),
+        };
         // Plan 141 — packet-observer wiring shared across both directions.
         let wiring = ObserverWiring {
             observers: cfg.observers.clone(),
@@ -503,8 +518,8 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             substitution: Arc::new(NoopSubstitution),
             // Host-side mandatory-deny (link-local + cloud metadata), always on
             // and unbypassable from inside a compromised guest; the per-tenant
-            // L4 filter composes under it when a bundle is present.
-            scan: build_egress_scan(egress_policy),
+            // L4 + DNS filters compose under it when a bundle is present.
+            scan: build_egress_scan(egress_l4, dns_allow),
         };
 
         // Bridge task — variant-specific.
@@ -2056,16 +2071,38 @@ mod tests {
     // ───────────────────────────────────────────────────────────────
 
     /// A bridge `ObserverWiring` whose egress scan is the real Slice 3 scan for
-    /// `policy` (mandatory-deny + the L4 filter), no observers.
-    fn wiring_with_egress_scan(policy: Option<L4Policy>) -> ObserverWiring {
+    /// `l4` + `dns_allow` (mandatory-deny + L4 + DNS sink-hole), no observers.
+    fn wiring_with_egress_scan(l4: Option<L4Policy>, dns_allow: Vec<String>) -> ObserverWiring {
         ObserverWiring {
             observers: vec![],
             latency: Arc::new(ObserverLatency::new("vm-test", "t")),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
             substitution: Arc::new(NoopSubstitution),
-            scan: build_egress_scan(policy),
+            scan: build_egress_scan(l4, dns_allow),
         }
+    }
+
+    /// A UDP/53 frame (guest 10.0.0.2 → resolver 1.1.1.1) carrying a DNS query
+    /// for `qname` (A/IN). 1.1.1.1 is a public IP, so mandatory-deny passes it
+    /// and the DNS sink-hole decides on the qname.
+    fn udp_dns_frame(qname: &str) -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let mut dns = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        for label in qname.split('.') {
+            dns.push(label.len() as u8);
+            dns.extend_from_slice(label.as_bytes());
+        }
+        dns.push(0);
+        dns.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // qtype A, qclass IN
+        let b = PacketBuilder::ethernet2([1; 6], [2; 6])
+            .ipv4([10, 0, 0, 2], [1, 1, 1, 1], 64)
+            .udp(40000, 53);
+        let mut o = Vec::new();
+        b.write(&mut o, &dns).unwrap();
+        o
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2086,7 +2123,7 @@ mod tests {
             "t".to_string(),
             policy,
             tx,
-            wiring_with_egress_scan(Some(L4Policy::deny_all())),
+            wiring_with_egress_scan(Some(L4Policy::deny_all()), vec![]),
         ));
 
         let libkrun = connect_libkrun(&sup_listen).await;
@@ -2151,7 +2188,7 @@ mod tests {
             "t".to_string(),
             policy,
             tx,
-            wiring_with_egress_scan(Some(allow)),
+            wiring_with_egress_scan(Some(allow), vec![]),
         ));
 
         let libkrun = connect_libkrun(&sup_listen).await;
@@ -2166,6 +2203,103 @@ mod tests {
         let parsed = crate::supervisor::network::packet::parse(&buf[..n])
             .expect("forwarded frame re-parses");
         assert_eq!(parsed.five_tuple.dst_port, 443);
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dns_sinkhole_drops_a_denied_lookup_through_the_live_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
+        // Egress allow-list = {example.com} → a UDP/53 query for a host outside
+        // it is sink-holed at the chokepoint.
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(None, vec!["example.com".to_string()]),
+        ));
+
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun
+            .send(&udp_dns_frame("tracker.evil.test"))
+            .await
+            .unwrap();
+
+        // The denied lookup must NOT reach gvproxy.
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "a sink-holed DNS query must not reach gvproxy"
+        );
+
+        let mut saw_fault = false;
+        for _ in 0..4 {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(ev)) => {
+                    if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
+                        assert_eq!(observer, "scan-chain");
+                        assert_eq!(reason, "drop");
+                        saw_fault = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            saw_fault,
+            "an ObserverFault must fire when DNS is sink-holed"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dns_sinkhole_forwards_an_allowed_lookup_through_the_live_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with_egress_scan(None, vec!["example.com".to_string()]),
+        ));
+
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun
+            .send(&udp_dns_frame("api.example.com"))
+            .await
+            .unwrap();
+
+        // An allowed lookup is forwarded to gvproxy.
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+            .await
+            .expect("an allowed DNS query must reach gvproxy")
+            .expect("recv ok");
+        let parsed = crate::supervisor::network::packet::parse(&buf[..n])
+            .expect("forwarded frame re-parses");
+        assert_eq!(parsed.five_tuple.dst_port, 53);
         bridge.abort();
     }
 

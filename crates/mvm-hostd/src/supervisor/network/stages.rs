@@ -317,21 +317,32 @@ impl ScanStage for L4PolicyScan {
     }
 }
 
-/// Build the egress `ScanStage` for a VM's gateway bridge: always the host-side
-/// mandatory-deny ranges, plus the per-tenant [`L4PolicyScan`] when the tenant's
-/// bundle L4 policy was resolved. `None` (no policy bundle reached the bridge) →
-/// mandatory-deny only, i.e. the current live default — so wiring this is a
-/// no-op until a bundle's resolved `L4Policy` reaches the bridge.
-pub fn build_egress_scan(policy: Option<L4Policy>) -> Arc<dyn ScanStage> {
-    match policy {
-        Some(p) => {
-            let stages: Vec<Arc<dyn ScanStage>> = vec![
-                Arc::new(MandatoryDenyEgressScan),
-                Arc::new(L4PolicyScan::new(p)),
-            ];
-            Arc::new(ScanChain::new(stages))
-        }
-        None => Arc::new(MandatoryDenyEgressScan),
+/// Build the egress `ScanStage` for a VM's gateway bridge, composing the
+/// per-tenant egress filters under the always-on host-side mandatory-deny:
+///
+/// - `MandatoryDenyEgressScan` — always (link-local + cloud metadata).
+/// - `L4PolicyScan(l4)` — when the bundle resolved an L4 policy (CIDR/port).
+/// - `DnsSinkholeScan(dns_allow)` — when `dns_allow` (the bundle's egress
+///   allow-list hostnames) is non-empty: sink-holes UDP/53 lookups for hosts
+///   outside the list. An **empty** `dns_allow` deliberately adds no sink-hole
+///   (it would otherwise drop every lookup); host gating is opt-in via a
+///   non-empty allow-list.
+///
+/// With neither an L4 policy nor a DNS allow-list it's mandatory-deny only —
+/// the prior live default — so a no-bundle plan is unchanged.
+pub fn build_egress_scan(l4: Option<L4Policy>, dns_allow: Vec<String>) -> Arc<dyn ScanStage> {
+    let mut stages: Vec<Arc<dyn ScanStage>> = vec![Arc::new(MandatoryDenyEgressScan)];
+    if let Some(p) = l4 {
+        stages.push(Arc::new(L4PolicyScan::new(p)));
+    }
+    if !dns_allow.is_empty() {
+        stages.push(Arc::new(DnsSinkholeScan::new(dns_allow)));
+    }
+    if stages.len() == 1 {
+        // Mandatory-deny only — return it unwrapped (no ScanChain overhead).
+        Arc::new(MandatoryDenyEgressScan)
+    } else {
+        Arc::new(ScanChain::new(stages))
     }
 }
 
@@ -649,7 +660,7 @@ mod tests {
     fn build_egress_scan_none_is_mandatory_deny_only() {
         // No per-tenant policy → mandatory-deny only — identical to the current
         // live default. A metadata IP drops; a public IP passes (no L4 filter).
-        let scan = build_egress_scan(None);
+        let scan = build_egress_scan(None, vec![]);
         assert_eq!(scan.name(), "mandatory-deny-egress");
         assert_eq!(
             scan.scan(
@@ -668,11 +679,39 @@ mod tests {
     fn build_egress_scan_some_chains_policy_under_mandatory_deny() {
         // A deny_all L4 policy → the chain drops every egress packet; the
         // metadata IP is dropped by the mandatory-deny stage too.
-        let scan = build_egress_scan(Some(L4Policy::deny_all()));
+        let scan = build_egress_scan(Some(L4Policy::deny_all()), vec![]);
         assert_eq!(scan.name(), "scan-chain");
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
             ScanOutcome::Drop
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_chains_dns_sinkhole_when_allow_list_present() {
+        // A non-empty DNS allow-list adds DnsSinkholeScan under mandatory-deny:
+        // a UDP/53 query for a non-allowed host drops; an allowed one passes.
+        let scan = build_egress_scan(None, vec!["example.com".to_string()]);
+        assert_eq!(scan.name(), "scan-chain");
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("tracker.evil.test"))),
+            ScanOutcome::Drop
+        );
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("api.example.com"))),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_empty_dns_allow_list_adds_no_sinkhole() {
+        // An empty DNS allow-list must NOT add DnsSinkholeScan (that would drop
+        // every lookup). With no L4 policy either, it's mandatory-deny only.
+        let scan = build_egress_scan(None, vec![]);
+        assert_eq!(scan.name(), "mandatory-deny-egress");
+        assert_eq!(
+            scan.scan(&egress_ctx(), &dns_packet(&dns_query("anything.test"))),
+            ScanOutcome::Pass
         );
     }
 
