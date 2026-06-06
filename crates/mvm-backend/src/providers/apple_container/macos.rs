@@ -395,6 +395,44 @@ const ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
     <key>com.apple.security.hypervisor</key><true/>\n\
     </dict></plist>";
 
+/// Read the binary's entitlements XML via codesign.
+fn read_entitlements_xml(path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("codesign")
+        .args(["-d", "--entitlements", "-", "--xml"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// True only when BOTH the virtualization and hypervisor entitlements
+/// are present (the launch path requires both — see `ensure_signed`).
+pub(super) fn entitlements_present(path: &std::path::Path) -> bool {
+    match read_entitlements_xml(path) {
+        Some(xml) => {
+            xml.contains("com.apple.security.virtualization")
+                && xml.contains("com.apple.security.hypervisor")
+        }
+        None => false,
+    }
+}
+
+/// Sign `path` ad-hoc with both entitlements and report the result.
+pub(super) fn sign_path(path: &std::path::Path) -> super::SignReport {
+    let already = entitlements_present(path);
+    if !already {
+        sign_binary(&path.to_string_lossy());
+    }
+    super::SignReport {
+        path: path.to_path_buf(),
+        applied: !already,
+        entitlements_present: entitlements_present(path),
+    }
+}
+
 /// Sign the binary ad-hoc with both VZ and Hypervisor.framework
 /// entitlements (no self-restart).
 ///
