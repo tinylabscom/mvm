@@ -2122,7 +2122,7 @@ fn security_signing_check() -> Check {
     let exe = std::env::current_exe().ok();
     let present = exe
         .as_deref()
-        .and_then(|p| mvm_backend::providers::apple_container::entitlements_present(p));
+        .and_then(mvm_backend::providers::apple_container::entitlements_present);
     match present {
         None => Check {
             name: "signing",
