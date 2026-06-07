@@ -128,19 +128,30 @@ the live build awaits a box E2E run (needs an image-mode QEMU Stage 0 first).
     `OUTPUT` DROP, even flake-input source archives). Prod backends (no marker)
     stay fully locked — Claim 9/10 unchanged there.
 
-## Phase 2: QEMU dev/test workload runtime
+## Phase 2: QEMU dev/test workload runtime — DONE + box-proven (2026-06-07, PR #671)
 
-Lets a workload *run* for dev/test on a no-KVM host. Dev tier only.
+Lets a workload *run* for dev/test. Dev tier only. **Box-verified E2E (x86_64
+box):** `MVM_BUILDER_BACKEND=qemu mvmctl up --flake <x> --hypervisor qemu`
+builds the workload (qemu builder), boots it under QEMU (KVM), the
+`mvm-guest-agent` comes up on vsock 5252, and `mvmctl wait` returns
+`all components ready` — a full agent round-trip over the host
+AF_VSOCK↔UNIX bridge.
 
 ### Task 2.1: real `Qemu(QemuBackend)` in `AnyBackend`
-- [ ] Add `Qemu(QemuBackend)` to `AnyBackend` (`crates/mvm-backend/src/backend.rs`) with a `qemu.rs` impl. **Retire the vestigial `from_hypervisor("qemu") → MicrovmNix` alias** — `"qemu"` now routes to the real backend.
-- [ ] `security_profile` / `tier()`: KVM → `Tier2`, TCG → `Tier3`. Keep the `BackendSecurityProfile.tier` ↔ `AnyBackend::tier()` sync test green.
-- [ ] `auto_select`: **Firecracker still wins on `/dev/kvm`**. QEMU is reached only when no native runner *and* a dev/test context (never the silent production default — that stays Firecracker, whose `start()` then surfaces the "Firecracker requires /dev/kvm" error).
+- [x] `Qemu(QemuBackend)` added to `AnyBackend` + `crates/mvm-backend/src/qemu.rs`. **Retired the `from_hypervisor("qemu") → MicrovmNix` alias** — `"qemu"` routes to the real backend; `MicrovmNix` stays via `from_build_output(true)`.
+- [x] `security_profile` / `tier()`: best-case **Tier 2** (KVM). TCG is a *runtime* Tier-3 degradation surfaced by the `start` banner + `doctor`, **not** the static enum — the closed-enum `tier()` stays Tier 2 so the tier-sync test + CI-without-KVM stay green.
+- [x] `auto_select`: unchanged — Firecracker wins on `/dev/kvm`; QEMU is opt-in only, never auto-selected.
+- [x] **Real `start()`** (daemonized `qemu-system`, write-only console capture/claim 15, per-VM CID, slirp, virtio-vsock) + lifecycle. Dev-tier **workload-kernel fallback**: a bare mkGuest workload has no vmlinux, so QEMU falls back to the cached builder kernel (`~/.cache/mvm/builder-vm/<arch>/vmlinux`).
+- [x] **Host AF_VSOCK↔UNIX bridge** (`__qemu-vsock-bridge` hidden subcommand) so the per-port-UNIX-socket agent client reaches QEMU's real-AF_VSOCK guest backend-agnostically.
 
 ### Task 2.2: production gating
-- [ ] Firecracker `start()` on Linux: explicit fail-closed `/dev/kvm` probe with the ADR-072 hint (KVM host for prod, or `--hypervisor qemu` for local dev). (image.rs already emits a `[ -c /dev/kvm ]` guard — make the Rust-side selection match.)
-- [ ] **mvmd**: extend the `--prod` admission gate to refuse a QEMU-tier backend (Tier 2/3) — production requires an admitted Firecracker launch. Draft in `../mvmd/specs/plans/` + a coordinating note here; do not add `--prod` logic to mvm.
-- [ ] `mvmctl up` / `doctor`: Tier-3 (TCG) banner reuses the existing Docker-fallback banner path; Tier-2 (KVM-QEMU) notes "unaudited vs ADR-002".
+- [x] Firecracker `start()` on Linux: fail-closed `/dev/kvm` probe with the ADR-072 hint (use `--hypervisor qemu` for local dev) — no silent FC fallback.
+- [ ] **mvmd**: extend the `--prod` admission gate to refuse a QEMU-tier backend (Tier 2/3). Coordinating note only; admission policy lives in mvmd ([[feedback_prod_gate_lives_in_mvmd]]). **Remaining (mvmd-side).**
+- [x] TCG boot emits a loud Tier-3 banner (mirrors Docker fallback); qemu `security_profile` notes "unaudited vs ADR-002".
+
+### Deferred follow-ups (Phase 2)
+- [ ] `mvmctl ls` / `down` aren't QEMU-backend-aware (they query one backend; a QEMU VM's `qemu.pid` isn't listed — same multi-backend limitation libkrun has). Wire a backend-agnostic VM registry.
+- [ ] mvmd `--prod` Tier 2/3 refusal (above).
 
 ## Phase 3: provisioning, docs, and the firecracker arch bug
 

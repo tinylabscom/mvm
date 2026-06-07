@@ -195,6 +195,7 @@ impl Commands {
             Commands::Artifact(_) => "artifact",
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",
+            Commands::QemuVsockBridge(_) => "__qemu-vsock-bridge",
         }
     }
 }
