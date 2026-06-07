@@ -32,6 +32,10 @@ pub mod probes;
 /// units. Folded in from the former `mvm-runner` crate (plan 121 A1).
 pub mod runner;
 pub mod runtime_config;
+/// Plan 129 / ADR-067 §1 — in-guest substitution client: relays a secret-bearing
+/// request to the host substitution endpoint over vsock (the relay half of the
+/// guest-local forward proxy).
+pub mod substitution_client;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
