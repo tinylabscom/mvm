@@ -109,7 +109,13 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         .with_resources(vcpus, config.memory_mib)
         .with_cmdline(&cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
-        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
+        // Plan 152 WS-A: host-side listener the supervisor writes the
+        // workload exit code to once the guest entrypoint returns.
+        // Registered with add_host_listen_port (listen=true) so the
+        // supervisor owns the socket; the guest connects and writes the
+        // one-byte exit code before powering off.
+        .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
     // Plan 87/88 / ADR-058 — configure the virtio-net gateway. TSI was removed
     // (Plan 102 W6.A): it bypasses virtio-net, so the admitted gateway-audit
     // bridge refuses it (claim-10 no-bypass). KrunContext defaults to TSI, so an
@@ -465,6 +471,21 @@ impl VmBackend for LibkrunBackend {
         }
     }
 
+    fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
+        // Block until the supervisor (and thus the guest) exits, then read
+        // the captured workload exit code. Plan 152 WS-A.
+        let pid_path = vm_libkrun_pid(&id.0);
+        loop {
+            match read_pid(&pid_path) {
+                Some(pid) if pid_alive(pid) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => break,
+            }
+        }
+        Ok(read_exit_status_from(&vm_state_dir(&id.0)))
+    }
+
     fn list(&self) -> Result<Vec<VmInfo>> {
         let root = PathBuf::from(mvm_data_dir()).join("vms");
         let entries = match std::fs::read_dir(&root) {
@@ -634,6 +655,19 @@ fn pid_alive(pid: libc::pid_t) -> bool {
 
 fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe { libc::kill(pid, sig) };
+}
+
+/// Read the workload exit status written by the supervisor into
+/// `<state_dir>/workload.exit`. Returns UNKNOWN when the file is absent
+/// (guest was killed / backend doesn't support capture). Plan 152 WS-A.
+fn read_exit_status_from(state_dir: &std::path::Path) -> mvm_core::vm_backend::VmExitStatus {
+    match mvm_core::exit_capture::read_captured(state_dir) {
+        Some(code) => mvm_core::vm_backend::VmExitStatus {
+            code: Some(code),
+            success: code == 0,
+        },
+        None => mvm_core::vm_backend::VmExitStatus::UNKNOWN,
+    }
 }
 
 #[cfg(test)]
@@ -911,5 +945,62 @@ mod tests {
             let err = result.expect_err("expected missing-file error");
             assert!(err.to_string().contains("not a file"));
         });
+    }
+
+    // Plan 152 WS-A — read_exit_status_from / wait() tests.
+
+    #[test]
+    fn wait_reads_workload_exit_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(mvm_core::exit_capture::exit_file_path(dir.path()), "3").unwrap();
+        let status = read_exit_status_from(dir.path());
+        assert_eq!(status.code, Some(3));
+        assert!(!status.success);
+    }
+
+    #[test]
+    fn read_exit_status_zero_is_success() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(mvm_core::exit_capture::exit_file_path(dir.path()), "0").unwrap();
+        let status = read_exit_status_from(dir.path());
+        assert_eq!(status.code, Some(0));
+        assert!(status.success);
+    }
+
+    #[test]
+    fn read_exit_status_absent_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = read_exit_status_from(dir.path());
+        assert_eq!(status, mvm_core::vm_backend::VmExitStatus::UNKNOWN);
+    }
+
+    #[test]
+    fn build_supervisor_config_registers_control_port() {
+        // Plan 152 WS-A: the workload exit-code control port must appear in
+        // host_listen_ports (not vsock_ports) so the supervisor owns the
+        // listener socket and the guest connects as a client.
+        let config = VmStartConfig {
+            name: "ctrl-port-test".into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_supervisor_config(&config, tmp.path()).expect("build");
+        assert!(
+            cfg.krun
+                .host_listen_ports
+                .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT),
+            "WORKLOAD_EXIT_PORT must be in host_listen_ports"
+        );
+        // Must not be double-registered as a guest-facing vsock port.
+        assert!(
+            !cfg.krun
+                .vsock_ports
+                .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT),
+            "WORKLOAD_EXIT_PORT must not appear in vsock_ports"
+        );
     }
 }
