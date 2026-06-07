@@ -18,12 +18,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde::{Deserialize, Serialize};
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
 use mvm_core::crypto::secret_store::SecretStore;
 use mvm_core::plan::SecretBinding;
+use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_sdk::ir::AuthType;
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
@@ -116,34 +116,9 @@ fn destination_host(url: &str) -> Result<String, ProxyError> {
 // Transport — the host-local listener + the real-TLS forward leg (D-T2)
 // ============================================================================
 
-/// Wire envelope the guest's SDK sends over the host-local socket:
-/// length-prefixed JSON, body base64 so it stays compact and binary-safe.
-/// `deny_unknown_fields` fails closed on an unexpected field (W4.1).
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireRequest {
-    method: String,
-    url: String,
-    headers: Vec<(String, String)>,
-    #[serde(default)]
-    body_b64: String,
-}
-
-/// Reply: the destination's response, or a refusal (unbound destination,
-/// unknown placeholder, malformed request, forward failure). A refusal never
-/// carries a secret.
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-enum WireResponse {
-    Ok {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body_b64: String,
-    },
-    Refused {
-        message: String,
-    },
-}
+// The wire envelope (`WireRequest`/`WireResponse`) lives in
+// `mvm_core::substitution_wire` so the in-guest client and this server share
+// one contract (imported at the top of this file).
 
 /// The response from the real destination.
 pub struct ForwardResponse {
