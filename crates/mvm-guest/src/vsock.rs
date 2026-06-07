@@ -2411,8 +2411,19 @@ pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult
             | GuestRequest::FsMove { .. }
     ));
     let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    require_capabilities(&mut stream, &[GuestCapability::FilesystemRpc])?;
-    let resp = send_request(&mut stream, &req)?;
+    send_fs_request_on(&mut stream, req)
+}
+
+/// Dispatch a single FS RPC on an already-connected stream and return the
+/// `FsResult`. The backend-agnostic entry point: the host CLI obtains the
+/// stream from `mvm::vsock_transport::for_vm(name)` (which resolves the
+/// right socket per backend — Firecracker's `v.sock`, or the per-port UNIX
+/// socket libkrun/QEMU expose), so `fs`/`cp` work regardless of which VMM
+/// launched the VM (Plan 169). `send_fs_request` is the dir-based wrapper
+/// over this for callers that still pass an instance dir (mvmd, mock).
+pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<FsResult> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    let resp = send_request(stream, &req)?;
     match resp {
         GuestResponse::FsResult(r) => Ok(r),
         GuestResponse::Error { message } => bail!("Guest FS RPC transport error: {}", message),

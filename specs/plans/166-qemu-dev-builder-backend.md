@@ -150,7 +150,8 @@ AF_VSOCK↔UNIX bridge.
 - [x] TCG boot emits a loud Tier-3 banner (mirrors Docker fallback); qemu `security_profile` notes "unaudited vs ADR-002".
 
 ### Deferred follow-ups (Phase 2)
-- [ ] `mvmctl ls` / `down` aren't QEMU-backend-aware (they query one backend; a QEMU VM's `qemu.pid` isn't listed — same multi-backend limitation libkrun has). Wire a backend-agnostic VM registry.
+- [x] `mvmctl ls` / `down` backend-aware (PR #675): `AnyBackend::for_started_vm` (pid-marker dispatch) + `list_all` aggregation; `ls` shows the real backend, `down` stops per-VM. Fixed the latent libkrun-invisible gap too.
+- [ ] `mvmctl fs` / `proc` / `exec` / `cp` / `diff` resolve the agent vsock socket the Firecracker way (`<dir>/runtime/v.sock`) instead of the backend-aware `vsock_transport::for_vm`, so they fail against QEMU (and libkrun). → **Plan 169** (cross-backend agent-RPC transport unification). `wait` / `boot-report` already work.
 - [ ] mvmd `--prod` Tier 2/3 refusal (above).
 
 ## Phase 3: provisioning, docs, and the firecracker arch bug

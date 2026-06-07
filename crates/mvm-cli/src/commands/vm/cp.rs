@@ -122,7 +122,6 @@ fn copy_host_to_guest(host: &Path, vm: &str, guest_path: &str, args: &Args) -> R
     if !args.force && guest_exists(vm, guest_path)? {
         bail!("Guest destination {vm}:{guest_path} exists; pass --force to overwrite");
     }
-    let dir = super::fs::instance_dir_for(vm)?;
     let req = GuestRequest::FsWrite {
         path: guest_path.to_string(),
         content,
@@ -134,7 +133,7 @@ fn copy_host_to_guest(host: &Path, vm: &str, guest_path: &str, args: &Args) -> R
     // before dispatch so a failure on the wire still leaves an
     // audit trail of "host tried to write to this guest path".
     super::shared::emit_vsock_rpc_audit(vm, &req);
-    match unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)? {
+    match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Write { bytes_written } => {
             mvm_core::audit_emit!(
                 VmFileCopy,
@@ -182,7 +181,6 @@ fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> R
             )
         })?;
     }
-    let dir = super::fs::instance_dir_for(vm)?;
     let req = GuestRequest::FsRead {
         path: guest_path.to_string(),
         offset: None,
@@ -191,7 +189,7 @@ fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> R
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm, &req);
-    match unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)? {
+    match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Read { content, .. } => {
             if content.len() as u64 != stat.size {
                 bail!(
@@ -266,14 +264,13 @@ fn parse_endpoint(raw: &str) -> Result<Endpoint> {
 }
 
 fn guest_exists(vm: &str, path: &str) -> Result<bool> {
-    let dir = super::fs::instance_dir_for(vm)?;
     let req = GuestRequest::FsStat {
         path: path.to_string(),
         follow_symlinks: false,
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm, &req);
-    match mvm_guest::vsock::send_fs_request(&dir, req)? {
+    match super::fs::fs_request(vm, req)? {
         FsResult::Stat(_) => Ok(true),
         FsResult::Error {
             kind: mvm_guest::vsock::FsErrorKind::NotFound,
@@ -285,14 +282,13 @@ fn guest_exists(vm: &str, path: &str) -> Result<bool> {
 }
 
 fn guest_stat(vm: &str, path: &str) -> Result<mvm_guest::vsock::FsStat> {
-    let dir = super::fs::instance_dir_for(vm)?;
     let req = GuestRequest::FsStat {
         path: path.to_string(),
         follow_symlinks: true,
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm, &req);
-    match unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)? {
+    match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Stat(stat) => Ok(stat),
         other => bail!("Unexpected FsResult variant for Stat: {:?}", other),
     }
