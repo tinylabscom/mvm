@@ -220,7 +220,18 @@ impl VmBackend for QemuBackend {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        spawn_vsock_bridge(&config.name, cid, &state_dir)?;
+        // If the bridge can't come up, the already-daemonized qemu would be
+        // orphaned (a failed `start` won't be followed by `stop`). Roll back:
+        // kill qemu + drop the pid/cid sidecars so a retry re-allocates a CID
+        // instead of pinning the (possibly conflicting) one this attempt wrote.
+        if let Err(e) = spawn_vsock_bridge(&config.name, cid, &state_dir) {
+            if let Some(pid) = read_pid(&pid_file) {
+                send_signal(pid, libc::SIGTERM);
+            }
+            let _ = std::fs::remove_file(&pid_file);
+            let _ = std::fs::remove_file(state_dir.join(QEMU_CID_FILE));
+            return Err(e);
+        }
 
         ui::success(&format!(
             "QEMU workload '{}' started (pid: {}).",
@@ -233,7 +244,11 @@ impl VmBackend for QemuBackend {
     fn stop(&self, id: &VmId) -> Result<()> {
         let state_dir = vm_state_dir(&id.0);
         // Reap the bridge first so it can't keep serving a half-dead VM.
-        if let Some(bpid) = read_pid(&state_dir.join(BRIDGE_PID_FILE)) {
+        // Guard on liveness so a stale pidfile (crash without cleanup) whose
+        // PID the OS has since recycled isn't signalled by mistake.
+        if let Some(bpid) = read_pid(&state_dir.join(BRIDGE_PID_FILE))
+            && pid_alive(bpid)
+        {
             send_signal(bpid, libc::SIGTERM);
         }
         let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
@@ -481,6 +496,33 @@ fn allocate_cid(name: &str) -> Result<u32> {
     if let Some(existing) = read_cid(name) {
         return Ok(existing);
     }
+    // Serialize the scan→pick→write across concurrent `mvmctl up
+    // --hypervisor qemu` so two VMs can't pick the same CID in the window
+    // before either qemu has daemonized (vhost-vsock refuses duplicate live
+    // CIDs). A held `flock` on a shared lock file under the vms root is the
+    // cheapest cross-process mutex; it's released when `_lock` (the open
+    // file description) drops at function return.
+    use std::os::fd::AsRawFd;
+    let vms_root = PathBuf::from(mvm_data_dir()).join("vms");
+    std::fs::create_dir_all(&vms_root)
+        .map_err(|e| anyhow!("create {}: {e}", vms_root.display()))?;
+    let lock_path = vms_root.join(".qemu-cid-alloc.lock");
+    let _lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| anyhow!("open cid lock {}: {e}", lock_path.display()))?;
+    // SAFETY: flock(2) on a valid open fd; LOCK_EX blocks until acquired and
+    // is released on close (when `_lock` drops).
+    if unsafe { libc::flock(_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(anyhow!(
+            "flock cid alloc {}: {}",
+            lock_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+
     let in_use = used_cids();
     // CID 0/1 reserved (hypervisor/local), 2 = host. Guests start at 3.
     let cid = (3u32..).find(|c| !in_use.contains(c)).unwrap_or(3);
@@ -600,12 +642,21 @@ pub fn run_vsock_bridge(uds: &Path, cid: u32, port: u32, watch_pid_file: &Path) 
         .set_nonblocking(true)
         .map_err(|e| anyhow!("set_nonblocking on {}: {e}", uds.display()))?;
 
-    let watch_pid = read_pid(watch_pid_file);
     loop {
-        // Stop when the watched VM process is gone.
-        if let Some(pid) = watch_pid
-            && !pid_alive(pid)
-        {
+        // Stop when the watched VM is gone. Re-read the pidfile each
+        // iteration so a transient partial read at startup doesn't latch
+        // (the old read-once approach could loop forever on a one-off None).
+        // Distinguish the cases: file *missing* or a *dead* pid → the VM is
+        // torn down, exit; file present but momentarily unparseable → treat
+        // as still-alive and retry (don't exit on a transient bad read).
+        let vm_gone = match std::fs::read_to_string(watch_pid_file) {
+            Err(_) => true, // pidfile removed → VM torn down
+            Ok(s) => match s.trim().parse::<libc::pid_t>() {
+                Ok(pid) => !pid_alive(pid),
+                Err(_) => false, // transient empty/partial read → keep serving
+            },
+        };
+        if vm_gone {
             let _ = std::fs::remove_file(uds);
             return Ok(());
         }
@@ -640,6 +691,11 @@ fn dial_vsock(cid: u32, port: u32) -> std::io::Result<std::net::TcpStream> {
         svm_cid: u32,
         svm_zero: [u8; 4],
     }
+    // Pin the wire layout against the kernel uapi `struct sockaddr_vm`
+    // (family u16 + reserved u16 + port u32 + cid u32 + 4-byte pad = 16,
+    // == sizeof(struct sockaddr)). A future field edit that desyncs the
+    // `socklen` passed to connect(2) trips this at compile time.
+    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
 
     // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; addr is fully
     // initialized and sized exactly.
