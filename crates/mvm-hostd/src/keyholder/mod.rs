@@ -17,8 +17,8 @@ pub use admission::{AssembleError, HandedPlaceholders, assemble_registry};
 pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use injector::{InjectError, Injector};
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
-pub use signer::{SigV4Input, SignError, Signature, Signer};
+pub use signer::{SigV4Input, SignError, Signature, Signer, SigningInput};
 pub use substitution::{
-    PLACEHOLDER_PREFIX, Placeholder, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry,
-    find_placeholder,
+    PLACEHOLDER_PREFIX, Placeholder, SignDispatchError, SubstituteError, SubstitutionEndpoint,
+    SubstitutionRegistry, find_placeholder,
 };
