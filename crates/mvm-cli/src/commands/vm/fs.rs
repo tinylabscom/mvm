@@ -13,7 +13,6 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use std::io::{Read, Write};
 
-use mvm_backend::microvm;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_guest::vsock::{FsResult, GuestRequest};
@@ -163,19 +162,22 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-pub(super) fn instance_dir_for(name: &str) -> Result<String> {
+/// Send an FS RPC to `name`'s guest agent over the backend-aware transport
+/// (Plan 169). `vsock_transport::for_vm` picks the right socket per VMM —
+/// Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU expose
+/// — so `mvmctl fs`/`cp` work regardless of which backend launched the VM.
+/// The `--hypervisor mock` fast path (a mock agent at the VM dir's
+/// `runtime/v.sock`) stays ahead of the probe since `for_vm` is unaware of
+/// the in-memory mock backend.
+pub(super) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    // Plan 66 W3: if a mock VM is registered at
-    // `<mvm_data_dir>/mock-vms/<name>/runtime/v.sock`, route to it
-    // directly. The check is filesystem-based — production code
-    // never reaches the mock-vms path because `MockBackend` only
-    // populates it under `--hypervisor mock`. Falls through to the
-    // Lima-era resolver when no mock is in play.
     let mock_dir = mvm_backend::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
-        return Ok(mock_dir.to_string_lossy().into_owned());
+        return mvm_guest::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
     }
-    microvm::resolve_running_vm_dir(name)
+    let mut stream =
+        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    mvm_guest::vsock::send_fs_request_on(&mut stream, req)
 }
 
 fn unwrap_fs(result: FsResult) -> Result<FsResult> {
@@ -186,7 +188,6 @@ fn unwrap_fs(result: FsResult) -> Result<FsResult> {
 }
 
 fn cmd_read(name: &str, path: &str, offset: u64, length: u64) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::FsRead {
         path: path.to_string(),
         offset: if offset == 0 { None } else { Some(offset) },
@@ -195,7 +196,7 @@ fn cmd_read(name: &str, path: &str, offset: u64, length: u64) -> Result<()> {
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::Read { content, .. } => {
             std::io::stdout().write_all(&content)?;
@@ -213,7 +214,6 @@ fn cmd_write(
     create_parents: bool,
     follow_symlinks: bool,
 ) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let bytes = match content {
         Some(s) => s.into_bytes(),
         None => {
@@ -231,7 +231,7 @@ fn cmd_write(
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::Write { bytes_written } => {
             eprintln!("wrote {} bytes", bytes_written);
@@ -243,14 +243,13 @@ fn cmd_write(
 }
 
 fn cmd_ls(name: &str, path: &str, json: bool) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::FsList {
         path: path.to_string(),
         follow_symlinks: true,
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::List { entries, truncated } => {
             if json {
@@ -286,14 +285,13 @@ fn cmd_ls(name: &str, path: &str, json: bool) -> Result<()> {
 }
 
 fn cmd_stat(name: &str, path: &str, follow_symlinks: bool, json: bool) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::FsStat {
         path: path.to_string(),
         follow_symlinks,
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::Stat(s) => {
             if json {
@@ -314,7 +312,6 @@ fn cmd_stat(name: &str, path: &str, follow_symlinks: bool, json: bool) -> Result
 }
 
 fn cmd_mkdir(name: &str, path: &str, mode: u32, parents: bool) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::FsMkdir {
         path: path.to_string(),
         mode,
@@ -322,7 +319,7 @@ fn cmd_mkdir(name: &str, path: &str, mode: u32, parents: bool) -> Result<()> {
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::Mkdir => {
             mvm_core::audit_emit!(VmFsMutate, vm: name, "op=mkdir path={path} mode={mode:o} parents={parents}");
@@ -333,7 +330,6 @@ fn cmd_mkdir(name: &str, path: &str, mode: u32, parents: bool) -> Result<()> {
 }
 
 fn cmd_rm(name: &str, path: &str, recursive: bool) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::FsRemove {
         path: path.to_string(),
         recursive,
@@ -341,7 +337,7 @@ fn cmd_rm(name: &str, path: &str, recursive: bool) -> Result<()> {
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::Remove { entries_removed } => {
             eprintln!("removed {} entries", entries_removed);
@@ -353,7 +349,6 @@ fn cmd_rm(name: &str, path: &str, recursive: bool) -> Result<()> {
 }
 
 fn cmd_mv(name: &str, from: &str, to: &str) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::FsMove {
         from: from.to_string(),
         to: to.to_string(),
@@ -361,7 +356,7 @@ fn cmd_mv(name: &str, from: &str, to: &str) -> Result<()> {
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(mvm_guest::vsock::send_fs_request(&dir, req)?)?;
+    let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
         FsResult::Move => {
             mvm_core::audit_emit!(VmFsMutate, vm: name, "op=mv from={from} to={to}");
