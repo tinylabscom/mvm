@@ -13,9 +13,23 @@
 //! credential because it must reach the wire — the confinement is that this
 //! host component is the only place it exists in the clear.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use serde::{Deserialize, Serialize};
+use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
-use crate::keyholder::{SubstituteError, SubstitutionEndpoint, find_placeholder};
+use crate::framing::{FrameError, read_json_frame, write_json_frame};
+use crate::keyholder::{
+    SecretResolver, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, find_placeholder,
+};
+use crate::supervisor::tools::http_hardening::hardened_client_builder;
+
+/// 16 MiB cap on a single routed request/response frame.
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// A request the guest routed to the substitution endpoint. Header values may
 /// carry an opaque placeholder where a credential goes.
@@ -88,6 +102,201 @@ fn destination_host(url: &str) -> Result<String, ProxyError> {
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
         .ok_or_else(|| ProxyError::BadUrl(url.to_string()))
+}
+
+// ============================================================================
+// Transport — the host-local listener + the real-TLS forward leg (D-T2)
+// ============================================================================
+
+/// Wire envelope the guest's SDK sends over the host-local socket:
+/// length-prefixed JSON, body base64 so it stays compact and binary-safe.
+/// `deny_unknown_fields` fails closed on an unexpected field (W4.1).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRequest {
+    method: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    #[serde(default)]
+    body_b64: String,
+}
+
+/// Reply: the destination's response, or a refusal (unbound destination,
+/// unknown placeholder, malformed request, forward failure). A refusal never
+/// carries a secret.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+enum WireResponse {
+    Ok {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body_b64: String,
+    },
+    Refused {
+        message: String,
+    },
+}
+
+/// The response from the real destination.
+pub struct ForwardResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Errors from the forward leg.
+#[derive(Debug, thiserror::Error)]
+pub enum ForwardError {
+    #[error("forward failed: {0}")]
+    Failed(String),
+}
+
+/// Forwards a prepared (credential-substituted) request to the real
+/// destination and returns its response — the real-TLS leg of the endpoint.
+/// A trait so the listener can be tested with a mock that records the
+/// credential it received without a network call.
+#[async_trait]
+pub trait Forwarder: Send + Sync {
+    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError>;
+}
+
+/// Production forwarder: a hardened reqwest client (TLS 1.3 min, SSRF-filtered
+/// resolver, no redirects — `hardened_client_builder`) makes the real request.
+pub struct ReqwestForwarder {
+    client: reqwest::Client,
+}
+
+impl ReqwestForwarder {
+    pub fn new(timeout_secs: u64) -> Result<Self, ForwardError> {
+        let client = hardened_client_builder(timeout_secs)
+            .build()
+            .map_err(|e| ForwardError::Failed(e.to_string()))?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait]
+impl Forwarder for ReqwestForwarder {
+    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+        let method = reqwest::Method::from_bytes(req.method.as_bytes())
+            .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
+        let mut rb = self.client.request(method, &req.url);
+        for (k, v) in &req.headers {
+            rb = rb.header(k, v);
+        }
+        if !req.body.is_empty() {
+            rb = rb.body(req.body);
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| ForwardError::Failed(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+            .collect();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| ForwardError::Failed(e.to_string()))?
+            .to_vec();
+        Ok(ForwardResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+/// The running host substitution endpoint: the admission-minted placeholder
+/// registry, the secret resolver, and the forward leg. Placeholders are minted
+/// at admission (ADR-067 §4), so the registry is read-only while serving.
+pub struct SubstitutionService {
+    registry: Arc<SubstitutionRegistry>,
+    resolver: Arc<dyn SecretResolver>,
+    forwarder: Arc<dyn Forwarder>,
+}
+
+impl SubstitutionService {
+    pub fn new(
+        registry: Arc<SubstitutionRegistry>,
+        resolver: Arc<dyn SecretResolver>,
+        forwarder: Arc<dyn Forwarder>,
+    ) -> Self {
+        Self {
+            registry,
+            resolver,
+            forwarder,
+        }
+    }
+
+    /// Accept loop: one routed request per connection, framed JSON, a task per
+    /// connection. Runs until the listener errors.
+    pub async fn serve(self: Arc<Self>, listener: UnixListener) {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let me = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = me.handle_connection(stream).await {
+                            tracing::warn!(error = %e, "substitution endpoint connection failed");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "substitution endpoint accept failed; stopping");
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
+        let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        let resp = self.process(wire).await;
+        write_json_frame(&mut stream, &resp).await
+    }
+
+    async fn process(&self, wire: WireRequest) -> WireResponse {
+        let body = match B64.decode(wire.body_b64.as_bytes()) {
+            Ok(b) => b,
+            Err(e) => {
+                return WireResponse::Refused {
+                    message: format!("bad body encoding: {e}"),
+                };
+            }
+        };
+        let req = ProxyRequest {
+            method: wire.method,
+            url: wire.url,
+            headers: wire.headers,
+            body,
+        };
+        // Per-request endpoint: two refs, cheap; the registry is read-only
+        // after admission minted its placeholders.
+        let registry: &SubstitutionRegistry = &self.registry;
+        let endpoint = SubstitutionEndpoint::new(registry, self.resolver.as_ref());
+        let prepared = match prepare_request(&endpoint, req) {
+            Ok(p) => p,
+            Err(e) => {
+                return WireResponse::Refused {
+                    message: e.to_string(),
+                };
+            }
+        };
+        match self.forwarder.forward(prepared).await {
+            Ok(r) => WireResponse::Ok {
+                status: r.status,
+                headers: r.headers,
+                body_b64: B64.encode(r.body),
+            },
+            Err(e) => WireResponse::Refused {
+                message: e.to_string(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +401,137 @@ mod tests {
             prepare_request(&endpoint, req).unwrap_err(),
             ProxyError::BadUrl(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+    use crate::keyholder::LocalResolver;
+    use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
+    use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+    use secrecy::SecretBox;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    /// Records the request it was handed so a test can prove the destination
+    /// (not the guest) received the real credential — without a network call.
+    struct MockForwarder {
+        seen: Mutex<Option<PreparedRequest>>,
+    }
+
+    #[async_trait]
+    impl Forwarder for MockForwarder {
+        async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            *self.seen.lock().unwrap() = Some(req);
+            Ok(ForwardResponse {
+                status: 200,
+                headers: vec![("x-mock".into(), "1".into())],
+                body: b"pong".to_vec(),
+            })
+        }
+    }
+
+    fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
+        SecretRef {
+            name: name.into(),
+            mount: SecretMount::Env { var: "K".into() },
+            auth_type: AuthType::Bearer,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        }
+    }
+
+    /// Build a service over a file store seeded with `openai`=value, a registry
+    /// holding one minted placeholder for `hosts`, and a `MockForwarder`.
+    /// Returns the service, the minted placeholder string, and the forwarder.
+    fn service_with(
+        value: &str,
+        hosts: &[&str],
+    ) -> (
+        Arc<SubstitutionService>,
+        String,
+        Arc<MockForwarder>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(value.to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(bearer_ref("openai", hosts)).as_str().to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(reg),
+            resolver,
+            forwarder.clone(),
+        ));
+        (service, ph, forwarder, dir)
+    }
+
+    #[tokio::test]
+    async fn endpoint_substitutes_then_forwards_over_uds() {
+        let (service, ph, forwarder, dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        write_json_frame(&mut client, &wire).await.unwrap();
+        let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+
+        // The forwarder (i.e. the destination) saw the REAL credential.
+        let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            seen.headers[0],
+            ("authorization".into(), "Bearer sk-live-zzz".into())
+        );
+        match resp {
+            WireResponse::Ok {
+                status, body_b64, ..
+            } => {
+                assert_eq!(status, 200);
+                assert_eq!(B64.decode(body_b64).unwrap(), b"pong");
+            }
+            WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn endpoint_refuses_unbound_destination_and_never_forwards() {
+        let (service, ph, forwarder, dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://evil.example.com/x".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: String::new(),
+        };
+        write_json_frame(&mut client, &wire).await.unwrap();
+        let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+
+        assert!(matches!(resp, WireResponse::Refused { .. }));
+        // claim 12: an unbound destination never reaches the forward leg.
+        assert!(forwarder.seen.lock().unwrap().is_none());
+        server.abort();
     }
 }

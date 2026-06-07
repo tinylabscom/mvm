@@ -118,11 +118,17 @@ ADR-067 §1. The workload routes a secret-bearing request to a host endpoint (ho
 - [ ] **Step 3:** SDK routing — the `mvm-sdk` HTTP client (and a documented `HTTP_PROXY`-style escape for non-SDK clients) sends secret-bearing requests to the endpoint with the placeholder. `Sandbox` exposes `mvm.secret("openai")` returning the placeholder token.
 - [ ] **Step 4: Commit.** *(dispatch core committed; remaining steps below.)*
 
+### transport leg (D-T1 + D-T2 done)
+
+- [x] **D-T1 — request prep** (`mvm-hostd/src/supervisor/substitution_proxy.rs::prepare_request`): finds the placeholder in each header (`find_placeholder`), resolves it, binding-checks the destination taken from the **request URL** (a guest can't bind to `api.openai.com` then send the bytes elsewhere — the bind-check uses the URL we will dial), substitutes the real credential. Sync, fully unit-tested.
+- [x] **D-T2 — the running endpoint**: a host-local **UDS listener** (`SubstitutionService::serve`) speaking a length-prefixed JSON envelope (`WireRequest`/`WireResponse`, `deny_unknown_fields`, base64 body) + a `Forwarder` trait with a hardened-reqwest `ReqwestForwarder` (TLS 1.3 min, SSRF-filtered, no-redirect) for the real-TLS forward. Integration-tested over a **real Unix socket** with a mock forwarder: the destination receives the real credential, the guest never does; an unbound destination is refused and **never reaches the forward leg** (claim 12). The registry is read-only while serving (placeholders minted at admission, ADR-067 §4).
+
 ### deferred follow-ups (Phase D)
 
-- [ ] Transport leg: drive `SubstitutionEndpoint` from a host-local vsock/UDS endpoint inside 123's proxy, make the real TLS to the destination, stream back; full socket integration test with a mock destination + the live bridge (run on real sockets, no VM — sibling to the `run_libkrun_gvproxy_bridge` tests) + the `secret.substituted`/`secret.placeholder_dropped` audit emit (Phase E2).
+- [ ] Supervisor lifecycle wiring: spawn `SubstitutionService::serve` per-VM (socket path, lifecycle/teardown) + the guest-facing vsock exposure per backend; full live-bridge + real-destination integration (the `ReqwestForwarder`'s SSRF filter blocks loopback, so that test needs a non-loopback mock or a test-only forwarder seam).
+- [ ] `secret.substituted` / `secret.placeholder_dropped` audit emit (Phase E2) wired into the endpoint's success/refusal paths.
 - [ ] Signer-path endpoint shape: the SigV4/HMAC path computes a signature over the canonical request and adds the `Authorization` header (different request shape than the injector's placeholder-substitute); route by `auth_type`.
-- [ ] SDK routing (Step 3): `mvm-sdk` HTTP client → endpoint + `mvm.secret("openai")` returning a placeholder + the `HTTP_PROXY`-style escape for non-SDK clients.
+- [ ] SDK routing (Step 3): `mvm-sdk` HTTP client → endpoint + `mvm.secret("openai")` returning a placeholder + the `HTTP_PROXY`-style escape for non-SDK clients. Reconcile/retire the legacy `mvm-sdk/src/runtime_substitution.rs` (`mvm-secret://`, dead ADR-049 scaffolding superseded by ADR-062) so there is one placeholder format — the opaque `mvm-secret-<hex>` (ADR-067 §4 requires opacity; `mvm-secret://name` embeds the name and must not be used).
 
 ## Phase E — leak-detection + audit (needs 123's proxy)
 
