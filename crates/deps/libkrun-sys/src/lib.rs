@@ -259,6 +259,12 @@ pub struct KrunContext {
     pub ram_mib: u32,
     pub kernel_cmdline: Option<String>,
     pub vsock_ports: Vec<u32>,
+    /// Vsock ports the HOST (supervisor) listens on; the guest connects.
+    /// Registered with `add_vsock_port2(listen=false)` so libkrun
+    /// proxies guest-initiated connects to the supervisor's unix socket.
+    /// Disjoint from [`Self::vsock_ports`]. Plan 152 WS-A.
+    #[serde(default)]
+    pub host_listen_ports: Vec<u32>,
     /// Additional virtio-blk devices, appearing as `/dev/vdb`,
     /// `/dev/vdc`, … in the order listed. Empty by default; the
     /// dev-VM builder VM uses one entry for the Nix-store overlay
@@ -390,6 +396,7 @@ impl KrunContext {
             ram_mib: 256,
             kernel_cmdline: None,
             vsock_ports: Vec::new(),
+            host_listen_ports: Vec::new(),
             extra_disks: Vec::new(),
             virtio_fs_mounts: Vec::new(),
             console_output_path: None,
@@ -417,6 +424,7 @@ impl KrunContext {
             ram_mib: 256,
             kernel_cmdline: None,
             vsock_ports: Vec::new(),
+            host_listen_ports: Vec::new(),
             extra_disks: Vec::new(),
             virtio_fs_mounts: Vec::new(),
             console_output_path: None,
@@ -453,6 +461,7 @@ impl KrunContext {
             ram_mib: 256,
             kernel_cmdline: None,
             vsock_ports: Vec::new(),
+            host_listen_ports: Vec::new(),
             extra_disks: Vec::new(),
             virtio_fs_mounts: Vec::new(),
             console_output_path: None,
@@ -542,6 +551,17 @@ impl KrunContext {
     /// Append a vsock port the guest agent will listen on.
     pub fn add_vsock_port(mut self, port: u32) -> Self {
         self.vsock_ports.push(port);
+        self
+    }
+
+    /// Append a control vsock port the HOST listens on (the guest
+    /// connects). Registered with `add_vsock_port2(listen=false)` so
+    /// the supervisor binds the unix listener at
+    /// `<vsock_socket_dir>/vsock-<port>.sock` and libkrun proxies
+    /// guest connects to it. The supervisor must bind that listener
+    /// BEFORE `start_enter`. Plan 152 WS-A.
+    pub fn add_host_listen_port(mut self, port: u32) -> Self {
+        self.host_listen_ports.push(port);
         self
     }
 
@@ -1045,6 +1065,13 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         // bridge socket above. Keeps `dev up` idempotent across runs.
         let _ = std::fs::remove_file(&socket);
         krun.add_vsock_port2(port, &socket, /* listen = */ true)?;
+    }
+    for &port in &ctx.host_listen_ports {
+        let socket = ctx.vsock_socket_path(port);
+        // listen=false: the host (supervisor) binds the listener; do NOT
+        // pre-unlink — the supervisor created it. libkrun proxies guest
+        // connects on `port` to that socket. Plan 152 WS-A.
+        krun.add_vsock_port2(port, &socket, /* listen = */ false)?;
     }
     if let Some(console_path) = &ctx.console_output_path {
         krun.set_console_output(Path::new(console_path))?;
@@ -1796,6 +1823,19 @@ mod tests {
         let back: KrunContext = serde_json::from_str(&json).unwrap();
         assert_eq!(back.virtio_fs_mounts.len(), 2);
         assert_eq!(back.virtio_fs_mounts[1].host_path, "/host/artifacts");
+    }
+
+    /// `add_host_listen_port` populates `host_listen_ports`, not
+    /// `vsock_ports`. The two sets are disjoint and registered with
+    /// opposite `listen` flags in `configure`. Plan 152 WS-A.
+    #[test]
+    fn control_listen_port_is_registered_listen_false() {
+        let ctx = KrunContext::new("vm-1", "/k", "/r")
+            .add_vsock_port(5252)
+            .add_host_listen_port(5251);
+        assert!(ctx.host_listen_ports.contains(&5251));
+        assert!(!ctx.vsock_ports.contains(&5251));
+        assert!(ctx.vsock_ports.contains(&5252));
     }
 
     #[test]
