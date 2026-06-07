@@ -75,6 +75,9 @@ fn reconcile_dry_run_json_runs_against_isolated_dirs() {
         serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("not JSON ({e}):\n{stdout}"));
     // The ConvergeReport shape: arrays for each classification bucket.
     assert!(parsed.get("dead_process_reaped").is_some(), "got: {parsed}");
-    assert!(parsed.get("stale_record_dropped").is_some(), "got: {parsed}");
+    assert!(
+        parsed.get("stale_record_dropped").is_some(),
+        "got: {parsed}"
+    );
     assert!(parsed.get("orphan_state_reaped").is_some(), "got: {parsed}");
 }

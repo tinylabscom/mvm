@@ -100,7 +100,8 @@ pub struct ConvergeReport {
 impl ConvergeReport {
     /// Total drift healed: records dropped plus orphan dirs reaped.
     pub fn reconciled_count(&self) -> usize {
-        self.dead_process_reaped.len() + self.stale_record_dropped.len()
+        self.dead_process_reaped.len()
+            + self.stale_record_dropped.len()
             + self.orphan_state_reaped.len()
     }
 
@@ -643,7 +644,11 @@ mod tests {
 
     #[test]
     fn sweep_run_twice_is_a_no_op() {
-        let mut reg = registry_with(&[("live", "/s/live"), ("dead", "/s/dead"), ("gone", "/s/gone")]);
+        let mut reg = registry_with(&[
+            ("live", "/s/live"),
+            ("dead", "/s/dead"),
+            ("gone", "/s/gone"),
+        ]);
         let world = FakeWorld {
             present: RefCell::new(["/s/live".to_string(), "/s/dead".to_string()].into()),
             alive: RefCell::new(["/s/live".to_string()].into()),
@@ -808,7 +813,8 @@ mod tests {
         let mut reg = VmNameRegistry::default();
         reg.register_with_metadata(RegisterParams::minimal("dead", &dead_dir, "default"))
             .unwrap();
-        reg.save(&crate::vm::name_registry::registry_path()).unwrap();
+        reg.save(&crate::vm::name_registry::registry_path())
+            .unwrap();
 
         let report = converge(&ConvergeOpts::default());
         assert_eq!(report.dead_process_reaped, vec!["dead".to_string()]);
@@ -855,8 +861,12 @@ mod tests {
             .unwrap();
         reg.register_with_metadata(RegisterParams::minimal("dead", &dead_dir, "default"))
             .unwrap();
-        reg.register_with_metadata(RegisterParams::minimal("gone", "/nonexistent/gone", "default"))
-            .unwrap();
+        reg.register_with_metadata(RegisterParams::minimal(
+            "gone",
+            "/nonexistent/gone",
+            "default",
+        ))
+        .unwrap();
         reg.save(&registry_path).unwrap();
 
         let report = converge_at(&registry_path, &vms_root, &ConvergeOpts::default());
@@ -874,7 +884,10 @@ mod tests {
 
         // Idempotent on disk: a second pass is clean and rewrites nothing.
         let again = converge_at(&registry_path, &vms_root, &ConvergeOpts::default());
-        assert!(again.is_clean(), "second converge_at must be clean: {again:?}");
+        assert!(
+            again.is_clean(),
+            "second converge_at must be clean: {again:?}"
+        );
     }
 
     #[test]
@@ -893,7 +906,12 @@ mod tests {
         assert_eq!(report.dead_process_reaped, vec!["dead".to_string()]);
         // Disk + registry untouched.
         assert!(Path::new(&dead_dir).exists());
-        assert!(VmNameRegistry::load(&registry_path).unwrap().lookup("dead").is_some());
+        assert!(
+            VmNameRegistry::load(&registry_path)
+                .unwrap()
+                .lookup("dead")
+                .is_some()
+        );
     }
 
     #[test]
