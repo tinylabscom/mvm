@@ -14,6 +14,8 @@ pub use mvm_core::exit_capture::{WORKLOAD_EXIT_FILE, exit_file_path, read_captur
 
 /// Block on `listener` for one guest connection, read the 4-byte LE i32,
 /// and persist it to `<vm_state_dir>/workload.exit`. Returns the code.
+/// Best-effort: called on a background thread; an `Err` simply leaves no
+/// file, which the backend reads downstream as `UNKNOWN`.
 pub fn capture_once(listener: &UnixListener, vm_state_dir: &Path) -> std::io::Result<i32> {
     let (mut stream, _addr) = listener.accept()?;
     let mut buf = [0u8; 4];

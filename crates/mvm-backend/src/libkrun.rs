@@ -110,11 +110,11 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         .with_cmdline(&cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
-        // Plan 152 WS-A: host-side listener the supervisor writes the
-        // workload exit code to once the guest entrypoint returns.
-        // Registered with add_host_listen_port (listen=true) so the
-        // supervisor owns the socket; the guest connects and writes the
-        // one-byte exit code before powering off.
+        // Plan 152 WS-A: workload exit-code capture. listen=false means
+        // the HOST supervisor binds the Unix socket; libkrun proxies the
+        // guest's connect() to it. Guest /init connects and writes a
+        // 4-byte LE i32 before powering off; supervisor persists it to
+        // <vm_state_dir>/workload.exit.
         .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
     // Plan 87/88 / ADR-058 — configure the virtio-net gateway. TSI was removed
     // (Plan 102 W6.A): it bypasses virtio-net, so the admitted gateway-audit
