@@ -216,3 +216,30 @@ not the throwaway afternoon the spike assumed. The decision the spike was meant 
 inform (justify or kill the Plan 157 follow-up) is therefore **deferred**, with the
 honest new datum that *the Vz workload path itself needs plumbing* — relevant to the
 broader Vz warm-path effort (Plan 152 / 159), not just to page-cache priming.
+
+## Update — 2026-06-07 (A+B fixed; a third bug surfaced)
+
+Bugs A and B were fixed properly (TDD) in **PR #674**; the spike still can't run because
+fixing B exposed a deeper third bug.
+
+- **Bug A — FIXED + E2E-validated.** Root cause refined: the Vz backend
+  (`build_supervisor_config`) *unconditionally* requested the bridge
+  (`events_ingest_socket_path: Some(...)`), while `spawn_vz_drainer` only binds that
+  socket for admitted workloads (`plan_json` + `tenant_id`) — which the default
+  `up --dev` / `up --flake` path doesn't set (the in-VM bridge is `MVM_GATEWAY_BRIDGE`-
+  gated, off by default; a Plan 138 libkrun workaround). Fix: gate the bridge *request*
+  on the same condition as the drainer (no shim, no Swift change). E2E: `up --dev
+  --hypervisor vz` now boots — `console.log` ~5501 bytes, agent listening.
+- **Bug B — FIXED (the transport-selection gap).** `VzTransport` +
+  `vm_vz_vsock_dir` / `vm_vz_vsock_port_socket` helpers, wired into both pickers.
+  `console` now selects the Vz transport and connects to the right socket.
+- **Bug C — OPEN, [issue #673](https://github.com/tinylabscom/mvm/issues/673).** B's fix
+  makes `console` reach the socket, exposing that the Vz vsock **proxy**
+  (`VsockProxy.swift` — accept → `connect(toPort:)` → bidirectional `DispatchIO` pump,
+  *implemented*) **connects but hangs** with no agent round-trip (`console --command`
+  exit 124, no output). This is the remaining blocker for `console`-on-Vz E2E and for
+  this spike's measurement channel.
+
+**Net:** the page-cache number is still unmeasured — now gated on Bug C (#673), or on
+running the measurement on Firecracker/Linux-KVM instead. The Plan 157 follow-up stays
+deferred (no data to justify or kill it).
