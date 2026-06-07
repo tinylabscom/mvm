@@ -364,6 +364,24 @@ pub fn vm_vsock_proxy_socket(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("vsock.sock")
 }
 
+/// The directory the Vz supervisor nests its per-port vsock listener
+/// sockets under: `<vm_state_dir>/vsock`. Unlike libkrun (which binds
+/// `<vm_state_dir>/vsock-<port>.sock` directly), the Vz `VsockProxy`
+/// listens inside this subdir. Single source of truth for the subdir so
+/// `mvm-backend`'s supervisor config and the host-side `VzTransport`
+/// can't drift (the #582 lesson, applied to Vz).
+pub fn vm_vz_vsock_dir(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("vsock")
+}
+
+/// Vz's per-port vsock listener socket: `<vm_state_dir>/vsock/vsock-<port>.sock`.
+/// The Vz supervisor listens here and forwards to the guest's vsock port, so a
+/// host client connects directly with no port handshake (same shape as libkrun,
+/// one subdir deeper). Pairs with [`vm_vz_vsock_dir`] + [`vsock_socket_filename`].
+pub fn vm_vz_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
+    vm_vz_vsock_dir(name).join(vsock_socket_filename(port))
+}
+
 /// libkrun supervisor pid file: `<vm_state_dir>/libkrun.pid`.
 pub fn vm_libkrun_pid(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("libkrun.pid")
@@ -731,6 +749,17 @@ mod tests {
         assert_eq!(
             vm_vsock_proxy_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/vsock.sock")
+        );
+        // Vz nests its per-port listener under a `vsock/` subdir (vz.rs
+        // builds `<state_dir>/vsock`); the console VzTransport must derive
+        // the same path so they can't drift.
+        assert_eq!(
+            vm_vz_vsock_port_socket("foo", 5252),
+            std::path::PathBuf::from("/custom/data/vms/foo/vsock/vsock-5252.sock")
+        );
+        assert_eq!(
+            vm_vz_vsock_dir("foo").join(vsock_socket_filename(5252)),
+            vm_vz_vsock_port_socket("foo", 5252)
         );
         // The dev-VM connect resolver (mvm-backend) and the console transport
         // (mvm) both build the libkrun socket as state-dir + shared filename,
