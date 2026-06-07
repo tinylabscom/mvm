@@ -8,6 +8,7 @@ mod image;
 mod kernel;
 mod manifest;
 mod ops;
+mod qemu_bridge;
 mod shared;
 mod storage;
 mod trust;
@@ -173,6 +174,11 @@ pub(in crate::commands) enum Commands {
     #[cfg(feature = "builder-vm")]
     #[command(name = "persistent-builder")]
     PersistentBuilder(build::persistent_builder::Args),
+    /// Internal: host-side AF_VSOCK↔UNIX bridge for the QEMU workload
+    /// backend (Plan 166 Phase 2). Spawned detached by
+    /// `mvm_backend::qemu`; not a user-facing command.
+    #[command(name = "__qemu-vsock-bridge", hide = true)]
+    QemuVsockBridge(qemu_bridge::Args),
 }
 
 // ============================================================================
@@ -240,6 +246,14 @@ pub fn run() -> Result<()> {
     };
     if !matches!(cli.command, Commands::Mcp(_)) {
         logging::init(log_format);
+    }
+
+    // Plan 166 Phase 2 — the internal QEMU vsock bridge is a detached,
+    // long-running helper (spawned by `mvm_backend::qemu`), not a user
+    // command. Short-circuit before the ctrl-c handler, operator-config
+    // load, and the cmd-audit envelope — none of which apply to it.
+    if let Commands::QemuVsockBridge(a) = &cli.command {
+        return qemu_bridge::run(a);
     }
 
     // Install Ctrl-C / SIGTERM handler for graceful shutdown.
@@ -333,6 +347,9 @@ pub fn run() -> Result<()> {
         Commands::Artifact(a) => vm::artifact::run(&cli, a, &cfg),
         #[cfg(feature = "builder-vm")]
         Commands::PersistentBuilder(a) => build::persistent_builder::run(&cli, a),
+        // Handled by the early return above (before ctrl-c / config /
+        // cmd-audit setup); this arm only satisfies match exhaustiveness.
+        Commands::QemuVsockBridge(_) => unreachable!("qemu vsock bridge short-circuits in run()"),
     };
 
     cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);

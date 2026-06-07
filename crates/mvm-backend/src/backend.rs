@@ -17,6 +17,7 @@ use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
+use crate::qemu::QemuBackend;
 use crate::vz::VzBackend;
 use crate::{firecracker, microvm, microvm_nix};
 
@@ -144,6 +145,21 @@ impl VmBackend for FirecrackerBackend {
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        // Task 2.2 / ADR-072 — fail closed when KVM is absent rather than
+        // letting the Firecracker boot fault deep in the API handshake.
+        // Firecracker is the production runtime and *requires* `/dev/kvm`;
+        // a no-KVM host should use `--hypervisor qemu` for local dev/test
+        // (Tier-3 TCG), never a silent Firecracker fallback. On macOS the
+        // runtime path nests through libkrun/Vz, so this probe is Linux-only.
+        #[cfg(target_os = "linux")]
+        if !crate::qemu::kvm_available() {
+            anyhow::bail!(
+                "Firecracker requires /dev/kvm, which is not available on this host. \
+                 Firecracker is the production runtime; for local dev/test on a no-KVM \
+                 host run with `--hypervisor qemu` (Tier-3 TCG software emulation, \
+                 ADR-072). To run Firecracker, use a host with KVM enabled."
+            );
+        }
         let fc_config = FirecrackerConfig::from_start_config(config)?;
         // Thread the W6.2.1 sidecar into per-VM runtime metadata so
         // `mvmctl console` can enforce the accessible/sealed gate.
@@ -333,6 +349,12 @@ pub enum AnyBackend {
     /// beyond what FC supports. Opt-in via `--hypervisor cloud-hypervisor`;
     /// auto_select keeps Firecracker as the KVM default.
     CloudHypervisor(CloudHypervisorBackend),
+    /// QEMU workload runtime (Plan 166 Phase 2 / ADR-072) — Linux dev/test
+    /// substrate (KVM where present, TCG fallback). Opt-in via
+    /// `--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+    /// it (Firecracker stays the production runtime). Dev tier only,
+    /// outside ADR-002 claims.
+    Qemu(QemuBackend),
     /// In-memory mock — test-only. Records `start`/`stop`/`pause`/
     /// `resume` calls against a `Mutex<HashMap>` and never touches
     /// the host. Selected only via explicit `--hypervisor mock`;
@@ -373,7 +395,11 @@ impl AnyBackend {
             "cloud-hypervisor" | "cloud_hypervisor" | "ch" | "clh" => {
                 Self::CloudHypervisor(CloudHypervisorBackend)
             }
-            "qemu" => Self::MicrovmNix(MicrovmNixBackend),
+            // Plan 166 Phase 2 — `"qemu"` now routes to the real QEMU
+            // workload backend, not the vestigial microvm.nix alias.
+            // `MicrovmNixBackend` stays selectable via `from_build_output`
+            // (a flake that emits a microvm.nix runner), not by name.
+            "qemu" => Self::Qemu(QemuBackend),
             // Test-only in-memory backend. See `crate::mock`. Routing
             // here from a production caller is a misconfiguration, but
             // the explicit selector lets integration tests drive every
@@ -457,9 +483,15 @@ impl AnyBackend {
             // Container (Virtualization.framework) and microvm.nix
             // (qemu) also sit here per their existing
             // `BackendSecurityProfile.tier` strings.
-            Self::Libkrun(_) | Self::AppleContainer(_) | Self::MicrovmNix(_) | Self::Vz(_) => {
-                BackendTier::Tier2
-            }
+            // QEMU: best-case Tier 2 (KVM-accelerated). The TCG (no-KVM)
+            // mode is a runtime Tier-3 degradation surfaced by the QEMU
+            // backend's `start` banner + doctor, not by this compile-time
+            // classification (Plan 166 / ADR-072).
+            Self::Libkrun(_)
+            | Self::AppleContainer(_)
+            | Self::MicrovmNix(_)
+            | Self::Vz(_)
+            | Self::Qemu(_) => BackendTier::Tier2,
 
             // Tier 3: fallback / test. Docker is a userspace
             // container fallback; Mock is in-memory test-only.
@@ -477,6 +509,7 @@ impl AnyBackend {
             Self::Libkrun(b) => b,
             Self::Vz(b) => b,
             Self::CloudHypervisor(b) => b,
+            Self::Qemu(b) => b,
             Self::Mock(b) => b,
         }
     }
@@ -713,8 +746,19 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_hypervisor_qemu() {
+        // Plan 166 Phase 2 — `"qemu"` routes to the real QEMU workload
+        // backend, not the retired microvm.nix alias.
         let backend = AnyBackend::from_hypervisor("qemu");
-        assert_eq!(backend.name(), "microvm-nix");
+        assert_eq!(backend.name(), "qemu");
+        assert!(matches!(backend, AnyBackend::Qemu(_)));
+    }
+
+    #[test]
+    fn microvm_nix_no_longer_reachable_by_name() {
+        // The "qemu" alias was retired; MicrovmNix is selected via
+        // `from_build_output(true)`, never by hypervisor name.
+        assert_eq!(AnyBackend::from_build_output(true).name(), "microvm-nix");
+        assert_ne!(AnyBackend::from_hypervisor("qemu").name(), "microvm-nix");
     }
 
     #[test]
@@ -871,7 +915,13 @@ mod tests {
 
     #[test]
     fn pause_resume_unsupported_on_microvm_nix() {
-        assert_unsupported_pause_resume(AnyBackend::from_hypervisor("qemu"), "microvm-nix");
+        // MicrovmNix is no longer reachable by name; construct it directly.
+        assert_unsupported_pause_resume(AnyBackend::MicrovmNix(MicrovmNixBackend), "microvm-nix");
+    }
+
+    #[test]
+    fn pause_resume_unsupported_on_qemu() {
+        assert_unsupported_pause_resume(AnyBackend::from_hypervisor("qemu"), "qemu");
     }
 
     #[test]
@@ -900,9 +950,21 @@ mod tests {
 
     #[test]
     fn snapshot_capability_unsupported_on_microvm_nix() {
+        // MicrovmNix is no longer reachable by name (the "qemu" alias was
+        // retired in Plan 166 Phase 2); construct it directly.
+        assert_eq!(
+            AnyBackend::MicrovmNix(MicrovmNixBackend).snapshot_capability(),
+            SnapshotCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn snapshot_capability_disk_only_on_qemu() {
+        // QEMU warm-start is a disk-image fast reboot (no live-memory QMP
+        // snapshot wired) — same posture as libkrun.
         assert_eq!(
             AnyBackend::from_hypervisor("qemu").snapshot_capability(),
-            SnapshotCapability::Unsupported
+            SnapshotCapability::DiskOnly
         );
     }
 
