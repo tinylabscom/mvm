@@ -20,6 +20,9 @@ use mvm_sdk::ir::AuthType;
 use serde::{Deserialize, Serialize};
 
 /// Per-(tenant, name) binding metadata. No secret bytes — safe to print.
+// allow(secret-debug): metadata only — auth_type + allowed_hosts. The
+// secret value lives in `SecretStore`, never here; Debug prints the
+// destination policy, which `mvmctl secret ls` already shows in cleartext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretBindingMeta {
     /// How the keyholder uses the secret on egress (signer vs injector).
