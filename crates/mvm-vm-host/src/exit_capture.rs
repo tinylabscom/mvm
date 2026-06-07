@@ -22,6 +22,13 @@ pub fn capture_once(listener: &UnixListener, vm_state_dir: &Path) -> std::io::Re
     stream.read_exact(&mut buf)?;
     let code = i32::from_le_bytes(buf);
     std::fs::write(exit_file_path(vm_state_dir), code.to_string())?;
+    // Ack AFTER the file is durably written: the guest waits for this
+    // before powering off, so the supervisor's start_enter->exit() can't
+    // race the file write. Best-effort — a failed ack just means the
+    // guest times out and powers off (file already written). Plan 152 WS-A.
+    use std::io::Write as _;
+    let _ = stream.write_all(&[1u8]);
+    let _ = stream.flush();
     Ok(code)
 }
 
@@ -41,6 +48,9 @@ mod tests {
             move || {
                 let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
                 c.write_all(&(-7i32).to_le_bytes()).unwrap();
+                let mut ack = [0u8; 1];
+                use std::io::Read as _;
+                let _ = c.read_exact(&mut ack);
             }
         });
 

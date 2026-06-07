@@ -62,6 +62,14 @@ fn report(code: i32) -> std::io::Result<()> {
     let mut stream = unsafe { TcpStream::from_raw_fd(fd) };
     stream.write_all(&code.to_le_bytes())?;
     stream.flush()?;
+    // Wait (bounded) for the host's ack so /init doesn't poweroff until
+    // the supervisor has durably written workload.exit (avoids the
+    // start_enter->exit() race). Best-effort: a timeout/EOF is fine — we
+    // return Ok and /init powers off regardless. Plan 152 WS-A.
+    use std::io::Read as _;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    let mut ack = [0u8; 1];
+    let _ = stream.read_exact(&mut ack);
     Ok(())
 }
 
