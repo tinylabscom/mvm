@@ -37,6 +37,13 @@ class AddonTier(Enum):
     in_vm = 'in_vm'
 
 
+class AuthType(Enum):
+    sigv4 = 'sigv4'
+    hmac = 'hmac'
+    bearer = 'bearer'
+    basic = 'basic'
+
+
 class Kind2(Enum):
     warm_process = 'warm_process'
 
@@ -203,35 +210,46 @@ class MountSource3:
     size_mb: int
 
 
-MountSource = Union[MountSource1, MountSource2, MountSource3]
-
-
 class Kind17(Enum):
+    external = 'external'
+
+
+@dataclass
+class MountSource4:
+    config: Any
+    kind: Kind17
+    provider: str
+
+
+MountSource = Union[MountSource1, MountSource2, MountSource3, MountSource4]
+
+
+class Kind18(Enum):
     none = 'none'
 
 
 @dataclass
 class NetworkDns1:
-    kind: Kind17
+    kind: Kind18
 
 
-class Kind18(Enum):
+class Kind19(Enum):
     system = 'system'
 
 
 @dataclass
 class NetworkDns2:
-    kind: Kind18
+    kind: Kind19
 
 
-class Kind19(Enum):
+class Kind20(Enum):
     resolver = 'resolver'
 
 
 @dataclass
 class NetworkDns3:
     host: str
-    kind: Kind19
+    kind: Kind20
     port: int
 
 
@@ -243,10 +261,24 @@ class NetworkEgress:
     allowlist: List[HostPort]
 
 
-class NetworkMode(Enum):
+class NetworkMode1(Enum):
     none = 'none'
     bridge = 'bridge'
     host = 'host'
+
+
+@dataclass
+class Custom:
+    config: Any
+    provider: str
+
+
+@dataclass
+class NetworkMode2:
+    custom: Custom
+
+
+NetworkMode = Union[NetworkMode1, NetworkMode2]
 
 
 class NodeTool1(Enum):
@@ -287,23 +319,23 @@ class Resources:
     rootfs_size_mb: int
 
 
-class Kind20(Enum):
+class Kind21(Enum):
     env = 'env'
 
 
 @dataclass
 class SecretMount1:
-    kind: Kind20
+    kind: Kind21
     var: str
 
 
-class Kind21(Enum):
+class Kind22(Enum):
     file = 'file'
 
 
 @dataclass
 class SecretMount2:
-    kind: Kind21
+    kind: Kind22
     path: str
 
 
@@ -312,40 +344,42 @@ SecretMount = Union[SecretMount1, SecretMount2]
 
 @dataclass
 class SecretRef:
+    allowed_hosts: List[str]
+    auth_type: AuthType
     mount: SecretMount
     name: str
 
 
-class Kind22(Enum):
+class Kind23(Enum):
     local_path = 'local_path'
 
 
 @dataclass
 class Source1:
-    kind: Kind22
+    kind: Kind23
     path: str
     exclude: Optional[List[str]] = field(default_factory=lambda: [])
     include: Optional[List[str]] = field(default_factory=lambda: ['**'])
 
 
-class Kind23(Enum):
+class Kind24(Enum):
     nix_derivation = 'nix_derivation'
 
 
 @dataclass
 class Source2:
     expr: str
-    kind: Kind23
+    kind: Kind24
 
 
-class Kind24(Enum):
+class Kind25(Enum):
     oci_image = 'oci_image'
 
 
 @dataclass
 class Source3:
     digest: str
-    kind: Kind24
+    kind: Kind25
     reference: str
 
 

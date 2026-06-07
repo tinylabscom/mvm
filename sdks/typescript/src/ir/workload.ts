@@ -135,6 +135,10 @@ export type EnvValue =
       kind: "secret_ref";
       ref: SecretRef;
     };
+/**
+ * How a secret authenticates an outbound request, so the keyholder picks the right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer); `Bearer`/`Basic` are *injected* credentials. Plan 129 / ADR-067 §4.
+ */
+export type AuthType = "sigv4" | "hmac" | "bearer" | "basic";
 export type SecretMount =
   | {
       kind: "env";
@@ -203,6 +207,11 @@ export type MountSource =
   | {
       kind: "tmpfs";
       size_mb: number;
+    }
+  | {
+      config: unknown;
+      kind: "external";
+      provider: string;
     };
 export type NetworkDns =
   | {
@@ -216,7 +225,14 @@ export type NetworkDns =
       kind: "resolver";
       port: number;
     };
-export type NetworkMode = "none" | "bridge" | "host";
+export type NetworkMode =
+  | ("none" | "bridge" | "host")
+  | {
+      custom: {
+        config: unknown;
+        provider: string;
+      };
+    };
 export type PortProto = "tcp" | "udp";
 export type Source =
   | {
@@ -336,6 +352,14 @@ export interface Hooks {
   before_stop?: HookCmd[];
 }
 export interface SecretRef {
+  /**
+   * The hosts the substituted credential may reach — the claim-12 binding. Supports `*.` subdomain wildcards (see [`host_matches`]). An empty list is an unbound secret, rejected at validation (`SecretWithoutBinding`).
+   */
+  allowed_hosts: string[];
+  /**
+   * How the keyholder uses the secret on egress (signer vs injector) — Plan 129 / ADR-067 §4.
+   */
+  auth_type: AuthType;
   mount: SecretMount;
   name: string;
 }

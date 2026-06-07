@@ -2,9 +2,13 @@
 //!
 //! Plan 60 Phase 5 — codegen pipeline for the Python and TypeScript
 //! SDKs' lower-layer IR types. Single source of truth is the Rust
-//! `mvm-ir` crate's `Workload` struct (via `schemars`); the JSON
+//! `mvm-sdk` crate's `ir::Workload` struct (via `schemars`); the JSON
 //! Schema is emitted to `schema/workload-ir-v0.json` and downstream
 //! generators produce per-language dataclasses / interfaces.
+//!
+//! (Plan 121 folded the former `mvm-ir` crate into `mvm-sdk::ir`; the
+//! schema-emit bin moved with it — Plan 124 D fixed the stale `-p
+//! mvm-ir` invocation that left this pipeline unrunnable.)
 //!
 //! Modeled on mvmforge's `just schema-gen` / `sdk-python-gen` /
 //! `sdk-ts-gen` recipes (`/Users/auser/work/tinylabs/mvmco/mvmforge/
@@ -15,8 +19,8 @@
 //!
 //! Toolchain:
 //!
-//! * Rust schema emit: `cargo run -q -p mvm-ir --bin
-//!   emit_workload_schema` (the binary lives in mvm-ir per Slice A).
+//! * Rust schema emit: `cargo run -q -p mvm-sdk --bin
+//!   emit_workload_schema` (the binary lives in `mvm-sdk` post-121).
 //! * Python: `uvx --from datamodel-code-generator==<PIN>
 //!   datamodel-codegen ...` — zero-install via `uv`. Devs don't need
 //!   to `uv sync` a Python env first.
@@ -103,10 +107,17 @@ pub fn check(workspace: &Path) -> Result<()> {
 
 fn emit_schema(workspace: &Path) -> Result<Vec<u8>> {
     let output = Command::new("cargo")
-        .args(["run", "-q", "-p", "mvm-ir", "--bin", "emit_workload_schema"])
+        .args([
+            "run",
+            "-q",
+            "-p",
+            "mvm-sdk",
+            "--bin",
+            "emit_workload_schema",
+        ])
         .current_dir(workspace)
         .output()
-        .context("spawning cargo run -p mvm-ir --bin emit_workload_schema")?;
+        .context("spawning cargo run -p mvm-sdk --bin emit_workload_schema")?;
     if !output.status.success() {
         bail!(
             "emit_workload_schema exited {}: {}",
