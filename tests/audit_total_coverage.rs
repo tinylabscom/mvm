@@ -265,6 +265,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("cleanup", AuditPosture::Emits("SlotPrune")),
     ("update", AuditPosture::Emits("UpdateInstall")),
     ("doctor", AuditPosture::ReadOnly),
+    ("sign", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
     ("uninstall", AuditPosture::Emits("Uninstall")),
     ("init", AuditPosture::InteractiveOrControl),

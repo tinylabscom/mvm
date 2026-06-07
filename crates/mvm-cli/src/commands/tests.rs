@@ -12,8 +12,9 @@ use super::build::compile;
 use super::catalog;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
+use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
-use super::vm::{console, cp, down, exec, forward, sandbox, up, volume};
+use super::vm::{console, cp, down, exec, forward, pause, sandbox, session, up, volume};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -1293,6 +1294,21 @@ fn test_uninstall_all_flag_parses() {
 // ---- Audit command tests ----
 
 #[test]
+fn test_audit_show_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Audit(audit::Args {
+            action: AuditAction::Show {
+                ref plan_id,
+                json: true,
+                ..
+            }
+        }) if plan_id == "plan-abc"
+    ));
+}
+
+#[test]
 fn test_audit_tail_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "audit", "tail"]).unwrap();
     match cli.command {
@@ -1376,10 +1392,16 @@ fn test_audit_show_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc"]).unwrap();
     match cli.command {
         Commands::Audit(audit::Args {
-            action: AuditAction::Show { plan_id, tenant },
+            action:
+                AuditAction::Show {
+                    plan_id,
+                    tenant,
+                    json,
+                },
         }) => {
             assert_eq!(plan_id, "plan-abc");
             assert_eq!(tenant, "local");
+            assert!(!json);
         }
         _ => panic!("Expected Audit::Show"),
     }
@@ -1601,6 +1623,28 @@ fn tenant_orchestration_commands_are_not_mvmctl_surface() {
 // --- Network CLI tests ---
 
 #[test]
+fn test_network_list_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "network", "list", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Network(ops::network::Args {
+            action: ops::network::NetworkAction::List { json: true }
+        })
+    ));
+}
+
+#[test]
+fn test_network_inspect_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "network", "inspect", "isolated", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Network(ops::network::Args {
+            action: ops::network::NetworkAction::Inspect { json: true, .. }
+        })
+    ));
+}
+
+#[test]
 fn test_network_list_help() {
     let cli = Cli::try_parse_from(["mvmctl", "network", "list"]);
     assert!(cli.is_ok());
@@ -1622,6 +1666,19 @@ fn test_network_inspect_help() {
 fn test_network_remove_help() {
     let cli = Cli::try_parse_from(["mvmctl", "network", "rm", "mynet"]);
     assert!(cli.is_ok());
+}
+
+// --- Snapshot CLI tests ---
+
+#[test]
+fn test_snapshot_ls_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "snapshot", "ls", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Snapshot(pause::SnapshotArgs {
+            command: pause::SnapshotCmd::Ls { json: true }
+        })
+    ));
 }
 
 // --- Catalog CLI tests (plan 40 replaced `mvmctl image *`) ---
@@ -2306,6 +2363,17 @@ fn test_init_catalog_conflicts_with_preset() {
 // --- Cache CLI tests ---
 
 #[test]
+fn test_cache_info_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "info", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Cache(cache::Args {
+            action: CacheAction::Info { json: true }
+        })
+    ));
+}
+
+#[test]
 fn test_cache_info() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "info"]);
     assert!(cli.is_ok());
@@ -2718,4 +2786,48 @@ fn builder_flag_rejects_unknown_value() {
 fn builder_flag_unset_by_default() {
     let cli = Cli::try_parse_from(["mvmctl", "doctor"]).expect("parse");
     assert_eq!(cli.builder, None);
+}
+
+// --- Session start --ephemeral tests (Task 3.3) ---
+
+#[test]
+fn test_session_start_ephemeral_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "session", "start", "tmpl", "--ephemeral"]).unwrap();
+    match cli.command {
+        Commands::Session(session::Args {
+            command: session::Cmd::Start(a),
+        }) => assert!(a.ephemeral),
+        _ => panic!("expected session start"),
+    }
+}
+
+// --- Session attach --continue / --resume tests (Task 3.2) ---
+
+#[test]
+fn test_session_attach_continue_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "session", "attach", "--continue"]).unwrap();
+    match cli.command {
+        Commands::Session(session::Args {
+            command: session::Cmd::Attach(a),
+        }) => {
+            assert!(a.continue_latest);
+            assert!(a.session_id.is_none());
+            assert!(a.resume.is_none());
+        }
+        _ => panic!("expected session attach"),
+    }
+}
+
+#[test]
+fn test_session_attach_resume_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "session", "attach", "-r", "aaaaaaaaaaaaaaaa"]).unwrap();
+    match cli.command {
+        Commands::Session(session::Args {
+            command: session::Cmd::Attach(a),
+        }) => {
+            assert_eq!(a.resume.as_deref(), Some("aaaaaaaaaaaaaaaa"));
+        }
+        _ => panic!("expected session attach"),
+    }
 }

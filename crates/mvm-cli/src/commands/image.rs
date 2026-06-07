@@ -420,7 +420,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ImageAction::Ls { registry, json } => {
             let rows = list_rows(&cache_root, registry.as_deref())?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                crate::json_out::emit_json(&rows)?;
             } else {
                 render_list(&rows);
             }
@@ -429,7 +429,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ImageAction::Inspect { reference, json } => {
             let output = inspect_image(&cache_root, &reference)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                crate::json_out::emit_json(&output)?;
             } else {
                 render_inspect(&output);
             }

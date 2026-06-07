@@ -53,6 +53,9 @@ pub(in crate::commands) enum AuditAction {
         /// Tenant whose chain to search. Defaults to `"local"`.
         #[arg(long, default_value = "local")]
         tenant: String,
+        /// Emit matching entries as a JSON array to stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Run a read-only security-posture self-test. Reports the live
     /// state of plan-65 + plan-7a mitigations on this host (host
@@ -126,7 +129,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
         }
         AuditAction::Verify { tenant } => audit_verify(&tenant),
-        AuditAction::Show { plan_id, tenant } => audit_show(&tenant, &plan_id),
+        AuditAction::Show {
+            plan_id,
+            tenant,
+            json,
+        } => audit_show(&tenant, &plan_id, json),
         AuditAction::Posture { json } => super::audit_posture::run(json),
         AuditAction::VerifyCert {
             cert,
@@ -447,30 +454,39 @@ fn audit_verify(tenant: &str) -> Result<()> {
     }
 }
 
-fn audit_show(tenant: &str, plan_id: &str) -> Result<()> {
+fn audit_show(tenant: &str, plan_id: &str, json: bool) -> Result<()> {
     let dir = default_audit_dir()?;
     let path = audit_path_for_tenant(&dir, tenant);
     if !path.exists() {
-        ui::info(&format!(
-            "No audit chain found for tenant '{tenant}' at {}.",
-            path.display()
-        ));
+        if json {
+            crate::json_out::emit_json(&Vec::<SignedEnvelope>::new())?;
+        } else {
+            ui::info(&format!(
+                "No audit chain found for tenant '{tenant}' at {}.",
+                path.display()
+            ));
+        }
         return Ok(());
     }
     use std::io::BufRead;
     let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
     let reader = std::io::BufReader::new(file);
-    let mut matched = 0usize;
+    let mut matched: Vec<SignedEnvelope> = Vec::new();
     for line in reader.lines() {
         let line = line?;
         if let Ok(env) = serde_json::from_str::<SignedEnvelope>(&line)
             && env.entry.plan_id.0 == plan_id
         {
-            print_chain_line(&line);
-            matched += 1;
+            if json {
+                matched.push(env);
+            } else {
+                print_chain_line(&line);
+            }
         }
     }
-    if matched == 0 {
+    if json {
+        crate::json_out::emit_json(&matched)?;
+    } else if matched.is_empty() {
         ui::info(&format!(
             "No audit entries found for plan_id '{plan_id}' in tenant '{tenant}'."
         ));

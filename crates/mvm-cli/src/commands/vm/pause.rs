@@ -242,7 +242,7 @@ fn snap_ls(json: bool) -> Result<()> {
                 sealed: e.sidecar.is_some(),
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::json_out::emit_json(&rows)?;
         return Ok(());
     }
     if entries.is_empty() {

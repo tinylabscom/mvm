@@ -40,30 +40,73 @@ pub(in crate::commands) enum CacheAction {
         reap_orphans: bool,
     },
     /// Show cache directory path and disk usage
-    Info,
+    Info {
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Structured output for `cache info --json`.
+#[derive(serde::Serialize)]
+struct CacheInfo {
+    cache_dir: String,
+    exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_usage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    detail_lines: Vec<String>,
+}
+
+fn collect_cache_info() -> Result<CacheInfo> {
+    let cache_dir = mvm_core::config::mvm_cache_dir();
+    let path = std::path::Path::new(&cache_dir);
+    if !path.exists() {
+        return Ok(CacheInfo {
+            cache_dir,
+            exists: false,
+            disk_usage_bytes: None,
+            detail_lines: Vec::new(),
+        });
+    }
+    let disk_usage_bytes = dir_size(path);
+    let stage0_dir = mvm_build::stage0::stage0_cache_dir();
+    let blob_filenames: Vec<&str> = mvm_build::stage0::assets_for_host_arch()
+        .iter()
+        .map(|a| a.cache_filename)
+        .collect();
+    let detail_lines = stage0_cache_report(path, &stage0_dir, &blob_filenames);
+    Ok(CacheInfo {
+        cache_dir,
+        exists: true,
+        disk_usage_bytes: Some(disk_usage_bytes),
+        detail_lines,
+    })
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let cache_dir = mvm_core::config::mvm_cache_dir();
 
     match args.action {
-        CacheAction::Info => {
+        CacheAction::Info { json } => {
+            let info = collect_cache_info()?;
+            if json {
+                crate::json_out::emit_json(&info)?;
+                return Ok(());
+            }
             println!("Cache directory: {cache_dir}");
-            let path = std::path::Path::new(&cache_dir);
-            if !path.exists() {
+            if !info.exists {
                 println!("(not yet created)");
                 return Ok(());
             }
-            println!("Disk usage: {}", human_bytes(dir_size(path)));
+            println!(
+                "Disk usage: {}",
+                human_bytes(info.disk_usage_bytes.unwrap_or(0))
+            );
             // Plan 93 Phase 3: surface vendored-blob ages, the
             // cross-target builder-VM cache size, assembled rootfs ages,
             // and the last Stage 0 source fingerprint.
-            let stage0_dir = mvm_build::stage0::stage0_cache_dir();
-            let blob_filenames: Vec<&str> = mvm_build::stage0::assets_for_host_arch()
-                .iter()
-                .map(|a| a.cache_filename)
-                .collect();
-            for line in stage0_cache_report(path, &stage0_dir, &blob_filenames) {
+            for line in &info.detail_lines {
                 println!("{line}");
             }
             Ok(())

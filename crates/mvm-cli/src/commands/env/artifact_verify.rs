@@ -179,10 +179,27 @@ pub(super) fn verify_artifact_hash(
     Ok(())
 }
 
-/// Download a file from a URL using curl.
+/// Build the curl argv for a (resumable) download to `dest`.
+/// `-C -` resumes from a partial `dest` if present; on a fresh or
+/// already-complete file curl handles it gracefully. Corruption is
+/// still caught downstream by the SHA-256 gate (`verify_artifact_hash`),
+/// which deletes on mismatch so the next run restarts clean.
+pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
+    vec![
+        "-fSL".to_string(),
+        "--progress-bar".to_string(),
+        "-C".to_string(),
+        "-".to_string(),
+        "-o".to_string(),
+        dest.to_string(),
+        url.to_string(),
+    ]
+}
+
+/// Download a file from a URL using curl, resuming a partial `dest`.
 pub(super) fn download_file(url: &str, dest: &str) -> Result<()> {
     let status = std::process::Command::new("curl")
-        .args(["-fSL", "--progress-bar", "-o", dest, url])
+        .args(curl_download_args(dest, url))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -190,8 +207,10 @@ pub(super) fn download_file(url: &str, dest: &str) -> Result<()> {
         .context("Failed to run curl")?;
 
     if !status.success() {
-        // Clean up partial download
-        let _ = std::fs::remove_file(dest);
+        // Keep any partial file: curl's `-C -` resumes it on the next
+        // run. It's never hash-accepted while incomplete — verify runs
+        // only after a successful download, and the SHA-256 gate deletes
+        // on mismatch — so leaving it is safe and saves re-fetching.
         anyhow::bail!(
             "Download failed. Pre-built images for v{version} may not yet be\n\
              published — release tags are pushed before the artifact-build\n\
@@ -221,6 +240,21 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     use std::sync::Mutex;
+
+    #[test]
+    fn curl_download_args_request_resume() {
+        let args = curl_download_args("/tmp/out", "https://example/x");
+        assert!(
+            args.contains(&"-C".to_string()),
+            "must pass -C for resume: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["-C", "-"]),
+            "expected `-C -`: {args:?}"
+        );
+        assert!(args.contains(&"-fSL".to_string()));
+        assert_eq!(args.last().unwrap(), "https://example/x");
+    }
 
     /// Cargo test runs tests in parallel within a single binary. Two
     /// of these tests touch `MVM_SKIP_HASH_VERIFY` (the global env-var

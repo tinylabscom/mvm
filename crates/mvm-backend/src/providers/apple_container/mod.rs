@@ -10,6 +10,8 @@
 #[cfg(target_os = "macos")]
 mod macos;
 
+use std::path::{Path, PathBuf};
+
 /// Check if Apple Virtualization is available on this platform.
 pub fn is_available() -> bool {
     #[cfg(target_os = "macos")]
@@ -243,6 +245,103 @@ pub fn list_ids() -> Vec<String> {
     #[cfg(not(target_os = "macos"))]
     {
         vec![]
+    }
+}
+
+/// Outcome of attempting to sign one binary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SignReport {
+    pub path: PathBuf,
+    /// Whether codesign was (re)applied during this call.
+    pub applied: bool,
+    /// Whether both VZ + Hypervisor entitlements are present after.
+    pub entitlements_present: bool,
+}
+
+/// `Some(true/false)` on macOS (both required entitlements present?),
+/// `None` on platforms where the question is meaningless.
+pub fn entitlements_present(path: &Path) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::entitlements_present(path))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Ad-hoc re-sign each target with the VZ + Hypervisor entitlements and
+/// report the post-sign state. No-op (empty) off macOS.
+pub fn sign_binaries(targets: &[PathBuf]) -> Vec<SignReport> {
+    #[cfg(target_os = "macos")]
+    {
+        targets.iter().map(|p| macos::sign_path(p)).collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = targets;
+        Vec::new()
+    }
+}
+
+/// The binaries that need VZ/Hypervisor entitlements to launch a VM:
+/// the running CLI plus whichever supervisors resolve on this host.
+/// Unresolved supervisors are silently skipped (a host may have only
+/// one backend installed).
+pub fn collect_sign_targets() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        out.push(exe);
+    }
+    if let Ok(p) = crate::vz::resolve_supervisor_path() {
+        out.push(p);
+    }
+    if let Ok(p) = crate::libkrun::resolve_supervisor_path() {
+        out.push(p);
+    }
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod sign_api_tests {
+    use super::*;
+
+    #[test]
+    fn sign_report_is_serializable() {
+        let r = SignReport {
+            path: std::path::PathBuf::from("/tmp/mvmctl"),
+            applied: true,
+            entitlements_present: true,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"applied\":true"));
+        assert!(json.contains("\"entitlements_present\":true"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn entitlements_present_is_none_off_macos() {
+        assert!(entitlements_present(std::path::Path::new("/bin/sh")).is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sign_binaries_is_noop_off_macos() {
+        let targets = vec![std::path::PathBuf::from("/bin/sh")];
+        assert!(sign_binaries(&targets).is_empty());
+    }
+
+    #[test]
+    fn collect_sign_targets_includes_current_exe() {
+        let targets = collect_sign_targets();
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            targets.contains(&exe),
+            "targets must include the running exe"
+        );
     }
 }
 

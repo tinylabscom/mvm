@@ -27,11 +27,18 @@ pub(in crate::commands) enum NetworkAction {
     },
     /// List all dev networks
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Show details of a named network
     Inspect {
         /// Network name
         name: String,
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a named network
     #[command(alias = "rm")]
@@ -89,10 +96,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             ));
             Ok(())
         }
-        NetworkAction::List => {
+        NetworkAction::List { json } => {
             let dir = networks_dir();
             if !std::path::Path::new(&dir).exists() {
-                ui::info("No networks configured.");
+                if json {
+                    crate::json_out::emit_json(&Vec::<DevNetwork>::new())?;
+                } else {
+                    ui::info("No networks configured.");
+                }
                 return Ok(());
             }
 
@@ -104,6 +115,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 {
                     networks.push(net);
                 }
+            }
+
+            if json {
+                crate::json_out::emit_json(&networks)?;
+                return Ok(());
             }
 
             if networks.is_empty() {
@@ -119,14 +135,18 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
             Ok(())
         }
-        NetworkAction::Inspect { name } => {
+        NetworkAction::Inspect { name, json } => {
             let path = network_path(&name);
             if !std::path::Path::new(&path).exists() {
                 anyhow::bail!("Network {:?} not found", name);
             }
             let text = std::fs::read_to_string(&path)?;
             let net: DevNetwork = serde_json::from_str(&text)?;
-            println!("{}", serde_json::to_string_pretty(&net)?);
+            if json {
+                crate::json_out::emit_json(&net)?;
+            } else {
+                println!("{}", serde_json::to_string_pretty(&net)?);
+            }
             Ok(())
         }
         NetworkAction::Remove { name } => {

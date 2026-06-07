@@ -1087,7 +1087,7 @@ fn build_supervisor_config(
 ///    mvm-published artifacts"); this matters during local dev
 ///    when `mvmctl` is `cargo run` from the workspace root.
 /// 4. The version-pinned release layout `~/.mvm/bin/mvm-vz-supervisor-<version>`.
-fn resolve_supervisor_path() -> Result<PathBuf> {
+pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
         let path = PathBuf::from(p);
         if path.is_file() {

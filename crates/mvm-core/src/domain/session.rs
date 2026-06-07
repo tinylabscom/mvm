@@ -199,6 +199,11 @@ pub struct SessionRecord {
     /// gate is implicitly disabled for this record."
     #[serde(default)]
     pub creator_pid: u32,
+    /// When true, the session is torn down automatically after an
+    /// attach completes (vz-style `--ephemeral`). Defaults false so
+    /// records written before this field still parse.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// Whether the session's wrapper is allowed to run ad-hoc code (dev)
@@ -241,6 +246,7 @@ impl SessionRecord {
             invoke_count: 0,
             state: SessionState::Running,
             creator_pid: std::process::id(),
+            ephemeral: false,
         }
     }
 }
@@ -409,6 +415,26 @@ pub fn list_expired_session_ids(now: chrono::DateTime<chrono::Utc>) -> Result<Ve
         }
     }
     Ok(expired)
+}
+
+/// The most-recently-active Running session, ranked by
+/// `last_invoke_at` (falling back to `started_at`). Pure over the
+/// input so it can be tested without touching disk.
+pub fn most_recent_running(records: Vec<SessionRecord>) -> Option<SessionRecord> {
+    records
+        .into_iter()
+        .filter(|r| r.state == SessionState::Running)
+        .max_by(|a, b| {
+            let ka = a.last_invoke_at.as_deref().unwrap_or(&a.started_at);
+            let kb = b.last_invoke_at.as_deref().unwrap_or(&b.started_at);
+            ka.cmp(kb)
+        })
+}
+
+/// Disk-backed convenience: scan the session table and return the
+/// most-recently-active Running session.
+pub fn most_recent_running_on_disk() -> Result<Option<SessionRecord>> {
+    Ok(most_recent_running(list_sessions()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -785,5 +811,64 @@ mod tests {
         let path = sessions_dir().join(format!("{id}.json"));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn most_recent_running_prefers_latest_activity() {
+        let mut a = SessionRecord::new_running("vm-a", "tmpl", SessionMode::Prod);
+        a.started_at = "2026-01-01T00:00:00Z".to_string();
+        a.last_invoke_at = Some("2026-01-01T05:00:00Z".to_string());
+        let mut b = SessionRecord::new_running("vm-b", "tmpl", SessionMode::Prod);
+        b.started_at = "2026-01-02T00:00:00Z".to_string();
+        b.last_invoke_at = None; // falls back to started_at
+        let mut killed = SessionRecord::new_running("vm-c", "tmpl", SessionMode::Prod);
+        killed.started_at = "2026-09-09T00:00:00Z".to_string();
+        killed.state = SessionState::Killed; // excluded
+
+        let pick = most_recent_running(vec![a, b, killed]);
+        // b's started_at (Jan 2) beats a's last_invoke (Jan 1 05:00).
+        assert_eq!(pick.unwrap().vm_name, "vm-b");
+    }
+
+    #[test]
+    fn most_recent_running_none_when_empty() {
+        assert!(most_recent_running(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn most_recent_running_compares_two_invoked() {
+        // Both records have last_invoke_at set; the later one wins.
+        let mut earlier = SessionRecord::new_running("vm-early", "tmpl", SessionMode::Prod);
+        earlier.last_invoke_at = Some("2026-03-01T10:00:00Z".to_string());
+        let mut later = SessionRecord::new_running("vm-late", "tmpl", SessionMode::Prod);
+        later.last_invoke_at = Some("2026-03-01T11:00:00Z".to_string());
+
+        let pick = most_recent_running(vec![earlier, later]);
+        assert_eq!(
+            pick.unwrap().vm_name,
+            "vm-late",
+            "later last_invoke_at should win"
+        );
+    }
+
+    #[test]
+    fn session_record_ephemeral_defaults_false_and_roundtrips() {
+        let mut r = SessionRecord::new_running("vm", "tmpl", SessionMode::Prod);
+        assert!(!r.ephemeral);
+        r.ephemeral = true;
+        let json = serde_json::to_string(&r).unwrap();
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert!(back.ephemeral);
+    }
+
+    #[test]
+    fn session_record_legacy_without_ephemeral_parses() {
+        // A record serialized before `ephemeral` existed must still parse
+        // (serde default), despite deny_unknown_fields.
+        let r = SessionRecord::new_running("vm", "tmpl", SessionMode::Prod);
+        let mut val = serde_json::to_value(&r).unwrap();
+        val.as_object_mut().unwrap().remove("ephemeral");
+        let back: SessionRecord = serde_json::from_value(val).unwrap();
+        assert!(!back.ephemeral);
     }
 }

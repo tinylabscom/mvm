@@ -591,7 +591,7 @@ impl VmBackend for LibkrunBackend {
 /// 3. `PATH` lookup.
 ///
 /// Returns an actionable error if all three fail.
-fn resolve_supervisor_path() -> Result<PathBuf> {
+pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_LIBKRUN_SUPERVISOR_PATH") {
         let path = PathBuf::from(p);
         if path.is_file() {

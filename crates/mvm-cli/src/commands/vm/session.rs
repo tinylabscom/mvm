@@ -126,8 +126,19 @@ pub(in crate::commands) struct SetTimeoutArgs {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct AttachArgs {
-    /// Session id to dispatch into.
-    pub session_id: String,
+    /// Session id to dispatch into (positional). Omit with --continue.
+    pub session_id: Option<String>,
+    /// Re-attach the most-recently-active running session.
+    #[arg(short = 'c', long = "continue", conflicts_with_all = ["session_id", "resume"])]
+    pub continue_latest: bool,
+    /// Re-attach a specific session id (alias for the positional).
+    #[arg(
+        short = 'r',
+        long = "resume",
+        value_name = "ID",
+        conflicts_with = "session_id"
+    )]
+    pub resume: Option<String>,
     /// Path to stdin payload, or `-` for mvmctl's own stdin. Default:
     /// no stdin (the wrapper sees an empty pipe).
     #[arg(long, value_name = "PATH")]
@@ -187,6 +198,10 @@ pub(in crate::commands) struct StartArgs {
     /// minutes).
     #[arg(long, default_value_t = mvm_core::session::DEFAULT_IDLE_TIMEOUT_SECS)]
     pub idle_timeout: u64,
+    /// Tear the session down automatically after the next attach
+    /// completes (no manual `session kill` needed).
+    #[arg(long)]
+    pub ephemeral: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -609,7 +624,17 @@ fn enforce_creator_pid_gate(
 }
 
 fn cmd_attach(args: AttachArgs) -> Result<()> {
-    let (id, record) = require_running_session(&args.session_id)?;
+    let resolved_id: String = if args.continue_latest {
+        let rec = mvm_core::session::most_recent_running_on_disk()?
+            .ok_or_else(|| anyhow::anyhow!("no running session to --continue"))?;
+        rec.id.into_string()
+    } else if let Some(id) = args.resume.or(args.session_id) {
+        id
+    } else {
+        bail!("provide a session id, --resume <id>, or --continue");
+    };
+
+    let (id, record) = require_running_session(&resolved_id)?;
 
     let stdin_bytes = super::invoke::read_stdin_payload(args.stdin.as_deref())?;
     ui::info(&format!(
@@ -632,6 +657,21 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
         Ok(())
     }) {
         tracing::warn!(err = %e, "failed to bump session invoke counter");
+    }
+
+    // Ephemeral teardown runs unconditionally — before any early exit on
+    // non-zero workload exit code — so the VM is always cleaned up.
+    if record.ephemeral {
+        ui::info(&format!(
+            "ephemeral session {id}: tearing down after attach"
+        ));
+        crate::exec::tear_down_session_vm(crate::exec::SessionVm {
+            vm_name: record.vm_name.clone(),
+        });
+        let _ = mvm_core::session::update_session(&id, |r| {
+            r.state = mvm_core::session::SessionState::Reaped;
+            Ok(())
+        });
     }
 
     if exit_code != 0 {
@@ -886,6 +926,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
 
     let mut record = SessionRecord::new_running(&vm.vm_name, &template_id, mode);
     record.idle_timeout_secs = args.idle_timeout;
+    record.ephemeral = args.ephemeral;
     let id = record.id.clone();
     if let Err(e) = mvm_core::session::write_session(&record) {
         // Boot succeeded but we can't persist the record. Tear down
@@ -1256,7 +1297,9 @@ mod tests {
         let _guard = isolated_runtime_dir();
         let id = SessionId::new().to_string();
         let err = cmd_attach(AttachArgs {
-            session_id: id,
+            session_id: Some(id),
+            continue_latest: false,
+            resume: None,
             stdin: None,
             timeout: 1,
         })
@@ -1264,6 +1307,25 @@ mod tests {
         assert!(
             err.to_string().contains("no session with id"),
             "expected missing-id error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn attach_continue_with_no_sessions_errors() {
+        // Empty session store → most_recent_running_on_disk returns None
+        // → cmd_attach bails before touching any vsock.
+        let _guard = isolated_runtime_dir();
+        let err = cmd_attach(AttachArgs {
+            session_id: None,
+            continue_latest: true,
+            resume: None,
+            stdin: None,
+            timeout: 30,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no running session"),
+            "expected no-running-session error, got: {err}"
         );
     }
 

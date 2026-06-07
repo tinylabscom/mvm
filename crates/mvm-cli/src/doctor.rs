@@ -277,6 +277,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_network_policy_default_check());
     checks.push(security_snapshot_key_check());
     checks.push(security_snapshot_dirs_check());
+    checks.push(security_signing_check());
 
     // ── Active backend security posture (ADR-002 / plan 53) ──────
     let security_posture = collect_security_posture();
@@ -2115,6 +2116,35 @@ fn security_snapshot_dirs_check() -> Check {
     }
 }
 
+/// macOS-only: VM launch needs the VZ + Hypervisor entitlements on the
+/// running binary. Off macOS the question is n/a.
+fn security_signing_check() -> Check {
+    let exe = std::env::current_exe().ok();
+    let present = exe
+        .as_deref()
+        .and_then(mvm_backend::providers::apple_container::entitlements_present);
+    match present {
+        None => Check {
+            name: "signing",
+            category: "security",
+            ok: true,
+            info: "n/a (macOS only)".to_string(),
+        },
+        Some(true) => Check {
+            name: "signing",
+            category: "security",
+            ok: true,
+            info: "VZ + Hypervisor entitlements present".to_string(),
+        },
+        Some(false) => Check {
+            name: "signing",
+            category: "security",
+            ok: false,
+            info: "entitlements missing — run `mvmctl sign`".to_string(),
+        },
+    }
+}
+
 /// Pinned cross-compile toolchain versions, parsed at build time from
 /// the workspace's [workspace.metadata.mvm.toolchain] block.
 pub struct ZigbuildProbe {
@@ -3120,5 +3150,12 @@ mod tests {
             "stub should mention n/a; got: {}",
             c.info
         );
+    }
+
+    #[test]
+    fn signing_check_is_in_security_category() {
+        let c = security_signing_check();
+        assert_eq!(c.category, "security");
+        assert_eq!(c.name, "signing");
     }
 }
