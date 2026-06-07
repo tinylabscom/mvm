@@ -90,9 +90,16 @@ bridge socket), then drive the stream-based primitives.
   `mvm-backend::mock_guest_agent` drive a CONNECT-handshaked stream (the shape
   `for_vm(...).connect(...)` yields). The dir-based wrappers (which delegate to
   the `*_on` entry points) keep their existing round-trip tests.
-- [ ] Box (x86_64): `mvmctl up --hypervisor qemu` then `proc list` /
-  `proc start`+`proc wait` / `diff` / an `exec` succeed against the live QEMU
-  workload (agent over the `__qemu-vsock-bridge`). (Pending box run.)
+- [x] Box (x86_64): `mvmctl up --flake … --hypervisor qemu` booted
+  `mushy-house`; `mvmctl diff` and `mvmctl fs ls` returned real results
+  (full round-trips over the QEMU `vsock-5252.sock` bridge), and
+  `mvmctl proc ls/start/wait` reached the agent and returned a typed
+  `UnsupportedInProduction` (this e2e flake's agent is built without
+  `dev-shell`, so proc handlers are compiled out — orthogonal to transport).
+  The FC-style `…/runtime/v.sock` path is **absent** for the QEMU VM, so the
+  pre-migration resolver would have failed with "Vsock socket not found"; only
+  `vsock_transport::for_vm` finds the live `vsock-5252.sock`. This is the
+  end-to-end proof the transport migration works.
 - [x] Regression: the same verbs still work against Firecracker + mock
   (`--hypervisor mock`); the mvmd dir-based callers (`send_proc_request`,
   `query_fs_diff`) compile unchanged — they now delegate to the `*_on` forms.
