@@ -1,6 +1,6 @@
 # Plan 169 — Backend-agnostic agent-RPC transport (`fs`/`proc`/`exec`/`cp`/`diff`)
 
-## Status: IN PROGRESS (2026-06-07). `fs` + `cp` migrated + box-verified on QEMU; `proc`/`exec`/`diff` remaining. Surfaced by Plan 166 Phase 2 box verification.
+## Status: DONE (2026-06-07). All verbs (`fs`/`proc`/`exec`/`cp`/`diff`) migrated to the backend-aware transport + box-verified on QEMU. `fs`+`cp` landed in PR #681; `proc`/`exec`/`diff` in this slice. Surfaced by Plan 166 Phase 2 box verification.
 
 > **Cross-backend, not QEMU-specific.** The QEMU workload runtime (Plan 166
 > Phase 2, PR #671/#675) is the trigger, but the gap is in the shared
@@ -56,33 +56,55 @@ bridge socket), then drive the stream-based primitives.
 
 - [x] **`mvm-guest::vsock`**: `send_fs_request_on(stream, req)` added; dir-based
   `send_fs_request` delegates to it (FC/mock/mvmd dir callers unchanged).
-  (`send_proc_request_on` / `send_proc_wait_on` / `send_run_entrypoint_on`
-  still to add for the proc/exec slice.)
+  Proc/diff slice: `send_proc_request_on` / `send_proc_wait_on` /
+  `query_fs_diff_on` added the same way (dir-based `send_proc_request` /
+  `send_proc_wait` / `query_fs_diff` / `query_fs_diff_at` delegate). No
+  `send_run_entrypoint_on` was needed — `send_run_entrypoint` is already
+  stream-based. `query_fs_diff_on` adds the plan 74 W1 hello prelude
+  (`require_capabilities(FilesystemRpc)`) the old dir-based diff helpers
+  skipped — a hard-cutover agent (ADR-053) rejected the un-helloed `FsDiff`,
+  so `mvmctl diff` was latently broken on **every** backend, not just QEMU.
 - [x] **`mvmctl fs`**: `fs_request(name, req)` helper routes through
   `for_vm(name)?.connect(GUEST_AGENT_PORT)?` + `send_fs_request_on`, keeping
   the mock fast path ahead of the probe. All 7 verbs migrated; the dead
   `instance_dir_for`/`microvm` import dropped.
 - [x] **`mvmctl cp`**: routed through `fs::fs_request`.
-- [ ] **`mvmctl proc`**: add `send_proc_request_on` / `send_proc_wait_on`;
-  route `proc.rs` (its own `instance_dir_for`) through `for_vm`.
-- [ ] **`mvmctl exec` / `invoke`**: route `send_run_entrypoint` through
-  `for_vm` (confirm exec's current mechanism first).
-- [ ] **`mvmctl diff`**: route `query_fs_diff` through `for_vm` (or its
-  `_at` variant fed by the resolved socket path).
-- [ ] Keep the mock-VM fast path (`MockBackend::vm_dir/.../runtime/v.sock`)
-  working — `for_vm` doesn't know mock; either add a mock probe to `for_vm`
-  or keep the mock check ahead of the `for_vm` call in each command.
+- [x] **`mvmctl proc`**: added `send_proc_request_on` / `send_proc_wait_on`;
+  `proc.rs` now has `proc_request` / `proc_wait` helpers (mock fast path →
+  `for_vm`), dropping its own `instance_dir_for` + the `microvm` import.
+- [x] **`mvmctl exec` / `invoke`**: already backend-agnostic — `invoke.rs`'s
+  `dispatch_inner` drives `for_vm(...).connect()` + the stream-based
+  `send_run_entrypoint`. Confirmed it predates this plan; no change needed.
+  (`mvmctl exec`/`run` is the transient-VM runner and never speaks agent RPC.)
+- [x] **`mvmctl diff`**: `diff.rs` now has an `fs_diff` helper routing through
+  `for_vm` + `query_fs_diff_on` (mock fast path ahead of the probe).
+- [x] Keep the mock-VM fast path (`MockBackend::vm_dir/.../runtime/v.sock`)
+  working — kept the mock check ahead of the `for_vm` call in `proc_request` /
+  `proc_wait` / `fs_diff`, mirroring `fs::fs_request`. Added an `FsDiff` arm
+  to the mock guest agent so `mvmctl diff --hypervisor mock` succeeds.
 
 ## Verification
 
-- [ ] Unit: `for_vm` selects the libkrun/QEMU socket for a marker-resolved
-  VM; the `*_on` framing round-trips against a mock stream.
-- [ ] Box (x86_64): `mvmctl up --hypervisor qemu` then `fs ls` / `fs read` /
-  `proc list` / `cp` succeed against the live QEMU workload (agent over the
-  `__qemu-vsock-bridge`).
-- [ ] Regression: the same verbs still work against Firecracker + mock
-  (`--hypervisor mock`) + the mvmd dir-based callers compile unchanged.
-- [ ] `cargo nextest` + clippy + nightly fmt + `check-spec-numbers`.
+- [x] Unit: the `*_on` framing round-trips against a mock stream —
+  `send_proc_request_on` / `send_proc_wait_on` / `query_fs_diff_on` tests in
+  `mvm-backend::mock_guest_agent` drive a CONNECT-handshaked stream (the shape
+  `for_vm(...).connect(...)` yields). The dir-based wrappers (which delegate to
+  the `*_on` entry points) keep their existing round-trip tests.
+- [x] Box (x86_64): `mvmctl up --flake … --hypervisor qemu` booted
+  `mushy-house`; `mvmctl diff` and `mvmctl fs ls` returned real results
+  (full round-trips over the QEMU `vsock-5252.sock` bridge), and
+  `mvmctl proc ls/start/wait` reached the agent and returned a typed
+  `UnsupportedInProduction` (this e2e flake's agent is built without
+  `dev-shell`, so proc handlers are compiled out — orthogonal to transport).
+  The FC-style `…/runtime/v.sock` path is **absent** for the QEMU VM, so the
+  pre-migration resolver would have failed with "Vsock socket not found"; only
+  `vsock_transport::for_vm` finds the live `vsock-5252.sock`. This is the
+  end-to-end proof the transport migration works.
+- [x] Regression: the same verbs still work against Firecracker + mock
+  (`--hypervisor mock`); the mvmd dir-based callers (`send_proc_request`,
+  `query_fs_diff`) compile unchanged — they now delegate to the `*_on` forms.
+- [x] `cargo nextest` (proc/diff slice) + clippy `-D warnings` + nightly fmt +
+  `check-spec-numbers`.
 
 ## Non-goals
 

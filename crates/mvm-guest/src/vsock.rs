@@ -2313,22 +2313,25 @@ pub fn exec_at(
 /// the diff.
 pub fn query_fs_diff(instance_dir: &str) -> Result<Vec<FsChange>> {
     let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::FsDiff)?;
-
-    match resp {
-        GuestResponse::FsDiffResult { changes } => Ok(changes),
-        GuestResponse::Error { message } => {
-            bail!("Guest fs-diff error: {}", message);
-        }
-        _ => bail!("Unexpected response to FsDiff"),
-    }
+    query_fs_diff_on(&mut stream)
 }
 
 /// Query filesystem diff at a specific UDS path.
 pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
     let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::FsDiff)?;
+    query_fs_diff_on(&mut stream)
+}
 
+/// Query filesystem diff on an already-connected stream. Backend-agnostic
+/// entry point for `mvmctl diff` — the stream comes from
+/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM
+/// (Plan 169). `FsDiff` is part of the filesystem RPC surface, so this drives
+/// the plan 74 W1 hello prelude requiring `FilesystemRpc` exactly like
+/// [`send_fs_request_on`] — the dir-based wrappers used to skip the hello,
+/// which a hard-cutover agent (ADR-053) would reject.
+pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    let resp = send_request(stream, &GuestRequest::FsDiff)?;
     match resp {
         GuestResponse::FsDiffResult { changes } => Ok(changes),
         GuestResponse::Error { message } => {
@@ -2340,8 +2343,20 @@ pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
 
 /// Dispatch a non-streaming process-control request to a running
 /// VM and return the `ProcResult`. Single-frame surface — the
-/// streaming `ProcWait` verb has its own helper below.
+/// streaming `ProcWait` verb has its own helper below. Dir-based
+/// wrapper over [`send_proc_request_on`] for callers that still pass
+/// an instance dir (mvmd, mock).
 pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcResult> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    send_proc_request_on(&mut stream, req)
+}
+
+/// Dispatch a non-streaming process-control verb on an already-connected
+/// stream and return the `ProcResult`. The backend-agnostic entry point:
+/// the host CLI obtains the stream from `mvm::vsock_transport::for_vm(name)`
+/// so `mvmctl proc` works regardless of which VMM launched the VM
+/// (Plan 169). `send_proc_request` is the dir-based wrapper over this.
+pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<ProcResult> {
     debug_assert!(matches!(
         req,
         GuestRequest::ProcStart { .. }
@@ -2350,9 +2365,8 @@ pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcRe
             | GuestRequest::ProcSendInput { .. }
             | GuestRequest::ProcKill { .. }
     ));
-    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    require_capabilities(&mut stream, &[GuestCapability::ProcessRpc])?;
-    let resp = send_request(&mut stream, &req)?;
+    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
+    let resp = send_request(stream, &req)?;
     match resp {
         GuestResponse::ProcResult(r) => Ok(r),
         GuestResponse::Error { message } => {
@@ -2364,22 +2378,36 @@ pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcRe
 
 /// Stream `ProcWait` events for `pid_token`. Calls `on_event` for
 /// every non-terminal frame and returns the terminal event. Mirrors
-/// the host shape of `send_run_entrypoint`.
+/// the host shape of `send_run_entrypoint`. Dir-based wrapper over
+/// [`send_proc_wait_on`].
 pub fn send_proc_wait<F: FnMut(&ProcWaitEvent)>(
     instance_dir: &str,
     pid_token: &str,
     timeout_secs: Option<u64>,
-    mut on_event: F,
+    on_event: F,
 ) -> Result<ProcWaitEvent> {
     let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    require_capabilities(&mut stream, &[GuestCapability::ProcessRpc])?;
+    send_proc_wait_on(&mut stream, pid_token, timeout_secs, on_event)
+}
+
+/// Stream `ProcWait` events on an already-connected stream. Backend-agnostic
+/// entry point for `mvmctl proc wait` — the stream comes from
+/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM
+/// (Plan 169). Mirrors the host shape of [`send_run_entrypoint`].
+pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
+    stream: &mut UnixStream,
+    pid_token: &str,
+    timeout_secs: Option<u64>,
+    mut on_event: F,
+) -> Result<ProcWaitEvent> {
+    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
     let req = GuestRequest::ProcWait {
         pid_token: pid_token.to_string(),
         timeout_secs,
     };
-    write_frame(&mut stream, &req)?;
+    write_frame(stream, &req)?;
     loop {
-        let resp: GuestResponse = read_frame(&mut stream)?;
+        let resp: GuestResponse = read_frame(stream)?;
         match resp {
             GuestResponse::ProcWaitEvent(ev) => {
                 if ev.is_terminal() {
