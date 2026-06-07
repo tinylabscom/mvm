@@ -14,12 +14,13 @@
 
 use std::collections::HashMap;
 
-use mvm_sdk::ir::{AuthType, SecretRef};
+use mvm_sdk::ir::{AuthType, SecretRef, host_matches};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
 use super::injector::{InjectError, Injector};
 use super::resolver::SecretResolver;
+use super::signer::{SignError, Signature, Signer, SigningInput};
 
 /// The host-owned namespace every minted [`Placeholder`] carries. This prefix
 /// is reserved: it must never appear in a workload's own egress, so the
@@ -111,6 +112,7 @@ pub enum SubstituteError {
 /// separate Phase D legs.
 pub struct SubstitutionEndpoint<'a> {
     registry: &'a SubstitutionRegistry,
+    resolver: &'a dyn SecretResolver,
     injector: Injector<'a>,
 }
 
@@ -118,6 +120,7 @@ impl<'a> SubstitutionEndpoint<'a> {
     pub fn new(registry: &'a SubstitutionRegistry, resolver: &'a dyn SecretResolver) -> Self {
         Self {
             registry,
+            resolver,
             injector: Injector::new(resolver),
         }
     }
@@ -150,6 +153,49 @@ impl<'a> SubstitutionEndpoint<'a> {
             .injector
             .inject_placeholder(secret, destination, request_text, placeholder)?)
     }
+
+    /// Sign for a signing-scheme secret (SigV4/HMAC) bound to `destination`:
+    /// resolve the placeholder, binding-check the destination (claim 12), then
+    /// dispatch to the [`Signer`] — the key never leaves the signer. Refuses an
+    /// unknown placeholder or an unbound destination before signing; the signer
+    /// itself refuses an injector (bearer/basic) secret (`WrongAuthType`).
+    pub fn sign(
+        &self,
+        placeholder: &str,
+        destination: &str,
+        input: &SigningInput,
+    ) -> Result<Signature, SignDispatchError> {
+        let secret = self
+            .registry
+            .resolve(placeholder)
+            .ok_or(SignDispatchError::UnknownPlaceholder)?;
+        if !secret
+            .allowed_hosts
+            .iter()
+            .any(|p| host_matches(p, destination))
+        {
+            return Err(SignDispatchError::DestinationNotBound(
+                destination.to_string(),
+            ));
+        }
+        let signer = Signer::new(self.resolver);
+        let sig = match input {
+            SigningInput::SigV4(i) => signer.sign_sigv4(secret, i),
+            SigningInput::Hmac { payload } => signer.sign_hmac(secret, payload),
+        }?;
+        Ok(sig)
+    }
+}
+
+/// Errors from the signing endpoint dispatch.
+#[derive(Debug, thiserror::Error)]
+pub enum SignDispatchError {
+    #[error("unknown placeholder")]
+    UnknownPlaceholder,
+    #[error("destination `{0}` is not in the secret's allowed_hosts")]
+    DestinationNotBound(String),
+    #[error(transparent)]
+    Sign(#[from] SignError),
 }
 
 #[cfg(test)]
@@ -200,6 +246,134 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
+    }
+
+    fn signing_ref(name: &str, auth: AuthType, hosts: &[&str]) -> SecretRef {
+        SecretRef {
+            name: name.into(),
+            mount: SecretMount::Env { var: "K".into() },
+            auth_type: auth,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn sign_dispatches_sigv4_to_the_signer_for_a_bound_destination() {
+        use crate::keyholder::{SigV4Input, SigningInput};
+        let (_dir, spy) = spy_with("aws", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(signing_ref(
+            "aws",
+            AuthType::Sigv4,
+            &["example.amazonaws.com"],
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        // aws-sig-v4-test-suite `get-vanilla` — the oracle from the C1 signer.
+        let input = SigningInput::SigV4(SigV4Input {
+            canonical_request: "GET\n/\n\nhost:example.amazonaws.com\n\
+                 x-amz-date:20150830T123600Z\n\nhost;x-amz-date\n\
+                 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .into(),
+            amz_date: "20150830T123600Z".into(),
+            date_stamp: "20150830".into(),
+            region: "us-east-1".into(),
+            service: "service".into(),
+        });
+        let sig = endpoint
+            .sign(ph.as_str(), "example.amazonaws.com", &input)
+            .unwrap();
+        assert_eq!(
+            sig.hex,
+            "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+        );
+    }
+
+    #[test]
+    fn sign_dispatches_hmac_to_the_signer() {
+        use crate::keyholder::SigningInput;
+        let (_dir, spy) = spy_with("webhook", "Jefe"); // RFC 4231 case 2
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(signing_ref(
+            "webhook",
+            AuthType::Hmac,
+            &["hooks.example.com"],
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let input = SigningInput::Hmac {
+            payload: b"what do ya want for nothing?".to_vec(),
+        };
+        let sig = endpoint
+            .sign(ph.as_str(), "hooks.example.com", &input)
+            .unwrap();
+        assert_eq!(
+            sig.hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn sign_refuses_unbound_destination_without_resolving() {
+        use crate::keyholder::SigningInput;
+        let (_dir, spy) = spy_with("aws", "key");
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(signing_ref(
+            "aws",
+            AuthType::Sigv4,
+            &["example.amazonaws.com"],
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let err = endpoint
+            .sign(
+                ph.as_str(),
+                "evil.example.com",
+                &SigningInput::Hmac { payload: vec![] },
+            )
+            .unwrap_err();
+        assert!(matches!(err, SignDispatchError::DestinationNotBound(_)));
+        assert_eq!(
+            spy.calls.load(SeqCst),
+            0,
+            "must not resolve for an unbound destination"
+        );
+    }
+
+    #[test]
+    fn sign_refuses_unknown_placeholder_without_resolving() {
+        use crate::keyholder::SigningInput;
+        let (_dir, spy) = spy_with("aws", "key");
+        let reg = SubstitutionRegistry::new();
+        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let err = endpoint
+            .sign(
+                "mvm-secret-deadbeef",
+                "example.amazonaws.com",
+                &SigningInput::Hmac { payload: vec![] },
+            )
+            .unwrap_err();
+        assert!(matches!(err, SignDispatchError::UnknownPlaceholder));
+        assert_eq!(spy.calls.load(SeqCst), 0);
+    }
+
+    #[test]
+    fn sign_rejects_an_injector_auth_type() {
+        use crate::keyholder::{SignError, SigningInput};
+        let (_dir, spy) = spy_with("api", "tok");
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(bearer_ref("api", &["api.example.com"]));
+        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let err = endpoint
+            .sign(
+                ph.as_str(),
+                "api.example.com",
+                &SigningInput::Hmac {
+                    payload: b"x".to_vec(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SignDispatchError::Sign(SignError::WrongAuthType(AuthType::Bearer))
+        ));
     }
 
     #[test]

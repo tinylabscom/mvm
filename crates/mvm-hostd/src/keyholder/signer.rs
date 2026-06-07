@@ -39,6 +39,14 @@ pub enum SignError {
     WrongAuthType(AuthType),
 }
 
+/// What to sign, by scheme. The SDK builds the canonical request (SigV4) or
+/// supplies the payload (HMAC webhook); the signer returns a signature. Lets
+/// the endpoint take one signing call and dispatch to the right `Signer` method.
+pub enum SigningInput {
+    SigV4(SigV4Input),
+    Hmac { payload: Vec<u8> },
+}
+
 /// Inputs for an AWS SigV4 signature. The caller prepares the canonical
 /// request — the signer signs, it does not build requests.
 pub struct SigV4Input {
