@@ -156,6 +156,12 @@ let
     inherit mvmSrc;
   };
 
+  # Exit reporter — records workload exit status before poweroff.
+  # Baked unconditionally into every guest rootfs (prod and dev).
+  exitReportPkg = pkgs.callPackage ../packages/mvm-exit-report.nix {
+    inherit mvmSrc;
+  };
+
   # ── Privilege model (uids) ─────────────────────────────────────
   #
   # PID 1 must be uid 0 (kernel requirement); everything we can
@@ -623,6 +629,7 @@ let
   # only when a zone file is present so the no-addon path is
   # unaffected. See `crates/mvm-addon-dns` for details.
   mvmAddonDnsBinary = "${addonDnsPkg}/bin/mvm-addon-dns";
+  mvmExitReportBinary = "${exitReportPkg}/bin/mvm-exit-report";
 
   # extraFiles — three accepted spec shapes per target path:
   #
@@ -833,6 +840,12 @@ let
       cp ${mvmAddonDnsBinary} "$out/usr/local/bin/mvm-addon-dns"
       chmod 0555 "$out/usr/local/bin/mvm-addon-dns"
     '' else ""}
+
+    # Exit reporter — unconditional: every prod and dev image carries
+    # this binary so the guest can record its exit status before
+    # poweroff regardless of whether dev-shell features are compiled in.
+    cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
+    chmod 0555 "$out/usr/local/bin/mvm-exit-report"
 
     # Kernel modules. `/init` `modprobe`s vsock before forking the
     # agent (default nixpkgs kernel ships AF_VSOCK as `=m`); without
