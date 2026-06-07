@@ -490,6 +490,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "SecretGet",
         "SecretPut",
         "SecretRm",
+        "SecretSet",
         "SandboxGc",
         "SessionStart",
         "SlotPrune",
