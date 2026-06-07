@@ -193,7 +193,7 @@ fn stage0_status_check() -> Check {
 }
 
 /// One-line summary of a dry-run convergence report for `doctor`
-/// (Plan 169 WS-A). Pure so it's testable without touching the registry.
+/// (Plan 170 WS-A). Pure so it's testable without touching the registry.
 fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
     let n = report.reconciled_count();
     if n == 0 {
@@ -203,7 +203,7 @@ fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String
     }
 }
 
-/// Surface registry/runtime drift (Plan 169 WS-A / ADR-074) without
+/// Surface registry/runtime drift (Plan 170 WS-A / ADR-074) without
 /// healing it: a dry-run convergence pass, reported as `clean` or a
 /// count. Informational — drift self-heals at the next state-touching
 /// command, so `ok` is always true.

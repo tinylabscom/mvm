@@ -156,7 +156,7 @@ pub enum LocalAuditKind {
     /// the count and (for small sweeps) the truncated slot hashes.
     SlotPrune,
     /// Reconcile-on-entry convergence healed registry/runtime drift
-    /// (Plan 169 WS-A / ADR-074): a dead-process record was torn down, a
+    /// (Plan 170 WS-A / ADR-074): a dead-process record was torn down, a
     /// stale record dropped, or an orphan state dir reaped. One entry per
     /// healed item; the `detail` field carries `action=<classification>`.
     /// Emitted by `mvmctl reconcile` and the cheap convergence pass run at
@@ -1035,7 +1035,7 @@ mod tests {
     /// the doc comment explaining why they're separate.
     #[test]
     fn registry_reconcile_kind_serializes_snake_case() {
-        // Plan 169 WS-A — the convergence audit kind must serde-roundtrip
+        // Plan 170 WS-A — the convergence audit kind must serde-roundtrip
         // (snake_case per the enum attr) so emission + chain verification
         // stay stable.
         let json = serde_json::to_string(&LocalAuditKind::RegistryReconcile).unwrap();

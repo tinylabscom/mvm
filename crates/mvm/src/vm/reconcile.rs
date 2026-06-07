@@ -1,4 +1,4 @@
-//! Reconcile-on-entry convergence (Plan 169 WS-A / ADR-074).
+//! Reconcile-on-entry convergence (Plan 170 WS-A / ADR-074).
 //!
 //! The VM name registry (`VmNameRegistry`, `{mvm_share_dir}/vm-names.json`)
 //! is the source of truth; this module converges on-disk runtime reality to

@@ -2,13 +2,13 @@
 title: "ADR-074: VM name-registry is the source of truth; converge at CLI entry, not a resident daemon"
 status: Proposed
 date: 2026-06-07
-related: Plan 169 (host-lifecycle convergence + density); ADR-045 (hermetic VM-lifecycle testing); ADR-044 (audit_emit! macro); Plan 140 (snapshot/restore productionization); Plan 99 (Stage 0 reaper / cache prune)
+related: Plan 170 (host-lifecycle convergence + density); ADR-045 (hermetic VM-lifecycle testing); ADR-044 (audit_emit! macro); Plan 140 (snapshot/restore productionization); Plan 99 (Stage 0 reaper / cache prune)
 ---
 
 ## Status
 
-Proposed. Records the architectural posture behind Plan 169; no code lands
-with the ADR. Supersedes nothing — it formalizes a model the codebase already
+Proposed. Records the architectural posture behind Plan 170; WS-A code
+lands in PR #688. Supersedes nothing — it formalizes a model the codebase already
 half-implements (`VmNameRegistry` + `cache prune --reap-orphans` + the TTL
 `reaper`) and makes the resolution rule explicit.
 

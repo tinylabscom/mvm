@@ -133,7 +133,7 @@ fn emit_unbound(recorder: &Recorder, event: String, extras: Vec<(String, String)
 
 impl Commands {
     /// Whether this command reads or mutates VM lifecycle state and so
-    /// warrants the cheap reconcile-on-entry convergence pass (Plan 169
+    /// warrants the cheap reconcile-on-entry convergence pass (Plan 170
     /// WS-A / ADR-074). Read-only, VM-agnostic commands (`doctor`, `ls`
     /// of caches, build/compile, config, …) skip it. `reconcile` itself
     /// is excluded — it *is* the convergence pass, run with its own opts.

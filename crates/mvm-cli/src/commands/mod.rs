@@ -286,7 +286,7 @@ pub fn run() -> Result<()> {
         tracing::warn!("failed to install signal handler: {e}");
     }
 
-    // Plan 169 WS-A / ADR-074 — reconcile-on-entry convergence. For any
+    // Plan 170 WS-A / ADR-074 — reconcile-on-entry convergence. For any
     // state-touching command, cheaply (registry read + pid-liveness stat
     // only) heal registry/runtime drift before dispatch, so stale records
     // self-heal instead of surfacing as a confusing failure three layers
@@ -373,7 +373,7 @@ pub fn run() -> Result<()> {
 }
 
 /// Run the cheap reconcile-on-entry convergence for state-touching
-/// commands (Plan 169 WS-A / ADR-074), unless `MVM_SKIP_RECONCILE=1`.
+/// commands (Plan 170 WS-A / ADR-074), unless `MVM_SKIP_RECONCILE=1`.
 /// Fail-open: `converge` collects errors internally and never returns an
 /// `Err`, so this can never block the requested command.
 fn maybe_converge_on_entry(command: &Commands) {

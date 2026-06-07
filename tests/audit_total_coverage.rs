@@ -319,7 +319,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
-    // Plan 169 WS-A — reconcile-on-entry convergence. The non-dry-run
+    // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
     ("mcp", AuditPosture::InteractiveOrControl),

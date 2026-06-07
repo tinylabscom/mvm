@@ -1,4 +1,4 @@
-//! CLI surface tests for `mvmctl reconcile` (Plan 169 WS-A).
+//! CLI surface tests for `mvmctl reconcile` (Plan 170 WS-A).
 
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;

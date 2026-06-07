@@ -1,6 +1,7 @@
-# Plan 169 — Host-side lifecycle convergence + single-host density (reconcile / idle-reaper / wake)
+# Plan 170 — Host-side lifecycle convergence + single-host density (reconcile / idle-reaper / wake)
 
-> **Status (2026-06-07):** Proposed. No code lands yet. Grounded in a
+> **Status (2026-06-07):** WS-A **implemented** (PR #688); WS-B/C/D
+> Proposed. Grounded in a
 > review of an external single-machine sandbox control plane — an
 > MIT-licensed Go service that pairs a container runtime, a reverse proxy,
 > and an embedded SQLite store to run agent workloads behind preview URLs.
@@ -14,12 +15,12 @@
 > obliquely per repo policy (the private oblique-reference key lives in
 > auto-memory).
 >
-> **Numbering caveat:** 169 is next-after-highest in local `specs/plans/`
-> (168 tops out). The `check-spec-numbers` Lint gate hard-fails on a
-> duplicate integer prefix — re-confirm 169 is free against open PRs +
-> `main` before merge and renumber if taken. Companion: **ADR-074**
-> (registry-as-source-of-truth; converge at CLI entry, not a resident
-> daemon).
+> **Numbering:** renumbered 169 → 170. 169 was claimed by the
+> agent-RPC backend-agnostic-transport plan that merged to `main` first,
+> which would trip the `check-spec-numbers` Lint gate (it hard-fails on a
+> duplicate integer prefix); 170 is the next free number. Companion:
+> **ADR-074** (registry-as-source-of-truth; converge at CLI entry, not a
+> resident daemon).
 
 ## Context
 
@@ -62,38 +63,46 @@ resident process. ADR-074 records this adaptation.
 
 ## Workstreams
 
-### WS-A — Reconcile-on-entry convergence (the core fix)
+### WS-A — Reconcile-on-entry convergence (the core fix) — **DONE (PR #688)**
 
 Make `VmNameRegistry` the source of truth and converge on-disk runtime reality
 to it, cheaply, at the start of every state-touching command.
 
-- [ ] Add `mvm::vm::reconcile::converge(registry, opts) -> ConvergeReport`, a
-      pure-logic-first sweep (testable without a real backend, mirroring
-      `reaper.rs`'s `sweep`): for each `VmRegistration`, classify as
-      `Live` / `DeadProcessLeftState` / `OrphanStateNoRecord` /
-      `RecordNoState`. Liveness check = the registry's runtime artifacts
-      (`vm_libkrun_pid()`, `vm_vsock_port_socket()` / `vm_vz_vsock_port_socket()`
-      from `mvm-core/src/config.rs`) cross-checked against the live PID — reuse
-      the existing live-vs-orphan discrimination in
-      `env::apple_container::reap_orphaned_vm_helpers` rather than reinventing it.
-- [ ] Convergence actions, all idempotent: dead-process records → tear down
-      leftover state + deregister; orphan state dirs with no record → reap
-      (the `cache prune --reap-orphans` logic, lifted into the shared sweep);
-      record pointing at vanished state → drop the stale record (today this
-      surfaces as the "stale `mvmctl pause` against a vanished VM" failure noted
-      in `instance_snapshot.rs:459`).
-- [ ] Wire a **cheap** `converge()` call into CLI entry for state-touching
+- [x] Add `mvm::vm::reconcile` — pure-logic-first `classify`/`sweep`
+      (testable without a real backend, mirroring `reaper.rs`'s `sweep`): for
+      each `VmRegistration`, classify as `Live` / `DeadProcessLeftState` /
+      `RecordNoState`, plus `OrphanStateNoRecord` for unrecorded state dirs.
+      Liveness = `kill(pid, 0)` on the recorded supervisor pid files
+      (`libkrun.pid` / `vz.pid` / `pid`) — the cheap half of the live-vs-orphan
+      discrimination from `env::apple_container::reap_orphaned_vm_helpers`,
+      restated as a bare syscall because the lower `mvm` crate can't depend on
+      `mvm-cli`. Intentionally-paused records are skipped.
+- [x] Convergence actions, all idempotent: dead-process records → tear down
+      leftover state + deregister; orphan state dirs with no record → reap;
+      record pointing at vanished state → drop the stale record (the "stale
+      `mvmctl pause` against a vanished VM" failure family). `converge()` fails
+      open and emits a `RegistryReconcile` audit line per healed item.
+      `FsRuntimeView`/`FsReconcileActions` are the real adapter; `converge_at`
+      is the path-injectable load/save seam.
+- [x] Wire a **cheap** `converge()` call into CLI entry for state-touching
       commands behind `MVM_SKIP_RECONCILE=1` (escape hatch, never set in CI).
       Cheap = registry read + PID liveness stat only; never spawns a VM, never
-      touches Nix. Read-only commands (`--help`, `model *`, `image ls`) skip it.
-- [ ] Add `mvmctl reconcile [--dry-run] [--json]` as the explicit, observable
+      touches Nix. Gated by `Commands::touches_vm_state()`
+      (up/down/run/console/dev/pause/resume/snapshot/ls); read-only / VM-agnostic
+      commands skip it; `reconcile` itself never double-runs.
+- [x] Add `mvmctl reconcile [--dry-run] [--json]` as the explicit, observable
       entry point (sibling to `cache prune`). `--json` emits the
-      `ConvergeReport` for scripting; `doctor` gains a one-line "registry
-      drift: N records reconciled / clean" summary.
+      `ConvergeReport` for scripting; `doctor` gained a one-line "registry
+      drift: N reconciled / clean" summary.
+
+### deferred follow-ups (WS-A)
+
 - [ ] **Self-heal the degraded-builder-store loop.** `converge()` detects the
       dangling-GC'd `…-source/flake.nix does not exist` builder state and, with
       `--repair`, clears `~/.cache/mvm/builder-vm` rather than letting `dev up`
-      spin. Closes the recovery side noted against that failure family.
+      spin. Closes the recovery side noted against that failure family. Deferred
+      from PR #688 — the builder-store probe is heavier than the PID-liveness
+      budget and wants its own slice.
 
 ### WS-B — Activity-driven idle reaper (stop-on-idle)
 

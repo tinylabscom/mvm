@@ -1,5 +1,5 @@
 //! `mvmctl reconcile` — explicit registry/runtime convergence pass
-//! (Plan 169 WS-A / ADR-074).
+//! (Plan 170 WS-A / ADR-074).
 //!
 //! The same cheap convergence the CLI entry path runs for state-touching
 //! commands, surfaced as an observable verb (sibling to `cache prune`).

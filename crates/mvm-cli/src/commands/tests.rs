@@ -2836,7 +2836,7 @@ fn test_session_attach_resume_parses() {
     }
 }
 
-// -------- Plan 169 WS-A: reconcile-on-entry gate --------
+// -------- Plan 170 WS-A: reconcile-on-entry gate --------
 
 fn touches(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv)
