@@ -11,9 +11,9 @@ new_adrs: 003-local-mcp-server.md (Proposal A); 004-hypervisor-egress-policy.md 
 Five external resources were evaluated for adoption: jail-nix
 (bubblewrap wrapper), nixai (Ollama-default Nix CLI), andersonjoseph's
 DEV-community jail.nix recipe, numtide/llm-agents.nix (curated agent
-catalog), and SecBear/nix-sandbox-mcp (MCP server with single-tool
+catalog), and an external single-tool Nix sandbox MCP server (referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`) (MCP server with single-tool
 design and a planned microvm.nix backend). The most relevant finding:
-**nix-sandbox-mcp explicitly lists "microvm.nix backend" as future work**
+**that MCP server explicitly lists "microvm.nix backend" as future work**
 because microVMs are "the right choice for running untrusted code from
 the internet." mvm already has that backend. The gap is on the
 agent-ergonomics side — mvm has zero MCP integration, no curated
@@ -56,7 +56,7 @@ does this with a binary cache).
 - **numtide/llm-agents.nix**: Curated catalog of ~90 AI agents as Nix
   packages with a binary cache at `cache.numtide.com`. *Borrowable:
   import it as a flake input in Proposal B.*
-- **SecBear/nix-sandbox-mcp**: MCP server, single `run` tool with `env`
+- **The external MCP server**: MCP server, single `run` tool with `env`
   parameter, ~420 fixed token cost, planned microvm.nix backend.
   *Borrowable: the entire single-tool design — Proposal A.*
 
@@ -66,10 +66,10 @@ does this with a binary cache).
 
 ## Why
 
-mvm has stronger isolation than nix-sandbox-mcp's current bubblewrap
+mvm has stronger isolation than the external MCP server's current bubblewrap
 backend (full microVM vs namespaces). Adding an MCP server lets LLM
 clients (Claude Code, opencode, etc.) drive mvm as a sandbox without
-shelling out to the CLI. The single-tool design from nix-sandbox-mcp
+shelling out to the CLI. The single-tool design from that MCP server
 keeps the LLM context-window cost flat (~420 tok) regardless of how many
 templates the user registers.
 
@@ -493,11 +493,11 @@ without an actual hypervisor.
 
 ## Why
 
-nix-sandbox-mcp uses `session` for REPL persistence inside a single
+The external MCP server uses `session` for REPL persistence inside a single
 sandbox process. mvm's analog is template snapshots — boot once, run
 many calls against the warm VM, snapshot/destroy at session end. This
-is a strict win over nix-sandbox-mcp's design because mvm sessions
-inherit microVM isolation; nix-sandbox-mcp sessions are
+is a strict win over that MCP server's design because mvm sessions
+inherit microVM isolation; its sessions are
 bubblewrap-bound.
 
 ## Design
@@ -635,9 +635,9 @@ Sits after A. Treat as A.2 — same crate, additive.
 
 ## Plumbing (nice to have)
 
-- **A: nix-sandbox-mcp wire compat.** If exact param names / response
+- **A: the external MCP server's wire format.** If exact param names / response
   shapes match (`env`, `code`, `session`), existing clients
-  configured for nix-sandbox-mcp can point at `mvmctl mcp` with one
+  configured for that MCP server can point at `mvmctl mcp` with one
   config edit.
 
 - **A: shell-env note in threat model.** For `env=shell`, `code` *is*

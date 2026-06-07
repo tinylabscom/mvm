@@ -40,7 +40,7 @@ Cross-repo: mvmd Plan 51 W1-W7 owns the fleet-side enforcement (DNS resolver, L7
 - [x] Add a public feature-status table: Shipped, Preview, Planned, Not claimed.
 - [x] Update Python SDK docs that still reference `mvmforge` instead of the current `mvm`/`mvmctl` surface.
 - [x] Add a docs check that blocks phrases like "any OCI image", "secrets cannot leak", and "<100ms" unless the corresponding claim gate file is marked Shipped.
-- [x] Update `specs/gap-analysis-vs-microsandbox.md` to include current SDK directories and mvmd ADR-0020.
+- [x] Update the external-sandbox gap-analysis note to include current SDK directories and mvmd ADR-0020 (external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`).
 
 **Verification:**
 
@@ -366,7 +366,7 @@ forbids claiming `<100ms` before measured data supports it.
 
 **Failure mode.** First measurements may show fresh Firecracker boot
 in the 200-500ms range with audit append, plan signing, and verity
-attach in the path. Microsandbox's `<100ms` claim is warm-pool
+attach in the path. The earlier external sandbox runtime's `<100ms` claim is warm-pool
 restore, not fresh boot — but their public docs do not always label
 this. If we publish only a fresh-boot number, we look slower than we
 are; if we publish only a warm-pool number, we overclaim. Either is a

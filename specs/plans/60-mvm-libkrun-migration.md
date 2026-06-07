@@ -2160,7 +2160,7 @@ Sequential: ~10-13 weeks for one engineer. Phases 2-5 can partially overlap (enc
 ## Reference links (verified URLs from the user)
 
 - microvm.nix — https://github.com/microvm-nix/microvm.nix (intro: https://microvm-nix.github.io/microvm.nix/intro.html)
-- llm-jail (mentioned in scratch.md line 15 for inspiration; not a dependency) — https://github.com/braiins/llm-jail.git
+- an external LLM sandbox/jail tool (mentioned in scratch.md line 15 for inspiration; not a dependency) (referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`)
 - Previous iteration: `/Users/auser/work/tinylabs/mvmco/mvm`
 - Orchestrator: `/Users/auser/work/tinylabs/mvmco/mvmd`
 - Tauri wrapper: `/Users/auser/work/tinylabs/mvmco/mvm-studio` (planned)

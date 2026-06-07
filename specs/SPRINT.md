@@ -248,7 +248,7 @@ Recent maintenance:
 - [x] Extended `runtime_boot_bench` with TOML config-file input, Apple Container backend defaults, configurable CPU/memory sizing, and Apple guest-agent readiness probing.
 - [x] Removed the remaining third-party sandbox Cargo dependency and backend/builder compile paths; `Cargo.lock` no longer carries the transitive SeaORM/SQLx stack, including the MySQL driver.
 - [x] Clarified the local platform policy after the cleanup: supported builder/runtime hosts are macOS Apple Silicon and native Linux with `/dev/kvm`; macOS Intel and native Windows are unsupported, while WSL2 nested KVM and a Hyper-V managed Linux builder remain future backend work.
-- [x] Added ADR-048 and Plan 74 to turn the Microsandbox comparison into claim-gated `mvm` runtime work: docs hygiene, OCI ingest, programmable networking, secret placeholders, SDK-owned lifecycle, measured cold-starts, and filesystem backend contracts.
+- [x] Added ADR-048 and Plan 74 to turn the external-sandbox-runtime comparison into claim-gated `mvm` runtime work (external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`): docs hygiene, OCI ingest, programmable networking, secret placeholders, SDK-owned lifecycle, measured cold-starts, and filesystem backend contracts.
 - [ ] Plan 74 W0 (claims hygiene and docs guardrails) in flight — new public Sandbox parity status page (`security/sandbox-parity-status.md`), `cargo xtask check-doc-claims` lint covering `<100ms` / `any OCI image` / `secrets cannot leak` / variants, `mvmforge` cleanup in `guides/exec.md` and `reference/cli-commands.md`, gap-analysis updated for current `crates/mvm-sdk` layout and mvmd ADR-0020 handoff, and a new `specs/plans/83-w1-w6-attack-plan.md` sequencing sidecar that defers risk discussion to plan 74's `## Risks` section (R1-R12).
 - [x] Added intent-bound admission profiles to signed `ExecutionPlan` v4, binding intent, seccomp tier, policy refs, secret-release posture, and audit taxonomy without adding new sandbox execution capability.
 - [x] Documented the host-orchestrated builder VM flow across the website docs, clarifying that `mvmctl build` runs from the host while Nix evaluation/builds execute inside the builder VM and runtime boot benchmarks consume already-built artifacts.
@@ -1965,7 +1965,7 @@ the guest`) on public docs unless the file marks the relevant claim
 Shipped or carries an `<!-- allow(doc-claim:<id>): <reason> -->`
 opt-out; strips live `mvmforge` references from
 `guides/exec.md` and `reference/cli-commands.md` (the deliberate
-migration guide stays); updates `specs/gap-analysis-vs-microsandbox.md`
+migration guide stays); updates the external-sandbox gap-analysis note
 for the current `crates/mvm-sdk` + `crates/mvm-sdk-macros` layout
 and the mvmd ADR-0020 cross-repo handoff; and lands plan 74's
 `## Risks` section (R1-R12, eight cross-cutting plus four

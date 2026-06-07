@@ -7,7 +7,7 @@
 
 ## Context
 
-Microsandbox's public positioning has sharpened the product bar for local and fleet-managed code sandboxes:
+The earlier external sandbox runtime's public positioning has sharpened the product bar for local and fleet-managed code sandboxes (external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`):
 
 - sub-100ms cold start
 - embedded, no-root, no-daemon SDK-owned runtime

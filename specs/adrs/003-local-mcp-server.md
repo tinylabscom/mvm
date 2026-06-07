@@ -24,13 +24,13 @@ free-form output, and lose the protocol's structured affordances
 
 `mvmctl mcp` adds the MCP transport. It exposes mvm's microVM
 template registry as a single parameterized `run` tool — borrowing
-nix-sandbox-mcp's design insight that one tool with an `env`
+the design insight of an external single-tool Nix sandbox MCP server (referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`) that one tool with an `env`
 parameter keeps the LLM context-window cost flat (~420 tokens)
-regardless of how many envs the user has built. nix-sandbox-mcp's
+regardless of how many envs the user has built. That MCP server's
 own roadmap explicitly lists "microvm.nix backend" as future work
 because microVMs are "the right choice for running untrusted code
 from the internet"; mvm already has that backend. The combination
-— mvm's isolation strength with nix-sandbox-mcp's tool-design
+— mvm's isolation strength with that MCP server's tool-design
 ergonomics — is the point.
 
 ## Threat model (additive over ADR-002)
@@ -128,7 +128,7 @@ Surfaces specific to this ADR:
   keeping it tiny: protocol types + stdio loop, no business logic.
 - The `run` tool's lack of structured stdin (only `code` as a
   string) means clients have to pre-render scripts into a single
-  string. nix-sandbox-mcp has the same shape; we'll match it.
+  string. The external MCP server has the same shape; we'll match it.
 
 ### Explicit non-goals
 
@@ -137,7 +137,7 @@ Surfaces specific to this ADR:
 - **Per-tenant authentication.** mvm is single-host; mvmd handles
   tenant auth.
 - **Streaming responses.** v1 returns one `tools/call` response per
-  request, not a stream. nix-sandbox-mcp does the same. If the LLM
+  request, not a stream. The external MCP server does the same. If the LLM
   ecosystem moves to require streaming we revisit.
 - **Wire compatibility with non-mvm MCP servers' run tools** beyond
   the parameter-name overlap (`env`, `code`, `session`). Different
@@ -164,5 +164,5 @@ existing audit logs. Keep them even if the MCP server is dropped.
 - Plan 32: `specs/plans/32-mcp-agent-adoption.md`
 - Plan 33: `specs/plans/33-hosted-mcp-transport.md`
 - Related ADRs: ADR-002 (microVM security posture)
-- Upstream design: [SecBear/nix-sandbox-mcp](https://github.com/SecBear/nix-sandbox-mcp) — single-tool design pattern
+- Upstream design: the external single-tool Nix sandbox MCP server — single-tool design pattern
 - MCP protocol spec: <https://modelcontextprotocol.io/>

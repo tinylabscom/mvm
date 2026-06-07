@@ -148,7 +148,7 @@ Fetched the seed deck (export/txt). Added **§0b Positioning & marketing goals**
 ### A27. Isolation-dimensions coverage map + config-file-for-environment (this turn)
 - **Sandboxing dimensions** (your question): the classic triad is the floor. Added **§3f** — a 15-row coverage map (kernel, process, FS-access, FS-confidentiality, egress, ingress, memory, compute/DoS, device, secret, control-plane, audit, temporal/state, supply-chain, multi-tenant). The 3 named are shipped+gated for process + FS-access + egress; the two **live gaps the rewrite closes are at-rest encryption (FS confidentiality) + ingress parity**; memory-vs-malicious-host (CC) + hardware side-channels are the deferred frontier.
 - **Config file for environment** (#5 follow-up): yes — layered typed config (defaults < `~/.config/mvm/config.toml` < project `mvm.toml`/`.mvm/` < env < flags) with named dev/prod profiles. Nuance folded in: config selects mode/defaults, but the prod security *tier* is structural/build-time (`do_exec` compiled out — claim 4), never a config toggle.
-- **Confirmations:** #1 (complete refactor) ✅, #6 (mvm-managed AEAD — now marked **DECIDED**) ✅, #8 (REST+OpenAPI) ✅, #9 (rotation) ✅, #13 (ExampleBackend stub + Lima reframe; **microsandbox stays forbidden**) ✅, #15 (local now, push when work starts) ✅.
+- **Confirmations:** #1 (complete refactor) ✅, #6 (mvm-managed AEAD — now marked **DECIDED**) ✅, #8 (REST+OpenAPI) ✅, #9 (rotation) ✅, #13 (ExampleBackend stub + Lima reframe; **the removed predecessor sandbox stays forbidden** — external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`) ✅, #15 (local now, push when work starts) ✅.
 
 ### A28. Stage B architecture ADR written; crate graph / process model / topology resolved (this turn)
 Stage B's architecture ADR is written: **ADR-066** (`specs/adrs/066-target-architecture.md`). It is canonical for the target architecture and **supersedes A16 / §3 where they differ.** Resolved this turn:
@@ -200,7 +200,7 @@ The owner pushed to verify before writing plans; four read-only explorations cor
 > - Sealed **app-deps** volumes (ADR-047, claim 11); **host-services broker** — binding-gated, no raw secrets (ADR-059/061/062, claims 12/13); **runtime overlay** for the universal agent (ADR-051).
 > - **Rust** is the default boundary language (ADR-063); SDK decorator parse is **static** (never runs user code on the host).
 > - **Immutability** (rebuild, not mutate) + dev-mode exception; **no backwards compat** (pre-1.0).
-> - Dead/forbidden — never reintroduce: microsandbox, smolvm, ur-seed, external build-cache providers. (**Lima is different**: a legitimate backend that was *dropped* — re-addable later via the `VmBackend` trait; just not in this rewrite.)
+> - Dead/forbidden — never reintroduce: the removed predecessor sandbox, smolvm, ur-seed, external build-cache providers. (**Lima is different**: a legitimate backend that was *dropped* — re-addable later via the `VmBackend` trait; just not in this rewrite.)
 >
 > ### 0b. Positioning & marketing goals (from the seed deck) — the architecture must serve these
 > The product is sold as **"secure microVM infrastructure for AI-native workloads"** — hardened microVMs for agents, code interpreters, and anything running model-generated code: *Isolated. Signed. Policy-governed. Audited. Sub-150 ms cold boot.* Mantra: **"Run the workload. Isolate the tenant. Enforce the policy. Audit the execution."** "If you're shipping an AI agent to production, it belongs on MVM." Each claim below is a **public promise** the rearchitecture must keep true:
@@ -471,7 +471,7 @@ The owner pushed to verify before writing plans; four read-only explorations cor
 > Keep these as a single backlog index so nothing is lost; don't let adjacent network/L7 work foreclose them.
 >
 > ### 8. Constraints & taboos
-> - **Never** name external inspiration projects in filenames, branches, worktrees, code, comments, commits, or any repo text. (And never reintroduce `microsandbox`, `smolvm`, or `ur-seed` — all dead/forbidden per memory.)
+> - **Never** name external inspiration projects in filenames, branches, worktrees, code, comments, commits, or any repo text. (And never reintroduce the removed predecessor sandbox, `smolvm`, or `ur-seed` — all dead/forbidden per memory.)
 > - **No plan/ADR numbers in code.**
 > - Respect the **mvmd** boundary: no `--prod` admission policy or tenant orchestration in this repo.
 > - Confirm any destructive or outward-facing step before taking it.
