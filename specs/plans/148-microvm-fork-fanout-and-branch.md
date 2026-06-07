@@ -1,4 +1,4 @@
-# Plan 148 — MicroVM fork fan-out + live BRANCH (forkd-inspired)
+# Plan 148 — MicroVM fork fan-out + live BRANCH (fork/snapshot-sibling-inspired)
 
 > Number 148 is the next free integer (145–147 are claimed: 145 app-deps-completion
 > on `main`, 146 cloud-hypervisor-tier1-parity, 147 portable-runnable-artifacts).
@@ -7,9 +7,11 @@
 
 ## Context
 
-[forkd](https://github.com/deeplethe/forkd) is the closest public sibling to mvm:
-Firecracker microVMs, Rust, AI-agent sandboxing, an explicit security posture. Its
-one genuinely novel mechanism is **fork fan-out** — pause a *warmed* parent, then
+The closest public sibling to mvm — a Rust Firecracker-microVM fork/snapshot tool
+for AI-agent sandboxing with an explicit security posture (referred to obliquely per
+[[feedback_no_competitor_names_anywhere]]; trait key in auto-memory
+`reference_external_sandbox_control_plane_oblique_key`) — has one genuinely novel
+mechanism: **fork fan-out** — pause a *warmed* parent, then
 spawn N children as separate Firecracker processes that `mmap` the parent's memory
 image `MAP_PRIVATE`, so the kernel does page-level copy-on-write and children share
 the parent's resident RAM until they diverge ("100 microVMs in 101 ms," full KVM
@@ -23,13 +25,12 @@ base `mem.bin`/`vmstate.bin` and per-instance deltas; `instance_wake`
 Firecracker UFFD/NBD/hugepages fast-resume substrate; Plan 140 closes the four
 restore-correctness gaps (seccomp, entropy reseed, clock resync, wake-admission).
 **What's missing is the fan-out: many children from one warm parent, and a
-live-branch of a running workload.** That is the forkd delta, and the agent
+live-branch of a running workload.** That is the sibling's delta, and the agent
 fan-out use case (parallel rollouts, code-interpreter swarms, SWE-bench evals) is
 squarely mvm/mvmd territory.
 
-**Decision up front — no vendored Firecracker.** forkd vendors a patched
-Firecracker (`forkd-v0.4-mem-backend-shared`) to expose `mmap MAP_SHARED` on a
-memfd-backed *live* parent. That collides with three standing principles: keep VMM
+**Decision up front — no vendored Firecracker.** The sibling vendors a patched
+Firecracker branch to expose `mmap MAP_SHARED` on a memfd-backed *live* parent. That collides with three standing principles: keep VMM
 specifics behind the backend trait (the trick is Firecracker/x86_64/Linux-only,
 with no libkrun/Vz/AppleContainer analogue); replace a problematic dep rather than
 maintain a fork against upstream; and don't pay a vendored-hypervisor tax for a win
@@ -131,14 +132,14 @@ entropy_seed }`), `crates/mvm-core` plan/audit (`synthesize_plan` / `admit_for_r
 ## Phase B — live BRANCH (bounded spike, go/no-go)
 
 Branching a **running** parent into divergent children inheriting in-flight state is
-forkd's speculative-branch feature and the one piece that wants a live shared-memory
+the sibling's speculative-branch feature and the one piece that wants a live shared-memory
 parent. This phase is investigation, not a vendoring commitment.
 
 ### Task B1: feasibility spike on stock Firecracker
 
 - [ ] **Step 1:** Measure stock Firecracker's pause → Diff-snapshot → resume window
       on a representative running workload (warmed deps, ~1–4 GiB RSS) at the dirty-
-      page volumes a mid-execution branch produces. forkd's own numbers: full-copy
+      page volumes a mid-execution branch produces. The sibling's own numbers: full-copy
       branch was 29.3 s, diff-snapshot dropped it to 205 ms, async UFFD_WP live mode
       to 56 ms. The question for us: **is upstream Firecracker's Diff snapshot
       pause-window acceptable** (children restore via Phase A's shared-base path from
@@ -199,7 +200,7 @@ parent. This phase is investigation, not a vendoring commitment.
 
 - **Why this isn't just Plan 123/140 again:** 123 C2 and 140 make *one* VM resume
   fast and correct. This plan makes *N* children share *one* base's resident RAM and
-  proves each diverges security-correctly — the fan-out forkd is built around. The
+  proves each diverges security-correctly — the fan-out the sibling is built around. The
   single-restore path is the prereq, not the feature.
 - **The honest win:** Phase A gives the "many-from-one" amortized-warmup benefit on
   stock Firecracker via page-cache sharing of a frozen base. The sub-ms `mmap`
