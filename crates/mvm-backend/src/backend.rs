@@ -526,6 +526,14 @@ impl AnyBackend {
         self.inner().stop(id)
     }
 
+    /// Block until a VM exits and return its captured exit status.
+    /// Plan 152 WS-A Task 3.1. Delegates to the inner backend; only
+    /// libkrun (and mock) implement a real wait surface — other backends
+    /// return a clear bail via the default VmBackend impl.
+    pub fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
+        self.inner().wait(id)
+    }
+
     pub fn stop_all(&self) -> Result<()> {
         self.inner().stop_all()
     }

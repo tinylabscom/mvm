@@ -2819,6 +2819,15 @@ fn test_session_attach_continue_parses() {
 }
 
 #[test]
+fn test_up_wait_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait"]).unwrap();
+    match cli.command {
+        Commands::Up(ref a) => assert!(a.wait),
+        _ => panic!("expected up"),
+    }
+}
+
+#[test]
 fn test_session_attach_resume_parses() {
     let cli =
         Cli::try_parse_from(["mvmctl", "session", "attach", "-r", "aaaaaaaaaaaaaaaa"]).unwrap();

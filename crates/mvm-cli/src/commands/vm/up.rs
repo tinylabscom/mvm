@@ -800,6 +800,10 @@ pub(in crate::commands) struct Args {
     /// Run in background (detached mode, like docker run -d)
     #[arg(short, long)]
     pub detach: bool,
+    /// Block until the workload powers off, then exit with its code
+    /// (one-shot workloads). Plan 152 WS-A.
+    #[arg(long)]
+    pub wait: bool,
     /// Network preset (unrestricted, none, registries, dev)
     #[arg(long)]
     pub network_preset: Option<String>,
@@ -1103,6 +1107,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         workload_ir_path: args.from_workload_ir.as_deref(),
         up_json: args.up_json,
         services_health_timeout_secs: cfg.effective_services_health_timeout_secs(),
+        wait: args.wait,
     })?;
 
     // Plan 73 Followup H-live: after a successful boot, emit a
@@ -1213,6 +1218,10 @@ pub(in crate::commands) struct RunParams<'a> {
     /// `~/.mvm/config.toml` flow through without `cmd_run` itself
     /// re-reading the config.
     pub(super) services_health_timeout_secs: u64,
+    /// `true` when `--wait` was set. After the agent-ready check
+    /// confirms the workload booted, block until it powers off and
+    /// propagate its exit code. Plan 152 WS-A.
+    pub(super) wait: bool,
 }
 
 pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
@@ -1249,6 +1258,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         workload_ir_path,
         up_json: _up_json,
         services_health_timeout_secs,
+        wait,
     } = params;
     let _span =
         tracing::info_span!("cmd_run", name = ?name, cpus = ?cpus, memory_mib = ?memory).entered();
@@ -1988,6 +1998,27 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             emit_failed_if(&admission_main, "agent-unreachable", &err);
             return Err(err);
         }
+    }
+
+    // Plan 152 WS-A — block until the workload powers off and propagate its
+    // exit code. Only wired for libkrun today (Task 3.1 adds the wait impl
+    // there); other backends fall through to the default bail. `--detach`
+    // already short-circuits before this block so `!detach` is implicit here.
+    if wait && matches!(effective_hypervisor, "libkrun" | "firecracker") {
+        let id = mvm_core::vm_backend::VmId(vm_name_owned.clone());
+        let status = backend.wait(&id)?;
+        let code = status.code.unwrap_or(1);
+        if let Some(ctx) = &admission_main
+            && let Err(e) = ctx
+                .emitter
+                .emit_exited(&ctx.admitted.plan, code, effective_hypervisor)
+        {
+            tracing::warn!(error = %e, "audit emit_exited failed (non-fatal)");
+        }
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
     }
 
     // Apple Virtualization VMs live in-process — the process must stay alive.

@@ -357,8 +357,6 @@ impl AuditEmitter {
 
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code. Plan 152 WS-A.
-    // Wired from the wait-exit path in Task 3.3+; suppress dead_code until then.
-    #[allow(dead_code)]
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
         self.emit(
             plan,
