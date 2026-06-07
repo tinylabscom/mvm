@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use mvm_sdk::ir::SecretRef;
+use mvm_sdk::ir::{AuthType, SecretRef};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -120,6 +120,15 @@ impl<'a> SubstitutionEndpoint<'a> {
             registry,
             injector: Injector::new(resolver),
         }
+    }
+
+    /// The `(secret name, auth-type)` a placeholder resolves to — for audit
+    /// labelling. `None` for an unknown placeholder. No value is touched, so
+    /// this is safe to call without triggering a decrypt.
+    pub fn resolve_meta(&self, placeholder: &str) -> Option<(String, AuthType)> {
+        self.registry
+            .resolve(placeholder)
+            .map(|r| (r.name.clone(), r.auth_type))
     }
 
     /// Substitute `placeholder` in `request_text` with the real credential

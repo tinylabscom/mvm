@@ -72,6 +72,9 @@ pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
+/// Plan 129 / ADR-067 §4 + claim 13 — chain-signed `secret.substituted` /
+/// `secret.placeholder_dropped` audit events (metadata only, never the value).
+pub mod secret_audit;
 pub mod secrets_scanner;
 /// Plan 129 / ADR-067 §1 — host substitution endpoint request preparation
 /// (placeholder → real credential, binding-checked). The forward leg + the
