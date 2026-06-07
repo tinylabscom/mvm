@@ -109,12 +109,20 @@ ADR-067 §3 fallback. The raw value must hit the wire, so confine it: decrypt on
 
 ADR-067 §1. The workload routes a secret-bearing request to a host endpoint (host-local hop) carrying an opaque placeholder; the endpoint binds-checks, calls the signer/injector, makes the real TLS, streams back.
 
-**Files:** the egress proxy in `mvm-network` (123) — add the substitution stage; `crates/mvm-sdk` client routing.
+**Files:** `crates/mvm-hostd/src/keyholder/substitution.rs` (dispatch core); the egress proxy in `mvm-network`/`gateway_bridge` (transport leg); `crates/mvm-sdk` client routing.
 
-- [ ] **Step 1:** Failing integration test — a request to an `allowed_hosts` destination carrying a placeholder comes back substituted (the destination, a mock, sees the real credential; the guest-side capture never does). A request to a non-allowed host has the placeholder **dropped** (mock sees the placeholder, not a secret) and an audit entry emitted.
-- [ ] **Step 2:** Placeholder = an opaque, per-session, single-use token minted at admission and mapped to a `SecretRef` (not the secret name — a leaked token reveals nothing and can't be replayed). The endpoint resolves token → `SecretRef` → signer/injector. Wire it as a stage in 123's proxy.
+> **Reconciliation:** the dispatch *core* lives in `mvm-hostd/src/keyholder/substitution.rs` next to the resolver/keyholder it composes (mvm-hostd → mvm-network, so it can later be driven from the proxy). ADR-067 §1's mechanism is the **endpoint-hop** (host-local vsock/UDS, real-TLS to the destination from the host), not a packet-level rewrite inside the guest's TLS — so the A3 `SubstitutionStage` byte-rewrite seam is *not* the substitution path; it stays available for plaintext and the A3 `ScanStage` is Phase E's leak backstop.
+
+- [x] **Step 1 (logic):** Tests — a placeholder for an `allowed_hosts` destination is substituted to the real credential (output carries the value, the placeholder is gone); a non-allowed destination is refused (`DestinationNotBound`) and a spy resolver proves **no decrypt**; an unknown placeholder is refused without decrypting; session isolation (a placeholder from another registry doesn't resolve). *(Full socket integration with a mock destination + the live bridge + audit emit = the transport-leg follow-up.)*
+- [x] **Step 2 (core):** `Placeholder` = opaque high-entropy per-session token (`mvm-secret-<hex>`, not the secret name); `SubstitutionRegistry::mint` records token→`SecretRef`, `resolve` is session-scoped (cross-session replay impossible); `SubstitutionEndpoint::substitute` resolves token → `SecretRef` → injector with the claim-12 binding check. *(Wiring it as a stage in 123's proxy + the signer-path endpoint shape = transport-leg follow-up.)*
 - [ ] **Step 3:** SDK routing — the `mvm-sdk` HTTP client (and a documented `HTTP_PROXY`-style escape for non-SDK clients) sends secret-bearing requests to the endpoint with the placeholder. `Sandbox` exposes `mvm.secret("openai")` returning the placeholder token.
-- [ ] **Step 4: Commit.**
+- [ ] **Step 4: Commit.** *(dispatch core committed; remaining steps below.)*
+
+### deferred follow-ups (Phase D)
+
+- [ ] Transport leg: drive `SubstitutionEndpoint` from a host-local vsock/UDS endpoint inside 123's proxy, make the real TLS to the destination, stream back; full socket integration test with a mock destination + the live bridge (run on real sockets, no VM — sibling to the `run_libkrun_gvproxy_bridge` tests) + the `secret.substituted`/`secret.placeholder_dropped` audit emit (Phase E2).
+- [ ] Signer-path endpoint shape: the SigV4/HMAC path computes a signature over the canonical request and adds the `Authorization` header (different request shape than the injector's placeholder-substitute); route by `auth_type`.
+- [ ] SDK routing (Step 3): `mvm-sdk` HTTP client → endpoint + `mvm.secret("openai")` returning a placeholder + the `HTTP_PROXY`-style escape for non-SDK clients.
 
 ## Phase E — leak-detection + audit (needs 123's proxy)
 
