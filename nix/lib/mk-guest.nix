@@ -215,7 +215,10 @@ let
   setprivWrap = uid: cmd:
     if uid == 0 then cmd
     else
-      "exec ${pkgs.util-linux}/bin/setpriv "
+      # No exec: PID 1 runs the workload as a child so /init can capture $?
+      # (Plan 152 WS-A). Persistent services exec `sleep infinity` inside
+      # and never return.
+      "${pkgs.util-linux}/bin/setpriv "
       + "--reuid=${toString uid} --regid=${toString uid} "
       + "--clear-groups --no-new-privs -- ${cmd}";
 
@@ -537,13 +540,17 @@ let
     # both (the legacy single-file path).
     MVM_BOOT=/etc/mvm/entrypoint
     [ -e /etc/mvm/boot ] && MVM_BOOT=/etc/mvm/boot
+    # Run the workload as a child (setprivWrap no longer execs) so PID 1
+    # can capture its exit code. Persistent services exec `sleep infinity`
+    # inside and never return here. Plan 152 WS-A.
     . "$MVM_BOOT"
-
-    # If the boot command exits or doesn't exec, the kernel panics.
-    # The fallthrough echo gives a chance to capture *why* via
-    # console before that happens.
-    echo "mvm: $MVM_BOOT returned without exec — kernel will panic"
-    /bin/busybox sleep 5
+    MVM_CODE=$?
+    # Report the exit code to the host (best-effort), then power off —
+    # never reboot. The host reads it from the control vsock port.
+    /usr/local/bin/mvm-exit-report "$MVM_CODE" || \
+      echo "mvm: exit-report failed (code=$MVM_CODE); powering off anyway"
+    /bin/busybox sync
+    /bin/busybox poweroff -f
   '';
 
   # Render the entrypoint as a shell-sourced fragment. /init does
