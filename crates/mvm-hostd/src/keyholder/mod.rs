@@ -6,6 +6,8 @@
 //! adds the signer/injector that uses a resolved value on egress without
 //! ever handing it to the guest (claims 12/13).
 
+pub mod binding;
 pub mod resolver;
 
+pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
