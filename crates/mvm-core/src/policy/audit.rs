@@ -155,6 +155,13 @@ pub enum LocalAuditKind {
     /// `mvmctl cache prune --orphan-builds`. The detail field carries
     /// the count and (for small sweeps) the truncated slot hashes.
     SlotPrune,
+    /// Reconcile-on-entry convergence healed registry/runtime drift
+    /// (Plan 169 WS-A / ADR-074): a dead-process record was torn down, a
+    /// stale record dropped, or an orphan state dir reaped. One entry per
+    /// healed item; the `detail` field carries `action=<classification>`.
+    /// Emitted by `mvmctl reconcile` and the cheap convergence pass run at
+    /// CLI entry for state-touching commands.
+    RegistryReconcile,
     // --- Sandbox SDK foundation (fs/proc/share/pause/TTL/tags) ---
     // The verbs below are state-changing CLI surfaces added by the
     // sandbox-SDK foundation work. Each kind names a single mutation
@@ -1026,6 +1033,17 @@ mod tests {
     /// policy-deny variant. A future maintainer who tries to
     /// collapse them into one kind fails this test and reads
     /// the doc comment explaining why they're separate.
+    #[test]
+    fn registry_reconcile_kind_serializes_snake_case() {
+        // Plan 169 WS-A — the convergence audit kind must serde-roundtrip
+        // (snake_case per the enum attr) so emission + chain verification
+        // stay stable.
+        let json = serde_json::to_string(&LocalAuditKind::RegistryReconcile).unwrap();
+        assert_eq!(json, "\"registry_reconcile\"");
+        let parsed: LocalAuditKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, LocalAuditKind::RegistryReconcile);
+    }
+
     #[test]
     fn w2_mandatory_deny_is_separate_from_policy_deny() {
         // PartialEq + serialize both establish identity.

@@ -15,6 +15,7 @@ pub mod egress_proxy;
 pub mod instance_snapshot;
 pub mod name_registry;
 pub mod overlay;
+pub mod reconcile;
 pub mod template;
 pub mod vminitd_client;
 pub mod volume_registry;
