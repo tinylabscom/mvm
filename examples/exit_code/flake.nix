@@ -13,11 +13,26 @@
   # This fixture bakes `sh -c 'exit 7'` as the sealed workload so a clean
   # E2E run of `mvmctl up --flake ./examples/exit_code --wait` must exit 7.
   #
+  # ── Canonical user-flake form (matches `mvmctl compile`'s output) ──
+  #
+  # This is shaped EXACTLY like the SDK-generated flake
+  # (crates/mvm-sdk/src/compile/flake.rs): it declares `inputs.mvm`
+  # pinned to GitHub, follows `mvm/nixpkgs`, and builds the image via
+  # `mvm.lib.<system>.mkGuest`. The literal `github:tinylabscom/mvm`
+  # string is load-bearing: from a source checkout, `mvmctl up`'s
+  # source-checkout override mode (dev_build.rs `local_mvm_workspace`)
+  # only triggers when the user flake pins `mvm` to GitHub — it then
+  # rewrites it to the in-repo `path:/work/nix` via
+  # `--override-input mvm path:/work/nix --override-input
+  # mvm/mvm-workspace "path:$MVM_SRC"`. So this resolves against the
+  # in-repo flake at build time without a release round-trip, and locks
+  # against GitHub on the host before staging.
+  #
   # ── entrypoint shape ──────────────────────────────────────────────
   #
   # `entrypoint.command = [ "/bin/busybox" "sh" "-c" "exit 7" ]`
   #
-  # The `command` form → mkGuest infers sealed/prod (isDev = false),
+  # The `command` form → mkGuest infers sealed/prod (dev = false),
   # builds the agent without `dev-shell` (no console, no do_exec),
   # and writes the rendered command to /etc/mvm/entrypoint (mode 0500).
   # /init sources it, captures $?, reports, poweroffs.
@@ -26,65 +41,32 @@
   # not an idle boot loop + per-call agent dispatch. That is exactly the
   # non-function-service sealed path.
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    microvm = {
-      url = "github:microvm-nix/microvm.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-  };
+  inputs.mvm.url = "github:tinylabscom/mvm/main?dir=nix";
+  inputs.nixpkgs.follows = "mvm/nixpkgs";
 
   outputs =
-    { self, nixpkgs, microvm, ... }:
+    { self, mvm, nixpkgs, ... }:
     let
-      systems = [ "aarch64-linux" "x86_64-linux" ];
-      forAllSystems = nixpkgs.lib.genAttrs systems;
-
-      # Resolve the workspace root the same way builder-vm / default-tenant do:
-      # - In the builder VM (Nix sandbox, impure eval), mvmctl sets MVM_WORKSPACE_PATH.
-      # - On a developer host with impure allowed, the relative ../../.. fallback
-      #   reaches the workspace root from examples/exit_code/.
-      workspaceRoot =
-        let envPath = builtins.getEnv "MVM_WORKSPACE_PATH";
-        in if envPath != "" then /. + envPath else ../../..;
-
-      # The workspace-filter.nix brings only non-artifact files into the store
-      # so the Rust cross-compile sees the Cargo.lock without ingesting
-      # multi-GB target/ or .build/ trees.
-      workspace =
-        (import (workspaceRoot + "/nix/lib/workspace-filter.nix") {
-          inherit (nixpkgs) lib;
-        })
-        { inherit workspaceRoot; };
-
-      libFor = system:
-        (import (workspace + "/nix/lib") {
-          inherit nixpkgs microvm;
-          mvmSrc = workspace;
-        }) { inherit system; };
-
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      eachSystem = f: builtins.listToAttrs
+        (map (s: { name = s; value = f s; }) systems);
     in
     {
-      packages = forAllSystems (system:
-        let
-          lib = libFor system;
-
-          rootfs = lib.mkGuest {
+      packages = eachSystem (system:
+        {
+          default = mvm.lib.${system}.mkGuest {
             name = "exit-code-7";
 
             # `command` form → sealed/prod image, no dev-shell.
             # mkGuest renders this to /etc/mvm/entrypoint; /init sources it,
             # captures $?, calls mvm-exit-report, poweroffs.
-            # busybox is already in the rootfs as /bin/busybox — no packages = needed.
+            # busybox is already in the rootfs as /bin/busybox.
             entrypoint.command = [ "/bin/busybox" "sh" "-c" "exit 7" ];
 
-            hypervisor = "libkrun";  # matches mvmctl default on macOS
+            hypervisor = "libkrun"; # matches mvmctl default on macOS
             vcpus = 1;
             memory_mib = 256;
           };
-        in
-        {
-          default = rootfs;
         });
     };
 }
