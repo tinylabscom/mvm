@@ -3388,6 +3388,7 @@ dependencies = [
  "libkrun-sys",
  "mvm-backend",
  "mvm-core",
+ "mvm-guest",
  "mvm-hostd",
  "serde",
  "serde_json",

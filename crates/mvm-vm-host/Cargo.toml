@@ -32,6 +32,8 @@ mvm-hostd = { workspace = true }
 # Codesigning gate on macOS (apple_container::ensure_signed) for the
 # libkrun supervisor bin.
 mvm-backend = { workspace = true }
+# vsock port constants (WORKLOAD_EXIT_PORT) for the exit-capture thread.
+mvm-guest = { workspace = true }
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow = { workspace = true }

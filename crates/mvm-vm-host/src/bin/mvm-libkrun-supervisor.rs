@@ -111,6 +111,34 @@ fn main() -> ExitCode {
         }
     };
 
+    // Plan 152 WS-A: bind the workload-exit control listener and capture
+    // the guest's exit code on a background thread. Must bind BEFORE the
+    // run dispatch (libkrun's listen=false proxy needs a live socket
+    // before start_enter). Best-effort: a bind failure must not block
+    // boot — workload.exit simply stays absent and the host reads "unknown".
+    if cfg
+        .krun
+        .host_listen_ports
+        .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT)
+    {
+        let state_dir = std::path::PathBuf::from(&cfg.vm_state_dir);
+        let control_sock = state_dir.join(format!(
+            "vsock-{}.sock",
+            mvm_guest::vsock::WORKLOAD_EXIT_PORT
+        ));
+        let _ = std::fs::remove_file(&control_sock);
+        match std::os::unix::net::UnixListener::bind(&control_sock) {
+            Ok(listener) => {
+                std::thread::spawn(move || {
+                    if let Err(e) = mvm_vm_host::exit_capture::capture_once(&listener, &state_dir) {
+                        eprintln!("mvm-libkrun-supervisor: exit capture: {e}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("mvm-libkrun-supervisor: bind control socket: {e}"),
+        }
+    }
+
     // Plan 102 W6.A.5 — route to the bridge path when the producer
     // populated the audit substrate, otherwise fall back to the
     // legacy direct-libkrun path (Stage 0 builder VMs, smoke tests,
