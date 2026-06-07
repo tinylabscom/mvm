@@ -18,6 +18,10 @@ use mvm_sdk::ir::{SecretMount, SecretRef};
 use super::binding::BindingStore;
 use super::substitution::{Placeholder, SubstitutionRegistry};
 
+/// `(guest-facing name, opaque placeholder)` pairs handed to the guest so the
+/// workload sends the placeholder where its credential would go.
+pub type HandedPlaceholders = Vec<(String, Placeholder)>;
+
 /// Errors from assembling the registry at admission.
 #[derive(Debug, thiserror::Error)]
 pub enum AssembleError {
@@ -40,7 +44,7 @@ pub fn assemble_registry(
     plan_secrets: &[SecretBinding],
     tenant: &str,
     bindings: &dyn BindingStore,
-) -> Result<(SubstitutionRegistry, Vec<(String, Placeholder)>), AssembleError> {
+) -> Result<(SubstitutionRegistry, HandedPlaceholders), AssembleError> {
     let mut registry = SubstitutionRegistry::new();
     let mut handed = Vec::new();
     for b in plan_secrets {
