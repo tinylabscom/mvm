@@ -34,6 +34,10 @@ fn top_level_command_summaries_stay_short() {
     let longest_allowed = 72;
     let long_summaries = cli_command()
         .get_subcommands()
+        // Hidden internal commands (e.g. `__qemu-vsock-bridge`) never
+        // appear in user-facing help, so the summary-length UX rule
+        // doesn't apply to them.
+        .filter(|cmd| !cmd.is_hide_set())
         .filter_map(|cmd| {
             cmd.get_about().and_then(|about| {
                 let about = about.to_string();
