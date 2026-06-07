@@ -8,6 +8,8 @@
 
 pub mod binding;
 pub mod resolver;
+pub mod signer;
 
 pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
+pub use signer::{SigV4Input, SignError, Signature, Signer};
