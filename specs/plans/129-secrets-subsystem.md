@@ -75,26 +75,33 @@ ADR-067 §2 — the local define path so the demo needs no `mvmd`.
 
 ## Phase C — keyholder (123-independent)
 
+> **Reconciliation:** both live under `crates/mvm-hostd/src/keyholder/` (`signer.rs`, `injector.rs`), not the plan's standalone `secret_signer/`/`secret_injector/` — ADR-067 §3 literally calls signer+injector "the keyholder, split by auth-type", so they sit with the resolver + binding store under one cohesive module. Both take a `&dyn SecretResolver`. The separate-process moat (a `[[bin]]` under the jailer) is **deferred** — see "deferred follow-ups" below; the in-process lib is what D/E wire against, and the jailer wrap is orthogonal to the signing/injecting logic.
+
 ### Task C1: the signer (signing-based: SigV4, HMAC)
 
 ADR-067 §3 gold path. The signer takes a canonical request + a `SecretRef`, returns a signature; the key never leaves it. Hardware-sealed when a Secure Enclave/TPM is present, else a jailed software signer — **same interface**.
 
-**Files:** `crates/mvm-hostd/src/secret_signer/` (new module + a `[[bin]]` per the §3 separate-process model); reuse `core::subprocess`.
+**Files:** `crates/mvm-hostd/src/keyholder/signer.rs`.
 
-- [ ] **Step 1:** Failing test — given a SigV4 canonical request and a stored signing key, the signer returns a signature that verifies, and the key bytes never appear in the returned struct or the signer's public surface (assert the response type has no key field; `check-no-display-on-secret-types` covers Debug).
-- [ ] **Step 2:** Implement SigV4 + HMAC signing (existing `hmac`/`sha2`); key loaded via the resolver into the signer's confined memory (software path) or referenced by handle (hardware path — `keyring` → Secure Enclave on macOS). Zeroize after. Run under the jailer (ADR-066 §3).
-- [ ] **Step 3:** Hardware-optional test — with no Secure Enclave, the software path runs and zeroizes (assert the key is wiped post-sign); with a sealed handle present, signing uses it. No hardware required for the suite to pass.
-- [ ] **Step 4: Commit.**
+- [x] **Step 1:** Tests — `Signer::sign_hmac`/`sign_sigv4` return a signature; `Signature` has no key field (no key on the public surface; `check-no-display-on-secret-types` covers Debug). Verified against **published vectors**: RFC 4231 HMAC-SHA256 case 2 + aws-sig-v4-test-suite `get-vanilla`.
+- [x] **Step 2:** SigV4 + HMAC over existing `hmac`/`sha2`; key resolved into confined memory; derived SigV4 keys live in `Zeroizing` buffers (no intermediate lingers); the resolved value is a `SecretBox` that wipes on drop. Wrong auth type (bearer/basic) refused → signer is signing-only. (Hardware-sealed handle + jailer wrap: deferred follow-up.)
+- [x] **Step 3:** Software path runs with no hardware (the default; all tests exercise it). Sealed-handle path is the deferred hardware follow-up.
+- [x] **Step 4: Commit.**
 
 ### Task C2: the injector (bearer / basic)
 
 ADR-067 §3 fallback. The raw value must hit the wire, so confine it: decrypt only inside the injector, inject into the request, zeroize. Honest — not "never seen", but minimal + audited.
 
-**Files:** `crates/mvm-hostd/src/secret_injector/` (new).
+**Files:** `crates/mvm-hostd/src/keyholder/injector.rs`.
 
-- [ ] **Step 1:** Failing test — the injector replaces a placeholder in a request header with the resolved value and zeroizes its copy; on a destination not in `allowed_hosts` it refuses (returns `DestinationNotBound`, claim 12) and never decrypts.
-- [ ] **Step 2:** Implement: check `allowed_hosts` *before* resolving (no decrypt for an unbound destination), inject, zeroize. Encrypted at rest via 122's DEK/KEK.
-- [ ] **Step 3: Commit.**
+- [x] **Step 1:** Tests — `Injector::inject_placeholder` substitutes the resolved value into the outbound text and returns it `Zeroizing` (wipes on drop); a destination not in `allowed_hosts` returns `DestinationNotBound` (claim 12) and a spy resolver proves **no decrypt** happened; a signing auth type returns `WrongAuthType`, also without decrypting.
+- [x] **Step 2:** `allowed_hosts` (and auth-type) checked *before* resolve — no decrypt for an unbound destination; `*.` wildcard binding honored via `host_matches`. (Encrypted-at-rest via 122's DEK/KEK is the value store's concern.)
+- [x] **Step 3: Commit.**
+
+### deferred follow-ups (Phase C)
+
+- [ ] Separate-process moat: run the signer + injector as jailed `[[bin]]`s (ADR-066 §3 / `core::subprocess`) so a compromised signer can't read the supervisor's address space. The in-process lib is correct and tested; this is a confinement hardening, sequenced with the broker subprocess model.
+- [ ] Hardware-sealed signing path: load the SigV4/HMAC key by handle from the OS keyring → Secure Enclave on macOS, so the host never sees the plaintext key. Same `Signer` interface; the software path is the no-hardware default already shipped.
 
 ## Phase D — substitution endpoint + SDK routing (needs 123's proxy)
 

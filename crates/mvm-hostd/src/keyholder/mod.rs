@@ -7,9 +7,11 @@
 //! ever handing it to the guest (claims 12/13).
 
 pub mod binding;
+pub mod injector;
 pub mod resolver;
 pub mod signer;
 
 pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
+pub use injector::{InjectError, Injector};
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer};
