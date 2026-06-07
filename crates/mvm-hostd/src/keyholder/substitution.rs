@@ -21,6 +21,13 @@ use zeroize::Zeroizing;
 use super::injector::{InjectError, Injector};
 use super::resolver::SecretResolver;
 
+/// The host-owned namespace every minted [`Placeholder`] carries. This prefix
+/// is reserved: it must never appear in a workload's own egress, so the
+/// Phase E leak scan can drop any non-substitution egress that contains it
+/// (ADR-067 §1 backstop) — the legitimate substitution path routes the
+/// placeholder to the host-local endpoint, never out the raw egress wire.
+pub const PLACEHOLDER_PREFIX: &str = "mvm-secret-";
+
 /// An opaque, per-session placeholder standing in for a secret on the guest
 /// side. **Not** the secret name and **not** the value: a leaked
 /// placeholder reveals nothing and resolves to nothing outside the session
@@ -55,7 +62,7 @@ impl SubstitutionRegistry {
     pub fn mint(&mut self, secret: SecretRef) -> Placeholder {
         let mut bytes = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut bytes);
-        let ph = Placeholder(format!("mvm-secret-{}", hex::encode(bytes)));
+        let ph = Placeholder(format!("{PLACEHOLDER_PREFIX}{}", hex::encode(bytes)));
         self.map.insert(ph.clone(), secret);
         ph
     }

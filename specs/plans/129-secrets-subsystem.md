@@ -137,9 +137,9 @@ ADR-067 §1 backstop, **expanded (owner, 2026-05-31):** the scan catches not jus
 
 **Files:** the egress proxy scan stage in `mvm-network` (123 A3); `crates/mvm-core/src/redact/` (the detector ruleset — reused by 127 D1's no-secret-in-spans check so one ruleset governs both surfaces).
 
-- [ ] **Step 1:** Failing tests — a placeholder in non-substitution egress is dropped + audited (`secret.placeholder_dropped`); a high-entropy token or a PII match (SSN/card/email) fires the destination's action (`secret.pii_detected`); the **Luhn check** rejects a non-card 16-digit number (no false positive on order IDs); clean traffic passes.
-- [ ] **Step 2:** Implement the scan as an ordered detector set over a **bounded window** (`RegexSet` + entropy, not full-body buffering — line rate). The ruleset lives in `core::redact`. Per-destination action from the named profile (125 E4).
-- [ ] **Step 3: Commit.** *(The full predictive PII/secret **detection + obfuscation** is a core feature in its own right — it may warrant its own ADR/brainstorm; this task lands the regex+entropy baseline + the seam for the feature-gated heavier detectors.)*
+- [x] **Step 1 (placeholder baseline):** `PlaceholderLeakScan` (a `ScanStage` in `mvm-hostd/src/supervisor/network/stages.rs`) drops any egress carrying the host-reserved `PLACEHOLDER_PREFIX` (`mvm-secret-`) — the ADR-067 §1 "placeholder smuggled out a side channel" backstop. Unit tests: drops a placeholder-bearing egress, passes clean traffic, ignores ingress. Wired **live** into `build_egress_scan` as an always-on backstop (sibling to mandatory-deny); chain test proves it fires with no per-tenant policy. *(The drop is audited via the pipeline's generic flow-fault path carrying `by="placeholder-leak"`; the dedicated `secret.placeholder_dropped` event is the E2 audit refinement.)*
+- [ ] **Step 2 (the larger detector set):** secret-shaped (regex + Shannon entropy, gitleaks-style) + PII (Presidio-aligned regex + **Luhn**) over a **bounded window** (`RegexSet`, not full-body buffering), ruleset in `core::redact` (new), per-destination action from the named profile (125 E4). **Owner flagged this as a core feature that may want its own ADR/brainstorm** — land it as its own slice.
+- [ ] **Step 3: Commit.** *(placeholder baseline committed; the larger detector set is the remaining E1 work.)*
 
 ### Task E2: audit (claim 13 lineage)
 
