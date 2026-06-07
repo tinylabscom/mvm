@@ -51,56 +51,57 @@ ADR-067 §4. The reference must say *how* the secret is used (so the keyholder p
 
 ### Task B1: the `SecretResolver` trait + `Local` impl
 
-ADR-067 §2. One trait, value source swappable. `Local` is the existing `KeyProvider` (OS keyring).
+ADR-067 §2. One trait, value source swappable. `Local` reads the existing named-secret store.
 
-**Files:** `crates/mvm-core/src/secret/resolver.rs` (new); reuse `keystore.rs`'s `KeyProvider`.
+**Files:** `crates/mvm-hostd/src/keyholder/resolver.rs` (new) + `keyholder/mod.rs`.
 
-- [ ] **Step 1:** Failing test — `LocalResolver` resolves a `SecretRef` whose value was set in the OS keyring (use the in-memory/file `KeyProvider` backend in test), and returns the value in a `SecretBox` (zeroize on drop).
-  ```rust
-  #[test]
-  fn local_resolver_returns_zeroizing_value_for_a_known_ref() {
-      let store = KeyProvider::file_backed(tmp());          // existing backend
-      store.set("openai", b"sk-live-xxx").unwrap();
-      let r = LocalResolver::new(store);
-      let secret = r.resolve(&secret_ref("openai", AuthType::Bearer, &["api.openai.com"])).unwrap();
-      assert_eq!(secret.expose(), b"sk-live-xxx"); // SecretBox<Vec<u8>>, zeroized on drop
-  }
-  ```
-- [ ] **Step 2:** Define `trait SecretResolver { fn resolve(&self, r: &SecretRef) -> Result<SecretBox<Vec<u8>>, ResolveError>; }`; implement `LocalResolver` over `KeyProvider`. The `mvmd` resolver is a separate mvmd plan; leave a `// resolver: mvmd impl lives in mvmd` note, not a stub.
-- [ ] **Step 3: Commit.**
+> **Reconciliation (post-plan-121):** the plan first named `crates/mvm-core/src/secret/resolver.rs` over `KeyProvider`. Two corrections: (1) `KeyProvider` (keystore.rs) is the *single* per-tenant master DEK — the actual named-secret backend is `SecretStore` (`mvm_core::crypto::secret_store`, the `mvmctl secret put/ls` backend); (2) `SecretRef` now lives in `mvm-sdk::ir`, and `mvm-core` is *below* `mvm-sdk`, so a resolver taking `&SecretRef` cannot live in mvm-core. `mvm-hostd` deps both `mvm-sdk` (SecretRef) and `mvm-core` (SecretStore) and is the admit-time/keyholder home — the resolver lives there, sibling to the Phase C keyholder.
+
+- [x] **Step 1:** Failing test — `LocalResolver` resolves a `SecretRef` whose value was set in the file-backed `SecretStore`, returns it in a `SecretBox<Vec<u8>>` (zeroize on drop); plus an unbound-ref backstop and a missing-secret error path.
+- [x] **Step 2:** Define `trait SecretResolver { fn resolve(&self, r: &SecretRef) -> Result<SecretBox<Vec<u8>>, ResolveError>; }`; implement `LocalResolver` over `SecretStore`. `ResolveError::Unbound` is the fail-closed claim-12 backstop (empty `allowed_hosts` never resolves). The `mvmd` resolver is a separate mvmd plan.
+- [x] **Step 3: Commit.**
 
 ### Task B2: `mvmctl secret set` (the standalone-mvm DX)
 
 ADR-067 §2 — the local define path so the demo needs no `mvmd`.
 
-**Files:** `crates/mvm-cli/src/commands/secret.rs` (new); wire into `commands/mod.rs`.
+**Files:** extended `crates/mvm-cli/src/commands/ops/secret.rs` + new `crates/mvm-hostd/src/keyholder/binding.rs`.
 
-- [ ] **Step 1:** Failing CLI test — `mvmctl secret set openai --host api.openai.com --type bearer` (value from stdin or `--value-stdin`, never argv — it would hit the process table) stores it, and `mvmctl secret ls` shows the name + hosts + type, **never the value**.
-- [ ] **Step 2:** Implement over `LocalResolver`/`KeyProvider`; the value is read from stdin and zeroized; `ls` redacts. A `set` for a `--type sigv4` secret stores the signing key for the signer (Phase C).
-- [ ] **Step 3: Commit.**
+> **Reconciliation:** the plan named a *new* `commands/secret.rs`, but a `secret` clap command already exists (`commands/ops/secret.rs`, Plan 63 `put/get/ls/rm`) — a second one would collide, so `set` is added to that enum. Binding metadata (auth-type + allowed-hosts) needs storage separate from the value (`SecretStore` is value-only); it lives in a parallel `FileBindingStore` in `mvm-hostd` (where `AuthType` from mvm-sdk + `SecretStore` from mvm-core are both visible, and the Phase C/D keyholder can reuse it). `rm` now drops the binding too.
+
+- [x] **Step 1:** CLI tests — `cmd_set` stores value (`SecretStore`) + binding (`FileBindingStore`) and the binding sidecar never contains the value; `ls_line` shows name + `type=` + `hosts=` for a bound secret, name-only for a value-only (Plan 63) secret; `rm` removes the binding.
+- [x] **Step 2:** `mvmctl secret set <name> --host <h>… --type <sigv4|hmac|bearer|basic>` (value via prompt/stdin/`--value -`/`--value-file`, never argv); value through the existing zeroizing path; `ls` reads the binding store, redacts the value. (The Phase C signing-key-for-sigv4 store is wired in Phase C.)
+- [x] **Step 3: Commit.**
 
 ## Phase C — keyholder (123-independent)
+
+> **Reconciliation:** both live under `crates/mvm-hostd/src/keyholder/` (`signer.rs`, `injector.rs`), not the plan's standalone `secret_signer/`/`secret_injector/` — ADR-067 §3 literally calls signer+injector "the keyholder, split by auth-type", so they sit with the resolver + binding store under one cohesive module. Both take a `&dyn SecretResolver`. The separate-process moat (a `[[bin]]` under the jailer) is **deferred** — see "deferred follow-ups" below; the in-process lib is what D/E wire against, and the jailer wrap is orthogonal to the signing/injecting logic.
 
 ### Task C1: the signer (signing-based: SigV4, HMAC)
 
 ADR-067 §3 gold path. The signer takes a canonical request + a `SecretRef`, returns a signature; the key never leaves it. Hardware-sealed when a Secure Enclave/TPM is present, else a jailed software signer — **same interface**.
 
-**Files:** `crates/mvm-hostd/src/secret_signer/` (new module + a `[[bin]]` per the §3 separate-process model); reuse `core::subprocess`.
+**Files:** `crates/mvm-hostd/src/keyholder/signer.rs`.
 
-- [ ] **Step 1:** Failing test — given a SigV4 canonical request and a stored signing key, the signer returns a signature that verifies, and the key bytes never appear in the returned struct or the signer's public surface (assert the response type has no key field; `check-no-display-on-secret-types` covers Debug).
-- [ ] **Step 2:** Implement SigV4 + HMAC signing (existing `hmac`/`sha2`); key loaded via the resolver into the signer's confined memory (software path) or referenced by handle (hardware path — `keyring` → Secure Enclave on macOS). Zeroize after. Run under the jailer (ADR-066 §3).
-- [ ] **Step 3:** Hardware-optional test — with no Secure Enclave, the software path runs and zeroizes (assert the key is wiped post-sign); with a sealed handle present, signing uses it. No hardware required for the suite to pass.
-- [ ] **Step 4: Commit.**
+- [x] **Step 1:** Tests — `Signer::sign_hmac`/`sign_sigv4` return a signature; `Signature` has no key field (no key on the public surface; `check-no-display-on-secret-types` covers Debug). Verified against **published vectors**: RFC 4231 HMAC-SHA256 case 2 + aws-sig-v4-test-suite `get-vanilla`.
+- [x] **Step 2:** SigV4 + HMAC over existing `hmac`/`sha2`; key resolved into confined memory; derived SigV4 keys live in `Zeroizing` buffers (no intermediate lingers); the resolved value is a `SecretBox` that wipes on drop. Wrong auth type (bearer/basic) refused → signer is signing-only. (Hardware-sealed handle + jailer wrap: deferred follow-up.)
+- [x] **Step 3:** Software path runs with no hardware (the default; all tests exercise it). Sealed-handle path is the deferred hardware follow-up.
+- [x] **Step 4: Commit.**
 
 ### Task C2: the injector (bearer / basic)
 
 ADR-067 §3 fallback. The raw value must hit the wire, so confine it: decrypt only inside the injector, inject into the request, zeroize. Honest — not "never seen", but minimal + audited.
 
-**Files:** `crates/mvm-hostd/src/secret_injector/` (new).
+**Files:** `crates/mvm-hostd/src/keyholder/injector.rs`.
 
-- [ ] **Step 1:** Failing test — the injector replaces a placeholder in a request header with the resolved value and zeroizes its copy; on a destination not in `allowed_hosts` it refuses (returns `DestinationNotBound`, claim 12) and never decrypts.
-- [ ] **Step 2:** Implement: check `allowed_hosts` *before* resolving (no decrypt for an unbound destination), inject, zeroize. Encrypted at rest via 122's DEK/KEK.
-- [ ] **Step 3: Commit.**
+- [x] **Step 1:** Tests — `Injector::inject_placeholder` substitutes the resolved value into the outbound text and returns it `Zeroizing` (wipes on drop); a destination not in `allowed_hosts` returns `DestinationNotBound` (claim 12) and a spy resolver proves **no decrypt** happened; a signing auth type returns `WrongAuthType`, also without decrypting.
+- [x] **Step 2:** `allowed_hosts` (and auth-type) checked *before* resolve — no decrypt for an unbound destination; `*.` wildcard binding honored via `host_matches`. (Encrypted-at-rest via 122's DEK/KEK is the value store's concern.)
+- [x] **Step 3: Commit.**
+
+### deferred follow-ups (Phase C)
+
+- [ ] Separate-process moat: run the signer + injector as jailed `[[bin]]`s (ADR-066 §3 / `core::subprocess`) so a compromised signer can't read the supervisor's address space. The in-process lib is correct and tested; this is a confinement hardening, sequenced with the broker subprocess model.
+- [ ] Hardware-sealed signing path: load the SigV4/HMAC key by handle from the OS keyring → Secure Enclave on macOS, so the host never sees the plaintext key. Same `Signer` interface; the software path is the no-hardware default already shipped.
 
 ## Phase D — substitution endpoint + SDK routing (needs 123's proxy)
 

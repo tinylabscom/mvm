@@ -25,4 +25,8 @@ pub mod broker;
 pub mod framing;
 pub mod host_signer;
 pub mod jailer;
+/// Secret keyholder (Plan 129 / ADR-067) — the `SecretRef` → credential
+/// boundary. Phase B: the [`keyholder::SecretResolver`] trait + the
+/// single-host [`keyholder::LocalResolver`].
+pub mod keyholder;
 pub mod supervisor;

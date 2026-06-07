@@ -3246,6 +3246,7 @@ dependencies = [
  "etherparse",
  "hex",
  "hickory-resolver",
+ "hmac",
  "ipnet",
  "landlock",
  "libc",

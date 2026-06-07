@@ -135,6 +135,7 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
 
 const SECRET_SUB: &[(&str, AuditPosture)] = &[
     ("put", AuditPosture::Emits("SecretPut")),
+    ("set", AuditPosture::Emits("SecretSet")),
     ("get", AuditPosture::Emits("SecretGet")),
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("SecretRm")),
@@ -489,6 +490,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "SecretGet",
         "SecretPut",
         "SecretRm",
+        "SecretSet",
         "SandboxGc",
         "SessionStart",
         "SlotPrune",
