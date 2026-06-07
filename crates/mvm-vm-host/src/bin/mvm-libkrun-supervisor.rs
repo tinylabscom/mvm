@@ -122,10 +122,9 @@ fn main() -> ExitCode {
         .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT)
     {
         let state_dir = std::path::PathBuf::from(&cfg.vm_state_dir);
-        let control_sock = state_dir.join(format!(
-            "vsock-{}.sock",
-            mvm_guest::vsock::WORKLOAD_EXIT_PORT
-        ));
+        let control_sock = cfg
+            .krun
+            .vsock_socket_path(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
         let _ = std::fs::remove_file(&control_sock);
         match std::os::unix::net::UnixListener::bind(&control_sock) {
             Ok(listener) => {
