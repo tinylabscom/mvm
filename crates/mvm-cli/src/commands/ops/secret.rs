@@ -1,10 +1,16 @@
-//! Plan 63 W4 — `mvmctl secret put/get/ls/rm` CLI surface.
+//! `mvmctl secret put/set/get/ls/rm` CLI surface (Plan 63 W4 + Plan 129 B2).
 //!
 //! Local CRUD for secret namespaces. Values never appear in
-//! logs, error chains, or process listings — `put` accepts the
+//! logs, error chains, or process listings — `put`/`set` accept the
 //! value via an interactive hidden prompt, stdin, flag, or file;
 //! `get` verifies that a secret exists but never prints the stored
 //! value.
+//!
+//! `set` (Plan 129 / ADR-067 §2) is `put` plus an egress binding: it
+//! records, in a parallel [`mvm_hostd::keyholder::FileBindingStore`], the
+//! auth-type and destination allow-list for a secret whose value the host
+//! egress proxy substitutes toward bound destinations only (never the
+//! guest). `ls` surfaces that binding (type + hosts) but never the value.
 //!
 //! ## Audit
 //!
@@ -23,7 +29,8 @@
 //!   file-backed secrets visible.
 //! - `FileSecretStore` everywhere else (CI Linux, headless hosts).
 //!
-//! Tests inject `FileSecretStore::with_dir` via [`run_with_store`].
+//! Tests inject `FileSecretStore::with_dir` + `FileBindingStore::with_dir`
+//! via [`run_with_stores`].
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -31,10 +38,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Args as ClapArgs, Subcommand};
+use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_core::plan::TenantId;
+use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
+use mvm_sdk::ir::AuthType;
 use secrecy::SecretBox;
 
 use mvm_core::user_config::MvmConfig;
@@ -79,7 +88,38 @@ pub(in crate::commands) enum SecretAction {
         tenant: String,
     },
 
-    /// List secret names stored for a tenant.
+    /// Define a local secret with its egress binding (Plan 129 /
+    /// ADR-067 §2): store the value *and* record where the substituted
+    /// credential may go and how it authenticates. The value never
+    /// enters the guest — the host egress proxy substitutes it toward a
+    /// bound destination only. Value source as for `put` (interactive
+    /// prompt / piped stdin / `--value -` / `--value-file`); never pass
+    /// the value inline in scripts (it lands in the process table).
+    Set {
+        /// Name to store the secret under (alphanumeric + `_-`).
+        name: String,
+        /// Local namespace. Fleet tenant secrets are managed by mvmd.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Destination the credential may reach (claim 12). Repeatable;
+        /// at least one required. `*.` subdomain wildcards supported.
+        #[arg(long = "host", required = true)]
+        hosts: Vec<String>,
+        /// How the credential authenticates outbound requests.
+        #[arg(long = "type", value_enum)]
+        auth_type: AuthTypeArg,
+        /// Inline value. Pass `-` to read from stdin (preferred when
+        /// scripting; avoids shell-history exposure).
+        #[arg(long, conflicts_with = "value_file")]
+        value: Option<String>,
+        /// Read value from a file on disk.
+        #[arg(long)]
+        value_file: Option<PathBuf>,
+    },
+
+    /// List secret names stored for a tenant. Bound secrets (defined via
+    /// `set`) also show their auth-type and destination allow-list;
+    /// never the value.
     Ls {
         #[arg(long, default_value = "local")]
         tenant: String,
@@ -93,14 +133,40 @@ pub(in crate::commands) enum SecretAction {
     },
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let store = secret_store::default_secret_store();
-    run_with_store(store.as_ref(), args)
+/// Clap mirror of [`mvm_sdk::ir::AuthType`] — kept local so the CLI owns
+/// the clap dependency and `mvm-sdk` (a build-time crate) does not.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum AuthTypeArg {
+    Sigv4,
+    Hmac,
+    Bearer,
+    Basic,
 }
 
-/// Same dispatch as [`run`] but takes an injected store. Test
-/// seam for `FileSecretStore::with_dir(<tempdir>)`.
-pub(in crate::commands) fn run_with_store(store: &dyn SecretStore, args: Args) -> Result<()> {
+impl From<AuthTypeArg> for AuthType {
+    fn from(a: AuthTypeArg) -> Self {
+        match a {
+            AuthTypeArg::Sigv4 => AuthType::Sigv4,
+            AuthTypeArg::Hmac => AuthType::Hmac,
+            AuthTypeArg::Bearer => AuthType::Bearer,
+            AuthTypeArg::Basic => AuthType::Basic,
+        }
+    }
+}
+
+pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+    let store = secret_store::default_secret_store();
+    let bindings = FileBindingStore::default_location()?;
+    run_with_stores(store.as_ref(), &bindings, args)
+}
+
+/// Same dispatch as [`run`] but takes injected stores. Test seam for
+/// `FileSecretStore::with_dir(<tempdir>)` + `FileBindingStore::with_dir`.
+pub(in crate::commands) fn run_with_stores(
+    store: &dyn SecretStore,
+    bindings: &dyn BindingStore,
+    args: Args,
+) -> Result<()> {
     let audit = AuditLog::default()?.with_optional_recorder();
     match args.action {
         SecretAction::Put {
@@ -109,9 +175,29 @@ pub(in crate::commands) fn run_with_store(store: &dyn SecretStore, args: Args) -
             value,
             value_file,
         } => cmd_put(store, &audit, tenant, name, value, value_file),
+        SecretAction::Set {
+            name,
+            tenant,
+            hosts,
+            auth_type,
+            value,
+            value_file,
+        } => cmd_set(
+            store,
+            bindings,
+            &audit,
+            SetArgs {
+                tenant,
+                name,
+                hosts,
+                auth_type: auth_type.into(),
+                value,
+                value_file,
+            },
+        ),
         SecretAction::Get { name, tenant } => cmd_get(store, &audit, tenant, name),
-        SecretAction::Ls { tenant } => cmd_ls(store, &audit, tenant),
-        SecretAction::Rm { name, tenant } => cmd_rm(store, &audit, tenant, name),
+        SecretAction::Ls { tenant } => cmd_ls(store, bindings, &audit, tenant),
+        SecretAction::Rm { name, tenant } => cmd_rm(store, bindings, &audit, tenant, name),
     }
 }
 
@@ -138,6 +224,52 @@ fn cmd_put(
     Ok(())
 }
 
+/// The `secret set` inputs, bundled to keep [`cmd_set`] under the
+/// argument-count lint (never suppressed — see CLAUDE.md).
+struct SetArgs {
+    tenant: String,
+    name: String,
+    hosts: Vec<String>,
+    auth_type: AuthType,
+    value: Option<String>,
+    value_file: Option<PathBuf>,
+}
+
+fn cmd_set(
+    store: &dyn SecretStore,
+    bindings: &dyn BindingStore,
+    audit: &AuditLog,
+    set: SetArgs,
+) -> Result<()> {
+    let SetArgs {
+        tenant,
+        name,
+        hosts,
+        auth_type,
+        value,
+        value_file,
+    } = set;
+    let result = (|| -> Result<()> {
+        let raw = resolve_value(value, value_file, &name)?;
+        let secret = SecretBox::new(Box::new(raw));
+        store.put(&tenant, &name, &secret)?;
+        // Binding after value: if the value write fails we never record a
+        // binding for a secret that isn't there.
+        bindings.put(
+            &tenant,
+            &name,
+            &SecretBindingMeta {
+                auth_type,
+                allowed_hosts: hosts,
+            },
+        )
+    })();
+    audit.record("set", &tenant, &name, &result)?;
+    result?;
+    eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
+    Ok(())
+}
+
 fn cmd_get(store: &dyn SecretStore, audit: &AuditLog, tenant: String, name: String) -> Result<()> {
     let result = store.get(&tenant, &name);
     audit.record("get", &tenant, &name, &result.as_ref().map(|_| ()))?;
@@ -146,7 +278,12 @@ fn cmd_get(store: &dyn SecretStore, audit: &AuditLog, tenant: String, name: Stri
     Ok(())
 }
 
-fn cmd_ls(store: &dyn SecretStore, audit: &AuditLog, tenant: String) -> Result<()> {
+fn cmd_ls(
+    store: &dyn SecretStore,
+    bindings: &dyn BindingStore,
+    audit: &AuditLog,
+    tenant: String,
+) -> Result<()> {
     let result = store.list(&tenant);
     audit.record("list", &tenant, "*", &result.as_ref().map(|_| ()))?;
     let names = result?;
@@ -155,18 +292,51 @@ fn cmd_ls(store: &dyn SecretStore, audit: &AuditLog, tenant: String) -> Result<(
         return Ok(());
     }
     for name in &names {
-        // Names ONLY. Never values. Avoid even the names' lengths
-        // being implicit value-length signals: the names are
-        // user-chosen identifiers, not derived from values.
-        println!("{name}");
+        // Name + (for bound secrets) auth-type and destination
+        // allow-list. Never the value, and never anything value-derived:
+        // the binding is operator-declared metadata.
+        let binding = bindings.get(&tenant, name)?;
+        println!("{}", ls_line(name, binding.as_ref()));
     }
     Ok(())
 }
 
-fn cmd_rm(store: &dyn SecretStore, audit: &AuditLog, tenant: String, name: String) -> Result<()> {
+/// Render one `secret ls` row. Pure so it is unit-testable without
+/// capturing stdout — and structurally incapable of leaking the value,
+/// which is never an input.
+fn ls_line(name: &str, binding: Option<&SecretBindingMeta>) -> String {
+    match binding {
+        Some(b) => format!(
+            "{name}\ttype={}\thosts={}",
+            auth_type_label(b.auth_type),
+            b.allowed_hosts.join(",")
+        ),
+        None => name.to_string(),
+    }
+}
+
+fn auth_type_label(t: AuthType) -> &'static str {
+    match t {
+        AuthType::Sigv4 => "sigv4",
+        AuthType::Hmac => "hmac",
+        AuthType::Bearer => "bearer",
+        AuthType::Basic => "basic",
+    }
+}
+
+fn cmd_rm(
+    store: &dyn SecretStore,
+    bindings: &dyn BindingStore,
+    audit: &AuditLog,
+    tenant: String,
+    name: String,
+) -> Result<()> {
     let result = store.delete(&tenant, &name);
     audit.record("delete", &tenant, &name, &result)?;
     result?;
+    // Drop the binding too so a re-`put` of the same name can't inherit a
+    // stale allow-list. Idempotent — absent binding is fine.
+    bindings.delete(&tenant, &name)?;
     eprintln!("Removed secret '{name}' for tenant '{tenant}'.");
     Ok(())
 }
@@ -427,6 +597,12 @@ mod tests {
         (tmp, AuditLog::with_path(path))
     }
 
+    fn temp_bindings() -> (tempfile::TempDir, FileBindingStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileBindingStore::with_dir(tmp.path());
+        (tmp, store)
+    }
+
     fn read_audit(audit: &AuditLog) -> String {
         let path = audit.path.as_ref().expect("audit has path");
         std::fs::read_to_string(path).unwrap_or_default()
@@ -542,6 +718,7 @@ mod tests {
     fn cmd_rm_after_put_clears_name() {
         let tmp_store = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp_store.path());
+        let (_bind_dir, bindings) = temp_bindings();
         let (_audit_dir, audit) = temp_audit();
         cmd_put(
             &store,
@@ -552,8 +729,109 @@ mod tests {
             None,
         )
         .unwrap();
-        cmd_rm(&store, &audit, "acme".into(), "k".into()).unwrap();
+        cmd_rm(&store, &bindings, &audit, "acme".into(), "k".into()).unwrap();
         assert!(store.list("acme").unwrap().is_empty());
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Plan 129 B2 — `secret set` (value + egress binding) and `ls`
+    // ──────────────────────────────────────────────────────────────
+
+    fn set(
+        store: &dyn SecretStore,
+        bindings: &dyn BindingStore,
+        audit: &AuditLog,
+        name: &str,
+        hosts: &[&str],
+        auth_type: AuthType,
+        value: &str,
+    ) -> Result<()> {
+        cmd_set(
+            store,
+            bindings,
+            audit,
+            SetArgs {
+                tenant: "local".into(),
+                name: name.into(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                auth_type,
+                value: Some(value.into()),
+                value_file: None,
+            },
+        )
+    }
+
+    #[test]
+    fn cmd_set_stores_value_and_binding_without_leaking_value() {
+        let tmp_store = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(tmp_store.path());
+        let (bind_dir, bindings) = temp_bindings();
+        let (_audit_dir, audit) = temp_audit();
+
+        set(
+            &store,
+            &bindings,
+            &audit,
+            "openai",
+            &["api.openai.com"],
+            AuthType::Bearer,
+            "sk-live-zzz",
+        )
+        .unwrap();
+
+        // Value landed in the value store.
+        assert_eq!(store.list("local").unwrap(), vec!["openai"]);
+        // Binding landed with type + hosts.
+        let b = bindings.get("local", "openai").unwrap().unwrap();
+        assert_eq!(b.auth_type, AuthType::Bearer);
+        assert_eq!(b.allowed_hosts, vec!["api.openai.com"]);
+        // The binding sidecar carries metadata only — never the value.
+        let sidecar =
+            std::fs::read_to_string(bind_dir.path().join("local").join("openai.json")).unwrap();
+        assert!(
+            !sidecar.contains("sk-live-zzz"),
+            "binding sidecar must not contain the secret value: {sidecar}"
+        );
+    }
+
+    #[test]
+    fn ls_line_shows_type_and_hosts_for_a_bound_secret() {
+        let b = SecretBindingMeta {
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.openai.com".into(), "*.openai.com".into()],
+        };
+        let line = ls_line("openai", Some(&b));
+        assert!(line.starts_with("openai"));
+        assert!(line.contains("type=bearer"), "got: {line}");
+        assert!(
+            line.contains("hosts=api.openai.com,*.openai.com"),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn ls_line_for_a_value_only_secret_is_name_only() {
+        assert_eq!(ls_line("legacy", None), "legacy");
+    }
+
+    #[test]
+    fn cmd_rm_removes_binding_too() {
+        let tmp_store = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(tmp_store.path());
+        let (_bind_dir, bindings) = temp_bindings();
+        let (_audit_dir, audit) = temp_audit();
+        set(
+            &store,
+            &bindings,
+            &audit,
+            "openai",
+            &["api.openai.com"],
+            AuthType::Bearer,
+            "sk-live-zzz",
+        )
+        .unwrap();
+        cmd_rm(&store, &bindings, &audit, "local".into(), "openai".into()).unwrap();
+        assert!(bindings.get("local", "openai").unwrap().is_none());
     }
 
     #[test]

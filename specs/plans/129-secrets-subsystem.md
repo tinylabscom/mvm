@@ -65,11 +65,13 @@ ADR-067 §2. One trait, value source swappable. `Local` reads the existing named
 
 ADR-067 §2 — the local define path so the demo needs no `mvmd`.
 
-**Files:** `crates/mvm-cli/src/commands/secret.rs` (new); wire into `commands/mod.rs`.
+**Files:** extended `crates/mvm-cli/src/commands/ops/secret.rs` + new `crates/mvm-hostd/src/keyholder/binding.rs`.
 
-- [ ] **Step 1:** Failing CLI test — `mvmctl secret set openai --host api.openai.com --type bearer` (value from stdin or `--value-stdin`, never argv — it would hit the process table) stores it, and `mvmctl secret ls` shows the name + hosts + type, **never the value**.
-- [ ] **Step 2:** Implement over `LocalResolver`/`KeyProvider`; the value is read from stdin and zeroized; `ls` redacts. A `set` for a `--type sigv4` secret stores the signing key for the signer (Phase C).
-- [ ] **Step 3: Commit.**
+> **Reconciliation:** the plan named a *new* `commands/secret.rs`, but a `secret` clap command already exists (`commands/ops/secret.rs`, Plan 63 `put/get/ls/rm`) — a second one would collide, so `set` is added to that enum. Binding metadata (auth-type + allowed-hosts) needs storage separate from the value (`SecretStore` is value-only); it lives in a parallel `FileBindingStore` in `mvm-hostd` (where `AuthType` from mvm-sdk + `SecretStore` from mvm-core are both visible, and the Phase C/D keyholder can reuse it). `rm` now drops the binding too.
+
+- [x] **Step 1:** CLI tests — `cmd_set` stores value (`SecretStore`) + binding (`FileBindingStore`) and the binding sidecar never contains the value; `ls_line` shows name + `type=` + `hosts=` for a bound secret, name-only for a value-only (Plan 63) secret; `rm` removes the binding.
+- [x] **Step 2:** `mvmctl secret set <name> --host <h>… --type <sigv4|hmac|bearer|basic>` (value via prompt/stdin/`--value -`/`--value-file`, never argv); value through the existing zeroizing path; `ls` reads the binding store, redacts the value. (The Phase C signing-key-for-sigv4 store is wired in Phase C.)
+- [x] **Step 3: Commit.**
 
 ## Phase C — keyholder (123-independent)
 
