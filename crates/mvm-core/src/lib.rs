@@ -6,6 +6,7 @@ pub mod build_env;
 pub mod catalog;
 pub mod config;
 pub mod dev_network;
+pub mod exit_capture;
 pub mod kernel_format;
 pub mod metering;
 pub mod migration;
