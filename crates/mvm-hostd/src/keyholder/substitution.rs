@@ -43,6 +43,24 @@ impl Placeholder {
     }
 }
 
+/// Find the first placeholder token embedded in `text` (e.g. a header value
+/// `Bearer mvm-secret-<hex>`). Returns the `mvm-secret-<hex>` slice — the
+/// reserved prefix plus its trailing hex run — or `None` if no token is
+/// present. Used by the substitution endpoint to locate the placeholder a
+/// guest put in a request header without the guest having to name the header.
+pub fn find_placeholder(text: &str) -> Option<&str> {
+    let start = text.find(PLACEHOLDER_PREFIX)?;
+    let after = start + PLACEHOLDER_PREFIX.len();
+    let hex_len = text[after..]
+        .bytes()
+        .take_while(u8::is_ascii_hexdigit)
+        .count();
+    if hex_len == 0 {
+        return None;
+    }
+    Some(&text[start..after + hex_len])
+}
+
 /// Per-session map from a minted [`Placeholder`] to the [`SecretRef`] it
 /// stands for. Session-scoped: dropped when the session ends, so a
 /// placeholder can never be replayed in a different session.
@@ -171,6 +189,26 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn find_placeholder_extracts_token_from_a_header_value() {
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
+        let header = format!("Bearer {}", ph.as_str());
+        assert_eq!(find_placeholder(&header), Some(ph.as_str()));
+    }
+
+    #[test]
+    fn find_placeholder_stops_at_non_hex_and_ignores_clean_text() {
+        // Trailing non-hex (quote, space) bounds the token.
+        assert_eq!(
+            find_placeholder("Bearer mvm-secret-abc123\"; x=1"),
+            Some("mvm-secret-abc123")
+        );
+        // No token, and the bare prefix with no hex run, both yield None.
+        assert_eq!(find_placeholder("Bearer ya29.real-token"), None);
+        assert_eq!(find_placeholder("mvm-secret-"), None);
     }
 
     #[test]
