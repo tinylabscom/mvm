@@ -299,6 +299,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
     ("build", AuditPosture::Emits("TemplateBuild")),
     ("persistent-builder", AuditPosture::InteractiveOrControl),
+    // Plan 166 Phase 2 — hidden internal helper: a long-running host-side
+    // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
+    // plumbing spawned by `mvm_backend::qemu`; never emits audit events.
+    ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
     // SDK port Phase 2c — renders a `Workload` IR to a flake +
     // sidecars at the user-supplied --out path. Doesn't touch the
     // audit chain. ReadOnly w.r.t. host state.
