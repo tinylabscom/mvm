@@ -64,7 +64,9 @@ pub fn find_placeholder(text: &str) -> Option<&str> {
 /// Per-session map from a minted [`Placeholder`] to the [`SecretRef`] it
 /// stands for. Session-scoped: dropped when the session ends, so a
 /// placeholder can never be replayed in a different session.
-#[derive(Default)]
+// SecretRef holds only binding metadata (name + auth-type + hosts), no value,
+// so Debug here can't leak a secret.
+#[derive(Debug, Default)]
 pub struct SubstitutionRegistry {
     map: HashMap<Placeholder, SecretRef>,
 }

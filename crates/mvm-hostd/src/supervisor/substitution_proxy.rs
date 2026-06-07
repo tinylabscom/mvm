@@ -22,9 +22,14 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
+use mvm_core::crypto::secret_store::SecretStore;
+use mvm_core::plan::SecretBinding;
+
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
-    SecretResolver, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, find_placeholder,
+    AssembleError, BindingStore, HandedPlaceholders, LocalResolver, SecretResolver,
+    SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
+    find_placeholder,
 };
 use crate::supervisor::tools::http_hardening::hardened_client_builder;
 
@@ -151,6 +156,15 @@ pub enum ForwardError {
     Failed(String),
 }
 
+/// Errors from building a [`SubstitutionService`] from an admitted plan.
+#[derive(Debug, thiserror::Error)]
+pub enum FromPlanError {
+    #[error(transparent)]
+    Assemble(#[from] AssembleError),
+    #[error(transparent)]
+    Forward(#[from] ForwardError),
+}
+
 /// Forwards a prepared (credential-substituted) request to the real
 /// destination and returns its response — the real-TLS leg of the endpoint.
 /// A trait so the listener can be tested with a mock that records the
@@ -230,6 +244,26 @@ impl SubstitutionService {
             resolver,
             forwarder,
         }
+    }
+
+    /// Assemble a ready-to-serve service from an admitted plan's secret
+    /// bindings: build the registry ([`assemble_registry`]), a [`LocalResolver`]
+    /// over the tenant's secret store, and a hardened-reqwest forwarder.
+    /// Returns the service plus the `(guest name, placeholder)` pairs the
+    /// supervisor injects into the guest. The caller binds the listener and
+    /// calls [`Self::serve`].
+    pub fn from_plan(
+        plan_secrets: &[SecretBinding],
+        tenant: &str,
+        bindings: &dyn BindingStore,
+        secret_store: Arc<dyn SecretStore>,
+        forward_timeout_secs: u64,
+    ) -> Result<(Arc<Self>, HandedPlaceholders), FromPlanError> {
+        let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
+        let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
+        let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
+        let service = Arc::new(Self::new(Arc::new(registry), resolver, forwarder));
+        Ok((service, handed))
     }
 
     /// Accept loop: one routed request per connection, framed JSON, a task per
@@ -510,6 +544,47 @@ mod server_tests {
             WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
         }
         server.abort();
+    }
+
+    #[test]
+    fn from_plan_builds_a_service_and_handed_placeholders() {
+        use crate::keyholder::{FileBindingStore, SecretBindingMeta};
+        use mvm_core::plan::{SecretBinding, SecretSource};
+
+        let dir = tempdir().unwrap();
+        // Binding metadata (`secret set`) + the value store.
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            )
+            .unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk".to_string())),
+            )
+            .unwrap();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(store);
+
+        let plan = [SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }];
+        let (_service, handed) =
+            SubstitutionService::from_plan(&plan, "local", &bindings, secret_store, 30).unwrap();
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].0, "OPENAI_API_KEY");
+        assert!(handed[0].1.as_str().starts_with("mvm-secret-"));
     }
 
     #[tokio::test]
