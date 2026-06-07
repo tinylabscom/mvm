@@ -41,6 +41,13 @@ pub const GUEST_CID: u32 = 3;
 /// duplicates in the same commit; the workspace tests catch drift.
 pub const GUEST_AGENT_PORT: u32 = 5252;
 
+/// vsock port the host substitution endpoint (Plan 129 / ADR-067 §1) is exposed
+/// on. The in-guest forward proxy connects here; the host bin maps it to the
+/// UDS where `SubstitutionService` listens. Distinct from the removed 5300/5301
+/// secrets channel (ADR-062). NOTE: exposing this port end-to-end needs the
+/// host-side proxy port-allowlist (W1.3) to admit it — part of the bin glue.
+pub const SUBSTITUTION_PORT: u32 = 5253;
+
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;
