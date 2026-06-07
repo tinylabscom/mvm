@@ -8,7 +8,7 @@ use clap::Args as ClapArgs;
 
 use mvm::vsock_transport::{
     AppleContainerTransport, FirecrackerTransport, LibkrunTransport, VsockProxyTransport,
-    VsockTransport,
+    VsockTransport, VzTransport,
 };
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
@@ -22,7 +22,8 @@ use crate::ui;
 /// 1. In-process Apple Container (zero-copy `VZVirtioSocketDevice` stream).
 /// 2. Dev-mode mode-0700 proxy socket (cross-process daemon dispatch).
 /// 3. libkrun per-port Unix socket.
-/// 4. Firecracker UDS multiplexer (fleet/production path).
+/// 4. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`).
+/// 5. Firecracker UDS multiplexer (fleet/production path).
 ///
 /// The Apple Container probe consumes one stream and drops it; the
 /// returned `Arc<dyn VsockTransport>` is then used for every real
@@ -44,6 +45,13 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     let libkrun = LibkrunTransport::for_vm(name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Arc::new(libkrun));
+    }
+    // Vz workloads expose the agent at `<vm_state_dir>/vsock/vsock-<port>.sock`
+    // (one subdir deeper than libkrun); without this probe `console` fell
+    // through to the firecracker fallback and mis-resolved to `mvm-dev`.
+    let vz = VzTransport::for_vm(name);
+    if vz.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        return Ok(Arc::new(vz));
     }
     Ok(Arc::new(FirecrackerTransport::for_vm(name)?))
 }
@@ -422,6 +430,37 @@ mod accessible_gate_tests {
             match prev {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn pick_console_transport_selects_vz_when_only_vz_socket_present() {
+        use std::os::unix::net::UnixListener;
+        // Regression for the "console can't reach a Vz workload" gap: with a
+        // Vz workload's vsock socket present (and no apple-container / dev-proxy
+        // / libkrun / firecracker surface), the picker must select the Vz
+        // transport instead of erroring out on the firecracker fallback.
+        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("MVM_DATA_DIR");
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        let name = "vz-console-probe";
+        let sock =
+            mvm_core::config::vm_vz_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _listener = UnixListener::bind(&sock).unwrap();
+
+        let transport = pick_console_transport(name).expect("picker should find the vz transport");
+        transport
+            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("selected transport should connect to the vz socket");
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
             }
         }
     }
