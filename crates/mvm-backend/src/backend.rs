@@ -458,6 +458,50 @@ impl AnyBackend {
         Self::Firecracker(FirecrackerBackend)
     }
 
+    /// Resolve the backend that owns an already-started VM by its per-VM
+    /// state-dir marker file, so `down` / `status` dispatch to the VMM that
+    /// actually launched it rather than a platform default. The pid-file
+    /// backends each drop a distinct marker under `vm_state_dir(name)`:
+    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`.
+    ///
+    /// Returns `None` when no marker is present — the VM isn't one of the
+    /// pid-file backends (e.g. Apple Container / Docker, which track state
+    /// out-of-band) or doesn't exist. Callers fall back to the platform
+    /// default in that case.
+    pub fn for_started_vm(name: &str) -> Option<Self> {
+        let dir = mvm_core::config::vm_state_dir(name);
+        if dir.join("qemu.pid").is_file() {
+            Some(Self::Qemu(QemuBackend))
+        } else if dir.join("libkrun.pid").is_file() {
+            Some(Self::Libkrun(LibkrunBackend))
+        } else if dir.join("fc.pid").is_file() {
+            Some(Self::Firecracker(FirecrackerBackend))
+        } else {
+            None
+        }
+    }
+
+    /// Aggregate the running-VM listing across every backend that can be
+    /// probed on this host (best-effort; a backend that errors is skipped).
+    /// Single source of truth for `mvmctl ls` and `mvmctl down` (no-arg) so
+    /// a VM started under any VMM — including QEMU and libkrun — is visible
+    /// and stoppable, not just whichever backend the CLI defaulted to.
+    pub fn list_all() -> Vec<VmInfo> {
+        let mut vms = Vec::new();
+        for backend in [
+            Self::Qemu(QemuBackend),
+            Self::Libkrun(LibkrunBackend),
+            Self::Firecracker(FirecrackerBackend),
+            Self::AppleContainer(AppleContainerBackend),
+            Self::Docker(DockerBackend),
+        ] {
+            if let Ok(found) = backend.list() {
+                vms.extend(found);
+            }
+        }
+        vms
+    }
+
     /// Plan 76 Phase 7 — isolation tier of this backend. Used by
     /// `mvmctl up` to refuse silent Tier 2 downgrades on
     /// production-like launches, and by `mvmctl doctor` to surface
@@ -846,6 +890,53 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn for_started_vm_resolves_owning_backend_by_marker() {
+        // A started VM's owning backend is resolved from its state-dir pid
+        // marker so `down`/`status`/`ls` dispatch to the right VMM.
+        let temp = std::path::PathBuf::from(format!(
+            "/tmp/mvmac-fsv-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let vms = temp.join(".mvm/vms");
+        for (name, marker) in [("q1", "qemu.pid"), ("l1", "libkrun.pid"), ("f1", "fc.pid")] {
+            std::fs::create_dir_all(vms.join(name)).expect("mkdir vm dir");
+            std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
+        }
+        let saved = std::env::var("HOME").ok();
+        // SAFETY: for_started_vm (HOME consumer) is the only env reader in
+        // this test; restored below.
+        unsafe { std::env::set_var("HOME", &temp) };
+
+        let q = AnyBackend::for_started_vm("q1");
+        let l = AnyBackend::for_started_vm("l1");
+        let f = AnyBackend::for_started_vm("f1");
+        let none = AnyBackend::for_started_vm("does-not-exist");
+
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(matches!(q, Some(AnyBackend::Qemu(_))), "qemu.pid → Qemu");
+        assert!(
+            matches!(l, Some(AnyBackend::Libkrun(_))),
+            "libkrun.pid → Libkrun"
+        );
+        assert!(
+            matches!(f, Some(AnyBackend::Firecracker(_))),
+            "fc.pid → Firecracker"
+        );
+        assert!(none.is_none(), "no marker → None");
     }
 
     #[test]
