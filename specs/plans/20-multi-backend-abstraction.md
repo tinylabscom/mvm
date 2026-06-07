@@ -427,15 +427,15 @@ No new `oci.rs` module needed for Apple Containers — the same ext4 rootfs work
 - **Lima still needed on macOS** — for Nix builds (not in runtime hot path)
 - **Docker on Windows**: guest agent needs unix socket, not vsock (different IPC path)
 - **Memory overhead**: Apple Containers don't return freed pages to host
-- **Kernel compatibility**: Apple Container uses its own kernel (Kata Containers Linux 6.x with vminitd as PID 1); Nix rootfs is designed for Firecracker's kernel. See mitigation below.
+- **Kernel compatibility**: Apple Container uses its own kernel (a container-optimized Linux 6.x from an external containers-in-VMs project, with vminitd as PID 1); Nix rootfs is designed for Firecracker's kernel. See mitigation below.
 
 ## Kernel Compatibility Risk Mitigation
 
-**The problem**: Apple Containers use their own optimized Linux kernel (from Kata Containers project) with `vminitd` (Swift) as PID 1. Our Nix rootfs is designed for Firecracker's minimal kernel with mvm's guest agent as init. Key differences:
+**The problem**: Apple Containers use their own optimized Linux kernel (from an external containers-in-VMs project) with `vminitd` (Swift) as PID 1. Our Nix rootfs is designed for Firecracker's minimal kernel with mvm's guest agent as init. Key differences:
 
 | Concern | Firecracker | Apple Container |
 |---------|------------|-----------------|
-| Kernel | Custom minimal (from Nix) | Kata Containers 6.x (from Apple) |
+| Kernel | Custom minimal (from Nix) | Container-optimized 6.x (from Apple) |
 | PID 1 | mvm guest agent | vminitd (Swift, fixed) |
 | Block devices | `/dev/vda` (virtio-blk) | Likely `/dev/vda` (VZ block) |
 | Network | `eth0` (virtio-net via TAP) | `eth0` or `enp0s*` (VZ net) |

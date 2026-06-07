@@ -86,7 +86,7 @@ Ranked by strategic weight, not effort:
 
 ### G1. No Python / TypeScript / Rust SDK shipped yet — biggest adoption gap
 
-libkrun is fundamentally **SDK-shaped**: the install path is `pip install libkrun` or `npm install libkrun`, and three lines of code give you a running VM. mvm is **CLI-shaped**: you `mvmctl up --manifest ./mvm.toml --detach` and then shell out for everything else. The agent-framework audience (LangChain, LlamaIndex, Mastra, Vercel AI SDK) lives in Python and TypeScript and will not adopt a CLI-only tool.
+libkrun is fundamentally **SDK-shaped**: the install path is `pip install libkrun` or `npm install libkrun`, and three lines of code give you a running VM. mvm is **CLI-shaped**: you `mvmctl up --manifest ./mvm.toml --detach` and then shell out for everything else. The agent-framework audience (LangChain, LlamaIndex, Mastra) lives in Python and TypeScript and will not adopt a CLI-only tool.
 
 The good news: the design is already written. Plan 60 Phase 5 specs the full surface (`Sandbox.builder(...)`, `.commands.run(...)`, `.commands.run(..., background=True)`, etc.) and the previous iteration's `mvm-sdk` exists at `../mvmforge/crates/mvmforge-sdk/` ready to port. The bad news: it isn't in this repo's `crates/` and Phase 5 hasn't been started.
 

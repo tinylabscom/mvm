@@ -45,7 +45,7 @@ The current hand-written skeleton (`mvm-backend::Backend<Sb,Ctx>`, `mvm-builder:
                   │                                       │
                   ▼                                       ▼
    ┌──────────────────────────┐         ┌──────────────────────────┐
-   │  Modal-style decorators   │         │      mvm CLI (mvmctl)    │
+   │  remote-fn decorators    │         │      mvm CLI (mvmctl)    │
    │  + sandbox-runtime API    │         │  init, build, up, exec,  │
    │       (mvm-sdk)           │         │  install, session, …     │
    └──────────────────────────┘         └──────────────────────────┘
@@ -567,13 +567,13 @@ These live in `mvm-supervisor/src/tools/`. The MCP server (Phase 7) exposes the 
 
 ## SDK DX design — Rust + Python + TypeScript, three first-class SDKs
 
-Three SDKs, all first-class, all targeting **libkrun-style runtime + sandbox-runtime API surface** + **Modal-style decorators**. Common Rust core protocol; language-specific surface idiomatic to each ecosystem.
+Three SDKs, all first-class, all targeting **libkrun-style runtime + sandbox-runtime API surface** + **remote-function decorators**. Common Rust core protocol; language-specific surface idiomatic to each ecosystem.
 
 ### Architecture
 ```
                 ┌──────────────────────────────────────┐
                 │        Python SDK (PyPI: mvm)         │
-                │  sandbox runtime + Modal decorators   │
+                │  sandbox runtime + remote-fn decs.    │
                 └──────────────────────────────────────┘
                 ┌──────────────────────────────────────┐
                 │      TypeScript SDK (npm: @mvm/sdk)   │
@@ -887,15 +887,15 @@ Every method present on one is present on the others with semantically-identical
 
 ---
 
-### Style 2 — Declarative SDK (Modal-style decorators)
+### Style 2 — Declarative SDK (remote-function decorators)
 
-#### Python — full Modal-shaped DX
+#### Python — full remote-function-shaped DX
 ```python
 import mvm
 
 app = mvm.App("my-project")
 
-# Image composition (mirrors Modal's Image.debian_slim().pip_install)
+# Image composition (mirrors the reference platform's `Image.debian_slim().pip_install`)
 image = (
     mvm.Image.from_template("worker")
         .add_addon("python")
@@ -923,7 +923,7 @@ def charge(amount: int) -> str:
     r = requests.post("https://api.stripe.com/...", auth=(key, ""))
     return r.json()["id"]
 
-# Class with state — equivalent to Modal's @app.cls
+# Class with state — equivalent to the reference platform's `@app.cls`
 @app.cls(image=image, gpu=None)
 class Worker:
     @mvm.enter()
@@ -1034,12 +1034,12 @@ struct StripeKey;
 async fn charge(amount: u64) -> Result<ChargeId> { /* ... */ }
 ```
 
-### `.local()` vs `.remote()` — Modal's signature trick
+### `.local()` vs `.remote()` — the reference platform's signature trick
 A function decorated with `@app.function` is callable two ways:
 - `f.local(args)` — runs in the calling process (for testing)
 - `f.remote(args)` — packages args, ships them over the wire to a microVM, returns the result
 
-This is the *single* most-loved Modal DX feature. We replicate it in all three SDKs. The wire protocol is the same JSON-RPC `Sandbox.run_function` call underneath.
+This is the *single* most-loved feature of that platform's DX. We replicate it in all three SDKs. The wire protocol is the same JSON-RPC `Sandbox.run_function` call underneath.
 
 ### Tree-sitter analyzability for decorated forms
 The `mvm-tree-sitter` crate (Phase 5) ships grammars for *all three* declarative surfaces (Rust attribute macros, Python `@decorators`, TypeScript decorators). The future AI safety scanner walks any of them.
@@ -1050,13 +1050,13 @@ The `mvm-tree-sitter` crate (Phase 5) ships grammars for *all three* declarative
 - **Phase 9**: All three SDKs go beta with full surface parity tests in `tests/sdk_compat/`
 
 ### ADR
-- ADR-017 (already in catalog) extended: "Modal-style decorators + sandbox-runtime DX, **across Rust + Python + TypeScript**, with shared wire protocol and CI-enforced parity tests."
+- ADR-017 (already in catalog) extended: "Remote-function decorators + sandbox-runtime DX, **across Rust + Python + TypeScript**, with shared wire protocol and CI-enforced parity tests."
 
 ---
 
-## (Legacy) SDK DX design — Modal-style decorators + sandbox-runtime API surface
+## (Legacy) SDK DX design — remote-function decorators + sandbox-runtime API surface
 
-### Definition-time DX (Modal-like, decorator-driven, tree-sitter-friendly)
+### Definition-time DX (remote-function-style, decorator-driven, tree-sitter-friendly)
 
 Users describe their microVM declaratively with attribute macros that expand to data, not behavior. Trivially analyzable by tree-sitter (stable spans, named children) so the future AI safety scanner can audit configurations without running them.
 
@@ -1443,7 +1443,7 @@ Every architecturally-significant decision in this plan **must** be reflected in
 | 019 | Audit-everything coverage matrix | Phase 4 | NEW |
 | 020 | PII redaction tokenization scheme | Phase 6 | NEW |
 | 021 | Addons composability model | Phase 5 + 7b | NEW |
-| 022 | Modal-style decorators + sandbox-runtime DX (multi-language: Rust + Python + TypeScript) | Phase 5 + 7b + 9 | NEW |
+| 022 | Remote-function decorators + sandbox-runtime DX (multi-language: Rust + Python + TypeScript) | Phase 5 + 7b + 9 | NEW |
 | 023 | Long-running session model (tmux-backed) | Phase 7 | NEW |
 | 024 | Computer-use RPC surface | Phase 7b | NEW |
 | 025 | Transparent install/rebuild flow | Phase 7a | NEW |

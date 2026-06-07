@@ -10,7 +10,7 @@ related: ADR-002 (microVM security posture); ADR-005 (sealed signed builder imag
 ## Status
 
 Proposed. Lays the substrate for `mvmforge`'s function-call SDKs
-(decorationer ADR-0009, plan 0003) to wire a Modal-style
+(decorationer ADR-0009, plan 0003) to wire a remote-function
 `f.remote(...)` call surface onto mvm. Adopting this ADR commits mvm
 to shipping a constrained `RunEntrypoint` verb in production guest
 agents — alongside, not instead of, the dev-only `do_exec` (W4.3).
@@ -26,7 +26,7 @@ unsafe in production by construction — but it leaves no path for
 production workloads that want call-and-return semantics: send args,
 run a baked program, get output.
 
-`mvmforge` (decorationer) wants to add Modal-style function calls:
+`mvmforge` (decorationer) wants to add remote-function function calls:
 decorate a Python or TS function, call it from the host, body runs
 inside the microVM, return value flows back. The user's hard rule
 (captured in CLAUDE.md memory) is that **everything is written at
@@ -179,7 +179,7 @@ Concretely:
 Benefits:
 
 - A clean, prod-safe path for function-call workloads. mvmforge
-  builds Modal-class ergonomics on this; mvm stays language-agnostic.
+  builds remote-function ergonomics on this; mvm stays language-agnostic.
 - Mental hygiene: `mvmctl exec` (dev, arbitrary shell) and
   `mvmctl invoke` (prod, baked entrypoint) are visibly different
   surfaces with different CI gates and different security postures.

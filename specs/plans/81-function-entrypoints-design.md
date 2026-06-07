@@ -5,7 +5,7 @@
 You asked whether mvm supports "entrypoints" — booting a microVM,
 running something, getting output back. Shell case exists today
 (`mvmctl exec`). The new ask is **language-function entrypoints** in
-the Modal style: decorate a function, call it on the host, body runs
+the remote-function style: decorate a function, call it on the host, body runs
 in a microVM, return value flows back. Many small VMs (each a FaaS
 unit or library shard) compose into a single program.
 
@@ -157,7 +157,7 @@ primitive. Track in `specs/plans/4Y-session-pools.md` (separate).
 
 ### 5. (Out of scope) Closure shipping
 
-Modal's ephemeral apps pickle closures at call time. **Excluded** —
+The reference platform's ephemeral apps pickle closures at call time. **Excluded** —
 your build-time-only rule rules it out, and it's a real security
 surface (deserializing untrusted code) we don't want.
 
@@ -256,7 +256,7 @@ the SDK extracts the workload spec from kwargs (`name`, `image`,
 `entrypoint`, `resources`) and emits IR + flake + launch.json. The
 function body is dropped per the README.
 
-Users want Modal-style call-time semantics: decorate a function,
+Users want remote-function call-time semantics: decorate a function,
 call it on the host, body runs inside the microVM, return value
 flows back. mvm's substrate (ADR-0005) is gaining a constrained
 `RunEntrypoint` verb that runs a baked program with stdin piped in
@@ -304,7 +304,7 @@ its wrapper are baked into the rootfs at `mvmforge compile`.
 ## Consequences
 
 Benefits:
-- Modal-class ergonomics with mvm-class isolation (Firecracker
+- Remote-function ergonomics with mvm-class isolation (Firecracker
   per call/session).
 - Reuses ADR-0005 and ADR-0008 unchanged.
 - No new SDK ↔ host contract — just an IR field and a wrapper
@@ -370,7 +370,7 @@ None.
 
 ## Purpose
 
-Land function-call entrypoints (Modal-style `f.remote(...)`) on top
+Land function-call entrypoints (remote-function `f.remote(...)`) on top
 of the mvm `RunEntrypoint` substrate. End-to-end: decorate a Python
 or TypeScript function, run `mvmforge up`, then call it from the
 host and get a return value back.

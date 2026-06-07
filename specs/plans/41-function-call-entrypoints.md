@@ -1,6 +1,6 @@
 # Plan 41 — function-call entrypoints (mvm side)
 
-> Substrate work for Modal-style `f.remote(...)` semantics. mvmforge
+> Substrate work for remote-function `f.remote(...)` semantics. mvmforge
 > ships the language SDKs and Nix factories (decorationer plan 0003);
 > this plan covers the mvm pieces: a constrained `RunEntrypoint`
 > vsock verb, the `mvmctl invoke` CLI, snapshot integrity, and a flip

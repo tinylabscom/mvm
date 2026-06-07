@@ -289,6 +289,6 @@ architectural change worth considering after phases 1-5 are validated.
 - [microvm.nix optimization.nix](https://github.com/microvm-nix/microvm.nix/blob/main/nixos-modules/microvm/optimization.nix) — how microvm.nix optimizes Firecracker boot
 - [Firecracker CI kernel configs](https://github.com/firecracker-microvm/firecracker/tree/main/resources/guest_configs)
 - [Minimizing Linux boot times](https://blog.davidv.dev/posts/minimizing-linux-boot-times/) — 5.94ms kernel-to-userspace with custom init
-- [Kata containers boot fix](https://github.com/kata-containers/runtime/issues/1622) — masking udevd for fast boot
+- Masking udevd for fast boot (technique documented in an external containers-in-VMs runtime's issue tracker)
 - [firecracker-containerd #410](https://github.com/firecracker-microvm/firecracker-containerd/issues/410) — random seed + entropy wait
 - [NixOS: boot without initrd](https://discourse.nixos.org/t/how-to-boot-without-initrd/60082)
