@@ -51,23 +51,15 @@ ADR-067 §4. The reference must say *how* the secret is used (so the keyholder p
 
 ### Task B1: the `SecretResolver` trait + `Local` impl
 
-ADR-067 §2. One trait, value source swappable. `Local` is the existing `KeyProvider` (OS keyring).
+ADR-067 §2. One trait, value source swappable. `Local` reads the existing named-secret store.
 
-**Files:** `crates/mvm-core/src/secret/resolver.rs` (new); reuse `keystore.rs`'s `KeyProvider`.
+**Files:** `crates/mvm-hostd/src/keyholder/resolver.rs` (new) + `keyholder/mod.rs`.
 
-- [ ] **Step 1:** Failing test — `LocalResolver` resolves a `SecretRef` whose value was set in the OS keyring (use the in-memory/file `KeyProvider` backend in test), and returns the value in a `SecretBox` (zeroize on drop).
-  ```rust
-  #[test]
-  fn local_resolver_returns_zeroizing_value_for_a_known_ref() {
-      let store = KeyProvider::file_backed(tmp());          // existing backend
-      store.set("openai", b"sk-live-xxx").unwrap();
-      let r = LocalResolver::new(store);
-      let secret = r.resolve(&secret_ref("openai", AuthType::Bearer, &["api.openai.com"])).unwrap();
-      assert_eq!(secret.expose(), b"sk-live-xxx"); // SecretBox<Vec<u8>>, zeroized on drop
-  }
-  ```
-- [ ] **Step 2:** Define `trait SecretResolver { fn resolve(&self, r: &SecretRef) -> Result<SecretBox<Vec<u8>>, ResolveError>; }`; implement `LocalResolver` over `KeyProvider`. The `mvmd` resolver is a separate mvmd plan; leave a `// resolver: mvmd impl lives in mvmd` note, not a stub.
-- [ ] **Step 3: Commit.**
+> **Reconciliation (post-plan-121):** the plan first named `crates/mvm-core/src/secret/resolver.rs` over `KeyProvider`. Two corrections: (1) `KeyProvider` (keystore.rs) is the *single* per-tenant master DEK — the actual named-secret backend is `SecretStore` (`mvm_core::crypto::secret_store`, the `mvmctl secret put/ls` backend); (2) `SecretRef` now lives in `mvm-sdk::ir`, and `mvm-core` is *below* `mvm-sdk`, so a resolver taking `&SecretRef` cannot live in mvm-core. `mvm-hostd` deps both `mvm-sdk` (SecretRef) and `mvm-core` (SecretStore) and is the admit-time/keyholder home — the resolver lives there, sibling to the Phase C keyholder.
+
+- [x] **Step 1:** Failing test — `LocalResolver` resolves a `SecretRef` whose value was set in the file-backed `SecretStore`, returns it in a `SecretBox<Vec<u8>>` (zeroize on drop); plus an unbound-ref backstop and a missing-secret error path.
+- [x] **Step 2:** Define `trait SecretResolver { fn resolve(&self, r: &SecretRef) -> Result<SecretBox<Vec<u8>>, ResolveError>; }`; implement `LocalResolver` over `SecretStore`. `ResolveError::Unbound` is the fail-closed claim-12 backstop (empty `allowed_hosts` never resolves). The `mvmd` resolver is a separate mvmd plan.
+- [x] **Step 3: Commit.**
 
 ### Task B2: `mvmctl secret set` (the standalone-mvm DX)
 
