@@ -10,6 +10,9 @@ pub mod builder_agent;
 #[cfg(feature = "dev-shell")]
 pub mod console;
 pub mod entrypoint;
+/// Plan 129 / ADR-067 §1 (model ii) — in-guest forward-proxy front: parses a
+/// workload's proxied request into a `WireRequest` for the substitution client.
+pub mod forward_proxy;
 pub mod fs_rpc;
 /// Plan 122 D — guest-side VMGenID reseed. On a snapshot resume the host
 /// delivers a fresh generation token; when it changes (a clone, not a
