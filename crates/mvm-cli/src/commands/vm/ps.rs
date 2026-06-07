@@ -40,26 +40,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         tag_filter.insert(k, v);
     }
 
-    let mut all_vms: Vec<VmInfo> = Vec::new();
-
-    // Collect from Apple Container backend
-    let ac_backend = AnyBackend::from_hypervisor("apple-container");
-    if let Ok(vms) = ac_backend.list() {
-        all_vms.extend(vms);
-    }
-
-    // Collect from Docker backend
-    let docker_backend = AnyBackend::from_hypervisor("docker");
-    if let Ok(vms) = docker_backend.list() {
-        all_vms.extend(vms);
-    }
-
-    // Collect from Firecracker backend. Lima is gone (ADR-013) — Firecracker
-    // runs directly on Linux+KVM hosts.
-    let fc_backend = AnyBackend::from_hypervisor("firecracker");
-    if let Ok(vms) = fc_backend.list() {
-        all_vms.extend(vms);
-    }
+    // Aggregate across every backend (QEMU, libkrun, Firecracker, Apple
+    // Container, Docker) so a VM started under any VMM is listed — not just
+    // the platform default. Single source of truth in `AnyBackend::list_all`.
+    let mut all_vms: Vec<VmInfo> = AnyBackend::list_all();
 
     let _ = args.all;
 
@@ -153,16 +137,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         "NAME", "BACKEND", "STATUS", "CPUS", "MEMORY", "PORTS"
     );
     for vm in &all_vms {
-        let backend_name = if vm.flake_ref.as_deref().is_some() {
-            // Determine backend from context
-            if mvm_core::platform::current().has_apple_containers() {
-                "apple-container"
-            } else {
-                "firecracker"
-            }
-        } else {
-            "unknown"
-        };
+        // Prefer the VM's actual owning backend (resolved from its
+        // state-dir pid marker — qemu/libkrun/firecracker); fall back to a
+        // platform guess for the marker-less backends (Apple Container /
+        // Docker) so the column is accurate for pid-file VMMs.
+        let backend_name: String = AnyBackend::for_started_vm(&vm.name)
+            .map(|b| b.name().to_string())
+            .unwrap_or_else(|| {
+                if mvm_core::platform::current().has_apple_containers() {
+                    "apple-container".to_string()
+                } else {
+                    "firecracker".to_string()
+                }
+            });
         let status = format!("{:?}", vm.status);
         let mem = if vm.memory_mib > 0 {
             format!("{}Mi", vm.memory_mib)
