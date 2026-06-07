@@ -846,35 +846,58 @@ git commit -m "feat(mvm-cli): up --wait propagates workload exit code + plan.exi
   (mirror the smallest existing `examples/` flake that builds a sealed
   workload whose command runs and *returns* a chosen non-zero code).
 
-- [ ] **Step 1: Create the fixture** — a workload whose entrypoint is
-  effectively `sh -c 'exit 7'` (a command that returns, not `exec`s a
-  long-runner), built via the standard sealed/one-shot path so PID 1's
-  boot fragment returns 7. Read an existing `examples/*/flake.nix` and
-  mirror it with the trivial returning command.
+- [x] **Step 1: Create the fixture** — DONE (commit `76a46751`).
+  `examples/exit_code/flake.nix`: direct `mkGuest { entrypoint.command =
+  [ "/bin/busybox" "sh" "-c" "exit 7" ]; hypervisor = "libkrun"; }` — a
+  sealed prod one-shot whose PID-1 command returns 7. Evaluates cleanly:
+  `passthru.mvm` = `{sealed:true, entrypointKind:command,
+  hypervisor:libkrun, rootlessEntrypoint:true, agentBinary:real, ...}`;
+  the ext4 derivation is plannable. There is **no one-shot factory** —
+  direct `mkGuest` with `entrypoint.command` (and no `bootCommand`) is the
+  correct shape; `mkFunctionService` is persistent-only.
 
-- [ ] **Step 2: Live E2E on the libkrun host** (this Mac; isolate with
-  `MVM_CACHE_DIR`/`MVM_DATA_DIR` per `project_dev_host_runs_builder_via_vz`):
+- [~] **Step 2: Live E2E on the libkrun host — ATTEMPTED, BLOCKED on
+  fixture/builder staging (NOT on WS-A code).** Two successive
+  non-WS-A walls on this host:
+  1. The **Vz builder** needs the Swift `mvm-vz-supervisor` binary
+     (`reference_mvm_vz_supervisor_separate_swiftpm_binary`), absent in
+     the worktree → `--builder libkrun` to sidestep.
+  2. With `--builder libkrun`: Stage 0 booted, the builder VM ran, and
+     `nix build` started — but the fixture flake failed to evaluate:
+     `path '/work/nix/lib/workspace-filter.nix' does not exist`. The
+     `up --flake` builder stages **only the flake's own dir** at `/work`,
+     so the in-repo `workspaceRoot + "/nix/lib"` reference (mirrored from
+     the built-in `default-tenant` image, which is built with the whole
+     repo staged) does not resolve. The WS-A code path (guest `/init`
+     report → control vsock → supervisor capture → `wait()` →
+     `plan.exited` → exit propagation) is therefore **never exercised by
+     this fixture** — the image won't build.
+
+  **Resolution (follow-up):** author the fixture to reference mvm as a
+  proper flake **input** (as an external user flake would), OR build it
+  via the workspace-root-staged path the default image uses. Then re-run:
 
 ```bash
-cd /Users/auser/work/tinylabs/mvmco/mvm-plan-152-wsa
-export MVM_CACHE_DIR=$(mktemp -d) MVM_DATA_DIR=$(mktemp -d)
-cargo run -p mvm-cli -- up --flake examples/exit_code --wait --builder libkrun ; echo "mvmctl exit=$?"
-# Expect: mvmctl exit=7
-cargo run -p mvm-cli -- audit verify           # chain intact
-cargo run -p mvm-cli -- audit show <plan_id> --json | grep plan.exited   # carries exit_code=7
-# Confirm the VM powered off (not idling): the supervisor PID is gone and
-# console.log shows poweroff, not a panic/reboot.
+MVM_WORKSPACE_PATH="$(pwd)" ./target/debug/mvmctl up \
+  --flake ./examples/exit_code --builder libkrun --hypervisor libkrun --wait
+echo "exit: $?"   # expect 7
+./target/debug/mvmctl audit show <plan_id> --json | grep plan.exited   # exit_code=7
 ```
 
-  Expected: `mvmctl exit=7`; `plan.exited` with `exit_code=7` in the
-  chain; VM powered off cleanly.
+  **What IS verified without the live boot:** the host-side capture path
+  end-to-end on real sockets
+  (`mvm_vm_host::exit_capture::capture_once` test: bind listener →
+  connect → write 4-byte LE i32 → `workload.exit` → `read_captured`); the
+  backend mapping (`read_exit_status_from`: code→VmExitStatus,
+  absent→UNKNOWN); control-port registration
+  (`build_supervisor_config_registers_control_port`); `plan.exited`
+  chain emission (`emit_exited_writes_plan_exited_with_code` +
+  `verify_audit_chain`); `up --wait` parse + `conflicts_with`
+  detach/up-json; the guest `/init` rewrite (nix parse + opus security
+  review). The only unverified link is the live guest→libkrun-vsock→
+  supervisor proxy hop, which needs a buildable fixture.
 
-- [ ] **Step 3: Commit the fixture**
-
-```bash
-git add examples/exit_code/
-git commit -m "test(examples): exit_code one-shot fixture for WS-A E2E"
-```
+- [x] **Step 3: Commit the fixture** — DONE (commit `76a46751`).
 
 ---
 
