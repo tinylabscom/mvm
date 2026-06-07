@@ -2828,6 +2828,24 @@ fn test_up_wait_parses() {
 }
 
 #[test]
+fn test_up_wait_conflicts_with_detach() {
+    let res = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait", "--detach"]);
+    assert!(
+        res.is_err(),
+        "--wait --detach must be rejected at parse time"
+    );
+}
+
+#[test]
+fn test_up_wait_conflicts_with_up_json() {
+    let res = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--wait", "--up-json"]);
+    assert!(
+        res.is_err(),
+        "--wait --up-json must be rejected at parse time"
+    );
+}
+
+#[test]
 fn test_session_attach_resume_parses() {
     let cli =
         Cli::try_parse_from(["mvmctl", "session", "attach", "-r", "aaaaaaaaaaaaaaaa"]).unwrap();

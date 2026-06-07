@@ -802,7 +802,7 @@ pub(in crate::commands) struct Args {
     pub detach: bool,
     /// Block until the workload powers off, then exit with its code
     /// (one-shot workloads). Plan 152 WS-A.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["detach", "up_json"])]
     pub wait: bool,
     /// Network preset (unrestricted, none, registries, dev)
     #[arg(long)]
@@ -1302,6 +1302,15 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // only fires for the Docker tier; future non-microVM backends
     // would inherit the same banner via their `security_profile()`.
     emit_security_banner_if_needed(effective_hypervisor);
+
+    // Plan 152 WS-A: fail fast before boot so the user sees a clear
+    // error instead of booting then hitting the generic backend bail.
+    if wait && effective_hypervisor != "libkrun" {
+        anyhow::bail!(
+            "--wait is currently only supported on the libkrun backend (Plan 152 WS-A); \
+             other backends gain it in a later slice"
+        );
+    }
 
     // Lima is gone (ADR-013); no upfront VM check needed. The
     // libkrun-as-Linux-builder follow-up (W6.x) will reintroduce
@@ -2001,10 +2010,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     }
 
     // Plan 152 WS-A — block until the workload powers off and propagate its
-    // exit code. Only wired for libkrun today (Task 3.1 adds the wait impl
-    // there); other backends fall through to the default bail. `--detach`
-    // already short-circuits before this block so `!detach` is implicit here.
-    if wait && matches!(effective_hypervisor, "libkrun" | "firecracker") {
+    // exit code. `--wait` is parse-time mutually exclusive with `--detach`
+    // and `--up-json` (see Args); only the foreground libkrun path reaches here.
+    if wait && effective_hypervisor == "libkrun" {
         let id = mvm_core::vm_backend::VmId(vm_name_owned.clone());
         let status = backend.wait(&id)?;
         let code = status.code.unwrap_or(1);
