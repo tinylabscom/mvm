@@ -24,6 +24,7 @@ use url::Url;
 
 use mvm_core::crypto::secret_store::SecretStore;
 use mvm_core::plan::SecretBinding;
+use mvm_sdk::ir::AuthType;
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
@@ -31,6 +32,8 @@ use crate::keyholder::{
     SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
     find_placeholder,
 };
+use crate::supervisor::audit_recorder::Recorder;
+use crate::supervisor::secret_audit::emit_secret_substituted;
 use crate::supervisor::tools::http_hardening::hardened_client_builder;
 
 /// 16 MiB cap on a single routed request/response frame.
@@ -231,6 +234,9 @@ pub struct SubstitutionService {
     registry: Arc<SubstitutionRegistry>,
     resolver: Arc<dyn SecretResolver>,
     forwarder: Arc<dyn Forwarder>,
+    /// Optional chain-signed audit recorder. When set, each substitution emits
+    /// a `secret.substituted` entry (metadata only — claim 13).
+    recorder: Option<Recorder>,
 }
 
 impl SubstitutionService {
@@ -243,7 +249,15 @@ impl SubstitutionService {
             registry,
             resolver,
             forwarder,
+            recorder: None,
         }
+    }
+
+    /// Attach a chain-signed audit recorder; each substitution then emits a
+    /// `secret.substituted` entry (metadata only — claim 13).
+    pub fn with_recorder(mut self, recorder: Recorder) -> Self {
+        self.recorder = Some(recorder);
+        self
     }
 
     /// Assemble a ready-to-serve service from an admitted plan's secret
@@ -312,6 +326,16 @@ impl SubstitutionService {
         // after admission minted its placeholders.
         let registry: &SubstitutionRegistry = &self.registry;
         let endpoint = SubstitutionEndpoint::new(registry, self.resolver.as_ref());
+        // Capture audit metadata (name + auth-type per substituted secret, and
+        // the destination) before `prepare_request` consumes `req`. resolve_meta
+        // touches no value, so this is claim-13 safe.
+        let destination = destination_host(&req.url).ok();
+        let substituted: Vec<(String, AuthType)> = req
+            .headers
+            .iter()
+            .filter_map(|(_, v)| find_placeholder(v))
+            .filter_map(|ph| endpoint.resolve_meta(ph))
+            .collect();
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
@@ -321,14 +345,36 @@ impl SubstitutionService {
             }
         };
         match self.forwarder.forward(prepared).await {
-            Ok(r) => WireResponse::Ok {
-                status: r.status,
-                headers: r.headers,
-                body_b64: B64.encode(r.body),
-            },
+            Ok(r) => {
+                self.audit_substitutions(&substituted, destination.as_deref())
+                    .await;
+                WireResponse::Ok {
+                    status: r.status,
+                    headers: r.headers,
+                    body_b64: B64.encode(r.body),
+                }
+            }
             Err(e) => WireResponse::Refused {
                 message: e.to_string(),
             },
+        }
+    }
+
+    /// Emit one `secret.substituted` audit entry per substituted secret (claim
+    /// 13 — metadata only). Best-effort: an audit failure is logged, never
+    /// fails the request. No-op when no recorder is wired.
+    async fn audit_substitutions(
+        &self,
+        substituted: &[(String, AuthType)],
+        destination: Option<&str>,
+    ) {
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        for (name, auth_type) in substituted {
+            if let Err(e) = emit_secret_substituted(recorder, name, dest, *auth_type).await {
+                tracing::warn!(error = %e, secret = %name, "secret.substituted audit emit failed");
+            }
         }
     }
 }
@@ -607,6 +653,69 @@ mod server_tests {
         assert!(matches!(resp, WireResponse::Refused { .. }));
         // claim 12: an unbound destination never reaches the forward leg.
         assert!(forwarder.seen.lock().unwrap().is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn emits_secret_substituted_audit_on_success() {
+        use crate::supervisor::audit_file::FileAuditSigner;
+        use crate::supervisor::audit_recorder::Recorder;
+        use ed25519_dalek::SigningKey;
+        use mvm_core::plan::TenantId;
+
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+
+        let chain = dir.path().join("audit.jsonl");
+        let signer =
+            FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
+        let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
+
+        let service = Arc::new(
+            SubstitutionService::new(Arc::new(reg), resolver, forwarder).with_recorder(recorder),
+        );
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: String::new(),
+        };
+        write_json_frame(&mut client, &wire).await.unwrap();
+        // The audit emit completes before the Ok response is written, so the
+        // chain entry is on disk by the time we read the reply.
+        let _resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(logged.contains("secret.substituted"), "got: {logged}");
+        assert!(logged.contains("openai"));
+        assert!(logged.contains("api.openai.com"));
+        // claim 13: the value never reaches the audit chain.
+        assert!(
+            !logged.contains("sk-live-zzz"),
+            "audit chain must not carry the secret value: {logged}"
+        );
         server.abort();
     }
 }

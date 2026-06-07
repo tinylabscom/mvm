@@ -154,10 +154,12 @@ ADR-067 §1 backstop, **expanded (owner, 2026-05-31):** the scan catches not jus
 
 ### Task E2: audit (claim 13 lineage)
 
-**Files:** the chain-signed audit emitter (`mvm-hostd` / `audit_chain`).
+**Files:** `mvm-hostd/src/supervisor/secret_audit.rs` (emit helpers) + `substitution_proxy.rs` (wiring).
 
-- [ ] **Step 1:** Failing tests — every substitution emits `secret.substituted { name, destination, auth_type }`; the audit chain **carries no secret bytes** (assert no entry contains the value); `verify_audit_chain` passes; a tampered entry fails.
-- [ ] **Step 2:** Emit the entries; reuse the claim-8 chain. Commit.
+- [x] **Step 1:** Tests — `emit_secret_substituted` writes `secret.substituted { name, destination, auth_type }` to the chain-signed stream; the chain **carries no secret value** (asserted); `verify_audit_chain` passes; a tampered entry fails verification. `emit_secret_placeholder_dropped` records `secret.placeholder_dropped { destination }`. Plus an end-to-end test: a successful substitution over the UDS endpoint emits `secret.substituted` (value absent from the chain).
+- [x] **Step 2:** Both events emit via `Recorder::record_unbound(EventCategory::Secret, …)` (same claim-8 chain). `secret.substituted` is wired **live** into `SubstitutionService` (optional `Recorder` via `with_recorder`; `resolve_meta` supplies name+auth-type without touching the value; best-effort, never fails the request). Committed.
+
+> **Deferred:** wiring `secret.placeholder_dropped` into the live packet pipeline (the drop is already audited via the generic `gateway.flow_observer_fault` with `by="placeholder-leak"`; the dedicated event is a refinement, landed with the #1b bin-glue pass).
 
 ## Phase F — the claim-12/13 gate (with 128)
 
