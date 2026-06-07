@@ -27,6 +27,7 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn report(code: i32) -> std::io::Result<()> {
     use std::io::Write;
+    use std::net::TcpStream;
     use std::os::fd::FromRawFd;
 
     // Must match mvm_guest::vsock::WORKLOAD_EXIT_PORT (Plan 152 WS-A).
@@ -58,7 +59,7 @@ fn report(code: i32) -> std::io::Result<()> {
         return Err(err);
     }
     // SAFETY: fd is a valid connected AF_VSOCK stream we own.
-    let mut stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    let mut stream = unsafe { TcpStream::from_raw_fd(fd) };
     stream.write_all(&code.to_le_bytes())?;
     stream.flush()?;
     Ok(())
