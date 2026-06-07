@@ -12,7 +12,6 @@ use clap::{Args as ClapArgs, Subcommand};
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use mvm_backend::microvm;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_guest::vsock::{GuestRequest, ProcResult, ProcWaitEvent};
@@ -124,19 +123,45 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-fn instance_dir_for(name: &str) -> Result<String> {
+/// Send a non-streaming proc-control RPC to `name`'s guest agent over the
+/// backend-aware transport (Plan 169). Like `fs::fs_request`, the
+/// `--hypervisor mock` fast path (a mock agent at the VM dir's
+/// `runtime/v.sock`) stays ahead of the `vsock_transport::for_vm` probe,
+/// which resolves the right socket per VMM (Firecracker's `v.sock`, or the
+/// per-port UNIX socket libkrun/QEMU expose) but is unaware of the in-memory
+/// mock backend.
+fn proc_request(name: &str, req: GuestRequest) -> Result<ProcResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    // Plan 66 W3: if a mock VM is registered at
-    // `<mvm_data_dir>/mock-vms/<name>/runtime/v.sock`, route to it
-    // directly. The check is filesystem-based — production code
-    // never reaches the mock-vms path because `MockBackend` only
-    // populates it under `--hypervisor mock`. Falls through to the
-    // Lima-era resolver when no mock is in play.
     let mock_dir = mvm_backend::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
-        return Ok(mock_dir.to_string_lossy().into_owned());
+        return mvm_guest::vsock::send_proc_request(&mock_dir.to_string_lossy(), req);
     }
-    microvm::resolve_running_vm_dir(name)
+    let mut stream =
+        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    mvm_guest::vsock::send_proc_request_on(&mut stream, req)
+}
+
+/// Stream a `ProcWait` for `name`'s guest agent over the backend-aware
+/// transport (Plan 169), same mock-vs-`for_vm` resolution as [`proc_request`].
+fn proc_wait<F: FnMut(&ProcWaitEvent)>(
+    name: &str,
+    token: &str,
+    timeout: Option<u64>,
+    on_event: F,
+) -> Result<ProcWaitEvent> {
+    validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    if mock_dir.join("runtime").join("v.sock").exists() {
+        return mvm_guest::vsock::send_proc_wait(
+            &mock_dir.to_string_lossy(),
+            token,
+            timeout,
+            on_event,
+        );
+    }
+    let mut stream =
+        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    mvm_guest::vsock::send_proc_wait_on(&mut stream, token, timeout, on_event)
 }
 
 fn unwrap_proc(result: ProcResult) -> Result<ProcResult> {
@@ -164,7 +189,6 @@ fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) ->
     if argv.is_empty() {
         bail!("argv cannot be empty");
     }
-    let dir = instance_dir_for(name)?;
     let env = parse_envs(envs)?;
     let req = GuestRequest::ProcStart {
         argv: argv.to_vec(),
@@ -175,7 +199,7 @@ fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) ->
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(mvm_guest::vsock::send_proc_request(&dir, req)?)?;
+    let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
         ProcResult::Started { pid_token } => {
             println!("{pid_token}");
@@ -187,13 +211,9 @@ fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) ->
 }
 
 fn cmd_ls(name: &str, json: bool) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &GuestRequest::ProcList);
-    let result = unwrap_proc(mvm_guest::vsock::send_proc_request(
-        &dir,
-        GuestRequest::ProcList,
-    )?)?;
+    let result = unwrap_proc(proc_request(name, GuestRequest::ProcList)?)?;
     match result {
         ProcResult::List { processes } => {
             if json {
@@ -224,14 +244,13 @@ fn cmd_ls(name: &str, json: bool) -> Result<()> {
 }
 
 fn cmd_signal(name: &str, token: &str, signum: i32) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::ProcSignal {
         pid_token: token.to_string(),
         signum,
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(mvm_guest::vsock::send_proc_request(&dir, req)?)?;
+    let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
         ProcResult::Signaled => {
             mvm_core::audit_emit!(VmProcSignal, vm: name, "token={token} signum={signum}");
@@ -242,13 +261,12 @@ fn cmd_signal(name: &str, token: &str, signum: i32) -> Result<()> {
 }
 
 fn cmd_kill(name: &str, token: &str) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     let req = GuestRequest::ProcKill {
         pid_token: token.to_string(),
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(mvm_guest::vsock::send_proc_request(&dir, req)?)?;
+    let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
         ProcResult::Killed => {
             mvm_core::audit_emit!(Kill, vm: name, "scope=guest_proc token={token}");
@@ -260,7 +278,6 @@ fn cmd_kill(name: &str, token: &str) -> Result<()> {
 
 fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
     use std::io::Read;
-    let dir = instance_dir_for(name)?;
     let bytes = match content {
         Some(s) => s.into_bytes(),
         None => {
@@ -275,7 +292,7 @@ fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
     };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(mvm_guest::vsock::send_proc_request(&dir, req)?)?;
+    let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
         ProcResult::InputAccepted { bytes_accepted } => {
             eprintln!("accepted {bytes_accepted} bytes");
@@ -287,9 +304,8 @@ fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
 }
 
 fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
-    let dir = instance_dir_for(name)?;
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit. The
-    // `send_proc_wait` helper constructs the wire-format
+    // `proc_wait` helper constructs the wire-format
     // ProcWait internally; we synthesize an equivalent request
     // here purely so the audit kind_name lines up with what the
     // guest receives.
@@ -302,7 +318,7 @@ fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
     );
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
-    let terminal = mvm_guest::vsock::send_proc_wait(&dir, token, timeout, |ev| match ev {
+    let terminal = proc_wait(name, token, timeout, |ev| match ev {
         ProcWaitEvent::Stdout { chunk } => {
             let _ = stdout.write_all(chunk);
             let _ = stdout.flush();
