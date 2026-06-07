@@ -93,6 +93,9 @@ jobs:
       - name: guest agent forked in every bootable image
         run: cargo run -p xtask -- check-guest-agent-in-all-images
 
+      - name: runtime-overlay version pinned to workspace
+        run: cargo run -p xtask -- check-runtime-overlay-version
+
   test:
     name: Test
     runs-on: ubuntu-latest

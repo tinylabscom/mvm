@@ -19,6 +19,7 @@ mod check_guest_agent_runtime_free;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_overclaim;
+mod check_runtime_overlay_version;
 mod check_spec_numbers;
 mod gen_stubs;
 mod perf;
@@ -91,6 +92,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_mvm_host_binaries_sync::run(&workspace)
         }
+        Some("check-runtime-overlay-version") => {
+            let workspace = workspace_root();
+            check_runtime_overlay_version::run(&workspace)
+        }
         Some("perf") => perf::run(&args[2..]),
         Some("build-dev-image") => {
             let workspace = workspace_root();
@@ -105,7 +110,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-claim-catalog, check-mvm-host-binaries-sync, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -137,6 +142,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-guest-agent-in-all-images         Plan 124 B: assert every bootable image's launch path forks mvm-guest-agent"
+            );
+            eprintln!(
+                "  check-runtime-overlay-version           Plan 124 C: assert the runtime-overlay flake's overlayVersion matches the workspace version"
             );
             eprintln!(
                 "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from specs/claims/ outside exempt paths"

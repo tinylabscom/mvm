@@ -117,7 +117,9 @@
       # file disagrees with the running mvmctl. Bumping the
       # workspace version requires bumping this string too — keep
       # the two in lock-step or `mvmctl up` admission fails.
-      overlayVersion = "0.14.0";
+      # `xtask check-runtime-overlay-version` (a CI gate, Plan 124 C1)
+      # asserts this match so the pin can't silently go stale.
+      overlayVersion = "0.16.1";
 
       # mvm-guest binaries — agent + seccomp shim + verity-init.
       # `mvm-verity-init` is the initrd PID 1; it lives in the
