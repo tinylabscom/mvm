@@ -9,6 +9,9 @@ secrets/config disks + unique IP/ID on wake. But the restore path has four
 security-correctness gaps that make it **not production-ready** as written. This
 plan closes the mvm-side gaps. The warm-pool orchestration and wake-time
 admission *policy* live in mvmd — see `../mvmd/specs/plans/53-warm-pool-ms-restore.md`.
+The local single-host *idle-stop / wake / memory-pressure-evict* mechanism that
+*triggers* this sleep/wake machinery (vs. the snapshot correctness gaps below)
+lives in **Plan 169** (host-lifecycle convergence + density).
 
 Backend scope: Firecracker / cloud-hypervisor (`caps.snapshots == true`).
 libkrun + apple-container report `false` — no snapshot there, so the dev/libkrun
