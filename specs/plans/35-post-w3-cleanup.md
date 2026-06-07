@@ -51,12 +51,12 @@ verify* in CI. Specifically:
 ### C0 — Carryover housekeeping
 
 W7.1 from sprint 42's plan 31 left
-`nix/images/examples/{paperclip,openclaw}/` undeleted because
+`nix/images/examples/{paperclip,agent-workload}/` undeleted because
 the sandbox blocked `git rm` twice (recorded at sprint 42's
 SPRINT.md note for W7.1). Close it now.
 
 ```bash
-git rm -r nix/images/examples/paperclip nix/images/examples/openclaw
+git rm -r nix/images/examples/paperclip nix/images/examples/agent-workload
 ```
 
 Audit `nix/images/examples/flake.nix` (or per-example
@@ -67,7 +67,7 @@ remaining examples.
 **Files**
 
 - `nix/images/examples/paperclip/` — full deletion.
-- `nix/images/examples/openclaw/` — full deletion.
+- `nix/images/examples/agent-workload/` — full deletion.
 - Any aggregator flake that references these examples — drop
   the now-dangling entries.
 
@@ -76,7 +76,7 @@ remaining examples.
 - `nix flake check` (in Lima) passes after deletion: no
   dangling refs.
 - `git ls-files nix/images/examples/ | grep -E
-  '(paperclip|openclaw)'` returns nothing.
+  '(paperclip|agent-workload)'` returns nothing.
 
 **Estimate**: ½ hour. Smallest workstream in the sprint;
 slots in front of any other PR.
@@ -412,7 +412,7 @@ somewhere:
 - **Hosted MCP transport (HTTP/SSE)** (plan 33). Cross-repo
   work; lives in mvmd.
 - **`scripts/check-prod-agent-no-exec.sh` Nix examples**
-  cleanup — `nix/images/{paperclip,openclaw}/` deletion blocked
+  cleanup — `nix/images/{paperclip,agent-workload}/` deletion blocked
   by sandbox in W7.1; needs manual `git rm`.
 
 ## Acceptance criteria

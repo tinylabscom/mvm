@@ -15,23 +15,23 @@ on a single machine — every project has a stable identity tied to
 where its `mvm.toml` lives.
 
 The ambiguity surfaces at *transfer time*. If Alice on machine A
-runs `mvmctl manifest push openclaw` (publishing the slot for her
-`/Users/alice/work/openclaw/mvm.toml`), and Bob on machine B runs
-`mvmctl manifest pull openclaw`, **what canonical path should Bob's
-slot key off?** Bob doesn't have `/Users/alice/work/openclaw/`.
+runs `mvmctl manifest push agent-workload` (publishing the slot for her
+`/Users/alice/work/agent-workload/mvm.toml`), and Bob on machine B runs
+`mvmctl manifest pull agent-workload`, **what canonical path should Bob's
+slot key off?** Bob doesn't have `/Users/alice/work/agent-workload/`.
 Three answers:
 
 1. **Preserve source identity** — install to
    `~/.mvm/templates/<alice's-slot-hash>/` on Bob's machine. Bob's
    `mvmctl up` on that slot would error because the manifest path
    it records doesn't exist locally.
-2. **Bob provides destination** — `mvmctl manifest pull openclaw
-   --to /Users/bob/projects/openclaw`. Bob writes a fresh
+2. **Bob provides destination** — `mvmctl manifest pull agent-workload
+   --to /Users/bob/projects/agent-workload`. Bob writes a fresh
    `mvm.toml` at the destination (or pull writes one), the slot is
    keyed off that new canonical path. Slots are deterministic on
    each machine, but identity isn't preserved across the network.
 3. **Hybrid: pull writes the manifest** — `mvmctl manifest pull
-   openclaw [DIR]`. Pull fetches the bundled manifest (`mvm.toml`
+   agent-workload [DIR]`. Pull fetches the bundled manifest (`mvm.toml`
    contents shipped in the channel), writes it to `DIR/mvm.toml`,
    computes Bob's local slot hash from that canonical path, and
    installs the artifacts there. Bob ends up with a runnable
@@ -53,7 +53,7 @@ exists today, name-keyed) to operate on slot hashes.
 
 - Resolve PATH → slot_hash (same logic as other manifest verbs).
 - S3 channel key: derived from `persisted.name` if set
-  (e.g. `openclaw`), otherwise fallback to the slot_hash. Push
+  (e.g. `agent-workload`), otherwise fallback to the slot_hash. Push
   refuses if `persisted.name` is set AND the remote channel
   already points at a different slot, unless `--force-channel`
   passed.
@@ -92,17 +92,17 @@ Consumer side. Option-3 design.
   with the persisted manifest's `manifest_path` set to the local
   canonical path. Provenance retains `original_manifest_path`,
   `pulled_from_channel`, and `pulled_from_hash` for audit.
-- Print: "Pulled `openclaw` revision `abc123…` to `./openclaw`. Run:
-  `mvmctl up ./openclaw`."
+- Print: "Pulled `agent-workload` revision `abc123…` to `./agent-workload`. Run:
+  `mvmctl up ./agent-workload`."
 
 ### Channel collision rules
 
 | Producer state | Remote `current` | Push behaviour |
 |---|---|---|
 | Manifest has no `name` | n/a | Always pushes by slot_hash; no channel collision possible |
-| Has `name = "openclaw"`, channel doesn't exist | absent | Creates channel, pushes |
-| Has `name = "openclaw"`, channel matches our slot | matches | Pushes new revision, updates current |
-| Has `name = "openclaw"`, channel points at different slot | conflicts | Refuses unless `--force-channel`. Error includes the conflicting slot's hash and a hint to rename. |
+| Has `name = "agent-workload"`, channel doesn't exist | absent | Creates channel, pushes |
+| Has `name = "agent-workload"`, channel matches our slot | matches | Pushes new revision, updates current |
+| Has `name = "agent-workload"`, channel points at different slot | conflicts | Refuses unless `--force-channel`. Error includes the conflicting slot's hash and a hint to rename. |
 
 This is the same naming-collision logic plan 38 §"Edge cases" §"Push
 channel collisions" already specified.
@@ -152,11 +152,11 @@ what `current` points at on the channel.
    - `provenance.original_manifest_path` round-trip.
 2. `cargo clippy --workspace -- -D warnings` clean.
 3. Manual smoke (with a real S3 endpoint or `localstack`):
-   - `mvmctl init /tmp/openclaw && mvmctl build /tmp/openclaw`
-   - `mvmctl manifest push /tmp/openclaw`
-   - On a second machine: `mvmctl manifest pull openclaw /tmp/openclaw-pulled`
-   - `mvmctl up /tmp/openclaw-pulled` boots the pulled image.
-4. Channel collision smoke: push a second project with `name = "openclaw"`; expect refusal + clear error pointing at `--force-channel`.
+   - `mvmctl init /tmp/agent-workload && mvmctl build /tmp/agent-workload`
+   - `mvmctl manifest push /tmp/agent-workload`
+   - On a second machine: `mvmctl manifest pull agent-workload /tmp/agent-workload-pulled`
+   - `mvmctl up /tmp/agent-workload-pulled` boots the pulled image.
+4. Channel collision smoke: push a second project with `name = "agent-workload"`; expect refusal + clear error pointing at `--force-channel`.
 5. Hash pull: `mvmctl manifest pull <slot_hash> /tmp/by-hash` resolves to the bundle without going through channel `current`.
 
 ## Out of scope

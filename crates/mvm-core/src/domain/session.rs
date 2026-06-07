@@ -529,12 +529,12 @@ mod tests {
 
     #[test]
     fn session_record_roundtrip() {
-        let rec = SessionRecord::new_running("happy-cat-1234", "openclaw", SessionMode::Prod);
+        let rec = SessionRecord::new_running("happy-cat-1234", "agentapp", SessionMode::Prod);
         let json = serde_json::to_string(&rec).unwrap();
         let decoded: SessionRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.id, rec.id);
         assert_eq!(decoded.vm_name, "happy-cat-1234");
-        assert_eq!(decoded.workload_id, "openclaw");
+        assert_eq!(decoded.workload_id, "agentapp");
         assert_eq!(decoded.mode, SessionMode::Prod);
         assert_eq!(decoded.state, SessionState::Running);
         assert_eq!(decoded.invoke_count, 0);
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn store_write_then_read_roundtrip() {
         let _guard = isolated_runtime_dir();
-        let rec = SessionRecord::new_running("vm-1", "openclaw", SessionMode::Prod);
+        let rec = SessionRecord::new_running("vm-1", "agentapp", SessionMode::Prod);
         let id = rec.id.clone();
         write_session(&rec).expect("write");
         let read = read_session(&id).expect("read").expect("present");

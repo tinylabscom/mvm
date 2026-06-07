@@ -52,7 +52,7 @@ The whole sprint is ~1 week of work and 4 small PRs.
 Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C0.
 ½ hour, smallest PR; lands in front of everything else.
 
-- [ ] **C0.1** `git rm -r nix/images/examples/{paperclip,openclaw}/`
+- [ ] **C0.1** `git rm -r nix/images/examples/{paperclip,agent-workload}/`
       (W7.1 sandbox-blocked deletion from sprint 42's plan 31).
 - [ ] **C0.2** Audit `nix/images/examples/flake.nix` (or per-
       example flake aggregator) for dangling references to the
@@ -60,7 +60,7 @@ Plan: [`plans/35-post-w3-cleanup.md`](plans/35-post-w3-cleanup.md) §C0.
       stays green.
 
 **Done when**: `git ls-files nix/images/examples/ | grep -E
-'(paperclip|openclaw)'` returns nothing and `nix flake check`
+'(paperclip|agent-workload)'` returns nothing and `nix flake check`
 on the remaining examples passes.
 
 ### C1 — Init-script defects exposed by W3 live boot  🟢 implemented
@@ -171,7 +171,7 @@ behind without blocking on plan 34's runtime backing.
 
 By sprint close:
 
-1. ✅ Sprint 42's W7.1 paperclip/openclaw deletion closed (C0).
+1. ✅ Sprint 42's W7.1 paperclip/agent-workload deletion closed (C0).
 2. ✅ Verity-enabled template boots cleanly with no init-script
    warnings on console (C1).
 3. ✅ Snapshot/restore round-trip works for verity VMs (C2).

@@ -445,13 +445,13 @@ fn test_up_without_source_uses_default_microvm() {
 
 #[test]
 fn test_up_manifest_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "--manifest", "openclaw"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "up", "--manifest", "agentapp"]).unwrap();
     match cli.command {
         Commands::Up(up::Args {
             flake, manifest, ..
         }) => {
             assert!(flake.is_none());
-            assert_eq!(manifest, Some("openclaw".to_string()));
+            assert_eq!(manifest, Some("agentapp".to_string()));
         }
         _ => panic!("Expected Up command"),
     }
@@ -612,10 +612,10 @@ fn test_up_from_workload_ir_combines_with_dev_gate_flag() {
 
 #[test]
 fn test_up_manifest_short_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "up", "-m", "openclaw"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "up", "-m", "agentapp"]).unwrap();
     match cli.command {
         Commands::Up(up::Args { manifest, .. }) => {
-            assert_eq!(manifest, Some("openclaw".to_string()));
+            assert_eq!(manifest, Some("agentapp".to_string()));
         }
         _ => panic!("Expected Up command"),
     }
@@ -623,7 +623,7 @@ fn test_up_manifest_short_flag() {
 
 #[test]
 fn test_up_flake_and_manifest_conflict() {
-    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--manifest", "openclaw"]);
+    let result = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--manifest", "agentapp"]);
     assert!(
         result.is_err(),
         "--flake and --manifest should be mutually exclusive"

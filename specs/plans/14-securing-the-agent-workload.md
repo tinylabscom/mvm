@@ -1,14 +1,14 @@
-# Securing OpenClaw in mvm
+# Securing the agent workload in mvm
 
 ## Context
 
-OpenClaw runs AI agents inside Firecracker microVMs managed by mvm. The current vsock protocol between host and guest has no authentication, no command validation, no threat detection, and no health monitoring. Research from the OpenClaw Field Manual and SafeClaw's open-source security dashboard identified 10 security patterns to close these gaps.
+The reference AI-agent workload — a Node.js AI-agent platform (Claude API, gateway, MCP servers, channels) — runs AI agents inside Firecracker microVMs managed by mvm. The current vsock protocol between host and guest has no authentication, no command validation, no threat detection, and no health monitoring. Research from the agent workload's community field manual and an external agent security-dashboard (open-source, TypeScript) identified 10 security patterns to close these gaps.
 
-SafeClaw and the Field Manual are **reference material only** — no integration with SafeClaw. All security improvements are native Rust, implemented in mvm's existing crate structure.
+The external security dashboard and the field manual are **reference material only** — no integration with that dashboard. All security improvements are native Rust, implemented in mvm's existing crate structure.
 
 **Scope:** All 5 phases. Type and protocol changes in mvm (mvm-core, mvm-guest). Runtime security modules in mvm (reusable by mvmd as a dependency). mvmd-specific integration (QUIC approval flow, fleet-wide session management) is a follow-up after the mvm-side work lands.
 
-**Research:** See [specs/research/openclaw-security.md](../research/openclaw-security.md) for the full analysis of the OpenClaw Field Manual, SafeClaw codebase, and current mvm security gaps.
+**Research:** See [specs/research/agent-workload-security.md](../research/agent-workload-security.md) for the full analysis of the agent workload's community field manual, the external security dashboard's codebase, and current mvm security gaps.
 
 ---
 
@@ -20,8 +20,8 @@ SafeClaw and the Field Manual are **reference material only** — no integration
 | `SignedPayload` type | `crates/mvm-core/src/signing.rs` | Phase 1 (frame envelope) |
 | Audit log (append-only JSON, rotation) | `crates/mvm/src/security/audit.rs` | Phase 3 (extend) |
 | `AuditAction` + `AuditEntry` types | `crates/mvm-core/src/audit.rs` | Phase 3 (add variants) |
-| Secrets drive (ro, noexec) | `nix/openclaw/guests/baseline.nix` | Phase 1 (session keys) |
-| Config drive (ro) | `nix/openclaw/guests/baseline.nix` | Phase 5 (immutable policy) |
+| Secrets drive (ro, noexec) | `nix/agent-workload/guests/baseline.nix` | Phase 1 (session keys) |
+| Config drive (ro) | `nix/agent-workload/guests/baseline.nix` | Phase 5 (immutable policy) |
 | Jailer, cgroups, seccomp | `crates/mvm/src/security/` | Phase 5 (posture checks) |
 | Vsock protocol (`read_frame`/`write_frame`) | `crates/mvm-guest/src/vsock.rs` | Phase 1 (wrap with auth) |
 
@@ -126,7 +126,7 @@ Three-tier detection approach (minimize regex, maximize performance):
 - Obfuscation: `String.fromCharCode`, hex escape sequences
 - Shell injection: `$()`, backtick substitution in arguments
 
-**MicroVM-specific patterns (not in SafeClaw):**
+**MicroVM-specific patterns (not in the external security dashboard):**
 - Firecracker escape: `/dev/kvm` access, jailer breakout (`nsenter`, `unshare -m`)
 - Nix sandbox breakout: `nix-shell --run`, `--no-sandbox`, unrestricted builders
 - Cgroup escape: `release_agent` writes, `cgroupfs` mount attempts

@@ -92,10 +92,10 @@ worked LLM-agent example showing the pattern end-to-end.
 ### Running with host-mounted config and secrets
 
 ```bash
-mvmctl build ./openclaw
-mvmctl up ./openclaw --name oc \
-    -v nix/examples/openclaw/config:/mnt/config \
-    -v nix/examples/openclaw/secrets:/mnt/secrets \
+mvmctl build ./agentapp
+mvmctl up ./agentapp --name oc \
+    -v nix/examples/agentapp/config:/mnt/config \
+    -v nix/examples/agentapp/secrets:/mnt/secrets \
     -p 3000:3000
 mvmctl forward my-vm 3000:3000
 ```
@@ -121,7 +121,7 @@ cat > /tmp/my-secrets/secret-refs.env << 'EOF'
 ANTHROPIC_API_KEY_REF=anthropic-api-key
 EOF
 
-mvmctl up ./openclaw --name oc \
+mvmctl up ./agentapp --name oc \
     -v /tmp/oc-config:/mnt/config \
     -v /tmp/oc-secrets:/mnt/secrets \
     -p 3000:3000
@@ -140,10 +140,10 @@ cold-booting. Published latency numbers must name the backend, host, artifact,
 and readiness boundary.
 
 ```bash
-mvmctl build ./openclaw --snapshot
-mvmctl up ./openclaw --name oc \
-    -v nix/examples/openclaw/config:/mnt/config \
-    -v nix/examples/openclaw/secrets:/mnt/secrets \
+mvmctl build ./agentapp --snapshot
+mvmctl up ./agentapp --name oc \
+    -v nix/examples/agentapp/config:/mnt/config \
+    -v nix/examples/agentapp/secrets:/mnt/secrets \
     -p 3000:3000
 ```
 
@@ -170,19 +170,19 @@ keys:
 
 ```bash
 # Production gateway with prod Anthropic key
-mvmctl up --manifest openclaw --name oc-prod \
+mvmctl up --manifest agentapp --name oc-prod \
     -v ./prod/config:/mnt/config \
     -v ./prod/secrets:/mnt/secrets \
     -p 3000:3000
 
 # Staging gateway with test key
-mvmctl up --manifest openclaw --name oc-staging \
+mvmctl up --manifest agentapp --name oc-staging \
     -v ./staging/config:/mnt/config \
     -v ./staging/secrets:/mnt/secrets \
     -p 3001:3000
 
 # Dev gateway with no key (localhost-only testing)
-mvmctl up --manifest openclaw --name oc-dev \
+mvmctl up --manifest agentapp --name oc-dev \
     -v ./dev/config:/mnt/config \
     -p 3002:3000
 ```

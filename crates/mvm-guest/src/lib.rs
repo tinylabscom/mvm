@@ -1,4 +1,4 @@
-// mvm-guest: vsock protocol and openclaw connector mapping for mvm
+// mvm-guest: vsock protocol and agent workload connector mapping for mvm
 // Depends on mvm-core
 
 pub mod builder_agent;

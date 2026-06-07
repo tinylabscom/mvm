@@ -161,7 +161,7 @@ impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
 // Config discovery and parsing
 // ---------------------------------------------------------------------------
 
-/// Find the built-in images directory (e.g., images/openclaw/).
+/// Find the built-in images directory (e.g., images/agentapp/).
 /// Same lookup pattern as config::find_lima_template().
 fn find_images_dir() -> Result<PathBuf> {
     let exe_dir = std::env::current_exe()?
@@ -189,7 +189,7 @@ fn find_images_dir() -> Result<PathBuf> {
 ///
 /// - If `name_or_path` is a directory, look for Mvmfile.toml inside it.
 /// - If `name_or_path` is a file, use it directly.
-/// - Otherwise, treat it as a built-in image name (e.g., "openclaw").
+/// - Otherwise, treat it as a built-in image name (e.g., "agentapp").
 pub fn find_config(name_or_path: &str) -> Result<(PathBuf, MvmImageConfig)> {
     let path = Path::new(name_or_path);
 
@@ -902,7 +902,7 @@ name = "test"
     fn test_parse_full_config() {
         let toml = r#"
 [image]
-name = "openclaw"
+name = "agentapp"
 base = "ubuntu"
 disk = "4G"
 
@@ -931,7 +931,7 @@ after = "network-online.target"
 restart = "always"
 "#;
         let config: MvmImageConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.image.name, "openclaw");
+        assert_eq!(config.image.name, "agentapp");
         assert_eq!(config.resources.memory, 4096);
         assert_eq!(config.resources.cpus, 4);
         assert_eq!(config.packages.apt, vec!["curl", "wget"]);
@@ -1017,11 +1017,11 @@ size = "8G"
 
     #[test]
     fn test_find_builtin_config() {
-        // Should find the built-in openclaw config in the source tree
-        let result = find_config("openclaw");
+        // Should find the built-in agentapp config in the source tree
+        let result = find_config("agentapp");
         if let Ok((dir, config)) = result {
-            assert_eq!(config.image.name, "openclaw");
-            assert!(dir.ends_with("openclaw"));
+            assert_eq!(config.image.name, "agentapp");
+            assert!(dir.ends_with("agentapp"));
         }
     }
 

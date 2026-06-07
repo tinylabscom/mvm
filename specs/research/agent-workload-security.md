@@ -1,16 +1,16 @@
-# Research: Safely Providing OpenClaw in mvm
+# Research: Safely Providing the Reference AI-Agent Workload in mvm
 
 ## Context
 
-The goal is to understand how to securely provide OpenClaw — the AI agent framework — within mvm's Firecracker microVM environment. This document synthesizes findings from three research sources to identify security patterns, gaps, and a path forward.
+The goal is to understand how to securely provide the reference AI-agent workload — a Node.js AI-agent platform (Claude API, gateway, MCP servers, channels) — within mvm's Firecracker microVM environment. This document synthesizes findings from three research sources to identify security patterns, gaps, and a path forward.
 
 **Status**: Research phase. Waiting for a third resource from the user before finalizing an implementation plan.
 
 ---
 
-## Source 1: The OpenClaw Field Manual (PDF, 90 pages)
+## Source 1: The agent workload's community field manual (PDF, 90 pages)
 
-The Field Manual is the community guide (v1.0, Feb 2026) for running OpenClaw — a Node.js AI agent platform that uses Claude API, with a gateway process, MCP servers, channels (WhatsApp, Discord, Google), cron jobs, heartbeats, and a memory system.
+The Field Manual is the community guide (v1.0, Feb 2026) for running the agent workload — a Node.js AI-agent platform that uses Claude API, with a gateway process, MCP servers, channels (WhatsApp, Discord, Google), cron jobs, heartbeats, and a memory system.
 
 ### Security-Relevant Patterns Extracted
 
@@ -74,22 +74,22 @@ The Field Manual treats the agent as **adversarial-by-default** — it will drif
 
 ---
 
-## Source 2: SafeClaw (github.com/DinoMorphica/safeclaw)
+## Source 2: an external agent security-dashboard
 
-SafeClaw is an open-source TypeScript security dashboard (MIT license) that sits between an AI agent and the host OS. It intercepts, monitors, and controls what the agent can do.
+An external agent security-dashboard (open-source, TypeScript, MIT) sits between an AI agent and the host OS. It intercepts, monitors, and controls what the agent can do.
 
 ### Architecture
 
 ```
-User prompt → OpenClaw Agent → SafeClaw → OS / Network / MCP
+User prompt → agent → the external security dashboard → OS / Network / MCP
                                    │
                          Dashboard (localhost:54335)
                                    │
-                         SQLite (~/.safeclaw/safeclaw.db)
+                         SQLite (~/.agentsec/agentsec.db)
 ```
 
 **Two ingestion paths:**
-1. **WebSocket client** → OpenClaw gateway (port 18789) — real-time events via Ed25519-authenticated binary protocol
+1. **WebSocket client** → the agent workload's gateway (port 18789) — real-time events via Ed25519-authenticated binary protocol
 2. **SessionWatcher** → JSONL session files on disk — file-based activity monitoring
 
 ### 5 Independent Security Subsystems
@@ -110,7 +110,7 @@ User prompt → OpenClaw Agent → SafeClaw → OS / Network / MCP
 
 **3. Access Control Toggles (tool group blocks)**
 - 4 toggle dimensions: filesystem, system_commands, network, mcp_servers
-- Mutates OpenClaw's `tools.deny` config and plugin enable/disable
+- Mutates the agent workload's `tools.deny` config and plugin enable/disable
 
 **4. Skill Scanner (static pre-execution)**
 - 15 SK-* categories for analyzing markdown skill definitions before use
@@ -121,15 +121,15 @@ User prompt → OpenClaw Agent → SafeClaw → OS / Network / MCP
 - Layers: sandbox, filesystem, network, egress-proxy, exec, mcp, gateway, secrets, supply-chain, input-output, monitoring, human-in-loop
 - Score: `passed_checks / total_checks * 100`
 
-### Gateway Protocol (OpenClawClient)
+### Gateway Protocol (agent gateway client)
 - WebSocket to `ws://127.0.0.1:{port}` (default 18789)
-- **Ed25519 device authentication**: reads keypair from `~/.openclaw/identity/device.json`, signs challenge payload, gateway verifies
+- **Ed25519 device authentication**: reads keypair from `~/.agent/identity/device.json`, signs challenge payload, gateway verifies
 - Connect handshake: `connect.challenge` → client signs → `connect` request → `hello-ok`
 - Event streams: `agent` (tool calls), `chat` (messages), `lifecycle` (session start/end), `exec.approval.requested`, `tick` (keepalive)
 - Reconnect: exponential backoff (2s base, 1.5x, max 30s, 20 attempts)
 
 ### Key Takeaway for mvm
-SafeClaw provides a concrete, working implementation of the "external observer" pattern with 5 security subsystems. The most directly applicable patterns for mvm are:
+The external security dashboard provides a concrete, working implementation of the "external observer" pattern with 5 security subsystems. The most directly applicable patterns for mvm are:
 - **Threat classification on vsock traffic** — adapt the 10 TC-* categories to classify guest agent commands
 - **Exec approval flow** — blocklist + human-in-the-loop approval maps to host-side vsock command gating
 - **Security posture scoring** — multi-layer health check model applies to VM security configuration
@@ -137,7 +137,7 @@ SafeClaw provides a concrete, working implementation of the "external observer" 
 
 ---
 
-## Source 3: Current mvm OpenClaw Implementation (Codebase Exploration)
+## Source 3: Current mvm agent-workload Implementation (Codebase Exploration)
 
 ### What Exists Today
 
@@ -147,7 +147,7 @@ SafeClaw provides a concrete, working implementation of the "external observer" 
 - Port 21470 (builder agent): accepts `nix build` commands
 - 4-byte BE length prefix + JSON, 256 KiB max frame, 10s timeout
 
-**Nix guest images** (nix/openclaw/):
+**Nix guest images** (nix/agent/):
 - `flake.nix` builds tenant-gateway and tenant-worker NixOS images
 - `guests/baseline.nix` — hardened guest OS: no SSH, no sudo, serial console only
 - Drive mounts: config (ro), secrets (ro, noexec), data (rw, noexec)
@@ -186,8 +186,8 @@ SafeClaw provides a concrete, working implementation of the "external observer" 
 - **From**: Field Manual's deny-by-default execPolicy
 - **Apply**: Builder agent should have a fixed whitelist of allowed Nix operations. The host-side vsock handler should validate and reject unrecognized commands before they reach the guest.
 
-### Pattern 3: External Health Monitoring (SafeClaw Pattern)
-- **From**: SafeClaw's external observer + Field Manual's watchdog timer
+### Pattern 3: External Health Monitoring (external-observer pattern)
+- **From**: the dashboard's external observer + Field Manual's watchdog timer
 - **Apply**: Host-side periodic health checks via vsock Ping. If guest doesn't respond within timeout, host can kill/restart the VM. This is already partially implemented (Ping exists in the protocol) but needs enforcement.
 
 ### Pattern 4: Session Lifecycle Management
@@ -210,8 +210,8 @@ SafeClaw provides a concrete, working implementation of the "external observer" 
 
 ## Open Questions (Awaiting Third Resource)
 
-1. **What monitoring capabilities does SafeClaw actually provide?** The public info is thin. The third resource may fill this gap.
-2. **Should mvm embed a SafeClaw-compatible monitoring protocol?** If SafeClaw has an API/webhook format, mvm could emit compatible events.
+1. **What monitoring capabilities does the external security dashboard actually provide?** The public info is thin. The third resource may fill this gap.
+2. **Should mvm embed a dashboard-compatible monitoring protocol?** If the dashboard has an API/webhook format, mvm could emit compatible events.
 3. **What scope of changes does the user want?** This research identifies 8 gaps and 7 patterns. Are we implementing all of them, or starting with a focused subset?
 4. **Does the user want changes in mvm (the dev tool) or mvmd (the fleet orchestrator)?** Most of these security patterns matter more in multi-tenant fleet mode. For dev mode (single VM, local), the threat model is different.
 
@@ -219,7 +219,7 @@ SafeClaw provides a concrete, working implementation of the "external observer" 
 
 ## Recommended Next Steps
 
-1. **Wait for third resource** — may provide SafeClaw technical details or additional security patterns
+1. **Wait for third resource** — may provide additional technical details on the external dashboard or further security patterns
 2. **Scope the work** — after all resources reviewed, identify which gaps to address first
 3. **Prioritize by threat model**:
    - For dev mode (mvm): builder agent auth + health monitoring are highest priority

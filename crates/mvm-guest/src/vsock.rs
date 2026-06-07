@@ -124,7 +124,7 @@ pub enum GuestRequest {
     /// Query current worker status.
     WorkerStatus,
     /// Request sleep preparation. Guest should:
-    /// 1. Finish/checkpoint in-flight OpenClaw work
+    /// 1. Finish/checkpoint in-flight agent workload work
     /// 2. Flush data to disk
     /// 3. Drop page cache
     /// 4. ACK with SleepPrepAck
@@ -2131,7 +2131,7 @@ pub fn query_worker_status(instance_dir: &str) -> Result<GuestResponse> {
 
 /// Request sleep preparation via vsock.
 ///
-/// Returns Ok(true) if guest ACKed (OpenClaw idle, data flushed),
+/// Returns Ok(true) if guest ACKed (agent workload idle, data flushed),
 /// Ok(false) if guest NAKed or timed out.
 pub fn request_sleep_prep(instance_dir: &str, drain_timeout_secs: u64) -> Result<bool> {
     let mut stream = connect(instance_dir, drain_timeout_secs)?;

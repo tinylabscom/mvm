@@ -25,7 +25,7 @@ vcpus = 2
 mem = "1024M"
 data_disk = "0"
 
-name = "openclaw"             # optional; display + S3 channel hint
+name = "agentapp"             # optional; display + S3 channel hint
 ```
 
 That's it. Build inputs (`flake`, `profile`) and dev sizing (`vcpus`, `mem`, `data_disk`). No `role`, no `[network]`, no `[[variants]]`, no dependencies — those are flake territory or [`mvmd`](https://github.com/tinylabscom/mvmd) territory, not the dev tool's.
@@ -175,7 +175,7 @@ mvmctl manifest push [PATH] [--revision <hash>]
 
 # consumer
 mvmctl manifest pull <CHANNEL-OR-HASH> [DIR]
-mvmctl manifest pull openclaw ./openclaw   # writes mvm.toml in DIR, installs artifacts
+mvmctl manifest pull agentapp ./agentapp   # writes mvm.toml in DIR, installs artifacts
 mvmctl manifest verify --check-signature    # cosign verify (gated on plan 36)
 ```
 

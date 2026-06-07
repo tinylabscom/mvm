@@ -146,7 +146,7 @@ Parse `target` string into `BuildTarget`, call `dev_build_target()`, display app
 
 ---
 
-## Phase 4: Nix Flake (`nix/openclaw/`)
+## Phase 4: Nix Flake (`nix/agent-workload/`)
 
 ### 4a. Add `mkWasm` builder function to `flake.nix`
 
@@ -219,9 +219,9 @@ packages = {
 
 ### 4d. Add example WASM source
 
-Create `nix/openclaw/wasm/worker/` with a minimal Rust WASI hello-world (`Cargo.toml` + `src/main.rs`) as a working example.
+Create `nix/agent-workload/wasm/worker/` with a minimal Rust WASI hello-world (`Cargo.toml` + `src/main.rs`) as a working example.
 
-**Files:** `nix/openclaw/flake.nix`, `nix/openclaw/wasm/worker/Cargo.toml`, `nix/openclaw/wasm/worker/src/main.rs`
+**Files:** `nix/agent-workload/flake.nix`, `nix/agent-workload/wasm/worker/Cargo.toml`, `nix/agent-workload/wasm/worker/src/main.rs`
 
 ---
 
@@ -267,10 +267,10 @@ Uses `#[serde(default)]` so existing manifests without `wasm_profiles` parse fin
 
 1. **Unit tests:** `cargo test` — all existing tests pass, new tests for `BuildTarget`, `WasmBuildResult`, WASM attribute resolution, WASM cache logic
 2. **Clippy:** `cargo clippy -- -D warnings` passes
-3. **Nix build:** `nix build ./nix/openclaw#wasm-worker` produces `.wasm` module inside Lima VM
-4. **OCI build:** `nix build ./nix/openclaw#wasm-worker-oci` produces OCI tarball
-5. **CLI integration:** `mvm build --flake ./nix/openclaw --profile worker --target wasm` builds and displays WASM artifact paths
-6. **CLI integration:** `mvm build --flake ./nix/openclaw --profile worker --target wasm --oci` also produces OCI image
-7. **Backward compat:** `mvm build --flake ./nix/openclaw --profile worker` (no --target) builds FC as before
+3. **Nix build:** `nix build ./nix/agent-workload#wasm-worker` produces `.wasm` module inside Lima VM
+4. **OCI build:** `nix build ./nix/agent-workload#wasm-worker-oci` produces OCI tarball
+5. **CLI integration:** `mvm build --flake ./nix/agent-workload --profile worker --target wasm` builds and displays WASM artifact paths
+6. **CLI integration:** `mvm build --flake ./nix/agent-workload --profile worker --target wasm --oci` also produces OCI image
+7. **Backward compat:** `mvm build --flake ./nix/agent-workload --profile worker` (no --target) builds FC as before
 8. **OCI verify:** `oras manifest fetch` or `skopeo inspect` confirms WASM-specific media types (`application/vnd.wasm.content.layer.v1+wasm`)
 9. **Runtime verify:** `wasmtime run <build_dir>/app.wasm` executes the WASM module successfully

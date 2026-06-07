@@ -26,7 +26,7 @@ when `--cpus` / `--memory` are not passed to `mvmctl run`.
 - [06-minimum-runtime.md](sprints/06-minimum-runtime.md)
 - [07-role-profiles.md](sprints/07-role-profiles.md)
 - [08-integration-lifecycle.md](sprints/08-integration-lifecycle.md)
-- [09-openclaw-support.md](sprints/09-openclaw-support.md)
+- [09-agent-workload-support.md](sprints/09-agent-workload-support.md)
 - [10-coordinator.md](sprints/10-coordinator.md)
 - Sprint 11: Dev Environment
 - [12-install-release-security.md](sprints/12-install-release-security.md)

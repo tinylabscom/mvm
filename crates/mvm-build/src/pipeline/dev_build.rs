@@ -700,7 +700,7 @@ fn run_pre_build_hook(env: &dyn ShellEnvironment, flake_ref: &str) -> Result<&'s
     env.shell_exec_visible(&format!("bash {}", shell_quote(&pre_build)))
         .with_context(|| "pre-build.sh hook failed")?;
 
-    // The hook may install files outside the Nix store (e.g. /opt/openclaw)
+    // The hook may install files outside the Nix store (e.g. /opt/agentapp)
     // that the flake references via builtins.path. --impure is required for
     // nix build to access these host paths.
     Ok(" --impure")

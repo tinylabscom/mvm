@@ -250,9 +250,9 @@ New file replacing the role of `baseline.nix`. Contains all Firecracker-specific
 - Security hardening (no SSH, no sudo, no mutable users)
 - microvm.nix defaults: vcpu=2, mem=512, vsock cid=3
 
-### 2c: Update OpenClaw flake (reference implementation)
+### 2c: Update the agent workload's flake (reference implementation)
 
-Rewrite `nix/openclaw/flake.nix` — becomes trivial:
+Rewrite `nix/agent-workload/flake.nix` — becomes trivial:
 
 ```nix
 {
@@ -310,15 +310,15 @@ Rewrite `nix/openclaw/flake.nix` — becomes trivial:
 |------|--------|
 | `flake.nix` | **New**: repo root flake exporting `lib.mkGuest` |
 | `nix/modules/mvm-guest.nix` | **New**: unified guest baseline module |
-| `nix/openclaw/flake.nix` | Rewrite to use `mvm.lib.mkGuest` |
+| `nix/agent-workload/flake.nix` | Rewrite to use `mvm.lib.mkGuest` |
 | `resources/template_scaffold/flake.nix` | Rewrite to use `mvm.lib.mkGuest` |
 | `crates/mvm-cli/resources/template_scaffold/flake.nix` | Mirror of above |
-| `nix/openclaw/guests/baseline.nix` | Content moves to `mvm-guest.nix` |
+| `nix/agent-workload/guests/baseline.nix` | Content moves to `mvm-guest.nix` |
 
 ### Verification
 
-- `nix flake check` passes on repo root and openclaw flakes
-- `nix build` from openclaw produces `vmlinux` + `initrd` + `rootfs.ext4`
+- `nix flake check` passes on repo root and agent-workload flakes
+- `nix build` from agent-workload produces `vmlinux` + `initrd` + `rootfs.ext4`
 - `dev_build()` works unchanged (same output structure)
 - Existing custom flakes (without `mvm.lib`) continue to work
 

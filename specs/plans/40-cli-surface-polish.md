@@ -56,7 +56,7 @@ prints a recipe. The catalog itself (curated `flake_ref` +
 profile + sizing tuples) is still useful, but as a *scaffold
 source*, not as a runtime concept. Fold it into `init`:
 
-- `mvmctl init <DIR> --catalog openclaw` writes a `mvm.toml` +
+- `mvmctl init <DIR> --catalog agent-workload` writes a `mvm.toml` +
   `flake.nix` shim that points at the catalog entry's flake_ref
   with the catalog's recommended sizing.
 - `mvmctl image list` / `info` / `search` move under
@@ -136,7 +136,7 @@ is removed.
 3. Manual `mvmctl --help` shows the trimmed surface (21 verbs).
 4. Manual `mvmctl up --help` doesn't show `start`/`run` aliases.
 5. Manual `mvmctl doctor` output includes a security section.
-6. Manual `mvmctl init my-app --catalog openclaw` writes a
+6. Manual `mvmctl init my-app --catalog agent-workload` writes a
    `mvm.toml` + `flake.nix` aligned with the catalog entry.
 
 ## Out of scope

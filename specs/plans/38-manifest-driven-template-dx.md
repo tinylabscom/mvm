@@ -29,7 +29,7 @@ vcpus = 2
 mem = "1024M"
 data_disk = "0"
 
-name = "openclaw"            # optional; display name in `template list` and S3 channel key
+name = "agent-workload"            # optional; display name in `template list` and S3 channel key
 ```
 
 That's the entire surface. Build inputs + dev sizing. Nothing else.
@@ -90,7 +90,7 @@ After: `~/.mvm/templates/<sha256(canonical_manifest_path)>/manifest.json` + `art
   "vcpus": 2,
   "mem_mib": 1024,
   "data_disk_mib": 0,
-  "name": "openclaw",
+  "name": "agent-workload",
   "backend": "firecracker",
   "provenance": {
     "toolchain_version": "0.13.0",
@@ -211,7 +211,7 @@ The following corners are addressed so they don't bite later:
 
 - **CI ergonomics for legacy banner.** `MVM_NO_LEGACY_BANNER=1` env var or `--quiet` global flag suppresses the §8a one-time banner. CI users get no surprise output on first invocation post-upgrade.
 
-- **Push channel collisions.** `template push` checks the registry's S3 channel namespace before overwriting. If `name = "openclaw"` already points at a different slot hash, refuse with "channel `openclaw` already points at slot `<other-hash>`; pass `--force-channel` or rename." Manifest-hash addressing always works as a non-collision fallback.
+- **Push channel collisions.** `template push` checks the registry's S3 channel namespace before overwriting. If `name = "agent-workload"` already points at a different slot hash, refuse with "channel `agent-workload` already points at slot `<other-hash>`; pass `--force-channel` or rename." Manifest-hash addressing always works as a non-collision fallback.
 
 - **Stable slot layout as a contract.** Doc-comment the slot path layout in `mvm-core/src/domain/template.rs` as a stable public-ish API. Third-party tools should prefer `mvmctl template list --json`, but the layout is documented for emergencies / debugging. Mirrors how `~/.mvm` is documented today.
 
@@ -480,14 +480,14 @@ Reuse:
 2. `cargo clippy --workspace -- -D warnings` — clean.
 3. Manual: `cd nix/examples/hello && cargo run -- template init && cargo run -- template build` — manifest written, slot created at `~/.mvm/templates/<hash>/`, artifacts built.
 4. Manual: from a sub-directory of the example, `cargo run -- template build` walks up and finds the manifest.
-5. Manual: `cargo run -- template build --mvm-config nix/examples/openclaw` — resolves the manifest in that directory.
+5. Manual: `cargo run -- template build --mvm-config nix/examples/agent-workload` — resolves the manifest in that directory.
 6. Manual: edit `flake = "."` to a different ref and re-run `build` — refused with drift message; `--force` succeeds.
 7. Manual: drop a `Mvmfile.toml` next to a flake (instead of `mvm.toml`) — same behaviour. Drop both → conflict error.
 8. Manual: `mv nix/examples/hello/mvm.toml /tmp/elsewhere.toml && cargo run -- template list --orphans` — shows the original slot as orphaned.
 9. Manual: `cargo run -- up --template ./nix/examples/hello` — boots from manifest path.
 10. Manual: `cargo run -- template create old --flake .` — clean removal message; documented migration path.
 11. Manual (mvmforge integration smoke, after coordination ticket on mvmforge lands): `mvmforge compile <ir.json> --out /tmp/wf` generates `flake.nix` + `mvm.toml`; `cargo run -- template build --mvm-config /tmp/wf` builds; `mvmforge up` translates the IR into `mvmctl up --cmd … --env …` flags. No `launch.json` involved.
-12. Migration smoke: with a populated `~/.mvm/templates/openclaw/` legacy slot, `cargo run -- template list` prints the legacy banner; `cargo run -- template list --legacy` lists it; `cargo run -- template prune --legacy` removes it; new flow continues to work.
+12. Migration smoke: with a populated `~/.mvm/templates/agent-workload/` legacy slot, `cargo run -- template list` prints the legacy banner; `cargo run -- template list --legacy` lists it; `cargo run -- template prune --legacy` removes it; new flow continues to work.
 13. Cache-key change: `cargo test -p mvm-build` exercises `template_reuse.rs` with the 2-component key (`flake_lock + profile`); old role-bearing tests in `mvm-core/src/domain/template.rs:212-223` are rewritten or removed.
 14. MCP `run` tool: with the new schema, an LLM client passing `env: "shell"` resolves to the built-in preset manifest; passing `env: "/abs/path/to/mvm.toml"` resolves to a user manifest; passing a non-existent name returns a clear error.
 15. Prompt-driven init: `cargo run -- template init /tmp/scaffold --prompt "fastapi app with postgres"` (with `MVM_TEMPLATE_PROVIDER=heuristic` for offline determinism) emits `flake.nix` + `mvm.toml`; `mvm.toml` carries resource defaults from the lookup table (Python web → 2 vcpu/1G mem/1G disk). With `OPENAI_API_KEY` set, the structured-output schema accepts a `resources` block and overrides apply.

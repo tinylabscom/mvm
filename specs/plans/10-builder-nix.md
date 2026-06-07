@@ -3,7 +3,7 @@ You are a senior Rust infrastructure architect and systems designer.
 You are working in the existing repository:
 https://github.com/tinylabscom/mvm
 
-Your task is to update the architecture and repo layout to match the full multi-tenant OpenClaw microVM fleet design we have discussed, using:
+Your task is to update the architecture and repo layout to match the full multi-tenant microVM fleet design for the reference AI-agent workload — a Node.js AI-agent platform (Claude API, gateway, MCP servers, channels) — we have discussed, using:
 
 - A Rust WORKSPACE structure
 - A clean internal module map
@@ -29,7 +29,7 @@ NON-NEGOTIABLE CONSTRAINTS
 - Sleep/Wake/Warm supported; minimum runtime policy supported.
 - Role-based microVM profiles defined by composable NixOS modules:
   roles: gateway | worker | builder | capability-imessage
-  profiles: minimal | python | openclaw-gateway | openclaw-worker | custom
+  profiles: minimal | python | agent-workload-gateway | agent-workload-worker | custom
 
 ----------------------------------------------------------------
 CONFIGURATION FILE BEHAVIOR (IMPORTANT CHANGE)
@@ -89,7 +89,7 @@ Implement modules as previously defined:
 - mvm-agent: reconcile, planner, sleep policy, coordinator client
 - mvm: firecracker, jailer, cgroups, nftables, taps, bridges, volumes, luks
 - mvm-build: nix builder VM, artifact cache, config/secrets/job drives
-- mvm-guest: vsock protocol, openclaw connector mapping
+- mvm-guest: vsock protocol, agent-workload connector mapping
 - mvm-cli: clap commands only
 
 Ensure boundaries are respected.
@@ -116,8 +116,8 @@ required_drives = ["data","config","secrets"]
 expose_ingress = true
 vsock_ports = [10500]
 
-[microvms.profiles.openclaw-worker]
-nixos_modules = ["nix/profiles/openclaw-worker.nix"]
+[microvms.profiles.agent-workload-worker]
+nixos_modules = ["nix/profiles/agent-workload-worker.nix"]
 defaults.vcpus = 2
 defaults.mem_mib = 1024
 defaults.min_running_seconds = 180
@@ -149,14 +149,14 @@ Never depend implicitly on repo-root configuration.
 If using ./mvm.toml, it must be explicit in logs.
 
 ----------------------------------------------------------------
-E) MULTI-TENANT OPENCLAW SUPPORT
+E) MULTI-TENANT AGENT-WORKLOAD SUPPORT
 ----------------------------------------------------------------
 
 Maintain:
 
 - Gateway role
 - Worker role
-- Connector mapping to openclaw.json
+- Connector mapping to agent-workload.json
 - Tenant data layout on drives:
     /data
     /run/secrets

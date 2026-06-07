@@ -42,7 +42,7 @@ Additional userspace overhead:
   (`update-users-groups.pl`) add several seconds.
 - **systemd-tmpfiles, random-seed, update-utmp**: all unnecessary in an
   ephemeral VM.
-- **Mount polling for optional /dev/vdd**: `openclaw-init` waits for all three
+- **Mount polling for optional /dev/vdd**: `agent-workload-init` waits for all three
   mount units including the optional data drive.
 
 ## Plan
@@ -51,15 +51,15 @@ Additional userspace overhead:
 
 **Expected savings: 20-40s userspace**
 
-#### 1a. Remove `network-online.target` from OpenClaw roles
+#### 1a. Remove `network-online.target` from the agent workload's roles
 
 Replace `wants = [ "network-online.target" ]` with a direct dependency on
 `systemd-networkd.service` in both `gateway.nix` and `worker.nix`:
 
 ```nix
-after = [ "systemd-networkd.service" "openclaw-init.service" ];
+after = [ "systemd-networkd.service" "agent-workload-init.service" ];
 wants = [ "systemd-networkd.service" ];
-requires = [ "openclaw-init.service" ];
+requires = [ "agent-workload-init.service" ];
 ```
 
 The static IP is configured by `mvm-network-config` (which runs before
@@ -68,7 +68,7 @@ No need to wait for the full "online" state.
 
 #### 1b. Fix optional data drive dependency in `common.nix`
 
-Remove `mnt-data.mount` from the `openclaw-init` `after` clause since the
+Remove `mnt-data.mount` from the `agent-workload-init` `after` clause since the
 data drive is optional (`noauto`). The init script already handles the
 missing-drive case with `[ -b /dev/vdd ]`.
 
@@ -253,7 +253,7 @@ mvmctl vm exec <name> -- systemd-analyze plot > /tmp/boot.svg
 ## Success Criteria
 
 - Total boot time under 10 seconds (kernel + userspace)
-- `openclaw-gateway.service` or `openclaw-worker.service` starts within 15s of VM launch
+- `agent-workload-gateway.service` or `agent-workload-worker.service` starts within 15s of VM launch
 - No regression in functionality (networking, mounts, guest agent all work)
 
 ## Expected Impact Summary

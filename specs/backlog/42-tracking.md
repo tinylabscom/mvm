@@ -1792,7 +1792,7 @@ Status: Completed
 2	name = "mvm-guest"
 3	version.workspace = true
 4	edition.workspace = true
-5	description = "vsock protocol and openclaw connector mapping for mvm"
+5	description = "vsock protocol and agent-workload connector mapping for mvm"
 6	license.workspace = true
 7	repository.workspace = true
 8	homepage.workspace = true
@@ -4588,7 +4588,7 @@ b67768f7 feat(mvm-guest,mvm-cli): plan 74 W1 — guest-agent protocol hello + ca
 4bcdf4e4 feat(guest-agent): W6.1.2 — swap stub for real mvm-guest-agent binary
 c04f26bd fix(dev-vm): run guest agent as root in dev variant so nix builds work (#94)
 22e0aebc fix(security): move vsock guest-agent port out of priv range (ADR-002 §W4.5) (#80)
-4efa8693 feat: vsock retry/timeout, guest agent /bin/sh fix, openclaw template simplification
+4efa8693 feat: vsock retry/timeout, guest agent /bin/sh fix, agent-workload template simplification
 f6118a19 refactor(build): remove post-build guest agent injection
 52174bdd feat(build): auto-inject guest agent into rootfs during nix builds
 269e5265 fix(nix): add rust-overlay for edition 2024, validate guest agent end-to-end
@@ -4879,7 +4879,7 @@ Status: Completed
 2	name = "mvm-guest"
 3	version.workspace = true
 4	edition.workspace = true
-5	description = "vsock protocol and openclaw connector mapping for mvm"
+5	description = "vsock protocol and agent-workload connector mapping for mvm"
 6	license.workspace = true
 7	repository.workspace = true
 8	homepage.workspace = true
@@ -8162,7 +8162,7 @@ Status: Completed
 2	name = "mvm-guest"
 3	version.workspace = true
 4	edition.workspace = true
-5	description = "vsock protocol and openclaw connector mapping for mvm"
+5	description = "vsock protocol and agent-workload connector mapping for mvm"
 6	license.workspace = true
 7	repository.workspace = true
 8	homepage.workspace = true

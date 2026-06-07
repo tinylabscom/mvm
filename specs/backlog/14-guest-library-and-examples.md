@@ -1,4 +1,4 @@
-# mvm Sprint 14: Guest Library, Template Snapshots & OpenClaw Fixes
+# mvm Sprint 14: Guest Library, Template Snapshots & Agent-Workload Fixes
 
 Previous sprints:
 - Sprints 1-12: complete (see `specs/sprints/`)
@@ -10,7 +10,8 @@ Previous sprints:
 
 Sprint 13 achieved sub-10s boot times for Firecracker microVMs. Sprint 14 focused on
 making the Nix guest image build process modular and reusable, adding template snapshots
-for instant VM startup, and stabilizing the OpenClaw integration for production use.
+for instant VM startup, and stabilizing the reference AI-agent workload — a Node.js
+AI-agent platform (Claude API, gateway, MCP servers, channels) — for production use.
 
 ## Baseline
 
@@ -55,16 +56,16 @@ for instant VM restore (~200ms startup).
 - [x] Human-readable memory sizes (512M, 4G, 1024K)
 - [x] 15-minute health check timeout for nested virtualization
 
-## Phase 3: OpenClaw Stabilization
+## Phase 3: Agent-Workload Stabilization
 
 **Status: COMPLETE**
 
-Fixed multiple issues preventing OpenClaw gateway from running reliably in Firecracker:
+Fixed multiple issues preventing the agent workload's gateway from running reliably in Firecracker:
 
 - [x] **esbuild single-file bundle**: ESM format (`--format=esm`), `.mjs` extension, `--loader:.node=empty` for native modules. Reduced rootfs from ~1.8GB to ~50-100MB.
 - [x] **Gateway double-start bug fix**: Entry point wrapper suppresses `process.exit(1)` from concurrent `startGatewayServer()` conflict
 - [x] **Loopback proxy for device pairing**: TCP proxy `0.0.0.0:3000 → 127.0.0.1:3001` makes all connections appear local (auto-approved)
-- [x] **Config fallback**: `OPENCLAW_CONFIG_PATH` environment variable support
+- [x] **Config fallback**: `AGENT_WORKLOAD_CONFIG_PATH` environment variable support
 - [x] **WhatsApp channel**: `"enabled": true` required in channel config
 
 ## Phase 4: Binary Rename & Release Infrastructure
@@ -89,5 +90,5 @@ Fixed multiple issues preventing OpenClaw gateway from running reliably in Firec
 | Total tests      | 557    | 576   |
 | Clippy warnings  | 0      | 0     |
 | Version          | 0.3.2  | 0.3.5 |
-| OpenClaw rootfs  | ~1.8GB | ~100MB |
+| Agent-workload rootfs | ~1.8GB | ~100MB |
 | VM cold start    | ~5-10s | ~200ms (from snapshot) |

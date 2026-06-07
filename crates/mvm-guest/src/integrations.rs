@@ -27,7 +27,7 @@ pub struct IntegrationManifest {
 /// Typically declared via a JSON drop-in file in `/etc/mvm/integrations.d/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationEntry {
-    /// Integration name (e.g. "openclaw-worker", "my-service").
+    /// Integration name (e.g. "agentapp-worker", "my-service").
     /// Used as the directory name under /data/integrations/.
     pub name: String,
     /// Optional command to run before sleep to checkpoint state.
@@ -179,10 +179,10 @@ mod tests {
             integrations: vec![
                 IntegrationEntry {
                     name: "whatsapp".to_string(),
-                    checkpoint_cmd: Some("/opt/openclaw/bin/whatsapp-checkpoint".to_string()),
-                    restore_cmd: Some("/opt/openclaw/bin/whatsapp-restore".to_string()),
+                    checkpoint_cmd: Some("/opt/agentapp/bin/whatsapp-checkpoint".to_string()),
+                    restore_cmd: Some("/opt/agentapp/bin/whatsapp-restore".to_string()),
                     critical: true,
-                    health_cmd: Some("/opt/openclaw/bin/whatsapp-health".to_string()),
+                    health_cmd: Some("/opt/agentapp/bin/whatsapp-health".to_string()),
                     health_interval_secs: 15,
                     health_timeout_secs: 5,
                     startup_grace_secs: 0,

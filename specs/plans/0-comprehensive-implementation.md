@@ -465,7 +465,7 @@ Coordinator sends a **hierarchical tenant/pool** structure scoped to the node:
       "pools": [
         {
           "pool_id": "workers",
-          "flake_ref": "github:org/openclaw-worker?rev=abc123",
+          "flake_ref": "github:org/agent-workload-worker?rev=abc123",
           "profile": "minimal",
           "instance_resources": { "vcpus": 2, "mem_mib": 1024, "data_disk_mib": 2048 },
           "desired_counts": { "running": 3, "warm": 1, "sleeping": 2 },

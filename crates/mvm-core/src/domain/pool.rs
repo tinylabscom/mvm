@@ -43,7 +43,7 @@ impl fmt::Display for Role {
 /// Enables capability-based queries and policies without hardcoding types in Role enum.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PoolMetadata {
-    /// Capability identifier (e.g., "openclaw", "mcp-server", "database").
+    /// Capability identifier (e.g., "agentapp", "mcp-server", "database").
     /// Used for grouping pools by functional capability.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
@@ -649,9 +649,9 @@ mod tests {
 
     #[test]
     fn test_registry_artifact_no_revision() {
-        let json = r#"{"template_id": "openclaw"}"#;
+        let json = r#"{"template_id": "agentapp"}"#;
         let parsed: RegistryArtifact = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.template_id, "openclaw");
+        assert_eq!(parsed.template_id, "agentapp");
         assert!(parsed.revision.is_none());
     }
 

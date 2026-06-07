@@ -9,7 +9,7 @@ Previous sprints:
 ## Motivation
 
 Sprint 14 delivered a modular Nix guest library (mkGuest), template snapshots, and
-stabilized OpenClaw. Sprint 15 proved the platform by adding a second real-world
+stabilized the reference AI-agent workload. Sprint 15 proved the platform by adding a second real-world
 application (Paperclip — AI agent platform with PostgreSQL), improving the developer
 experience with environment injection, port forwarding, fleet config, and consolidating
 the CLI commands.
@@ -22,7 +22,7 @@ the CLI commands.
 | Total tests      | 576               |
 | Clippy warnings  | 0                 |
 | Version          | 0.3.5             |
-| Examples         | hello, openclaw   |
+| Examples         | hello, agent-workload |
 
 ---
 

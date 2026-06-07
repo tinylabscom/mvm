@@ -1476,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_check_integration_health_all_healthy() {
-        let integrations = vec![healthy_report("openclaw"), healthy_report("redis")];
+        let integrations = vec![healthy_report("agentapp"), healthy_report("redis")];
         let (all_healthy, unhealthy) = check_integration_health(&integrations);
         assert!(all_healthy);
         assert!(unhealthy.is_empty());
@@ -1485,12 +1485,12 @@ mod tests {
     #[test]
     fn test_check_integration_health_some_unhealthy() {
         let integrations = vec![
-            unhealthy_report("openclaw", "exit code 1"),
+            unhealthy_report("agentapp", "exit code 1"),
             healthy_report("redis"),
         ];
         let (all_healthy, unhealthy) = check_integration_health(&integrations);
         assert!(!all_healthy);
-        assert_eq!(unhealthy, vec!["openclaw"]);
+        assert_eq!(unhealthy, vec!["agentapp"]);
     }
 
     #[test]
@@ -1631,7 +1631,7 @@ mod tests {
     fn classify_separates_hashes_from_legacy_names() {
         let h = hex_dirname();
         let entries = vec![
-            "openclaw".to_string(),
+            "agentapp".to_string(),
             h.clone(),
             "agent-foo".to_string(),
             "claude-code-vm".to_string(),
@@ -1642,8 +1642,8 @@ mod tests {
             legacy,
             vec![
                 "agent-foo".to_string(),
+                "agentapp".to_string(),
                 "claude-code-vm".to_string(),
-                "openclaw".to_string(),
             ]
         );
     }
@@ -1707,7 +1707,7 @@ mod tests {
         let a = SlotEntry {
             slot_hash: "abc".to_string(),
             manifest_path: "/abs/mvm.toml".to_string(),
-            name: Some("openclaw".to_string()),
+            name: Some("agentapp".to_string()),
             updated_at: "2026-05-01T00:00:00Z".to_string(),
         };
         let b = a.clone();

@@ -1,4 +1,4 @@
-Update the mvm multi-tenant OpenClaw worker fleet design to include MINIMUM RUNTIME policy.
+Update the mvm multi-tenant agent-workload worker fleet design to include MINIMUM RUNTIME policy.
 
 Constraints:
 - Enforce minimum runtime in the HOST AGENT (not in guest metrics).
@@ -32,10 +32,10 @@ Implement:
   - guest agent loads config and copies secrets into tmpfs
 - On sleep:
   - agent requests sleep_prep via vsock
-  - guest must ACK only after OpenClaw is idle/checkpointed and data flushed
+  - guest must ACK only after the agent workload is idle/checkpointed and data flushed
   - enforce drain_timeout_seconds
 
 5) Documentation:
-- Explain minimum runtime semantics, exceptions, and how it supports OpenClaw safety/security.
+- Explain minimum runtime semantics, exceptions, and how it supports the agent workload's safety/security.
 
 Do not add unrelated features.

@@ -9,11 +9,11 @@ Previous sprints:
 - [SPRINT-6-minimum-runtime.md](sprints/SPRINT-6-minimum-runtime.md) (complete)
 - [SPRINT-7-role-profiles.md](sprints/SPRINT-7-role-profiles.md) (complete)
 
-Sprint 8 adds the infrastructure for OpenClaw integrations to operate inside mvm workers:
-gateway inbound routing, integration state preservation across sleep/wake, artifact reporting
-via vsock, and per-integration secret scoping.
+Sprint 8 adds the infrastructure for the reference AI-agent workload's integrations to
+operate inside mvm workers: gateway inbound routing, integration state preservation
+across sleep/wake, artifact reporting via vsock, and per-integration secret scoping.
 
-OpenClaw workers connect to external services (WhatsApp, Telegram, Slack, iMessage, etc.)
+The agent workload's workers connect to external services (WhatsApp, Telegram, Slack, iMessage, etc.)
 which maintain session state that must survive sleep/wake cycles. Workers also produce
 artifacts (messages, notes, images) that the host needs to observe for coordination.
 

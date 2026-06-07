@@ -471,7 +471,7 @@ pub fn instance_sleep(
         let drain_timeout = spec.runtime_policy.drain_timeout_seconds;
         match mvm_guest::vsock::request_sleep_prep(&inst_dir, drain_timeout) {
             Ok(true) => {
-                // Guest ACKed: OpenClaw idle, data flushed
+                // Guest ACKed: agent workload idle, data flushed
             }
             Ok(false) => {
                 // Drain timeout exceeded — log and force

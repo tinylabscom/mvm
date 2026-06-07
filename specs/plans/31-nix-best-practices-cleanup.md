@@ -72,7 +72,7 @@ Mostly clean, with concrete cracks:
 | `pkgs.replaceVars` for init substitutions (`nix/minimal-init/default.nix:488`) | ✅ pure | None |
 | `mvmSrc = ./..;` raw path (`nix/flake.nix:57,67`) | ❌ should be `builtins.path { path = ./..; name = "mvm-source"; }` | Store-path `name` field is auto-generated, can drift across NixOS releases |
 | `import nixpkgs { inherit system; overlays = [...]; }` without `config = {}` (`nix/flake.nix:32`) | ❌ | nixpkgs may pick up host `~/.config/nixpkgs/config.nix` overrides |
-| `flake.lock` committed | ⚠ Partial: present for `nix/dev-image/`, `nix/default-microvm/`, `nix/examples/hello/` only. **Missing** for `nix/flake.nix`, `nix/dev/flake.nix`, `nix/examples/{hello-node,hello-python,openclaw,paperclip}/flake.nix`. | Builds on a fresh checkout fetch a fresh nixpkgs revision → non-bit-reproducible across machines |
+| `flake.lock` committed | ⚠ Partial: present for `nix/dev-image/`, `nix/default-microvm/`, `nix/examples/hello/` only. **Missing** for `nix/flake.nix`, `nix/dev/flake.nix`, `nix/examples/{hello-node,hello-python,agent-workload,paperclip}/flake.nix`. | Builds on a fresh checkout fetch a fresh nixpkgs revision → non-bit-reproducible across machines |
 
 **Verdict:** image hash is *almost* reproducible. Closing the four issues above gets it to fully clean.
 
@@ -204,7 +204,7 @@ Currently only `nix/dev-image/`, `nix/default-microvm/`, `nix/examples/hello/` h
 - `nix/dev/flake.lock`
 - `nix/examples/hello-node/flake.lock`
 - `nix/examples/hello-python/flake.lock`
-- `nix/examples/openclaw/flake.lock`
+- `nix/examples/agent-workload/flake.lock`
 - `nix/examples/paperclip/flake.lock`
 
 This is the single biggest reproducibility win in Phase 1.
@@ -387,7 +387,7 @@ This is the largest scope change and is best done as its own PR after Phases 1-4
 | 1c | `nix/minimal-init/default.nix` (`initLibs`) |
 | 1d | `nix/flake.nix`, `nix/dev-image/flake.nix`, `nix/default-microvm/flake.nix`, `nix/examples/**/flake.nix` |
 | 1e | `nix/flake.nix` |
-| 1f | Generate + commit `nix/flake.lock`, `nix/dev/flake.lock`, `nix/examples/{hello-node,hello-python,openclaw,paperclip}/flake.lock` |
+| 1f | Generate + commit `nix/flake.lock`, `nix/dev/flake.lock`, `nix/examples/{hello-node,hello-python,agent-workload,paperclip}/flake.lock` |
 | 1g | `nix/flake.nix` (`mkGuestFn` adds `variant` arg, `name`/`passthru`), `nix/dev/flake.nix` (passes `variant = "dev"`), `nix/rootfs-templates/populate.sh.in` (writes `/etc/mvm/variant`) |
 | 2 | All of `nix/` (rename/move) |
 | 2 | `crates/mvm-build/src/pipeline/dev_build.rs`, `crates/mvm-cli/src/commands/env/{dev,apple_container}.rs` (path strings only) |
@@ -412,7 +412,7 @@ This is the largest scope change and is best done as its own PR after Phases 1-4
 | **Phase 1.5 (M)** | Lima VM rename `mvm` → `mvm-builder` across `crates/mvm/src/vm/lima.rs`, `crates/mvm/src/vm/network.rs`, `crates/mvm-cli/src/commands/env/dev.rs`, `crates/mvm-cli/src/bootstrap.rs`, `resources/lima.yaml.tera`, `Justfile`, `CLAUDE.md`, memory entries |
 | **Phase 1.5 (M)** | Migration UX: detect legacy `mvm` Lima VM on first run, print one-line manual migration command — no auto-rename |
 | **Phase 3a (N)** | Replace `mkNodeService`'s 3-stage FOD-then-patch pattern with `pkgs.buildNpmPackage`. Eliminates `chmod -R u+w` calls in `nix/flake.nix:271,297,307` |
-| **Phase 1 (O)** | Delete `nix/examples/paperclip/` and `nix/examples/openclaw/`. Remove their memory entries from `MEMORY.md` |
+| **Phase 1 (O)** | Delete `nix/examples/paperclip/` and `nix/examples/agent-workload/`. Remove their memory entries from `MEMORY.md` |
 | **Phase 1 (P)** | Remove `flake-utils` dep in `nix/flake.nix`. Replace `flake-utils.lib.eachSystem` with hand-rolled `eachSystem` already used elsewhere. Drop `flake-utils.url` from inputs |
 
 ## Other things this work needs to consider
@@ -452,7 +452,7 @@ Per memory: `wait_for_integrations_healthy` reads `/etc/mvm/integrations.d/*.jso
 
 ### F. `nix flake check` cost on macOS
 
-The bundled examples (`hello-node`, `paperclip`, `openclaw`) are heavy — they pull node, postgres, esbuild closures. Eval-only `nix flake check` on macOS still imports their definitions. If eval becomes slow, partition `checks.aarch64-darwin.default` to only the parent flake + `default-tenant`, and run example evaluation in a separate `checks.aarch64-darwin.examples` attribute. Worth measuring before deciding.
+The bundled examples (`hello-node`, `paperclip`, `agent-workload`) are heavy — they pull node, postgres, esbuild closures. Eval-only `nix flake check` on macOS still imports their definitions. If eval becomes slow, partition `checks.aarch64-darwin.default` to only the parent flake + `default-tenant`, and run example evaluation in a separate `checks.aarch64-darwin.examples` attribute. Worth measuring before deciding.
 
 ### G. `xtask` crate and `scripts/`
 
@@ -570,7 +570,7 @@ This becomes its own phase: **Phase 1.5** (between Phase 1 and Phase 2) so the r
 
 ### N. Eliminate the FOD-then-patch pattern in `mkNodeService`
 
-You're right to read the `chmod -R u+w $out` and `find ... -delete` as a smell — and once we delete `paperclip` and `openclaw`, the remaining cases all live in `mkNodeService` (`nix/flake.nix:257-329`). The reason they're there is the manual three-stage FOD pattern:
+You're right to read the `chmod -R u+w $out` and `find ... -delete` as a smell — and once we delete `paperclip` and `agent-workload`, the remaining cases all live in `mkNodeService` (`nix/flake.nix:257-329`). The reason they're there is the manual three-stage FOD pattern:
 
 ```nix
 node-src   = mkDerivation { src; npm install; outputHash = npmHash; };  # FOD
@@ -592,12 +592,12 @@ The remaining `chmod u+w $out` outside `mkNodeService` is in `nix/firecracker-ke
 
 Folded into Phase 3a alongside the broader package work.
 
-### O. Delete `nix/examples/paperclip` and `nix/examples/openclaw`
+### O. Delete `nix/examples/paperclip` and `nix/examples/agent-workload`
 
-Both examples are heavy (Postgres, OpenClaw bundling, ~75% of all `chmod`/`find` calls in `nix/`) and the OpenClaw one is flagged as an active blocker in memory. Removing them:
+Both examples are heavy (Postgres, agent-workload bundling, ~75% of all `chmod`/`find` calls in `nix/`) and the agent-workload one is flagged as an active blocker in memory. Removing them:
 
-- Deletes `nix/examples/paperclip/` and `nix/examples/openclaw/` entirely.
-- Removes their memory entries (the OpenClaw-specific pitfall list in `MEMORY.md` becomes stale).
+- Deletes `nix/examples/paperclip/` and `nix/examples/agent-workload/` entirely.
+- Removes their memory entries (the agent-workload-specific pitfall list in `MEMORY.md` becomes stale).
 - Removes their CI references if any (none in `release.yml` per audit).
 - Keeps `nix/examples/{hello, hello-node, hello-python}/` as the canonical small examples.
 

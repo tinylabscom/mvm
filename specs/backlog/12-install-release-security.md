@@ -1,4 +1,4 @@
-# mvm Sprint 12: Install & Release Reliability + Securing OpenClaw
+# mvm Sprint 12: Install & Release Reliability + Securing the Agent Workload
 
 Previous sprints:
 - [SPRINT-1-foundation.md](sprints/SPRINT-1-foundation.md) (complete)
@@ -9,7 +9,7 @@ Previous sprints:
 - [SPRINT-6-minimum-runtime.md](sprints/SPRINT-6-minimum-runtime.md) (complete)
 - [SPRINT-7-role-profiles.md](sprints/SPRINT-7-role-profiles.md) (complete)
 - [SPRINT-8-integration-lifecycle.md](sprints/SPRINT-8-integration-lifecycle.md) (complete)
-- [SPRINT-9-openclaw-support.md](sprints/SPRINT-9-openclaw-support.md) (complete)
+- [SPRINT-9-agent-workload-support.md](sprints/SPRINT-9-agent-workload-support.md) (complete)
 - [SPRINT-10-coordinator.md](sprints/SPRINT-10-coordinator.md) (complete)
 - [SPRINT-11-dev-environment.md](sprints/SPRINT-11-dev-environment.md) (complete)
 
@@ -19,7 +19,7 @@ Previous sprints:
 
 We hardened dev workflows in Sprint 11 but saw recurring friction around sync/bootstrap and release packaging (crates.io, GH Actions). Sprint 12 focuses on making installation, syncing, and publishing reliable on both macOS (Lima) and native Linux, with better diagnostics and documented escape hatches.
 
-Additionally, the vsock protocol between host and guest has no authentication, no command validation, no threat detection, and no health monitoring. OpenClaw agents run inside Firecracker microVMs as adversarial-by-default workloads — they will drift, forget rules, and silently fail. The security phases close the gaps identified in the [OpenClaw security research](research/openclaw-security.md) and implement the [securing plan](plans/14-securing-openclaw.md). All security improvements are native Rust — SafeClaw and the OpenClaw Field Manual are reference material only.
+Additionally, the vsock protocol between host and guest has no authentication, no command validation, no threat detection, and no health monitoring. The reference AI-agent workload — a Node.js AI-agent platform (Claude API, gateway, MCP servers, channels) — runs its agents inside Firecracker microVMs as adversarial-by-default workloads — they will drift, forget rules, and silently fail. The security phases close the gaps identified in the [agent-workload security research](research/agent-workload-security.md) and implement the [securing plan](plans/14-securing-the-agent-workload.md). All security improvements are native Rust — an external agent security-dashboard (open-source, TypeScript) and the agent workload's community field manual are reference material only.
 
 ## Baseline
 
@@ -75,7 +75,7 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 - [x] Guest agent handles: Ping, WorkerStatus, SleepPrep (sync + drop caches), Wake
 - [x] Guest agent accepts config file (`/etc/mvm/agent.json`) and CLI flags (`--port`, `--busy-threshold`, `--sample-interval`)
 - [x] Shared NixOS module (`nix/modules/guest-agent.nix`) and package (`nix/modules/guest-agent-pkg.nix`)
-- [x] OpenClaw flake imports guest agent module; agent starts automatically on boot
+- [x] The agent workload's flake imports guest agent module; agent starts automatically on boot
 - [x] Template scaffold emits guest agent module files on `mvm template create`
 - [x] CLI integration tests for `mvm vm` subcommands (help, parsing, graceful errors)
 - [x] Add `rust-overlay` to Nix flakes for Rust 1.85+ (edition 2024 support)
@@ -208,7 +208,7 @@ Additionally, the vsock protocol between host and guest has no authentication, n
 
 - Multi-node deployment or cloud installers
 - UI/dashboard work
-- SafeClaw integration (reference material only)
+- External security-dashboard integration (reference material only)
 - mvmd-specific security (coordinator approval flow, fleet-wide session management) — follow-up after mvm-side work lands
 - Hardware attestation (TPM2/SEV-SNP/TDX)
 

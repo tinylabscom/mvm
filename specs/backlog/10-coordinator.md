@@ -9,7 +9,7 @@ Previous sprints:
 - [SPRINT-6-minimum-runtime.md](sprints/SPRINT-6-minimum-runtime.md) (complete)
 - [SPRINT-7-role-profiles.md](sprints/SPRINT-7-role-profiles.md) (complete)
 - [SPRINT-8-integration-lifecycle.md](sprints/SPRINT-8-integration-lifecycle.md) (complete)
-- [SPRINT-9-openclaw-support.md](sprints/SPRINT-9-openclaw-support.md) (complete)
+- [SPRINT-9-agent-workload-support.md](sprints/SPRINT-9-agent-workload-support.md) (complete)
 
 ---
 

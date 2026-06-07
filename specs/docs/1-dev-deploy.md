@@ -1,5 +1,5 @@
 # mvm Deployment Plan
-A single reference plan for deploying a **multi-tenant Firecracker microVM fleet** (OpenClaw workers) with:
+A single reference plan for deploying a **multi-tenant Firecracker microVM fleet** (the agent workload's workers) with:
 - **Coordinator** (global intent: tenants, pools, allocations, scheduling)
 - **Host Agents (mvm agent)** (local execution + enforcement: Firecracker, networking, cgroups, jailer, snapshots, drives)
 - **Cluster-wide tenant networking** (stable tenant subnets; within-tenant allow, cross-tenant deny)

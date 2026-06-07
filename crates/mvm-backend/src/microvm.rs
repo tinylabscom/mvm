@@ -503,7 +503,7 @@ fn read_state_or_discover() -> Result<MvmState> {
 /// A file to inject onto a config or secrets drive before boot.
 #[derive(Debug, Clone)]
 pub struct DriveFile {
-    /// Destination filename inside the drive (e.g., "openclaw.json").
+    /// Destination filename inside the drive (e.g., "agentapp.json").
     pub name: String,
     /// File contents (inline).
     pub content: String,
@@ -2749,11 +2749,11 @@ mod tests {
     #[test]
     fn drive_file_construction() {
         let f = DriveFile {
-            name: "openclaw.json".into(),
+            name: "agentapp.json".into(),
             content: r#"{"gateway":{"port":18789}}"#.into(),
             mode: 0o444,
         };
-        assert_eq!(f.name, "openclaw.json");
+        assert_eq!(f.name, "agentapp.json");
         assert!(f.content.contains("gateway"));
         assert_eq!(f.mode, 0o444);
     }

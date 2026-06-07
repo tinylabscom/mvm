@@ -805,7 +805,7 @@
           ]
         },
         {
-          "description": "Request sleep preparation. Guest should: 1. Finish/checkpoint in-flight OpenClaw work 2. Flush data to disk 3. Drop page cache 4. ACK with SleepPrepAck",
+          "description": "Request sleep preparation. Guest should: 1. Finish/checkpoint in-flight agent workload work 2. Flush data to disk 3. Drop page cache 4. ACK with SleepPrepAck",
           "type": "object",
           "required": [
             "SleepPrep"

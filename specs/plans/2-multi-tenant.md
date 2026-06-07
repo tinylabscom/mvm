@@ -11,7 +11,7 @@ Assume the repo already supports:
 Your task:
 1) Harden the runtime (jailer, cgroups, seccomp, audit)
 2) Add SLEEP / WAKE support for tenant microVMs
-3) Add a reconcile-based node agent suitable for OpenClaw workers
+3) Add a reconcile-based node agent suitable for the agent workload's workers
 
 This is an implementation task. Do not explain.
 
@@ -129,7 +129,7 @@ desired.json:
   "tenants": [
     {
       "tenant_id": "worker-1",
-      "flake_ref": "github:org/openclaw-worker?rev=...",
+      "flake_ref": "github:org/agent-workload-worker?rev=...",
       "profile": "minimal",
       "vcpus": 2,
       "mem_mib": 1024,
@@ -147,7 +147,7 @@ Reconcile loop must:
 - NOT destroy unless --prune flag is passed
 
 ----------------------------------------------------------------
-OPENCLAW ALIGNMENT
+AGENT-WORKLOAD ALIGNMENT
 ----------------------------------------------------------------
 
 - Assume microVMs may be:

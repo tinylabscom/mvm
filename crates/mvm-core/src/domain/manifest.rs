@@ -15,7 +15,7 @@
 //! vcpus = 2
 //! mem = "1024M"
 //! data_disk = "0"
-//! name = "openclaw"   # optional, display only
+//! name = "agentapp"   # optional, display only
 //! ```
 //!
 //! Boundary: build inputs + dev sizing only. No `role` (the flake's
@@ -582,10 +582,10 @@ mod tests {
             vcpus = 2
             mem = "1G"
             data_disk = "0"
-            name = "openclaw"
+            name = "agentapp"
         "#;
         let m = Manifest::from_toml_str(toml).expect("parses");
-        assert_eq!(m.name.as_deref(), Some("openclaw"));
+        assert_eq!(m.name.as_deref(), Some("agentapp"));
     }
 
     #[test]
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn is_slot_hash_dirname_rejects_legacy_names() {
-        assert!(!is_slot_hash_dirname("openclaw"));
+        assert!(!is_slot_hash_dirname("agentapp"));
         assert!(!is_slot_hash_dirname("agent-foo"));
         assert!(!is_slot_hash_dirname(""));
         // Wrong length.
@@ -1141,7 +1141,7 @@ mod tests {
             vcpus = 2
             mem = "1G"
             data_disk = "0"
-            name = "openclaw"
+            name = "agentapp"
         "#;
         write(tmp.path(), "mvm.toml", toml);
         let manifest = Manifest::read_file(&tmp.path().join("mvm.toml")).unwrap();
@@ -1153,9 +1153,9 @@ mod tests {
             Provenance::current(),
         )
         .unwrap();
-        assert_eq!(p.name.as_deref(), Some("openclaw"));
+        assert_eq!(p.name.as_deref(), Some("agentapp"));
         let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains("\"name\":\"openclaw\""));
+        assert!(json.contains("\"name\":\"agentapp\""));
     }
 
     #[test]

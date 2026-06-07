@@ -100,14 +100,14 @@ fn session_ls_json_emits_array() {
 #[test]
 fn session_ls_with_records_prints_table() {
     let temp = tempfile::tempdir().unwrap();
-    let rec = SessionRecord::new_running("vm-1", "openclaw", SessionMode::Prod);
+    let rec = SessionRecord::new_running("vm-1", "agentapp", SessionMode::Prod);
     let _lock = populate_record(temp.path(), &rec);
 
     mvm_with_runtime_dir(temp.path())
         .args(["session", "ls"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("openclaw"))
+        .stdout(predicate::str::contains("agentapp"))
         .stdout(predicate::str::contains("vm-1"));
 }
 
@@ -130,7 +130,7 @@ fn session_info_unknown_id_errors() {
 #[test]
 fn session_info_returns_record_json() {
     let temp = tempfile::tempdir().unwrap();
-    let rec = SessionRecord::new_running("vm-1", "openclaw", SessionMode::Dev);
+    let rec = SessionRecord::new_running("vm-1", "agentapp", SessionMode::Dev);
     let id = rec.id.to_string();
     let _lock = populate_record(temp.path(), &rec);
 
@@ -183,7 +183,7 @@ fn session_set_timeout_above_ceiling_is_rejected() {
 #[test]
 fn session_set_timeout_updates_record() {
     let temp = tempfile::tempdir().unwrap();
-    let rec = SessionRecord::new_running("vm-1", "openclaw", SessionMode::Prod);
+    let rec = SessionRecord::new_running("vm-1", "agentapp", SessionMode::Prod);
     let id = rec.id.to_string();
     // Hold the env-lock through the read-back at the end so a
     // concurrent test can't change `MVM_RUNTIME_DIR` between mvmctl's
@@ -227,7 +227,7 @@ fn session_kill_unknown_id_errors_without_backend_call() {
 #[test]
 fn session_kill_non_running_session_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let mut rec = SessionRecord::new_running("vm-1", "openclaw", SessionMode::Prod);
+    let mut rec = SessionRecord::new_running("vm-1", "agentapp", SessionMode::Prod);
     rec.state = SessionState::Killed;
     let id = rec.id.to_string();
     let _lock = populate_record(temp.path(), &rec);

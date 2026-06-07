@@ -1,4 +1,4 @@
-# mvm Sprint 9: OpenClaw Support — Template + Wake API + Deploy Config
+# mvm Sprint 9: Agent-Workload Support — Template + Wake API + Deploy Config
 
 Previous sprints:
 - [SPRINT-1-foundation.md](sprints/SPRINT-1-foundation.md) (complete)
@@ -10,27 +10,29 @@ Previous sprints:
 - [SPRINT-7-role-profiles.md](sprints/SPRINT-7-role-profiles.md) (complete)
 - [SPRINT-8-integration-lifecycle.md](sprints/SPRINT-8-integration-lifecycle.md) (complete)
 
-Sprint 9 adds template-based deployments and a standalone deploy command. OpenClaw
-is the first template — a personal AI assistant gateway (Telegram/Discord -> Claude
-AI -> local CLI tools) that runs as per-user worker VMs with sleep/wake on demand.
+Sprint 9 adds template-based deployments and a standalone deploy command. The
+reference AI-agent workload — a Node.js AI-agent platform (Claude API, gateway, MCP
+servers, channels) — is the first template: a personal AI assistant gateway
+(Telegram/Discord -> Claude AI -> local CLI tools) that runs as per-user worker VMs
+with sleep/wake on demand.
 
-OpenClaw is NOT a built-in role. It's a template that creates standard gateway +
-worker pools pointing at an external flake (`github:openclaw/nix-openclaw`) which
-provides its own `mvm-profiles.toml` and NixOS modules. This approach supports any
-Nix-built image/set of images that execute within a microVM.
+The agent workload is NOT a built-in role. It's a template that creates standard
+gateway + worker pools pointing at an external flake (the agent workload's Nix
+packaging) which provides its own `mvm-profiles.toml` and NixOS modules. This
+approach supports any Nix-built image/set of images that execute within a microVM.
 
-Full spec: [specs/plans/11-openclaw-support.md](plans/11-openclaw-support.md)
+Full spec: [specs/plans/11-agent-workload-support.md](plans/11-agent-workload-support.md)
 
 ---
 
-## Phase 1: OpenClaw Template
+## Phase 1: Agent-Workload Template
 **Status: COMPLETE**
 
-Template for `mvm new openclaw <name>` that creates a gateway + worker deployment
-using standard roles, pointing at the external OpenClaw flake.
+Template for `mvm new agent-workload <name>` that creates a gateway + worker
+deployment using standard roles, pointing at the agent workload's external flake.
 
-- [x] `src/templates.rs` — openclaw template: gateway (1024 MiB) + workers (2048 MiB, `Role::Worker`)
-- [x] `src/templates.rs` — `default_flake = "github:openclaw/nix-openclaw"` (external, not built-in)
+- [x] `src/templates.rs` — agent-workload template: gateway (1024 MiB) + workers (2048 MiB, `Role::Worker`)
+- [x] `src/templates.rs` — `default_flake` points at the agent workload's Nix packaging (external, not built-in)
 
 ## Phase 2: Vsock Wake Protocol
 **Status: COMPLETE**
@@ -78,8 +80,8 @@ Config file for `mvm new --config` and standalone `mvm deploy manifest.toml`.
 
 | File | Changes |
 |------|---------|
-| `specs/plans/11-openclaw-support.md` | **NEW** — full OpenClaw support spec |
+| `specs/plans/11-agent-workload-support.md` | **NEW** — full agent-workload support spec |
 | `src/main.rs` | `--config`, `Deploy` command, `cmd_deploy()` |
-| `src/templates.rs` | OpenClaw template + DeployConfig + DeploymentManifest types |
+| `src/templates.rs` | agent-workload template + DeployConfig + DeploymentManifest types |
 | `src/worker/vsock.rs` | HostBoundRequest/Response + frame helpers |
 | `docs/cli.md` | `mvm deploy` and `--config` docs |

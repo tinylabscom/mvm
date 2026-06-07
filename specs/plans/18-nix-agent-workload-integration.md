@@ -1,10 +1,10 @@
-# Plan 18: Wire nix-openclaw into microVM rootfs + Nix probe module
+# Plan 18: Wire the agent workload's Nix packaging into microVM rootfs + Nix probe module
 
 **Status: PLANNED**
 
 ## Context
 
-The openclaw-worker integration shows `0/1 healthy` with "failed to execute: No such file or directory" because the `openclaw` binary is never included in the microVM rootfs. Both `roles/worker.nix` and `roles/gateway.nix` do `exec openclaw worker` / `exec openclaw gateway`, but nothing puts the binary in PATH.
+The agent-workload-worker integration shows `0/1 healthy` with "failed to execute: No such file or directory" because the `agent-workload` binary is never included in the microVM rootfs. Both `roles/worker.nix` and `roles/gateway.nix` do `exec agent-workload worker` / `exec agent-workload gateway`, but nothing puts the binary in PATH.
 
 **Already implemented (unstaged on `feat/dev-shell-exec`):**
 - Rust probe infrastructure: `probes.rs`, vsock protocol (`ProbeStatus`/`ProbeStatusReport`), guest agent probe execution loop
@@ -14,53 +14,53 @@ The openclaw-worker integration shows `0/1 healthy` with "failed to execute: No 
 - Plan 16 spec for full microvm.nix integration (staged)
 
 **What's missing (this plan):**
-1. The `openclaw` binary in the rootfs (nix-openclaw flake input)
+1. The `agent-workload` binary in the rootfs (the agent workload's Nix packaging flake input)
 2. A NixOS module for probes (`guest-probes.nix`) — the Nix counterpart to the Rust probe infrastructure
 3. The `/etc/mvm/probes.d/` directory creation in the guest agent module
 4. Example probes in the worker role
 
 **References:**
-- [nix-openclaw](https://github.com/openclaw/nix-openclaw) — Nix flake for installing openclaw
+- nix-agent-workload-integration — Nix flake for installing the agent workload
 - [microvm.nix](https://github.com/microvm-nix/microvm.nix) — NOT used here (our `mkGuest` suffices), but referenced in Plan 16 for future hypervisor decoupling
 
 ## Changes
 
-### Step 1: Add nix-openclaw flake input — `nix/openclaw/flake.nix`
+### Step 1: Add the agent workload's Nix flake input — `nix/agent-workload/flake.nix`
 
 Add to `inputs`:
 ```nix
-nix-openclaw = {
-  url = "github:openclaw/nix-openclaw";
+nix-agent-workload-integration = {
+  url = "github:agent-workload/nix-agent-workload-integration";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
 
 Update `outputs` function signature:
 ```nix
-outputs = { nixpkgs, flake-utils, rust-overlay, nix-openclaw, ... }:
+outputs = { nixpkgs, flake-utils, rust-overlay, nix-agent-workload-integration, ... }:
 ```
 
-Inside the `let` block, extract the openclaw package:
+Inside the `let` block, extract the agent-workload package:
 ```nix
-openclaw = nix-openclaw.packages.${system}.default;
+agent-workload = nix-agent-workload-integration.packages.${system}.default;
 ```
 
 Pass it to `mkGuest` via `specialArgs` (alongside existing `mvm-guest-agent`):
 ```nix
-specialArgs = { inherit mvm-guest-agent openclaw; };
+specialArgs = { inherit mvm-guest-agent agent-workload; };
 ```
 
 This follows the same pattern already used for `mvm-guest-agent` (line 30–33 → specialArgs line 49).
 
 ### Step 2: Update role modules to use the package
 
-**`nix/openclaw/roles/worker.nix`:**
-- Change function signature from `{ pkgs, ... }:` to `{ pkgs, openclaw, ... }:`
-- Change line 77 `exec openclaw worker` to `exec ${openclaw}/bin/openclaw worker`
+**`nix/agent-workload/roles/worker.nix`:**
+- Change function signature from `{ pkgs, ... }:` to `{ pkgs, agent-workload, ... }:`
+- Change line 77 `exec agent-workload worker` to `exec ${agent-workload}/bin/agent-workload worker`
 
-**`nix/openclaw/roles/gateway.nix`:**
-- Change function signature from `{ pkgs, ... }:` to `{ pkgs, openclaw, ... }:`
-- Change line 64 `exec openclaw gateway` to `exec ${openclaw}/bin/openclaw gateway`
+**`nix/agent-workload/roles/gateway.nix`:**
+- Change function signature from `{ pkgs, ... }:` to `{ pkgs, agent-workload, ... }:`
+- Change line 64 `exec agent-workload gateway` to `exec ${agent-workload}/bin/agent-workload gateway`
 
 ### Step 3: Create guest-probes NixOS module — `nix/modules/guest-probes.nix` (NEW)
 
@@ -124,7 +124,7 @@ systemd.tmpfiles.rules = [
 ];
 ```
 
-### Step 5: Add probes to worker role — `nix/openclaw/roles/worker.nix`
+### Step 5: Add probes to worker role — `nix/agent-workload/roles/worker.nix`
 
 Import guest-probes module alongside existing guest-integrations import:
 ```nix
@@ -157,17 +157,17 @@ services.mvm-probes = {
 
 After editing `flake.nix`, update the lock file inside the Lima VM:
 ```bash
-limactl shell mvm -- bash -c "cd /path/to/nix/openclaw && nix flake update nix-openclaw"
+limactl shell mvm -- bash -c "cd /path/to/nix/agent-workload && nix flake update nix-agent-workload-integration"
 ```
 
 ## Files Modified
 
 | File | Action |
 |------|--------|
-| `nix/openclaw/flake.nix` | Add `nix-openclaw` input, pass `openclaw` via specialArgs |
-| `nix/openclaw/flake.lock` | Auto-updated by `nix flake update` |
-| `nix/openclaw/roles/worker.nix` | Accept `openclaw` arg, use `${openclaw}/bin/openclaw`, import probes, add probes |
-| `nix/openclaw/roles/gateway.nix` | Accept `openclaw` arg, use `${openclaw}/bin/openclaw` |
+| `nix/agent-workload/flake.nix` | Add `nix-agent-workload-integration` input, pass `agent-workload` via specialArgs |
+| `nix/agent-workload/flake.lock` | Auto-updated by `nix flake update` |
+| `nix/agent-workload/roles/worker.nix` | Accept `agent-workload` arg, use `${agent-workload}/bin/agent-workload`, import probes, add probes |
+| `nix/agent-workload/roles/gateway.nix` | Accept `agent-workload` arg, use `${agent-workload}/bin/agent-workload` |
 | `nix/modules/guest-probes.nix` | **NEW** — NixOS module for declarative probe registration |
 | `nix/modules/guest-agent.nix` | Add `/etc/mvm/probes.d` to tmpfiles.rules |
 
@@ -175,17 +175,17 @@ limactl shell mvm -- bash -c "cd /path/to/nix/openclaw && nix flake update nix-o
 
 ```bash
 # Nix evaluation (inside Lima VM):
-cd nix/openclaw
+cd nix/agent-workload
 nix flake check                                # flake evaluates without errors
-nix build .#tenant-worker --dry-run            # verify closure includes openclaw
+nix build .#tenant-worker --dry-run            # verify closure includes agent-workload
 
 # Rust tests (from macOS host):
 cargo test --workspace                          # all tests pass
 cargo clippy --workspace -- -D warnings         # zero warnings
 
 # End-to-end (rebuild + run):
-mvm template build openclaw
-mvm run --template openclaw
+mvm template build agent-workload
+mvm run --template agent-workload
 mvm vm inspect <name>
-# Expected: openclaw-worker healthy, probes showing disk-usage + memory with JSON output
+# Expected: agent-workload-worker healthy, probes showing disk-usage + memory with JSON output
 ```

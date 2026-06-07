@@ -2,7 +2,7 @@
 name = "mvm-guest"
 version.workspace = true
 edition.workspace = true
-description = "vsock protocol and openclaw connector mapping for mvm"
+description = "vsock protocol and agent workload connector mapping for mvm"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

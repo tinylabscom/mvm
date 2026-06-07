@@ -41,7 +41,7 @@ For the rare customer who insists on processing PCI inside mvm, an opt-in templa
 
 ### Requirement 2 — Secure Configurations
 - [ ] (TBD) Hardened defaults (W1-W6 from sprint 42)
-- [ ] (TBD) `safe-openclaw` template defaults
+- [ ] (TBD) `safe-agent-workload` template defaults
 
 ### Requirement 3 — Protect Stored Account Data
 - [ ] (TBD) AES-256 LUKS volume encryption

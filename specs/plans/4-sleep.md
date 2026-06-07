@@ -10,7 +10,7 @@ Assume the repo already supports:
 - reconcile-based node agent
 - snapshot-based sleep / wake
 
-Your task is to OPTIMIZE sleep / wake behavior for large fleets of bursty OpenClaw-style microVM workers,
+Your task is to OPTIMIZE sleep / wake behavior for large fleets of bursty agent-workload-style microVM workers,
 minimizing idle cost, snapshot size, and wake latency.
 
 This is an implementation task. Do not explain. Make concrete code changes, add files, and refactor aggressively.
@@ -44,7 +44,7 @@ SLEEP / WAKE OPTIMIZATION (DO ALL)
 - Base snapshot is taken immediately after:
   - boot
   - guest initialization
-  - OpenClaw worker idle-ready state
+  - agent-workload worker idle-ready state
 
 - Delta snapshots capture only memory dirtied since base
 
@@ -131,7 +131,7 @@ Expose config:
 - Must never sleep a VM that is marked "pinned" or "critical"
 
 ----------------------------------------------------------------
-OPENCLAW WORKER ALIGNMENT
+AGENT-WORKLOAD WORKER ALIGNMENT
 ----------------------------------------------------------------
 
 12) Worker lifecycle hooks

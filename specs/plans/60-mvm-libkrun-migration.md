@@ -11,7 +11,7 @@ The pivot in this iteration: **libkrun (libkrun-backed) becomes the builder and 
 mvm is a **safe execution environment for AI agents and developer code**, in the same product class as other secure AI-agent sandboxes and hosted code-interpreters. The five workloads we must serve well:
 
 1. **Claude-Code-in-dangerous-mode**: a developer runs Claude Code (or another agent) inside a microVM where they don't have to approve every action — the VM itself is the security boundary. The host stays safe even when the agent does anything within the VM.
-2. **One-click "safe OpenClaw"** deployment template — hardened defaults, audit log, restricted egress.
+2. **One-click "safe agent workload"** deployment template — hardened defaults, audit log, restricted egress.
 3. **Long-running developer workflows**: agents that run for hours, install packages, save state across reconnects. State persists across `mvmctl down`/`up`.
 4. **Computer-use sandboxes**: graphical microVMs an agent can take screenshots of and synthesize input into. Headless display server (Xvfb + Xpra) inside; vsock RPC out.
 5. **Web search + code execution tools**: not raw internet for the agent — host-mediated tool RPCs over vsock, audit-logged.
@@ -41,7 +41,7 @@ The current hand-written skeleton (`mvm-backend::Backend<Sb,Ctx>`, `mvm-builder:
 ## North-star architecture
 
 ```
-   AI agent (Claude Code, OpenClaw, etc.)        Developer tools (CLI, REPL)
+   AI agent (Claude Code, the reference AI-agent workload, etc.)        Developer tools (CLI, REPL)
                   │                                       │
                   ▼                                       ▼
    ┌──────────────────────────┐         ┌──────────────────────────┐
@@ -322,9 +322,9 @@ Built-in addon catalog (Phase 7b ships this list — corresponds to the template
 |---|---|---|
 | `persistent-workspace` | encrypted `/workspace` overlay | Used by every long-lived template |
 | `claude-code` | Claude Code CLI in the closure | Used by `ai-sandbox` |
-| `openclaw-runtime` | OpenClaw service + hardened defaults | Used by `safe-openclaw` |
-| `web-tools` | host-mediated `web_search` + `web_fetch` RPCs | Used by `ai-sandbox`, `safe-openclaw` |
-| `code-eval-tools` | host-mediated `code_eval` RPC (nested sandbox) | Used by `ai-sandbox`, `safe-openclaw` |
+| `agent-workload-runtime` | The agent workload's service + hardened defaults | Used by `safe-agent-workload` |
+| `web-tools` | host-mediated `web_search` + `web_fetch` RPCs | Used by `ai-sandbox`, `safe-agent-workload` |
+| `code-eval-tools` | host-mediated `code_eval` RPC (nested sandbox) | Used by `ai-sandbox`, `safe-agent-workload` |
 | `chromium` | sandboxed Chromium + Xvfb + Xpra | Used by `computer-use` |
 | `postgres` | PostgreSQL service | Optional plug-in |
 | `redis` | Redis service | Optional plug-in |
@@ -344,11 +344,11 @@ Each ships as a versioned flake under `templates/` plus a manifest. `mvmctl init
 | `minimal` | Empty rootfs, shell entrypoint | `/bin/sh` | none | none | The "blank canvas" |
 | `worker` | Long-running headless workload | configurable command | none | `/var/data` (encrypted) | Auto-restart, sleep policy |
 | `ai-sandbox` | Claude Code / generic agent dangerous-mode | `claude code` (or `bash`) | host-mediated tool RPCs only (web-search, etc.) — **no raw internet** | `/workspace` (encrypted, persistent) | Long sessions, install transparency, MCP server bound, full audit |
-| `safe-openclaw` | One-click hardened OpenClaw | OpenClaw runtime | LLM endpoints allowlisted (anthropic.com, openai.com); everything else denied | `/workspace`, `/openclaw/state` | Hardened security defaults, signed plans required for changes |
+| `safe-agent-workload` | One-click hardened agent workload | Agent-workload runtime | LLM endpoints allowlisted (anthropic.com, openai.com); everything else denied | `/workspace`, `/agent-workload/state` | Hardened security defaults, signed plans required for changes |
 | `computer-use` | Graphical agent sandbox | Xvfb + Xpra session + agent runtime | as `ai-sandbox` plus optional vetted browser endpoints | `/workspace`, `/home/agent/.cache` | Screenshot RPC, input-synthesis RPC, window-tree RPC |
 | `repl` | Interactive REPL for code-eval tools | configurable language REPL | none | `/workspace` ephemeral | Lowest-latency boot via snapshot pool; for one-shot eval calls |
 
-Each template is a real microvm.nix flake under `templates/<name>/flake.nix` and a manifest at `templates/<name>/mvm.toml`. Tests in `tests/templates.rs` boot each template and exercise its hello-world path. The agent-oriented templates (`ai-sandbox`, `safe-openclaw`, `computer-use`) get extra tests for their RPC tool surfaces.
+Each template is a real microvm.nix flake under `templates/<name>/flake.nix` and a manifest at `templates/<name>/mvm.toml`. Tests in `tests/templates.rs` boot each template and exercise its hello-world path. The agent-oriented templates (`ai-sandbox`, `safe-agent-workload`, `computer-use`) get extra tests for their RPC tool surfaces.
 
 ## Entrypoints (port from `../mvm`)
 
@@ -434,7 +434,7 @@ sb.restore(snap.id()).await?;
 - `keep-tagged` — anything explicitly tagged stays
 - `keep-time-window` — anything within a rolling window (e.g., 7 days)
 - `keep-forensic` — `forensic = true` snapshots stay regardless
-- Defaults: `ai-sandbox` template = `keep-last-3 + keep-tagged`; `safe-openclaw` = `keep-last-5 + keep-tagged + 30-day window`
+- Defaults: `ai-sandbox` template = `keep-last-3 + keep-tagged`; `safe-agent-workload` = `keep-last-5 + keep-tagged + 30-day window`
 
 `mvmctl snapshot prune --tenant <id>` runs the policy. Scheduled via supervisor cron.
 
@@ -1972,10 +1972,10 @@ tools; persistent overlay supersedes `FsStagingArea`) and
 **Risk**: Live process restart is unavoidable (CRIU deferred); some workloads will lose in-flight state. Document clearly in DX; offer `mvmctl rebuild --schedule "after current task"` as a future affordance.
 
 ### Phase 7b — Built-in templates + agent use cases (~5-7 days)
-**Goal**: `mvmctl init --template ai-sandbox` produces a Claude-Code-ready dangerous-mode sandbox; `--template safe-openclaw` produces the one-click hardened OpenClaw; `--template computer-use` works end-to-end.
+**Goal**: `mvmctl init --template ai-sandbox` produces a Claude-Code-ready dangerous-mode sandbox; `--template safe-agent-workload` produces the one-click hardened agent workload; `--template computer-use` works end-to-end.
 
 **Action**:
-- Author `templates/{minimal,worker,ai-sandbox,safe-openclaw,computer-use,repl}/{flake.nix,mvm.toml}`.
+- Author `templates/{minimal,worker,ai-sandbox,safe-agent-workload,computer-use,repl}/{flake.nix,mvm.toml}`.
 - For `computer-use`: add `mvm/src/compute_use/` with screenshot/input/windows/clipboard/process_list RPCs over vsock; the guest profile includes Xvfb, Xpra, xdotool, wmctrl, and a vetted browser (Chromium with a hardened seccomp profile).
 - Each template ships its own tenant policy bundle (egress allowlist, tool allowlist, seccomp tier) signed by mvmd.
 - `tests/templates.rs` boots each template, exercises its hello-world path, and asserts policy is enforced (e.g., `ai-sandbox` cannot reach raw internet but the web_search tool returns results).
@@ -1983,7 +1983,7 @@ tools; persistent overlay supersedes `FsStagingArea`) and
 - Decorator support: TC39 decorators (TS 5.0+); builder-form fallback for older toolchains.
 
 **Exit tests**:
-- Per-template: `tests/templates.rs::ai_sandbox_boots_with_claude_code`; `safe_openclaw_boots_with_hardened_defaults`; `computer_use_screenshot_returns_png`; `computer_use_input_synthesis_round_trips`; `repl_boot_from_snapshot_under_50ms`
+- Per-template: `tests/templates.rs::ai_sandbox_boots_with_claude_code`; `safe_agent_workload_boots_with_hardened_defaults`; `computer_use_screenshot_returns_png`; `computer_use_input_synthesis_round_trips`; `repl_boot_from_snapshot_under_50ms`
 - Integration: `tests/cli.rs::test_init_template_ai_sandbox_scaffolds_runnable_project`
 
 **Risk**: Hardened browsers (Chromium under seccomp) historically need exemptions for namespaces; Xvfb + Xpra add attack surface. Mitigate by feature-gating `computer-use` behind a policy that defaults to off; tenants opt in.

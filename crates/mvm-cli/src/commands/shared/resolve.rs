@@ -50,7 +50,7 @@ pub enum ManifestArgRef {
 /// Detection rule: if the argument resolves to an existing file or
 /// directory on disk, treat it as a manifest path; otherwise it's a
 /// name. Both `mvmctl up --manifest ./my-app` and
-/// `mvmctl up --manifest openclaw` work as long as the referenced
+/// `mvmctl up --manifest agentapp` work as long as the referenced
 /// thing actually exists.
 ///
 /// Returns `Err` only on validation/IO failures; missing-name is

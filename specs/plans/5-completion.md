@@ -15,7 +15,7 @@ Assume the following have ALREADY been implemented:
    - audit logging
 4) Snapshot-based sleep / warm / wake
 5) Reconcile-based node agent for fleet control
-6) OpenClaw worker lifecycle hooks and sleep heuristics
+6) Agent-workload worker lifecycle hooks and sleep heuristics
 
 Your task is to perform a FINAL INTEGRATION AND COHERENCE PASS.
 

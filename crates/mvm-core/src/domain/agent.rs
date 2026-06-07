@@ -860,11 +860,11 @@ mod tests {
             "profile": "minimal",
             "instance_resources": {"vcpus": 1, "mem_mib": 512},
             "desired_counts": {"running": 1, "warm": 0, "sleeping": 0},
-            "registry_artifact": {"template_id": "openclaw"}
+            "registry_artifact": {"template_id": "agentapp"}
         }"#;
         let parsed: DesiredPool = serde_json::from_str(json).unwrap();
         let ra = parsed.registry_artifact.unwrap();
-        assert_eq!(ra.template_id, "openclaw");
+        assert_eq!(ra.template_id, "agentapp");
         assert!(ra.revision.is_none());
     }
 

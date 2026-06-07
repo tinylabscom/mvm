@@ -19,7 +19,7 @@ Instead of treating all microVMs as identical, introduce ROLE-BASED VM PROFILES.
 Each microVM must have:
 
 - role: gateway | worker | builder | capability-imessage (future-safe)
-- profile: minimal | python | openclaw-gateway | openclaw-worker | custom
+- profile: minimal | python | agent-workload-gateway | agent-workload-worker | custom
 - config_version
 - secrets_epoch
 
@@ -35,7 +35,7 @@ REQUIRED ROLES
 ----------------------------------------------------------------
 
 1) gateway role
-- Runs OpenClaw Gateway.
+- Runs the agent workload's gateway.
 - Exposes WebSocket endpoint internally (tenant network).
 - Optionally exposed via ingress (WSS).
 - Loads channel connectors (WhatsApp, Telegram).
@@ -44,7 +44,7 @@ REQUIRED ROLES
 - Loads configuration from /etc/mvm-config.
 
 2) worker role
-- Runs OpenClaw worker execution engine.
+- Runs the agent workload's worker execution engine.
 - Connects to tenant’s Gateway over tenant network.
 - Does NOT expose external ports.
 - Uses persistent workspace on /data.
@@ -77,8 +77,8 @@ Example conceptual structure:
     profiles/
         minimal.nix
         python.nix
-        openclaw-gateway.nix
-        openclaw-worker.nix
+        agent-workload-gateway.nix
+        agent-workload-worker.nix
 
 Role modules define:
 - services
@@ -99,15 +99,15 @@ Artifacts produced by Nix must include:
 Runtime must never reference the Nix store.
 
 ----------------------------------------------------------------
-OPENCLAW CONNECTION INTEGRATION
+AGENT-WORKLOAD CONNECTION INTEGRATION
 ----------------------------------------------------------------
 
-Incorporate OpenClaw documentation correctly:
+Incorporate the agent workload's documentation correctly:
 
 - Gateway protocol is WebSocket JSON; clients must send a `connect` frame declaring role/scope.
 - Token authentication may be required at gateway boundary.
 - Memory is plain Markdown in workspace and must be stored on persistent /data.
-- WhatsApp and Telegram connectors are configured via openclaw.json and require tokens / login flows.
+- WhatsApp and Telegram connectors are configured via agent-workload.json and require tokens / login flows.
 - Channel login/session state must persist on /data.
 
 Mapping to drives:
