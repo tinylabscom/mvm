@@ -110,6 +110,7 @@ pub fn adaptive_backoff(attempt: u32) -> Duration {
 /// unit, so the attribute applies cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestRequest {
     /// Negotiate guest-agent protocol compatibility and capabilities
     /// before dispatching capability-dependent requests. ADR-053 /
@@ -519,6 +520,7 @@ fn default_true() -> bool {
 /// elide subsystems they don't care about in tests / fixtures.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ComponentState {
     /// Subsystem is not configured for this image (no policy → no
     /// state machine to advance). Wire-stable distinct from `Ready`.
@@ -549,6 +551,7 @@ pub enum ComponentState {
 /// `integrations_ready_ms`, `probes_ready_ms`) stay `None` for now.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BootTimingReport {
     /// Milliseconds from agent process start to vsock bind/listen.
     /// Always present once the agent has bound — this number is the
@@ -593,6 +596,7 @@ pub struct BootTimingReport {
 /// reports with `..Default::default()`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReadinessReport {
     /// Vsock listener bound and accepting. Always `Ready` if the
     /// agent could respond at all.
@@ -776,6 +780,7 @@ impl GuestRequest {
 /// host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestResponse {
     /// Guest-agent protocol negotiation succeeded. ADR-053 / plan 74 W1.
     ProtocolHelloAck {
@@ -915,6 +920,7 @@ pub enum GuestResponse {
 /// guest fail loudly on drift instead of accepting arbitrary strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestCapability {
     Ping,
     IntegrationStatus,
@@ -934,6 +940,7 @@ pub enum GuestCapability {
 /// Required remediation for a host/guest protocol mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProtocolUpgradeAction {
     UpgradeHost,
     RebuildGuest,
@@ -1022,6 +1029,7 @@ pub fn protocol_hello_response(
 /// (Renamed from `ShareResult` per plan 45 §D5.)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum VolumeMountResult {
     /// `MountVolume` succeeded. `canonical_path` is the
     /// post-validation path the agent actually mounted at — same
@@ -1041,6 +1049,7 @@ pub enum VolumeMountResult {
 /// (Renamed from `ShareErrorKind` per plan 45 §D5.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum VolumeMountErrorKind {
     /// `guest_path` is empty / not absolute / contains `..` /
     /// embedded NUL.
@@ -1068,6 +1077,7 @@ pub enum VolumeMountErrorKind {
 /// fields past the host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcResult {
     /// `ProcStart` succeeded — `pid_token` is the opaque handle the
     /// host uses for the rest of the process's lifetime.
@@ -1094,6 +1104,7 @@ pub enum ProcResult {
 /// Per-process metadata returned by `ProcList`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProcInfo {
     pub pid_token: String,
     /// RFC 3339 timestamp.
@@ -1108,6 +1119,7 @@ pub struct ProcInfo {
 /// Lifecycle state of a tracked process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcState {
     Running,
     Exited(i32),
@@ -1121,6 +1133,7 @@ pub enum ProcState {
 /// `ProcWaitEvent::Error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcErrorKind {
     /// `pid_token` doesn't match any known process. Either the
     /// host fabricated it or the agent reaped the process record.
@@ -1154,6 +1167,7 @@ pub enum ProcErrorKind {
 /// `is_terminal()` just like for `EntrypointEvent`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcWaitEvent {
     /// Bytes from the process's stdout.
     Stdout { chunk: Vec<u8> },
@@ -1209,6 +1223,7 @@ impl ProcWaitEvent {
 /// data past the host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsResult {
     /// Bytes read. `total_size` is the on-disk size at read time so
     /// callers can detect short reads even when `content.len() <
@@ -1240,6 +1255,7 @@ pub enum FsResult {
 /// One entry in an `FsList` response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FsEntry {
     /// Bare entry name (no leading directory component).
     pub name: String,
@@ -1252,6 +1268,7 @@ pub struct FsEntry {
 /// Type of a filesystem entry returned by `FsList` / `FsStat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsEntryKind {
     File,
     Dir,
@@ -1262,6 +1279,7 @@ pub enum FsEntryKind {
 /// Stat metadata for a single filesystem entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FsStat {
     /// Canonical (post-`realpath`) path the agent operated on. Lets
     /// the host detect when a symlink resolution surprised it.
@@ -1281,6 +1299,7 @@ pub struct FsStat {
 /// host can branch on `kind` without parsing message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsErrorKind {
     /// Path was rejected by the agent's policy (deny-list,
     /// canonicalization failed, symlink crossed the deny-list).
@@ -1310,6 +1329,7 @@ pub enum FsErrorKind {
 /// A single filesystem change detected since boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FsChange {
     /// Path relative to the filesystem root.
     pub path: String,
@@ -1322,6 +1342,7 @@ pub struct FsChange {
 /// Kind of filesystem change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsChangeKind {
     Created,
     Modified,
@@ -1342,6 +1363,7 @@ pub enum FsChangeKind {
 /// the host already reads frames in a loop until terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum EntrypointEvent {
     /// Bytes from the wrapper's stdout.
     Stdout { chunk: Vec<u8> },
@@ -1419,6 +1441,7 @@ impl EntrypointEvent {
 /// breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RunEntrypointError {
     /// Inbound stdin or buffered stdout/stderr exceeded the cap
     /// configured for the call.

@@ -140,6 +140,7 @@ impl std::fmt::Display for InstanceStatus {
 /// in W4 are bounded and redacted — never argv / env / stdin / stdout
 /// / stderr / filesystem paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BackpressureReason {
     /// Host could not reach the guest agent within the configured

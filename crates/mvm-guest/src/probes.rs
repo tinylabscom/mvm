@@ -55,6 +55,7 @@ fn default_probe_timeout() -> u64 {
 
 /// Result of running a single probe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProbeResult {
     /// Probe name.
     pub name: String,

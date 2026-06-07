@@ -113,6 +113,7 @@ pub struct SessionHelloAck {
 /// `BuilderOnly`, so the value is wire-stable but unused for the
 /// tenant agent today.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentProfile {
     /// Hardened production guest. Only ADR-002 production-safe verbs

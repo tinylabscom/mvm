@@ -28,11 +28,21 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
 
-/// The async closure the lean guest agent must not carry (Plan 124 A3).
-/// `tokio` is the runtime; `async-trait` is the async-fn-in-trait glue
-/// the old `RouteInstaller` needed; `rtnetlink`/`netlink-packet-route`
-/// are the async netlink stack that pulled both in.
-const FORBIDDEN: &[&str] = &["tokio", "async-trait", "rtnetlink", "netlink-packet-route"];
+/// Heavy deps the lean guest agent's default closure must not carry.
+/// `tokio` is the async runtime; `async-trait` is the async-fn-in-trait
+/// glue the old `RouteInstaller` needed; `rtnetlink`/`netlink-packet-route`
+/// are the async netlink stack that pulled both in (Plan 124 A3).
+/// `schemars` is the protocol-schema-codegen dep (Plan 124 D1) — it's an
+/// optional, off-by-default `schema`-feature dep used only by the
+/// `emit_protocol_schema` bin at build time, and must never reach the
+/// runtime agent's default closure.
+const FORBIDDEN: &[&str] = &[
+    "tokio",
+    "async-trait",
+    "rtnetlink",
+    "netlink-packet-route",
+    "schemars",
+];
 
 /// The guest's real build target. The async stack above is
 /// `cfg(target_os = "linux")`-gated, invisible to a default (host) tree
