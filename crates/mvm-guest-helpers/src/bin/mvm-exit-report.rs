@@ -66,10 +66,16 @@ fn report(code: i32) -> std::io::Result<()> {
     // the supervisor has durably written workload.exit (avoids the
     // start_enter->exit() race). Best-effort: a timeout/EOF is fine — we
     // return Ok and /init powers off regardless. Plan 152 WS-A.
+    // Only wait for the ack if we could arm a timeout — otherwise skip
+    // the read entirely so the guest can never block before poweroff.
     use std::io::Read as _;
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
     let mut ack = [0u8; 1];
-    let _ = stream.read_exact(&mut ack);
+    if stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .is_ok()
+    {
+        let _ = stream.read_exact(&mut ack);
+    }
     Ok(())
 }
 
