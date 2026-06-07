@@ -99,10 +99,7 @@ impl VmBackend for QemuBackend {
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         let qemu_bin = locate_qemu()?;
-        let kernel = config
-            .kernel_path
-            .as_deref()
-            .ok_or_else(|| anyhow!("qemu backend requires a kernel path"))?;
+        let kernel = resolve_workload_kernel(config)?;
 
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)
@@ -169,7 +166,7 @@ impl VmBackend for QemuBackend {
         } else {
             cmd.args(["-cpu", "max"]);
         }
-        cmd.arg("-kernel").arg(kernel);
+        cmd.arg("-kernel").arg(&kernel);
         if let Some(initrd) = config.initrd_path.as_deref() {
             cmd.arg("-initrd").arg(initrd);
         }
@@ -402,6 +399,51 @@ impl VmBackend for QemuBackend {
 }
 
 // ─── KVM / qemu probing ─────────────────────────────────────────────
+
+fn host_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+}
+
+/// Resolve the kernel to boot the workload under QEMU.
+///
+/// `config.kernel_path` is the build's emitted `vmlinux` when there is one
+/// (builder/dev-shell images). A plain `mkGuest` **workload** is a bare
+/// rootfs with no kernel — libkrun boots it with libkrunfw's bundled
+/// kernel, but QEMU has none. For the dev tier we fall back to the cached
+/// builder VM kernel (`~/.cache/mvm/builder-vm/<arch>/vmlinux`), which has
+/// virtio-blk/net/vsock + ext4 built-in and boots a workload rootfs
+/// (`root=/dev/vda init=/init`) just fine — the Linux analog of
+/// libkrunfw's bundled kernel. Production uses a workload kernel via
+/// Firecracker; QEMU is dev/test only (ADR-072).
+fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
+    if let Some(k) = config.kernel_path.as_deref() {
+        let p = PathBuf::from(k);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    // ~/.cache/mvm/builder-vm/<arch>/vmlinux — same layout
+    // `mvm_build::libkrun_builder::ensure_builder_vm_image` promotes to.
+    let builder_kernel = PathBuf::from(mvm_core::config::mvm_cache_dir())
+        .join("builder-vm")
+        .join(host_arch())
+        .join("vmlinux");
+    if builder_kernel.is_file() {
+        return Ok(builder_kernel);
+    }
+    bail!(
+        "qemu workload '{}' has no bootable kernel: the build produced no vmlinux \
+         ({:?}) and no cached builder kernel exists at {}. Run a build / `mvmctl dev up` \
+         to populate the builder VM image first.",
+        config.name,
+        config.kernel_path,
+        builder_kernel.display()
+    )
+}
 
 /// `qemu-system-<host-arch>` on `$PATH`.
 fn locate_qemu() -> Result<String> {
