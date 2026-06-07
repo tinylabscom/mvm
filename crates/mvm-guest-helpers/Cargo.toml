@@ -16,6 +16,10 @@ path = "src/bin/mvm-addon-dns.rs"
 name = "mvm-addon-vsock-bridge"
 path = "src/bin/mvm-addon-vsock-bridge.rs"
 
+[[bin]]
+name = "mvm-exit-report"
+path = "src/bin/mvm-exit-report.rs"
+
 [dependencies]
 mvm-core.workspace = true
 anyhow.workspace = true
