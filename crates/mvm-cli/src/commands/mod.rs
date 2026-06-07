@@ -123,6 +123,8 @@ pub(in crate::commands) enum Commands {
     Console(vm::console::Args),
     /// Manage the XDG cache directory (~/.cache/mvm)
     Cache(ops::cache::Args),
+    /// Converge the VM name registry with on-disk runtime state
+    Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
     Init(env::init::Args),
     /// Run one command in a transient microVM
@@ -324,6 +326,7 @@ pub fn run() -> Result<()> {
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
+        Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
         Commands::Receipt(a) => vm::exec::run_receipt(&cli, a, &cfg),

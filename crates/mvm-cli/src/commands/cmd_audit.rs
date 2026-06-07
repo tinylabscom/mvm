@@ -169,6 +169,7 @@ impl Commands {
             Commands::Catalog(_) => "catalog",
             Commands::Console(_) => "console",
             Commands::Cache(_) => "cache",
+            Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
             Commands::Receipt(_) => "receipt",
