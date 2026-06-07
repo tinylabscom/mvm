@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use mvm_core::network_policy::{NetworkPolicy, is_mandatory_deny};
 
+use crate::keyholder::substitution::PLACEHOLDER_PREFIX;
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
 use crate::supervisor::proxy::l4::{L4Decision, L4Policy, Protocol};
@@ -191,6 +192,39 @@ impl ScanStage for MandatoryDenyEgressScan {
     }
 }
 
+/// Drops any egress packet whose L4 payload contains a substitution
+/// placeholder — the host-owned [`PLACEHOLDER_PREFIX`] namespace (Plan 129 /
+/// ADR-067 §1 leak backstop). The legitimate substitution path routes
+/// placeholders to the host-local endpoint, never out the raw egress wire, so a
+/// placeholder seen here is a guest trying to smuggle the token out a side
+/// channel. It can't smuggle a *value* (it never held one); this stops the
+/// token leaking too. Fail-closed; egress only (an ingress frame's payload is
+/// inbound, not guest-authored).
+///
+/// Baseline detector: a single reserved-prefix scan, no false positives on
+/// normal traffic (the namespace is ours). The broader secret-shaped/PII/
+/// entropy detector set over `core::redact` is the larger Phase E1 follow-up.
+pub struct PlaceholderLeakScan;
+
+impl ScanStage for PlaceholderLeakScan {
+    fn name(&self) -> &'static str {
+        "placeholder-leak"
+    }
+
+    fn scan(&self, ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> ScanOutcome {
+        match ctx.direction {
+            FlowDirection::Egress => {}
+            _ => return ScanOutcome::Pass,
+        }
+        let needle = PLACEHOLDER_PREFIX.as_bytes();
+        if pkt.l4_payload.windows(needle.len()).any(|w| w == needle) {
+            ScanOutcome::Drop { by: self.name() }
+        } else {
+            ScanOutcome::Pass
+        }
+    }
+}
+
 /// Enforces a resolved [`NetworkPolicy`] on the egress packet path (plan 123 A2
 /// / claim 10): the L4 allow-list backstop. `unrestricted` passes everything;
 /// an allow-list (including `deny_all`, the empty list) passes only packets
@@ -327,29 +361,29 @@ impl ScanStage for L4PolicyScan {
 /// per-tenant egress filters under the always-on host-side mandatory-deny:
 ///
 /// - `MandatoryDenyEgressScan` — always (link-local + cloud metadata).
+/// - `PlaceholderLeakScan` — always (Plan 129 / ADR-067 §1): drops any egress
+///   carrying a substitution placeholder out the raw wire. Always-on because
+///   the placeholder namespace is host-reserved and the scan is a cheap
+///   single-prefix check — a workload that never uses secrets never trips it.
 /// - `L4PolicyScan(l4)` — when the bundle resolved an L4 policy (CIDR/port).
 /// - `DnsSinkholeScan(dns_allow)` — when `dns_allow` (the bundle's egress
 ///   allow-list hostnames) is non-empty: sink-holes UDP/53 lookups for hosts
 ///   outside the list. An **empty** `dns_allow` deliberately adds no sink-hole
 ///   (it would otherwise drop every lookup); host gating is opt-in via a
 ///   non-empty allow-list.
-///
-/// With neither an L4 policy nor a DNS allow-list it's mandatory-deny only —
-/// the prior live default — so a no-bundle plan is unchanged.
 pub fn build_egress_scan(l4: Option<L4Policy>, dns_allow: Vec<String>) -> Arc<dyn ScanStage> {
-    let mut stages: Vec<Arc<dyn ScanStage>> = vec![Arc::new(MandatoryDenyEgressScan)];
+    // Always-on host backstops: mandatory-deny egress ranges + placeholder-leak.
+    let mut stages: Vec<Arc<dyn ScanStage>> = vec![
+        Arc::new(MandatoryDenyEgressScan),
+        Arc::new(PlaceholderLeakScan),
+    ];
     if let Some(p) = l4 {
         stages.push(Arc::new(L4PolicyScan::new(p)));
     }
     if !dns_allow.is_empty() {
         stages.push(Arc::new(DnsSinkholeScan::new(dns_allow)));
     }
-    if stages.len() == 1 {
-        // Mandatory-deny only — return it unwrapped (no ScanChain overhead).
-        Arc::new(MandatoryDenyEgressScan)
-    } else {
-        Arc::new(ScanChain::new(stages))
-    }
+    Arc::new(ScanChain::new(stages))
 }
 
 #[cfg(test)]
@@ -393,6 +427,54 @@ mod tests {
             direction: FlowDirection::Egress,
             flow_id: "vm-egress",
         }
+    }
+
+    fn tcp_egress(payload: &[u8]) -> ParsedPacket<'_> {
+        ParsedPacket {
+            five_tuple: FiveTuple {
+                proto: L4Proto::Tcp,
+                src_ip: "10.0.0.2".parse().unwrap(),
+                dst_ip: "1.1.1.1".parse().unwrap(),
+                src_port: 5000,
+                dst_port: 443,
+            },
+            l4_payload: payload,
+            raw_frame: payload,
+        }
+    }
+
+    #[test]
+    fn placeholder_leak_drops_egress_carrying_a_placeholder() {
+        // ADR-067 §1 backstop: a placeholder smuggled out the raw egress path
+        // (not the host-local substitution endpoint) is dropped.
+        let payload = b"POST /x HTTP/1.1\r\nAuthorization: Bearer mvm-secret-deadbeef\r\n\r\n";
+        assert_eq!(
+            PlaceholderLeakScan.scan(&egress_ctx(), &tcp_egress(payload)),
+            ScanOutcome::Drop {
+                by: "placeholder-leak"
+            }
+        );
+    }
+
+    #[test]
+    fn placeholder_leak_passes_clean_egress() {
+        let payload = b"POST /x HTTP/1.1\r\nAuthorization: Bearer ya29.real-token\r\n\r\n";
+        assert_eq!(
+            PlaceholderLeakScan.scan(&egress_ctx(), &tcp_egress(payload)),
+            ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn placeholder_leak_ignores_ingress() {
+        // An ingress frame's payload is inbound, not guest-authored — never our
+        // placeholder to police.
+        let payload = b"...mvm-secret-deadbeef...";
+        let ctx = ingress_ctx();
+        assert_eq!(
+            PlaceholderLeakScan.scan(&ctx, &tcp_egress(payload)),
+            ScanOutcome::Pass
+        );
     }
 
     /// A UDP/53 packet carrying `payload` as its DNS message.
@@ -692,11 +774,12 @@ mod tests {
     }
 
     #[test]
-    fn build_egress_scan_none_is_mandatory_deny_only() {
-        // No per-tenant policy → mandatory-deny only — identical to the current
-        // live default. A metadata IP drops; a public IP passes (no L4 filter).
+    fn build_egress_scan_none_chains_mandatory_deny_and_placeholder_leak() {
+        // No per-tenant policy → the always-on backstops (mandatory-deny +
+        // placeholder-leak). A metadata IP drops (mandatory-deny wins, first in
+        // the chain); a public IP with clean payload passes (no L4 filter).
         let scan = build_egress_scan(None, vec![]);
-        assert_eq!(scan.name(), "mandatory-deny-egress");
+        assert_eq!(scan.name(), "scan-chain");
         assert_eq!(
             scan.scan(
                 &egress_ctx(),
@@ -709,6 +792,20 @@ mod tests {
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
             ScanOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn build_egress_scan_always_includes_placeholder_leak_backstop() {
+        // The placeholder-leak backstop is always in the live chain, even with
+        // no per-tenant policy: a public IP carrying a placeholder is dropped.
+        let scan = build_egress_scan(None, vec![]);
+        let leak = b"POST /x HTTP/1.1\r\nAuthorization: Bearer mvm-secret-deadbeef\r\n\r\n";
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_egress(leak)),
+            ScanOutcome::Drop {
+                by: "placeholder-leak"
+            }
         );
     }
 
@@ -743,9 +840,10 @@ mod tests {
     #[test]
     fn build_egress_scan_empty_dns_allow_list_adds_no_sinkhole() {
         // An empty DNS allow-list must NOT add DnsSinkholeScan (that would drop
-        // every lookup). With no L4 policy either, it's mandatory-deny only.
+        // every lookup). With no L4 policy either, only the always-on backstops
+        // remain, so a DNS lookup passes (not sink-holed).
         let scan = build_egress_scan(None, vec![]);
-        assert_eq!(scan.name(), "mandatory-deny-egress");
+        assert_eq!(scan.name(), "scan-chain");
         assert_eq!(
             scan.scan(&egress_ctx(), &dns_packet(&dns_query("anything.test"))),
             ScanOutcome::Pass

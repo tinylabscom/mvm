@@ -10,8 +10,12 @@ pub mod binding;
 pub mod injector;
 pub mod resolver;
 pub mod signer;
+pub mod substitution;
 
 pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use injector::{InjectError, Injector};
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer};
+pub use substitution::{
+    PLACEHOLDER_PREFIX, Placeholder, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry,
+};
