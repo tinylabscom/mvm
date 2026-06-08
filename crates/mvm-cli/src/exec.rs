@@ -940,6 +940,16 @@ pub fn dispatch_in_session(vm: &SessionVm, code: String, timeout_secs: u64) -> R
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    // Plan 74 W2 — inbound vsock RPC audit. Mirrors run_in_guest's emit;
+    // was lost when this function migrated from send_request to
+    // send_exec_streaming.
+    let verb = "exec";
+    mvm_core::audit_emit!(
+        NetworkPolicyAllow,
+        vm: &vm.vm_name,
+        "scope=rpc,direction=in,kind=vsock,verb={verb}",
+        verb = verb,
+    );
 
     let mut out = Vec::<u8>::new();
     let mut err = Vec::<u8>::new();
