@@ -14,7 +14,7 @@
 > additionally requires libkrun/KVM, which github-hosted runners
 > cannot provide (no nested KVM); the boot half stays under the
 > self-hosted Vz/libkrun lanes.
-> Supersedes: Plan 75 (retired by commit `b02a5e8` on 2026-05-14, which deleted `specs/plans/75-oci-stage0-microsandbox-removal.md` and ADR-049 along with the broader microsandbox cleanup). Plan 85 keeps Plan 75's security envelope but **drops the Stage 0 entanglement** — Plan 77's vendored-seed path is the active Stage 0 design and Plan 85 does not propose to replace it.
+> Supersedes: Plan 75 (retired by commit `b02a5e8` on 2026-05-14, which deleted Plan 75's spec file and ADR-049 along with the broader removal of the earlier external sandbox runtime — external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`). Plan 85 keeps Plan 75's security envelope but **drops the Stage 0 entanglement** — Plan 77's vendored-seed path is the active Stage 0 design and Plan 85 does not propose to replace it.
 > Depends on: `mvm-oci` W1.1 + W1.2 (manifest fetch, digest verification, layer fetch w/ size cap + bounded retry) — already on `main`. Plan 72 (libkrun builder VM). Plan 77 (Stage 0 via vendored seed).
 > Does not supersede / does not change: Plan 77's vendored-seed Stage 0 path (CLAUDE.md "Source-checkout builds never depend on mvm-published artifacts" invariant stays load-bearing). ADR-046's two acquisition paths (source vs installed binary) stay intact.
 
@@ -26,7 +26,7 @@ Three things converge:
 
 1. **`mvm-oci` already exists as a primitive.** W1.1 (reference parser, manifest fetcher) and W1.2 (layer streaming with digest verification + size cap + bounded retry) landed on `main` and are being maintained. The pull-half of OCI ingest is shipped.
 2. **The runner-half — turning a pulled image into a bootable microvm — does not exist** anywhere in the workspace. mvm can build microvms from in-repo Nix flakes (Plan 72 + Plan 77); it cannot today consume an OCI image (e.g. `docker.io/library/alpine:3.20`) as a workload.
-3. **Plan 75 conflated this user-facing capability with a Stage 0 microsandbox replacement.** That coupling was the wrong design choice — Stage 0 is now Plan 77's vendored-seed path, and the user-facing image runner is its own coherent feature with its own security envelope. Decoupling lets each ship on its own review cadence.
+3. **Plan 75 conflated this user-facing capability with a Stage 0 replacement for the removed predecessor sandbox.** That coupling was the wrong design choice — Stage 0 is now Plan 77's vendored-seed path, and the user-facing image runner is its own coherent feature with its own security envelope. Decoupling lets each ship on its own review cadence.
 
 The user-facing claim Plan 85 delivers: **`mvmctl run --image <oci-reference>` boots that image as a microvm with the same audit / cosign / digest-verification guarantees that apply to Nix-built workloads.**
 
@@ -219,7 +219,7 @@ When all hold, Plan 85 moves to `specs/backlog/`:
    - `oci-reproducibility`
    - `oci-image-runner-smoke` (Phase B onward)
 5. CLAUDE.md claim 6 extension and claim 10 are wired to enforcing CI gates (no `check-no-overclaim` exemptions).
-6. `cargo metadata` shows zero `microsandbox*` hits (already true post-`b02a5e8`; Plan 85 doesn't regress this).
+6. `cargo metadata` shows zero crate hits for the removed predecessor sandbox (already true post-`b02a5e8`; Plan 85 doesn't regress this).
 
 ## Why Plan 75 is retired, not amended
 
@@ -227,7 +227,7 @@ The b02a5e8 cleanup deleted the Plan 75 spec same-day it merged. That's a strong
 
 Plan 85 takes the second path. It carries forward Plan 75's security envelope verbatim (the threat model, the allow-list philosophy, the fuzz lane, the audit-chain integration) but jettisons two structural mistakes:
 
-1. **Stage 0 entanglement.** Plan 77 won. The "mvm-oci ALSO replaces microsandbox in Stage 0" coupling was Plan 75's load-bearing reason for existing; it no longer applies. Stage 0 is Plan 77's vendored-seed path, and mvm-oci is a user-facing primitive. They share `crates/mvm-oci/` as a library but no runtime coupling.
+1. **Stage 0 entanglement.** Plan 77 won. The "mvm-oci ALSO replaces the removed predecessor sandbox in Stage 0" coupling was Plan 75's load-bearing reason for existing; it no longer applies. Stage 0 is Plan 77's vendored-seed path, and mvm-oci is a user-facing primitive. They share `crates/mvm-oci/` as a library but no runtime coupling.
 2. **Big-bang phasing.** Plan 75's W2 was one PR for the entire unpacker. Plan 85's Phase A is six sub-PRs (A.1–A.6) each with its own fixture suite + corpus. Each merge is reviewable in an afternoon; six small reviews beat one giant one.
 
 The trust shift Plan 75 documented (registry pull as a new security surface, cosign as the trust establishment, audit-chain claim 10 as the non-repudiation hook) is correct and unchanged. The phasing is what's new.

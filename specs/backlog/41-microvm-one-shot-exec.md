@@ -21,7 +21,7 @@ mvmctl exec --env DEBUG=1 -- env | grep DEBUG          # env var injection
 mvmctl exec --cpus 4 --memory 1G -- bash -c '…'        # custom resources
 ```
 
-Inspired by [cco](https://github.com/nikvdp/cco)'s sandbox-wrapper UX, but
+Inspired by an external thin sandbox-wrapper CLI's UX (referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`), but
 with a Firecracker microVM as the isolation boundary.
 
 ## Design highlights
@@ -140,8 +140,8 @@ both clean.
   reserve the slot; implementation is a follow-up sprint.
 - **Download fallback** for the bundled default image — release artifacts
   to be added in a follow-up.
-- **Persistent sessions** (cco's `--persist`) — out of scope.
-- **Runtime package install** (cco's `--packages`) — bake into the
+- **Persistent sessions** (that wrapper's `--persist`) — out of scope.
+- **Runtime package install** (that wrapper's `--packages`) — bake into the
   template instead.
 
 ## Decision log

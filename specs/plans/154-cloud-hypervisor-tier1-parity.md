@@ -1,4 +1,4 @@
-# Plan 154 — Cloud-hypervisor Tier-1 parity (Kuasar-referenced) + Wasm-sandbox note
+# Plan 154 — Cloud-hypervisor Tier-1 parity (reference-sandboxer-informed) + Wasm-sandbox note
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans /
 > subagent-driven-development. Checkbox (`- [ ]`) steps track progress.
@@ -11,21 +11,25 @@
 > `146-wasm-wasi-polyglot` (PR #556), so this branch-local plan yields. Re-confirm
 > before merge (`cargo xtask check-spec-numbers` is CI-gated).
 
-**Origin:** a comparison of mvm against **Kuasar** (https://github.com/kuasar-io/kuasar
+**Origin:** a comparison of mvm against **a production open-source cloud-hypervisor
+sandboxer** (referred to obliquely per [[feedback_no_competitor_names_anywhere]];
+trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`)
 — a CNCF multi-sandbox container runtime, Apache-2.0, mostly Rust: a node-level
 *sandboxer* under containerd's Sandbox API, with microVM (cloud-hypervisor /
-StratoVirt / QEMU), Wasm (WasmEdge), app-kernel, and runc sandboxers). Verdict:
-most of Kuasar is **architecturally convergent** with mvm (one backend abstraction
-over many VMMs; vsock-only guest channel) or **out of scope** (it's a k8s/CRI
-node daemon — mvm is a dev tool and mvmd is the fleet plane). The transferable
-value is narrow and sharp: Kuasar runs cloud-hypervisor *in production*, and mvm's
-own CH backend is **fully written but unit-tested only**. Kuasar is the reference
-that de-risks the CH bring-up mvm has already committed to in code.
+StratoVirt / QEMU), Wasm (WasmEdge), app-kernel, and runc sandboxers. Verdict:
+most of the reference sandboxer is **architecturally convergent** with mvm (one
+backend abstraction over many VMMs; vsock-only guest channel) or **out of scope**
+(it's a k8s/CRI node daemon — mvm is a dev tool and mvmd is the fleet plane). The
+transferable value is narrow and sharp: the reference sandboxer runs
+cloud-hypervisor *in production*, and mvm's own CH backend is **fully written but
+unit-tested only**. That runtime is the reference that de-risks the CH bring-up
+mvm has already committed to in code.
 
 **Goal:** Promote `CloudHypervisorBackend` from "complete-but-unbooted" to a
-live-validated Tier-1 backend at parity with Firecracker, using Kuasar's CH
-sandboxer as the production reference for device config, the snapshot/restore API
-sequence, and TAP/virtio-net wiring. Plus: record the one cross-repo lesson
+live-validated Tier-1 backend at parity with Firecracker, using the reference
+sandboxer's CH module as the production reference for device config, the
+snapshot/restore API sequence, and TAP/virtio-net wiring. Plus: record the one
+cross-repo lesson
 (single-daemon process model → mvmd) and park the Wasm-sandbox exploration.
 
 **Architecture / framing:** mvm already owns the CH backend
@@ -34,18 +38,19 @@ methods implemented, compat entry filled at `compat.rs:207-230`). Its module doc
 scope out three items as follow-up: TAP networking (`tap_networking: false`),
 snapshot/restore mechanics (declared `supports_snapshots: true` but orchestration
 targets the Firecracker API shape), and dm-verity (claim 3) parity. None of these
-are Kuasar-invented work — they're mvm's own roadmap — but Kuasar's CH integration
-is the best open reference for the exact REST payloads and device JSON, which is
-how this plan "pulls Kuasar in": as validation knowledge, **not a code copy**
+are the reference sandboxer's invented work — they're mvm's own roadmap — but its
+CH integration is the best open reference for the exact REST payloads and device
+JSON, which is how this plan "pulls the reference in": as validation knowledge,
+**not a code copy**
 (keeps the limit-dependencies posture; if any snippet is adapted, Apache-2.0 →
 attribution in the file header).
 
 **Reference to consult** (verify exact paths when network is available — captured
-from prior knowledge, not read live): Kuasar's VMM sandboxer lives under
-`vmm/sandbox/` with per-hypervisor modules incl. `cloud_hypervisor`; the guest
+from prior knowledge, not read live): the reference sandboxer's VMM sandboxer lives
+under `vmm/sandbox/` with per-hypervisor modules incl. `cloud_hypervisor`; the guest
 agent is `vmm-task` (vsock + ttRPC). Cross-check mvm's `build_vm_config`
-(`ch_runtime.rs`) against Kuasar's `vm.create` payload, and mvm's gaps against
-Kuasar's net-device + snapshot code. cloud-hypervisor's REST surface is the
+(`ch_runtime.rs`) against the reference sandboxer's `vm.create` payload, and mvm's
+gaps against its net-device + snapshot code. cloud-hypervisor's REST surface is the
 ground truth either way (`vm.create`, `vm.boot`, `vm.pause`, `vm.resume`,
 `vm.snapshot`, `vm.restore`, `vm.add-net`, `vm.info`, `vm.resize`).
 
@@ -60,7 +65,7 @@ ground truth either way (`vm.create`, `vm.boot`, `vm.pause`, `vm.resume`,
 - **Task 3 (CH snapshot mechanics) FEEDS Plan 140** — this plan wires the CH
   `vm.snapshot`/`vm.restore` mechanics; Plan 140 owns the restore *security*
   gaps (seccomp/entropy/clock/admission), which apply to the CH arm unchanged.
-- **Task 4 (CH builder VM)** is independent of Kuasar (reference is in-repo:
+- **Task 4 (CH builder VM)** is independent of the reference sandboxer (reference is in-repo:
   `libkrun_builder.rs` / `vz_builder.rs`); lowest priority.
 - **CI gates coordinate with Plan 128** (Stage D) — a CH smoke lane is added there
   alongside the other claim gates, same pattern as Plan 143 §Task 1 Step 4.
@@ -75,16 +80,16 @@ rejected/deferred tables.
 
 ---
 
-## Task 1 — CH live bring-up + config validation vs Kuasar  *(gated on Plan 120 green; needs Linux+CH host)*
+## Task 1 — CH live bring-up + config validation vs the reference sandboxer  *(gated on Plan 120 green; needs Linux+CH host)*
 
 mvm's CH backend has never booted a real VM — its JSON builders and path helpers
 are unit-tested, the API call sites reviewed against CH docs, but no live
-boot→agent-ping exists (`cloud_hypervisor.rs` / `ch_runtime.rs`). Kuasar's CH
-sandboxer is the production reference to diff against before trusting it.
+boot→agent-ping exists (`cloud_hypervisor.rs` / `ch_runtime.rs`). The reference
+sandboxer's CH module is the production reference to diff against before trusting it.
 
 - [ ] **Step 0 (gate):** confirm `core_demo_e2e` is green on macOS/libkrun (Plan
       120 Task 4 box ticked) so a CH boot failure is unambiguously a CH problem.
-- [ ] **Step 1 (reference diff):** read Kuasar's `cloud_hypervisor` module; diff
+- [ ] **Step 1 (reference diff):** read the reference sandboxer's `cloud_hypervisor` module; diff
       its `vm.create` payload + boot sequence against
       `ch_runtime.rs::build_vm_config` / `start_ch_daemon`. Record divergences
       (likely candidates: `rng` device for guest entropy, `console`/`serial`
@@ -112,8 +117,8 @@ handoff Firecracker has.
 - [ ] **Step 1:** after Plan 141 lands `gateway_bridge::run_bridge_inner` + the
       `on_packet` observer trait, add a CH net device to `build_vm_config` (`net`
       with an fd/tap handle + mac), and a CH adapter that hands the data fd to the
-      bridge (Firecracker is the in-repo pattern; Kuasar's CH net JSON is the
-      external cross-check). Reference `libkrun.rs:73-96` for the gvproxy/passt
+      bridge (Firecracker is the in-repo pattern; the reference sandboxer's CH net
+      JSON is the external cross-check). Reference `libkrun.rs:73-96` for the gvproxy/passt
       gateway-config shape on the macOS side, though CH is Linux-only here.
 - [ ] **Step 2:** flip `capabilities().tap_networking` → true and confirm the
       egress redactor / hostname filter / rate limiter observers run on CH
@@ -130,8 +135,8 @@ API shape. Wire the CH equivalent.
 
 - [ ] **Step 1:** implement the CH `vm.pause` → `vm.snapshot` → (new VM)
       `vm.restore` → `vm.resume` sequence and the on-disk snapshot layout in
-      `ch_runtime.rs` + the CH arm of the lifecycle path; Kuasar's CH snapshot
-      code is the reference for the API ordering and file set.
+      `ch_runtime.rs` + the CH arm of the lifecycle path; the reference sandboxer's
+      CH snapshot code is the reference for the API ordering and file set.
 - [ ] **Step 2:** hand off to **Plan 140** — its four restore *security* gaps
       (seccomp-on-restore #1 is FC-jailer-specific and **N/A to CH's own seccomp**;
       entropy reseed #2, clock resync #3, and wake re-admission #4 all apply to the
@@ -139,7 +144,7 @@ API shape. Wire the CH equivalent.
 - [ ] **Step 3:** snapshot/restore round-trip test on the Lima KVM host;
       `just lint`; commit.
 
-## Task 4 — CH builder VM path  *(independent; lowest priority; not Kuasar-derived)*
+## Task 4 — CH builder VM path  *(independent; lowest priority; not reference-sandboxer-derived)*
 
 `crates/mvm-build/src/builder_vm.rs` returns `NotYetImplemented`; only libkrun
 (`libkrun_builder.rs`) and Vz (`vz_builder.rs`) have a `VmBackendForBuilder` impl.
@@ -148,7 +153,7 @@ libkrun.
 
 - [ ] **Step 1:** implement `VmBackendForBuilder` for CH following the
       `libkrun_builder.rs` pattern — spawn the builder VM, mount `/work` + `/nix`
-      + `/out`, run `nix build`, extract results. Reference is in-repo, not Kuasar.
+      + `/out`, run `nix build`, extract results. Reference is in-repo, not the reference sandboxer.
 - [ ] **Step 2:** wire it into `builder_backend_select.rs` (a third
       `BuilderBackendChoice`); `--builder ch` / `MVM_BUILDER_BACKEND=ch`; keep
       auto-detect unchanged (macOS 26+ AS → Vz; else libkrun). `just lint`; commit.
@@ -158,11 +163,12 @@ libkrun.
 - [ ] **Step 1:** one paragraph in `specs/adrs/002-microvm-security-posture.md`
       (§Threat model, positioning prose — *not* a new claim, per the out-of-scope
       discipline) recording that CH joins Firecracker as a Tier-1 KVM backend and
-      why mvm tracks an external production CH reference (Kuasar) rather than a CRI
-      sandboxer integration. Reconcile the CH row in the per-backend tier matrix.
+      why mvm tracks an external production CH reference (the reference sandboxer)
+      rather than a CRI sandboxer integration. Reconcile the CH row in the
+      per-backend tier matrix.
 - [ ] **Step 2:** file an mvmd note (`../mvmd/specs/notes/`) capturing the one
-      genuinely transferable *fleet* lesson: Kuasar's headline win is collapsing
-      the one-shim-process-per-sandbox model into a single node-level sandboxer
+      genuinely transferable *fleet* lesson: the reference sandboxer's headline win
+      is collapsing the one-shim-process-per-sandbox model into a single node-level sandboxer
       daemon. mvm is per-VM by design (one supervisor per VM — `start_enter`
       `exit()`); the daemon-vs-process-per-VM tradeoff at fleet scale is **mvmd's**
       call, not mvm's. Record, don't implement here.
@@ -180,9 +186,9 @@ libkrun.
 - [ ] ADR-002 records CH Tier-1 positioning; mvmd note filed (Task 5).
 - [ ] `just lint` + `cargo test --workspace` green.
 
-## Considered and rejected (Kuasar features NOT adopted)
+## Considered and rejected (reference-sandboxer features NOT adopted)
 
-| Kuasar feature | Verdict for mvm |
+| Reference-sandboxer feature | Verdict for mvm |
 |---|---|
 | **ttRPC over vsock** (vmm-task RPC) | **Reject** — mvm uses minimal JSON + `#[serde(deny_unknown_fields)]` + Ed25519 `AuthenticatedFrame`, and *fuzzes* the parsers (ADR-002 W4.1/W4.2). ttRPC adds a protobuf attack surface needing its own fuzzing + a new dependency, against the limit-dependencies posture. The hand-rolled protocol is a deliberate security choice, not an accident. |
 | **Node-level single sandboxer daemon** (collapse process-per-sandbox) | **Defer to mvmd** — mvm is per-VM by design; fleet process-model is mvmd territory (see Task 5 Step 2). |
@@ -193,8 +199,8 @@ libkrun.
 
 ## Deferred — Wasm sandbox exploration  *(future; needs its own brainstorm + ADR/plan)*
 
-Owner intent: explore supporting Wasm sandboxes later. Kuasar's Wasm sandboxer
-(WasmEdge) is the prior art. Open architectural tension to resolve in a dedicated
+Owner intent: explore supporting Wasm sandboxes later. The reference sandboxer's
+Wasm sandboxer (WasmEdge) is the prior art. Open architectural tension to resolve in a dedicated
 brainstorm before any plan:
 
 - [ ] mvm's artifact model is **microVM-shaped** — `MicrovmBackend` enum,
@@ -217,12 +223,13 @@ brainstorm before any plan:
 - Real symbols only for the in-repo claims: CH backend completeness, `compat.rs`
   entry, `builder_vm.rs` `NotYetImplemented`, `gateway_bridge`/Plan 141 handoff,
   Plan 140 restore gaps — all read during research.
-- Kuasar specifics are flagged as not-read-live (network blocked at authoring):
-  module paths are prior-knowledge and carry a verify-when-available caveat; the
-  CH REST endpoints cited are cloud-hypervisor's documented API, the ground truth
-  regardless of Kuasar's exact layout.
+- The reference sandboxer's specifics are flagged as not-read-live (network blocked
+  at authoring): module paths are prior-knowledge and carry a verify-when-available
+  caveat; the CH REST endpoints cited are cloud-hypervisor's documented API, the
+  ground truth regardless of the reference sandboxer's exact layout.
 - Dependencies are explicit and one-directional: T1 waits on Plan 120; T2 waits on
   Plan 141; T3 feeds Plan 140; CI gates route through Plan 128 (Stage D), matching
   Plan 143's pattern.
-- Kuasar is referenced as prior art (not a competitor; cf. gvisor-tap-vsock); the
-  per-pod-shim model it improves on is named obliquely, not by product.
+- The reference sandboxer is referenced as prior art (not a competitor; cf.
+  gvisor-tap-vsock); the per-pod-shim model it improves on is named obliquely,
+  not by product.
