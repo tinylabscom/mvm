@@ -141,6 +141,61 @@ impl FlowPolicy for AllowAll {
     }
 }
 
+/// Per-tenant flow-open gate derived from the admitted plan's resolved
+/// [`mvm_core::policy::EffectivePolicy`] (plan 123 A2/A4 — claim 10).
+/// Deny-by-default: an egress flow opens only when the tenant policy
+/// admits *some* egress — an explicit L4 allow rule, an egress
+/// allow-list entry, or the `open` egress kill-switch. A deny-all
+/// policy drops the egress flow at open. This is the libkrun analogue
+/// of the Firecracker `install_default_deny` nftables drop
+/// (`SupervisorEgressEnforcer`): both backends derive the same
+/// default-deny posture from the same `NetworkPolicy`, through their
+/// respective seams.
+///
+/// This is the **coarse** gate. Fine-grained per-`(proto, CIDR, port)`
+/// and per-hostname admission is the packet-scan layer's job
+/// (`build_egress_scan` → `L4PolicyScan` + `DnsSinkholeScan`), which
+/// runs under the always-on `MandatoryDenyEgressScan` +
+/// `PlaceholderLeakScan` backstops. FlowPolicy and the scan compose:
+/// the flow must open **and** every packet must pass — neither widens
+/// the other. So even an `open` policy still has every packet gated by
+/// mandatory-deny + placeholder-leak.
+///
+/// Ingress always opens — an ingress frame is a reply to a guest-
+/// initiated (already-gated) egress flow, and deny-by-default is an
+/// *egress* control (ADR-002 claim 10), matching the egress-only scans.
+pub struct PlanFlowPolicy {
+    egress_permitted: bool,
+}
+
+impl PlanFlowPolicy {
+    /// Derive the coarse flow gate from a tenant's resolved policy.
+    /// Egress is permitted iff the policy is the `open` kill-switch or
+    /// carries at least one allow rule (L4 or egress allow-list);
+    /// otherwise it is deny-all and egress flows drop at open. The
+    /// permit test deliberately mirrors what `build_egress_scan`'s
+    /// packet layer would resolve to allow, so the coarse gate never
+    /// drops a flow the scan would have admitted.
+    pub fn from_effective(eff: &mvm_core::policy::EffectivePolicy) -> Self {
+        let open = eff.egress.mode.as_deref() == Some("open");
+        let has_allow = !eff.network.l4.is_empty() || !eff.egress.allow_list.is_empty();
+        Self {
+            egress_permitted: open || has_allow,
+        }
+    }
+}
+
+impl FlowPolicy for PlanFlowPolicy {
+    fn evaluate(&self, ctx: &FlowDecisionCtx) -> FlowAction {
+        match ctx.direction {
+            FlowDirection::Egress if !self.egress_permitted => FlowAction::Drop {
+                reason: DropReason::new("network-policy: egress denied (deny-by-default)"),
+            },
+            _ => FlowAction::Allow,
+        }
+    }
+}
+
 // ============================================================================
 // Bridge configuration
 // ============================================================================
@@ -489,7 +544,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
         // specs fail to translate (admission should have rejected it) fails
         // CLOSED to deny-all, never open. Emergency/now only gate the tool
         // policy, so the network resolution is stable.
-        let (egress_l4, dns_allow) = match cfg.bundle.as_deref() {
+        let (egress_l4, dns_allow, flow_policy) = match cfg.bundle.as_deref() {
             Some(bundle) => {
                 let eff = mvm_core::policy::resolve(
                     bundle,
@@ -512,9 +567,22 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                         .map(|(host, _port)| host.clone())
                         .collect()
                 };
-                (Some(l4), dns_allow)
+                // Plan 123 A2/A4 — the per-tenant deny-by-default flow-open gate,
+                // derived from the SAME resolved policy as the packet scan above
+                // (so the coarse gate never drops a flow the scan would admit).
+                // This replaces the supervisor bin's `AllowAll` when a bundle
+                // resolves; it's the libkrun analogue of the Firecracker
+                // `install_default_deny`. The two compose: flow must open AND
+                // every packet must pass mandatory-deny + L4 + DNS.
+                let flow_policy: Arc<dyn FlowPolicy> =
+                    Arc::new(PlanFlowPolicy::from_effective(&eff));
+                (Some(l4), dns_allow, flow_policy)
             }
-            None => (None, Vec::new()),
+            // No resolved bundle (Stage 0 builder VMs, dev-mode, legacy callers
+            // that carry a PlanArtifact pin, not resolved content): fall back to
+            // `cfg.policy` (the supervisor bin's `AllowAll`). The always-on
+            // mandatory-deny + placeholder-leak scans still gate every packet.
+            None => (None, Vec::new(), cfg.policy.clone()),
         };
         // Plan 141 — packet-observer wiring shared across both directions.
         let wiring = ObserverWiring {
@@ -543,7 +611,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     supervisor_fd,
                     cfg.vm_name.clone(),
                     cfg.plan.tenant.0.clone(),
-                    cfg.policy.clone(),
+                    flow_policy.clone(),
                     event_tx,
                     wiring,
                 )
@@ -558,7 +626,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     supervisor_listen_path,
                     cfg.vm_name.clone(),
                     cfg.plan.tenant.0.clone(),
-                    cfg.policy.clone(),
+                    flow_policy.clone(),
                     event_tx,
                     wiring,
                 )
@@ -568,7 +636,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                 run_vz_ingest_bridge(
                     events_socket_path,
                     cfg.vm_name.clone(),
-                    cfg.policy.clone(),
+                    flow_policy.clone(),
                     event_tx,
                 )
                 .await;
@@ -1768,6 +1836,85 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // PlanFlowPolicy — per-tenant deny-by-default flow gate (plan 123 A2/A4)
+    // -----------------------------------------------------------------
+
+    fn eff_with_l4(specs: Vec<L4RuleSpec>) -> mvm_core::policy::EffectivePolicy {
+        mvm_core::policy::EffectivePolicy {
+            network: mvm_core::policy::NetworkPolicy {
+                l4: specs,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plan_flow_policy_deny_all_drops_egress_allows_ingress() {
+        // Default resolved policy = deny-all (no L4 rules, no egress allow-list,
+        // mode unset). Egress drops at open; ingress (a reply to an already-
+        // gated egress flow) still opens.
+        let p = PlanFlowPolicy::from_effective(&mvm_core::policy::EffectivePolicy::default());
+        match p.evaluate(&ctx()) {
+            FlowAction::Drop { reason } => assert!(reason.0.contains("egress denied")),
+            other => panic!("expected Drop on egress, got {other:?}"),
+        }
+        let mut ingress = ctx();
+        ingress.direction = FlowDirection::Ingress;
+        assert_eq!(p.evaluate(&ingress), FlowAction::Allow);
+    }
+
+    #[test]
+    fn plan_flow_policy_open_mode_allows_egress() {
+        // The `open` egress kill-switch admits the flow (the packet scan still
+        // gates each packet under mandatory-deny).
+        let eff = mvm_core::policy::EffectivePolicy {
+            egress: mvm_core::policy::EgressPolicy {
+                mode: Some("open".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            PlanFlowPolicy::from_effective(&eff).evaluate(&ctx()),
+            FlowAction::Allow
+        );
+    }
+
+    #[test]
+    fn plan_flow_policy_l4_allow_rule_permits_egress() {
+        // Any L4 allow rule means the policy admits *some* egress → the coarse
+        // gate opens; the L4PolicyScan does the per-(proto,CIDR,port) filtering.
+        let eff = eff_with_l4(vec![L4RuleSpec {
+            proto: "tcp".into(),
+            dst_cidr: "1.2.3.4/32".into(),
+            port_lo: 443,
+            port_hi: 443,
+        }]);
+        assert_eq!(
+            PlanFlowPolicy::from_effective(&eff).evaluate(&ctx()),
+            FlowAction::Allow
+        );
+    }
+
+    #[test]
+    fn plan_flow_policy_egress_allow_list_permits_egress() {
+        // A hostname egress allow-list (DNS-layer gating) also counts as
+        // "admits some egress" → the coarse gate opens.
+        let eff = mvm_core::policy::EffectivePolicy {
+            egress: mvm_core::policy::EgressPolicy {
+                allow_list: vec![("api.example.com".to_string(), 443)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            PlanFlowPolicy::from_effective(&eff).evaluate(&ctx()),
+            FlowAction::Allow
+        );
+    }
+
+    // -----------------------------------------------------------------
     // FlowEventWire serde
     // -----------------------------------------------------------------
 
@@ -2661,6 +2808,117 @@ mod tests {
         let parsed = crate::supervisor::network::packet::parse(&buf[..n])
             .expect("forwarded frame re-parses");
         assert_eq!(parsed.five_tuple.dst_port, 53);
+        bridge.abort();
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Plan 123 A2/A4 — per-tenant FlowPolicy enforce exercised through the
+    // LIVE libkrun gvproxy bridge (real Unix datagram sockets, no VM). Unlike
+    // the L4/DNS scan tests above, these drive the *flow-open* gate
+    // (`PlanFlowPolicy`) with a NoopScan wiring, isolating the coarse
+    // deny-by-default gate from the packet-scan layer.
+    // ───────────────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_flow_policy_deny_all_drops_egress_flow_through_the_live_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        // Deny-all resolved policy → PlanFlowPolicy drops the egress flow at
+        // open, before any packet scan runs. NoopScan wiring proves the drop is
+        // the FlowPolicy's, not the packet layer's.
+        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_effective(
+            &mvm_core::policy::EffectivePolicy::default(),
+        ));
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with(vec![]),
+        ));
+
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun.send(&tcp_egress_frame(b"payload")).await.unwrap();
+
+        // The denied flow's packet must NOT reach gvproxy.
+        let mut buf = vec![0u8; 65536];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            gvproxy.recv(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "a flow-policy-denied egress packet must not reach gvproxy"
+        );
+
+        // The drop surfaces as FlowClosed{PolicyDropped} on the event stream.
+        let mut saw_drop = false;
+        for _ in 0..4 {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(ev)) => {
+                    if let FlowEventKind::Closed { reason } = ev.kind {
+                        assert!(matches!(reason, FlowCloseReason::PolicyDropped));
+                        assert_eq!(ev.direction, FlowDirection::Egress);
+                        saw_drop = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            saw_drop,
+            "a FlowClosed{{PolicyDropped}} must fire when the flow policy denies egress"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_flow_policy_open_allows_egress_flow_through_the_live_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let sup_listen = dir.path().join("sup.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        // `open` egress mode → the flow opens; with NoopScan the frame is
+        // forwarded to gvproxy.
+        let eff = mvm_core::policy::EffectivePolicy {
+            egress: mvm_core::policy::EgressPolicy {
+                mode: Some("open".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_effective(&eff));
+        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+            gvproxy_path.clone(),
+            sup_listen.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with(vec![]),
+        ));
+
+        let libkrun = connect_libkrun(&sup_listen).await;
+        libkrun.send(&tcp_egress_frame(b"payload")).await.unwrap();
+
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+            .await
+            .expect("an open-policy egress packet must reach gvproxy")
+            .expect("recv ok");
+        let parsed = crate::supervisor::network::packet::parse(&buf[..n])
+            .expect("forwarded frame re-parses");
+        assert_eq!(parsed.five_tuple.dst_port, 443);
         bridge.abort();
     }
 

@@ -74,6 +74,19 @@ PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density →
   [~] WS-D wake-on-request — owned by mvmd
   (WS-B/C/D density belongs to mvmd, not mvm — see plan-170 banner)
 
+PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C deferred (gated)
+  [x] Phase A claims-gated lift (A1/L1, A2, A3, A4, L3-A)
+  [x] A2/A4 per-tenant enforce: libkrun PlanFlowPolicy deny-by-default
+      (mirrors FC install_default_deny) + per-tenant DnsSinkholeScan
+  [x] L3 slice B — workload site honors MVM_NETWORKING (#664)
+  [x] L2 microvm_nix egress — DECIDED: QEMU is mvm-only dev/test (Tier 2),
+      no enforcement; option (a) VmStartConfig plumbing deferred to a future
+      promotion. Documented in ADR-002 + CLAUDE.md.
+  [x] Phase B StorageProvider local/encrypted(macOS)/CAS/snapshot + MountProvider+S3
+  [ ] Phase B Linux LUKS2 arm (MVM_LIVE_LUKS, Linux CI) + S3 live-bucket validation
+  [ ] Phase C warm-start (FC live-memory / Vz save-restore / libkrun disk) —
+      gated on the host PostRestore sender (absent) + Plan 152 WS-B
+
 PLAN 126 — Dependency reduction                 🔴 ~10%
   [x] A1 re-baseline
   [x] B5 drop tokio from mvm-core (PR-1)
