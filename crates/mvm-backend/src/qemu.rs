@@ -35,6 +35,7 @@
 
 use anyhow::{Result, anyhow, bail};
 use mvm_core::config::{mvm_data_dir, vm_console_log, vm_state_dir};
+use mvm_core::plan::SecretBinding;
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
     StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -65,6 +66,15 @@ const QEMU_PID_FILE: &str = "qemu.pid";
 const QEMU_LOG_FILE: &str = "qemu.log";
 const QEMU_CID_FILE: &str = "qemu.cid";
 const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
+/// Plan 129 — PID of the per-VM `mvm-substitution-endpoint` moat, and the
+/// JSON file holding the `(guest var, placeholder)` env pairs it minted (the
+/// invoke path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned
+/// only when the admitted plan carries secret bindings.
+const SUBST_PID_FILE: &str = "substitution.pid";
+const SUBST_ENV_FILE: &str = "substitution-env.json";
+/// How long the endpoint gets to bind its listener + write the ready
+/// handshake line before `start` declares the spawn failed.
+const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default workload kernel cmdline. `console=ttyS0` is QEMU's serial line
 /// (vs libkrun's `hvc0`); `root=/dev/vda rw init=/init` matches the same
@@ -233,6 +243,30 @@ impl VmBackend for QemuBackend {
             return Err(e);
         }
 
+        // Plan 129 — when the admitted plan carries secret bindings, spawn the
+        // per-VM substitution endpoint moat so the guest's egress can resolve
+        // placeholders host-side (the guest never holds the real secret). Fail
+        // closed: a secret-bearing workload whose endpoint can't come up is
+        // rolled back rather than run with its secrets unavailable.
+        if let (Some(tenant), Some(plan_json)) =
+            (config.tenant_id.as_deref(), config.plan_json.as_deref())
+        {
+            match mvm_core::plan::secrets_from_signed_json(plan_json) {
+                Ok(secrets) if !secrets.is_empty() => {
+                    if let Err(e) = spawn_substitution_endpoint(&state_dir, tenant, &secrets) {
+                        rollback_qemu(&state_dir, &pid_file);
+                        return Err(e);
+                    }
+                }
+                Ok(_) => {} // plan has no egress secrets — no endpoint needed.
+                Err(e) => {
+                    // Not a decodable signed plan (legacy / test callers that
+                    // pass a placeholder plan_json). No secrets ⇒ no endpoint.
+                    tracing::warn!(error = %e, "plan_json not a decodable signed plan; skipping substitution endpoint");
+                }
+            }
+        }
+
         ui::success(&format!(
             "QEMU workload '{}' started (pid: {}).",
             config.name,
@@ -252,6 +286,16 @@ impl VmBackend for QemuBackend {
             send_signal(bpid, libc::SIGTERM);
         }
         let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
+
+        // Plan 129 — reap the substitution endpoint moat (if this VM had one)
+        // so its decrypted secrets don't outlive the guest.
+        if let Some(spid) = read_pid(&state_dir.join(SUBST_PID_FILE))
+            && pid_alive(spid)
+        {
+            send_signal(spid, libc::SIGTERM);
+        }
+        let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
+        let _ = std::fs::remove_file(state_dir.join(SUBST_ENV_FILE));
 
         let pid_path = state_dir.join(QEMU_PID_FILE);
         let Some(pid) = read_pid(&pid_path) else {
@@ -624,6 +668,152 @@ fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
+}
+
+/// Kill the just-started qemu + bridge and drop their sidecars — used when a
+/// later step of `start` fails so a failed `start` (not followed by `stop`)
+/// doesn't orphan a daemonized qemu.
+fn rollback_qemu(state_dir: &Path, pid_file: &Path) {
+    if let Some(bpid) = read_pid(&state_dir.join(BRIDGE_PID_FILE)) {
+        send_signal(bpid, libc::SIGTERM);
+    }
+    if let Some(pid) = read_pid(pid_file) {
+        send_signal(pid, libc::SIGTERM);
+    }
+    let _ = std::fs::remove_file(pid_file);
+    let _ = std::fs::remove_file(state_dir.join(QEMU_CID_FILE));
+    let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
+}
+
+/// Locate the `mvm-substitution-endpoint` binary: `MVM_SUBSTITUTION_ENDPOINT_PATH`
+/// override → sibling of the current exe → workspace `target/{release,debug}`.
+/// Mirrors `resolve_vz_drainer_path`.
+fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
+    const BIN: &str = "mvm-substitution-endpoint";
+    if let Some(p) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
+        if p.is_file() {
+            return Ok(p);
+        }
+        bail!(
+            "MVM_SUBSTITUTION_ENDPOINT_PATH points at {} which is not a file",
+            p.display()
+        );
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        let candidate = dir.join(BIN);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        for variant in ["release", "debug"] {
+            let candidate = workspace_root.join("target").join(variant).join(BIN);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    bail!("could not locate the {BIN} binary (set MVM_SUBSTITUTION_ENDPOINT_PATH)")
+}
+
+/// Plan 129 — spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
+/// plan's secret bindings on stdin, reads back the minted `(guest var,
+/// placeholder)` handshake line, and persists it to `SUBST_ENV_FILE` for the
+/// invoke path to inject (`HTTP_PROXY` + placeholder vars). The endpoint binds
+/// a host AF_VSOCK listener on `SUBSTITUTION_PORT` (QEMU's vhost-vsock guest→
+/// host path). Detached via `setsid` so it outlives `mvmctl up`; `stop` reaps
+/// it via `SUBST_PID_FILE`. The real secret values never leave the endpoint's
+/// address space — only the opaque placeholders are persisted/handed out.
+fn spawn_substitution_endpoint(
+    state_dir: &Path,
+    tenant: &str,
+    secrets: &[SecretBinding],
+) -> Result<()> {
+    use std::io::Write;
+
+    let bin = resolve_substitution_endpoint_path()?;
+    let cfg = serde_json::json!({
+        "tenant_id": tenant,
+        "secrets": secrets,
+        "transport": { "kind": "vsock", "port": mvm_guest::vsock::SUBSTITUTION_PORT },
+    });
+
+    let mut cmd = Command::new(&bin);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // Detach into its own session so it survives this `mvmctl` process.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // SAFETY: post-fork, pre-exec; setsid has no preconditions.
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("spawn substitution endpoint ({}): {e}", bin.display()))?;
+
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("substitution endpoint stdin was not piped"))?
+        .write_all(cfg.to_string().as_bytes())
+        .map_err(|e| anyhow!("pipe EndpointConfig to substitution endpoint: {e}"))?;
+    // (stdin writer dropped here → EOF, so the endpoint stops reading config.)
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("substitution endpoint stdout was not piped"))?;
+    let handshake = read_handshake_line(stdout, child.id(), SUBST_HANDSHAKE_TIMEOUT)?;
+
+    let pid_file = state_dir.join(SUBST_PID_FILE);
+    std::fs::write(&pid_file, child.id().to_string())
+        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    std::fs::write(state_dir.join(SUBST_ENV_FILE), handshake.trim().as_bytes())
+        .map_err(|e| anyhow!("write substitution env file: {e}"))?;
+    // Detach: drop the child handle without killing. The endpoint runs
+    // daemonized (setsid) and is reaped by `stop` via SUBST_PID_FILE.
+    Ok(())
+}
+
+/// Read the endpoint's one-line ready handshake from its stdout within
+/// `timeout`. A blocking pipe read can't be timed directly, so read on a
+/// helper thread and bound the wait; on timeout / EOF-without-line, SIGKILL
+/// the endpoint and fail (the caller rolls back qemu — fail closed).
+fn read_handshake_line(
+    stdout: std::process::ChildStdout,
+    pid: u32,
+    timeout: Duration,
+) -> Result<String> {
+    use std::io::{BufRead, BufReader};
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let res = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+        let _ = tx.send(res);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
+        Ok(Ok(_)) => {
+            send_signal(pid as libc::pid_t, libc::SIGKILL);
+            bail!("substitution endpoint closed stdout without a ready handshake")
+        }
+        Ok(Err(e)) => {
+            send_signal(pid as libc::pid_t, libc::SIGKILL);
+            bail!("read substitution endpoint handshake: {e}")
+        }
+        Err(_) => {
+            send_signal(pid as libc::pid_t, libc::SIGKILL);
+            bail!("substitution endpoint handshake timed out after {timeout:?}")
+        }
+    }
 }
 
 /// Body of the `mvmctl __qemu-vsock-bridge` subcommand. Listens on the
