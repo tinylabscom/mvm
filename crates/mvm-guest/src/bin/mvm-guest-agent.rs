@@ -1006,28 +1006,33 @@ fn do_run_code(file: &mut std::fs::File, code: &str, _timeout_secs: u64) -> Gues
     let lang = match read_wrapper_language() {
         Some(l) => l,
         None => {
-            return GuestResponse::ExecResult {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: "run-code refused: /etc/mvm/wrapper.json missing or has no \
+            write_response(
+                file,
+                &GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Stderr {
+                    chunk: b"run-code refused: /etc/mvm/wrapper.json missing or has no \
                          language field"
-                    .into(),
-            };
+                        .to_vec(),
+                }),
+            );
+            return GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Exit { code: -1 });
         }
     };
     let interpreter = match lang.as_str() {
         "python" => "python3",
         "node" => "node",
         other => {
-            return GuestResponse::ExecResult {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: format!(
-                    "run-code refused: unsupported language {:?} \
+            write_response(
+                file,
+                &GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Stderr {
+                    chunk: format!(
+                        "run-code refused: unsupported language {:?} \
                      (supported: python, node)",
-                    other
-                ),
-            };
+                        other
+                    )
+                    .into_bytes(),
+                }),
+            );
+            return GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Exit { code: -1 });
         }
     };
     // Build the shell command. Single-quote the code so the shell
