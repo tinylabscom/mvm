@@ -32,9 +32,13 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [x] invoke injects HTTP_PROXY+placeholders; guest forward proxy — PR #718
   [x] on-box endpoint validation: real AF_VSOCK + real encrypted store
       (placeholder mint, substitution success, claim-12 refuse) — 2026-06-08
-  [ ] full guest-VM boot e2e (custom secret workload) — runbook in plan 129
+  [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
+  [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
+  [x] secret-egress example workload (examples/python/secret-egress)
+  [ ] local secret-workload launch via admission flow (compile refuses managed
+      refs → deploy/plan path; the user-facing local boot gap) — plan 129
+  [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
-  [ ] Python/TS SDK `mvm.secret()` surface
 
 PLAN 152 — Rust-native VZ supervisor            🟡 design locked
   [x] WS-A exit channel (vsock + PID-1 helper) — PR #698 (merged)

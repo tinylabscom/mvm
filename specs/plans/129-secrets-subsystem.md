@@ -55,10 +55,21 @@ endpoint validation above**); this ties them on a real QEMU guest.
    request to `https://<echo-host>/headers` with `Authorization: Bearer <ph>`
    through `HTTP_PROXY`, and prints the response. Declares the secret via
    `mvm.secret("openai", type="bearer", hosts=["<echo-host>"])` so `up` lowers
-   it into `plan.secrets` (`lower_workload_secrets`). (No such example exists yet
-   — build one under `examples/` as part of this step.)
-3. **Run on QEMU**: `MVM_BACKEND=qemu mvmctl up --from-workload-ir <ir> ...`
-   then `mvmctl invoke <vm>`.
+   it into `plan.secrets` (`lower_workload_secrets`). **Built:**
+   `examples/python/secret-egress/` (declares a bearer secret bound to
+   postman-echo.com).
+3. **Run** — through the **admission / deploy (plan) flow**, NOT `mvmctl compile`.
+   > ⚠️ **Finding (2026-06-08):** `mvmctl compile` (local boot artifacts, no
+   > admission) **refuses managed secret refs** ("Use deploy/plan flows for
+   > managed refs"). The substitution endpoint is spawned only on the *admitted*
+   > plan path, and `mvmctl up` takes `--flake`/`--manifest` (not an app+secrets
+   > directly). So the user-facing local secret-workload boot is an
+   > admission/deploy concern (the fleet path, `mvmd` — consistent with
+   > deploy/tenant lifecycle living in mvmd), not a local `compile→up`. The
+   > egress *mechanism* is complete + box-validated (endpoint over real AF_VSOCK
+   > + real store: mint / substitute / claim-12 refuse); wiring an end-to-end
+   > local secret-workload **launch** through admission is the remaining gap,
+   > tracked here.
 4. **Assert**: the echo response shows the **real** credential (substitution
    happened host-side), `~/.mvm/vms/<vm>/substitution.pid` existed during the
    run and is gone after `stop`, and a request to an **unbound** host is refused
