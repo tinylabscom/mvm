@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟡 ~95%
+PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated; ~98%
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -26,10 +26,15 @@ PLAN 129 — Secrets / SigV4 substitution         🟡 ~95%
   [x] workload env injection via RunEntrypoint proto — PR #711
   [x] e2e substitution over AF_VSOCK loopback        — PR #710
   [x] claim-13 audit (secret.substituted)
-  [ ] forward-path signing integration
-  [ ] guest-init wiring (host call-site + bin glue)
-  [ ] Python/TS SDK toolchain integration
-  [ ] real-microVM boot validation (KVM box)
+  [x] retire dead in-guest ADR-049 scaffolding       — PR #713
+  [x] per-VM substitution-endpoint moat (mvm-hostd)  — PR #715
+  [x] QEMU spawns endpoint at boot, fail-closed      — PR #717
+  [x] invoke injects HTTP_PROXY+placeholders; guest forward proxy — PR #718
+  [x] on-box endpoint validation: real AF_VSOCK + real encrypted store
+      (placeholder mint, substitution success, claim-12 refuse) — 2026-06-08
+  [ ] full guest-VM boot e2e (custom secret workload) — runbook in plan 129
+  [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
+  [ ] Python/TS SDK `mvm.secret()` surface
 
 PLAN 152 — Rust-native VZ supervisor            🟡 design locked
   [x] WS-A exit channel (vsock + PID-1 helper) — PR #698 (merged)
