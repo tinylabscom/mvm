@@ -1965,6 +1965,73 @@ pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     connect_to_port(uds_path, GUEST_AGENT_PORT, timeout_secs)
 }
 
+/// The vsock CID of the host, from the guest's perspective (`VMADDR_CID_HOST`).
+pub const HOST_CID: u32 = 2;
+
+/// Open a **guest→host** vsock stream to the host on `port` (AF_VSOCK to
+/// [`HOST_CID`]). This is the direction the substitution forward proxy needs —
+/// the opposite of [`connect_to_port`], which is the host→guest Firecracker
+/// UDS-multiplexer path. Backend-agnostic on the guest side: both QEMU
+/// (`vhost-vsock`) and Firecracker forward a guest AF_VSOCK connect to CID 2 to
+/// the host's listener (real AF_VSOCK for QEMU, a per-port UDS for Firecracker).
+///
+/// The returned fd is a `SOCK_STREAM` socket wrapped as a [`UnixStream`] — a
+/// thin SOCK_STREAM wrapper whose read/write are the same syscalls — so the
+/// length-prefixed frame helpers ([`read_frame`]/[`write_frame`]) work over it
+/// unchanged.
+pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    const AF_VSOCK: libc::c_int = 40;
+    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
+    // cid u32 + 4-byte pad = 16 (== sizeof(struct sockaddr)).
+    #[repr(C)]
+    struct SockaddrVm {
+        svm_family: libc::sa_family_t,
+        svm_reserved1: u16,
+        svm_port: u32,
+        svm_cid: u32,
+        svm_zero: [u8; 4],
+    }
+    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+    // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
+    // initialized and sized exactly. The fd is adopted by `UnixStream` on
+    // success (closed on its drop) or closed explicitly on the error paths.
+    let stream = unsafe {
+        let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(
+                anyhow::Error::from(std::io::Error::last_os_error()).context("AF_VSOCK socket()")
+            );
+        }
+        let addr = SockaddrVm {
+            svm_family: AF_VSOCK as libc::sa_family_t,
+            svm_reserved1: 0,
+            svm_port: port,
+            svm_cid: HOST_CID,
+            svm_zero: [0; 4],
+        };
+        let rc = libc::connect(
+            fd,
+            std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+        );
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(anyhow::Error::from(err).context(format!(
+                "AF_VSOCK connect to host CID {HOST_CID} port {port}"
+            )));
+        }
+        UnixStream::from_raw_fd(fd)
+    };
+    let timeout = Duration::from_secs(timeout_secs);
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    Ok(stream)
+}
+
 /// Connect to the guest vsock agent via the fleet-mode instance directory convention.
 ///
 /// Resolves the UDS path as `<instance_dir>/runtime/v.sock`.
