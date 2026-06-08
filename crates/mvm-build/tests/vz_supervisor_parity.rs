@@ -34,9 +34,11 @@
 //!
 //! Slices so far: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy
 //! round-trip parity (identical request bytes → identical reply bytes through
-//! each supervisor's per-port proxy), plus the pure config/contract/round-trip
-//! helpers. Control-verb parity (PAUSE/RESUME/STATUS/BALLOON) and save/restore
-//! parity land as the supervisor grows those surfaces.
+//! each supervisor's per-port proxy); P3 control-verb parity (STATUS/PAUSE/
+//! RESUME replies must match step-for-step) — staged ahead of the Rust control
+//! socket, so it reports the gap until that slice lands. Plus the pure config/
+//! contract/round-trip/codec helpers. BALLOON + save/restore parity land as the
+//! supervisor grows those surfaces.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -289,6 +291,50 @@ fn probe_vsock_roundtrip(
     Ok(reply.filter(|r| !r.is_empty()))
 }
 
+/// Boot one supervisor, wait for its control socket, send each verb in `verbs`
+/// in order, and return the per-verb replies (`None` for a verb that errored, or
+/// for a supervisor that never bound the control socket), then stop. Until the
+/// Rust supervisor grows a control socket this returns all-`None` for it, so the
+/// parity assertion correctly reports the divergence.
+fn probe_control_verbs(
+    bin: &Path,
+    kernel: &str,
+    rootfs: &str,
+    verbs: &[&str],
+    label: &str,
+) -> std::io::Result<Vec<Option<String>>> {
+    let state_dir = make_state_dir(label)?;
+    let config = build_boot_config(label, kernel, rootfs, &state_dir);
+    let control_sock = config
+        .control_socket_path
+        .as_ref()
+        .map(PathBuf::from)
+        .expect("boot config sets a control socket path");
+    let mut child = spawn_with_config(bin, &config)?;
+
+    let booted = wait_for_file(
+        &config.resolved_pid_file(),
+        Instant::now() + Duration::from_secs(30),
+    );
+    let control_ready =
+        booted && wait_for_file(&control_sock, Instant::now() + Duration::from_secs(10));
+
+    let replies = verbs
+        .iter()
+        .map(|verb| {
+            if control_ready {
+                send_command(&control_sock, verb).ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let _ = stop_and_reap(&mut child, Duration::from_secs(20));
+    let _ = std::fs::remove_dir_all(&state_dir);
+    Ok(replies)
+}
+
 /// Returns the four live-test paths, or `None` (with an explanatory skip note)
 /// when any is unset — the live gate is opt-in via environment.
 fn live_env() -> Option<(PathBuf, PathBuf, String, String)> {
@@ -364,6 +410,33 @@ fn proxy_roundtrip_reads_the_peer_reply() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn send_command_reads_one_newline_framed_reply() {
+    // Validates the control-verb codec (write `verb\n`, read one line, strip the
+    // newline) against a fake control server — the wire both supervisors speak.
+    use std::os::unix::net::UnixListener;
+    let dir = std::env::temp_dir().join(format!("mvm-parity-ctl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("control.sock");
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).unwrap();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut conn, _)) = listener.accept() {
+            let mut b = [0u8; 1];
+            while let Ok(1) = conn.read(&mut b) {
+                if b[0] == b'\n' {
+                    break;
+                }
+            }
+            let _ = conn.write_all(b"OK running\n");
+        }
+    });
+    let resp = send_command(&sock, "STATUS").unwrap();
+    assert_eq!(resp, "OK running");
+    server.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // Live gate — skips unless both binaries + a boot artifact are exported.
 // ---------------------------------------------------------------------------
@@ -432,5 +505,34 @@ fn vsock_roundtrip_parity_swift_vs_rust() {
     assert_eq!(
         rust_reply, swift_reply,
         "Rust supervisor diverged from Swift on the vsock round-trip (port {port})"
+    );
+}
+
+#[test]
+fn control_verb_parity_swift_vs_rust() {
+    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+        eprintln!(
+            "SKIP control_verb_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
+             {ROOTFS} to run the live control-verb parity gate."
+        );
+        return;
+    };
+    // Stateful but symmetric: both supervisors get the same sequence, so the
+    // replies must match step-for-step. BALLOON/SAVE/RESTORE join once the boot
+    // config carries a balloon device and the save/restore slice lands.
+    let verbs = ["STATUS", "PAUSE", "RESUME", "STATUS"];
+    let swift_replies =
+        probe_control_verbs(&swift, &kernel, &rootfs, &verbs, "swift").expect("swift probe");
+    let rust_replies =
+        probe_control_verbs(&rust, &kernel, &rootfs, &verbs, "rust").expect("rust probe");
+
+    assert!(
+        swift_replies.iter().any(Option::is_some),
+        "Swift supervisor answered no control verbs — fix the fixture before judging parity"
+    );
+    assert_eq!(
+        rust_replies, swift_replies,
+        "Rust supervisor diverged from Swift on control verbs: rust={rust_replies:?} \
+         swift={swift_replies:?}"
     );
 }
