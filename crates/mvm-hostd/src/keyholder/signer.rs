@@ -48,7 +48,9 @@ pub enum SigningInput {
 }
 
 /// Inputs for an AWS SigV4 signature. The caller prepares the canonical
-/// request — the signer signs, it does not build requests.
+/// request — the signer signs, it does not build requests. Holds only the
+/// canonical request + scope (no key material), so Debug can't leak a secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigV4Input {
     pub canonical_request: String,
     /// `yyyymmddThhmmssZ`.

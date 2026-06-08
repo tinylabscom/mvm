@@ -11,6 +11,7 @@ pub mod binding;
 pub mod injector;
 pub mod resolver;
 pub mod signer;
+pub mod sigv4;
 pub mod substitution;
 
 pub use admission::{AssembleError, HandedPlaceholders, assemble_registry};
@@ -18,6 +19,7 @@ pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use injector::{InjectError, Injector};
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer, SigningInput};
+pub use sigv4::{SigV4BuildError, build_sigv4_input};
 pub use substitution::{
     PLACEHOLDER_PREFIX, Placeholder, SignDispatchError, SubstituteError, SubstitutionEndpoint,
     SubstitutionRegistry, find_placeholder,
