@@ -84,6 +84,10 @@ pub mod substitution_endpoint;
 /// (placeholder → real credential, binding-checked). The forward leg + the
 /// guest-facing listener are separate transport steps.
 pub mod substitution_proxy;
+/// Plan 129 stage 1b — transparent egress terminator primitives: original
+/// destination recovery after nft REDIRECT, plus the future forward/substitute
+/// legs (orig_dst is the only piece here now).
+pub mod terminator;
 // Plan 104 W1b.2a — supervisor-side UDS proxy clients for the three
 // broker subprocesses (mvm-broker, mvm-host-signer,
 // mvm-audit-signer; ADR-062 dropped mvm-secrets-dispatcher).
