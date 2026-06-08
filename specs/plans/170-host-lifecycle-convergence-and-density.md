@@ -2,7 +2,9 @@
 
 > **Status (2026-06-08):** WS-A **implemented** (PR #688); WS-B mvm-side
 > mechanism **implemented** (PR #696, backend `SleepFn` + resident loop are
-> mvmd-side); WS-C/D Proposed. Grounded in a
+> mvmd-side); WS-C **selection core implemented** (PR #TBD; sysinfo reader +
+> resident pressure-loop are consumer-side — see the WS-C consumer finding);
+> WS-D Proposed. Grounded in a
 > review of an external single-machine sandbox control plane — an
 > MIT-licensed Go service that pairs a container runtime, a reverse proxy,
 > and an embedded SQLite store to run agent workloads behind preview URLs.
@@ -138,24 +140,39 @@ persists and WS-C's wake brings it back.
       mvmd: add `IdleSlept`/`SleepFailed` arms to any exhaustive `ReapOutcome`
       match. No new snapshot code; this is a *trigger*, not a new mechanism.
 
-### WS-C — Host-memory-pressure reaper (single-host density)
+### WS-C — Host-memory-pressure reaper (single-host density) — **selection core DONE (PR #TBD)**
 
 Evict (sleep) the least-recently-active VMs when the host is under RAM
 pressure, so "dozens share one box" works on the user's Mac without manual
 babysitting.
 
-- [ ] Add a pressure-driven sweep to the reaper: read host memory via `sysinfo`
-      (already a dep — `balloon_runtime.rs` uses it), and when free RAM drops
-      below `MVM_HOST_MEM_LOW_WATERMARK`, sleep VMs in `last_active`-ascending
-      order until back above the high watermark. LRU eviction, never kill —
-      sleep + persist, same path as WS-B.
-- [ ] **Reconcile against the existing balloon lever before evicting.** mvm
-      already reclaims guest memory via `BalloonController` / `run_balloon_loop`
-      (`balloon_runtime.rs`). Order of escalation: balloon-reclaim first (cheap,
-      transparent), sleep-evict only when ballooning is exhausted. Document the
-      two-stage policy so they don't fight.
+> **Consumer finding (2026-06-08).** Verified while landing WS-B/WS-C: the
+> `mvm_hostd::supervisor::reaper` library has **no resident consumer** —
+> nothing in mvm constructs it (ADR-074: the local path is daemon-free), and
+> mvmd does **not** depend on it; mvmd reimplemented its own idle reaper in
+> `mvmd-gateway`/`mvmd-coordinator`. So the pure *selection mechanism* is the
+> durable mvm-side deliverable; the `sysinfo` reader + the resident
+> pressure-loop + balloon escalation belong with the actual consumer (mvmd's
+> reaper, or a future local daemon), not bolted onto an uncalled library.
+
+- [x] **Pure pressure-eviction core** (`supervisor::pressure`): `HostMem` +
+      `free_fraction`; `Watermarks` (free-RAM fractions in `(0,1]`,
+      `MVM_HOST_MEM_LOW_WATERMARK` / `_HIGH_WATERMARK`, opt-in) with
+      `under_pressure`/`relieved`; and `lru_eviction_order` — LRU-by-`last_active`
+      (registered_at fallback, unparseable sorts last), filtering
+      `auto_resume && !paused`. Fully unit-tested; no host/clock. (Fractions
+      not bytes: `parse_human_size` is `u32`, ~4 GiB cap.)
+- [ ] **Consumer-side (mvmd / future local daemon):** the `sysinfo` host-memory
+      reader and the resident loop that, while `under_pressure`, sleeps the next
+      `lru_eviction_order` candidate via the WS-B sleep path and re-reads memory
+      until `relieved`. Never kill — sleep + persist.
+- [ ] **Reconcile against the existing balloon lever before evicting** (also
+      consumer-side). mvm already reclaims guest memory via `BalloonController` /
+      `run_balloon_loop` (`balloon_runtime.rs`). Order of escalation:
+      balloon-reclaim first (cheap, transparent), sleep-evict only when
+      ballooning is exhausted. Document the two-stage policy so they don't fight.
 - [ ] This is the mvm-side mechanism only; mvmd's fleet scheduler may layer its
-      own cross-host policy on top via the same `reaper` library. Note the seam,
+      own cross-host policy on top via the same selection core. Note the seam,
       don't build the fleet side here.
 
 ### WS-D — Wake-on-request completion
