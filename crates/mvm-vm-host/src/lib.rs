@@ -11,4 +11,5 @@
 //! `mvm-firecracker-bridge` bin and the fuzz harnesses consume.
 //! Folded in from the former `mvm-firecracker-bridge` crate.
 
+pub mod exit_capture;
 pub mod firecracker_bridge;

@@ -356,9 +356,9 @@ pub struct VmExitStatus {
     /// Numeric exit code, when one was reported. None if the VM was
     /// terminated by signal or didn't expose a status.
     pub code: Option<i32>,
-    /// True if the VM exited normally (i.e. through its entrypoint
-    /// returning, not via signal or crash). Always `true` if
-    /// `code == Some(_)`.
+    /// `true` only when the VM exited normally with code 0 (or a
+    /// backend-defined clean exit); a non-zero captured `code` is
+    /// `success: false`. `false` for signal/crash/unknown exits.
     pub success: bool,
 }
 

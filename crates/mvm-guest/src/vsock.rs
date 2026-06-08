@@ -41,6 +41,12 @@ pub const GUEST_CID: u32 = 3;
 /// duplicates in the same commit; the workspace tests catch drift.
 pub const GUEST_AGENT_PORT: u32 = 5252;
 
+/// Control vsock port the guest's `/init` connects to (host side) to
+/// report a one-shot workload's exit code before `poweroff -f`. The host
+/// supervisor binds the listener (`add_vsock_port2(listen=false)`). Wire
+/// format: a single 4-byte little-endian `i32`. Plan 152 WS-A.
+pub const WORKLOAD_EXIT_PORT: u32 = 5251;
+
 /// vsock port the host substitution endpoint (Plan 129 / ADR-067 §1) is exposed
 /// on. The in-guest forward proxy connects here; the host bin maps it to the
 /// UDS where `SubstitutionService` listens. Distinct from the removed 5300/5301
@@ -5152,6 +5158,13 @@ mod tests {
         for (req, expected) in cases {
             assert_eq!(req.kind_name(), *expected, "verb name for {req:?}");
         }
+    }
+
+    #[test]
+    fn workload_exit_port_is_distinct_and_reserved() {
+        assert_eq!(WORKLOAD_EXIT_PORT, 5251);
+        assert_ne!(WORKLOAD_EXIT_PORT, GUEST_AGENT_PORT);
+        const { assert!(WORKLOAD_EXIT_PORT < PORT_FORWARD_BASE) }
     }
 
     /// Sanity: the verb names are all kebab-case (lowercase
