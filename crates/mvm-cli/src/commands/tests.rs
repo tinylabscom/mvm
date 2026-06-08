@@ -1853,6 +1853,18 @@ fn exec_default_manifest_argv_only() {
 }
 
 #[test]
+fn exec_timeout_parses_to_some() {
+    let cli = Cli::try_parse_from(["mvmctl", "exec", "--timeout", "5", "--", "sleep", "10"])
+        .expect("parse");
+    match cli.command {
+        Commands::Exec(exec::Args { timeout, .. }) => {
+            assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
+        }
+        _ => panic!("Expected Exec command"),
+    }
+}
+
+#[test]
 fn run_default_profile_argv_only() {
     let cli = Cli::try_parse_from(["mvmctl", "run", "--", "uname", "-a"]).expect("parse");
     match cli.command {
@@ -1893,6 +1905,18 @@ fn run_default_profile_argv_only() {
             assert!(!dev, "dev should default to false");
             assert!(!prod, "prod should default to false");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+        }
+        _ => panic!("Expected Run command"),
+    }
+}
+
+#[test]
+fn run_timeout_parses_to_some() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--timeout", "5", "--", "sleep", "10"])
+        .expect("parse");
+    match cli.command {
+        Commands::Run(exec::RunArgs { timeout, .. }) => {
+            assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
         }
         _ => panic!("Expected Run command"),
     }
