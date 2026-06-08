@@ -28,17 +28,31 @@ Demonstrates:
    workload's request carries the placeholder; the endpoint substitutes the
    real credential on egress.
 
-## Run
+## How to run it
+
+First, store the secret + its egress binding on the host (the value is piped,
+never on argv):
 
 ```sh
 printf '%s' "$REAL_KEY" | mvmctl secret set echo-key \
     --host postman-echo.com --type bearer --value -
-
-mvmctl compile examples/python/secret-egress/app.py --out /tmp/secret-egress
-mvmctl build /tmp/secret-egress
-mvmctl up secret-egress
-mvmctl invoke secret-egress
 ```
+
+A workload that references a **managed** secret is admitted through the
+**deploy / plan (admission) flow** — that path synthesizes a signed
+`ExecutionPlan` carrying the secret binding, which is what spawns the per-VM
+substitution endpoint at boot. `mvmctl compile` (which emits *local* boot
+artifacts with no admission) deliberately **refuses** managed secret refs:
+
+```text
+$ mvmctl compile examples/python/secret-egress/app.py --out /tmp/x
+Error: managed secret refs are not supported by `mvmctl compile` local boot
+artifacts yet ... Use deploy/plan flows for managed refs ...
+```
+
+So drive this example through the admission/deploy flow (the fleet path —
+`mvmd`), not `compile`. The runtime substitution itself is exercised on a
+`/dev/kvm` host per the boot-e2e runbook in `specs/plans/129-secrets-subsystem.md`.
 
 `postman-echo.com/get` reflects the request headers, so the returned JSON shows
 the substituted credential reached the destination — proving the guest only
