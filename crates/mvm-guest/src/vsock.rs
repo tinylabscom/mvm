@@ -866,6 +866,9 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
+    /// One event in the streaming response of an `Exec` call (dev-shell
+    /// only). Terminated by `ExecEvent::Exit`. Plan 159 WS-5 E.
+    ExecEvent(ExecEvent),
     /// Post-restore acknowledgement.
     PostRestoreAck {
         success: bool,
@@ -1442,6 +1445,29 @@ impl EntrypointEvent {
             self,
             EntrypointEvent::Exit { .. } | EntrypointEvent::Error { .. }
         )
+    }
+}
+
+/// One event in the response stream of an `Exec` call (dev-shell only).
+/// The agent emits a sequence of these for a single `Exec` request,
+/// terminated by `Exit`. The host reads frames in a loop until terminal.
+/// Plan 159 WS-5 E.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ExecEvent {
+    /// Bytes from the command's stdout, as they arrive.
+    Stdout { chunk: Vec<u8> },
+    /// Bytes from the command's stderr, as they arrive.
+    Stderr { chunk: Vec<u8> },
+    /// Command exited with this code. Terminal.
+    Exit { code: i32 },
+}
+
+impl ExecEvent {
+    /// True if this event terminates the `Exec` response stream.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, ExecEvent::Exit { .. })
     }
 }
 
@@ -5195,5 +5221,34 @@ mod tests {
             assert!(!s.starts_with('-'), "verb must not start with hyphen: {s}");
             assert!(!s.ends_with('-'), "verb must not end with hyphen: {s}");
         }
+    }
+
+    #[test]
+    fn exec_event_exit_is_terminal_others_are_not() {
+        assert!(ExecEvent::Exit { code: 0 }.is_terminal());
+        assert!(
+            !ExecEvent::Stdout {
+                chunk: b"x".to_vec()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !ExecEvent::Stderr {
+                chunk: b"y".to_vec()
+            }
+            .is_terminal()
+        );
+    }
+
+    #[test]
+    fn guest_response_exec_event_roundtrips() {
+        let r = GuestResponse::ExecEvent(ExecEvent::Stdout {
+            chunk: b"hi".to_vec(),
+        });
+        let j = serde_json::to_vec(&r).unwrap();
+        let back: GuestResponse = serde_json::from_slice(&j).unwrap();
+        assert!(
+            matches!(back, GuestResponse::ExecEvent(ExecEvent::Stdout { ref chunk }) if chunk == b"hi")
+        );
     }
 }
