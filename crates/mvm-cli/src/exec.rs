@@ -737,37 +737,70 @@ fn run_in_guest(
     labels: &[String],
     capture: bool,
 ) -> Result<Either<i32, ExecOutput>> {
+    use std::io::Write as _;
     if !wait_for_agent(vm_name, 30) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
     let wrapper = build_guest_wrapper(req, labels);
-    let resp = send_request(vm_name, &wrapper, req.timeout_secs)?;
-    match resp {
-        mvm_guest::vsock::GuestResponse::ExecResult {
-            exit_code,
-            stdout,
-            stderr,
-        } => {
-            if capture {
-                Ok(Either::Right(ExecOutput {
-                    exit_code,
-                    stdout,
-                    stderr,
-                }))
-            } else {
-                if !stdout.is_empty() {
-                    print!("{stdout}");
+
+    let transport = vsock_transport::for_vm(vm_name)?;
+    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit. exec.rs
+    // is a top-level module that can't reach the private
+    // `commands::shared` re-export, so inline the audit emit
+    // here. The detail format matches
+    // `commands::shared::vsock::emit_vsock_rpc_audit`:
+    // `scope=rpc,direction=in,kind=vsock,verb=<kebab-name>`.
+    let verb = "exec";
+    mvm_core::audit_emit!(
+        NetworkPolicyAllow,
+        vm: vm_name,
+        "scope=rpc,direction=in,kind=vsock,verb={verb}",
+        verb = verb,
+    );
+
+    let mut out = Vec::<u8>::new();
+    let mut err = Vec::<u8>::new();
+    let terminal = mvm_guest::vsock::send_exec_streaming(
+        &mut stream,
+        &wrapper,
+        None,
+        req.timeout_secs,
+        |event| match event {
+            mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+                if capture {
+                    out.extend_from_slice(chunk);
+                } else {
+                    let mut so = std::io::stdout();
+                    let _ = so.write_all(chunk);
+                    let _ = so.flush();
                 }
-                if !stderr.is_empty() {
-                    eprint!("{stderr}");
-                }
-                Ok(Either::Left(exit_code))
             }
-        }
-        mvm_guest::vsock::GuestResponse::Error { message } => {
-            anyhow::bail!("guest exec error: {message}")
-        }
-        other => anyhow::bail!("unexpected guest response: {other:?}"),
+            mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+                if capture {
+                    err.extend_from_slice(chunk);
+                } else {
+                    let mut se = std::io::stderr();
+                    let _ = se.write_all(chunk);
+                    let _ = se.flush();
+                }
+            }
+            _ => {}
+        },
+    )?;
+    let exit_code = match terminal {
+        mvm_guest::vsock::ExecEvent::Exit { code } => code,
+        other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
+    };
+
+    if capture {
+        Ok(Either::Right(ExecOutput {
+            exit_code,
+            stdout: String::from_utf8_lossy(&out).into_owned(),
+            stderr: String::from_utf8_lossy(&err).into_owned(),
+        }))
+    } else {
+        Ok(Either::Left(exit_code))
     }
 }
 
@@ -905,22 +938,31 @@ pub fn dispatch_in_session(vm: &SessionVm, code: String, timeout_secs: u64) -> R
         timeout_secs,
     };
     let wrapper = build_guest_wrapper(&req, &[]);
-    let resp = send_request(&vm.vm_name, &wrapper, timeout_secs)?;
-    match resp {
-        mvm_guest::vsock::GuestResponse::ExecResult {
-            exit_code,
-            stdout,
-            stderr,
-        } => Ok(ExecOutput {
-            exit_code,
-            stdout,
-            stderr,
-        }),
-        mvm_guest::vsock::GuestResponse::Error { message } => {
-            anyhow::bail!("guest exec error: {message}")
-        }
-        other => anyhow::bail!("unexpected guest response: {other:?}"),
-    }
+    let transport = vsock_transport::for_vm(&vm.vm_name)?;
+    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+
+    let mut out = Vec::<u8>::new();
+    let mut err = Vec::<u8>::new();
+    let terminal = mvm_guest::vsock::send_exec_streaming(
+        &mut stream,
+        &wrapper,
+        None,
+        timeout_secs,
+        |event| match event {
+            mvm_guest::vsock::ExecEvent::Stdout { chunk } => out.extend_from_slice(chunk),
+            mvm_guest::vsock::ExecEvent::Stderr { chunk } => err.extend_from_slice(chunk),
+            _ => {}
+        },
+    )?;
+    let exit_code = match terminal {
+        mvm_guest::vsock::ExecEvent::Exit { code } => code,
+        other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
+    };
+    Ok(ExecOutput {
+        exit_code,
+        stdout: String::from_utf8_lossy(&out).into_owned(),
+        stderr: String::from_utf8_lossy(&err).into_owned(),
+    })
 }
 
 /// Tear down a session VM. Best-effort — failures (already-stopped,
@@ -959,40 +1001,6 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     false
-}
-
-fn send_request(
-    vm_name: &str,
-    command: &str,
-    timeout_secs: u64,
-) -> Result<mvm_guest::vsock::GuestResponse> {
-    let transport = vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    // ADR-053 / plan 74 W1: hard cutover requires every fresh session
-    // to hello before any operational request. `Exec` is a dev-shell
-    // request not covered by the closed `GuestCapability` enum, so
-    // request no specific capability — the hello alone unblocks the
-    // dispatch.
-    let _ = mvm_guest::vsock::negotiate_protocol(&mut stream, Vec::new())?;
-    let request = mvm_guest::vsock::GuestRequest::Exec {
-        command: command.to_string(),
-        stdin: None,
-        timeout_secs: Some(timeout_secs),
-    };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit. exec.rs
-    // is a top-level module that can't reach the private
-    // `commands::shared` re-export, so inline the audit emit
-    // here. The detail format matches
-    // `commands::shared::vsock::emit_vsock_rpc_audit`:
-    // `scope=rpc,direction=in,kind=vsock,verb=<kebab-name>`.
-    let verb = request.kind_name();
-    mvm_core::audit_emit!(
-        NetworkPolicyAllow,
-        vm: vm_name,
-        "scope=rpc,direction=in,kind=vsock,verb={verb}",
-        verb = verb,
-    );
-    mvm_guest::vsock::send_request(&mut stream, &request)
 }
 
 #[cfg(test)]
