@@ -108,6 +108,11 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtioSocketDevice",
     "VZVirtioSocketDeviceConfiguration",
     "VZVirtioSocketConnection",
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZNetworkDeviceAttachment",
+    "VZFileHandleNetworkDeviceAttachment",
+    "VZMACAddress",
 ] }
 
 [dev-dependencies]

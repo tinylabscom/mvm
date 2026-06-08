@@ -13,18 +13,20 @@
 //! process main thread stays free for the control socket + vsock proxy (later
 //! slices). All `unsafe` is contained in this module.
 //!
-//! **Slice 1 scope.** Cold boot + clean lifecycle/exit propagation, plus the
-//! config translation for cpu/memory/kernel/disks/virtio-fs/vsock-device/
-//! console/entropy/balloon/platform. Deliberately fail-closed (not silently
-//! dropped) on the not-yet-ported surfaces — `network` and `Restore` startup —
-//! so a config that needs them refuses on the Rust supervisor while the Swift
-//! one still backs production behind the parity gate. The vsock host-side
-//! proxy, the control socket, snapshot/restore, and the gvproxy attachment +
-//! payload_tap are the next WS-B slices.
+//! **Scope so far.** Cold boot + clean lifecycle/exit propagation; config
+//! translation (cpu/memory/kernel/disks/virtio-fs/vsock-device/console/entropy/
+//! balloon/platform); the vsock host-side proxy (per-port UNIX listeners spliced
+//! to the guest); and the direct gvproxy virtio-net attachment. Deliberately
+//! fail-closed (not silently dropped) on the surfaces still on the Swift
+//! supervisor behind the parity gate: `Restore` startup, and **flow-audited**
+//! networking (the `events_ingest` path — porting it as an in-process
+//! `payload_tap` is a later slice, and direct-attaching it would bypass the
+//! claim-10 egress audit). Still to come: control socket, snapshot/save-restore,
+//! payload_tap, the workload-exit channel, codesigning, and the parity matrix.
 
 use std::cell::Cell;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -39,10 +41,11 @@ use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSArray, NSError, NSFileHandle, NSObject, NSString, NSURL};
 use objc2_virtualization::{
-    VZDiskImageStorageDeviceAttachment, VZFileHandleSerialPortAttachment,
-    VZGenericPlatformConfiguration, VZLinuxBootLoader, VZSharedDirectory, VZSingleDirectoryShare,
-    VZVirtioBlockDeviceConfiguration, VZVirtioConsoleDeviceSerialPortConfiguration,
-    VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
+    VZDiskImageStorageDeviceAttachment, VZFileHandleNetworkDeviceAttachment,
+    VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
+    VZMACAddress, VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
+    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
+    VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
     VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration,
     VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
     VZVirtualMachineConfiguration, VZVirtualMachineDelegate, VZVirtualMachineState,
@@ -53,7 +56,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
-use mvm_build::vz::{StartupMode, SupervisorConfig};
+use mvm_build::vz::{NetworkConfig, StartupMode, SupervisorConfig};
 
 /// Unique per-process counter so each VM's dispatch queue gets a distinct
 /// label (libdispatch keys its worker bookkeeping off the label).
@@ -667,12 +670,6 @@ async fn run_port_proxy(conn: VmConn, listener: UnixListener, port: u32) {
 /// Fail-closed on the surfaces not yet ported (see module docs): a `network`
 /// device or a `Restore` startup mode is refused rather than dropped.
 fn build_vz_config(config: &SupervisorConfig) -> Result<Retained<VZVirtualMachineConfiguration>> {
-    if config.network.is_some() {
-        bail!(
-            "vz network attachment is not yet wired in the Rust supervisor (Plan 152 WS-B slice 2); \
-             the Swift supervisor still backs networked guests"
-        );
-    }
     if let StartupMode::Restore { .. } = config.startup_mode {
         bail!(
             "vz Restore startup is not yet wired in the Rust supervisor (Plan 152 WS-B slice 2); \
@@ -837,6 +834,31 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<Retained<VZVirtualMachin
         unsafe { vz_config.setMemoryBalloonDevices(&array) };
     }
 
+    // Network (optional). gvproxy-backed virtio-net (ADR-055 — passt is
+    // Linux-only). The flow-audited path (events_ingest set) is the in-process
+    // payload_tap slice; until then it fails closed so claim-10 egress audit is
+    // never silently bypassed.
+    match &config.network {
+        None => {}
+        Some(NetworkConfig::Gvproxy {
+            socket_path,
+            mac,
+            events_ingest_socket_path,
+        }) => {
+            if events_ingest_socket_path.is_some() {
+                bail!(
+                    "vz flow-audited networking (in-process payload_tap, claim 10) is not yet \
+                     ported to the Rust supervisor (Plan 152 WS-B slice 4); the Swift supervisor \
+                     still backs flow-audited guests"
+                );
+            }
+            let device = build_gvproxy_device(socket_path, mac)?;
+            let array = NSArray::from_retained_slice(&[Retained::into_super(device)]);
+            // SAFETY: setNetworkDevices installs the virtio-net device.
+            unsafe { vz_config.setNetworkDevices(&array) };
+        }
+    }
+
     // SAFETY: validateWithError checks the assembled configuration's invariants.
     unsafe { vz_config.validateWithError() }
         .map_err(|e| anyhow!("VZ configuration invalid: {}", ns_error_to_string(&e)))?;
@@ -852,6 +874,99 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<Retained<VZVirtualMachin
     }
 
     Ok(vz_config)
+}
+
+/// Build a gvproxy-backed virtio-net device: a SOCK_DGRAM unix socket connected
+/// to gvproxy's `--listen-vfkit` listener, handed to Vz via a file-handle
+/// attachment, with the per-VM MAC pinned (deterministic across save/restore
+/// and collision-free across concurrent VMs).
+fn build_gvproxy_device(
+    socket_path: &str,
+    mac: &str,
+) -> Result<Retained<VZVirtioNetworkDeviceConfiguration>> {
+    let fd = connect_gvproxy_dgram(socket_path)?;
+    // Ownership transfers to the NSFileHandle (closeOnDealloc: true); the VM
+    // reads/writes vfkit frames on it for its lifetime.
+    // `raw` is a valid connected fd we just relinquished; the handle now owns it
+    // (closeOnDealloc: true).
+    let raw = fd.into_raw_fd();
+    let handle =
+        NSFileHandle::initWithFileDescriptor_closeOnDealloc(NSFileHandle::alloc(), raw, true);
+    // SAFETY: initWithFileHandle wraps the datagram endpoint as a VZ attachment.
+    let attachment = unsafe {
+        VZFileHandleNetworkDeviceAttachment::initWithFileHandle(
+            VZFileHandleNetworkDeviceAttachment::alloc(),
+            &handle,
+        )
+    };
+    // SAFETY: new() returns a default virtio-net device configuration.
+    let device = unsafe { VZVirtioNetworkDeviceConfiguration::new() };
+    // SAFETY: setAttachment accepts any VZNetworkDeviceAttachment subclass.
+    unsafe { device.setAttachment(Some(&attachment)) };
+
+    let mac_ns = NSString::from_str(mac);
+    // SAFETY: initWithString validates the MAC string (nil on malformed).
+    let vz_mac = unsafe { VZMACAddress::initWithString(VZMACAddress::alloc(), &mac_ns) }
+        .ok_or_else(|| anyhow!("invalid MAC address {mac:?} for gvproxy network"))?;
+    // SAFETY: setMACAddress pins the validated address.
+    unsafe { device.setMACAddress(&vz_mac) };
+
+    Ok(device)
+}
+
+/// Open and connect a SOCK_DGRAM AF_UNIX socket to gvproxy's vfkit listener,
+/// with 1 MiB send/recv buffers so an MTU-sized datagram survives a backlog
+/// (matches cloud-hypervisor / Apple's sample). Returns an owned fd that closes
+/// on any early-return error path.
+fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
+    // SAFETY: socket() with constant valid arguments.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        bail!(
+            "socket(AF_UNIX, SOCK_DGRAM) for gvproxy: {}",
+            io::Error::last_os_error()
+        );
+    }
+    // SAFETY: `fd` is a fresh fd we own; OwnedFd closes it on any early return.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let buf: libc::c_int = 1024 * 1024;
+    let buf_ptr = std::ptr::addr_of!(buf).cast::<libc::c_void>();
+    let buf_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        // SAFETY: setsockopt with a valid int option and length; failure is
+        // non-fatal (best-effort buffer bump), so the result is ignored.
+        unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, buf_ptr, buf_len) };
+    }
+
+    // SAFETY: zeroed sockaddr_un is a valid starting point.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = path.as_bytes();
+    if bytes.len() >= addr.sun_path.len() {
+        bail!(
+            "gvproxy socket path too long ({} bytes): {path}",
+            bytes.len()
+        );
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        addr.sun_path[i] = b as libc::c_char;
+    }
+    // SAFETY: connect() with a correctly-populated sockaddr_un and its size.
+    let ret = unsafe {
+        libc::connect(
+            fd,
+            std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        bail!(
+            "connect() gvproxy at {path}: {}",
+            io::Error::last_os_error()
+        );
+    }
+    Ok(owned)
 }
 
 // ---------------------------------------------------------------------------
