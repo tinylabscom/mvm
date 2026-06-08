@@ -17,6 +17,47 @@ TS `mvm.secret(type=, hosts=)` egress surface; the old in-guest substitution
 models retired across Rust/Python/TS), #724 (`examples/python/secret-egress/` +
 the finding below).
 
+## Security invariant — the whole point (verify, do not assume)
+
+**A raw secret must NEVER land on the microVM — with or without the SDK.** Two
+distinct mechanisms, and they are not interchangeable:
+
+- **Substitution (declared secrets) = "never ON the guest."** The guest receives
+  only an opaque `mvm-secret-<hex>` placeholder; the real value lives solely in
+  the host `mvm-substitution-endpoint`, which injects/signs it on egress. This is
+  the *only* mechanism that achieves "no secret on the microVM." It is **SDK-
+  independent** — it is driven by the *admitted plan's* `.secrets` (placeholder
+  env injection), not the SDK. mvm must hand a workload a placeholder, never a
+  raw value. **Built + box-validated.**
+- **Redaction/detection on egress = "never LEAVES the guest" (a backstop, not the
+  guarantee).** If a secret is redacted on the way out, it *was already on the
+  guest*. This only catches secrets that landed by some other path (baked into
+  the image, hardcoded, fetched). It does **not** give "never on the microVM" —
+  substitution does.
+
+**Current state of the egress scan (`mvm_hostd::supervisor::network::stages::build_egress_scan`):**
+wires `MandatoryDenyEgressScan` + `PlaceholderLeakScan` + L4/DNS policy only.
+`PlaceholderLeakScan` drops egress carrying a *placeholder* — NOT arbitrary
+secret-shaped content. `SecretsScanner` (secret-shaped regex, `DEFAULT_RULES`)
+and `PiiRedactor` **exist** but are **not wired into `build_egress_scan`** (only
+into the separate L7 inspector chain). So an **undeclared** real secret could be
+on the guest *and* leak today.
+
+**Required to fully hold the invariant (Plan 129 Phase E — currently deferred):**
+1. Confirm substitution gives no-secret-on-guest for declared secrets, **SDK and
+   non-SDK (plan-declared)** — on the box (the example workload + a non-SDK plan
+   with `.secrets`). Verify the guest's env/fs hold only the placeholder, never
+   the value.
+2. **Wire `SecretsScanner` + `PiiRedactor` into `build_egress_scan`** (the live
+   gateway-bridge ScanStage path the workload VMs use), fail-closed, and
+   box-validate that an **undeclared** secret-shaped / PII payload on egress is
+   dropped/redacted + audited — not just a placeholder. This is the backstop that
+   makes "without the SDK / undeclared" safe.
+
+> Decide whether Phase E is in this session's scope or its own follow-up, but the
+> invariant is not fully satisfied until #2 ships. Substitution (#1) is the
+> guarantee; the detector (#2) is the net for everything else.
+
 ## The gap (from on-box validation, 2026-06-08)
 
 `mvmctl compile` (which emits **local** boot artifacts with no admission)
