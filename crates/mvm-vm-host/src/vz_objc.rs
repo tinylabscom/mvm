@@ -17,14 +17,13 @@
 //! translation (cpu/memory/kernel/disks/virtio-fs/vsock-device/console/entropy/
 //! balloon/platform); the vsock host-side proxy (per-port UNIX listeners spliced
 //! to the guest); and the direct gvproxy virtio-net attachment. Deliberately
-//! fail-closed (not silently dropped) on the surfaces still on the Swift
-//! supervisor behind the parity gate: `Restore` startup, and **flow-audited**
-//! networking (the `events_ingest` path — porting it as an in-process
-//! `payload_tap` is a later slice, and direct-attaching it would bypass the
-//! claim-10 egress audit). Also wired: the control socket
-//! (STATUS/PAUSE/RESUME/BALLOON; SAVE/RESTORE refused pending the snapshot
-//! slice). Still to come: snapshot/save-restore, payload_tap, the workload-exit
-//! channel, and the parity matrix.
+//! fail-closed (not silently dropped) on the one surface still on the Swift
+//! supervisor behind the parity gate: **flow-audited** networking (the
+//! `events_ingest` path — porting it as an in-process `payload_tap` is a later
+//! slice, and direct-attaching it would bypass the claim-10 egress audit). Also
+//! wired: the control socket (STATUS/PAUSE/RESUME/BALLOON/SAVE), `Restore`
+//! startup mode, and the machine-id sidecar. Still to come: the in-process
+//! payload_tap, the workload-exit channel, and the parity matrix.
 
 use std::cell::Cell;
 use std::io;
@@ -41,17 +40,17 @@ use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-use objc2_foundation::{NSArray, NSError, NSFileHandle, NSObject, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSError, NSFileHandle, NSObject, NSString, NSURL};
 use objc2_virtualization::{
     VZDiskImageStorageDeviceAttachment, VZFileHandleNetworkDeviceAttachment,
-    VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
-    VZMACAddress, VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
-    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
-    VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
-    VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration,
-    VZVirtioTraditionalMemoryBalloonDevice, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
-    VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
-    VZVirtualMachineState,
+    VZFileHandleSerialPortAttachment, VZGenericMachineIdentifier, VZGenericPlatformConfiguration,
+    VZLinuxBootLoader, VZMACAddress, VZSharedDirectory, VZSingleDirectoryShare,
+    VZVirtioBlockDeviceConfiguration, VZVirtioConsoleDeviceSerialPortConfiguration,
+    VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
+    VZVirtioNetworkDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
+    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDevice,
+    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
+    VZVirtualMachineConfiguration, VZVirtualMachineDelegate, VZVirtualMachineState,
 };
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -390,13 +389,19 @@ unsafe impl Send for VmHandle {}
 // SAFETY: shared access is funnelled through the same serial queue.
 unsafe impl Sync for VmHandle {}
 
-/// Cheaply-clonable connector to a running VM's vsock device. Each vsock-proxy
-/// task holds one so it can dial the guest (`connectToPort`) on the VM's queue
-/// without sharing the whole supervisor.
+/// Cheaply-clonable connector to a running VM. Each vsock-proxy / control-socket
+/// task holds one so it can drive the VM (`connectToPort`, pause/resume/save, …)
+/// on the VM's serial queue without sharing the whole supervisor.
 #[derive(Clone)]
 struct VmConn {
     queue: SerialQueue,
     handle: Arc<VmHandle>,
+    /// Configured guest memory in bytes — the balloon target is derived from it
+    /// (`target = total − inflate`).
+    mem_total_bytes: u64,
+    /// `VZGenericMachineIdentifier.dataRepresentation` — SAVE writes it to the
+    /// `<snapshot>.machine-id` sidecar so RESTORE preserves guest identity.
+    machine_id: Option<Arc<Vec<u8>>>,
 }
 
 impl VmConn {
@@ -490,9 +495,20 @@ impl VmConn {
             .await
     }
 
-    /// Control verb: ask the guest to balloon to `bytes` of available memory.
-    /// Apple rounds + clamps; the actual in-guest change is asynchronous.
-    async fn set_balloon_target(&self, bytes: u64) -> Result<()> {
+    /// Control verb `BALLOON <mib>`: inflate the balloon by `inflate_mib` MiB,
+    /// i.e. set the guest's available memory to `total − inflate`. Matches the
+    /// host client contract (`balloon_set_target(target_inflate_mib)`) and the
+    /// Swift supervisor. Apple rounds + clamps; the in-guest change is async.
+    async fn set_balloon_inflate(&self, inflate_mib: u64) -> Result<()> {
+        let total = self.mem_total_bytes;
+        let inflate = inflate_mib.saturating_mul(1024 * 1024);
+        if inflate > total {
+            bail!(
+                "BALLOON {inflate_mib} MiB exceeds VM memory {} MiB",
+                total / (1024 * 1024)
+            );
+        }
+        let target = total - inflate;
         let handle = Arc::clone(&self.handle);
         self.queue
             .dispatch(move || -> Result<()> {
@@ -502,16 +518,59 @@ impl VmConn {
                     .to_vec()
                     .into_iter()
                     .next()
-                    .ok_or_else(|| anyhow!("no memory balloon device attached"))?;
+                    .ok_or_else(|| anyhow!("no traditional memory balloon device attached"))?;
                 let traditional =
                     Retained::downcast::<VZVirtioTraditionalMemoryBalloonDevice>(device)
                         .map_err(|_| anyhow!("balloon device is not a traditional balloon"))?;
                 // SAFETY: setTargetVirtualMachineMemorySize is a plain property setter.
-                unsafe { traditional.setTargetVirtualMachineMemorySize(bytes) };
+                unsafe { traditional.setTargetVirtualMachineMemorySize(target) };
                 Ok(())
             })
             .await?
     }
+
+    /// Control verb `SAVE <path>` (macOS 14+): checkpoint the (paused) guest to
+    /// `path`, then best-effort write the `<path>.machine-id` sidecar (mode
+    /// 0600) so RESTORE preserves guest identity. The caller pauses first; an
+    /// unpaused VM makes `saveMachineStateToURL` error (surfaced as `ERR`).
+    async fn save(&self, path: &str) -> Result<()> {
+        // VZ refuses to overwrite an existing save file.
+        let _ = std::fs::remove_file(path);
+        let owned_path = path.to_string();
+        let handle = Arc::clone(&self.handle);
+        let (tx, rx) = oneshot::channel();
+        self.queue
+            .dispatch(move || {
+                // NSURL is !Send — build it on the queue.
+                let url = nsurl_from_path(&owned_path);
+                let block = completion_block(tx);
+                // SAFETY: saveMachineStateToURL_completionHandler runs on the queue.
+                unsafe {
+                    handle
+                        .vm
+                        .saveMachineStateToURL_completionHandler(&url, &block)
+                };
+            })
+            .await?;
+        rx.await
+            .map_err(|_| anyhow!("save completion handler was never called"))??;
+        if let Some(bytes) = &self.machine_id {
+            let sidecar = format!("{path}.machine-id");
+            if let Err(e) = write_machine_id_sidecar(&sidecar, bytes) {
+                tracing::warn!(error = %e, "SAVE machine-id sidecar write failed (RESTORE will use a fresh identifier)");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Write the machine-id sidecar atomically at mode 0600 (identity bytes bind to
+/// the guest, so keep them owner-only).
+fn write_machine_id_sidecar(path: &str, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).map_err(|e| anyhow!("write {path}: {e}"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| anyhow!("chmod 0600 {path}: {e}"))
 }
 
 /// Map Apple's `VZVirtualMachineState` onto the control protocol's `STATUS`
@@ -544,10 +603,14 @@ pub struct VzSupervisor {
     vsock_tasks: Vec<JoinHandle<()>>,
     /// Bound `vsock-<port>.sock` paths, unlinked on shutdown.
     vsock_paths: Vec<PathBuf>,
-    /// Control-socket accept loop (PAUSE/RESUME/STATUS/BALLOON), if bound.
+    /// Control-socket accept loop (PAUSE/RESUME/STATUS/BALLOON/SAVE), if bound.
     control_task: Option<JoinHandle<()>>,
     /// Bound `control.sock` path, unlinked on shutdown.
     control_path: Option<PathBuf>,
+    /// Configured guest memory in bytes (balloon target derivation).
+    mem_total_bytes: u64,
+    /// Machine-identifier bytes for the SAVE sidecar (`None` if unavailable).
+    machine_id: Option<Arc<Vec<u8>>>,
 }
 
 impl VzSupervisor {
@@ -567,12 +630,16 @@ impl VzSupervisor {
         let vsock_dir = config.vsock.socket_dir.clone();
         let vsock_ports = config.vsock.ports.clone();
         let control_path = config.control_socket_path.clone();
+        let mem_total_bytes = mib_to_bytes(config.resources.memory_mib);
+        let startup_mode = config.startup_mode.clone();
 
         let config = config.clone();
         let queue_inner = queue.clone_inner();
-        let handle = queue
-            .dispatch(move || -> Result<Arc<VmHandle>> {
-                let vz_config = build_vz_config(&config)?;
+        // The create closure returns the VM handle and the machine-identifier
+        // bytes (for the SAVE sidecar) together — both produced on the queue.
+        let (handle, machine_id) = queue
+            .dispatch(move || -> Result<(Arc<VmHandle>, Option<Vec<u8>>)> {
+                let (vz_config, machine_id) = build_vz_config(&config)?;
                 // SAFETY: initWithConfiguration_queue binds the VM to this
                 // queue; we are executing on it.
                 let vm = unsafe {
@@ -585,10 +652,13 @@ impl VzSupervisor {
                 let delegate = VmDelegate::new(delegate_tx);
                 // SAFETY: setDelegate must run on the VM's queue (we are on it).
                 unsafe { vm.setDelegate(Some(delegate.as_protocol())) };
-                Ok(Arc::new(VmHandle {
-                    vm,
-                    _delegate: delegate,
-                }))
+                Ok((
+                    Arc::new(VmHandle {
+                        vm,
+                        _delegate: delegate,
+                    }),
+                    machine_id,
+                ))
             })
             .await??;
 
@@ -601,6 +671,8 @@ impl VzSupervisor {
             vsock_paths: Vec::new(),
             control_task: None,
             control_path: None,
+            mem_total_bytes,
+            machine_id: machine_id.map(Arc::new),
         };
         // Bind the host-side vsock proxy + control socket before start, so a
         // client (mvmctl / mvmd) can reach the guest agent and drive lifecycle
@@ -609,7 +681,13 @@ impl VzSupervisor {
         if let Some(path) = control_path {
             this.start_control_socket(&path)?;
         }
-        this.start().await?;
+        // Boot a fresh guest, or restore from a saved state + resume.
+        match startup_mode {
+            StartupMode::Boot => this.start().await?,
+            StartupMode::Restore { snapshot_path, .. } => {
+                this.restore_and_resume(&snapshot_path).await?
+            }
+        }
         Ok(this)
     }
 
@@ -617,7 +695,35 @@ impl VzSupervisor {
         VmConn {
             queue: self.queue.clone(),
             handle: Arc::clone(&self.handle),
+            mem_total_bytes: self.mem_total_bytes,
+            machine_id: self.machine_id.clone(),
         }
+    }
+
+    /// Restore a saved guest state (macOS 14+) and resume it. The two calls run
+    /// on the VM's queue; restore leaves the VM paused, resume unsticks it.
+    async fn restore_and_resume(&self, snapshot_path: &str) -> Result<()> {
+        let owned = snapshot_path.to_string();
+        let handle = Arc::clone(&self.handle);
+        let (tx, rx) = oneshot::channel();
+        self.queue
+            .dispatch(move || {
+                // NSURL is !Send — build it on the queue.
+                let url = nsurl_from_path(&owned);
+                let block = completion_block(tx);
+                // SAFETY: restoreMachineStateFromURL_completionHandler runs on the queue.
+                unsafe {
+                    handle
+                        .vm
+                        .restoreMachineStateFromURL_completionHandler(&url, &block)
+                };
+            })
+            .await?;
+        rx.await
+            .map_err(|_| anyhow!("restore completion handler was never called"))??;
+        self.connector().resume().await?;
+        self.push_current_state().await;
+        Ok(())
     }
 
     /// Bind one `<socket_dir>/vsock-<port>.sock` (mode 0700) UNIX listener per
@@ -821,15 +927,19 @@ async fn dispatch_control(conn: &VmConn, command: &str) -> String {
         "PAUSE" => ok_reply(conn.pause().await),
         "RESUME" => ok_reply(conn.resume().await),
         "BALLOON" => match arg.parse::<u64>() {
-            Ok(mib) => ok_reply(conn.set_balloon_target(mib * 1024 * 1024).await),
+            Ok(mib) => ok_reply(conn.set_balloon_inflate(mib).await),
             Err(_) => format!("ERR BALLOON requires a MiB integer argument, got {arg:?}"),
         },
-        "SAVE" => "ERR SAVE (snapshot) is not yet ported to the Rust supervisor \
-                   (Plan 152 WS-B slice 6); the Swift supervisor still backs snapshots"
-            .to_string(),
-        "RESTORE" => {
-            "ERR RESTORE is a supervisor startup mode, not a control-socket command".to_string()
+        "SAVE" => {
+            if arg.is_empty() {
+                "ERR SAVE requires a path argument".to_string()
+            } else {
+                ok_reply(conn.save(arg).await)
+            }
         }
+        "RESTORE" => "ERR RESTORE is a supervisor startup mode, not a control-socket command — \
+                      spawn a new supervisor with startup_mode={kind:restore,...} on stdin"
+            .to_string(),
         other => format!("ERR unknown control command {other:?}"),
     }
 }
@@ -852,18 +962,15 @@ fn err_reply(e: &anyhow::Error) -> String {
 // ---------------------------------------------------------------------------
 
 /// Translate a [`SupervisorConfig`] into a validated
-/// `VZVirtualMachineConfiguration`. All `unsafe` objc2 calls are here.
+/// `VZVirtualMachineConfiguration` plus the machine-identifier bytes (for the
+/// SAVE sidecar). All `unsafe` objc2 calls are here.
 ///
-/// Fail-closed on the surfaces not yet ported (see module docs): a `network`
-/// device or a `Restore` startup mode is refused rather than dropped.
-fn build_vz_config(config: &SupervisorConfig) -> Result<Retained<VZVirtualMachineConfiguration>> {
-    if let StartupMode::Restore { .. } = config.startup_mode {
-        bail!(
-            "vz Restore startup is not yet wired in the Rust supervisor (Plan 152 WS-B slice 2); \
-             boot a fresh guest or use the Swift supervisor for snapshot restore"
-        );
-    }
-
+/// Fail-closed on the one surface not yet ported (see module docs):
+/// flow-audited networking. Both `Boot` and `Restore` startup modes build the
+/// same device config; the caller picks `start()` vs `restore + resume`.
+fn build_vz_config(
+    config: &SupervisorConfig,
+) -> Result<(Retained<VZVirtualMachineConfiguration>, Option<Vec<u8>>)> {
     // SAFETY: new() returns a default-initialized configuration.
     let vz_config = unsafe { VZVirtualMachineConfiguration::new() };
     // SAFETY: plain setters with validated scalar values.
@@ -888,10 +995,30 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<Retained<VZVirtualMachin
     // SAFETY: setBootLoader accepts any VZBootLoader subclass.
     unsafe { vz_config.setBootLoader(Some(&boot_loader)) };
 
-    // Linux guests require a generic platform. Slice 1 uses the default machine
-    // identifier; the SAVE/Restore machine-id sidecar is a later slice.
+    // Linux guests require a generic platform. Pin an explicit machine
+    // identifier: Boot mints a fresh one; Restore reloads the `.machine-id`
+    // sidecar so the restored guest keeps its identity (systemd machine-id /
+    // boot-id continuity). The identifier's bytes are returned for SAVE to
+    // re-emit the sidecar. A missing/unreadable sidecar falls back to a fresh
+    // identifier — restore still works, only identity continuity is lost.
     // SAFETY: new() returns a valid generic platform configuration.
     let platform = unsafe { VZGenericPlatformConfiguration::new() };
+    let identifier = match &config.startup_mode {
+        StartupMode::Restore {
+            machine_id_path: Some(path),
+            ..
+        } => load_machine_identifier(path).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "machine-id sidecar unreadable; using a fresh identifier");
+            // SAFETY: new() always returns a valid fresh identifier.
+            unsafe { VZGenericMachineIdentifier::new() }
+        }),
+        // SAFETY: new() returns a fresh machine identifier.
+        _ => unsafe { VZGenericMachineIdentifier::new() },
+    };
+    // SAFETY: dataRepresentation returns the identifier's opaque bytes.
+    let machine_id = unsafe { identifier.dataRepresentation() }.to_vec();
+    // SAFETY: setMachineIdentifier applies a validated identifier.
+    unsafe { platform.setMachineIdentifier(&identifier) };
     // SAFETY: setPlatform accepts any VZPlatformConfiguration subclass.
     unsafe { vz_config.setPlatform(&platform) };
 
@@ -1060,7 +1187,21 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<Retained<VZVirtualMachin
         );
     }
 
-    Ok(vz_config)
+    Ok((vz_config, Some(machine_id)))
+}
+
+/// Load a `VZGenericMachineIdentifier` from a SAVE-written `.machine-id` sidecar.
+fn load_machine_identifier(path: &str) -> Result<Retained<VZGenericMachineIdentifier>> {
+    let bytes = std::fs::read(path).map_err(|e| anyhow!("read {path}: {e}"))?;
+    let data = NSData::with_bytes(&bytes);
+    // SAFETY: initWithDataRepresentation validates the opaque payload (nil on bad bytes).
+    unsafe {
+        VZGenericMachineIdentifier::initWithDataRepresentation(
+            VZGenericMachineIdentifier::alloc(),
+            &data,
+        )
+    }
+    .ok_or_else(|| anyhow!("{path} is not a valid machine identifier"))
 }
 
 /// Build a gvproxy-backed virtio-net device: a SOCK_DGRAM unix socket connected

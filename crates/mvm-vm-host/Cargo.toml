@@ -88,6 +88,7 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtualMachine",
     "VZVirtualMachineConfiguration",
     "VZGenericPlatformConfiguration",
+    "VZGenericMachineIdentifier",
     "VZPlatformConfiguration",
     "VZVirtioBlockDeviceConfiguration",
     "VZStorageDeviceConfiguration",
