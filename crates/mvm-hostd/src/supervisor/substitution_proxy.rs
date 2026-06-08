@@ -152,6 +152,21 @@ pub trait Forwarder: Send + Sync {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError>;
 }
 
+/// Flatten an error and its `source()` chain into one message. reqwest wraps
+/// the underlying connect/TLS/resolver cause as a source; the outer
+/// `to_string()` alone is just "error sending request for url (...)", which
+/// hides whether a forward failed on DNS, the SSRF filter, TLS, or timeout.
+fn err_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        src = s.source();
+    }
+    out
+}
+
 /// Production forwarder: a hardened reqwest client (TLS 1.3 min, SSRF-filtered
 /// resolver, no redirects — `hardened_client_builder`) makes the real request.
 pub struct ReqwestForwarder {
@@ -182,7 +197,7 @@ impl Forwarder for ReqwestForwarder {
         let resp = rb
             .send()
             .await
-            .map_err(|e| ForwardError::Failed(e.to_string()))?;
+            .map_err(|e| ForwardError::Failed(err_chain(&e)))?;
         let status = resp.status().as_u16();
         let headers = resp
             .headers()
@@ -192,7 +207,7 @@ impl Forwarder for ReqwestForwarder {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| ForwardError::Failed(e.to_string()))?
+            .map_err(|e| ForwardError::Failed(err_chain(&e)))?
             .to_vec();
         Ok(ForwardResponse {
             status,
