@@ -852,12 +852,6 @@ pub enum GuestResponse {
     ProbeStatusReport {
         probes: Vec<crate::probes::ProbeResult>,
     },
-    /// Result of an Exec request.
-    ExecResult {
-        exit_code: i32,
-        stdout: String,
-        stderr: String,
-    },
     /// One event in the response stream of a `RunEntrypoint` call.
     /// ADR-007 / plan 41 W1.
     ///
@@ -2374,24 +2368,6 @@ pub fn post_restore_at(vsock_uds_path: &str) -> Result<bool> {
     }
 }
 
-/// Execute a command inside the guest via vsock at a specific UDS path (dev-only).
-pub fn exec_at(
-    vsock_uds_path: &str,
-    command: &str,
-    stdin: Option<String>,
-    timeout_secs: u64,
-) -> Result<GuestResponse> {
-    let mut stream = connect_to(vsock_uds_path, timeout_secs)?;
-    send_request(
-        &mut stream,
-        &GuestRequest::Exec {
-            command: command.to_string(),
-            stdin,
-            timeout_secs: Some(timeout_secs),
-        },
-    )
-}
-
 /// Query filesystem diff from the guest agent at a specific UDS path.
 ///
 /// Returns the list of filesystem changes since boot (created, modified,
@@ -2835,11 +2811,6 @@ mod tests {
                     output: Some(serde_json::json!({"usage_pct": 42})),
                     checked_at: "2026-02-26T12:00:00Z".to_string(),
                 }],
-            },
-            GuestResponse::ExecResult {
-                exit_code: 0,
-                stdout: "Linux\n".to_string(),
-                stderr: String::new(),
             },
             GuestResponse::PostRestoreAck {
                 success: true,
