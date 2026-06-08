@@ -16,7 +16,9 @@ use mvm_core::network_policy::{NetworkPolicy, is_mandatory_deny};
 use crate::keyholder::substitution::PLACEHOLDER_PREFIX;
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
+use crate::supervisor::pii_redactor::{PiiRedactor, REDACTION_MASK};
 use crate::supervisor::proxy::l4::{L4Decision, L4Policy, Protocol};
+use crate::supervisor::secrets_scanner::SecretsScanner;
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
 /// flow — the same fail-closed path as `Verdict::Drop`. `by` names the scan that
@@ -60,6 +62,57 @@ pub struct NoopSubstitution;
 impl SubstitutionStage for NoopSubstitution {
     fn name(&self) -> &'static str {
         "noop-substitution"
+    }
+}
+
+/// Plan 129 Phase E — the egress secret/PII redactor. A `SubstitutionStage`
+/// (the `Verdict::Modify` rebuild path), **not** a scan/drop: an *undeclared*
+/// secret-shaped or PII run on outbound bytes is masked in place (replaced with
+/// [`REDACTION_MASK`]) and the request continues, rather than dropping the whole
+/// flow. This is the backstop for the no-secret-on-the-guest invariant when a
+/// secret reaches the guest by some path *other* than a declared
+/// `mvm.secret(...)` (baked in, hardcoded, fetched) — declared secrets are
+/// substituted host-side via the endpoint and never on the guest in the first
+/// place. (A leaked *placeholder* is still dropped by [`PlaceholderLeakScan`] —
+/// that's a host/transport bug, fail-closed; a raw secret-shaped blob is a
+/// workload mistake, mask-and-continue.)
+pub struct RedactingSubstitution {
+    secrets: SecretsScanner,
+    pii: PiiRedactor,
+}
+
+impl RedactingSubstitution {
+    /// The curated secret-pattern + PII rulesets (`DEFAULT_RULES`).
+    pub fn with_default_rules() -> Self {
+        Self {
+            secrets: SecretsScanner::with_default_rules(),
+            pii: PiiRedactor::with_default_rules(),
+        }
+    }
+}
+
+impl SubstitutionStage for RedactingSubstitution {
+    fn name(&self) -> &'static str {
+        "redact-secrets-pii"
+    }
+
+    fn substitute(&self, _ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> Option<Vec<u8>> {
+        // Secret-shaped first, then PII; both mask to REDACTION_MASK.
+        let (after_secrets, secret_hits) = self.secrets.redact(pkt.l4_payload, REDACTION_MASK);
+        let (after_pii, pii_hits) = self.pii.redact(&after_secrets);
+        if secret_hits.is_empty() && pii_hits.is_empty() {
+            return None; // clean payload — pass through unchanged.
+        }
+        // Observability only: the categories that fired + the destination,
+        // never the matched bytes (claim-13 discipline).
+        tracing::warn!(
+            dst = %pkt.five_tuple.dst_ip,
+            dst_port = pkt.five_tuple.dst_port,
+            secrets = ?secret_hits,
+            pii = ?pii_hits,
+            "egress redactor masked undeclared secret/PII content"
+        );
+        Some(after_pii)
     }
 }
 
@@ -441,6 +494,23 @@ mod tests {
             l4_payload: payload,
             raw_frame: payload,
         }
+    }
+
+    #[test]
+    fn redacting_substitution_masks_secret_and_passes_clean() {
+        let r = RedactingSubstitution::with_default_rules();
+        // A clean payload passes through (None — no rewrite).
+        assert_eq!(r.substitute(&egress_ctx(), &tcp_egress(b"GET / nothing here")), None);
+        // A payload carrying an undeclared secret-shaped token is rewritten with
+        // the mask, and the original token is gone.
+        let key = "sk-".to_owned() + &"z".repeat(48);
+        let body = format!("POST {{\"k\":\"{key}\"}}").into_bytes();
+        let out = r
+            .substitute(&egress_ctx(), &tcp_egress(&body))
+            .expect("secret-bearing payload must be rewritten");
+        let masked = String::from_utf8_lossy(&out);
+        assert!(!masked.contains(&key), "secret survived redaction: {masked}");
+        assert!(masked.contains("XXX"), "no mask present: {masked}");
     }
 
     #[test]

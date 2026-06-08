@@ -70,7 +70,7 @@ use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
 // ObserverWiring (default no-op) so plan 129 sets them without touching the
 // call sites.
 use crate::supervisor::network::stages::{
-    NoopSubstitution, ScanStage, SubstitutionStage, build_egress_scan,
+    RedactingSubstitution, ScanStage, SubstitutionStage, build_egress_scan,
 };
 use crate::supervisor::proxy::l4::LiveL4Gate;
 use std::collections::HashSet;
@@ -593,7 +593,12 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             )),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
-            substitution: Arc::new(NoopSubstitution),
+            // Plan 129 Phase E — always-on egress redactor: mask any UNDECLARED
+            // secret-shaped / PII run in the guest's outbound bytes to `XXX`
+            // (mask-and-continue). Declared secrets never reach the guest (they
+            // substitute host-side via the endpoint); this is the backstop for
+            // anything that got onto the guest by another path.
+            substitution: Arc::new(RedactingSubstitution::with_default_rules()),
             // Host-side mandatory-deny (link-local + cloud metadata), always on
             // and unbypassable from inside a compromised guest; the per-tenant
             // L4 + DNS filters compose under it when a bundle is present.
@@ -1776,7 +1781,7 @@ mod tests {
     use super::*;
     // The live default scan is MandatoryDenyEgressScan; the bridge tests want a
     // pass-through default, so wiring_with keeps NoopScan (test-scoped import).
-    use crate::supervisor::network::stages::NoopScan;
+    use crate::supervisor::network::stages::{NoopScan, NoopSubstitution};
     use crate::supervisor::proxy::l4::{L4Policy, LiveL4Gate};
     use mvm_core::policy::L4RuleSpec;
 
