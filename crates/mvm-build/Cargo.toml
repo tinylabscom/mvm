@@ -7,10 +7,6 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-# Folded in with mvm-vz (plan 121 C2): auto-builds the mvm-vz-supervisor
-# Swift binary on macOS when MVM_VZ_BUILD_SUPERVISOR=1. No-op otherwise
-# (non-macOS, or env unset) — never fails the Rust build.
-build = "build.rs"
 
 # Builder-VM-only Linux tools (plan 121 D4) — cross-compiled to
 # aarch64-unknown-linux-musl by crates/mvm-cli/build.rs and embedded.
