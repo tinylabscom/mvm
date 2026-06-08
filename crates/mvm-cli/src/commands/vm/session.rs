@@ -765,21 +765,27 @@ fn dispatch_run_code(
     let req = mvm_guest::vsock::GuestRequest::RunCode { code, timeout_secs };
     // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(&record.vm_name, &req);
-    let resp = mvm_guest::vsock::send_request(&mut stream, &req)?;
-    let (exit_code, stdout, stderr) = match resp {
-        mvm_guest::vsock::GuestResponse::ExecResult {
-            exit_code,
-            stdout,
-            stderr,
-        } => (exit_code, stdout, stderr),
-        mvm_guest::vsock::GuestResponse::Error { message } => {
-            bail!("guest run-code error: {message}")
+    // RunCode now streams ExecEvent frames (Plan 159 WS-5 E). The hello +
+    // request write above mirror the old send_request path; read_exec_stream
+    // takes over from here.
+    mvm_guest::vsock::write_frame(&mut stream, &req)?;
+    let terminal = mvm_guest::vsock::read_exec_stream(&mut stream, |event| match event {
+        mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+            let mut so = std::io::stdout();
+            let _ = so.write_all(chunk);
+            let _ = so.flush();
         }
-        other => bail!("unexpected response to RunCode: {other:?}"),
+        mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+            let mut se = std::io::stderr();
+            let _ = se.write_all(chunk);
+            let _ = se.flush();
+        }
+        _ => {}
+    })?;
+    let exit_code = match terminal {
+        mvm_guest::vsock::ExecEvent::Exit { code } => code,
+        other => bail!("unexpected terminal exec event: {other:?}"),
     };
-
-    let _ = std::io::stdout().write_all(stdout.as_bytes());
-    let _ = std::io::stderr().write_all(stderr.as_bytes());
 
     if let Err(e) = session::update_session(id, |r| {
         r.invoke_count = r.invoke_count.saturating_add(1);
