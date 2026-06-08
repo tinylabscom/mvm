@@ -856,48 +856,38 @@ git commit -m "feat(mvm-cli): up --wait propagates workload exit code + plan.exi
   direct `mkGuest` with `entrypoint.command` (and no `bootCommand`) is the
   correct shape; `mkFunctionService` is persistent-only.
 
-- [~] **Step 2: Live E2E on the libkrun host — ATTEMPTED, BLOCKED on
-  fixture/builder staging (NOT on WS-A code).** Two successive
-  non-WS-A walls on this host:
-  1. The **Vz builder** needs the Swift `mvm-vz-supervisor` binary
-     (`reference_mvm_vz_supervisor_separate_swiftpm_binary`), absent in
-     the worktree → `--builder libkrun` to sidestep.
-  2. With `--builder libkrun`: Stage 0 booted, the builder VM ran, and
-     `nix build` started — but the fixture flake failed to evaluate:
-     `path '/work/nix/lib/workspace-filter.nix' does not exist`. The
-     `up --flake` builder stages **only the flake's own dir** at `/work`,
-     so the in-repo `workspaceRoot + "/nix/lib"` reference (mirrored from
-     the built-in `default-tenant` image, which is built with the whole
-     repo staged) does not resolve. The WS-A code path (guest `/init`
-     report → control vsock → supervisor capture → `wait()` →
-     `plan.exited` → exit propagation) is therefore **never exercised by
-     this fixture** — the image won't build.
+- [x] **Step 2: Live E2E on the libkrun host — PASSED.**
+  `MVM_WORKSPACE_PATH="$(pwd)" mvmctl up --flake ./examples/exit_code
+  --builder libkrun --hypervisor libkrun --wait` → **`mvmctl` exits `7`**,
+  and the chain-signed audit log carries
+  `plan.exited {exit_code:"7", backend:"libkrun"}`. The full loop is
+  proven on a real libkrun VM: guest `/init` runs `sh -c 'exit 7'` →
+  captures `$?` → `mvm-exit-report` → control vsock 5251 → supervisor
+  capture (ack handshake) → `workload.exit=7` → ack → `poweroff -f` →
+  supervisor exits → `backend.wait()` reads `workload.exit` →
+  `emit_exited` → `process::exit(7)`.
 
-  **Resolution (follow-up):** author the fixture to reference mvm as a
-  proper flake **input** (as an external user flake would), OR build it
-  via the workspace-root-staged path the default image uses. Then re-run:
+  **Two bugs the E2E surfaced and fixed (both post-implementation):**
+  1. **`up --wait` hung in the persistent-agent wait.** A one-shot
+     workload powers off in ms and has no persistent agent, so
+     `wait_for_guest_agent` blocked. Fix: skip that probe when `--wait`
+     (commit `83838c29`) — go straight to `backend.wait()`.
+  2. **`backend.wait()` hung on PID reuse.** It polled supervisor PID
+     liveness; on this busy host the dead supervisor's PID was recycled,
+     so the liveness check spun forever. Fix: poll for `workload.exit` to
+     appear instead (reuse-proof; the ack handshake guarantees it is
+     written before poweroff), bounded by `WORKLOAD_WAIT_TIMEOUT`
+     (commit `6e9a9791`).
 
-```bash
-MVM_WORKSPACE_PATH="$(pwd)" ./target/debug/mvmctl up \
-  --flake ./examples/exit_code --builder libkrun --hypervisor libkrun --wait
-echo "exit: $?"   # expect 7
-./target/debug/mvmctl audit show <plan_id> --json | grep plan.exited   # exit_code=7
-```
+  **Fixture:** the `up --flake` builder uses source-checkout "override
+  mode" (`--override-input mvm path:/work/nix`), which only triggers when
+  the user flake's text contains `github:tinylabscom/mvm`. The fixture was
+  re-authored (commit `0bc6f843`) as a canonical user flake
+  (`inputs.mvm.url = "github:tinylabscom/mvm/main?dir=nix"`, calling
+  `mvm.lib.${system}.mkGuest`) — the in-repo-image `workspace-filter`
+  pattern was wrong for a user `--flake`.
 
-  **What IS verified without the live boot:** the host-side capture path
-  end-to-end on real sockets
-  (`mvm_vm_host::exit_capture::capture_once` test: bind listener →
-  connect → write 4-byte LE i32 → `workload.exit` → `read_captured`); the
-  backend mapping (`read_exit_status_from`: code→VmExitStatus,
-  absent→UNKNOWN); control-port registration
-  (`build_supervisor_config_registers_control_port`); `plan.exited`
-  chain emission (`emit_exited_writes_plan_exited_with_code` +
-  `verify_audit_chain`); `up --wait` parse + `conflicts_with`
-  detach/up-json; the guest `/init` rewrite (nix parse + opus security
-  review). The only unverified link is the live guest→libkrun-vsock→
-  supervisor proxy hop, which needs a buildable fixture.
-
-- [x] **Step 3: Commit the fixture** — DONE (commit `76a46751`).
+- [x] **Step 3: Commit the fixture** — DONE (re-authored at `0bc6f843`).
 
 ---
 
