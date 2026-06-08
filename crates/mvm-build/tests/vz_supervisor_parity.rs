@@ -32,13 +32,14 @@
 //! Both supervisor binaries share the name `mvm-vz-supervisor`, so they are
 //! addressed by explicit path, never by name resolution.
 //!
-//! Slices so far: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy
-//! round-trip parity (identical request bytes → identical reply bytes through
-//! each supervisor's per-port proxy); P3 control-verb parity (STATUS/PAUSE/
-//! RESUME replies must match step-for-step) — staged ahead of the Rust control
-//! socket, so it reports the gap until that slice lands. Plus the pure config/
-//! contract/round-trip/codec helpers. BALLOON + save/restore parity land as the
-//! supervisor grows those surfaces.
+//! Slices: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy round-trip
+//! parity (identical request bytes → identical reply bytes through each
+//! supervisor's per-port proxy); P3 control-verb parity (STATUS/PAUSE/RESUME
+//! replies match step-for-step); P4 save/restore parity (`SAVE` a snapshot, then
+//! restore it in a fresh supervisor). P3/P4 are staged ahead of the Rust control
+//! socket + snapshot slices, so they report the gap until those land. Plus the
+//! pure config/contract/round-trip/codec helpers. (BALLOON joins P3 once the
+//! boot config carries a balloon device.)
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -46,7 +47,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mvm_build::vz::{DiskConfig, KernelConfig, ResourceConfig, SupervisorConfig, VsockConfig};
+use mvm_build::vz::{
+    DiskConfig, KernelConfig, ResourceConfig, StartupMode, SupervisorConfig, VsockConfig,
+};
 
 const SWIFT_BIN: &str = "MVM_VZ_PARITY_SWIFT_BIN";
 const RUST_BIN: &str = "MVM_VZ_PARITY_RUST_BIN";
@@ -335,6 +338,86 @@ fn probe_control_verbs(
     Ok(replies)
 }
 
+/// Observable outcome of a save→restore round-trip. Both supervisors must agree.
+#[derive(Debug, PartialEq, Eq)]
+struct SaveRestoreOutcome {
+    /// Reply to `SAVE <path>` (`"OK"` on success), or `None` if the control
+    /// socket never bound.
+    save_reply: Option<String>,
+    /// The snapshot blob materialized on disk.
+    snapshot_written: bool,
+    /// The `<snapshot>.machine-id` sidecar materialized (identity continuity).
+    sidecar_written: bool,
+    /// A fresh supervisor in `Restore` mode reached running from the snapshot.
+    restore_reached_running: bool,
+}
+
+/// Save/restore parity: boot one supervisor, `SAVE` a snapshot, stop it, then
+/// spawn a fresh supervisor in `Restore` mode against that snapshot and check it
+/// reaches running. Contract per ADR-056 / `vz.rs`: `SAVE <path>` is a control
+/// verb that also writes a `<path>.machine-id` sidecar; RESTORE is a *startup
+/// mode*, not a verb. Staged ahead of the Rust snapshot slice → all-negative for
+/// it until that lands, so the parity assertion reports the gap. The phases use
+/// separate `boot/` and `restore/` state subdirs so their sockets/pid files
+/// don't collide; the snapshot lives in the shared parent.
+fn probe_save_restore(
+    bin: &Path,
+    kernel: &str,
+    rootfs: &str,
+    label: &str,
+) -> std::io::Result<SaveRestoreOutcome> {
+    let root = make_state_dir(label)?;
+    let snapshot = root.join("snapshot.vzstate");
+    let machine_id = root.join("snapshot.vzstate.machine-id");
+
+    // Phase 1 — boot, SAVE, stop.
+    let boot_cfg = build_boot_config(label, kernel, rootfs, &root.join("boot"));
+    let control_sock = boot_cfg
+        .control_socket_path
+        .as_ref()
+        .map(PathBuf::from)
+        .expect("boot config sets a control socket path");
+    let mut child = spawn_with_config(bin, &boot_cfg)?;
+    let control_ready = wait_for_file(
+        &boot_cfg.resolved_pid_file(),
+        Instant::now() + Duration::from_secs(30),
+    ) && wait_for_file(&control_sock, Instant::now() + Duration::from_secs(10));
+    let save_reply = if control_ready {
+        send_command(&control_sock, &format!("SAVE {}", snapshot.display())).ok()
+    } else {
+        None
+    };
+    let _ = stop_and_reap(&mut child, Duration::from_secs(20));
+    let snapshot_written = snapshot.exists();
+    let sidecar_written = machine_id.exists();
+
+    // Phase 2 — restore in a fresh supervisor.
+    let restore_reached_running = if snapshot_written {
+        let mut restore_cfg = build_boot_config(label, kernel, rootfs, &root.join("restore"));
+        restore_cfg.startup_mode = StartupMode::Restore {
+            snapshot_path: snapshot.to_string_lossy().into_owned(),
+            machine_id_path: Some(machine_id.to_string_lossy().into_owned()),
+        };
+        let mut rchild = spawn_with_config(bin, &restore_cfg)?;
+        let reached = wait_for_file(
+            &restore_cfg.resolved_pid_file(),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let _ = stop_and_reap(&mut rchild, Duration::from_secs(20));
+        reached
+    } else {
+        false
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(SaveRestoreOutcome {
+        save_reply,
+        snapshot_written,
+        sidecar_written,
+        restore_reached_running,
+    })
+}
+
 /// Returns the four live-test paths, or `None` (with an explanatory skip note)
 /// when any is unset — the live gate is opt-in via environment.
 fn live_env() -> Option<(PathBuf, PathBuf, String, String)> {
@@ -437,6 +520,24 @@ fn send_command_reads_one_newline_framed_reply() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn restore_config_round_trips_as_restore_mode() {
+    // The Restore startup mode must survive the shared deny-unknown-fields
+    // decoder both supervisors use — drift in the snapshot contract fails here.
+    let dir = Path::new("/tmp/mvm-parity-restore-unit");
+    let mut cfg = build_boot_config("snap", "/k/vmlinux", "/r/rootfs.ext4", dir);
+    cfg.startup_mode = StartupMode::Restore {
+        snapshot_path: "/abs/snap.vzstate".into(),
+        machine_id_path: Some("/abs/snap.vzstate.machine-id".into()),
+    };
+    let json = cfg.to_json().expect("serialize");
+    let back: SupervisorConfig = serde_json::from_str(&json).expect("decode");
+    assert!(
+        matches!(back.startup_mode, StartupMode::Restore { .. }),
+        "restore config must decode as Restore mode"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Live gate — skips unless both binaries + a boot artifact are exported.
 // ---------------------------------------------------------------------------
@@ -534,5 +635,29 @@ fn control_verb_parity_swift_vs_rust() {
         rust_replies, swift_replies,
         "Rust supervisor diverged from Swift on control verbs: rust={rust_replies:?} \
          swift={swift_replies:?}"
+    );
+}
+
+#[test]
+fn save_restore_parity_swift_vs_rust() {
+    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+        eprintln!(
+            "SKIP save_restore_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
+             {ROOTFS} to run the live save/restore parity gate (macOS 14+)."
+        );
+        return;
+    };
+    let swift_outcome = probe_save_restore(&swift, &kernel, &rootfs, "swift").expect("swift probe");
+    let rust_outcome = probe_save_restore(&rust, &kernel, &rootfs, "rust").expect("rust probe");
+
+    assert!(
+        swift_outcome.snapshot_written && swift_outcome.restore_reached_running,
+        "Swift supervisor could not save+restore — fix the fixture (macOS 14+?) before judging \
+         parity: {swift_outcome:?}"
+    );
+    assert_eq!(
+        rust_outcome, swift_outcome,
+        "Rust supervisor diverged from Swift on save/restore: rust={rust_outcome:?} \
+         swift={swift_outcome:?}"
     );
 }
