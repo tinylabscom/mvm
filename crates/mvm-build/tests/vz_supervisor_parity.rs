@@ -239,17 +239,52 @@ fn spawn_with_config(bin: &Path, config: &SupervisorConfig) -> std::io::Result<C
     Ok(child)
 }
 
+/// Copy the source rootfs into `state_dir` as a writable image and return its
+/// path. Vz refuses a read-write disk attachment backed by a read-only file (the
+/// cached artifacts are mode 0444 → "storage device attachment is invalid"), and
+/// two supervisors must never share one mutable disk — so each probe boots from
+/// its own copy.
+fn writable_rootfs(state_dir: &Path, src: &str) -> std::io::Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(state_dir)?;
+    let dst = state_dir.join("rootfs.ext4");
+    std::fs::copy(src, &dst)?;
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644))?;
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+/// Poll the supervisor's control socket until STATUS reports the guest running,
+/// or the deadline passes. Symmetric across supervisors (both bind the control
+/// socket and answer STATUS) — unlike the pid file, whose write timing differs
+/// (Swift writes it before start, the Rust supervisor after), which skews a
+/// pid-based "reached running" signal on the failure path.
+fn wait_for_running(control_sock: &Path, deadline: Instant) -> bool {
+    while Instant::now() < deadline {
+        if control_sock.exists()
+            && let Ok(resp) = send_command(control_sock, "STATUS")
+            && resp == "OK running"
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
 /// Spawn one supervisor against a freshly-built config, wait for boot, stop it.
 fn probe_boot(bin: &Path, kernel: &str, rootfs: &str, label: &str) -> std::io::Result<BootOutcome> {
     let state_dir = make_state_dir(label)?;
-    let config = build_boot_config(label, kernel, rootfs, &state_dir);
+    let rootfs_copy = writable_rootfs(&state_dir, rootfs)?;
+    let config = build_boot_config(label, kernel, &rootfs_copy, &state_dir);
+    let control_sock = config
+        .control_socket_path
+        .as_ref()
+        .map(PathBuf::from)
+        .expect("boot config sets a control socket path");
     let mut child = spawn_with_config(bin, &config)?;
 
-    let reached = wait_for_file(
-        &config.resolved_pid_file(),
-        Instant::now() + Duration::from_secs(30),
-    );
-    // If it never booted, it may still be flailing — stop it regardless.
+    let reached = wait_for_running(&control_sock, Instant::now() + Duration::from_secs(30));
+    // Stop regardless — if it never reached running it may still be flailing.
     let exit_code = stop_and_reap(&mut child, Duration::from_secs(20));
     let _ = std::fs::remove_dir_all(&state_dir);
 
@@ -272,13 +307,16 @@ fn probe_vsock_roundtrip(
     label: &str,
 ) -> std::io::Result<Option<Vec<u8>>> {
     let state_dir = make_state_dir(label)?;
-    let config = build_boot_config(label, kernel, rootfs, &state_dir);
+    let rootfs_copy = writable_rootfs(&state_dir, rootfs)?;
+    let config = build_boot_config(label, kernel, &rootfs_copy, &state_dir);
+    let control_sock = config
+        .control_socket_path
+        .as_ref()
+        .map(PathBuf::from)
+        .expect("boot config sets a control socket path");
     let mut child = spawn_with_config(bin, &config)?;
 
-    let booted = wait_for_file(
-        &config.resolved_pid_file(),
-        Instant::now() + Duration::from_secs(30),
-    );
+    let booted = wait_for_running(&control_sock, Instant::now() + Duration::from_secs(30));
     let proxy_sock = Path::new(&config.vsock.socket_dir).join(format!("vsock-{port}.sock"));
     let proxy_ready =
         booted && wait_for_file(&proxy_sock, Instant::now() + Duration::from_secs(10));
@@ -307,7 +345,8 @@ fn probe_control_verbs(
     label: &str,
 ) -> std::io::Result<Vec<Option<String>>> {
     let state_dir = make_state_dir(label)?;
-    let config = build_boot_config(label, kernel, rootfs, &state_dir);
+    let rootfs_copy = writable_rootfs(&state_dir, rootfs)?;
+    let config = build_boot_config(label, kernel, &rootfs_copy, &state_dir);
     let control_sock = config
         .control_socket_path
         .as_ref()
@@ -315,12 +354,7 @@ fn probe_control_verbs(
         .expect("boot config sets a control socket path");
     let mut child = spawn_with_config(bin, &config)?;
 
-    let booted = wait_for_file(
-        &config.resolved_pid_file(),
-        Instant::now() + Duration::from_secs(30),
-    );
-    let control_ready =
-        booted && wait_for_file(&control_sock, Instant::now() + Duration::from_secs(10));
+    let control_ready = wait_for_running(&control_sock, Instant::now() + Duration::from_secs(30));
 
     let replies = verbs
         .iter()
@@ -370,18 +404,17 @@ fn probe_save_restore(
     let snapshot = root.join("snapshot.vzstate");
     let machine_id = root.join("snapshot.vzstate.machine-id");
 
-    // Phase 1 — boot, SAVE, stop.
-    let boot_cfg = build_boot_config(label, kernel, rootfs, &root.join("boot"));
+    // Phase 1 — boot, SAVE, stop. Its writable rootfs copy is reused by the
+    // restore phase so the restored memory state matches the disk it saw.
+    let rootfs_copy = writable_rootfs(&root.join("boot"), rootfs)?;
+    let boot_cfg = build_boot_config(label, kernel, &rootfs_copy, &root.join("boot"));
     let control_sock = boot_cfg
         .control_socket_path
         .as_ref()
         .map(PathBuf::from)
         .expect("boot config sets a control socket path");
     let mut child = spawn_with_config(bin, &boot_cfg)?;
-    let control_ready = wait_for_file(
-        &boot_cfg.resolved_pid_file(),
-        Instant::now() + Duration::from_secs(30),
-    ) && wait_for_file(&control_sock, Instant::now() + Duration::from_secs(10));
+    let control_ready = wait_for_running(&control_sock, Instant::now() + Duration::from_secs(30));
     let save_reply = if control_ready {
         send_command(&control_sock, &format!("SAVE {}", snapshot.display())).ok()
     } else {
@@ -391,18 +424,21 @@ fn probe_save_restore(
     let snapshot_written = snapshot.exists();
     let sidecar_written = machine_id.exists();
 
-    // Phase 2 — restore in a fresh supervisor.
+    // Phase 2 — restore in a fresh supervisor against the same disk copy.
     let restore_reached_running = if snapshot_written {
-        let mut restore_cfg = build_boot_config(label, kernel, rootfs, &root.join("restore"));
+        let restore_dir = root.join("restore");
+        let mut restore_cfg = build_boot_config(label, kernel, &rootfs_copy, &restore_dir);
         restore_cfg.startup_mode = StartupMode::Restore {
             snapshot_path: snapshot.to_string_lossy().into_owned(),
             machine_id_path: Some(machine_id.to_string_lossy().into_owned()),
         };
+        let restore_control = restore_cfg
+            .control_socket_path
+            .as_ref()
+            .map(PathBuf::from)
+            .expect("restore config sets a control socket path");
         let mut rchild = spawn_with_config(bin, &restore_cfg)?;
-        let reached = wait_for_file(
-            &restore_cfg.resolved_pid_file(),
-            Instant::now() + Duration::from_secs(30),
-        );
+        let reached = wait_for_running(&restore_control, Instant::now() + Duration::from_secs(30));
         let _ = stop_and_reap(&mut rchild, Duration::from_secs(20));
         reached
     } else {
