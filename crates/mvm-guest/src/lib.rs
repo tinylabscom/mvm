@@ -49,3 +49,7 @@ pub mod worker_protocol;
 /// production guest agents (ADR-002 §W4.3 + ADR-007 §W5).
 #[cfg(feature = "dev-shell")]
 pub mod process_rpc;
+
+/// Streaming exec core — runs `sh -c <cmd>` and emits `ExecEvent` chunks
+/// via a closure. Dev-only (claim 4 / ADR-002 §W4.3). Plan 159 WS-5 E.
+pub mod exec_stream;
