@@ -2786,6 +2786,23 @@ fn main() {
     HOT_SAMPLE_INTERVAL_SECS.store(cfg.sample_interval_secs, Ordering::Release);
     std::thread::spawn(move || monitoring_loop(monitor_state));
 
+    // Plan 129 #1b: the guest-local egress forward proxy. Binds loopback
+    // FORWARD_PROXY_PORT and relays each proxied request to the host
+    // substitution endpoint over AF_VSOCK. Started unconditionally — it only
+    // dials the host when a request arrives, and is only *used* when the
+    // workload's HTTP_PROXY points at it (secret-bearing VMs, set from the
+    // admission handoff). Best-effort: a bind failure logs and the agent keeps
+    // serving; non-secret VMs simply never route through it.
+    std::thread::spawn(|| {
+        // Real-TLS forward happens host-side; this is the guest→host relay hop.
+        const FORWARD_PROXY_RELAY_TIMEOUT_SECS: u64 = 30;
+        if let Err(e) =
+            mvm_guest::forward_proxy::start_forward_proxy(FORWARD_PROXY_RELAY_TIMEOUT_SECS)
+        {
+            eprintln!("mvm-guest-agent: forward proxy exited: {e}");
+        }
+    });
+
     // Plan 76 Phase 3: defer integration drop-in scanning + health
     // loop startup to a dedicated background thread. The scan
     // itself is fast (single directory read), but moving it off the
