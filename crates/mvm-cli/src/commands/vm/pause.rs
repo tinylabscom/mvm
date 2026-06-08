@@ -129,6 +129,9 @@ pub(in crate::commands) fn run_resume(
     let registry_path = mvm::vm::name_registry::registry_path();
     if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(&args.name, false);
+        // A resume is activity — refresh idle tracking so the freshly woken
+        // VM isn't immediately re-slept by the idle reaper (Plan 170 WS-B).
+        let _ = registry.touch_last_active(&args.name, mvm_core::time::utc_now());
         let _ = registry.save(&registry_path);
     }
     println!(

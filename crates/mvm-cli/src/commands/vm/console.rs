@@ -93,6 +93,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let command = args.command.as_deref();
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     enforce_accessible_gate(name, args.force)?;
+    // Plan 170 WS-B — a console attach (one-shot exec or interactive PTY)
+    // is guest activity; refresh idle tracking so an in-use session isn't
+    // idle-slept underneath the user. Best-effort.
+    touch_activity(name);
 
     if let Some(cmd) = command {
         let transport = pick_console_transport(name)?;
@@ -135,6 +139,20 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     } else {
         // Interactive PTY session
         console_interactive(name)
+    }
+}
+
+/// Record a coarse guest-activity touch on the named VM (Plan 170 WS-B).
+/// Best-effort: only rewrites the registry when the name is registered;
+/// any load/save hiccup is swallowed so console attach never blocks.
+fn touch_activity(name: &str) {
+    let path = mvm::vm::name_registry::registry_path();
+    if let Ok(mut reg) = mvm::vm::name_registry::VmNameRegistry::load(&path)
+        && reg
+            .touch_last_active(name, mvm_core::time::utc_now())
+            .unwrap_or(false)
+    {
+        let _ = reg.save(&path);
     }
 }
 
@@ -486,6 +504,41 @@ mod accessible_gate_tests {
             .expect("write");
             assert!(enforce_accessible_gate(name, false).is_ok());
         });
+    }
+
+    #[test]
+    fn touch_activity_refreshes_last_active_for_registered_vm() {
+        // Serialize env mutation with the file's HOME lock; MVM_SHARE_DIR
+        // relocates registry_path() to a throwaway dir.
+        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("MVM_SHARE_DIR");
+        unsafe { std::env::set_var("MVM_SHARE_DIR", tmp.path()) };
+
+        let path = mvm::vm::name_registry::registry_path();
+        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
+        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.save(&path).unwrap();
+        assert!(reg.lookup("vm1").unwrap().last_active.is_none());
+
+        touch_activity("vm1");
+        let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        assert!(
+            reloaded.lookup("vm1").unwrap().last_active.is_some(),
+            "console attach must refresh last_active"
+        );
+
+        // Unknown name is a clean no-op — no panic, registry untouched.
+        touch_activity("ghost");
+        let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        assert!(reloaded.lookup("ghost").is_none());
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_SHARE_DIR", v),
+                None => std::env::remove_var("MVM_SHARE_DIR"),
+            }
+        }
     }
 
     #[test]
