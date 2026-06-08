@@ -3,8 +3,8 @@
 //! Plan 97 / ADR-056. Tier 2 microVM backend for macOS 13+ that runs
 //! the workload directly on the host (no nested Firecracker, no
 //! libkrun in the path). Lifecycle delegates to a per-VM
-//! `mvm-vz-supervisor` Swift subprocess (lives in
-//! `crates/mvm-vz-supervisor/`) — same one-process-per-VM contract
+//! Rust-native `mvm-vz-supervisor` (the objc2 `[[bin]]` in
+//! `mvm-vm-host`) — same one-process-per-VM contract
 //! `LibkrunBackend` uses, swapped underneath.
 //!
 //! ## Why opt-in only
@@ -1126,11 +1126,10 @@ fn build_supervisor_config(
 /// 2. A binary named `mvm-vz-supervisor` adjacent to the current
 ///    executable — the layout produced by `cargo install` /
 ///    Homebrew bottles that ship `mvmctl` alongside it.
-/// 3. The source-checkout build output under
-///    `crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/<config>/`
-///    (CLAUDE.md "Source-checkout builds never depend on
-///    mvm-published artifacts"); this matters during local dev
-///    when `mvmctl` is `cargo run` from the workspace root.
+/// 3. The source-checkout build output at
+///    `<workspace>/target/debug/mvm-vz-supervisor` (the cargo `[[bin]]`
+///    in `mvm-vm-host`); this matters during local dev when `mvmctl`
+///    is `cargo run` from the workspace root.
 /// 4. The version-pinned release layout `~/.mvm/bin/mvm-vz-supervisor-<version>`.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
@@ -1169,11 +1168,10 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     bail!(
         "mvm-vz-supervisor binary not found. Looked for: \
          $MVM_VZ_SUPERVISOR_PATH, alongside the current exe, \
-         crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/debug/mvm-vz-supervisor \
-         (source-checkout), and ~/.mvm/bin/mvm-vz-supervisor-{} \
-         (release-installed). Run `MVM_VZ_BUILD_SUPERVISOR=1 cargo build \
-         -p mvm-vz` to build it via the mvm-vz build script, or invoke \
-         `crates/mvm-vz-supervisor/tools/build.sh` directly.",
+         <workspace>/target/debug/mvm-vz-supervisor (source-checkout), and \
+         ~/.mvm/bin/mvm-vz-supervisor-{} (release-installed). Build it with \
+         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`, or set \
+         MVM_VZ_SUPERVISOR_PATH=/abs/path/to/the/binary.",
         env!("CARGO_PKG_VERSION")
     );
 }

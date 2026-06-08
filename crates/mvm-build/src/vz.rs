@@ -380,27 +380,18 @@ pub fn supervisor_binary_path(home: &std::path::Path, mvmctl_version: &str) -> P
         .join(format!("{SUPERVISOR_BIN_PREFIX}{mvmctl_version}"))
 }
 
-/// Source-checkout layout: the Swift Package Manager build output
-/// lives under `<workspace>/crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/<config>/`.
-/// CLAUDE.md "Source-checkout builds never depend on mvm-published
-/// artifacts" — a contributor running `cargo run` from the workspace
-/// must use whatever the local `tools/build.sh` produced, not the
-/// `~/.mvm/bin/` release path.
+/// Source-checkout layout: the Rust-native `mvm-vz-supervisor` is a cargo
+/// `[[bin]]` in `mvm-vm-host`, so a workspace build lands in the cargo target
+/// dir. CLAUDE.md "Source-checkout builds never depend on mvm-published
+/// artifacts" — a contributor who has `cargo build -p mvm-vm-host --bin
+/// mvm-vz-supervisor`'d the bin uses that, not the `~/.mvm/bin/` release path.
+/// (The resolver's adjacent-to-exe probe covers `cargo run`; this is the
+/// fallback when `mvmctl` is invoked from outside `target/`.)
 pub fn source_tree_binary_path(workspace_root: &std::path::Path) -> PathBuf {
-    let arch = current_arch_triple_macos();
     workspace_root
-        .join("crates/mvm-vz-supervisor/.build")
-        .join(arch)
+        .join("target")
         .join("debug")
         .join("mvm-vz-supervisor")
-}
-
-fn current_arch_triple_macos() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64-apple-macosx"
-    } else {
-        "x86_64-apple-macosx"
-    }
 }
 
 // MARK: - Errors
