@@ -1,11 +1,16 @@
 # Plan 152 — Rust-native `Virtualization.framework` supervisor + guest `/init` lifecycle parity
 
-> **Status (2026-06-05):** Findings recorded; not yet started. **Both
-> gates satisfied — WS-A is unblocked (roadmap S2).** Plan 120 green
+> **Status (2026-06-07):** In progress, staged per workstream.
+> **WS-A** (guest `/init` exit-code + poweroff parity) implemented on
+> `feat/plan-152-wsa-init-exit` — a separate session owns it.
+> **WS-B threading-model decision RESOLVED** (this update): private serial
+> `DispatchQueue` + delegate, tokio current-thread I/O — see the WS-B
+> checkbox below and the ADR-056 addendum. The WS-B Rust-supervisor build
+> follows from it. **Both gates satisfied** — Plan 120 green
 > (`core_demo_e2e` COMPLETE 2026-06-03); Plan 134 (architecture-aware
 > artifact model, slice 1) merged to main (via `feat/artifact-model-impl`,
-> tip `a57f2548`). Boot path is now on main, so the `/init` diff is no
-> longer measured against a moving target.
+> tip `a57f2548`). Boot path is on main, so the `/init` diff is no longer
+> measured against a moving target.
 >
 > **Numbering caveat:** picked 152 as next-after-highest from local
 > `specs/plans/`. Reconcile against open PRs before merge — the
@@ -269,16 +274,21 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
 `objc2-virtualization`, kept as a separate per-VM codesigned process.
 ~70% of the substrate is already shared Rust (exploration verdict).
 
-- [ ] **Threading-model decision (do this first).** Evaluate the simplest
-      viable shape: the supervisor process's **main thread runs the VM's
-      `CFRunLoop`**, `block2::RcBlock` completion handlers write a terminal
-      atomic + `CFRunLoopStop`, SIGINT→stop — no `declare_class!` delegate,
-      no `QueueBound<Send>`, no dispatch-queue plumbing (proven viable by
-      the minimal two-backend reference for a one-VM-per-process model).
-      Compare against the private-serial-queue model (this plan's original
-      Findings) on one axis: cleanly servicing the control socket + vsock
-      proxy on **worker threads** while a runloop owns the main thread.
-      Pick one and record the rationale; the rest of WS-B follows from it.
+- [x] **Threading-model decision (resolved 2026-06-07 — ADR-056 addendum).**
+      **Private serial `DispatchQueue` + `VZVirtualMachineDelegate`, NOT
+      main-thread `CFRunLoop`** — a 1:1 port of the shipping Swift supervisor
+      (one serial queue services VM + control socket + vsock proxy + signal
+      sources; delegate fires `guestDidStop`/`didStopWithError` on it; start
+      blocks on a terminal signal). `CFRunLoop`-on-main was rejected: it pins
+      VZ to main, still needs worker threads for control/vsock, and forces
+      `main()` into a runloop pump that contends with the I/O runtime — no
+      payoff for one-VM-per-process, and it diverges from the proven design
+      the parity matrix must compare against. I/O (control socket + vsock
+      proxy) runs on a **single-threaded tokio reactor** (`rt`, not
+      `rt-multi-thread`; `AsyncFd` + `copy_bidirectional`), hopping onto the
+      VZ serial queue only for VZ API calls via `QueueBound<Send>` (one
+      `unsafe impl Send`, deref'd only inside dispatched closures). Rationale
+      in `specs/adrs/056-vz-backend.md` §"Addendum … threading model".
 - [ ] New `[[bin]]` `mvm-vz-supervisor` in `mvm-vm-host`, sibling to
       `mvm-libkrun-supervisor` / `mvm-vz-drainer`, cfg-gated macOS. Reads
       the same `SupervisorConfig` JSON on stdin.
@@ -300,10 +310,12 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       Vz; delete the `mvm-vz-drainer` + `BridgeEndpoints::VzIngest` NDJSON
       path (Plan 141 Q10). Reuses 141's backend-agnostic
       `Observer`/`gateway_bridge` core unchanged (ADR-064 §8).
-- [ ] Lifecycle: **per the threading-model decision above** — either the
-      main-thread `CFRunLoop` shape, or a private serial dispatch queue +
-      `declare_class!` delegate + `QueueBound<Send>` for the non-`Send`
-      `Retained` handles. `RcBlock` completion handlers either way.
+- [ ] Lifecycle (per the resolved threading decision): a private serial
+      `dispatch2` queue passed to `VZVirtualMachine`, a `declare_class!`
+      `VZVirtualMachineDelegate` writing the write-once terminal slot,
+      `QueueBound<Send>` for the non-`Send` `Retained` handles, and
+      `block2::RcBlock` completion handlers. Main thread blocks on the
+      terminal signal; SIGTERM/SIGINT → `requestStop`.
 - [ ] Reimplement `VsockProxy.swift` in Rust: per-port UDS listeners at
       `<socketDir>/vsock-<port>.sock` (mode 0700) ↔
       `VZVirtioSocketDevice.connect(toPort:)`, fd→`dup`→`AsyncFd`. Mine
