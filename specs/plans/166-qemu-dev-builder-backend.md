@@ -1,10 +1,10 @@
 # Plan 166 — QEMU dev/builder backend (portable dev substrate; Firecracker stays prod)
 
-## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); **Task 1.5 (`run_build`) DONE + FULLY GREEN on the x86_64 box (2026-06-06)** — `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <x>` runs end-to-end (image-mode QEMU Stage 0 → layer-2 `run_build` over virtiofs/slirp → networked nix build → `vmlinux`+`rootfs.ext4`, exit 0). Includes the option-A dev-tier egress-lockdown skip + the `iptables-legacy` builder-image fix. Phase 2 (runtime) designed + DEFERRED — fully specified below.
+## Status: Phase 1 DONE + CLI-proven; Task 3.1 (firecracker arch bug) DONE (2026-06-05); **Task 1.5 (`run_build`) DONE + FULLY GREEN on the x86_64 box (2026-06-06)** — `MVM_BUILDER_BACKEND=qemu mvmctl build --flake <x>` runs end-to-end (image-mode QEMU Stage 0 → layer-2 `run_build` over virtiofs/slirp → networked nix build → `vmlinux`+`rootfs.ext4`, exit 0). Includes the option-A dev-tier egress-lockdown skip + the `iptables-legacy` builder-image fix. **Phase 2 (runtime) DONE + box-proven (2026-06-07, PR #671/#675)** — `AnyBackend::Qemu` real backend, workload boot under QEMU/KVM, agent round-trip over the AF_VSOCK↔UNIX bridge; `ls`/`down` backend-aware. The cross-backend agent-RPC transport that `fs`/`proc`/`exec`/`cp`/`diff` need landed as **Plan 169 (DONE)**.
 
-**Deferred (with the concrete design captured here):**
-- **Phase 2 (runtime)** — `AnyBackend::Qemu` + a `VmBackend` impl + retire the `"qemu"→MicrovmNix` alias. Design below; deferred (a whole new runtime backend needing a workload boot to validate).
-- The box stays provisioned (QEMU + virtiofsd installed, repo at `/root/mvm`, `/dev/kvm`) so the next session can implement against it directly.
+**Remaining: one mvmd-side item only.**
+- **mvmd `--prod` Tier 2/3 refusal** — extend mvmd's admission gate to refuse a QEMU-tier (Tier 2/3) backend under `--prod`. Lives in mvmd ([[feedback_prod_gate_lives_in_mvmd]]). **Not urgent:** mvmd launches Firecracker+jailer only and already fails closed in prod (jailer required), so a QEMU-tier backend is unreachable from mvmd today — this is future-proofing for when mvmd grows a runtime backend-selection concept, not a live exposure.
+- The box stays provisioned (QEMU + virtiofsd installed, repo at `/root/mvm`, `/dev/kvm`) for further QEMU work.
 
 **Phase 1 complete on the x86_64 box:** `MVM_BUILDER_BACKEND=qemu mvmctl kernel build` drives the full codified path — `QemuBuilderVm::run_stage0` packs the seed + shares as ext4 disks (`mkfs.ext4 -d`, **no root**), boots the stock Debian kernel + initramfs with slirp networking, `stage0-init` (QEMU branch) configures the NIC + mounts + runs `nix build`, the **kernel compiles**, `debugfs rdump` extracts `vmlinux`, and it's **promoted to the cache** (`builder/vmlinux`, 9.7 MiB). Exit 0, no passt, no libkrun, no libkrunfw. Committed: guest side (`2262faf4`), host side + wiring (`5f238362`), + the seed-mountpoint/cleanup fixes.
 
@@ -151,7 +151,7 @@ AF_VSOCK↔UNIX bridge.
 
 ### Deferred follow-ups (Phase 2)
 - [x] `mvmctl ls` / `down` backend-aware (PR #675): `AnyBackend::for_started_vm` (pid-marker dispatch) + `list_all` aggregation; `ls` shows the real backend, `down` stops per-VM. Fixed the latent libkrun-invisible gap too.
-- [ ] `mvmctl fs` / `proc` / `exec` / `cp` / `diff` resolve the agent vsock socket the Firecracker way (`<dir>/runtime/v.sock`) instead of the backend-aware `vsock_transport::for_vm`, so they fail against QEMU (and libkrun). → **Plan 169** (cross-backend agent-RPC transport unification). `wait` / `boot-report` already work.
+- [x] `mvmctl fs` / `proc` / `exec` / `cp` / `diff` resolve the agent vsock socket the Firecracker way (`<dir>/runtime/v.sock`) instead of the backend-aware `vsock_transport::for_vm`, so they fail against QEMU (and libkrun). → **Plan 169** (cross-backend agent-RPC transport unification) **DONE + merged** (fs/cp #681, proc/diff #685; exec/invoke already routed through `for_vm`). `wait` / `boot-report` already worked.
 - [ ] mvmd `--prod` Tier 2/3 refusal (above).
 
 ## Phase 3: provisioning, docs, and the firecracker arch bug
