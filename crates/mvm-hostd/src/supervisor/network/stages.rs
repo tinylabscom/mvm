@@ -500,7 +500,10 @@ mod tests {
     fn redacting_substitution_masks_secret_and_passes_clean() {
         let r = RedactingSubstitution::with_default_rules();
         // A clean payload passes through (None — no rewrite).
-        assert_eq!(r.substitute(&egress_ctx(), &tcp_egress(b"GET / nothing here")), None);
+        assert_eq!(
+            r.substitute(&egress_ctx(), &tcp_egress(b"GET / nothing here")),
+            None
+        );
         // A payload carrying an undeclared secret-shaped token is rewritten with
         // the mask, and the original token is gone.
         let key = "sk-".to_owned() + &"z".repeat(48);
@@ -509,7 +512,10 @@ mod tests {
             .substitute(&egress_ctx(), &tcp_egress(&body))
             .expect("secret-bearing payload must be rewritten");
         let masked = String::from_utf8_lossy(&out);
-        assert!(!masked.contains(&key), "secret survived redaction: {masked}");
+        assert!(
+            !masked.contains(&key),
+            "secret survived redaction: {masked}"
+        );
         assert!(masked.contains("XXX"), "no mask present: {masked}");
     }
 
