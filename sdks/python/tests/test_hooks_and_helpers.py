@@ -76,17 +76,29 @@ def test_literal_wraps_str_as_env_value():
 
 
 def test_secret_default_var_matches_name():
-    s = mvm.secret("api-key")
+    s = mvm.secret("api-key", type="bearer", hosts=["api.example.com"])
     assert isinstance(s, _ir.EnvValue2)
     assert s.kind.value == "secret_ref"
     assert s.ref.name == "api-key"
     assert isinstance(s.ref.mount, _ir.SecretMount1)
     assert s.ref.mount.var == "api-key"
+    # Egress binding (claim 12) — how it auths + where it may go.
+    assert s.ref.auth_type.value == "bearer"
+    assert s.ref.allowed_hosts == ["api.example.com"]
 
 
 def test_secret_with_explicit_var():
-    s = mvm.secret("api-key", var="API_KEY")
+    s = mvm.secret("api-key", var="API_KEY", type="bearer", hosts=["api.example.com"])
     assert s.ref.mount.var == "API_KEY"
+
+
+def test_secret_rejects_unknown_type_and_empty_hosts():
+    import pytest
+
+    with pytest.raises(ValueError):
+        mvm.secret("api-key", type="oauth", hosts=["api.example.com"])
+    with pytest.raises(ValueError):
+        mvm.secret("api-key", type="bearer", hosts=[])
 
 
 def test_app_with_all_four_hook_phases_emits_merged_hooks():
@@ -164,7 +176,7 @@ def test_env_with_literal_and_secret_helpers():
         entrypoint=mvm.entrypoint(command=["python", "-m", "hello"]),
         env={
             "MODEL_PATH": mvm.literal("/data/model.pt"),
-            "API_KEY": mvm.secret("api-key"),
+            "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"]),
         },
     )
     def hello():
