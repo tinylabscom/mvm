@@ -94,23 +94,36 @@ timeout:
 
 ### 4. Host — `Option` pass-through + (b) (`crates/mvm-guest/src/vsock.rs`)
 
-`send_exec_streaming` signature changes `timeout_secs: u64` → `timeout_secs: Option<u64>`
-and passes it straight into `GuestRequest::Exec` (today it force-wraps `Some`).
+`send_exec_streaming` and `GuestRequest::{Exec,RunCode}` carry `timeout_secs: Option<u64>`
+(`Exec` already does; `RunCode` is widened to match). `send_exec_streaming` passes the
+`Option` straight through (today it force-wraps `Some`).
+
+**Mechanism for "unset ⇒ unbounded": the `Option<u64>` type, not clap `ValueSource`.**
+The user-facing per-command `--timeout` flags drop their `default_value` and become
+`Option<u64>` (clap derive: absent ⇒ `None`). This is the idiomatic, robust way to
+distinguish unset-from-default across the **three** commands that share the verb
+(`exec`/`run`, `session exec`/`run-code`, plus `console`), and it avoids threading
+`ArgMatches` into the engine. `--timeout` on `exec`/`run` is overloaded — it *also*
+feeds the **signed `ExecutionPlan.exec_timeout_secs`** (claim-8 admission) and the
+receipt/preflight display. Those legs call `args.timeout.unwrap_or(60)`, so an unset
+flag keeps their existing default-60 byte-for-byte; an explicit `--timeout N` flows to
+*both* the admitted plan and the ad-hoc stream (consistent intent). The engine's
+`ExecRequest.timeout_secs` and `dispatch_in_session(timeout_secs)` widen to `Option<u64>`
+and carry only the ad-hoc value.
 
 Per-caller policy:
 
 | Caller | Today | New |
 |---|---|---|
-| `mvm-cli/exec.rs:764` (`exec`/ad-hoc) | `req.timeout_secs` | `None` unless `--timeout` explicit |
-| `mvm-cli/exec.rs:956` (run ad-hoc leg) | `timeout_secs` | `None` unless `--timeout` explicit |
-| `mvm-cli/commands/vm/console.rs:115` (`console --command`) | `30` | `None` unless `--timeout` explicit |
-| `mvm-backend/base/linux_env.rs:192` (setup scripts) | `timeout_secs` | pass-through (caller decides; default `None`) |
-| `mvm-cli/commands/env/apple_container.rs:475` (`uname -r` probe) | `5` | `Some(5)` — a hung probe *should* die |
+| `exec.rs::run_in_guest` (`exec`/`run` ad-hoc) | `req.timeout_secs: u64` | `Option` — `None` unless `--timeout` set |
+| `exec.rs::dispatch_in_session` (`session run-code`/`exec`, MCP) | `timeout_secs: u64` | `Option` — `None` unless set; MCP passes `Some(clamped)` |
+| `commands/vm/console.rs` (`console --command`) | hard-coded `30` | `None` (interactive; unbounded) |
+| `base/linux_env.rs::exec_via_vsock` (setup scripts, bounds 60/300) | ignored `u64` | `Some(timeout_secs)` — enforce the *existing* deliberate bounds; `TimedOut ⇒ Err` |
+| `commands/env/apple_container.rs:475` (`uname -r` probe) | `5` | `Some(5)` — a hung probe *should* die |
 
-"Explicit `--timeout`" is detected via clap `ValueSource::CommandLine` on the
-existing shared `--timeout` arg, so the other legs that read `args.timeout`
-(default 60: boot/admission/entrypoint) are **left untouched** — no field-type
-ripple.
+The signed-plan / admission / receipt / display legs are **not** widened — they read
+`args.timeout.unwrap_or(60)` and are otherwise untouched (no claim-8 behavior change
+when unset).
 
 ### 5. Host — terminal mapping
 
