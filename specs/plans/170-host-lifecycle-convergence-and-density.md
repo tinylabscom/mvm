@@ -104,7 +104,7 @@ to it, cheaply, at the start of every state-touching command.
       from PR #688 — the builder-store probe is heavier than the PID-liveness
       budget and wants its own slice.
 
-### WS-B — Activity-driven idle reaper (stop-on-idle) — **mvm-side mechanism DONE (PR #TBD)**
+### WS-B — Activity-driven idle reaper (stop-on-idle) — **mvm-side mechanism DONE (PR #696)**
 
 Extend the TTL reaper from wall-clock-only to TTL **or** idle-timeout, and have
 idle expiry *sleep* (drain/pause) rather than tear down — so the workspace
