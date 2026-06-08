@@ -8,6 +8,23 @@
 
 **Tech Stack:** `mvm-ir` (→ `mvm-sdk::ir` post-121), `mvm-core` (`keystore.rs`, `core::subprocess`), `mvm-hostd`, `mvm-sdk` (the SDK client + `runtime_substitution.rs` repurposed), the egress proxy in `mvm-network` (123). Existing crypto deps only (`ed25519-dalek`, `aes-gcm`, `keyring`, `zeroize`); no new deps.
 
+## Status (2026-06-07) — host + guest Rust foundation landed; remaining = boot + 2 design decisions
+
+**Merged to `main` (12 PRs):** the entire unit/integration-testable Rust surface —
+- **Host keyholder** (`mvm-hostd/src/keyholder/`): `resolver` (B1), `binding` store (B2), `injector` (C2), `signer` (C1, RFC 4231 + AWS get-vanilla vectors), `sigv4` canonical-request builder (exact-match + e2e signature vs get-vanilla), `substitution` (registry + endpoint dispatch: `substitute` inject path + `sign` signing path, claim-12 bind-check-before-decrypt), `admission` (`assemble_registry` + `from_plan`).
+- **Host endpoint** (`mvm-hostd/src/supervisor/substitution_proxy.rs`): the UDS `SubstitutionService` (real-TLS `ReqwestForwarder`, `from_plan`, optional audit `Recorder`) + `secret_audit` (`secret.substituted`/`placeholder_dropped`, claim 13) + the live `PlaceholderLeakScan` (E1 baseline).
+- **Shared contract** (`mvm-core/src/substitution_wire.rs`): `WireRequest`/`WireResponse`.
+- **Guest** (`mvm-guest/src`): `substitution_client` (vsock relay) + `forward_proxy` (parse + render + serve, model ii).
+
+**Remaining — all needs a real microVM boot to validate, plus the Python/TS toolchains; do NOT land on the live egress path unvalidated.** Two pieces also need a **design decision** first:
+
+1. **Forward-path signing integration** — when a placeholder resolves to a SigV4/HMAC secret, the endpoint must build the `SigningInput` (`build_sigv4_input` / payload) → `sign` → add the `Authorization` header instead of injecting. **DECISION NEEDED:** (a) the **sign-request signal** the guest emits (which header/marker says "sign this with secret X" vs the inject path's `Bearer <placeholder>`), and (b) the **AWS credential shape** (SigV4 needs access-key-id + secret-key + optional session-token — store as one combined value per name, or multiple? ADR-049's `aws_credentials_from_placeholders` took them separately).
+2. **Guest init wiring** — bind `forward_proxy::serve` at guest start with a relay closure over `substitution_client::substitute`; set `HTTP_PROXY`/`HTTPS_PROXY` in the workload env. (boot)
+3. **`#1b` bin glue** — in each per-VM host bin call `SubstitutionService::from_plan`, bind the UDS at the `SUBSTITUTION_PORT` path, spawn `serve`; declare the vsock port in `SupervisorConfig` + `mvm-backend` launch + the host proxy port-allowlist (W1.3); inject `HandedPlaceholders` into the guest env. (boot, backend-specific)
+4. **Python `mvm.secret()` surface** — return the admission-minted placeholder (`sdks/python/mvm/_dsl.py`). (needs pytest)
+5. **Retire the cross-language ADR-049 API** — Rust `mvm-sdk/src/runtime_substitution.rs` (0 crate callers) + Python `sdks/python/mvm/_runtime.py` + TS `sdks/typescript/src/runtime.ts` (all `mvm-secret://`, superseded by ADR-062), so one opaque format remains (`mvm-secret-<hex>`). (cross-language; needs pytest + npm test)
+6. **F** — claim-12/13 CI gate (with Plan 128).
+
 **Prereqs / sequencing:**
 - **ADR-067** is the design.
 - **121** for the post-fold homes (`mvm-core`, `mvm-hostd`, `mvm-sdk::ir`).
