@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::plan::execution_plan::{ExecutionPlan, SCHEMA_VERSION};
+use crate::plan::types::SecretBinding;
 
 /// Plan envelope. Wraps the canonical-JSON-encoded `ExecutionPlan`
 /// alongside the Ed25519 signature and a signer identifier.
@@ -62,6 +63,21 @@ pub fn sign_plan(plan: &ExecutionPlan, key: &SigningKey, signer_id: &str) -> Sig
         signature: signature.to_bytes().to_vec(),
         signer_id: signer_id.to_string(),
     })
+}
+
+/// Extract the `secrets` bindings from a serialised `SignedExecutionPlan`
+/// envelope JSON, decoding the inner `ExecutionPlan` from the signed payload.
+///
+/// Used by a backend to hand the per-VM substitution endpoint (Plan 129) only
+/// the secret bindings it needs — never the rest of the plan. The signature is
+/// **not** re-verified here: the host verified it at admission (ADR-041), and
+/// the endpoint's security boundary is the local binding store (a secret is
+/// only ever substituted toward a host-bound destination), not the plan
+/// signature. The host is in the TCB per ADR-002.
+pub fn secrets_from_signed_json(plan_json: &str) -> Result<Vec<SecretBinding>, serde_json::Error> {
+    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
+    Ok(plan.secrets)
 }
 
 /// Verify a signed plan against a set of trusted keys, returning the
@@ -209,6 +225,27 @@ mod tests {
         let signed = sign_plan(&plan, &sk, "test-signer");
         let recovered = verify_plan(&signed, &[("test-signer", &vk)]).unwrap();
         assert_eq!(recovered, plan);
+    }
+
+    #[test]
+    fn secrets_extracted_from_signed_envelope() {
+        let mut plan = sample_plan();
+        plan.secrets = vec![SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }];
+        let (sk, _vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let json = serde_json::to_string(&signed).unwrap();
+        let secrets = secrets_from_signed_json(&json).unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].name, "OPENAI_API_KEY");
+        assert!(matches!(
+            &secrets[0].source,
+            SecretSource::Keystore { address } if address == "openai"
+        ));
     }
 
     #[test]

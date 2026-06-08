@@ -32,6 +32,12 @@ path = "src/bin/mvm-host-signer.rs"
 name = "mvm-audit-signer"
 path = "src/bin/mvm-audit-signer.rs"
 
+# Plan 129 — per-VM secret-substitution moat (the one process holding secrets
+# in the clear; opens the host stores, serves guest→host substitution).
+[[bin]]
+name = "mvm-substitution-endpoint"
+path = "src/bin/mvm-substitution-endpoint.rs"
+
 [dependencies]
 mvm-core.workspace = true
 mvm-backend.workspace = true

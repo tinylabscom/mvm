@@ -184,6 +184,11 @@ pub enum GuestRequest {
         /// kills the wrapper on overrun and emits
         /// `EntrypointEvent::Error { kind: Timeout }`.
         timeout_secs: u64,
+        /// Env vars injected into the workload after `env_clear()`
+        /// (Plan 129: `HTTP_PROXY` + secret placeholder vars). Empty for
+        /// a plain call; omitted on the wire defaults to empty.
+        #[serde(default)]
+        env: Vec<(String, String)>,
     },
     /// Signal post-restore: remount drives and restart services.
     PostRestore,
@@ -852,12 +857,6 @@ pub enum GuestResponse {
     ProbeStatusReport {
         probes: Vec<crate::probes::ProbeResult>,
     },
-    /// Result of an Exec request.
-    ExecResult {
-        exit_code: i32,
-        stdout: String,
-        stderr: String,
-    },
     /// One event in the response stream of a `RunEntrypoint` call.
     /// ADR-007 / plan 41 W1.
     ///
@@ -866,6 +865,9 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
+    /// One event in the streaming response of an `Exec` call (dev-shell
+    /// only). Terminated by `ExecEvent::Exit`. Plan 159 WS-5 E.
+    ExecEvent(ExecEvent),
     /// Post-restore acknowledgement.
     PostRestoreAck {
         success: bool,
@@ -1445,6 +1447,29 @@ impl EntrypointEvent {
     }
 }
 
+/// One event in the response stream of an `Exec` call (dev-shell only).
+/// The agent emits a sequence of these for a single `Exec` request,
+/// terminated by `Exit`. The host reads frames in a loop until terminal.
+/// Plan 159 WS-5 E.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ExecEvent {
+    /// Bytes from the command's stdout, as they arrive.
+    Stdout { chunk: Vec<u8> },
+    /// Bytes from the command's stderr, as they arrive.
+    Stderr { chunk: Vec<u8> },
+    /// Command exited with this code. Terminal.
+    Exit { code: i32 },
+}
+
+impl ExecEvent {
+    /// True if this event terminates the `Exec` response stream.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, ExecEvent::Exit { .. })
+    }
+}
+
 /// Kind of agent-side error reported via `EntrypointEvent::Error`.
 /// ADR-007 / plan 41 W1.
 ///
@@ -1965,6 +1990,73 @@ pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
     connect_to_port(uds_path, GUEST_AGENT_PORT, timeout_secs)
 }
 
+/// The vsock CID of the host, from the guest's perspective (`VMADDR_CID_HOST`).
+pub const HOST_CID: u32 = 2;
+
+/// Open a **guest→host** vsock stream to the host on `port` (AF_VSOCK to
+/// [`HOST_CID`]). This is the direction the substitution forward proxy needs —
+/// the opposite of [`connect_to_port`], which is the host→guest Firecracker
+/// UDS-multiplexer path. Backend-agnostic on the guest side: both QEMU
+/// (`vhost-vsock`) and Firecracker forward a guest AF_VSOCK connect to CID 2 to
+/// the host's listener (real AF_VSOCK for QEMU, a per-port UDS for Firecracker).
+///
+/// The returned fd is a `SOCK_STREAM` socket wrapped as a [`UnixStream`] — a
+/// thin SOCK_STREAM wrapper whose read/write are the same syscalls — so the
+/// length-prefixed frame helpers ([`read_frame`]/[`write_frame`]) work over it
+/// unchanged.
+pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    const AF_VSOCK: libc::c_int = 40;
+    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
+    // cid u32 + 4-byte pad = 16 (== sizeof(struct sockaddr)).
+    #[repr(C)]
+    struct SockaddrVm {
+        svm_family: libc::sa_family_t,
+        svm_reserved1: u16,
+        svm_port: u32,
+        svm_cid: u32,
+        svm_zero: [u8; 4],
+    }
+    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+    // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
+    // initialized and sized exactly. The fd is adopted by `UnixStream` on
+    // success (closed on its drop) or closed explicitly on the error paths.
+    let stream = unsafe {
+        let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(
+                anyhow::Error::from(std::io::Error::last_os_error()).context("AF_VSOCK socket()")
+            );
+        }
+        let addr = SockaddrVm {
+            svm_family: AF_VSOCK as libc::sa_family_t,
+            svm_reserved1: 0,
+            svm_port: port,
+            svm_cid: HOST_CID,
+            svm_zero: [0; 4],
+        };
+        let rc = libc::connect(
+            fd,
+            std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+        );
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(anyhow::Error::from(err).context(format!(
+                "AF_VSOCK connect to host CID {HOST_CID} port {port}"
+            )));
+        }
+        UnixStream::from_raw_fd(fd)
+    };
+    let timeout = Duration::from_secs(timeout_secs);
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    Ok(stream)
+}
+
 /// Connect to the guest vsock agent via the fleet-mode instance directory convention.
 ///
 /// Resolves the UDS path as `<instance_dir>/runtime/v.sock`.
@@ -2106,6 +2198,7 @@ pub fn send_run_entrypoint<F>(
     stream: &mut UnixStream,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
     mut on_event: F,
 ) -> Result<EntrypointEvent>
 where
@@ -2115,6 +2208,7 @@ where
     let req = GuestRequest::RunEntrypoint {
         stdin,
         timeout_secs,
+        env,
     };
     write_frame(stream, &req)?;
 
@@ -2124,6 +2218,53 @@ where
             GuestResponse::EntrypointEvent(e) => e,
             GuestResponse::Error { message } => bail!("guest agent error: {message}"),
             other => bail!("expected EntrypointEvent during RunEntrypoint stream, got {other:?}"),
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
+/// Send an `Exec` request and stream its response. Invokes `on_event`
+/// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
+/// `Exit`. Exec carries no `GuestCapability` — the agent gates it at
+/// compile time via the `dev-shell` feature — so this does a plain
+/// protocol hello (no capability requirement). Plan 159 WS-5 E.
+pub fn send_exec_streaming<F>(
+    stream: &mut UnixStream,
+    command: &str,
+    stdin: Option<String>,
+    timeout_secs: u64,
+    on_event: F,
+) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let req = GuestRequest::Exec {
+        command: command.to_string(),
+        stdin,
+        timeout_secs: Some(timeout_secs),
+    };
+    write_frame(stream, &req)?;
+    read_exec_stream(stream, on_event)
+}
+
+/// Read an `ExecEvent` response stream from `stream`: invoke `on_event`
+/// for each non-terminal chunk, return the terminal `Exit`. The caller
+/// must have already done the protocol hello and written the request
+/// frame (`Exec` or `RunCode` — both stream `ExecEvent`). Plan 159 WS-5 E.
+pub fn read_exec_stream<F>(stream: &mut UnixStream, mut on_event: F) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    loop {
+        let resp: GuestResponse = read_frame(stream)?;
+        let event = match resp {
+            GuestResponse::ExecEvent(e) => e,
+            GuestResponse::Error { message } => bail!("guest exec error: {message}"),
+            other => bail!("expected ExecEvent during exec stream, got {other:?}"),
         };
         if event.is_terminal() {
             return Ok(event);
@@ -2299,24 +2440,6 @@ pub fn post_restore_at(vsock_uds_path: &str) -> Result<bool> {
         }
         _ => bail!("Unexpected response to PostRestore"),
     }
-}
-
-/// Execute a command inside the guest via vsock at a specific UDS path (dev-only).
-pub fn exec_at(
-    vsock_uds_path: &str,
-    command: &str,
-    stdin: Option<String>,
-    timeout_secs: u64,
-) -> Result<GuestResponse> {
-    let mut stream = connect_to(vsock_uds_path, timeout_secs)?;
-    send_request(
-        &mut stream,
-        &GuestRequest::Exec {
-            command: command.to_string(),
-            stdin,
-            timeout_secs: Some(timeout_secs),
-        },
-    )
 }
 
 /// Query filesystem diff from the guest agent at a specific UDS path.
@@ -2762,11 +2885,6 @@ mod tests {
                     output: Some(serde_json::json!({"usage_pct": 42})),
                     checked_at: "2026-02-26T12:00:00Z".to_string(),
                 }],
-            },
-            GuestResponse::ExecResult {
-                exit_code: 0,
-                stdout: "Linux\n".to_string(),
-                stderr: String::new(),
             },
             GuestResponse::PostRestoreAck {
                 success: true,
@@ -3484,6 +3602,7 @@ mod tests {
         let req = GuestRequest::RunEntrypoint {
             stdin: vec![1, 2, 3, 4, 5],
             timeout_secs: 30,
+            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3491,10 +3610,27 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs,
+                env,
             } => {
                 assert_eq!(stdin, vec![1, 2, 3, 4, 5]);
                 assert_eq!(timeout_secs, 30);
+                assert_eq!(
+                    env,
+                    vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())]
+                );
             }
+            other => panic!("expected RunEntrypoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_entrypoint_request_env_defaults_empty_when_omitted() {
+        // `env` is `#[serde(default)]`: a wire frame without it decodes to an
+        // empty env (a plain call), so callers that never inject stay valid.
+        let json = r#"{"RunEntrypoint":{"stdin":[1,2,3],"timeout_secs":10}}"#;
+        let decoded: GuestRequest = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunEntrypoint { env, .. } => assert!(env.is_empty()),
             other => panic!("expected RunEntrypoint, got {other:?}"),
         }
     }
@@ -3504,6 +3640,7 @@ mod tests {
         let req = GuestRequest::RunEntrypoint {
             stdin: vec![],
             timeout_secs: 5,
+            env: vec![],
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3512,6 +3649,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs: 5,
+                ..
             } if stdin.is_empty()
         ));
     }
@@ -3732,6 +3870,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs: 15,
+                ..
             } if stdin.is_empty()
         ));
     }
@@ -4411,7 +4550,7 @@ mod tests {
         });
 
         let mut received: Vec<EntrypointEvent> = Vec::new();
-        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, |evt| {
+        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, Vec::new(), |evt| {
             received.push(evt.clone())
         })
         .expect("send_run_entrypoint");
@@ -4468,7 +4607,7 @@ mod tests {
         });
 
         let mut received: Vec<EntrypointEvent> = Vec::new();
-        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, |evt| {
+        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |evt| {
             received.push(evt.clone())
         })
         .expect("send_run_entrypoint");
@@ -4504,7 +4643,7 @@ mod tests {
             write_frame(&mut guest, &GuestResponse::Pong).unwrap();
         });
 
-        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, |_| {});
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
         guest_handle.join().unwrap();
 
         let err = result.expect_err("should reject Pong");
@@ -4537,7 +4676,7 @@ mod tests {
             .unwrap();
         });
 
-        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, |_| {});
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
         guest_handle.join().unwrap();
 
         let err = result.expect_err("should surface guest error");
@@ -4641,6 +4780,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 1,
+                env: vec![],
             },
             GuestRequest::PostRestore,
             GuestRequest::FsDiff,
@@ -4825,6 +4965,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 60,
+                env: vec![],
             },
             GuestRequest::SleepPrep {
                 drain_timeout_secs: 5,
@@ -5108,6 +5249,7 @@ mod tests {
                 GuestRequest::RunEntrypoint {
                     stdin: Vec::new(),
                     timeout_secs: 0,
+                    env: Vec::new(),
                 },
                 "run-entrypoint",
             ),
@@ -5195,5 +5337,120 @@ mod tests {
             assert!(!s.starts_with('-'), "verb must not start with hyphen: {s}");
             assert!(!s.ends_with('-'), "verb must not end with hyphen: {s}");
         }
+    }
+
+    #[test]
+    fn exec_event_exit_is_terminal_others_are_not() {
+        assert!(ExecEvent::Exit { code: 0 }.is_terminal());
+        assert!(
+            !ExecEvent::Stdout {
+                chunk: b"x".to_vec()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !ExecEvent::Stderr {
+                chunk: b"y".to_vec()
+            }
+            .is_terminal()
+        );
+    }
+
+    #[test]
+    fn guest_response_exec_event_roundtrips() {
+        let r = GuestResponse::ExecEvent(ExecEvent::Stdout {
+            chunk: b"hi".to_vec(),
+        });
+        let j = serde_json::to_vec(&r).unwrap();
+        let back: GuestResponse = serde_json::from_slice(&j).unwrap();
+        assert!(
+            matches!(back, GuestResponse::ExecEvent(ExecEvent::Stdout { ref chunk }) if chunk == b"hi")
+        );
+    }
+
+    // Plan 159 WS-5 E — send_exec_streaming host reader
+    // -------------------------------------------------------------------
+
+    fn answer_exec_protocol_hello(stream: &mut UnixStream) {
+        let req: GuestRequest = read_frame(stream).unwrap();
+        match req {
+            GuestRequest::ProtocolHello {
+                requested_capabilities,
+                ..
+            } => assert_eq!(requested_capabilities, vec![]),
+            other => panic!("expected ProtocolHello, got {other:?}"),
+        }
+        write_frame(
+            stream,
+            &GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "test-agent".to_string(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn send_exec_streaming_collects_chunks_until_exit() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let guest_handle = std::thread::spawn(move || {
+            answer_exec_protocol_hello(&mut guest);
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            assert!(matches!(req, GuestRequest::Exec { ref command, .. } if command == "echo hi"));
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stdout {
+                    chunk: b"hi\n".to_vec(),
+                }),
+            )
+            .unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+            )
+            .unwrap();
+        });
+
+        let mut got: Vec<ExecEvent> = Vec::new();
+        let terminal = send_exec_streaming(&mut host, "echo hi", None, 30, |e| got.push(e.clone()))
+            .expect("send_exec_streaming");
+        guest_handle.join().unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ExecEvent::Stdout { ref chunk } if chunk == b"hi\n"));
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn read_exec_stream_collects_until_exit() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stderr {
+                    chunk: b"e".to_vec(),
+                }),
+            )
+            .unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 2 }),
+            )
+            .unwrap();
+        });
+        let mut got = Vec::new();
+        let term = read_exec_stream(&mut host, |e| got.push(e.clone())).unwrap();
+        guest_handle.join().unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
+        assert!(matches!(term, ExecEvent::Exit { code: 2 }));
     }
 }

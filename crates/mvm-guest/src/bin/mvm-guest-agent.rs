@@ -966,70 +966,20 @@ fn handle_proc_wait_streaming(
     })
 }
 
-/// Maximum output size per stream (1 MiB) to prevent OOM from unbounded output.
+/// `Exec` streaming arm — writes intermediate `ExecEvent` Stdout/Stderr
+/// frames to the connection and returns the terminal `Exit` for the
+/// dispatch loop to write last. Mirrors `handle_run_entrypoint` /
+/// `handle_proc_wait_streaming`. Plan 159 WS-5 E. (dev-shell only)
 #[cfg(feature = "dev-shell")]
-const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
-
-/// Run a command via `sh -c` and capture output (dev-only, feature-gated).
-#[cfg(feature = "dev-shell")]
-fn do_exec(command: &str, stdin_data: Option<&str>, _timeout_secs: u64) -> GuestResponse {
-    use std::process::{Command, Stdio};
-
-    let mut child = match Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(if stdin_data.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return GuestResponse::ExecResult {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: format!("failed to spawn: {}", e),
-            };
-        }
-    };
-
-    if let Some(data) = stdin_data
-        && let Some(ref mut pipe) = child.stdin
-        && let Err(e) = pipe.write_all(data.as_bytes())
-    {
-        eprintln!("failed to write to pipe: {e}");
-    }
-    drop(child.stdin.take());
-
-    match child.wait_with_output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let truncate = |s: &str| -> String {
-                if s.len() > MAX_EXEC_OUTPUT {
-                    let mut t = s[..MAX_EXEC_OUTPUT].to_string();
-                    t.push_str("\n... (truncated)");
-                    t
-                } else {
-                    s.to_string()
-                }
-            };
-            GuestResponse::ExecResult {
-                exit_code: out.status.code().unwrap_or(-1),
-                stdout: truncate(&stdout),
-                stderr: truncate(&stderr),
-            }
-        }
-        Err(e) => GuestResponse::ExecResult {
-            exit_code: -1,
-            stdout: String::new(),
-            stderr: format!("wait failed: {}", e),
-        },
-    }
+fn do_exec_streaming(
+    file: &mut std::fs::File,
+    command: &str,
+    stdin_data: Option<&str>,
+) -> GuestResponse {
+    let terminal = mvm_guest::exec_stream::stream_exec(command, stdin_data, |ev| {
+        write_response(file, &GuestResponse::ExecEvent(ev));
+    });
+    GuestResponse::ExecEvent(terminal)
 }
 
 /// Read the wrapper's language from `/etc/mvm/wrapper.json`. Returns
@@ -1045,39 +995,44 @@ fn read_wrapper_language() -> Option<String> {
 
 /// Stateless run-code v1: dispatch a fresh interpreter subprocess
 /// with the user-supplied source on its `-c` / `-e` arg. Refuses
-/// unknown languages with a wire-stable error string. Reuses the
-/// same `/bin/sh -c` mechanics as `do_exec` for capture + truncation.
+/// unknown languages with a wire-stable error string. Streams output
+/// via `do_exec_streaming` (Plan 159 WS-5 E).
 ///
 /// Plan-0010 Choice A v2 will route through the warm-process pool
 /// instead, providing stateful eval across calls. Wire shape stays
 /// identical — the dispatch flips inside this function.
 #[cfg(feature = "dev-shell")]
-fn do_run_code(code: &str, timeout_secs: u64) -> GuestResponse {
+fn do_run_code(file: &mut std::fs::File, code: &str, _timeout_secs: u64) -> GuestResponse {
     let lang = match read_wrapper_language() {
         Some(l) => l,
         None => {
-            return GuestResponse::ExecResult {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: "run-code refused: /etc/mvm/wrapper.json missing or has no \
+            write_response(
+                file,
+                &GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Stderr {
+                    chunk: b"run-code refused: /etc/mvm/wrapper.json missing or has no \
                          language field"
-                    .into(),
-            };
+                        .to_vec(),
+                }),
+            );
+            return GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Exit { code: -1 });
         }
     };
     let interpreter = match lang.as_str() {
         "python" => "python3",
         "node" => "node",
         other => {
-            return GuestResponse::ExecResult {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: format!(
-                    "run-code refused: unsupported language {:?} \
+            write_response(
+                file,
+                &GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Stderr {
+                    chunk: format!(
+                        "run-code refused: unsupported language {:?} \
                      (supported: python, node)",
-                    other
-                ),
-            };
+                        other
+                    )
+                    .into_bytes(),
+                }),
+            );
+            return GuestResponse::ExecEvent(mvm_guest::vsock::ExecEvent::Exit { code: -1 });
         }
     };
     // Build the shell command. Single-quote the code so the shell
@@ -1090,7 +1045,7 @@ fn do_run_code(code: &str, timeout_secs: u64) -> GuestResponse {
         interp_flag,
         shell_quote_for_sh(code)
     );
-    do_exec(&shell_command, None, timeout_secs)
+    do_exec_streaming(file, &shell_command, None)
 }
 
 /// Single-quote `s` for `/bin/sh` consumption: doubles up embedded
@@ -1724,13 +1679,14 @@ fn handle_run_entrypoint(
     file: &mut std::fs::File,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
 ) -> GuestResponse {
     // Plan 43: when a warm-process pool is active, route through it
     // instead of the cold-respawn path. The host wire is identical;
     // the pool's `dispatch` synthesizes the same `EntrypointEvent`
     // stream (Stdout / Stderr / Exit | Error) we'd produce below.
     if let Some(Some(pool)) = WARM_POOL.get() {
-        return dispatch_via_warm_pool(file, pool, stdin, timeout_secs);
+        return dispatch_via_warm_pool(file, pool, stdin, timeout_secs, env);
     }
 
     let _guard = match RUN_ENTRYPOINT_LOCK.try_lock() {
@@ -1775,6 +1731,7 @@ fn handle_run_entrypoint(
         &stdin,
         Duration::from_secs(timeout_secs),
         CallCaps::v1(),
+        env,
     );
 
     // tmpdir drops at end of scope (or on early-return below) and runs
@@ -1881,8 +1838,9 @@ fn dispatch_via_warm_pool(
     pool: &Arc<WorkerPool>,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
 ) -> GuestResponse {
-    match pool.dispatch(stdin, timeout_secs) {
+    match pool.dispatch(stdin, timeout_secs, env) {
         Ok(DispatchOutcome {
             stdout,
             stderr,
@@ -2163,10 +2121,10 @@ fn handle_client(
         GuestRequest::Exec {
             command,
             stdin,
-            timeout_secs,
+            timeout_secs: _,
         } => {
             eprintln!("[audit] exec request: {:?}", command);
-            do_exec(&command, stdin.as_deref(), timeout_secs.unwrap_or(30))
+            do_exec_streaming(&mut file, &command, stdin.as_deref())
         }
 
         #[cfg(not(feature = "dev-shell"))]
@@ -2186,7 +2144,7 @@ fn handle_client(
             // run-code`'s host-side audit posture — argv / code can
             // carry user-typed secrets).
             eprintln!("[audit] run-code request");
-            do_run_code(&code, timeout_secs)
+            do_run_code(&mut file, &code, timeout_secs)
         }
 
         #[cfg(not(feature = "dev-shell"))]
@@ -2198,6 +2156,7 @@ fn handle_client(
         GuestRequest::RunEntrypoint {
             stdin,
             timeout_secs,
+            env,
         } => {
             // Plan 76 Phase 2: distinguish "validation hasn't
             // completed yet" (Starting → NotReady, transient) from
@@ -2212,7 +2171,7 @@ fn handle_client(
                         .to_string(),
                 })
             } else {
-                handle_run_entrypoint(&mut file, stdin, timeout_secs)
+                handle_run_entrypoint(&mut file, stdin, timeout_secs, env)
             }
         }
 
@@ -2848,6 +2807,19 @@ fn main() {
         let s = Arc::clone(&probe_state);
         std::thread::spawn(move || init_probes(&bs, &s));
     }
+
+    // Plan 129 — start the egress forward proxy (loopback FORWARD_PROXY_PORT).
+    // The workload's HTTP_PROXY (set by the host invoke path only when the VM
+    // has a substitution endpoint) routes secret-bearing requests here; this
+    // relays them over vsock to the host endpoint, which substitutes the real
+    // credential. Always started (cheap, loopback-only): with no HTTP_PROXY in
+    // the workload env it simply sees no connections. Not dev-shell-gated —
+    // egress substitution is a production feature.
+    std::thread::spawn(|| {
+        if let Err(e) = mvm_guest::forward_proxy::start_forward_proxy(30) {
+            eprintln!("mvm-guest-agent: forward proxy failed to start: {e}");
+        }
+    });
 
     // Port forwarders are started on-demand via StartPortForward requests
     // from the host (works with all backends, no config drive needed).

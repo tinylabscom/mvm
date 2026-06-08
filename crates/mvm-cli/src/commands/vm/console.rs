@@ -101,40 +101,44 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     if let Some(cmd) = command {
         let transport = pick_console_transport(name)?;
         let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-        // ADR-053 / plan 74 W1: hard cutover requires hello before any
-        // operational request. One-shot `Exec` is a dev-shell request
-        // not covered by the closed `GuestCapability` enum, so request
-        // no specific capability — the hello alone unblocks dispatch.
-        let _ = mvm_guest::vsock::negotiate_protocol(&mut stream, Vec::new())?;
-        let req = mvm_guest::vsock::GuestRequest::Exec {
-            command: cmd.to_string(),
-            stdin: None,
-            timeout_secs: Some(30),
-        };
-        // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
-        super::shared::emit_vsock_rpc_audit(name, &req);
-        let resp = mvm_guest::vsock::send_request(&mut stream, &req)?;
-        match resp {
-            mvm_guest::vsock::GuestResponse::ExecResult {
-                exit_code,
-                stdout,
-                stderr,
-            } => {
-                if !stdout.is_empty() {
-                    print!("{stdout}");
+        // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit (verb=exec).
+        super::shared::emit_vsock_rpc_audit(
+            name,
+            &mvm_guest::vsock::GuestRequest::Exec {
+                command: cmd.to_string(),
+                stdin: None,
+                timeout_secs: Some(30),
+            },
+        );
+        // send_exec_streaming does the protocol hello internally (Plan 159 WS-5 E).
+        use std::io::Write as _;
+        let terminal = mvm_guest::vsock::send_exec_streaming(
+            &mut stream,
+            cmd,
+            None,
+            30,
+            |event| match event {
+                mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+                    let mut so = std::io::stdout();
+                    let _ = so.write_all(chunk);
+                    let _ = so.flush();
                 }
-                if !stderr.is_empty() {
-                    eprint!("{stderr}");
+                mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+                    let mut se = std::io::stderr();
+                    let _ = se.write_all(chunk);
+                    let _ = se.flush();
                 }
-                if exit_code != 0 {
-                    std::process::exit(exit_code);
+                _ => {}
+            },
+        )?;
+        match terminal {
+            mvm_guest::vsock::ExecEvent::Exit { code } => {
+                if code != 0 {
+                    std::process::exit(code);
                 }
                 Ok(())
             }
-            mvm_guest::vsock::GuestResponse::Error { message } => {
-                anyhow::bail!("Console exec error: {message}")
-            }
-            other => anyhow::bail!("Unexpected response: {other:?}"),
+            other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
         }
     } else {
         // Interactive PTY session
