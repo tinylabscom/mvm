@@ -11,6 +11,19 @@
 //! per-record expiry: G6 in the plan calls for ±10 s jitter so an
 //! external observer cannot use TTL expiry as a precise timing
 //! oracle. Per-record expiry stays exact.
+//!
+//! ## Consumer note (Plan 170)
+//!
+//! The opt-in idle-sleep extension below (`with_idle_sleep` /
+//! `IdleConfig` / `IdleSlept`, Plan 170 WS-B) is an **unconsumed
+//! primitive**: nothing in this repo constructs a `Reaper` outside tests
+//! (ADR-074 — the local `mvmctl` path is daemon-free), and mvmd does *not*
+//! depend on this crate — it implements idle / host-memory-pressure / wake
+//! natively in its own model (`mvmd-agent/host_pressure.rs`,
+//! `mvmd-coordinator/{idle,wake,wake_on_demand}.rs`). The TTL path is the
+//! load-bearing part; the idle hook is retained as additive,
+//! behavior-preserving infrastructure should a resident consumer ever want
+//! it. See `specs/plans/170-…` "Density ownership correction".
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

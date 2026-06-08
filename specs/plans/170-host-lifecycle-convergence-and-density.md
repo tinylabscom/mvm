@@ -1,8 +1,10 @@
 # Plan 170 — Host-side lifecycle convergence + single-host density (reconcile / idle-reaper / wake)
 
-> **Status (2026-06-08):** WS-A **implemented** (PR #688); WS-B mvm-side
-> mechanism **implemented** (PR #696, backend `SleepFn` + resident loop are
-> mvmd-side); WS-C/D Proposed. Grounded in a
+> **Status (2026-06-08):** WS-A **implemented + merged** (PR #688) — the
+> mvm-side win. **WS-B/C/D density is owned by mvmd, not mvm** — see the
+> "Density ownership correction" banner below; WS-B's mvm-side mechanism
+> shipped (PR #696) but has no consumer, and WS-C's selection core was
+> **closed unmerged** (PR #701). Grounded in a
 > review of an external single-machine sandbox control plane — an
 > MIT-licensed Go service that pairs a container runtime, a reverse proxy,
 > and an embedded SQLite store to run agent workloads behind preview URLs.
@@ -50,10 +52,24 @@ is a live concern, not a fleet abstraction.
 
 **mvm / mvmd boundary.** Fleet warm-pool orchestration and wake-time
 *admission policy* stay in mvmd (Plan 140 already draws this line;
-`../mvmd/specs/plans/53-warm-pool-ms-restore.md`). This plan delivers only the
-**local single-host mechanism** that lives in this repo: the registry, the
-reaper, the wake trigger, the convergence pass. mvmd consumes the same
-`mvm_hostd::supervisor::reaper` library it already does.
+`../mvmd/specs/plans/53-warm-pool-ms-restore.md`). This plan delivers the
+**local single-host reconcile mechanism** (WS-A). The density workstreams
+(WS-B/C/D) turned out to belong to mvmd — see the correction banner.
+
+> **Density ownership correction (2026-06-08).** This plan was written
+> assuming mvmd consumes `mvm_hostd::supervisor::reaper` and that the density
+> reaper is the shared mvm-side mechanism. **That premise was wrong.** Verified
+> against both repos: nothing in mvm constructs the reaper (ADR-074 — the local
+> path is daemon-free), and **mvmd does not depend on the mvm `mvm-hostd`
+> crate** — it implements idle + host-memory-pressure + wake natively in its
+> tenant/pool/instance model (`mvmd-agent/src/host_pressure.rs` + agent
+> reconcile "Phase 6b" → `instance_sleep`; `mvmd-coordinator/src/{idle,wake,
+> wake_on_demand}.rs`). mvmd Plan 55's "reaper library mvmd already consumes"
+> is likewise aspirational (status: Proposed, no code). Net: **WS-A is the
+> mvm-side deliverable; WS-B/C/D density is mvmd's, already built there.** The
+> mvm-side reaper idle extension (WS-B, PR #696) is an unconsumed primitive
+> left in place; the WS-C selection core (PR #701) was closed unmerged rather
+> than accumulate shelf-ware.
 
 **`mvmctl` is a CLI, not a resident daemon.** That control plane "converges on
 every boot" because it *is* a long-lived process. mvm's local path is one-shot CLI
@@ -105,7 +121,13 @@ to it, cheaply, at the start of every state-touching command.
       from PR #688 — the builder-store probe is heavier than the PID-liveness
       budget and wants its own slice.
 
-### WS-B — Activity-driven idle reaper (stop-on-idle) — **mvm-side mechanism DONE (PR #696)**
+### WS-B — Activity-driven idle reaper (stop-on-idle) — **mvm-side mechanism shipped but UNCONSUMED (PR #696); density owned by mvmd**
+
+> Shipped as an additive primitive (PR #696), but per the ownership
+> correction above it has **no consumer**: mvmd implements idle-sleep
+> natively. Left in place (additive, behavior-preserving), not reverted.
+> The real idle reaper is `mvmd-coordinator/src/idle.rs` + the agent
+> reconcile loop.
 
 Extend the TTL reaper from wall-clock-only to TTL **or** idle-timeout, and have
 idle expiry *sleep* (drain/pause) rather than tear down — so the workspace
@@ -138,27 +160,27 @@ persists and WS-C's wake brings it back.
       mvmd: add `IdleSlept`/`SleepFailed` arms to any exhaustive `ReapOutcome`
       match. No new snapshot code; this is a *trigger*, not a new mechanism.
 
-### WS-C — Host-memory-pressure reaper (single-host density)
+### WS-C — Host-memory-pressure reaper — **OWNED BY mvmd (already built); mvm WS-C closed unmerged (PR #701)**
 
-Evict (sleep) the least-recently-active VMs when the host is under RAM
-pressure, so "dozens share one box" works on the user's Mac without manual
-babysitting.
+> **Resolved to mvmd.** mvmd already evicts under host-memory pressure
+> natively: `mvmd-agent/src/host_pressure.rs` (`HostPressureMonitor`,
+> hysteresis Normal→Critical) feeds the agent reconcile loop's "Phase 6b"
+> pressure-driven sleep (`policy::pressure_candidates()` LRU →
+> `instance_sleep`). The mvm-side selection core (PR #701) was **closed
+> unmerged** — it had no consumer (mvm has no resident daemon; mvmd doesn't
+> use mvm's reaper). The balloon-before-evict escalation ladder + cross-tenant
+> fairness live in mvmd **Plan 55** (fleet policy). Nothing to build in mvm.
 
-- [ ] Add a pressure-driven sweep to the reaper: read host memory via `sysinfo`
-      (already a dep — `balloon_runtime.rs` uses it), and when free RAM drops
-      below `MVM_HOST_MEM_LOW_WATERMARK`, sleep VMs in `last_active`-ascending
-      order until back above the high watermark. LRU eviction, never kill —
-      sleep + persist, same path as WS-B.
-- [ ] **Reconcile against the existing balloon lever before evicting.** mvm
-      already reclaims guest memory via `BalloonController` / `run_balloon_loop`
-      (`balloon_runtime.rs`). Order of escalation: balloon-reclaim first (cheap,
-      transparent), sleep-evict only when ballooning is exhausted. Document the
-      two-stage policy so they don't fight.
-- [ ] This is the mvm-side mechanism only; mvmd's fleet scheduler may layer its
-      own cross-host policy on top via the same `reaper` library. Note the seam,
-      don't build the fleet side here.
+### WS-D — Wake-on-request completion — **OWNED BY mvmd (already built)**
 
-### WS-D — Wake-on-request completion
+> **Resolved to mvmd.** Wake-on-request exists in mvmd:
+> `mvmd-coordinator/src/wake_on_demand.rs` (`InstanceWaker::wake_for_request`
+> / `touch`) + `mvmd-gateway/src/per_vm_router.rs` (touch-on-forward, wake if
+> paused). The lifecycle audit events (`vm.slept_idle` / `vm.slept_pressure` /
+> `vm.woke`) belong with whichever reaper actually runs — mvmd's. Nothing to
+> build in mvm.
+
+The original mvm-side framing (below) is retained for history; it does not apply.
 
 Close the loop so a slept VM (WS-B/C) comes back on first contact.
 
