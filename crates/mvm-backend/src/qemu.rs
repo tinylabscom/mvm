@@ -71,7 +71,6 @@ const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
 /// invoke path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned
 /// only when the admitted plan carries secret bindings.
 const SUBST_PID_FILE: &str = "substitution.pid";
-const SUBST_ENV_FILE: &str = "substitution-env.json";
 /// How long the endpoint gets to bind its listener + write the ready
 /// handshake line before `start` declares the spawn failed.
 const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -253,7 +252,9 @@ impl VmBackend for QemuBackend {
         {
             match mvm_core::plan::secrets_from_signed_json(plan_json) {
                 Ok(secrets) if !secrets.is_empty() => {
-                    if let Err(e) = spawn_substitution_endpoint(&state_dir, tenant, &secrets) {
+                    if let Err(e) =
+                        spawn_substitution_endpoint(&config.name, &state_dir, tenant, &secrets)
+                    {
                         rollback_qemu(&state_dir, &pid_file);
                         return Err(e);
                     }
@@ -295,7 +296,7 @@ impl VmBackend for QemuBackend {
             send_signal(spid, libc::SIGTERM);
         }
         let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
-        let _ = std::fs::remove_file(state_dir.join(SUBST_ENV_FILE));
+        let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(&id.0));
 
         let pid_path = state_dir.join(QEMU_PID_FILE);
         let Some(pid) = read_pid(&pid_path) else {
@@ -729,6 +730,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
 /// it via `SUBST_PID_FILE`. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
 fn spawn_substitution_endpoint(
+    vm_name: &str,
     state_dir: &Path,
     tenant: &str,
     secrets: &[SecretBinding],
@@ -776,8 +778,9 @@ fn spawn_substitution_endpoint(
     let pid_file = state_dir.join(SUBST_PID_FILE);
     std::fs::write(&pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
-    std::fs::write(state_dir.join(SUBST_ENV_FILE), handshake.trim().as_bytes())
-        .map_err(|e| anyhow!("write substitution env file: {e}"))?;
+    let env_path = mvm_core::config::vm_substitution_env_path(vm_name);
+    std::fs::write(&env_path, handshake.trim().as_bytes())
+        .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
     // Detach: drop the child handle without killing. The endpoint runs
     // daemonized (setsid) and is reaped by `stop` via SUBST_PID_FILE.
     Ok(())
