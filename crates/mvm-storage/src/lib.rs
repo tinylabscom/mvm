@@ -27,9 +27,14 @@ pub mod mount_provider;
 pub mod provider;
 pub mod snapshot;
 
-// Non-Linux at-rest arm: wraps mvm-core's per-file AEAD volume sealer. The
-// Linux LUKS2 block-device arm is a tracked follow-up (plan 123 B2).
+// At-rest-encrypted `StorageProvider` — two arms, one `encrypted::EncryptedStorage`
+// type so callers never branch on platform (plan 123 B2):
+// - non-Linux: per-file AES-256-GCM seal (mvm-core volume sealer).
+// - Linux: block-level LUKS2 over a loop-backed image (`cryptsetup`).
 #[cfg(not(target_os = "linux"))]
+pub mod encrypted;
+#[cfg(target_os = "linux")]
+#[path = "encrypted_linux.rs"]
 pub mod encrypted;
 
 // S3 mount source — off by default; pulls object_store only under `s3`.
@@ -45,7 +50,6 @@ pub use mount_provider::{
 pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
 pub use snapshot::SnapshotUpper;
 
-#[cfg(not(target_os = "linux"))]
 pub use encrypted::EncryptedStorage;
 
 #[cfg(feature = "s3")]
