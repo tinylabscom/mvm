@@ -389,6 +389,29 @@ pub(in crate::commands) fn dispatch(
     }
 }
 
+/// Workload env to inject into `vm_name`'s `RunEntrypoint` call: the
+/// egress-substitution handoff the supervisor wrote at boot (Plan 129 #1b —
+/// `HTTP_PROXY` + the opaque placeholder vars), or empty when there's no
+/// sidecar (a plan with no secret bindings → today's no-injected-env
+/// behavior). A malformed sidecar degrades to empty with a warning rather
+/// than failing the call: the workload then can't reach its secrets (a
+/// visible functional failure), but nothing leaks and default-deny egress
+/// (claim 10) still holds.
+fn injected_env(vm_name: &str) -> Vec<(String, String)> {
+    match mvm_core::substitution_handoff::read(vm_name) {
+        Ok(Some(handoff)) => handoff.env,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                vm = %vm_name,
+                "reading substitution handoff; proceeding with no injected env"
+            );
+            Vec::new()
+        }
+    }
+}
+
 fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i32> {
     let transport = mvm::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on '{vm_name}'"))?;
@@ -400,9 +423,10 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         &mut stream,
         stdin,
         timeout_secs,
-        // No injected env on the plain invoke path yet; Plan 129 will supply
-        // HTTP_PROXY + secret placeholder vars here from the admitted plan.
-        Vec::new(),
+        // Plan 129 #1b: the supervisor wrote the egress-substitution env
+        // (HTTP_PROXY + opaque placeholder vars) to a per-VM sidecar at boot;
+        // inject it here. Empty when the plan bound no secrets.
+        injected_env(vm_name),
         |event| match event {
             mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
                 let _ = std::io::stdout().write_all(chunk);
@@ -485,6 +509,56 @@ fn exit_code_for(event: &mvm_guest::vsock::EntrypointEvent) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run `f` with `MVM_DATA_DIR` pointed at a fresh tempdir so
+    /// `injected_env` resolves the per-VM sidecar in isolation. `MVM_DATA_DIR`
+    /// is process-global, so the lock serializes the env-mutating tests —
+    /// keeping them correct under shared-process `cargo test`, not just
+    /// process-per-test nextest.
+    fn with_data_dir(f: impl FnOnce(&str)) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("MVM_DATA_DIR");
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        f("vm-under-test");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn injected_env_empty_without_sidecar() {
+        with_data_dir(|vm| assert!(injected_env(vm).is_empty()));
+    }
+
+    #[test]
+    fn injected_env_reads_supervisor_sidecar() {
+        with_data_dir(|vm| {
+            let handoff = mvm_core::substitution_handoff::SubstitutionHandoff {
+                env: vec![
+                    ("HTTP_PROXY".into(), "http://127.0.0.1:5254".into()),
+                    ("OPENAI_API_KEY".into(), "mvm-secret-abc123".into()),
+                ],
+            };
+            mvm_core::substitution_handoff::write(vm, &handoff).expect("write sidecar");
+            assert_eq!(injected_env(vm), handoff.env);
+        });
+    }
+
+    #[test]
+    fn injected_env_degrades_to_empty_on_malformed_sidecar() {
+        with_data_dir(|vm| {
+            let path = mvm_core::substitution_handoff::handoff_path(vm);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{ not json").unwrap();
+            assert!(injected_env(vm).is_empty());
+        });
+    }
 
     #[test]
     fn test_exit_code_normal_exit_zero() {

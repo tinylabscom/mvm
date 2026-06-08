@@ -31,6 +31,9 @@ pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;
+/// Plan 129 #1b — per-VM sidecar handing the admission-minted placeholders +
+/// egress-proxy env from the supervisor to `mvmctl` invoke and the guest init.
+pub mod substitution_handoff;
 /// Plan 129 / ADR-067 §1 — the guest↔host substitution-endpoint wire contract,
 /// shared so the in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;
