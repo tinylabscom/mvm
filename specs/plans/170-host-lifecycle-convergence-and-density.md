@@ -1,7 +1,8 @@
 # Plan 170 — Host-side lifecycle convergence + single-host density (reconcile / idle-reaper / wake)
 
-> **Status (2026-06-07):** WS-A **implemented** (PR #688); WS-B/C/D
-> Proposed. Grounded in a
+> **Status (2026-06-08):** WS-A **implemented** (PR #688); WS-B mvm-side
+> mechanism **implemented** (PR #696, backend `SleepFn` + resident loop are
+> mvmd-side); WS-C/D Proposed. Grounded in a
 > review of an external single-machine sandbox control plane — an
 > MIT-licensed Go service that pairs a container runtime, a reverse proxy,
 > and an embedded SQLite store to run agent workloads behind preview URLs.
