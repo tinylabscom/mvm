@@ -501,6 +501,11 @@ unsafe impl Send for VmHandle {}
 // SAFETY: shared access is funnelled through the same serial queue.
 unsafe impl Sync for VmHandle {}
 
+/// What the create closure produces on the VM's queue: the VM handle, the
+/// machine-identifier bytes (SAVE sidecar), and the pending flow-audit bridge
+/// half (when the network is flow-audited).
+type CreatedVm = (Arc<VmHandle>, Option<Vec<u8>>, Option<PendingBridge>);
+
 /// Cheaply-clonable connector to a running VM. Each vsock-proxy / control-socket
 /// task holds one so it can drive the VM (`connectToPort`, pause/resume/save, …)
 /// on the VM's serial queue without sharing the whole supervisor.
@@ -730,6 +735,10 @@ pub struct VzSupervisor {
     exit_task: Option<JoinHandle<()>>,
     /// Retains the exit-port `VZVirtioSocketListener` for the VM's lifetime.
     _exit_listener: Option<ExitListenerHandle>,
+    /// In-process flow-audited gvproxy bridge thread (Plan 152 WS-B slice 8).
+    /// Held for its lifetime; process exit reaps it. `None` when no audit
+    /// substrate (direct gvproxy attach) or no network.
+    _bridge: Option<std::thread::JoinHandle<()>>,
 }
 
 impl VzSupervisor {
@@ -762,13 +771,16 @@ impl VzSupervisor {
         let mem_total_bytes = mib_to_bytes(config.resources.memory_mib);
         let startup_mode = config.startup_mode.clone();
 
+        // Retained for the flow-audited bridge spawn after the VM is created.
+        let bridge_config = config.clone();
         let config = config.clone();
         let queue_inner = queue.clone_inner();
-        // The create closure returns the VM handle and the machine-identifier
-        // bytes (for the SAVE sidecar) together — both produced on the queue.
-        let (handle, machine_id) = queue
-            .dispatch(move || -> Result<(Arc<VmHandle>, Option<Vec<u8>>)> {
-                let (vz_config, machine_id) = build_vz_config(&config)?;
+        // The create closure returns the VM handle, the machine-identifier bytes
+        // (for the SAVE sidecar), and the pending bridge socketpair half (when
+        // flow-audited) — all produced on the queue.
+        let (handle, machine_id, pending_bridge) = queue
+            .dispatch(move || -> Result<CreatedVm> {
+                let (vz_config, machine_id, pending_bridge) = build_vz_config(&config)?;
                 // SAFETY: initWithConfiguration_queue binds the VM to this
                 // queue; we are executing on it.
                 let vm = unsafe {
@@ -787,6 +799,7 @@ impl VzSupervisor {
                         _delegate: delegate,
                     }),
                     machine_id,
+                    pending_bridge,
                 ))
             })
             .await??;
@@ -805,6 +818,7 @@ impl VzSupervisor {
             captured_exit: Arc::new(Mutex::new(None)),
             exit_task: None,
             _exit_listener: None,
+            _bridge: None,
         };
         // Bind the host-side vsock proxy + control socket + workload-exit
         // listener before start, so a client (mvmctl / mvmd) can reach the guest
@@ -817,6 +831,13 @@ impl VzSupervisor {
         }
         if capture_exit {
             this.start_exit_listener(&vm_state_dir).await?;
+        }
+        // Flow-audited networking: spawn the in-process gvproxy bridge before
+        // start so it is splicing before the guest brings its NIC up. Fail-closed
+        // — a malformed audit substrate refuses the boot (the bridge guards
+        // claim-10 egress; we never run a substrate-tagged guest unaudited).
+        if let Some(pending) = pending_bridge {
+            this._bridge = Some(spawn_payload_tap(&bridge_config, pending)?);
         }
         // Boot a fresh guest, or restore from a saved state + resume.
         match startup_mode {
@@ -1151,9 +1172,16 @@ fn err_reply(e: &anyhow::Error) -> String {
 /// Fail-closed on the one surface not yet ported (see module docs):
 /// flow-audited networking. Both `Boot` and `Restore` startup modes build the
 /// same device config; the caller picks `start()` vs `restore + resume`.
-fn build_vz_config(
-    config: &SupervisorConfig,
-) -> Result<(Retained<VZVirtualMachineConfiguration>, Option<Vec<u8>>)> {
+type BuiltConfig = (
+    Retained<VZVirtualMachineConfiguration>,
+    Option<Vec<u8>>,
+    Option<PendingBridge>,
+);
+
+fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
+    // Set when the flow-audited gvproxy bridge is wired (audit substrate present):
+    // the supervisor's half of the guest-NIC socketpair, handed to the bridge.
+    let mut pending_bridge: Option<PendingBridge> = None;
     // SAFETY: new() returns a default-initialized configuration.
     let vz_config = unsafe { VZVirtualMachineConfiguration::new() };
     // SAFETY: plain setters with validated scalar values.
@@ -1338,18 +1366,23 @@ fn build_vz_config(
     match &config.network {
         None => {}
         Some(NetworkConfig::Gvproxy {
-            socket_path,
-            mac,
-            events_ingest_socket_path,
+            socket_path, mac, ..
         }) => {
-            if events_ingest_socket_path.is_some() {
-                bail!(
-                    "vz flow-audited networking (in-process payload_tap, claim 10) is not yet \
-                     ported to the Rust supervisor (Plan 152 WS-B slice 4); the Swift supervisor \
-                     still backs flow-audited guests"
-                );
-            }
-            let device = build_gvproxy_device(socket_path, mac)?;
+            // Flow-audited (audit substrate present): interpose the in-process
+            // gvproxy bridge. The guest NIC attaches to one half of a SOCK_DGRAM
+            // socketpair; the bridge gets the other (`supervisor_fd`) and splices
+            // to gvproxy through the observer + chain-signing pipeline. Without a
+            // substrate (dev / builder VMs) the NIC attaches straight to gvproxy.
+            let device = if config.has_audit_substrate() {
+                let (vz_fd, supervisor_fd) = dgram_socketpair()?;
+                pending_bridge = Some(PendingBridge {
+                    supervisor_fd,
+                    gvproxy_socket_path: socket_path.clone(),
+                });
+                net_device_from_fd(vz_fd, mac)?
+            } else {
+                build_gvproxy_device(socket_path, mac)?
+            };
             let array = NSArray::from_retained_slice(&[Retained::into_super(device)]);
             // SAFETY: setNetworkDevices installs the virtio-net device.
             unsafe { vz_config.setNetworkDevices(&array) };
@@ -1370,7 +1403,7 @@ fn build_vz_config(
         );
     }
 
-    Ok((vz_config, Some(machine_id)))
+    Ok((vz_config, Some(machine_id), pending_bridge))
 }
 
 /// Load a `VZGenericMachineIdentifier` from a SAVE-written `.machine-id` sidecar.
@@ -1387,19 +1420,33 @@ fn load_machine_identifier(path: &str) -> Result<Retained<VZGenericMachineIdenti
     .ok_or_else(|| anyhow!("{path} is not a valid machine identifier"))
 }
 
+/// The supervisor's half of the guest-NIC socketpair, handed to the in-process
+/// gvproxy bridge (Plan 152 WS-B slice 8). Carried out of `build_vz_config`
+/// because the bridge is spawned after the VM is created.
+struct PendingBridge {
+    supervisor_fd: OwnedFd,
+    gvproxy_socket_path: String,
+}
+
 /// Build a gvproxy-backed virtio-net device: a SOCK_DGRAM unix socket connected
-/// to gvproxy's `--listen-vfkit` listener, handed to Vz via a file-handle
-/// attachment, with the per-VM MAC pinned (deterministic across save/restore
-/// and collision-free across concurrent VMs).
+/// to gvproxy's `--listen-vfkit` listener (direct, no flow audit), handed to Vz
+/// via a file-handle attachment with the per-VM MAC pinned.
 fn build_gvproxy_device(
     socket_path: &str,
     mac: &str,
 ) -> Result<Retained<VZVirtioNetworkDeviceConfiguration>> {
-    let fd = connect_gvproxy_dgram(socket_path)?;
-    // Ownership transfers to the NSFileHandle (closeOnDealloc: true); the VM
-    // reads/writes vfkit frames on it for its lifetime.
-    // `raw` is a valid connected fd we just relinquished; the handle now owns it
-    // (closeOnDealloc: true).
+    net_device_from_fd(connect_gvproxy_dgram(socket_path)?, mac)
+}
+
+/// Wrap an owned SOCK_DGRAM fd as a `VZVirtioNetworkDeviceConfiguration` with
+/// the pinned MAC. The fd is either connected straight to gvproxy (direct) or
+/// the guest half of the bridge socketpair (flow-audited). Ownership transfers
+/// to the NSFileHandle (`closeOnDealloc: true`); the VM reads/writes vfkit
+/// frames on it for its lifetime.
+fn net_device_from_fd(
+    fd: OwnedFd,
+    mac: &str,
+) -> Result<Retained<VZVirtioNetworkDeviceConfiguration>> {
     let raw = fd.into_raw_fd();
     let handle =
         NSFileHandle::initWithFileDescriptor_closeOnDealloc(NSFileHandle::alloc(), raw, true);
@@ -1423,6 +1470,137 @@ fn build_gvproxy_device(
     unsafe { device.setMACAddress(&vz_mac) };
 
     Ok(device)
+}
+
+/// A connected SOCK_DGRAM socketpair (both halves 1 MiB-buffered) — one half
+/// becomes the guest NIC, the other the bridge's guest-facing socket.
+fn dgram_socketpair() -> Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0_i32; 2];
+    // SAFETY: socketpair fills the two-element array with a connected pair.
+    let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+    if r != 0 {
+        bail!(
+            "socketpair(AF_UNIX, SOCK_DGRAM): {}",
+            io::Error::last_os_error()
+        );
+    }
+    // SAFETY: both are fresh fds we own.
+    let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    bump_socket_buffers(a.as_raw_fd());
+    bump_socket_buffers(b.as_raw_fd());
+    Ok((a, b))
+}
+
+/// Best-effort 1 MiB SO_SNDBUF/SO_RCVBUF so an MTU-sized datagram survives a
+/// backlog (matches cloud-hypervisor / Apple's sample).
+fn bump_socket_buffers(fd: std::os::fd::RawFd) {
+    let buf: libc::c_int = 1024 * 1024;
+    let buf_ptr = std::ptr::addr_of!(buf).cast::<libc::c_void>();
+    let buf_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        // SAFETY: setsockopt with a valid int option + length; failure is benign.
+        unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, buf_ptr, buf_len) };
+    }
+}
+
+/// Construct the gateway `BridgeConfig` from the config's audit substrate and
+/// spawn the in-process flow-audited gvproxy bridge (Plan 152 WS-B slice 8).
+/// Mirrors the libkrun supervisor's `run_with_bridge`: decode the signed plan +
+/// bundle, open the chain `FileAuditSigner`, resolve the observer chain, then
+/// `spawn_bridge_thread(VzGvproxy)`. Fail-closed: a malformed substrate refuses
+/// the boot rather than running unaudited. The returned bridge thread runs until
+/// the guest stops (or process exit reaps it).
+fn spawn_payload_tap(
+    config: &SupervisorConfig,
+    pending: PendingBridge,
+) -> Result<std::thread::JoinHandle<()>> {
+    use ed25519_dalek::SigningKey;
+    use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
+    use mvm_core::policy::PolicyBundle;
+    use mvm_hostd::supervisor::audit::AuditSigner;
+    use mvm_hostd::supervisor::audit_file::FileAuditSigner;
+    use mvm_hostd::supervisor::gateway_bridge::{
+        AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
+    };
+    use mvm_hostd::supervisor::network::{
+        ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_plan,
+    };
+
+    let plan_value = config
+        .plan
+        .clone()
+        .ok_or_else(|| anyhow!("has_audit_substrate but plan missing"))?;
+    let signed: SignedExecutionPlan = serde_json::from_value(plan_value)
+        .map_err(|e| anyhow!("decode SignedExecutionPlan: {e}"))?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+        .map_err(|e| anyhow!("decode ExecutionPlan from signed payload: {e}"))?;
+    let bundle: Option<PolicyBundle> = match config.bundle.clone() {
+        Some(v) => {
+            Some(serde_json::from_value(v).map_err(|e| anyhow!("decode PolicyBundle: {e}"))?)
+        }
+        None => None,
+    };
+
+    let audit_dir = config.audit_dir.clone().expect("has_audit_substrate");
+    let audit_socket = config
+        .gateway_audit_socket
+        .clone()
+        .expect("has_audit_substrate");
+    let signing_key_path = config
+        .signing_key_path
+        .clone()
+        .expect("has_audit_substrate");
+
+    let key_bytes =
+        std::fs::read(&signing_key_path).map_err(|e| anyhow!("read signing key: {e}"))?;
+    let key_array: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("signing key is {} bytes, expected 32", key_bytes.len()))?;
+    let signer = FileAuditSigner::open(SigningKey::from_bytes(&key_array), Path::new(&audit_dir))
+        .map_err(|e| anyhow!("open FileAuditSigner: {e}"))?;
+    let signer: Arc<dyn AuditSigner> = Arc::new(signer);
+
+    // Leaf capabilities: the Rust Vz supervisor splices in-process, so it can
+    // observe + rewrite payloads (payload_tap), like the libkrun gvproxy path.
+    let leaf_caps = ProviderCapabilities {
+        flow_events: true,
+        payload_tap: true,
+    };
+    let observer_names =
+        resolve_observer_chain_from_plan(&plan).map_err(|e| anyhow!("resolve observers: {e}"))?;
+    let observers = if observer_names.is_empty() {
+        Vec::new()
+    } else {
+        let allowlist = ObserverAllowlist::load_from_host_config()
+            .map_err(|e| anyhow!("load observer allowlist: {e}"))?;
+        let mut pipe = Pipeline::new();
+        for name in observer_names {
+            let obs = allowlist
+                .resolve(&name)
+                .map_err(|e| anyhow!("resolve observer {name:?}: {e}"))?;
+            pipe = pipe
+                .observe(obs, leaf_caps)
+                .map_err(|e| anyhow!("observer capability gate: {e}"))?;
+        }
+        pipe.build_observers()
+    };
+
+    let bridge_cfg = BridgeConfig {
+        vm_name: config.name.clone(),
+        plan: Arc::new(plan),
+        bundle: bundle.map(Arc::new),
+        audit_socket: PathBuf::from(audit_socket),
+        signer,
+        policy: Arc::new(AllowAll),
+        observers,
+    };
+    let endpoints = BridgeEndpoints::VzGvproxy {
+        supervisor_fd: pending.supervisor_fd,
+        gvproxy_socket_path: PathBuf::from(pending.gvproxy_socket_path),
+    };
+    Ok(spawn_bridge_thread(endpoints, bridge_cfg))
 }
 
 /// Open and connect a SOCK_DGRAM AF_UNIX socket to gvproxy's vfkit listener,
