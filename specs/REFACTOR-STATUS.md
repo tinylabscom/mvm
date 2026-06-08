@@ -39,10 +39,15 @@ PLAN 152 — Rust-native VZ supervisor            🟡 design locked
   [ ] WS-D nested KVM (/dev/kvm in guest)
   [ ] WS-E VZ-config hardening
 
-PLAN 159 — vz-inspired macOS VZ DX               🔴 gated on 152
+PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
+  [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)
+  [x] WS-5 C shared --json (cache/network/snapshot/audit) — PR #667
+  [x] WS-5 B session --continue/--resume/--ephemeral — PR #667
+  [x] WS-4 resumable + honest-cost dev-image download — PR #667
   [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
-  [ ] WS-1 warm path / WS-2 checkpoints+fork (need 152 WS-B)
-  [ ] WS-* remaining DX/UX layer
+  [ ] WS-1 warm pool / WS-2 checkpoint+fork  (gated on 152 WS-B)
+  [ ] WS-5 D verb renames; curl|sh installer; --json remainder
+  [ ] signed delta-image distribution (unowned — needs a home)
 
 PLAN 124 — Lean guest agent                     🟡 ~65%
   [x] A1/A3 drop tokio+rtnetlink (-27 crates)
