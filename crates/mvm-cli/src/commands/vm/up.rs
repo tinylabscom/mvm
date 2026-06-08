@@ -1979,7 +1979,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // boot→ping proof is hollow (it only watches for this exact warning).
     // `--detach` opts out (fire-and-forget, like the apple-container
     // launchd path). apple-container keeps its own wait in its block.
-    if matches!(effective_hypervisor, "libkrun" | "firecracker") && !detach {
+    // `--wait` (Plan 152 WS-A one-shot) skips this persistent-agent probe:
+    // the workload runs then `poweroff -f`s, so there is no agent to wait
+    // for — we wait for the VM to power off in the `wait` block below and
+    // read its captured exit code instead.
+    if matches!(effective_hypervisor, "libkrun" | "firecracker") && !detach && !wait {
         ui::info("Waiting for guest agent...");
         record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
         if wait_for_guest_agent(&vm_name_owned, 30) {
