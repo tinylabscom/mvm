@@ -484,3 +484,4 @@ macOS / Linux Host
 - Active sprint spec: `specs/SPRINT.md`
 - Completed sprints archived to: `specs/backlog/` (e.g. `specs/backlog/01-foundation.md`)
 - When a sprint is completed, rename `specs/SPRINT.md` to `specs/backlog/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint
+- `specs/REFACTOR-STATUS.md` is the cross-plan rollup checklist. Keep it ticked in the same change whenever a plan workstream lands, merges, or is descoped. It is an index, not source of truth — if it disagrees with a `specs/plans/` doc, the plan doc wins.
