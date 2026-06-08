@@ -54,6 +54,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [x] WS-5 B session --continue/--resume/--ephemeral — PR #667
   [x] WS-4 resumable + honest-cost dev-image download — PR #667
   [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
+  [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173
   [ ] WS-1 warm pool / WS-2 checkpoint+fork  (gated on 152 WS-B)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)

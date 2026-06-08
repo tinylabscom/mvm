@@ -193,7 +193,7 @@ impl AppleContainerEnv {
             &mut stream,
             &wrapped,
             None,
-            timeout_secs,
+            Some(timeout_secs),
             |event| match event {
                 mvm_guest::vsock::ExecEvent::Stdout { chunk } => out_buf.extend_from_slice(chunk),
                 mvm_guest::vsock::ExecEvent::Stderr { chunk } => err_buf.extend_from_slice(chunk),
@@ -211,6 +211,10 @@ impl AppleContainerEnv {
                     stderr: err_buf,
                 })
             }
+            mvm_guest::vsock::ExecEvent::TimedOut => anyhow::bail!(
+                "command timed out after {timeout_secs}s in dev VM '{}'",
+                self.vm_id
+            ),
             other => anyhow::bail!("unexpected terminal exec event from dev VM: {other:?}"),
         }
     }

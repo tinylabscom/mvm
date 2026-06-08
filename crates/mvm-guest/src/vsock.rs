@@ -457,7 +457,10 @@ pub enum GuestRequest {
     /// through the warm-process pool's wrapper for stateful eval
     /// across calls; the wire shape stays identical, the dispatch
     /// flips inside the agent.
-    RunCode { code: String, timeout_secs: u64 },
+    RunCode {
+        code: String,
+        timeout_secs: Option<u64>,
+    },
 }
 
 impl GuestRequest {
@@ -1461,12 +1464,17 @@ pub enum ExecEvent {
     Stderr { chunk: Vec<u8> },
     /// Command exited with this code. Terminal.
     Exit { code: i32 },
+    /// `timeout_secs` elapsed; the agent killed the command's process
+    /// group. Terminal. Mirrors `ProcWaitEvent::TimedOut`. The host maps
+    /// this to exit code 124 (GNU `timeout(1)` convention) for user
+    /// commands. Plan 173.
+    TimedOut,
 }
 
 impl ExecEvent {
     /// True if this event terminates the `Exec` response stream.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, ExecEvent::Exit { .. })
+        matches!(self, ExecEvent::Exit { .. } | ExecEvent::TimedOut)
     }
 }
 
@@ -2228,14 +2236,14 @@ where
 
 /// Send an `Exec` request and stream its response. Invokes `on_event`
 /// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
-/// `Exit`. Exec carries no `GuestCapability` — the agent gates it at
-/// compile time via the `dev-shell` feature — so this does a plain
-/// protocol hello (no capability requirement). Plan 159 WS-5 E.
+/// `Exit` or `TimedOut`. Exec carries no `GuestCapability` — the agent
+/// gates it at compile time via the `dev-shell` feature — so this does
+/// a plain protocol hello (no capability requirement). Plan 159 WS-5 E.
 pub fn send_exec_streaming<F>(
     stream: &mut UnixStream,
     command: &str,
     stdin: Option<String>,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     on_event: F,
 ) -> Result<ExecEvent>
 where
@@ -2245,7 +2253,7 @@ where
     let req = GuestRequest::Exec {
         command: command.to_string(),
         stdin,
-        timeout_secs: Some(timeout_secs),
+        timeout_secs,
     };
     write_frame(stream, &req)?;
     read_exec_stream(stream, on_event)
@@ -2797,7 +2805,7 @@ mod tests {
             GuestRequest::UpdateIdleTimeout { secs: 0 },
             GuestRequest::RunCode {
                 code: "print('hello')".into(),
-                timeout_secs: 30,
+                timeout_secs: Some(30),
             },
             GuestRequest::ReadinessStatus,
         ];
@@ -4865,7 +4873,7 @@ mod tests {
             GuestRequest::UpdateIdleTimeout { secs: 0 },
             GuestRequest::RunCode {
                 code: "x".into(),
-                timeout_secs: 1,
+                timeout_secs: Some(1),
             },
         ];
 
@@ -4919,7 +4927,7 @@ mod tests {
             },
             GuestRequest::RunCode {
                 code: "print(1)".into(),
-                timeout_secs: 1,
+                timeout_secs: Some(1),
             },
             GuestRequest::FsWrite {
                 path: "/x".into(),
@@ -5340,8 +5348,9 @@ mod tests {
     }
 
     #[test]
-    fn exec_event_exit_is_terminal_others_are_not() {
+    fn exec_event_exit_and_timedout_are_terminal() {
         assert!(ExecEvent::Exit { code: 0 }.is_terminal());
+        assert!(ExecEvent::TimedOut.is_terminal());
         assert!(
             !ExecEvent::Stdout {
                 chunk: b"x".to_vec()
@@ -5419,8 +5428,10 @@ mod tests {
         });
 
         let mut got: Vec<ExecEvent> = Vec::new();
-        let terminal = send_exec_streaming(&mut host, "echo hi", None, 30, |e| got.push(e.clone()))
-            .expect("send_exec_streaming");
+        let terminal = send_exec_streaming(&mut host, "echo hi", None, Some(30), |e| {
+            got.push(e.clone())
+        })
+        .expect("send_exec_streaming");
         guest_handle.join().unwrap();
 
         assert_eq!(got.len(), 1);
