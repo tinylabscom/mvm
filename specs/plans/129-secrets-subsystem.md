@@ -12,12 +12,40 @@
 
 **The full path now exists on `main` (QEMU backend):** `mvmctl up` (secret-bearing plan) → `QemuBackend::start` spawns the `mvm-substitution-endpoint` moat → it opens the encrypted host store, mints opaque placeholders, hands them back (never values) → `invoke` injects `HTTP_PROXY` + placeholders into the workload → the workload's egress hits the in-guest forward proxy → relayed over vsock → the host endpoint substitutes the real credential → real TLS. The guest only ever holds opaque placeholders. PRs #710 (transport), #711 (`RunEntrypoint.env`), #713 (drop dead in-guest ADR-049), #715 (endpoint moat), #717 (QEMU spawn), #718 (invoke env + guest forward proxy). Each leg is unit/integration-tested; the live guest→host boot e2e is the one remaining validation.
 
+### On-box endpoint validation (2026-06-08, dev-kvm)
+
+The real `mvm-substitution-endpoint` was driven over **real AF_VSOCK on the box
+against a real encrypted `FileSecretStore`** (`mvmctl secret set`), not a mock:
+
+- **Placeholder mint:** the endpoint minted `mvm-secret-<hex>` for the bound
+  secret and handed back only that (the value never appears in the handshake).
+- **Substitution success:** a request carrying `Authorization: Bearer <placeholder>`
+  to the bound host → the endpoint substituted and forwarded over real TLS; the
+  destination (`postman-echo.com`) echoed `Bearer sk-DUMMY-…` (the **real**
+  credential), with the placeholder absent. Status 200.
+- **Claim-12 refuse:** the same placeholder to an **unbound** host
+  (`evil.example.com`) was refused before any forward — "destination
+  `evil.example.com` is not in the secret's allowed_hosts".
+
+So the endpoint + store-decrypt + bind-check + substitution + forward are proven
+live. What remains is only the literal guest-VM origination (a guest connecting
+to host CID 2 vs. the host-loopback CID 1 used here) — the host listener + wire
++ store + substitution path is identical regardless of which CID dials.
+
+> ⚠️ **Operator note (TLS 1.3 floor):** the forward leg uses
+> `hardened_client_builder` with a **TLS 1.3 minimum** (Plan 65 W7). A secret
+> bound to a **TLS-1.2-only** destination (e.g. `httpbin.org`) fails the forward
+> with `peer is incompatible: ServerTlsVersionIsDisabledByOurConfig` (surfaced
+> clearly after #720's error-chain fix). This is intended hardening, but it
+> means egress to legacy-TLS upstreams is refused — document per-destination, or
+> revisit the floor if a real upstream needs 1.2.
+
 ### Boot e2e runbook (the remaining gate, dev-kvm box)
 
 Proves the live guest→host leg end-to-end. Each component is already tested in
 isolation (#710 host `serve_vsock` over real vsock loopback; #715 endpoint over
-UDS; `build_substitution_env`; `secrets_from_signed_json`); this ties them on a
-real QEMU guest.
+UDS; `build_substitution_env`; `secrets_from_signed_json`; **2026-06-08 on-box
+endpoint validation above**); this ties them on a real QEMU guest.
 
 1. **Local secret + binding** (host store the endpoint opens):
    `mvmctl secret put openai <key>` then
