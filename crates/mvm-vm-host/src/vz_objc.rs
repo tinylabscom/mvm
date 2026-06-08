@@ -30,15 +30,15 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use anyhow::{Result, anyhow, bail};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{Bool, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSArray, NSData, NSError, NSFileHandle, NSObject, NSString, NSURL};
 use objc2_virtualization::{
@@ -48,17 +48,20 @@ use objc2_virtualization::{
     VZVirtioBlockDeviceConfiguration, VZVirtioConsoleDeviceSerialPortConfiguration,
     VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
     VZVirtioNetworkDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
-    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDevice,
-    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
-    VZVirtualMachineConfiguration, VZVirtualMachineDelegate, VZVirtualMachineState,
+    VZVirtioSocketDeviceConfiguration, VZVirtioSocketListener, VZVirtioSocketListenerDelegate,
+    VZVirtioTraditionalMemoryBalloonDevice, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
+    VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
+    VZVirtualMachineState,
 };
 use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::UnixListener;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use mvm_build::vz::{NetworkConfig, StartupMode, SupervisorConfig};
+use mvm_core::exit_capture::exit_file_path;
+use mvm_guest::vsock::WORKLOAD_EXIT_PORT;
 
 /// Unique per-process counter so each VM's dispatch queue gets a distinct
 /// label (libdispatch keys its worker bookkeeping off the label).
@@ -373,6 +376,115 @@ impl AsyncWrite for VsockStream {
 }
 
 // ---------------------------------------------------------------------------
+// Guest→host vsock listener (workload-exit capture)
+// ---------------------------------------------------------------------------
+
+/// Ivars for [`VsockListenerDelegate`]: the channel each accepted guest
+/// connection is forwarded on. Runs on the VM's queue, so a `Cell` suffices.
+struct VsockListenerDelegateIvars {
+    tx: Cell<Option<mpsc::UnboundedSender<SendableConnection>>>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; adds no Drop.
+    #[unsafe(super(NSObject))]
+    #[ivars = VsockListenerDelegateIvars]
+    #[name = "MvmVzExitListenerDelegate"]
+    struct VsockListenerDelegate;
+
+    unsafe impl NSObjectProtocol for VsockListenerDelegate {}
+
+    unsafe impl VZVirtioSocketListenerDelegate for VsockListenerDelegate {
+        /// Accept a guest-initiated connection and forward it for capture.
+        #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
+        fn should_accept(
+            &self,
+            _listener: &VZVirtioSocketListener,
+            connection: &VZVirtioSocketConnection,
+            _device: &VZVirtioSocketDevice,
+        ) -> Bool {
+            if let Some(tx) = self.ivars().tx.take() {
+                // SAFETY: valid framework connection; retain it past the callback.
+                let retained = unsafe {
+                    Retained::retain(connection as *const _ as *mut VZVirtioSocketConnection)
+                };
+                if let Some(conn) = retained {
+                    let _ = tx.send(SendableConnection(conn));
+                    self.ivars().tx.set(Some(tx));
+                    return Bool::YES;
+                }
+                self.ivars().tx.set(Some(tx));
+            }
+            Bool::NO
+        }
+    }
+);
+
+impl VsockListenerDelegate {
+    fn new(tx: mpsc::UnboundedSender<SendableConnection>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(VsockListenerDelegateIvars {
+            tx: Cell::new(Some(tx)),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn as_protocol(&self) -> &ProtocolObject<dyn VZVirtioSocketListenerDelegate> {
+        ProtocolObject::from_ref(self)
+    }
+}
+
+/// Keeps the exit-port listener + delegate alive for the VM's lifetime. Both
+/// are `!Send`; only ever touched on the VM's queue (creation) and dropped on
+/// shutdown, which is what makes the `unsafe impl` sound.
+struct ExitListenerHandle {
+    _listener: Retained<VZVirtioSocketListener>,
+    _delegate: Retained<VsockListenerDelegate>,
+}
+
+// SAFETY: created on the queue and only held to defer deallocation.
+unsafe impl Send for ExitListenerHandle {}
+// SAFETY: shared access is funnelled through the queue.
+unsafe impl Sync for ExitListenerHandle {}
+
+/// Capture one finished workload's exit code: read the guest's 4-byte LE i32,
+/// persist it to `<vm_state_dir>/workload.exit`, store it in `slot`, then ack
+/// (the guest waits for the ack before powering off — so the file + slot are
+/// durably set before the VM stops). Mirrors `exit_capture::capture_once`.
+async fn capture_exit<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    vm_state_dir: PathBuf,
+    slot: Arc<Mutex<Option<i32>>>,
+) {
+    let mut buf = [0u8; 4];
+    if let Err(e) = stream.read_exact(&mut buf).await {
+        tracing::warn!(error = %e, "exit-capture: read failed");
+        return;
+    }
+    let code = i32::from_le_bytes(buf);
+    if let Err(e) = std::fs::write(exit_file_path(&vm_state_dir), code.to_string()) {
+        tracing::warn!(error = %e, "exit-capture: write workload.exit failed");
+    }
+    *slot.lock().expect("exit slot mutex") = Some(code);
+    let _ = stream.write_all(&[1u8]).await;
+    let _ = stream.flush().await;
+}
+
+/// Await the first guest connection on the exit port and capture its code. A
+/// one-shot workload reports exactly once; long-running workloads never connect.
+async fn run_exit_listener(
+    mut rx: mpsc::UnboundedReceiver<SendableConnection>,
+    vm_state_dir: PathBuf,
+    slot: Arc<Mutex<Option<i32>>>,
+) {
+    if let Some(conn) = rx.recv().await {
+        match VsockStream::from_connection(conn.0) {
+            Ok(stream) => capture_exit(stream, vm_state_dir, slot).await,
+            Err(e) => tracing::warn!(error = %e, "exit-capture: build stream failed"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VM handle + supervisor
 // ---------------------------------------------------------------------------
 
@@ -611,6 +723,13 @@ pub struct VzSupervisor {
     mem_total_bytes: u64,
     /// Machine-identifier bytes for the SAVE sidecar (`None` if unavailable).
     machine_id: Option<Arc<Vec<u8>>>,
+    /// Captured one-shot workload exit code, if the guest reported one over the
+    /// exit port. `wait()` returns it in preference to the VZ clean/error code.
+    captured_exit: Arc<Mutex<Option<i32>>>,
+    /// Workload-exit listener accept loop, aborted on shutdown.
+    exit_task: Option<JoinHandle<()>>,
+    /// Retains the exit-port `VZVirtioSocketListener` for the VM's lifetime.
+    _exit_listener: Option<ExitListenerHandle>,
 }
 
 impl VzSupervisor {
@@ -628,7 +747,17 @@ impl VzSupervisor {
 
         // Captured before `config` is moved into the create closure.
         let vsock_dir = config.vsock.socket_dir.clone();
-        let vsock_ports = config.vsock.ports.clone();
+        // The exit port is guest→host (a VZVirtioSocketListener), so it is NOT a
+        // host→guest proxy port — keep it out of the proxy set.
+        let proxy_ports: Vec<u32> = config
+            .vsock
+            .ports
+            .iter()
+            .copied()
+            .filter(|&p| p != WORKLOAD_EXIT_PORT)
+            .collect();
+        let capture_exit = config.vsock.ports.contains(&WORKLOAD_EXIT_PORT);
+        let vm_state_dir = config.vm_state_dir.clone();
         let control_path = config.control_socket_path.clone();
         let mem_total_bytes = mib_to_bytes(config.resources.memory_mib);
         let startup_mode = config.startup_mode.clone();
@@ -673,13 +802,21 @@ impl VzSupervisor {
             control_path: None,
             mem_total_bytes,
             machine_id: machine_id.map(Arc::new),
+            captured_exit: Arc::new(Mutex::new(None)),
+            exit_task: None,
+            _exit_listener: None,
         };
-        // Bind the host-side vsock proxy + control socket before start, so a
-        // client (mvmctl / mvmd) can reach the guest agent and drive lifecycle
-        // verbs the moment it boots — the Swift supervisor's ordering.
-        this.start_vsock_proxy(&vsock_dir, &vsock_ports)?;
+        // Bind the host-side vsock proxy + control socket + workload-exit
+        // listener before start, so a client (mvmctl / mvmd) can reach the guest
+        // agent and drive lifecycle verbs — and a finished one-shot workload can
+        // report its exit code — the moment it boots. The Swift supervisor's
+        // ordering.
+        this.start_vsock_proxy(&vsock_dir, &proxy_ports)?;
         if let Some(path) = control_path {
             this.start_control_socket(&path)?;
+        }
+        if capture_exit {
+            this.start_exit_listener(&vm_state_dir).await?;
         }
         // Boot a fresh guest, or restore from a saved state + resume.
         match startup_mode {
@@ -776,14 +913,53 @@ impl VzSupervisor {
         Ok(())
     }
 
-    /// Abort the vsock proxy + control accept loops and unlink their sockets.
-    /// Best-effort; process exit would reap them anyway, but this keeps the
-    /// state dir clean.
+    /// Set a guest→host `VZVirtioSocketListener` on the workload-exit port and
+    /// spawn the capture task. A finished one-shot workload's `/init` dials this
+    /// port (via the baked `mvm-exit-report`) with its 4-byte LE exit code
+    /// before `poweroff`; we persist it to `workload.exit` and surface it from
+    /// [`wait`](Self::wait). Long-running workloads never connect.
+    async fn start_exit_listener(&mut self, vm_state_dir: &str) -> Result<()> {
+        let (tx, rx) = mpsc::unbounded_channel::<SendableConnection>();
+        let handle = Arc::clone(&self.handle);
+        let listener_handle = self
+            .queue
+            .dispatch(move || -> Result<ExitListenerHandle> {
+                // SAFETY: socketDevices() is a queue-bound accessor.
+                let devices = unsafe { handle.vm.socketDevices() };
+                let device = devices
+                    .to_vec()
+                    .into_iter()
+                    .next()
+                    .and_then(|d| Retained::downcast::<VZVirtioSocketDevice>(d).ok())
+                    .ok_or_else(|| anyhow!("VM has no virtio-socket device for exit listener"))?;
+                let delegate = VsockListenerDelegate::new(tx);
+                // SAFETY: new() returns a default socket listener.
+                let listener = unsafe { VZVirtioSocketListener::new() };
+                // SAFETY: setDelegate installs our accept delegate.
+                unsafe { listener.setDelegate(Some(delegate.as_protocol())) };
+                // SAFETY: setSocketListener_forPort must run on the VM's queue.
+                unsafe { device.setSocketListener_forPort(&listener, WORKLOAD_EXIT_PORT) };
+                Ok(ExitListenerHandle {
+                    _listener: listener,
+                    _delegate: delegate,
+                })
+            })
+            .await??;
+        let dir = PathBuf::from(vm_state_dir);
+        let slot = Arc::clone(&self.captured_exit);
+        self.exit_task = Some(tokio::spawn(run_exit_listener(rx, dir, slot)));
+        self._exit_listener = Some(listener_handle);
+        Ok(())
+    }
+
+    /// Abort the vsock proxy + control + exit accept loops and unlink their
+    /// sockets. Best-effort; process exit would reap them anyway, but this keeps
+    /// the state dir clean.
     pub fn shutdown(&self) {
         for task in &self.vsock_tasks {
             task.abort();
         }
-        if let Some(task) = &self.control_task {
+        for task in self.control_task.iter().chain(self.exit_task.iter()) {
             task.abort();
         }
         for path in self.vsock_paths.iter().chain(self.control_path.iter()) {
@@ -835,18 +1011,21 @@ impl VzSupervisor {
             .await?
     }
 
-    /// Block until the guest reaches a terminal state. Returns the process exit
-    /// code: 0 on a clean guest power-off, 1 on a framework error stop.
+    /// Block until the guest reaches a terminal state. Returns the captured
+    /// one-shot workload exit code if the guest reported one over the exit port
+    /// (the guest acks that report before powering off, so it is durably set by
+    /// the time we observe the stop); otherwise the VZ outcome — 0 on a clean
+    /// power-off, 1 on a framework error stop.
     pub async fn wait(&self) -> Result<i32> {
         let mut rx = self.state_rx.clone();
         loop {
             match rx.borrow_and_update().clone() {
-                RunState::Stopped => return Ok(0),
+                RunState::Stopped => return Ok(self.captured_exit_code().unwrap_or(0)),
                 RunState::Errored(msg) => {
                     if !msg.is_empty() {
                         eprintln!("mvm-vz-supervisor: guest stopped with error: {msg}");
                     }
-                    return Ok(1);
+                    return Ok(self.captured_exit_code().unwrap_or(1));
                 }
                 RunState::Pending | RunState::Running => {}
             }
@@ -854,6 +1033,10 @@ impl VzSupervisor {
                 bail!("state channel closed before the guest reached a terminal state");
             }
         }
+    }
+
+    fn captured_exit_code(&self) -> Option<i32> {
+        *self.captured_exit.lock().expect("exit slot mutex")
     }
 }
 
@@ -1328,6 +1511,26 @@ mod tests {
     fn mib_to_bytes_is_binary_megabytes() {
         assert_eq!(mib_to_bytes(1), 1024 * 1024);
         assert_eq!(mib_to_bytes(512), 512 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn capture_exit_persists_code_and_acks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut client, server) = tokio::io::duplex(64);
+        let slot = Arc::new(Mutex::new(None));
+        let task = tokio::spawn(capture_exit(
+            server,
+            dir.path().to_path_buf(),
+            Arc::clone(&slot),
+        ));
+        client.write_all(&(-7i32).to_le_bytes()).await.unwrap();
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        task.await.unwrap();
+        assert_eq!(ack[0], 1);
+        assert_eq!(*slot.lock().unwrap(), Some(-7));
+        assert_eq!(mvm_core::exit_capture::read_captured(dir.path()), Some(-7));
     }
 
     #[test]

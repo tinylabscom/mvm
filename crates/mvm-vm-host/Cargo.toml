@@ -112,6 +112,7 @@ objc2-virtualization = { version = "0.3", features = [
     "VZVirtioSocketDevice",
     "VZVirtioSocketDeviceConfiguration",
     "VZVirtioSocketConnection",
+    "VZVirtioSocketListener",
     "VZNetworkDeviceConfiguration",
     "VZVirtioNetworkDeviceConfiguration",
     "VZNetworkDeviceAttachment",
