@@ -2142,32 +2142,70 @@ fn security_snapshot_dirs_check() -> Check {
     }
 }
 
-/// macOS-only: VM launch needs the VZ + Hypervisor entitlements on the
-/// running binary. Off macOS the question is n/a.
+/// macOS-only: every sign target (mvmctl plus the supervisor binaries) needs
+/// the VZ and Hypervisor entitlements. Probes all paths from
+/// `collect_sign_targets` so an unsigned supervisor is not left unreported.
+/// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    let exe = std::env::current_exe().ok();
-    let present = exe
-        .as_deref()
-        .and_then(mvm_backend::providers::apple_container::entitlements_present);
-    match present {
-        None => Check {
+    use mvm_backend::providers::apple_container::{collect_sign_targets, entitlements_present};
+    let targets = collect_sign_targets();
+    // `entitlements_present` returns `None` off macOS for every path, so if
+    // the first target gives `None` the whole check is n/a.
+    let probed: Vec<(std::path::PathBuf, Option<bool>)> = targets
+        .into_iter()
+        .map(|p| {
+            let r = entitlements_present(&p);
+            (p, r)
+        })
+        .collect();
+    signing_check_from_probes(&probed)
+}
+
+/// Pure mapping: per-target probe results → Check. Separate so tests can
+/// drive it with fixture data without invoking codesign or the filesystem.
+fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> Check {
+    // All None → not on macOS; the question is n/a.
+    if probes.iter().all(|(_, r)| r.is_none()) {
+        return Check {
             name: "signing",
             category: "security",
             ok: true,
             info: "n/a (macOS only)".to_string(),
-        },
-        Some(true) => Check {
+        };
+    }
+    // Collect names of targets that are verifiably unsigned (Some(false)).
+    let unsigned: Vec<String> = probes
+        .iter()
+        .filter_map(|(p, r)| {
+            if *r == Some(false) {
+                Some(
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("<unknown>")
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    if unsigned.is_empty() {
+        Check {
             name: "signing",
             category: "security",
             ok: true,
-            info: "VZ + Hypervisor entitlements present".to_string(),
-        },
-        Some(false) => Check {
+            info: "VZ + Hypervisor entitlements present on all sign targets".to_string(),
+        }
+    } else {
+        Check {
             name: "signing",
             category: "security",
             ok: false,
-            info: "entitlements missing — run `mvmctl sign`".to_string(),
-        },
+            info: format!(
+                "entitlements missing on: {} — run `mvmctl sign`",
+                unsigned.join(", ")
+            ),
+        }
     }
 }
 
@@ -2362,6 +2400,115 @@ mod tests {
         // broken" — the doctor's None-path is reserved for "couldn't run
         // codesign at all".
         assert!(!entitlement_present_in_codesign_output(b""));
+    }
+
+    // ── signing_check_from_probes unit tests ────────────────────────
+
+    #[test]
+    fn signing_check_all_none_is_na() {
+        // Off macOS every probe returns None → n/a, ok: true.
+        let probes = vec![(std::path::PathBuf::from("/usr/local/bin/mvmctl"), None)];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok);
+        assert!(c.info.contains("n/a"), "expected n/a, got: {}", c.info);
+    }
+
+    #[test]
+    fn signing_check_all_signed_is_ok() {
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                Some(true),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok, "all signed → ok; got: {}", c.info);
+        assert!(
+            c.info.contains("all sign targets"),
+            "expected 'all sign targets', got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_one_unsigned_supervisor_is_not_ok() {
+        // mvmctl signed, supervisor unsigned — doctor must NOT report OK.
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                Some(false),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(!c.ok, "unsigned supervisor must fail; got: {}", c.info);
+        assert!(
+            c.info.contains("mvm-vz-supervisor"),
+            "info must name the unsigned target; got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("mvmctl sign"),
+            "info must carry the remediation hint; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_mixed_none_and_false_treats_false_as_unsigned() {
+        // Some targets return None (probe failed / tooling unavailable),
+        // others return Some(false) (verifiably unsigned). The None ones
+        // must not be counted as "unsigned" — only confirmed Some(false)
+        // targets appear in the remediation list.
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-libkrun-supervisor"),
+                None,
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                Some(false),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(!c.ok, "at least one Some(false) → not ok; got: {}", c.info);
+        assert!(
+            c.info.contains("mvm-vz-supervisor"),
+            "must name the unsigned binary; got: {}",
+            c.info
+        );
+        assert!(
+            !c.info.contains("mvm-libkrun-supervisor"),
+            "None probe must not be listed as unsigned; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_all_unknown_probes_is_ok() {
+        // All probes return None → on macOS this means codesign wasn't
+        // available for every target (treated as "unknown, not a failure").
+        // The n/a branch fires only when ALL are None.
+        let probes = vec![
+            (std::path::PathBuf::from("/usr/local/bin/mvmctl"), None),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                None,
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok, "all None → n/a, ok; got: {}", c.info);
     }
 
     #[test]
