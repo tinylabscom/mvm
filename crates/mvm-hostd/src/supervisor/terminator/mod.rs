@@ -5,5 +5,7 @@
 //! secret placeholders in the payload, and forwards the request under the real
 //! credential. Each sub-module is its own self-contained concern.
 
+pub mod handler;
 pub mod orig_dst;
+pub mod read;
 pub mod request;
