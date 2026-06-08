@@ -21,8 +21,10 @@
 //! supervisor behind the parity gate: `Restore` startup, and **flow-audited**
 //! networking (the `events_ingest` path — porting it as an in-process
 //! `payload_tap` is a later slice, and direct-attaching it would bypass the
-//! claim-10 egress audit). Still to come: control socket, snapshot/save-restore,
-//! payload_tap, the workload-exit channel, codesigning, and the parity matrix.
+//! claim-10 egress audit). Also wired: the control socket
+//! (STATUS/PAUSE/RESUME/BALLOON; SAVE/RESTORE refused pending the snapshot
+//! slice). Still to come: snapshot/save-restore, payload_tap, the workload-exit
+//! channel, and the parity matrix.
 
 use std::cell::Cell;
 use std::io;
@@ -47,8 +49,9 @@ use objc2_virtualization::{
     VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
     VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
     VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration,
-    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
-    VZVirtualMachineConfiguration, VZVirtualMachineDelegate, VZVirtualMachineState,
+    VZVirtioTraditionalMemoryBalloonDevice, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
+    VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
+    VZVirtualMachineState,
 };
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -446,6 +449,87 @@ impl VmConn {
             .map_err(|_| anyhow!("vsock connect completion handler was never called"))??;
         VsockStream::from_connection(conn.0)
     }
+
+    /// Control verb: pause the running guest (`pauseWithCompletionHandler`).
+    async fn pause(&self) -> Result<()> {
+        let handle = Arc::clone(&self.handle);
+        let (tx, rx) = oneshot::channel();
+        self.queue
+            .dispatch(move || {
+                let block = completion_block(tx);
+                // SAFETY: pauseWithCompletionHandler must run on the VM's queue.
+                unsafe { handle.vm.pauseWithCompletionHandler(&block) };
+            })
+            .await?;
+        rx.await
+            .map_err(|_| anyhow!("pause completion handler was never called"))?
+    }
+
+    /// Control verb: resume a paused guest (`resumeWithCompletionHandler`).
+    async fn resume(&self) -> Result<()> {
+        let handle = Arc::clone(&self.handle);
+        let (tx, rx) = oneshot::channel();
+        self.queue
+            .dispatch(move || {
+                let block = completion_block(tx);
+                // SAFETY: resumeWithCompletionHandler must run on the VM's queue.
+                unsafe { handle.vm.resumeWithCompletionHandler(&block) };
+            })
+            .await?;
+        rx.await
+            .map_err(|_| anyhow!("resume completion handler was never called"))?
+    }
+
+    /// Control verb: the guest's current lifecycle state as the word the
+    /// control protocol reports (`OK <word>`).
+    async fn status_word(&self) -> Result<&'static str> {
+        let handle = Arc::clone(&self.handle);
+        self.queue
+            // SAFETY: `state` is a queue-bound property accessor.
+            .dispatch(move || status_word(unsafe { handle.vm.state() }))
+            .await
+    }
+
+    /// Control verb: ask the guest to balloon to `bytes` of available memory.
+    /// Apple rounds + clamps; the actual in-guest change is asynchronous.
+    async fn set_balloon_target(&self, bytes: u64) -> Result<()> {
+        let handle = Arc::clone(&self.handle);
+        self.queue
+            .dispatch(move || -> Result<()> {
+                // SAFETY: memoryBalloonDevices is a queue-bound property accessor.
+                let devices = unsafe { handle.vm.memoryBalloonDevices() };
+                let device = devices
+                    .to_vec()
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("no memory balloon device attached"))?;
+                let traditional =
+                    Retained::downcast::<VZVirtioTraditionalMemoryBalloonDevice>(device)
+                        .map_err(|_| anyhow!("balloon device is not a traditional balloon"))?;
+                // SAFETY: setTargetVirtualMachineMemorySize is a plain property setter.
+                unsafe { traditional.setTargetVirtualMachineMemorySize(bytes) };
+                Ok(())
+            })
+            .await?
+    }
+}
+
+/// Map Apple's `VZVirtualMachineState` onto the control protocol's `STATUS`
+/// word (matches the Swift `ControlSocket` responses).
+fn status_word(s: VZVirtualMachineState) -> &'static str {
+    match s {
+        VZVirtualMachineState::Stopped => "stopped",
+        VZVirtualMachineState::Starting => "starting",
+        VZVirtualMachineState::Running => "running",
+        VZVirtualMachineState::Pausing => "pausing",
+        VZVirtualMachineState::Paused => "paused",
+        VZVirtualMachineState::Resuming => "resuming",
+        VZVirtualMachineState::Stopping => "stopping",
+        VZVirtualMachineState::Saving => "saving",
+        VZVirtualMachineState::Restoring => "restoring",
+        VZVirtualMachineState::Error => "error",
+        _ => "unknown",
+    }
 }
 
 /// One Vz guest, driven from Rust. Created with [`VzSupervisor::boot`], which
@@ -460,6 +544,10 @@ pub struct VzSupervisor {
     vsock_tasks: Vec<JoinHandle<()>>,
     /// Bound `vsock-<port>.sock` paths, unlinked on shutdown.
     vsock_paths: Vec<PathBuf>,
+    /// Control-socket accept loop (PAUSE/RESUME/STATUS/BALLOON), if bound.
+    control_task: Option<JoinHandle<()>>,
+    /// Bound `control.sock` path, unlinked on shutdown.
+    control_path: Option<PathBuf>,
 }
 
 impl VzSupervisor {
@@ -478,6 +566,7 @@ impl VzSupervisor {
         // Captured before `config` is moved into the create closure.
         let vsock_dir = config.vsock.socket_dir.clone();
         let vsock_ports = config.vsock.ports.clone();
+        let control_path = config.control_socket_path.clone();
 
         let config = config.clone();
         let queue_inner = queue.clone_inner();
@@ -510,11 +599,16 @@ impl VzSupervisor {
             state_rx,
             vsock_tasks: Vec::new(),
             vsock_paths: Vec::new(),
+            control_task: None,
+            control_path: None,
         };
-        // Bind the host-side vsock proxy before start, so a client (mvmctl /
-        // mvmd) can reach the guest agent the moment it boots — the Swift
-        // supervisor's ordering.
+        // Bind the host-side vsock proxy + control socket before start, so a
+        // client (mvmctl / mvmd) can reach the guest agent and drive lifecycle
+        // verbs the moment it boots — the Swift supervisor's ordering.
         this.start_vsock_proxy(&vsock_dir, &vsock_ports)?;
+        if let Some(path) = control_path {
+            this.start_control_socket(&path)?;
+        }
         this.start().await?;
         Ok(this)
     }
@@ -556,13 +650,37 @@ impl VzSupervisor {
         Ok(())
     }
 
-    /// Abort the vsock proxy accept loops and unlink their sockets. Best-effort;
-    /// process exit would reap them anyway, but this keeps the state dir clean.
+    /// Bind the per-VM control socket (`control.sock`, mode 0700) and spawn its
+    /// accept loop. Speaks the newline-framed `VERB args\n` → `OK …`/`ERR …`
+    /// protocol the host-side `mvm_backend::vz_control` client drives.
+    fn start_control_socket(&mut self, path: &str) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = Path::new(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("create {}: {e}", parent.display()))?;
+        }
+        let _ = std::fs::remove_file(path);
+        let listener =
+            UnixListener::bind(path).map_err(|e| anyhow!("bind {}: {e}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| anyhow!("chmod 0700 {}: {e}", path.display()))?;
+        self.control_task = Some(tokio::spawn(run_control_socket(self.connector(), listener)));
+        self.control_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    /// Abort the vsock proxy + control accept loops and unlink their sockets.
+    /// Best-effort; process exit would reap them anyway, but this keeps the
+    /// state dir clean.
     pub fn shutdown(&self) {
         for task in &self.vsock_tasks {
             task.abort();
         }
-        for path in &self.vsock_paths {
+        if let Some(task) = &self.control_task {
+            task.abort();
+        }
+        for path in self.vsock_paths.iter().chain(self.control_path.iter()) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -658,6 +776,75 @@ async fn run_port_proxy(conn: VmConn, listener: UnixListener, port: u32) {
             }
         });
     }
+}
+
+/// Accept loop for the control socket. Each connection carries one command
+/// (matching the host client's single-short-lived-connection-per-command
+/// model): read a line, dispatch, write `OK …`/`ERR …\n`.
+async fn run_control_socket(conn: VmConn, listener: UnixListener) {
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _addr)) => stream,
+            Err(e) => {
+                tracing::warn!(error = %e, "control-socket accept failed; stopping");
+                return;
+            }
+        };
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let (read_half, mut write_half) = stream.into_split();
+            let mut lines = BufReader::new(read_half).lines();
+            if let Ok(Some(line)) = lines.next_line().await {
+                let reply = dispatch_control(&conn, line.trim()).await;
+                let _ = write_half.write_all(reply.as_bytes()).await;
+                let _ = write_half.write_all(b"\n").await;
+                let _ = write_half.flush().await;
+            }
+        });
+    }
+}
+
+/// Execute one control verb and format the single-line response. SAVE/RESTORE
+/// are deliberately refused — snapshot is a later WS-B slice, and RESTORE is a
+/// supervisor startup mode, not a runtime command (matches the Swift response).
+async fn dispatch_control(conn: &VmConn, command: &str) -> String {
+    let (verb, arg) = command
+        .split_once(' ')
+        .map(|(v, a)| (v, a.trim()))
+        .unwrap_or((command, ""));
+    match verb {
+        "STATUS" => match conn.status_word().await {
+            Ok(word) => format!("OK {word}"),
+            Err(e) => err_reply(&e),
+        },
+        "PAUSE" => ok_reply(conn.pause().await),
+        "RESUME" => ok_reply(conn.resume().await),
+        "BALLOON" => match arg.parse::<u64>() {
+            Ok(mib) => ok_reply(conn.set_balloon_target(mib * 1024 * 1024).await),
+            Err(_) => format!("ERR BALLOON requires a MiB integer argument, got {arg:?}"),
+        },
+        "SAVE" => "ERR SAVE (snapshot) is not yet ported to the Rust supervisor \
+                   (Plan 152 WS-B slice 6); the Swift supervisor still backs snapshots"
+            .to_string(),
+        "RESTORE" => {
+            "ERR RESTORE is a supervisor startup mode, not a control-socket command".to_string()
+        }
+        other => format!("ERR unknown control command {other:?}"),
+    }
+}
+
+fn ok_reply(result: Result<()>) -> String {
+    match result {
+        Ok(()) => "OK".to_string(),
+        Err(e) => err_reply(&e),
+    }
+}
+
+/// Format an error as a single `ERR …` line — newlines collapsed so the
+/// response stays one line (the client reads up to the first `\n`).
+fn err_reply(e: &anyhow::Error) -> String {
+    format!("ERR {}", e.to_string().replace('\n', "; "))
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1187,15 @@ mod tests {
     fn mib_to_bytes_is_binary_megabytes() {
         assert_eq!(mib_to_bytes(1), 1024 * 1024);
         assert_eq!(mib_to_bytes(512), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn status_word_covers_lifecycle_states() {
+        assert_eq!(status_word(VZVirtualMachineState::Running), "running");
+        assert_eq!(status_word(VZVirtualMachineState::Paused), "paused");
+        assert_eq!(status_word(VZVirtualMachineState::Stopped), "stopped");
+        assert_eq!(status_word(VZVirtualMachineState::Saving), "saving");
+        assert_eq!(status_word(VZVirtualMachineState(9999)), "unknown");
     }
 
     #[test]
