@@ -1,45 +1,37 @@
-//! Plan 152 WS-B parity gate — Swift vs Rust `mvm-vz-supervisor`.
+//! Plan 152 WS-B gate — Rust-native `mvm-vz-supervisor` correctness.
 //!
-//! The mandatory gate that must be green **before** the Swift supervisor
-//! (`crates/mvm-vz-supervisor/`) is deleted: the Rust-native objc2 supervisor
-//! must match the Swift one on boot, vsock round-trip, every control verb, and
-//! save/restore. This file is authored independently of the supervisor
-//! implementation (Plan 152 WS-B is built on a separate branch) — the gate is
-//! deliberately written by a different hand than the code it judges.
+//! Originally a Swift-vs-Rust parity gate; the Swift supervisor was removed in
+//! the WS-B finalization (it self-deadlocked on async VZ control ops — its
+//! `synchronousVZCall` blocked the VM's serial dispatch queue awaiting a
+//! completion dispatched to that same queue). The Rust-native objc2 supervisor
+//! replaces it, so this gate now asserts the **Rust** supervisor is correct on
+//! boot, vsock round-trip, every control verb, and save/restore.
 //!
-//! **Why this is a subprocess harness, not a linked one.** Both supervisors are
-//! standalone binaries that read a [`SupervisorConfig`] JSON on stdin. We drive
-//! them as child processes resolved by path, never linking
+//! **Why this is a subprocess harness, not a linked one.** The supervisor is a
+//! standalone binary that reads a [`SupervisorConfig`] JSON on stdin. We drive
+//! it as a child process resolved by path, never linking
 //! `Virtualization.framework` into the test binary itself. That keeps the gate
 //! runnable on a normal dev Mac: a test binary that links VZ gets SIGKILL'd by
 //! the macOS codesign/amfid path (see the `mvm-backend` test caveat), so this
-//! harness lives in the VZ-free `mvm-build` crate and speaks to the supervisors
-//! only over stdin + the per-VM unix sockets they expose.
+//! harness lives in the VZ-free `mvm-build` crate and speaks to the supervisor
+//! only over stdin + the per-VM unix sockets it exposes.
 //!
-//! **Gating.** The live comparison needs two built+signed supervisor binaries
-//! and a bootable kernel+rootfs. Those come from the environment so the test is
-//! a no-op skip on a machine without them (a plain `cargo test` host, CI Linux,
+//! **Gating.** The live tests need a built+signed supervisor binary and a
+//! bootable kernel+rootfs. Those come from the environment so the test is a
+//! no-op skip on a machine without them (a plain `cargo test` host, CI Linux,
 //! GitHub macOS runners that lack Hypervisor.framework) and runs for real on the
 //! self-hosted `vz-macos-26` runner or a dev Mac that exports them:
 //!
 //! ```text
-//! MVM_VZ_PARITY_SWIFT_BIN=/abs/path/to/swift/mvm-vz-supervisor   # tools/build.sh output
-//! MVM_VZ_PARITY_RUST_BIN=/abs/path/to/rust/mvm-vz-supervisor     # cargo --bin output, codesigned
-//! MVM_VZ_PARITY_KERNEL=/abs/path/to/vmlinux                      # uncompressed
+//! MVM_VZ_PARITY_RUST_BIN=/abs/path/to/mvm-vz-supervisor   # cargo --bin output, codesigned
+//! MVM_VZ_PARITY_KERNEL=/abs/path/to/vmlinux               # uncompressed
 //! MVM_VZ_PARITY_ROOTFS=/abs/path/to/rootfs.ext4
+//! MVM_VZ_PARITY_CMDLINE="console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000"  # long-lived guest
 //! ```
 //!
-//! Both supervisor binaries share the name `mvm-vz-supervisor`, so they are
-//! addressed by explicit path, never by name resolution.
-//!
-//! Slices: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy round-trip
-//! parity (identical request bytes → identical reply bytes through each
-//! supervisor's per-port proxy); P3 control-verb parity (STATUS/PAUSE/RESUME
-//! replies match step-for-step); P4 save/restore parity (`SAVE` a snapshot, then
-//! restore it in a fresh supervisor). P3/P4 are staged ahead of the Rust control
-//! socket + snapshot slices, so they report the gap until those land. Plus the
-//! pure config/contract/round-trip/codec helpers. (BALLOON joins P3 once the
-//! boot config carries a balloon device.)
+//! Slices: boot + graceful-stop; vsock proxy round-trip; control verbs
+//! (STATUS/PAUSE/RESUME); save/restore (`SAVE` a snapshot, restore it in a fresh
+//! supervisor). Plus the pure config/contract/round-trip/codec helpers.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
