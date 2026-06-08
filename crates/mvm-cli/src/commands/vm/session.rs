@@ -771,10 +771,14 @@ fn dispatch_run_code(
     mvm_guest::vsock::write_frame(&mut stream, &req)?;
     let terminal = mvm_guest::vsock::read_exec_stream(&mut stream, |event| match event {
         mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
-            let _ = std::io::stdout().write_all(chunk);
+            let mut so = std::io::stdout();
+            let _ = so.write_all(chunk);
+            let _ = so.flush();
         }
         mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
-            let _ = std::io::stderr().write_all(chunk);
+            let mut se = std::io::stderr();
+            let _ = se.write_all(chunk);
+            let _ = se.flush();
         }
         _ => {}
     })?;
