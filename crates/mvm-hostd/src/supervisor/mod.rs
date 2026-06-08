@@ -76,6 +76,10 @@ pub mod reaper;
 /// `secret.placeholder_dropped` audit events (metadata only, never the value).
 pub mod secret_audit;
 pub mod secrets_scanner;
+/// Plan 129 — the per-VM substitution endpoint subprocess library half: the
+/// stdin config contract + store-opening/service assembly. The
+/// `mvm-substitution-endpoint` bin is the process wrapper.
+pub mod substitution_endpoint;
 /// Plan 129 / ADR-067 §1 — host substitution endpoint request preparation
 /// (placeholder → real credential, binding-checked). The forward leg + the
 /// guest-facing listener are separate transport steps.
