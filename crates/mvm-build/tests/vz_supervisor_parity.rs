@@ -32,14 +32,20 @@
 //! Both supervisor binaries share the name `mvm-vz-supervisor`, so they are
 //! addressed by explicit path, never by name resolution.
 //!
-//! Slices: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy round-trip
-//! parity (identical request bytes → identical reply bytes through each
-//! supervisor's per-port proxy); P3 control-verb parity (STATUS/PAUSE/RESUME
-//! replies match step-for-step); P4 save/restore parity (`SAVE` a snapshot, then
-//! restore it in a fresh supervisor). P3/P4 are staged ahead of the Rust control
-//! socket + snapshot slices, so they report the gap until those land. Plus the
-//! pure config/contract/round-trip/codec helpers. (BALLOON joins P3 once the
-//! boot config carries a balloon device.)
+//! Two kinds of live check, because the Swift baseline is uneven on macOS 26:
+//!
+//! - **Parity** (P1 boot, P2 vsock round-trip) — compares Rust against Swift on
+//!   surfaces where Swift works, a no-regression check during the migration.
+//! - **Absolute Rust-correctness** (P3 control verbs, P4 save/restore) — Swift
+//!   *deadlocks* on PAUSE/RESUME/SAVE here (`synchronousVZCall` blocks the VM's
+//!   dispatch queue), so it is a broken, soon-to-be-deleted baseline; "matches
+//!   Swift" is the wrong bar. These assert the Rust supervisor is correct on its
+//!   own terms. P4 is expected to fail until the slice-6 SAVE handler adds the
+//!   `pause → save` step (ADR-056 addendum) — it's the live "not safe to delete
+//!   Swift yet" signal.
+//!
+//! Plus pure config/contract/round-trip/codec helpers covered by always-on unit
+//! tests. (BALLOON joins P3 once the boot config carries a balloon device.)
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -341,11 +347,10 @@ fn probe_vsock_roundtrip(
     Ok(reply.filter(|r| !r.is_empty()))
 }
 
-/// Boot one supervisor, wait for its control socket, send each verb in `verbs`
-/// in order, and return the per-verb replies (`None` for a verb that errored, or
-/// for a supervisor that never bound the control socket), then stop. Until the
-/// Rust supervisor grows a control socket this returns all-`None` for it, so the
-/// parity assertion correctly reports the divergence.
+/// Boot one supervisor, wait for it to reach running, send each verb in `verbs`
+/// in order, and return the per-verb replies (`None` for a verb that errored or
+/// timed out — e.g. against a supervisor whose control queue deadlocked), then
+/// stop.
 fn probe_control_verbs(
     bin: &Path,
     kernel: &str,
@@ -399,10 +404,9 @@ struct SaveRestoreOutcome {
 /// spawn a fresh supervisor in `Restore` mode against that snapshot and check it
 /// reaches running. Contract per ADR-056 / `vz.rs`: `SAVE <path>` is a control
 /// verb that also writes a `<path>.machine-id` sidecar; RESTORE is a *startup
-/// mode*, not a verb. Staged ahead of the Rust snapshot slice → all-negative for
-/// it until that lands, so the parity assertion reports the gap. The phases use
-/// separate `boot/` and `restore/` state subdirs so their sockets/pid files
-/// don't collide; the snapshot lives in the shared parent.
+/// mode*, not a verb. The phases use separate `boot/` and `restore/` state
+/// subdirs so their sockets/pid files don't collide; the snapshot lives in the
+/// shared parent.
 fn probe_save_restore(
     bin: &Path,
     kernel: &str,
@@ -464,13 +468,27 @@ fn probe_save_restore(
 }
 
 /// Returns the four live-test paths, or `None` (with an explanatory skip note)
-/// when any is unset — the live gate is opt-in via environment.
+/// when any is unset — the live gate is opt-in via environment. Used by the
+/// boot + vsock *parity* tests, which compare against Swift on surfaces where
+/// Swift works.
 fn live_env() -> Option<(PathBuf, PathBuf, String, String)> {
     let swift = std::env::var_os(SWIFT_BIN)?;
     let rust = std::env::var_os(RUST_BIN)?;
     let kernel = std::env::var(KERNEL).ok()?;
     let rootfs = std::env::var(ROOTFS).ok()?;
     Some((PathBuf::from(swift), PathBuf::from(rust), kernel, rootfs))
+}
+
+/// Returns the Rust-only live-test paths (no Swift). The control-verb and
+/// save/restore checks assert *absolute Rust correctness* rather than parity:
+/// the Swift supervisor deadlocks on PAUSE/RESUME/SAVE on macOS 26 (its
+/// `synchronousVZCall` blocks the VM's dispatch queue), so it is a broken,
+/// soon-to-be-deleted baseline — "matches Swift" is the wrong bar there.
+fn rust_env() -> Option<(PathBuf, String, String)> {
+    let rust = std::env::var_os(RUST_BIN)?;
+    let kernel = std::env::var(KERNEL).ok()?;
+    let rootfs = std::env::var(ROOTFS).ok()?;
+    Some((PathBuf::from(rust), kernel, rootfs))
 }
 
 // ---------------------------------------------------------------------------
@@ -654,55 +672,71 @@ fn vsock_roundtrip_parity_swift_vs_rust() {
     );
 }
 
+/// Absolute Rust-correctness, NOT `== Swift`. The Swift supervisor deadlocks on
+/// PAUSE/RESUME (and SAVE) on macOS 26 — `synchronousVZCall` blocks the VM's
+/// dispatch queue waiting for a completion that fires on that same queue, and
+/// the control socket (which shares the queue) wedges. Since Swift is the broken
+/// baseline being deleted, the meaningful gate is that the Rust supervisor's
+/// control socket answers each verb correctly.
 #[test]
-fn control_verb_parity_swift_vs_rust() {
-    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+fn control_verbs_rust_correct() {
+    let Some((rust, kernel, rootfs)) = rust_env() else {
         eprintln!(
-            "SKIP control_verb_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} to run the live control-verb parity gate."
+            "SKIP control_verbs_rust_correct: set {RUST_BIN}, {KERNEL}, {ROOTFS} to run the live \
+             control-verb correctness check."
         );
         return;
     };
-    // Stateful but symmetric: both supervisors get the same sequence, so the
-    // replies must match step-for-step. BALLOON/SAVE/RESTORE join once the boot
-    // config carries a balloon device and the save/restore slice lands.
     let verbs = ["STATUS", "PAUSE", "RESUME", "STATUS"];
-    let swift_replies =
-        probe_control_verbs(&swift, &kernel, &rootfs, &verbs, "swift").expect("swift probe");
-    let rust_replies =
-        probe_control_verbs(&rust, &kernel, &rootfs, &verbs, "rust").expect("rust probe");
-
-    assert!(
-        swift_replies.iter().any(Option::is_some),
-        "Swift supervisor answered no control verbs — fix the fixture before judging parity"
-    );
+    let replies =
+        probe_control_verbs(&rust, &kernel, &rootfs, &verbs, "rust-ctl").expect("rust probe");
+    let expected = vec![
+        Some("OK running".to_string()),
+        Some("OK".to_string()),
+        Some("OK".to_string()),
+        Some("OK running".to_string()),
+    ];
     assert_eq!(
-        rust_replies, swift_replies,
-        "Rust supervisor diverged from Swift on control verbs: rust={rust_replies:?} \
-         swift={swift_replies:?}"
+        replies, expected,
+        "Rust control socket did not answer STATUS/PAUSE/RESUME/STATUS correctly: {replies:?}"
     );
 }
 
+/// Absolute Rust-correctness, NOT `== Swift` (Swift deadlocks on SAVE — see
+/// `control_verbs_rust_correct`). The Rust supervisor must SAVE a snapshot
+/// (writing the blob + the `.machine-id` sidecar) and restore from it.
+///
+/// As of slice 6 this is EXPECTED TO FAIL: the SAVE handler calls
+/// `saveMachineStateToURL` while the VM is running, but VZ requires it paused
+/// first (`VZErrorDomain:3 "running is invalid for saving"`). The fix is the
+/// `pause → save` call order from the ADR-056 addendum / WS-B plan. This test is
+/// the live signal that save/restore is not yet safe — it goes green when that
+/// pause-before-save step lands.
 #[test]
-fn save_restore_parity_swift_vs_rust() {
-    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+fn save_restore_rust_correct() {
+    let Some((rust, kernel, rootfs)) = rust_env() else {
         eprintln!(
-            "SKIP save_restore_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} to run the live save/restore parity gate (macOS 14+)."
+            "SKIP save_restore_rust_correct: set {RUST_BIN}, {KERNEL}, {ROOTFS} to run the live \
+             save/restore correctness check (macOS 14+)."
         );
         return;
     };
-    let swift_outcome = probe_save_restore(&swift, &kernel, &rootfs, "swift").expect("swift probe");
-    let rust_outcome = probe_save_restore(&rust, &kernel, &rootfs, "rust").expect("rust probe");
-
-    assert!(
-        swift_outcome.snapshot_written && swift_outcome.restore_reached_running,
-        "Swift supervisor could not save+restore — fix the fixture (macOS 14+?) before judging \
-         parity: {swift_outcome:?}"
-    );
+    let outcome = probe_save_restore(&rust, &kernel, &rootfs, "rust-sr").expect("rust probe");
     assert_eq!(
-        rust_outcome, swift_outcome,
-        "Rust supervisor diverged from Swift on save/restore: rust={rust_outcome:?} \
-         swift={swift_outcome:?}"
+        outcome.save_reply.as_deref(),
+        Some("OK"),
+        "Rust SAVE should return OK (missing pause-before-save? VZErrorDomain:3): {outcome:?}"
+    );
+    assert!(
+        outcome.snapshot_written,
+        "Rust SAVE should write the snapshot blob: {outcome:?}"
+    );
+    assert!(
+        outcome.sidecar_written,
+        "Rust SAVE should write the .machine-id sidecar: {outcome:?}"
+    );
+    assert!(
+        outcome.restore_reached_running,
+        "Rust should restore to a running guest: {outcome:?}"
     );
 }
