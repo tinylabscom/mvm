@@ -278,10 +278,10 @@ impl SubstitutionService {
 
     /// Accept loop over a host **AF_VSOCK** listener — the QEMU (`vhost-vsock`)
     /// guest→host path. Firecracker/libkrun route guest→host through a per-port
-    /// UDS instead and use [`Self::serve`]. The accepted vsock fd is a
-    /// `SOCK_STREAM` socket wrapped as a tokio `UnixStream` (same read/write
-    /// syscalls), so it reuses [`Self::handle_connection`]. Blocking `accept(2)`
-    /// runs on a `spawn_blocking` thread — no new async-vsock dependency.
+    /// UDS instead and use [`Self::serve`]. Both `accept(2)` and the per-
+    /// connection framing run with **blocking** I/O on `spawn_blocking` threads
+    /// (tokio's async reactor doesn't interplay reliably with an AF_VSOCK fd);
+    /// the async forward leg is driven via `Handle::block_on`. No new dep.
     #[cfg(target_os = "linux")]
     pub async fn serve_vsock(self: Arc<Self>, listener: vsock::VsockListener) {
         loop {
@@ -298,16 +298,9 @@ impl SubstitutionService {
                     return;
                 }
             };
-            let stream = match vsock::into_tokio_stream(conn_fd) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "wrap vsock connection; dropping");
-                    continue;
-                }
-            };
             let me = Arc::clone(&self);
             tokio::spawn(async move {
-                if let Err(e) = me.handle_connection(stream).await {
+                if let Err(e) = me.handle_vsock_connection(conn_fd).await {
                     tracing::warn!(error = %e, "vsock substitution connection failed");
                 }
             });
@@ -318,6 +311,30 @@ impl SubstitutionService {
         let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
         let resp = self.process(wire).await;
         write_json_frame(&mut stream, &resp).await
+    }
+
+    /// Handle one vsock connection: the raw socket I/O is blocking, so the
+    /// frame read/write run on `spawn_blocking` threads, while `process` (the
+    /// substitution + forward leg — the prod forward needs the tokio reactor)
+    /// runs on the runtime. We do NOT `block_on` the forward from a blocking
+    /// thread: a `spawn_blocking` thread is still inside the runtime context,
+    /// so tokio's `block_on` panics there.
+    #[cfg(target_os = "linux")]
+    async fn handle_vsock_connection(&self, conn_fd: std::os::fd::RawFd) -> std::io::Result<()> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: `conn_fd` is an owned connected stream socket from `accept`.
+        let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn_fd) };
+        let (mut stream, wire) = tokio::task::spawn_blocking(move || {
+            let mut s = stream;
+            let wire: WireRequest = vsock::read_frame_sync(&mut s)?;
+            std::io::Result::Ok((s, wire))
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let resp = self.process(wire).await;
+        tokio::task::spawn_blocking(move || vsock::write_frame_sync(&mut stream, &resp))
+            .await
+            .map_err(std::io::Error::other)?
     }
 
     async fn process(&self, wire: WireRequest) -> WireResponse {
@@ -472,13 +489,38 @@ pub mod vsock {
         Ok(cfd)
     }
 
-    /// Adopt an accepted vsock connection fd as a non-blocking tokio
-    /// `UnixStream` (a `SOCK_STREAM` socket — same read/write syscalls).
-    pub fn into_tokio_stream(conn_fd: RawFd) -> io::Result<tokio::net::UnixStream> {
-        // SAFETY: `conn_fd` is an owned connected stream socket from `accept`.
-        let std_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn_fd) };
-        std_stream.set_nonblocking(true)?;
-        tokio::net::UnixStream::from_std(std_stream)
+    /// Read one length-prefixed JSON frame (4-byte BE length + body) with
+    /// blocking I/O. The vsock connection is handled synchronously (tokio's
+    /// async reactor doesn't interplay reliably with an AF_VSOCK fd).
+    pub fn read_frame_sync<T: serde::de::DeserializeOwned, R: io::Read>(
+        r: &mut R,
+    ) -> io::Result<T> {
+        let mut len = [0u8; 4];
+        r.read_exact(&mut len)?;
+        let n = u32::from_be_bytes(len) as usize;
+        if n > super::MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
+        }
+        let mut buf = vec![0u8; n];
+        r.read_exact(&mut buf)?;
+        serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// Write one length-prefixed JSON frame with blocking I/O.
+    pub fn write_frame_sync<T: serde::Serialize, W: io::Write>(
+        w: &mut W,
+        value: &T,
+    ) -> io::Result<()> {
+        let body =
+            serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let len = u32::try_from(body.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
+        w.write_all(&len.to_be_bytes())?;
+        w.write_all(&body)?;
+        w.flush()
     }
 }
 
@@ -658,6 +700,135 @@ mod server_tests {
             forwarder.clone(),
         ));
         (service, ph, forwarder, dir)
+    }
+
+    /// End-to-end over a **real AF_VSOCK** connection (Linux vsock loopback,
+    /// `VMADDR_CID_LOCAL`) — proving `serve_vsock` + the framed substitution
+    /// path work over the actual transport, not just a UnixStream pair.
+    /// Gracefully skips where vsock/loopback is unavailable (CI, macOS) so it
+    /// only asserts where it can really run (a vsock-capable Linux box).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn substitutes_over_real_af_vsock_loopback() {
+        use super::vsock::VsockListener;
+        use std::io::{Read, Write};
+        use std::os::fd::FromRawFd;
+
+        // serve_vsock's accept loop parks an un-cancellable spawn_blocking(accept);
+        // a plain #[tokio::test] would hang on runtime drop waiting for it to
+        // return. Build the runtime by hand and force teardown with
+        // shutdown_timeout once the round-trip + assertions are done.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            const AF_VSOCK: libc::c_int = 40;
+            const VMADDR_CID_LOCAL: u32 = 1;
+            #[repr(C)]
+            struct SockaddrVm {
+                svm_family: libc::sa_family_t,
+                svm_reserved1: u16,
+                svm_port: u32,
+                svm_cid: u32,
+                svm_zero: [u8; 4],
+            }
+
+            let port = 54000 + (std::process::id() % 2000);
+            let listener = match VsockListener::bind(port) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!(
+                        "SKIP substitutes_over_real_af_vsock_loopback: AF_VSOCK bind failed ({e})"
+                    );
+                    return;
+                }
+            };
+            let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+            let server = tokio::spawn(Arc::clone(&service).serve_vsock(listener));
+
+            // Client: connect over vsock loopback, send a framed WireRequest with the
+            // placeholder, read the framed WireResponse. `None` = transport
+            // unavailable → skip rather than assert.
+            let client = tokio::task::spawn_blocking(move || -> Option<WireResponse> {
+                let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+                if fd < 0 {
+                    return None;
+                }
+                let addr = SockaddrVm {
+                    svm_family: AF_VSOCK as libc::sa_family_t,
+                    svm_reserved1: 0,
+                    svm_port: port,
+                    svm_cid: VMADDR_CID_LOCAL,
+                    svm_zero: [0; 4],
+                };
+                let rc = unsafe {
+                    libc::connect(
+                        fd,
+                        std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                        std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+                    )
+                };
+                if rc < 0 {
+                    unsafe { libc::close(fd) };
+                    return None;
+                }
+                let mut s = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                // Bound the round-trip so a regression fails fast instead of hanging.
+                s.set_read_timeout(Some(std::time::Duration::from_secs(15)))
+                    .ok();
+                s.set_write_timeout(Some(std::time::Duration::from_secs(15)))
+                    .ok();
+                let wire = WireRequest {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                };
+                let body = serde_json::to_vec(&wire).unwrap();
+                s.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
+                s.write_all(&body).unwrap();
+                s.flush().unwrap();
+                let mut len = [0u8; 4];
+                s.read_exact(&mut len).unwrap();
+                let n = u32::from_be_bytes(len) as usize;
+                let mut buf = vec![0u8; n];
+                s.read_exact(&mut buf).unwrap();
+                Some(serde_json::from_slice(&buf).unwrap())
+            });
+            // vsock does not reliably honor SO_RCVTIMEO, so the in-client read
+            // timeout can't be trusted — bound the round-trip here so a server-side
+            // regression fails fast instead of hanging until libtest's watchdog.
+            let resp = match tokio::time::timeout(std::time::Duration::from_secs(20), client).await
+            {
+                Ok(joined) => joined.unwrap(),
+                Err(_) => {
+                    panic!("vsock loopback round-trip timed out (20s): serve_vsock did not reply")
+                }
+            };
+
+            let Some(resp) = resp else {
+                eprintln!(
+                    "SKIP substitutes_over_real_af_vsock_loopback: vsock loopback unavailable"
+                );
+                server.abort();
+                return;
+            };
+
+            // The destination (mock forwarder) saw the REAL credential over real vsock.
+            let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+            assert_eq!(
+                seen.headers[0],
+                ("authorization".into(), "Bearer sk-live-zzz".into())
+            );
+            match resp {
+                WireResponse::Ok { status, .. } => assert_eq!(status, 200),
+                WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
+            }
+            server.abort();
+        });
+        rt.shutdown_timeout(std::time::Duration::from_millis(50));
     }
 
     #[tokio::test]
