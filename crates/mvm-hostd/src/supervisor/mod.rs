@@ -70,6 +70,7 @@ pub mod lifecycle_hooks;
 pub mod network;
 pub mod pii_redactor;
 pub mod policy_tool_gate;
+pub mod pressure;
 pub mod proxy;
 pub mod reaper;
 /// Plan 129 / ADR-067 §4 + claim 13 — chain-signed `secret.substituted` /
