@@ -140,7 +140,7 @@ persists and WS-C's wake brings it back.
       mvmd: add `IdleSlept`/`SleepFailed` arms to any exhaustive `ReapOutcome`
       match. No new snapshot code; this is a *trigger*, not a new mechanism.
 
-### WS-C — Host-memory-pressure reaper (single-host density) — **selection core DONE (PR #TBD)**
+### WS-C — Host-memory-pressure reaper (single-host density) — **selection core DONE (PR #701)**
 
 Evict (sleep) the least-recently-active VMs when the host is under RAM
 pressure, so "dozens share one box" works on the user's Mac without manual
