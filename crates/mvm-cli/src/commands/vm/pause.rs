@@ -19,7 +19,8 @@ use clap::Args as ClapArgs;
 use std::path::{Path, PathBuf};
 
 use mvm::vm::instance_snapshot::{
-    CannedIO, FirecrackerIO, SnapshotIO, pause_and_seal, verify_and_resume,
+    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, pause_and_seal,
+    signal_post_restore, verify_and_resume,
 };
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
@@ -126,6 +127,9 @@ pub(in crate::commands) fn run_resume(
     let sidecar = verify_and_resume(&args.name, &*io)
         .with_context(|| format!("resuming VM {:?}", args.name))?;
 
+    // The VM is now running at the hypervisor level — mark it resumed before
+    // signaling the guest, so a post-restore failure below leaves the registry
+    // consistent (the VM *is* up) and the operator can simply re-run resume.
     let registry_path = mvm::vm::name_registry::registry_path();
     if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(&args.name, false);
@@ -134,6 +138,20 @@ pub(in crate::commands) fn run_resume(
         let _ = registry.touch_last_active(&args.name, mvm_core::time::utc_now());
         let _ = registry.save(&registry_path);
     }
+
+    // Plan 123 Phase C — the host-side PostRestore sender. Resuming vCPUs is
+    // not enough: the guest agent must remount the config/secrets drives and
+    // restart services (it maps PostRestore → SIGUSR1 → PID 1). The `mock`
+    // hypervisor has no guest agent, so skip it there.
+    if args.hypervisor != "mock" {
+        crate::commands::shared::emit_vsock_rpc_audit(
+            &args.name,
+            &mvm_guest::vsock::GuestRequest::PostRestore,
+        );
+        signal_post_restore(&args.name, &VsockPostRestoreSignal)
+            .with_context(|| format!("post-restore signal for {:?}", args.name))?;
+    }
+
     println!(
         "{}: resumed (epoch {}, vmstate {} B, mem {} B)",
         args.name, sidecar.epoch, sidecar.vmstate_len, sidecar.mem_len
