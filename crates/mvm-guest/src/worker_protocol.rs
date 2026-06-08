@@ -37,6 +37,10 @@ pub struct WorkerCallRequest {
     /// SIGKILL-on-expiry watchdog regardless of whether the wrapper
     /// honors it; the field is informational for the wrapper.
     pub timeout_secs: u64,
+    /// Env vars injected into the workload after `env_clear()` (Plan 129).
+    /// Empty for a plain call; omitted on the wire defaults to empty.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 /// Response frame: worker → agent. One per call.
@@ -172,6 +176,7 @@ mod tests {
         let req = WorkerCallRequest {
             stdin: b"hello world".to_vec(),
             timeout_secs: 30,
+            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
         };
         let mut buf = Vec::new();
         write_pipe_frame(&mut buf, &req).unwrap();
@@ -219,6 +224,7 @@ mod tests {
         let req = WorkerCallRequest {
             stdin: payload.clone(),
             timeout_secs: 5,
+            env: vec![],
         };
         let mut buf = Vec::new();
         write_pipe_frame(&mut buf, &req).unwrap();
@@ -291,6 +297,7 @@ mod tests {
         let req = WorkerCallRequest {
             stdin: huge_stdin,
             timeout_secs: 1,
+            env: vec![],
         };
         let mut buf = Vec::new();
         let res = write_pipe_frame(&mut buf, &req);

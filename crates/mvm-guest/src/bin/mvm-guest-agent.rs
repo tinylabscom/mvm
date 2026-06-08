@@ -1724,13 +1724,14 @@ fn handle_run_entrypoint(
     file: &mut std::fs::File,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
 ) -> GuestResponse {
     // Plan 43: when a warm-process pool is active, route through it
     // instead of the cold-respawn path. The host wire is identical;
     // the pool's `dispatch` synthesizes the same `EntrypointEvent`
     // stream (Stdout / Stderr / Exit | Error) we'd produce below.
     if let Some(Some(pool)) = WARM_POOL.get() {
-        return dispatch_via_warm_pool(file, pool, stdin, timeout_secs);
+        return dispatch_via_warm_pool(file, pool, stdin, timeout_secs, env);
     }
 
     let _guard = match RUN_ENTRYPOINT_LOCK.try_lock() {
@@ -1775,6 +1776,7 @@ fn handle_run_entrypoint(
         &stdin,
         Duration::from_secs(timeout_secs),
         CallCaps::v1(),
+        env,
     );
 
     // tmpdir drops at end of scope (or on early-return below) and runs
@@ -1881,8 +1883,9 @@ fn dispatch_via_warm_pool(
     pool: &Arc<WorkerPool>,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
 ) -> GuestResponse {
-    match pool.dispatch(stdin, timeout_secs) {
+    match pool.dispatch(stdin, timeout_secs, env) {
         Ok(DispatchOutcome {
             stdout,
             stderr,
@@ -2198,6 +2201,7 @@ fn handle_client(
         GuestRequest::RunEntrypoint {
             stdin,
             timeout_secs,
+            env,
         } => {
             // Plan 76 Phase 2: distinguish "validation hasn't
             // completed yet" (Starting → NotReady, transient) from
@@ -2212,7 +2216,7 @@ fn handle_client(
                         .to_string(),
                 })
             } else {
-                handle_run_entrypoint(&mut file, stdin, timeout_secs)
+                handle_run_entrypoint(&mut file, stdin, timeout_secs, env)
             }
         }
 

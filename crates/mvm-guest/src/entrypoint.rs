@@ -432,6 +432,7 @@ pub fn execute(
     stdin_data: &[u8],
     timeout: Duration,
     caps: CallCaps,
+    env: Vec<(String, String)>,
 ) -> CallOutcome {
     if stdin_data.len() > caps.stdin_max {
         return CallOutcome::PayloadCap {
@@ -486,10 +487,24 @@ pub fn execute(
         }
     };
 
+    // The workload launches under `env_clear()`, then only the explicitly
+    // injected vars are added back (e.g. Plan 129 HTTP_PROXY + secret
+    // placeholder vars). `env` arrives from the host over the authenticated
+    // agent frame, but a malformed entry must never crash the agent:
+    // `Command::env` panics if a key is empty / contains '=' or NUL, or a
+    // value contains NUL, so drop those rather than pass them through.
+    let safe_env = env
+        .into_iter()
+        .filter(|(k, v)| {
+            !k.is_empty() && !k.contains('=') && !k.contains('\0') && !v.contains('\0')
+        })
+        .collect::<Vec<_>>();
+
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(&program);
     cmd.current_dir(cwd)
         .env_clear()
+        .envs(safe_env)
         // Put the wrapper into its own process group so a kill-signal
         // can be delivered to every process the wrapper might fork
         // (e.g. a shell that exec'd `sleep`). Without this, SIGKILL to

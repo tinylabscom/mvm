@@ -53,6 +53,7 @@ fn test_execute_zero_exit_captures_stdout_stderr() {
         b"STDOUT hello-out\nSTDERR hello-err\nEXIT 0\n\n",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited {
@@ -78,6 +79,7 @@ fn test_execute_nonzero_exit_preserved() {
         b"EXIT 7\n\n",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited { code, .. } => assert_eq!(code, 7),
@@ -96,6 +98,7 @@ fn test_execute_stdin_piped_to_wrapper() {
         &stdin,
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited { code, stdout, .. } => {
@@ -103,6 +106,62 @@ fn test_execute_stdin_piped_to_wrapper() {
             assert_eq!(stdout, b"echo this back");
         }
         other => panic!("expected Exited(0) with echoed stdin, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_execute_injects_env_and_clears_inherited() {
+    let (tmp, entry) = make_wrapper();
+    let outcome = execute(
+        &entry,
+        tmp.path(),
+        b"ENV MVM_TEST_VAR\nENV PATH\nEXIT 0\n\n",
+        Duration::from_secs(5),
+        caps_with_timeout(1024, 1024),
+        vec![("MVM_TEST_VAR".to_string(), "injected-value".to_string())],
+    );
+    match outcome {
+        CallOutcome::Exited { code, stdout, .. } => {
+            assert_eq!(code, 0);
+            let s = String::from_utf8(stdout).unwrap();
+            // The injected var reaches the workload.
+            assert!(s.contains("MVM_TEST_VAR=injected-value"), "got {s:?}");
+            // env_clear() still holds: an inherited var not in the injected
+            // set is absent in the child.
+            assert!(s.contains("PATH=<unset>"), "got {s:?}");
+        }
+        other => panic!("expected Exited(0), got {other:?}"),
+    }
+}
+
+#[test]
+fn test_execute_skips_invalid_env_entries() {
+    let (tmp, entry) = make_wrapper();
+    // A key containing '=' and a value containing NUL would each panic
+    // Command::env; execute must drop them and still run, applying the
+    // one valid entry. (env is host-supplied over the authenticated frame,
+    // but a malformed entry must never crash the agent — a DoS.)
+    let outcome = execute(
+        &entry,
+        tmp.path(),
+        b"ENV GOOD\nENV BAD\nEXIT 0\n\n",
+        Duration::from_secs(5),
+        caps_with_timeout(1024, 1024),
+        vec![
+            ("GOOD".to_string(), "ok".to_string()),
+            ("BAD=KEY".to_string(), "x".to_string()),
+            ("BAD".to_string(), "has\0nul".to_string()),
+        ],
+    );
+    match outcome {
+        CallOutcome::Exited { code, stdout, .. } => {
+            assert_eq!(code, 0);
+            let s = String::from_utf8(stdout).unwrap();
+            assert!(s.contains("GOOD=ok"), "got {s:?}");
+            // Both invalid 'BAD' entries dropped → the var is unset.
+            assert!(s.contains("BAD=<unset>"), "got {s:?}");
+        }
+        other => panic!("expected Exited(0), got {other:?}"),
     }
 }
 
@@ -119,6 +178,7 @@ fn test_execute_captures_fd3_control_record() {
           EXIT 0\n\n",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited {
@@ -146,6 +206,7 @@ fn test_execute_fd3_emits_no_records_when_wrapper_silent() {
         b"STDOUT hi\nEXIT 0\n\n",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited { controls, .. } => {
@@ -169,6 +230,7 @@ fn test_execute_fd3_partial_frame_at_eof_is_dropped() {
         b"FD3_HEX 0a000000\nEXIT 0\n\n",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited { controls, .. } => assert!(controls.is_empty()),
@@ -187,6 +249,7 @@ fn test_execute_fd3_oversized_header_is_refused() {
         b"FD3_HEX 00000200\nEXIT 0\n\n",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     match outcome {
         CallOutcome::Exited { controls, .. } => assert!(controls.is_empty()),
@@ -204,6 +267,7 @@ fn test_execute_timeout_kills_wrapper() {
         b"SLEEP_MS 10000\nEXIT 0\n\n",
         Duration::from_millis(200),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     let elapsed = started.elapsed();
     match outcome {
@@ -225,7 +289,14 @@ fn test_execute_stdin_cap_rejects_before_spawn() {
     let huge = vec![b'A'; 2048];
     let mut caps = caps_with_timeout(1024, 1024);
     caps.stdin_max = 1024;
-    let outcome = execute(&entry, tmp.path(), &huge, Duration::from_secs(5), caps);
+    let outcome = execute(
+        &entry,
+        tmp.path(),
+        &huge,
+        Duration::from_secs(5),
+        caps,
+        Vec::new(),
+    );
     match outcome {
         CallOutcome::PayloadCap {
             stream: PayloadCapStream::Stdin,
@@ -256,6 +327,7 @@ fn test_execute_stdout_cap_kills_wrapper() {
         b"UNBOUNDED_STDOUT\n\n",
         Duration::from_secs(10),
         caps,
+        Vec::new(),
     );
     let elapsed = started.elapsed();
     match outcome {
@@ -288,6 +360,7 @@ fn test_execute_spawn_failed_when_program_missing() {
         b"",
         Duration::from_secs(5),
         caps_with_timeout(1024, 1024),
+        Vec::new(),
     );
     // Linux uses /proc/self/fd/<n> which still resolves through the
     // held fd even after the path is unlinked, so spawn may succeed

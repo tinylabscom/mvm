@@ -400,6 +400,9 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         &mut stream,
         stdin,
         timeout_secs,
+        // No injected env on the plain invoke path yet; Plan 129 will supply
+        // HTTP_PROXY + secret placeholder vars here from the admitted plan.
+        Vec::new(),
         |event| match event {
             mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
                 let _ = std::io::stdout().write_all(chunk);

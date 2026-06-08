@@ -184,6 +184,11 @@ pub enum GuestRequest {
         /// kills the wrapper on overrun and emits
         /// `EntrypointEvent::Error { kind: Timeout }`.
         timeout_secs: u64,
+        /// Env vars injected into the workload after `env_clear()`
+        /// (Plan 129: `HTTP_PROXY` + secret placeholder vars). Empty for
+        /// a plain call; omitted on the wire defaults to empty.
+        #[serde(default)]
+        env: Vec<(String, String)>,
     },
     /// Signal post-restore: remount drives and restart services.
     PostRestore,
@@ -2173,6 +2178,7 @@ pub fn send_run_entrypoint<F>(
     stream: &mut UnixStream,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
     mut on_event: F,
 ) -> Result<EntrypointEvent>
 where
@@ -2182,6 +2188,7 @@ where
     let req = GuestRequest::RunEntrypoint {
         stdin,
         timeout_secs,
+        env,
     };
     write_frame(stream, &req)?;
 
@@ -3551,6 +3558,7 @@ mod tests {
         let req = GuestRequest::RunEntrypoint {
             stdin: vec![1, 2, 3, 4, 5],
             timeout_secs: 30,
+            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3558,10 +3566,27 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs,
+                env,
             } => {
                 assert_eq!(stdin, vec![1, 2, 3, 4, 5]);
                 assert_eq!(timeout_secs, 30);
+                assert_eq!(
+                    env,
+                    vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())]
+                );
             }
+            other => panic!("expected RunEntrypoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_entrypoint_request_env_defaults_empty_when_omitted() {
+        // `env` is `#[serde(default)]`: a wire frame without it decodes to an
+        // empty env (a plain call), so callers that never inject stay valid.
+        let json = r#"{"RunEntrypoint":{"stdin":[1,2,3],"timeout_secs":10}}"#;
+        let decoded: GuestRequest = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunEntrypoint { env, .. } => assert!(env.is_empty()),
             other => panic!("expected RunEntrypoint, got {other:?}"),
         }
     }
@@ -3571,6 +3596,7 @@ mod tests {
         let req = GuestRequest::RunEntrypoint {
             stdin: vec![],
             timeout_secs: 5,
+            env: vec![],
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3579,6 +3605,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs: 5,
+                ..
             } if stdin.is_empty()
         ));
     }
@@ -3799,6 +3826,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin,
                 timeout_secs: 15,
+                ..
             } if stdin.is_empty()
         ));
     }
@@ -4478,7 +4506,7 @@ mod tests {
         });
 
         let mut received: Vec<EntrypointEvent> = Vec::new();
-        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, |evt| {
+        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, Vec::new(), |evt| {
             received.push(evt.clone())
         })
         .expect("send_run_entrypoint");
@@ -4535,7 +4563,7 @@ mod tests {
         });
 
         let mut received: Vec<EntrypointEvent> = Vec::new();
-        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, |evt| {
+        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |evt| {
             received.push(evt.clone())
         })
         .expect("send_run_entrypoint");
@@ -4571,7 +4599,7 @@ mod tests {
             write_frame(&mut guest, &GuestResponse::Pong).unwrap();
         });
 
-        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, |_| {});
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
         guest_handle.join().unwrap();
 
         let err = result.expect_err("should reject Pong");
@@ -4604,7 +4632,7 @@ mod tests {
             .unwrap();
         });
 
-        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, |_| {});
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
         guest_handle.join().unwrap();
 
         let err = result.expect_err("should surface guest error");
@@ -4708,6 +4736,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 1,
+                env: vec![],
             },
             GuestRequest::PostRestore,
             GuestRequest::FsDiff,
@@ -4892,6 +4921,7 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 60,
+                env: vec![],
             },
             GuestRequest::SleepPrep {
                 drain_timeout_secs: 5,
@@ -5175,6 +5205,7 @@ mod tests {
                 GuestRequest::RunEntrypoint {
                     stdin: Vec::new(),
                     timeout_secs: 0,
+                    env: Vec::new(),
                 },
                 "run-entrypoint",
             ),
