@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-07**
+**Last updated: 2026-06-08**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -19,12 +19,15 @@ PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
 PLAN 129 — Secrets / SigV4 substitution         🟡 ~95%
   [x] keyholder, resolver, binding store, `secret set`
-  [x] host substitution endpoint (UDS)
+  [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
   [x] in-guest substitution client + forward-proxy
+  [x] guest↔host vsock transport, both directions   — PR #708/#709
+  [x] workload env injection via RunEntrypoint proto — PR #711
+  [x] e2e substitution over AF_VSOCK loopback        — PR #710
   [x] claim-13 audit (secret.substituted)
   [ ] forward-path signing integration
-  [ ] guest-init wiring
+  [ ] guest-init wiring (host call-site + bin glue)
   [ ] Python/TS SDK toolchain integration
   [ ] real-microVM boot validation (KVM box)
 
@@ -36,6 +39,11 @@ PLAN 152 — Rust-native VZ supervisor            🟡 design locked
   [ ] WS-D nested KVM (/dev/kvm in guest)
   [ ] WS-E VZ-config hardening
 
+PLAN 159 — vz-inspired macOS VZ DX               🔴 gated on 152
+  [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
+  [ ] WS-1 warm path / WS-2 checkpoints+fork (need 152 WS-B)
+  [ ] WS-* remaining DX/UX layer
+
 PLAN 124 — Lean guest agent                     🟡 ~65%
   [x] A1/A3 drop tokio+rtnetlink (-27 crates)
   [x] B universal agent in all images
@@ -44,11 +52,12 @@ PLAN 124 — Lean guest agent                     🟡 ~65%
   [ ] D1.2/D1.3 SDK codegen
   [ ] E signed on-device config
 
-PLAN 170 — Host lifecycle convergence           🟡 ~25%
-  [x] WS-A reconcile-on-entry — PR #688
-  [ ] WS-B idle reaper — PR #696 (open)
-  [ ] WS-C pressure reaper
-  [ ] WS-D wake-on-request
+PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density → mvmd)
+  [x] WS-A reconcile-on-entry — PR #688 (merged)
+  [~] WS-B idle-reaper mechanism — PR #696 (merged, no consumer)
+  [~] WS-C pressure reaper — PR #701 (closed unmerged)
+  [~] WS-D wake-on-request — owned by mvmd
+  (WS-B/C/D density belongs to mvmd, not mvm — see plan-170 banner)
 
 PLAN 126 — Dependency reduction                 🔴 ~10%
   [x] A1 re-baseline
