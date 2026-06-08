@@ -319,6 +319,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
+    // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
+    // path emits one `RegistryReconcile` per healed drift item.
+    ("reconcile", AuditPosture::Emits("RegistryReconcile")),
     ("mcp", AuditPosture::InteractiveOrControl),
     ("secret", AuditPosture::DelegatesToSub(SECRET_SUB)),
     ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
@@ -491,6 +494,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestTagRemove",
         "NetworkCreate",
         "NetworkRemove",
+        "RegistryReconcile",
         "SecretGet",
         "SecretPut",
         "SecretRm",

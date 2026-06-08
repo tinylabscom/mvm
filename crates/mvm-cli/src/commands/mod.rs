@@ -123,6 +123,8 @@ pub(in crate::commands) enum Commands {
     Console(vm::console::Args),
     /// Manage the XDG cache directory (~/.cache/mvm)
     Cache(ops::cache::Args),
+    /// Converge the VM name registry with on-disk runtime state
+    Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
     Init(env::init::Args),
     /// Run one command in a transient microVM
@@ -284,6 +286,15 @@ pub fn run() -> Result<()> {
         tracing::warn!("failed to install signal handler: {e}");
     }
 
+    // Plan 170 WS-A / ADR-074 — reconcile-on-entry convergence. For any
+    // state-touching command, cheaply (registry read + pid-liveness stat
+    // only) heal registry/runtime drift before dispatch, so stale records
+    // self-heal instead of surfacing as a confusing failure three layers
+    // down. Fail-open: `converge` never returns an error and we drop the
+    // report — `mvmctl reconcile` is the observable entry point.
+    // `MVM_SKIP_RECONCILE=1` opts out (never set in CI).
+    maybe_converge_on_entry(&cli.command);
+
     // Load operator config once; used as fallback for dev_vm_cpus, dev_vm_mem_gib, cpus, memory.
     let cfg = mvm_core::user_config::load(None);
 
@@ -324,6 +335,7 @@ pub fn run() -> Result<()> {
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
+        Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
         Commands::Receipt(a) => vm::exec::run_receipt(&cli, a, &cfg),
@@ -358,4 +370,18 @@ pub fn run() -> Result<()> {
     cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);
 
     with_hints(result)
+}
+
+/// Run the cheap reconcile-on-entry convergence for state-touching
+/// commands (Plan 170 WS-A / ADR-074), unless `MVM_SKIP_RECONCILE=1`.
+/// Fail-open: `converge` collects errors internally and never returns an
+/// `Err`, so this can never block the requested command.
+fn maybe_converge_on_entry(command: &Commands) {
+    if !command.touches_vm_state() {
+        return;
+    }
+    if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
+        return;
+    }
+    let _ = mvm::vm::reconcile::converge(&mvm::vm::reconcile::ConvergeOpts::default());
 }

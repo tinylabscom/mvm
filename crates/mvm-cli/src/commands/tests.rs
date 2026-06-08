@@ -2835,3 +2835,34 @@ fn test_session_attach_resume_parses() {
         _ => panic!("expected session attach"),
     }
 }
+
+// -------- Plan 170 WS-A: reconcile-on-entry gate --------
+
+fn touches(argv: &[&str]) -> bool {
+    Cli::try_parse_from(argv)
+        .unwrap()
+        .command
+        .touches_vm_state()
+}
+
+#[test]
+fn state_touching_commands_trigger_entry_convergence() {
+    // Lifecycle mutate/read commands run the cheap converge pass.
+    assert!(touches(&["mvmctl", "up"]));
+    assert!(touches(&["mvmctl", "down"]));
+    assert!(touches(&["mvmctl", "console", "myvm"]));
+    assert!(touches(&["mvmctl", "pause", "myvm"]));
+    assert!(touches(&["mvmctl", "ls"]));
+    assert!(touches(&["mvmctl", "dev", "status"]));
+}
+
+#[test]
+fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
+    assert!(!touches(&["mvmctl", "doctor"]));
+    assert!(!touches(&["mvmctl", "catalog", "list"]));
+    assert!(!touches(&["mvmctl", "audit", "tail"]));
+    assert!(!touches(&["mvmctl", "cache", "info"]));
+    // `reconcile` is the convergence verb itself — must not double-run on entry.
+    assert!(!touches(&["mvmctl", "reconcile"]));
+    assert!(!touches(&["mvmctl", "reconcile", "--dry-run"]));
+}
