@@ -21,6 +21,19 @@ use std::path::Path;
 
 use crate::ui;
 
+/// Exit code the CLI returns when a guest command exceeds its `--timeout`.
+/// Matches GNU `timeout(1)` so scripts can branch on it.
+pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
+
+/// Human-facing message for a command killed by its `--timeout`. `None`
+/// timeout ⇒ no duration suffix (e.g. the interactive console path).
+pub(crate) fn timeout_exit_message(timeout_secs: Option<u64>) -> String {
+    let suffix = timeout_secs
+        .map(|s| format!(" after {s}s"))
+        .unwrap_or_default();
+    format!("error: command timed out{suffix}")
+}
+
 /// Where to source the command that runs inside the transient microVM.
 ///
 /// Marked `non_exhaustive` so future variants (e.g. baked-in template
@@ -157,8 +170,9 @@ pub struct ExecRequest {
     pub add_dirs: Vec<AddDir>,
     pub env: Vec<(String, String)>,
     pub target: ExecTarget,
-    /// Timeout for the in-guest command in seconds.
-    pub timeout_secs: u64,
+    /// Timeout for the in-guest command in seconds. `None` ⇒ no per-command
+    /// kill (the default for interactive/ad-hoc exec).
+    pub timeout_secs: Option<u64>,
 }
 
 impl ExecRequest {
@@ -790,6 +804,15 @@ fn run_in_guest(
     )?;
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
+        mvm_guest::vsock::ExecEvent::TimedOut => {
+            let msg = timeout_exit_message(req.timeout_secs);
+            if capture {
+                err.extend_from_slice(format!("{msg}\n").as_bytes());
+            } else {
+                eprintln!("{msg}");
+            }
+            EXEC_TIMEOUT_EXIT_CODE
+        }
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
     };
 
@@ -918,7 +941,11 @@ pub fn boot_session_vm(
 /// Dispatch a single command into an already-booted session VM,
 /// capturing stdout/stderr. Equivalent to the dispatch step of
 /// [`run_captured`] without any boot/teardown.
-pub fn dispatch_in_session(vm: &SessionVm, code: String, timeout_secs: u64) -> Result<ExecOutput> {
+pub fn dispatch_in_session(
+    vm: &SessionVm,
+    code: String,
+    timeout_secs: Option<u64>,
+) -> Result<ExecOutput> {
     if !wait_for_agent(&vm.vm_name, 30) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
@@ -966,6 +993,10 @@ pub fn dispatch_in_session(vm: &SessionVm, code: String, timeout_secs: u64) -> R
     )?;
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
+        mvm_guest::vsock::ExecEvent::TimedOut => {
+            err.extend_from_slice(format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes());
+            EXEC_TIMEOUT_EXIT_CODE
+        }
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
     };
     Ok(ExecOutput {
@@ -1123,7 +1154,7 @@ mod tests {
             target: ExecTarget::Inline {
                 argv: vec!["uname".into(), "-a".into()],
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -1140,7 +1171,7 @@ mod tests {
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -1165,7 +1196,7 @@ mod tests {
             target: ExecTarget::Inline {
                 argv: vec!["echo".into(), "$FOO".into()],
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -1190,7 +1221,7 @@ mod tests {
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -1419,7 +1450,7 @@ mod tests {
                     env: BTreeMap::new(),
                 },
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -1443,7 +1474,7 @@ mod tests {
                     env,
                 },
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -1478,7 +1509,7 @@ mod tests {
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
             },
-            timeout_secs: 30,
+            timeout_secs: Some(30),
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));

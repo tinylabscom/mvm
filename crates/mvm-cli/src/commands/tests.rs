@@ -1841,9 +1841,24 @@ fn exec_default_manifest_argv_only() {
             assert_eq!(memory, "512M");
             assert!(add_dir.is_empty());
             assert!(env.is_empty());
-            assert_eq!(timeout, 60);
+            assert_eq!(
+                timeout, None,
+                "unset --timeout ⇒ None (no per-command kill)"
+            );
             assert!(launch_plan.is_none(), "launch_plan should default to None");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+        }
+        _ => panic!("Expected Exec command"),
+    }
+}
+
+#[test]
+fn exec_timeout_parses_to_some() {
+    let cli = Cli::try_parse_from(["mvmctl", "exec", "--timeout", "5", "--", "sleep", "10"])
+        .expect("parse");
+    match cli.command {
+        Commands::Exec(exec::Args { timeout, .. }) => {
+            assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
         }
         _ => panic!("Expected Exec command"),
     }
@@ -1878,7 +1893,10 @@ fn run_default_profile_argv_only() {
             assert_eq!(profile, exec::RunProfile::Standard);
             assert!(add_dir.is_empty());
             assert!(env.is_empty());
-            assert_eq!(timeout, 60);
+            assert_eq!(
+                timeout, None,
+                "unset --timeout ⇒ None (no per-command kill)"
+            );
             assert!(receipt.is_none(), "receipt should default to None");
             assert!(!json, "json should default to false");
             assert!(!dry_run, "dry_run should default to false");
@@ -1887,6 +1905,18 @@ fn run_default_profile_argv_only() {
             assert!(!dev, "dev should default to false");
             assert!(!prod, "prod should default to false");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
+        }
+        _ => panic!("Expected Run command"),
+    }
+}
+
+#[test]
+fn run_timeout_parses_to_some() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--timeout", "5", "--", "sleep", "10"])
+        .expect("parse");
+    match cli.command {
+        Commands::Run(exec::RunArgs { timeout, .. }) => {
+            assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
         }
         _ => panic!("Expected Run command"),
     }

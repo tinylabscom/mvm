@@ -791,7 +791,7 @@ git commit -m "refactor(mvm-guest): remove single-frame ExecResult (superseded b
 
 ## Deferred (tracked, not in this plan)
 
-- [ ] Enforce exec `timeout_secs` (today ignored; preserved as-is).
+- [x] Enforce exec `timeout_secs` (today ignored; preserved as-is). (shipped — see specs/plans/173-exec-timeout-enforcement.md)
 - [ ] Progressive upgrade of `RunEntrypoint` (its v1 buffering is a
       separate concern; the wire shape already supports it).
 
