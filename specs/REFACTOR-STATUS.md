@@ -31,6 +31,14 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [x] QEMU spawns endpoint at boot, fail-closed      — PR #717
   [x] invoke injects HTTP_PROXY+placeholders; guest forward proxy — PR #718
   [x] on-box endpoint validation: real AF_VSOCK + real encrypted store
+  — SDK-free egress (transparent terminator) · direction 2026-06-08 · branch feat/plan-129-egress-terminator · plan: specs/notes/plan-129-stage1b-2-transparent-terminator-plan.md ("Resume state")
+  [x] SDK secret() type/hosts + ADR-049 retire             — PR #722/#723
+  [x] passt-redirect feasibility PoC (nft OUTPUT + SO_ORIGINAL_DST) — GREEN on box
+  [x] terminator core (orig_dst, request parse, handler, reader) — 4 commits, reviewed
+  [ ] terminator listener + EndpointConfig wiring          — Task 4 (Linux)
+  [ ] passt --runas + scoped nft redirect at launch        — Task 5 (Linux)
+  [ ] box e2e: generic curl http, SDK-free, audited        — Task 0/6
+  [ ] Stage 2: name-constrained CA + https termination     — ADR-006
       (placeholder mint, substitution success, claim-12 refuse) — 2026-06-08
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
