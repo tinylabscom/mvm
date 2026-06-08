@@ -104,30 +104,38 @@ to it, cheaply, at the start of every state-touching command.
       from PR #688 — the builder-store probe is heavier than the PID-liveness
       budget and wants its own slice.
 
-### WS-B — Activity-driven idle reaper (stop-on-idle)
+### WS-B — Activity-driven idle reaper (stop-on-idle) — **mvm-side mechanism DONE (PR #TBD)**
 
 Extend the TTL reaper from wall-clock-only to TTL **or** idle-timeout, and have
 idle expiry *sleep* (drain/pause) rather than tear down — so the workspace
 persists and WS-C's wake brings it back.
 
-- [ ] Add `last_active: Option<DateTime<Utc>>` to `VmRegistration` (`#[serde(default)]`,
-      backward-compatible — absent = treat as `registered_at`). Touched on every
-      console attach, vsock agent request, and successful `wake`.
-- [ ] Extend `reaper::sweep` with an `IdleSlept { name }` outcome alongside the
-      existing `Reaped`: when `now - last_active > idle_timeout` **and**
-      `auto_resume`, invoke a **sleep** callback (drain-on-sleep / `pause`,
-      the machinery already in `vm/instance/lifecycle.rs` + `instance_snapshot.rs`)
-      instead of teardown. TTL `expires_at` still hard-reaps as today. Keep the
-      ±10 s tick jitter (G6 timing-oracle defense already in `reaper.rs`).
-- [ ] Idle timeout config: `MVM_IDLE_TIMEOUT` env + per-VM tag override
-      (`VmRegistration.tags`), default off on the local path (opt-in), so a plain
-      `mvmctl start` is unchanged unless the user asks for density.
-- [ ] Backend awareness: snapshot-capable backends (FC / CH / Vz —
-      `caps.snapshots`) sleep via drain+snapshot; libkrun / apple-container
-      (no snapshot) sleep via clean stop with the data disk + TAP kept for a
-      cold wake (the disk/TAP retention path already exists —
-      `lifecycle.rs:454/523`). No new snapshot code; this is a *trigger*, not a
-      new sleep mechanism.
+- [x] Add `last_active` to `VmRegistration` (stored as `Option<String>`
+      RFC3339 for consistency with `registered_at`/`expires_at`; `#[serde(default)]`,
+      backward-compatible — absent = treat as `registered_at`). `touch_last_active`
+      is called on console attach and successful `wake` (coarse touch — the
+      per-vsock-request sharpening stays in deferred follow-ups, where the plan
+      already parks it).
+- [x] Extend `reaper::sweep` with `IdleSlept`/`SleepFailed` outcomes alongside
+      `Reaped`: when `now - last_active > idle_timeout` **and** `auto_resume`
+      **and** `!paused`, invoke an injected `SleepFn`, then flip `paused = true`
+      so the next tick skips it. TTL `expires_at` still hard-reaps and **wins over
+      idle**. Opt-in + additive: `Reaper::new` stays TTL-only;
+      `Reaper::with_idle_sleep(sleep, default_timeout)` enables it. The ±10 s tick
+      jitter is untouched.
+- [x] Idle timeout config: `MVM_IDLE_TIMEOUT` env (`global_idle_timeout_from_env`)
+      + per-VM `idle_timeout_secs` tag override (`resolve_idle_timeout`; `0` opts a
+      workload out), default off (opt-in) so a plain `mvmctl start` is unchanged.
+- [ ] **Backend-aware `SleepFn` + the resident loop that calls
+      `with_idle_sleep` are mvmd-side.** The reaper exposes the hook; the concrete
+      sleep (drain+snapshot for `caps.snapshots` backends; clean stop with data
+      disk + TAP retained for libkrun/apple-container — disk/TAP retention already
+      exists at `lifecycle.rs:454/523`) and the timer that ticks it live in mvmd's
+      supervisor. By ADR-074 the local `mvmctl` path has **no resident daemon**, so
+      there is nothing on the bare-CLI path to tick an idle loop; idle-sleep fires
+      under a long-lived consumer (mvmd's supervisor / the MCP dispatcher). Also
+      mvmd: add `IdleSlept`/`SleepFailed` arms to any exhaustive `ReapOutcome`
+      match. No new snapshot code; this is a *trigger*, not a new mechanism.
 
 ### WS-C — Host-memory-pressure reaper (single-host density)
 
