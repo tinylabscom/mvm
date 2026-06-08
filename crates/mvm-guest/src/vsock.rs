@@ -2158,6 +2158,43 @@ where
     }
 }
 
+/// Send an `Exec` request and stream its response. Invokes `on_event`
+/// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
+/// `Exit`. Exec carries no `GuestCapability` — the agent gates it at
+/// compile time via the `dev-shell` feature — so this does a plain
+/// protocol hello (no capability requirement). Plan 159 WS-5 E.
+pub fn send_exec_streaming<F>(
+    stream: &mut UnixStream,
+    command: &str,
+    stdin: Option<String>,
+    timeout_secs: u64,
+    mut on_event: F,
+) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let req = GuestRequest::Exec {
+        command: command.to_string(),
+        stdin,
+        timeout_secs: Some(timeout_secs),
+    };
+    write_frame(stream, &req)?;
+
+    loop {
+        let resp: GuestResponse = read_frame(stream)?;
+        let event = match resp {
+            GuestResponse::ExecEvent(e) => e,
+            GuestResponse::Error { message } => bail!("guest exec error: {message}"),
+            other => bail!("expected ExecEvent during exec stream, got {other:?}"),
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
 // ============================================================================
 // High-level API
 // ============================================================================
@@ -5250,5 +5287,65 @@ mod tests {
         assert!(
             matches!(back, GuestResponse::ExecEvent(ExecEvent::Stdout { ref chunk }) if chunk == b"hi")
         );
+    }
+
+    // Plan 159 WS-5 E — send_exec_streaming host reader
+    // -------------------------------------------------------------------
+
+    fn answer_exec_protocol_hello(stream: &mut UnixStream) {
+        let req: GuestRequest = read_frame(stream).unwrap();
+        match req {
+            GuestRequest::ProtocolHello {
+                requested_capabilities,
+                ..
+            } => assert_eq!(requested_capabilities, vec![]),
+            other => panic!("expected ProtocolHello, got {other:?}"),
+        }
+        write_frame(
+            stream,
+            &GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "test-agent".to_string(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn send_exec_streaming_collects_chunks_until_exit() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let guest_handle = std::thread::spawn(move || {
+            answer_exec_protocol_hello(&mut guest);
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            assert!(matches!(req, GuestRequest::Exec { ref command, .. } if command == "echo hi"));
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stdout {
+                    chunk: b"hi\n".to_vec(),
+                }),
+            )
+            .unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+            )
+            .unwrap();
+        });
+
+        let mut got: Vec<ExecEvent> = Vec::new();
+        let terminal = send_exec_streaming(&mut host, "echo hi", None, 30, |e| got.push(e.clone()))
+            .expect("send_exec_streaming");
+        guest_handle.join().unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ExecEvent::Stdout { ref chunk } if chunk == b"hi\n"));
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
     }
 }
