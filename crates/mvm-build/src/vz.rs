@@ -460,6 +460,12 @@ mod tests {
             balloon: None,
             control_socket_path: None,
             startup_mode: StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
         }
     }
 

@@ -1081,6 +1081,15 @@ fn build_supervisor_config(
         // boot path; the restore path constructs its own config in
         // `build_restore_supervisor_config` below.
         startup_mode: vz::StartupMode::Boot,
+        // Audit substrate (Plan 152 WS-B slice 8) — populated by the producer
+        // wiring step so the Rust supervisor runs the in-process flow-audited
+        // gvproxy bridge. None until then (direct gvproxy attach, no audit).
+        tenant_id: None,
+        plan: None,
+        bundle: None,
+        audit_dir: None,
+        gateway_audit_socket: None,
+        signing_key_path: None,
     })
 }
 

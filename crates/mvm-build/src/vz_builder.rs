@@ -336,6 +336,13 @@ fn build_vz_supervisor_config(
         balloon: None,
         control_socket_path: None,
         startup_mode: crate::vz::StartupMode::Boot,
+        // Builder VMs are trusted dev-tier — no claim-10 flow audit.
+        tenant_id: None,
+        plan: None,
+        bundle: None,
+        audit_dir: None,
+        gateway_audit_socket: None,
+        signing_key_path: None,
     })
 }
 
@@ -1265,6 +1272,13 @@ fn build_vz_persistent_supervisor_config(
         balloon: None,
         control_socket_path: None,
         startup_mode: crate::vz::StartupMode::Boot,
+        // Builder VMs are trusted dev-tier — no claim-10 flow audit.
+        tenant_id: None,
+        plan: None,
+        bundle: None,
+        audit_dir: None,
+        gateway_audit_socket: None,
+        signing_key_path: None,
     })
 }
 
