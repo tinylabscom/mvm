@@ -70,9 +70,13 @@ describe("literal() / secret()", () => {
   });
 
   it("secret with default var matches name", () => {
-    expect(mvm.secret("api-key")).toEqual({
+    expect(
+      mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
+    ).toEqual({
       kind: "secret_ref",
       ref: {
+        allowed_hosts: ["api.example.com"],
+        auth_type: "bearer",
         name: "api-key",
         mount: { kind: "env", var: "api-key" },
       },
@@ -80,13 +84,31 @@ describe("literal() / secret()", () => {
   });
 
   it("secret with explicit var", () => {
-    expect(mvm.secret("api-key", { var: "API_KEY" })).toEqual({
+    expect(
+      mvm.secret("api-key", {
+        type: "bearer",
+        hosts: ["api.example.com"],
+        var: "API_KEY",
+      }),
+    ).toEqual({
       kind: "secret_ref",
       ref: {
+        allowed_hosts: ["api.example.com"],
+        auth_type: "bearer",
         name: "api-key",
         mount: { kind: "env", var: "API_KEY" },
       },
     });
+  });
+
+  it("secret rejects unknown type and empty hosts", () => {
+    expect(() =>
+      // @ts-expect-error — invalid auth type rejected at runtime
+      mvm.secret("api-key", { type: "oauth", hosts: ["api.example.com"] }),
+    ).toThrow();
+    expect(() =>
+      mvm.secret("api-key", { type: "bearer", hosts: [] }),
+    ).toThrow();
   });
 });
 
@@ -163,7 +185,7 @@ describe("env helpers", () => {
       entrypoint: mvm.entrypoint({ command: ["python"] }),
       env: {
         MODEL_PATH: "/data/model.pt",
-        API_KEY: mvm.secret("api-key"),
+        API_KEY: mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
       },
     })(() => "x");
 
