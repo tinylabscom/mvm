@@ -9,11 +9,11 @@
 
 use crate::vsock::ExecEvent;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 /// Per-stream total-byte cap (1 MiB) — bounds host capture-mode memory
 /// (was `MAX_EXEC_OUTPUT` in the agent bin).

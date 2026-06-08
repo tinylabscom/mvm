@@ -457,7 +457,10 @@ pub enum GuestRequest {
     /// through the warm-process pool's wrapper for stateful eval
     /// across calls; the wire shape stays identical, the dispatch
     /// flips inside the agent.
-    RunCode { code: String, timeout_secs: Option<u64> },
+    RunCode {
+        code: String,
+        timeout_secs: Option<u64>,
+    },
 }
 
 impl GuestRequest {
@@ -5425,8 +5428,10 @@ mod tests {
         });
 
         let mut got: Vec<ExecEvent> = Vec::new();
-        let terminal = send_exec_streaming(&mut host, "echo hi", None, Some(30), |e| got.push(e.clone()))
-            .expect("send_exec_streaming");
+        let terminal = send_exec_streaming(&mut host, "echo hi", None, Some(30), |e| {
+            got.push(e.clone())
+        })
+        .expect("send_exec_streaming");
         guest_handle.join().unwrap();
 
         assert_eq!(got.len(), 1);

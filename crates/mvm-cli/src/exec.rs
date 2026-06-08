@@ -994,9 +994,7 @@ pub fn dispatch_in_session(
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
         mvm_guest::vsock::ExecEvent::TimedOut => {
-            err.extend_from_slice(
-                format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes(),
-            );
+            err.extend_from_slice(format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes());
             EXEC_TIMEOUT_EXIT_CODE
         }
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),

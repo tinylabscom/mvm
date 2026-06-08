@@ -1841,7 +1841,10 @@ fn exec_default_manifest_argv_only() {
             assert_eq!(memory, "512M");
             assert!(add_dir.is_empty());
             assert!(env.is_empty());
-            assert_eq!(timeout, None, "unset --timeout ⇒ None (no per-command kill)");
+            assert_eq!(
+                timeout, None,
+                "unset --timeout ⇒ None (no per-command kill)"
+            );
             assert!(launch_plan.is_none(), "launch_plan should default to None");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
         }
@@ -1878,7 +1881,10 @@ fn run_default_profile_argv_only() {
             assert_eq!(profile, exec::RunProfile::Standard);
             assert!(add_dir.is_empty());
             assert!(env.is_empty());
-            assert_eq!(timeout, None, "unset --timeout ⇒ None (no per-command kill)");
+            assert_eq!(
+                timeout, None,
+                "unset --timeout ⇒ None (no per-command kill)"
+            );
             assert!(receipt.is_none(), "receipt should default to None");
             assert!(!json, "json should default to false");
             assert!(!dry_run, "dry_run should default to false");
