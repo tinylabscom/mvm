@@ -5345,8 +5345,9 @@ mod tests {
     }
 
     #[test]
-    fn exec_event_exit_is_terminal_others_are_not() {
+    fn exec_event_exit_and_timedout_are_terminal() {
         assert!(ExecEvent::Exit { code: 0 }.is_terminal());
+        assert!(ExecEvent::TimedOut.is_terminal());
         assert!(
             !ExecEvent::Stdout {
                 chunk: b"x".to_vec()

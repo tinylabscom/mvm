@@ -279,6 +279,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_kills_the_whole_process_group() {
         // The command backgrounds a long sleep in the SAME process group,
