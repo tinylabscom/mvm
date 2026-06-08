@@ -32,9 +32,11 @@
 //! Both supervisor binaries share the name `mvm-vz-supervisor`, so they are
 //! addressed by explicit path, never by name resolution.
 //!
-//! Slice P1 (this file): boot + graceful-stop + exit-code parity, plus the pure
-//! config/contract helpers. Control-verb parity (PAUSE/RESUME/STATUS/BALLOON)
-//! and save/restore parity land as the supervisor grows those surfaces.
+//! Slices so far: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy
+//! round-trip parity (identical request bytes → identical reply bytes through
+//! each supervisor's per-port proxy), plus the pure config/contract/round-trip
+//! helpers. Control-verb parity (PAUSE/RESUME/STATUS/BALLOON) and save/restore
+//! parity land as the supervisor grows those surfaces.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -48,6 +50,13 @@ const SWIFT_BIN: &str = "MVM_VZ_PARITY_SWIFT_BIN";
 const RUST_BIN: &str = "MVM_VZ_PARITY_RUST_BIN";
 const KERNEL: &str = "MVM_VZ_PARITY_KERNEL";
 const ROOTFS: &str = "MVM_VZ_PARITY_ROOTFS";
+/// Guest vsock port to round-trip through the proxy (default 5252, the agent).
+const VSOCK_PORT: &str = "MVM_VZ_PARITY_VSOCK_PORT";
+/// Path to a file of request bytes the guest answers on that port (e.g. a
+/// captured agent ping). The gate stays protocol-agnostic — it asserts the two
+/// supervisors return *identical* replies to identical bytes, not what the bytes
+/// mean. Without it the vsock round-trip parity test skips.
+const VSOCK_REQUEST: &str = "MVM_VZ_PARITY_VSOCK_REQUEST";
 
 /// Default workload kernel cmdline (ADR-056 §"Kernel-cmdline lockdown"). The
 /// backend constructs this; we mirror it so the gate boots the same shape the
@@ -124,6 +133,39 @@ fn send_command(socket: &Path, verb: &str) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Connect to a host-side proxy unix socket, send `request`, and read the reply
+/// until the peer closes or goes idle for `idle`. Returns the accumulated bytes.
+/// Protocol-agnostic on purpose: vsock round-trip parity asserts identical bytes
+/// out for identical bytes in under both supervisors, without encoding the agent
+/// wire format (that's `mvm-guest`'s concern and would couple the gate to drift).
+fn proxy_roundtrip(socket: &Path, request: &[u8], idle: Duration) -> std::io::Result<Vec<u8>> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_write_timeout(Some(idle))?;
+    stream.set_read_timeout(Some(idle))?;
+    stream.write_all(request)?;
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break, // peer closed
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            // Idle for `idle` (first byte never came, or the framed reply is
+            // complete and the agent left the connection open) — return what we
+            // have.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
 /// Observable outcome of booting one supervisor and asking it to stop. The two
 /// supervisors must agree on every field.
 #[derive(Debug, PartialEq, Eq)]
@@ -167,14 +209,18 @@ fn stop_and_reap(child: &mut Child, grace: Duration) -> Option<i32> {
     None
 }
 
-/// Spawn one supervisor against a freshly-built config, wait for boot, stop it.
-fn probe_boot(bin: &Path, kernel: &str, rootfs: &str, label: &str) -> std::io::Result<BootOutcome> {
-    let state_dir =
-        std::env::temp_dir().join(format!("mvm-vz-parity-{label}-{}", std::process::id()));
-    std::fs::create_dir_all(&state_dir)?;
-    let config = build_boot_config(label, kernel, rootfs, &state_dir);
-    let json = config.to_json().expect("serialize SupervisorConfig");
+/// Unique per-run scratch state dir for a supervisor under test.
+fn make_state_dir(label: &str) -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("mvm-vz-parity-{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
 
+/// Spawn a supervisor with `config` piped to stdin. stdout/stderr are silenced —
+/// the gate judges observable side effects (pid file, sockets, exit code), not
+/// logs.
+fn spawn_with_config(bin: &Path, config: &SupervisorConfig) -> std::io::Result<Child> {
+    let json = config.to_json().expect("serialize SupervisorConfig");
     let mut child = Command::new(bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -185,6 +231,14 @@ fn probe_boot(bin: &Path, kernel: &str, rootfs: &str, label: &str) -> std::io::R
         .take()
         .expect("supervisor stdin piped")
         .write_all(json.as_bytes())?;
+    Ok(child)
+}
+
+/// Spawn one supervisor against a freshly-built config, wait for boot, stop it.
+fn probe_boot(bin: &Path, kernel: &str, rootfs: &str, label: &str) -> std::io::Result<BootOutcome> {
+    let state_dir = make_state_dir(label)?;
+    let config = build_boot_config(label, kernel, rootfs, &state_dir);
+    let mut child = spawn_with_config(bin, &config)?;
 
     let reached = wait_for_file(
         &config.resolved_pid_file(),
@@ -198,6 +252,41 @@ fn probe_boot(bin: &Path, kernel: &str, rootfs: &str, label: &str) -> std::io::R
         reached_running: reached,
         exit_code,
     })
+}
+
+/// Boot one supervisor, wait for the per-port `vsock-<port>.sock` to appear,
+/// dial it through the proxy, send `request`, read the guest's reply, then stop.
+/// Returns the reply bytes, or `None` if the proxy socket never appeared or the
+/// guest sent nothing — both parity failures the caller asserts on.
+fn probe_vsock_roundtrip(
+    bin: &Path,
+    kernel: &str,
+    rootfs: &str,
+    port: u32,
+    request: &[u8],
+    label: &str,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let state_dir = make_state_dir(label)?;
+    let config = build_boot_config(label, kernel, rootfs, &state_dir);
+    let mut child = spawn_with_config(bin, &config)?;
+
+    let booted = wait_for_file(
+        &config.resolved_pid_file(),
+        Instant::now() + Duration::from_secs(30),
+    );
+    let proxy_sock = Path::new(&config.vsock.socket_dir).join(format!("vsock-{port}.sock"));
+    let proxy_ready =
+        booted && wait_for_file(&proxy_sock, Instant::now() + Duration::from_secs(10));
+
+    let reply = if proxy_ready {
+        proxy_roundtrip(&proxy_sock, request, Duration::from_secs(5)).ok()
+    } else {
+        None
+    };
+
+    let _ = stop_and_reap(&mut child, Duration::from_secs(20));
+    let _ = std::fs::remove_dir_all(&state_dir);
+    Ok(reply.filter(|r| !r.is_empty()))
 }
 
 /// Returns the four live-test paths, or `None` (with an explanatory skip note)
@@ -251,6 +340,30 @@ fn control_verb_rejects_embedded_newline() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }
 
+#[test]
+fn proxy_roundtrip_reads_the_peer_reply() {
+    // Exercises the round-trip helper end-to-end against a fake peer (no VZ):
+    // request goes out, the peer's reply comes back verbatim.
+    use std::os::unix::net::UnixListener;
+    let dir = std::env::temp_dir().join(format!("mvm-parity-rt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("echo.sock");
+    let _ = std::fs::remove_file(&sock);
+    let listener = UnixListener::bind(&sock).unwrap();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut conn, _)) = listener.accept() {
+            let mut got = [0u8; 4];
+            let _ = conn.read_exact(&mut got);
+            let _ = conn.write_all(b"PONG");
+            // drop closes the connection → the client's read returns 0.
+        }
+    });
+    let reply = proxy_roundtrip(&sock, b"PING", Duration::from_secs(5)).unwrap();
+    assert_eq!(reply, b"PONG");
+    server.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------
 // Live gate — skips unless both binaries + a boot artifact are exported.
 // ---------------------------------------------------------------------------
@@ -281,5 +394,43 @@ fn boot_parity_swift_vs_rust() {
     assert_eq!(
         rust_outcome, swift_outcome,
         "Rust supervisor diverged from Swift on boot/exit: rust={rust_outcome:?} swift={swift_outcome:?}"
+    );
+}
+
+#[test]
+fn vsock_roundtrip_parity_swift_vs_rust() {
+    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+        eprintln!(
+            "SKIP vsock_roundtrip_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
+             {ROOTFS} (+ {VSOCK_REQUEST}) to run the live vsock proxy parity gate."
+        );
+        return;
+    };
+    let Some(request_path) = std::env::var_os(VSOCK_REQUEST) else {
+        eprintln!(
+            "SKIP vsock_roundtrip_parity_swift_vs_rust: set {VSOCK_REQUEST} to a file of request \
+             bytes the guest agent answers on the vsock port (e.g. a captured agent ping)."
+        );
+        return;
+    };
+    let request = std::fs::read(&request_path).expect("read vsock request fixture");
+    let port: u32 = std::env::var(VSOCK_PORT)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5252);
+
+    let swift_reply = probe_vsock_roundtrip(&swift, &kernel, &rootfs, port, &request, "swift")
+        .expect("swift probe");
+    let rust_reply =
+        probe_vsock_roundtrip(&rust, &kernel, &rootfs, port, &request, "rust").expect("rust probe");
+
+    assert!(
+        swift_reply.is_some(),
+        "Swift supervisor returned no vsock reply on port {port} — fix the fixture/agent before \
+         judging parity"
+    );
+    assert_eq!(
+        rust_reply, swift_reply,
+        "Rust supervisor diverged from Swift on the vsock round-trip (port {port})"
     );
 }
