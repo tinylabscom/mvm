@@ -19,7 +19,10 @@ pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 const DRAIN_BUF: usize = 4096;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-fn spawn_drain<R: Read + Send + 'static>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>) {
+fn spawn_drain<R: Read + Send + 'static>(
+    mut reader: R,
+    buf: Arc<Mutex<Vec<u8>>>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; DRAIN_BUF];
         loop {
@@ -32,7 +35,7 @@ fn spawn_drain<R: Read + Send + 'static>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>
                 Err(_) => break,
             }
         }
-    });
+    })
 }
 
 /// Emit newly-buffered bytes (past `*sent`) as one chunk, capped at
@@ -104,12 +107,8 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
 
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
-    if let Some(o) = child.stdout.take() {
-        spawn_drain(o, out_buf.clone());
-    }
-    if let Some(e) = child.stderr.take() {
-        spawn_drain(e, err_buf.clone());
-    }
+    let mut out_handle = child.stdout.take().map(|o| spawn_drain(o, out_buf.clone()));
+    let mut err_handle = child.stderr.take().map(|e| spawn_drain(e, err_buf.clone()));
 
     let mut sent_out = 0usize;
     let mut sent_err = 0usize;
@@ -127,9 +126,16 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Child exited: let the drain threads flush the tail,
-                // then emit any remaining bytes.
-                std::thread::sleep(POLL_INTERVAL);
+                // Child exited: join the drain threads so every buffered
+                // byte has been appended (a happens-before edge — the
+                // thread only returns after its final append), then flush
+                // the tail. Avoids the timing race a bare sleep would have.
+                if let Some(h) = out_handle.take() {
+                    let _ = h.join();
+                }
+                if let Some(h) = err_handle.take() {
+                    let _ = h.join();
+                }
                 let _ = drain_into(&out_buf, &mut sent_out, true, &mut emit);
                 let _ = drain_into(&err_buf, &mut sent_err, false, &mut emit);
                 return ExecEvent::Exit {
@@ -197,5 +203,26 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(out, b"piped");
+    }
+
+    #[test]
+    fn large_final_write_is_not_truncated() {
+        // Emit ~256 KiB right before exit; the joined drain must capture all of it.
+        // head -c 262144 /dev/zero is standard on macOS + Linux (POSIX).
+        // 262144 < MAX_EXEC_OUTPUT (1 MiB) so the cap is not hit.
+        let mut events = Vec::new();
+        let term = stream_exec("head -c 262144 /dev/zero", None, |e| events.push(e));
+        assert!(matches!(term, ExecEvent::Exit { code: 0 }));
+        let total: usize = events
+            .iter()
+            .filter_map(|e| match e {
+                ExecEvent::Stdout { chunk } => Some(chunk.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            total, 262144,
+            "all 256 KiB of stdout must be streamed, none lost"
+        );
     }
 }
