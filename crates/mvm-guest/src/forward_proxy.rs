@@ -161,16 +161,15 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 /// Start the guest-local forward proxy: bind loopback [`FORWARD_PROXY_PORT`] and
-/// serve, relaying each request to the host substitution endpoint over vsock
-/// (`vsock_uds_path` is the backend's vsock multiplexer socket). Blocks; the
-/// guest init runs it on its own thread. This is the production entry point —
-/// `serve` + `substitution_client::substitute` are the unit-tested parts it
-/// composes.
-pub fn start_forward_proxy(vsock_uds_path: String, relay_timeout_secs: u64) -> Result<()> {
+/// serve, relaying each request to the host substitution endpoint over a
+/// guest→host AF_VSOCK connection. Blocks; the guest init runs it on its own
+/// thread. This is the production entry point — `serve` +
+/// `substitution_client::substitute` are the unit-tested parts it composes.
+pub fn start_forward_proxy(relay_timeout_secs: u64) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", FORWARD_PROXY_PORT))
         .with_context(|| format!("binding forward proxy on 127.0.0.1:{FORWARD_PROXY_PORT}"))?;
     serve(&listener, move |req| {
-        substitution_client::substitute(&vsock_uds_path, req, relay_timeout_secs)
+        substitution_client::substitute(req, relay_timeout_secs)
     })
 }
 
