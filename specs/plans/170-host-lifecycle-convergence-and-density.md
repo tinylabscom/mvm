@@ -2,7 +2,7 @@
 
 > **Status (2026-06-08):** WS-A **implemented** (PR #688); WS-B mvm-side
 > mechanism **implemented** (PR #696, backend `SleepFn` + resident loop are
-> mvmd-side); WS-C **selection core implemented** (PR #TBD; sysinfo reader +
+> mvmd-side); WS-C **selection core implemented** (PR #701; sysinfo reader +
 > resident pressure-loop are consumer-side — see the WS-C consumer finding);
 > WS-D Proposed. Grounded in a
 > review of an external single-machine sandbox control plane — an
