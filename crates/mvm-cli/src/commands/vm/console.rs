@@ -107,7 +107,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             &mvm_guest::vsock::GuestRequest::Exec {
                 command: cmd.to_string(),
                 stdin: None,
-                timeout_secs: Some(30),
+                timeout_secs: None,
             },
         );
         // send_exec_streaming does the protocol hello internally (Plan 159 WS-5 E).
@@ -116,7 +116,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             &mut stream,
             cmd,
             None,
-            30,
+            None,
             |event| match event {
                 mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
                     let mut so = std::io::stdout();
@@ -137,6 +137,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     std::process::exit(code);
                 }
                 Ok(())
+            }
+            mvm_guest::vsock::ExecEvent::TimedOut => {
+                eprintln!("{}", crate::exec::timeout_exit_message(None));
+                std::process::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
             }
             other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
         }

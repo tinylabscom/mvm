@@ -143,9 +143,9 @@ pub(in crate::commands) struct AttachArgs {
     /// no stdin (the wrapper sees an empty pipe).
     #[arg(long, value_name = "PATH")]
     pub stdin: Option<String>,
-    /// Wall-clock timeout for the call, in seconds. Default 30.
-    #[arg(long, default_value = "30")]
-    pub timeout: u64,
+    /// Wall-clock timeout for the call, in seconds. Unset ⇒ no kill.
+    #[arg(long)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -157,9 +157,9 @@ pub(in crate::commands) struct ExecArgs {
     /// `mvmctl` flags (e.g. `mvmctl session exec <id> -- ls -la`).
     #[arg(required = true, last = true)]
     pub argv: Vec<String>,
-    /// Wall-clock timeout for the call, in seconds. Default 30.
-    #[arg(long, default_value = "30")]
-    pub timeout: u64,
+    /// Wall-clock timeout for the call, in seconds. Unset ⇒ no kill.
+    #[arg(long)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -170,9 +170,9 @@ pub(in crate::commands) struct RunCodeArgs {
     /// runtime (Python, Node, etc. — language is determined by the
     /// session's wrapper, not by the CLI).
     pub code: String,
-    /// Wall-clock timeout for the call, in seconds. Default 30.
-    #[arg(long, default_value = "30")]
-    pub timeout: u64,
+    /// Wall-clock timeout for the call, in seconds. Unset ⇒ no kill.
+    #[arg(long)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -646,8 +646,16 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
         Some(&record.vm_name),
         Some(&format!("session={id}")),
     );
-    let exit_code = super::invoke::dispatch(&record.vm_name, stdin_bytes, args.timeout, Some(&id))
-        .with_context(|| format!("dispatching into session {id}"))?;
+    // attach forwards to the entrypoint-runner leg (invoke::dispatch), which
+    // requires a concrete u64 and has its own Timeout→124 mapping. Preserve
+    // the prior default-30 kill window when --timeout is unset.
+    let exit_code = super::invoke::dispatch(
+        &record.vm_name,
+        stdin_bytes,
+        args.timeout.unwrap_or(30),
+        Some(&id),
+    )
+    .with_context(|| format!("dispatching into session {id}"))?;
 
     // Bump the session's invoke counter / last-used timestamp so
     // observers (`mvmctl session info`) see the activity.
@@ -743,7 +751,7 @@ fn dispatch_run_code(
     id: &SessionId,
     record: &mvm_core::session::SessionRecord,
     code: String,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -784,6 +792,10 @@ fn dispatch_run_code(
     })?;
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
+        mvm_guest::vsock::ExecEvent::TimedOut => {
+            eprintln!("{}", crate::exec::timeout_exit_message(timeout_secs));
+            crate::exec::EXEC_TIMEOUT_EXIT_CODE
+        }
         other => bail!("unexpected terminal exec event: {other:?}"),
     };
 
@@ -830,7 +842,7 @@ fn run_in_session(
     id: &SessionId,
     record: &mvm_core::session::SessionRecord,
     command: String,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -1271,7 +1283,7 @@ mod tests {
         let err = cmd_exec(ExecArgs {
             session_id: id,
             argv: vec![],
-            timeout: 30,
+            timeout: None,
         })
         .unwrap_err();
         assert!(
@@ -1307,7 +1319,7 @@ mod tests {
             continue_latest: false,
             resume: None,
             stdin: None,
-            timeout: 1,
+            timeout: None,
         })
         .unwrap_err();
         assert!(
@@ -1326,7 +1338,7 @@ mod tests {
             continue_latest: true,
             resume: None,
             stdin: None,
-            timeout: 30,
+            timeout: None,
         })
         .unwrap_err();
         assert!(
@@ -1344,7 +1356,7 @@ mod tests {
         let err = cmd_run_code(RunCodeArgs {
             session_id: id,
             code: "print(1)".into(),
-            timeout: 1,
+            timeout: None,
         })
         .unwrap_err();
         assert!(

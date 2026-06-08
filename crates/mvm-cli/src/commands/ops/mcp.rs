@@ -406,7 +406,7 @@ impl ExecDispatcher {
             add_dirs: Vec::new(),
             env: Vec::new(),
             target: crate::exec::ExecTarget::Inline { argv },
-            timeout_secs: timeout,
+            timeout_secs: Some(timeout),
         };
         crate::exec::run_captured(req)
     }
@@ -427,7 +427,7 @@ impl ExecDispatcher {
         let vm = handle
             .lock()
             .map_err(|_| anyhow::anyhow!("warm-VM lock poisoned for session '{session_id}'"))?;
-        crate::exec::dispatch_in_session(&vm, code.to_string(), timeout)
+        crate::exec::dispatch_in_session(&vm, code.to_string(), Some(timeout))
     }
 
     /// Look up an existing warm VM for the session, or boot a new one

@@ -472,7 +472,7 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
         );
         // Best-effort kernel probe via streaming exec (Plan 159 WS-5 E).
         let mut out_buf: Vec<u8> = Vec::new();
-        if mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, 5, |event| {
+        if mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, Some(5), |event| {
             if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
                 out_buf.extend_from_slice(chunk);
             }

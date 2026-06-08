@@ -71,7 +71,10 @@ def test_commands_start_carries_env() -> None:
     sb = mvm.Sandbox.create("python-3.12")
     sb.commands.start(
         ["python", "run.py"],
-        env={"MODE": "prod", "API_KEY": mvm.secret("api-key")},
+        env={
+            "MODE": "prod",
+            "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"]),
+        },
     )
     ops = mvm.current_recording_dict()["ops"]
     env = ops[0]["env"]

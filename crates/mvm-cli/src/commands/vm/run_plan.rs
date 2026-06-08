@@ -344,7 +344,7 @@ mod tests {
             profile: RunProfile::Standard,
             add_dir: Vec::new(),
             env: Vec::new(),
-            timeout: 60,
+            timeout: Some(60),
             receipt: None,
             json: false,
             launch_plan: None,
