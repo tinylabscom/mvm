@@ -1,20 +1,18 @@
 //! Plan 97 Phase B foundation — type-safe interface to
 //! `mvm-vz-supervisor`.
 //!
-//! The Vz backend (`mvm-backend::VzBackend`, lands in a follow-up
-//! slice) constructs a [`SupervisorConfig`], serializes it to JSON,
-//! and pipes it to the Swift supervisor binary on stdin. The Swift
-//! side decodes against an equivalent `Codable` schema in
-//! `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/Config.swift`
+//! The Vz backend (`mvm-backend::VzBackend`) constructs a
+//! [`SupervisorConfig`], serializes it to JSON, and pipes it to the
+//! Rust-native `mvm-vz-supervisor` binary on stdin, which decodes it
 //! with strict deny-unknown-fields semantics — ADR-002 claim 5 rests
-//! on those two decoders rejecting the same inputs.
+//! on that decoder rejecting malformed input (fuzzed in security.yml).
 //!
-//! Pure data + path resolution. No FFI, no Swift toolchain dep, no
-//! Vz framework binding. This crate compiles on every host the
-//! workspace targets, including Linux contributors who never touch
-//! the Vz code path (`has_vz()` returns `false` there). The Swift
-//! supervisor's actual build is gated on macOS via
-//! `crates/mvm-vz-supervisor/tools/build.sh`.
+//! Pure data + path resolution. No FFI, no Vz framework binding. This
+//! crate compiles on every host the workspace targets, including Linux
+//! contributors who never touch the Vz code path (`has_vz()` returns
+//! `false` there). The supervisor binary itself is the objc2 `[[bin]]`
+//! in `mvm-vm-host`, built via
+//! `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
 
 use std::path::PathBuf;
 
@@ -22,7 +20,7 @@ use std::path::PathBuf;
 
 /// JSON payload the host pipes to `mvm-vz-supervisor` on stdin.
 ///
-/// The schema **must** stay in lockstep with the Swift `Config.swift`
+/// The schema **must** stay in lockstep with the Rust `SupervisorConfig`
 /// decoder — both sides apply deny-unknown-fields. Adding a field
 /// requires landing both edits in the same PR (and the Phase A
 /// equivalence fuzz corpus catches drift in CI).
@@ -564,7 +562,7 @@ mod tests {
         // The Swift supervisor threads `read_only` onto
         // `VZSharedDirectory(readOnly:)`, so the wire format must
         // carry the field as `read_only` (snake_case) to match the
-        // strict-keys decoder in Config.swift.
+        // strict-keys decoder in the Rust SupervisorConfig.
         let mut cfg = minimal_config();
         cfg.virtio_fs = vec![
             VirtioFsShare {

@@ -949,7 +949,7 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
 /// follow-up plan after Phase 3c — until then, the substrate's
 /// path values are computed but not threaded into
 /// `vz::SupervisorConfig` (which would also require lockstep Swift
-/// `Config.swift` decoder updates per the schema deny-unknown-fields
+/// the Rust `SupervisorConfig` decoder updates per the schema deny-unknown-fields
 /// contract). The Swift bridge already writes flow events to
 /// `events_ingest_socket_path` (PR #487 commit 7); the drainer
 /// closes the loop.

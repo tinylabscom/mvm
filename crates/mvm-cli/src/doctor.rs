@@ -902,8 +902,9 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     }
     (
         None,
-        "supervisor binary NOT FOUND — build via `crates/mvm-vz-supervisor/tools/build.sh` \
-         before `mvmctl up --backend vz`"
+        "supervisor binary NOT FOUND — build via \
+         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor` before \
+         `mvmctl up --backend vz`"
             .to_string(),
     )
 }
@@ -916,8 +917,8 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
 ///   permitted to use Virtualization.framework).
 /// - `Some(false)` — codesign ran successfully but the entitlement is
 ///   absent from the binary. `mvmctl up --backend vz` will fail with
-///   an opaque framework error; rebuilding via `tools/build.sh` fixes
-///   it.
+///   an opaque framework error; the supervisor self-signs the
+///   entitlement on first launch, so a fresh run fixes it.
 /// - `None` — codesign couldn't be invoked (not on PATH, or the
 ///   binary path is wrong). Surfaced as `entitlement ?` in doctor; not
 ///   a hard failure because we can't distinguish "tooling unavailable"
@@ -2356,7 +2357,7 @@ mod tests {
     fn entitlement_probe_parses_plist_without_entitlement() {
         // A binary that codesign succeeds against but carries no entitlements
         // (or carries a different set) — operator needs to rebuild via
-        // tools/build.sh.
+        // `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
         let stdout = br#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>

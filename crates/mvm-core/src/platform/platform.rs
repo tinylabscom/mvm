@@ -99,7 +99,7 @@ impl Platform {
     ///
     /// This probe does **not** assert the `mvm-vz-supervisor` binary
     /// is installed — that lives under `~/.mvm/bin/` for release
-    /// layouts and at `crates/mvm-vz-supervisor/.build/.../` for
+    /// layouts and at `the cargo target dir (target/<profile>/)` for
     /// source-checkout builds. `mvmctl doctor` surfaces the binary
     /// presence separately; `VzBackend::start` returns the precise
     /// "supervisor binary missing" error when needed.
