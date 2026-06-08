@@ -32,7 +32,7 @@ PLAN 129 — Secrets / SigV4 substitution         🟡 substitution path done & 
   [x] invoke injects HTTP_PROXY+placeholders; guest forward proxy — PR #718
   [x] on-box endpoint validation: real AF_VSOCK + real encrypted store
       (placeholder mint, substitution success, claim-12 refuse) — 2026-06-08
-  — SDK-free egress (transparent terminator) · direction 2026-06-08 · branch feat/plan-129-egress-terminator · plan: specs/notes/plan-129-stage1b-2-transparent-terminator-plan.md ("Resume state")
+  — SDK-free egress (transparent terminator) · direction 2026-06-08 · branch feat/plan-129-egress-terminator · draft PR #735 · plan: specs/notes/plan-129-stage1b-2-transparent-terminator-plan.md ("Resume state")
   [x] SDK secret() type/hosts + ADR-049 retire             — PR #722/#723
   [x] passt-redirect feasibility PoC (nft OUTPUT + SO_ORIGINAL_DST) — GREEN on box
   [x] terminator core (orig_dst, request parse, handler, reader) — 4 commits, reviewed

@@ -21,7 +21,7 @@
 
 ## Resume state (2026-06-08) — START HERE next session
 
-**Done (4 commits on `feat/plan-129-egress-terminator`, ahead of `origin/main` #724, unpushed):**
+**Done (on `feat/plan-129-egress-terminator`, ahead of `origin/main` #724, pushed — draft PR #735):**
 - Task 1 — `8039120d` `terminator/orig_dst.rs`: `original_dst()` (Linux `SO_ORIGINAL_DST`, cfg-gated) + portable `sockaddr_in_to_v4`.
 - Task 2 — `3f68e3e8` `terminator/request.rs`: `proxy_request_from_origin_form(raw, orig_dst) -> ProxyRequest`.
 - Task 3 — `45557b69` `terminator/handler.rs` + `read.rs`: the host-testable substitution core + bounded reader; `8ed2a584` deduped `find_subslice` into `mod.rs`. Reviewed (fail-closed claim-12 property structurally enforced + tested: `forward` is never called for an unbound dest / unknown placeholder).
