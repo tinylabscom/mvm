@@ -276,6 +276,44 @@ impl SubstitutionService {
         }
     }
 
+    /// Accept loop over a host **AF_VSOCK** listener — the QEMU (`vhost-vsock`)
+    /// guest→host path. Firecracker/libkrun route guest→host through a per-port
+    /// UDS instead and use [`Self::serve`]. The accepted vsock fd is a
+    /// `SOCK_STREAM` socket wrapped as a tokio `UnixStream` (same read/write
+    /// syscalls), so it reuses [`Self::handle_connection`]. Blocking `accept(2)`
+    /// runs on a `spawn_blocking` thread — no new async-vsock dependency.
+    #[cfg(target_os = "linux")]
+    pub async fn serve_vsock(self: Arc<Self>, listener: vsock::VsockListener) {
+        loop {
+            let listen_fd = listener.raw_fd();
+            let accepted = tokio::task::spawn_blocking(move || vsock::accept(listen_fd)).await;
+            let conn_fd = match accepted {
+                Ok(Ok(fd)) => fd,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "vsock substitution accept failed; stopping");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "vsock accept task panicked; stopping");
+                    return;
+                }
+            };
+            let stream = match vsock::into_tokio_stream(conn_fd) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "wrap vsock connection; dropping");
+                    continue;
+                }
+            };
+            let me = Arc::clone(&self);
+            tokio::spawn(async move {
+                if let Err(e) = me.handle_connection(stream).await {
+                    tracing::warn!(error = %e, "vsock substitution connection failed");
+                }
+            });
+        }
+    }
+
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
         let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
         let resp = self.process(wire).await;
@@ -351,6 +389,96 @@ impl SubstitutionService {
                 tracing::warn!(error = %e, secret = %name, "secret.substituted audit emit failed");
             }
         }
+    }
+}
+
+/// Host-side AF_VSOCK listener for the QEMU (`vhost-vsock`) guest→host
+/// substitution path. Firecracker/libkrun bridge guest→host through a per-port
+/// UDS — those use the `UnixListener` `serve`. Raw libc (no async-vsock dep);
+/// blocking `accept` is driven from the async loop via `spawn_blocking`.
+#[cfg(target_os = "linux")]
+pub mod vsock {
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    const AF_VSOCK: libc::c_int = 40;
+    /// Bind to any guest CID so any guest on this host can reach the endpoint.
+    const VMADDR_CID_ANY: u32 = u32::MAX;
+
+    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
+    // cid u32 + 4-byte pad = 16.
+    #[repr(C)]
+    struct SockaddrVm {
+        svm_family: libc::sa_family_t,
+        svm_reserved1: u16,
+        svm_port: u32,
+        svm_cid: u32,
+        svm_zero: [u8; 4],
+    }
+    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+    /// A bound, listening host AF_VSOCK socket on a vsock port.
+    pub struct VsockListener {
+        fd: OwnedFd,
+    }
+
+    impl VsockListener {
+        /// Bind + listen on AF_VSOCK `(VMADDR_CID_ANY, port)`.
+        pub fn bind(port: u32) -> io::Result<Self> {
+            // SAFETY: standard socket/bind/listen on AF_VSOCK; `addr` is fully
+            // initialized and sized exactly. The fd is adopted by `OwnedFd`
+            // immediately, closing on drop / on the error paths.
+            unsafe {
+                let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let owned = OwnedFd::from_raw_fd(fd);
+                let addr = SockaddrVm {
+                    svm_family: AF_VSOCK as libc::sa_family_t,
+                    svm_reserved1: 0,
+                    svm_port: port,
+                    svm_cid: VMADDR_CID_ANY,
+                    svm_zero: [0; 4],
+                };
+                if libc::bind(
+                    fd,
+                    std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                    std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+                ) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::listen(fd, 128) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Self { fd: owned })
+            }
+        }
+
+        pub fn raw_fd(&self) -> RawFd {
+            self.fd.as_raw_fd()
+        }
+    }
+
+    /// Blocking `accept(2)` on a listening AF_VSOCK fd, returning the
+    /// connection fd. Run via `spawn_blocking` from the async serve loop.
+    pub fn accept(listen_fd: RawFd) -> io::Result<RawFd> {
+        // SAFETY: accept(2) on a listening AF_VSOCK fd; peer addr not needed.
+        let cfd = unsafe { libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if cfd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(cfd)
+    }
+
+    /// Adopt an accepted vsock connection fd as a non-blocking tokio
+    /// `UnixStream` (a `SOCK_STREAM` socket — same read/write syscalls).
+    pub fn into_tokio_stream(conn_fd: RawFd) -> io::Result<tokio::net::UnixStream> {
+        // SAFETY: `conn_fd` is an owned connected stream socket from `accept`.
+        let std_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn_fd) };
+        std_stream.set_nonblocking(true)?;
+        tokio::net::UnixStream::from_std(std_stream)
     }
 }
 
