@@ -1,4 +1,11 @@
-# Plan 169 — Plan 152 WS-A: guest `/init` exit-code + poweroff parity (Implementation Plan)
+# Plan 171 — Plan 152 WS-A: guest `/init` exit-code + poweroff parity (Implementation Plan)
+
+> **Numbering:** renumbered 169 → **171** before merge — live `main`
+> advanced past this branch's base (`2e0fcd03`) and now holds plans 169
+> (agent-RPC transport) + 170 (host-lifecycle). 171 is the next free
+> number; `check-spec-numbers` rejects duplicates. (Earlier WS-A commit
+> messages still say "plan-169" — cosmetic; the gate checks the file
+> prefix.)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
