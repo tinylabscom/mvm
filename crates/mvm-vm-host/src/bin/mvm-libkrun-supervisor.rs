@@ -294,6 +294,14 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
         bundle: bundle.map(Arc::new),
         audit_socket,
         signer,
+        // Plan 123 A2/A4 — the flow-open gate. This `AllowAll` is only the
+        // *no-bundle fallback*: when the admitted plan carries a resolvable
+        // policy bundle, `run_bridge_inner` derives a per-tenant
+        // `PlanFlowPolicy` (deny-by-default, the libkrun analogue of the
+        // Firecracker `install_default_deny`) from the same resolved policy as
+        // the packet scan, and that supersedes this field. Stage 0 builder VMs /
+        // dev-mode carry no bundle, so they keep `AllowAll` (still gated by the
+        // always-on mandatory-deny + placeholder-leak packet scans).
         policy: Arc::new(AllowAll),
         // Plan 113 / ADR-064 — observers resolved above from the
         // admitted plan's `network_policy` ref through the host
