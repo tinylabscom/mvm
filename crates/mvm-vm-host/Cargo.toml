@@ -37,6 +37,15 @@ path = "src/bin/mvm-vz-drainer.rs"
 name = "mvm-firecracker-bridge"
 path = "src/bin/mvm-firecracker-bridge.rs"
 
+# Rust-native Vz supervisor (Plan 152 WS-B) — the objc2 reimplementation of
+# the Swift crates/mvm-vz-supervisor. macOS-only at runtime; the bin self-gates
+# to a stub main() on other targets so non-macOS workspace builds stay green.
+# The Virtualization.framework objc2 stack lives in the macOS target table
+# below and the lib's cfg(target_os="macos") `vz_objc` module.
+[[bin]]
+name = "mvm-vz-supervisor"
+path = "src/bin/mvm-vz-supervisor.rs"
+
 [dependencies]
 mvm-core = { workspace = true }
 mvm-hostd = { workspace = true }
@@ -45,6 +54,8 @@ mvm-hostd = { workspace = true }
 mvm-backend = { workspace = true }
 # vsock port constants (WORKLOAD_EXIT_PORT) for the exit-capture thread.
 mvm-guest = { workspace = true }
+# SupervisorConfig — the stdin JSON contract the Vz supervisor decodes.
+mvm-build = { workspace = true }
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow = { workspace = true }
@@ -55,6 +66,46 @@ sha2 = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Vz supervisor lifecycle: serial-queue dispatch bridged to async, SIGTERM
+# handling, the terminal-state watch. rt (not rt-multi-thread) — one VM per
+# process, all VZ calls serialize on the VM's own dispatch queue.
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
+
+# Apple Virtualization.framework objc2 stack — macOS-only, already in the
+# workspace lock (mvm-backend's apple_container path carries the same set, so
+# no new third-party dependency). Plan 152 WS-B §"Dependency wash".
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSError", "NSData", "NSFileManager", "NSFileHandle"] }
+objc2-virtualization = { version = "0.3", features = [
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZGenericPlatformConfiguration",
+    "VZPlatformConfiguration",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZStorageDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZSharedDirectory",
+    "VZSingleDirectoryShare",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZEntropyDeviceConfiguration",
+    "VZSerialPortConfiguration",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZMemoryBalloonDeviceConfiguration",
+    "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
