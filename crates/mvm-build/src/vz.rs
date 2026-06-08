@@ -86,6 +86,32 @@ pub struct SupervisorConfig {
     /// a configured boot loader on restore).
     #[serde(default, skip_serializing_if = "StartupMode::is_default")]
     pub startup_mode: StartupMode,
+
+    // ── Audit substrate (Plan 152 WS-B slice 8 — flow-audited networking) ──
+    // The Rust-native Vz supervisor runs the Plan 141 gateway bridge in-process
+    // (payload_tap), so it needs the same admitted-plan + signing inputs the
+    // libkrun supervisor's config carries. All optional + omitted-when-absent so
+    // pre-slice-8 configs (and the dev/builder VM, which has no audit substrate)
+    // round-trip unchanged. When present, the supervisor splices the guest NIC
+    // through the bridge to gvproxy and chain-signs every flow event.
+    /// Owning tenant id (audit chain partition key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// `SignedExecutionPlan` envelope (JSON) the host admitted + signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<serde_json::Value>,
+    /// `PolicyBundle` (JSON), when the admitted plan pinned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<serde_json::Value>,
+    /// Audit chain directory (`~/.mvm/audit/`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_dir: Option<String>,
+    /// Gateway audit subscriber socket (`~/.mvm/audit/gateway-<vm>.sock`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_audit_socket: Option<String>,
+    /// Host Ed25519 signing key (mode 0600) the chain signer re-reads per start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key_path: Option<String>,
 }
 
 /// How the supervisor brings the VM up.
@@ -160,6 +186,17 @@ impl SupervisorConfig {
     /// hashing should layer a canonicalizer on top.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
+    }
+
+    /// True when the config carries a full audit substrate — the trigger for
+    /// the in-process flow-audited gvproxy bridge (Plan 152 WS-B slice 8).
+    /// Without it (dev / builder VMs) the supervisor direct-attaches gvproxy.
+    pub fn has_audit_substrate(&self) -> bool {
+        self.plan.is_some()
+            && self.tenant_id.is_some()
+            && self.audit_dir.is_some()
+            && self.gateway_audit_socket.is_some()
+            && self.signing_key_path.is_some()
     }
 }
 
