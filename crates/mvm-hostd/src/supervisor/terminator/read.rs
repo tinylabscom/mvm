@@ -2,8 +2,7 @@
 //!
 //! Ported from `crates/mvm-guest/src/forward_proxy.rs`. The terminator reads
 //! raw redirected TCP bytes off a blocking socket and needs the same
-//! headers→body logic. `find_subslice` is `pub(super)` so `request.rs` can
-//! reference it via the parent module rather than duplicating it.
+//! headers→body logic.
 
 use std::io::Read;
 use std::net::TcpStream;
@@ -22,7 +21,7 @@ pub fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
 
     // Phase 1: accumulate until we see the header terminator.
     let header_end = loop {
-        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+        if let Some(pos) = super::find_subslice(&buf, b"\r\n\r\n") {
             break pos + 4;
         }
         if buf.len() > MAX_REQUEST_BYTES {
@@ -54,13 +53,6 @@ pub fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// First index of `needle` in `haystack`, or `None`.
-pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 /// Parse a `Content-Length` value out of an already-read header block.
 fn content_length_of(head: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(head).ok()?;
@@ -74,9 +66,11 @@ fn content_length_of(head: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    use crate::supervisor::terminator::find_subslice;
 
     /// Write `data` into a loopback pair, return the reader end.
     fn pipe(data: &[u8]) -> TcpStream {

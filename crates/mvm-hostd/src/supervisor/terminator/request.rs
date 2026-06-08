@@ -5,7 +5,8 @@ use anyhow::{Context, Result, bail};
 use std::net::SocketAddr;
 
 pub fn proxy_request_from_origin_form(raw: &[u8], orig_dst: SocketAddr) -> Result<ProxyRequest> {
-    let split = find_subslice(raw, b"\r\n\r\n").context("request has no header terminator")?;
+    let split =
+        super::find_subslice(raw, b"\r\n\r\n").context("request has no header terminator")?;
     let head = std::str::from_utf8(&raw[..split]).context("request head not UTF-8")?;
     let body = raw[split + 4..].to_vec();
 
@@ -54,10 +55,6 @@ pub fn proxy_request_from_origin_form(raw: &[u8], orig_dst: SocketAddr) -> Resul
         headers,
         body,
     })
-}
-
-fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]
