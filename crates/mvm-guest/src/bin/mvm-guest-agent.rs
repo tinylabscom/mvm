@@ -2808,6 +2808,19 @@ fn main() {
         std::thread::spawn(move || init_probes(&bs, &s));
     }
 
+    // Plan 129 — start the egress forward proxy (loopback FORWARD_PROXY_PORT).
+    // The workload's HTTP_PROXY (set by the host invoke path only when the VM
+    // has a substitution endpoint) routes secret-bearing requests here; this
+    // relays them over vsock to the host endpoint, which substitutes the real
+    // credential. Always started (cheap, loopback-only): with no HTTP_PROXY in
+    // the workload env it simply sees no connections. Not dev-shell-gated —
+    // egress substitution is a production feature.
+    std::thread::spawn(|| {
+        if let Err(e) = mvm_guest::forward_proxy::start_forward_proxy(30) {
+            eprintln!("mvm-guest-agent: forward proxy failed to start: {e}");
+        }
+    });
+
     // Port forwarders are started on-demand via StartPortForward requests
     // from the host (works with all backends, no config drive needed).
 

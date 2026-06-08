@@ -392,6 +392,14 @@ pub fn vm_console_log(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("console.log")
 }
 
+/// Plan 129 — per-VM JSON file of `(guest var, placeholder)` pairs the
+/// substitution endpoint minted at boot. The backend writes it; the invoke
+/// path reads it to inject `HTTP_PROXY` + the placeholder env vars into the
+/// workload. Holds opaque placeholders only — never secret values.
+pub fn vm_substitution_env_path(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("substitution-env.json")
+}
+
 // ============================================================================
 // Sensitive ~/.mvm subdirectories
 // ============================================================================

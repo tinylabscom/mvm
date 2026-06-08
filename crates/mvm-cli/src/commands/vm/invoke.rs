@@ -6,8 +6,10 @@
 //! is the production-safe call surface — it dispatches the
 //! `RunEntrypoint` vsock verb, which the guest agent serves only by
 //! spawning the program named in `/etc/mvm/entrypoint`. There is no
-//! shell, no argv override, and no env injection beyond what the
-//! wrapper template defined at image build time.
+//! shell and no argv override. The only env injected is the Plan 129
+//! substitution env — `HTTP_PROXY` + the opaque secret placeholders —
+//! and only when the VM's admitted plan carried secrets; never a raw
+//! secret value (those stay in the host substitution endpoint).
 //!
 //! v1 behaviour:
 //!   - boots a transient microVM from a registered template,
@@ -400,9 +402,11 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         &mut stream,
         stdin,
         timeout_secs,
-        // No injected env on the plain invoke path yet; Plan 129 will supply
-        // HTTP_PROXY + secret placeholder vars here from the admitted plan.
-        Vec::new(),
+        // Plan 129: when the VM has a substitution endpoint (the admitted plan
+        // carried secrets), inject HTTP_PROXY + the opaque placeholder vars so
+        // the workload routes secret-bearing egress through the in-guest
+        // forward proxy → host endpoint. Empty when there are no secrets.
+        substitution_env(vm_name),
         |event| match event {
             mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
                 let _ = std::io::stdout().write_all(chunk);
@@ -444,6 +448,42 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     let _ = std::io::stderr().flush();
 
     Ok(exit_code_for(&terminal))
+}
+
+/// Plan 129 — the workload launch env that routes secret-bearing egress
+/// through the substitution endpoint. Reads the `(guest var, placeholder)`
+/// pairs the endpoint minted at boot (`vm_substitution_env_path`); when
+/// present, prepends `HTTP(S)_PROXY` pointing at the in-guest forward proxy so
+/// outbound requests carrying a placeholder are routed to the host for
+/// substitution. Empty (no proxy, no vars) when the VM has no secrets — so a
+/// plain workload is unaffected.
+fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
+    let path = mvm_core::config::vm_substitution_env_path(vm_name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    let placeholders: Vec<(String, String)> = serde_json::from_slice(&bytes).unwrap_or_default();
+    build_substitution_env(placeholders)
+}
+
+/// Pure half of [`substitution_env`]: given the endpoint's minted placeholder
+/// vars, prepend `HTTP(S)_PROXY` (the in-guest forward proxy) so the workload
+/// routes secret-bearing egress for substitution. Empty placeholders ⇒ empty
+/// env (a plain workload is left untouched).
+fn build_substitution_env(placeholders: Vec<(String, String)>) -> Vec<(String, String)> {
+    if placeholders.is_empty() {
+        return Vec::new();
+    }
+    let proxy = mvm_guest::forward_proxy::proxy_env_url();
+    // Both upper- and lower-case forms — toolchains differ on which they read.
+    let mut env = vec![
+        ("HTTP_PROXY".to_string(), proxy.clone()),
+        ("HTTPS_PROXY".to_string(), proxy.clone()),
+        ("http_proxy".to_string(), proxy.clone()),
+        ("https_proxy".to_string(), proxy),
+    ];
+    env.extend(placeholders);
+    env
 }
 
 fn exit_code_for(event: &mvm_guest::vsock::EntrypointEvent) -> i32 {
@@ -564,5 +604,32 @@ mod tests {
     fn test_read_stdin_missing_file_errors() {
         let err = read_stdin_payload(Some("/this/does/not/exist")).unwrap_err();
         assert!(err.to_string().contains("Reading stdin from"));
+    }
+
+    #[test]
+    fn build_substitution_env_empty_when_no_placeholders() {
+        assert!(super::build_substitution_env(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn build_substitution_env_prepends_proxy_and_keeps_placeholders() {
+        let env = super::build_substitution_env(vec![(
+            "OPENAI_API_KEY".to_string(),
+            "mvm-secret-abc123".to_string(),
+        )]);
+        let proxy = mvm_guest::forward_proxy::proxy_env_url();
+        // HTTP(S)_PROXY (upper + lower) point at the in-guest forward proxy.
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "HTTP_PROXY")
+                .map(|(_, v)| v.as_str()),
+            Some(proxy.as_str())
+        );
+        assert!(env.iter().any(|(k, v)| k == "https_proxy" && *v == proxy));
+        // The opaque placeholder var survives (never the value).
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-abc123")
+        );
     }
 }
