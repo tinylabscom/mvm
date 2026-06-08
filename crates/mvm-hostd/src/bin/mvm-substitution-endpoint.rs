@@ -78,7 +78,10 @@ fn main() -> Result<()> {
         .build()
         .context("tokio runtime build failed")?;
 
-    runtime.block_on(serve(service, bound, terminator))
+    // One configured deadline for the forward leg AND the untrusted guest socket
+    // (terminator). The UDS/vsock path already honors this via ReqwestForwarder.
+    let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
+    runtime.block_on(serve(service, bound, terminator, forward_timeout))
 }
 
 /// A bound, listening transport. QEMU uses an AF_VSOCK listener; the in-process
@@ -151,6 +154,7 @@ async fn serve(
     service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
+    forward_timeout: std::time::Duration,
 ) -> Result<()> {
     // Spawn the terminator loop first so it's accepting while the primary loop
     // owns the task. On non-Linux `terminator` is always None (bind bails).
@@ -160,13 +164,13 @@ async fn serve(
             let listener = tokio::net::TcpListener::from_std(std_listener)
                 .context("adopting terminator TCP listener into the tokio runtime")?;
             Some(tokio::spawn(
-                std::sync::Arc::clone(&service).serve_terminator(listener),
+                std::sync::Arc::clone(&service).serve_terminator(listener, forward_timeout),
             ))
         }
         None => None,
     };
     #[cfg(not(target_os = "linux"))]
-    let _ = terminator;
+    let _ = (terminator, forward_timeout);
 
     match bound {
         Bound::Uds(std_listener) => {
