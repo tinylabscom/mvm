@@ -590,6 +590,8 @@ fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
         .arg(cid.to_string())
         .arg("--port")
         .arg(mvm_guest::vsock::GUEST_AGENT_PORT.to_string())
+        .arg("--name")
+        .arg(name)
         .arg("--watch-pid-file")
         .arg(state_dir.join(QEMU_PID_FILE))
         .stdin(std::process::Stdio::null())

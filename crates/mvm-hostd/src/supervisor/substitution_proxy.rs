@@ -411,6 +411,17 @@ impl SubstitutionService {
         }
     }
 
+    /// Bind AF_VSOCK on `(VMADDR_CID_ANY, port)` and serve until the listener
+    /// errors — the convenience the per-VM host bridge calls so it never
+    /// handles the raw listener. Returns only if the bind fails; serving
+    /// otherwise loops for the VM's lifetime.
+    #[cfg(target_os = "linux")]
+    pub async fn serve_vsock_port(self: Arc<Self>, port: u32) -> std::io::Result<()> {
+        let listener = vsock::VsockListener::bind(port)?;
+        self.serve_vsock(listener).await;
+        Ok(())
+    }
+
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
         let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
         let resp = self.process(wire).await;
