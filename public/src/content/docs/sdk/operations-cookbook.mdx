@@ -50,7 +50,7 @@ with mvm.Sandbox.create(
     sandbox.files.write("/app/main.py", "print('hello from mvm')")
     sandbox.commands.start(
         ["python", "/app/main.py"],
-        env={"MODE": "dev", "API_KEY": mvm.secret("api-key")},
+        env={"MODE": "dev", "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"])},
     )
 ```
 
