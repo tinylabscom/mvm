@@ -139,7 +139,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 Ok(())
             }
             mvm_guest::vsock::ExecEvent::TimedOut => {
-                eprintln!("error: command timed out");
+                eprintln!("{}", crate::exec::timeout_exit_message(None));
                 std::process::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
             }
             other => anyhow::bail!("unexpected terminal exec event: {other:?}"),

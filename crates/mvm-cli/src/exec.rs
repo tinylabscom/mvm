@@ -25,6 +25,15 @@ use crate::ui;
 /// Matches GNU `timeout(1)` so scripts can branch on it.
 pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
 
+/// Human-facing message for a command killed by its `--timeout`. `None`
+/// timeout ⇒ no duration suffix (e.g. the interactive console path).
+pub(crate) fn timeout_exit_message(timeout_secs: Option<u64>) -> String {
+    let suffix = timeout_secs
+        .map(|s| format!(" after {s}s"))
+        .unwrap_or_default();
+    format!("error: command timed out{suffix}")
+}
+
 /// Where to source the command that runs inside the transient microVM.
 ///
 /// Marked `non_exhaustive` so future variants (e.g. baked-in template
@@ -796,11 +805,12 @@ fn run_in_guest(
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
         mvm_guest::vsock::ExecEvent::TimedOut => {
-            let suffix = req
-                .timeout_secs
-                .map(|s| format!(" after {s}s"))
-                .unwrap_or_default();
-            eprintln!("error: command timed out{suffix}");
+            let msg = timeout_exit_message(req.timeout_secs);
+            if capture {
+                err.extend_from_slice(format!("{msg}\n").as_bytes());
+            } else {
+                eprintln!("{msg}");
+            }
             EXEC_TIMEOUT_EXIT_CODE
         }
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
@@ -984,10 +994,9 @@ pub fn dispatch_in_session(
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
         mvm_guest::vsock::ExecEvent::TimedOut => {
-            let suffix = timeout_secs
-                .map(|s| format!(" after {s}s"))
-                .unwrap_or_default();
-            err.extend_from_slice(format!("error: command timed out{suffix}\n").as_bytes());
+            err.extend_from_slice(
+                format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes(),
+            );
             EXEC_TIMEOUT_EXIT_CODE
         }
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),

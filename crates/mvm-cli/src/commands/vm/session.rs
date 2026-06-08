@@ -793,10 +793,7 @@ fn dispatch_run_code(
     let exit_code = match terminal {
         mvm_guest::vsock::ExecEvent::Exit { code } => code,
         mvm_guest::vsock::ExecEvent::TimedOut => {
-            let suffix = timeout_secs
-                .map(|s| format!(" after {s}s"))
-                .unwrap_or_default();
-            eprintln!("error: command timed out{suffix}");
+            eprintln!("{}", crate::exec::timeout_exit_message(timeout_secs));
             crate::exec::EXEC_TIMEOUT_EXIT_CODE
         }
         other => bail!("unexpected terminal exec event: {other:?}"),
