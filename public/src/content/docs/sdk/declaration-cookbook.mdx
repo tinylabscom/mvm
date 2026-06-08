@@ -182,7 +182,7 @@ Declarations should refer to secrets without embedding raw values in source.
 ```python
 env={
     "MODEL": mvm.literal("gpt-4.1-mini"),
-    "OPENAI_API_KEY": mvm.secret("openai-api-key", var="OPENAI_API_KEY"),
+    "OPENAI_API_KEY": mvm.secret("openai-api-key", type="bearer", hosts=["api.openai.com"], var="OPENAI_API_KEY"),
 }
 ```
 
@@ -192,7 +192,7 @@ env={
 ```ts
 env: {
   MODEL: mvm.literal("gpt-4.1-mini"),
-  OPENAI_API_KEY: mvm.secret("openai-api-key", { var: "OPENAI_API_KEY" }),
+  OPENAI_API_KEY: mvm.secret("openai-api-key", { type: "bearer", hosts: ["api.openai.com"], var: "OPENAI_API_KEY" }),
 }
 ```
 

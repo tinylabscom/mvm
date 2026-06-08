@@ -33,6 +33,7 @@
 import type {
   AddonUse,
   App,
+  AuthType,
   Dependencies,
   Entrypoint,
   EnvValue,
@@ -80,15 +81,6 @@ export type {
   SandboxCreateOptions,
   SandboxCreateWire,
 } from "./_sandbox.js";
-export {
-  SubstitutionHandlerError,
-  aws_credentials_from_placeholders,
-  clear_substitution_handlers,
-  is_placeholder,
-  register_substitution_handler,
-  substitute,
-} from "./runtime.js";
-export type { AwsCredentials, SubstitutionHandler } from "./runtime.js";
 
 // ────────────────────────────────────────────────────────────────────
 // Module state
@@ -216,19 +208,41 @@ export function literal(value: string): EnvValue {
   return { kind: "literal", value };
 }
 
-/** Reference a named secret from the host keystore. `var` is the
- *  env-var name inside the guest; defaults to `name` itself. The
- *  supervisor's KeystoreReleaser resolves the value at admission
- *  time — the SDK only declares the reference. */
+const AUTH_TYPES: readonly AuthType[] = ["bearer", "basic", "sigv4", "hmac"];
+
+/** Reference a named secret from the host keystore for egress
+ *  substitution (ADR-067 / Plan 129). The guest only ever receives an
+ *  opaque placeholder in the env var `var` (defaults to `name`); the
+ *  host substitution endpoint injects/signs the real credential on
+ *  outbound requests — it never enters the guest.
+ *
+ *  `type` is how the credential authenticates the request
+ *  (`bearer` / `basic` / `sigv4` / `hmac`). `hosts` is the allow-list of
+ *  destinations the substituted credential may reach (claim 12; `*.`
+ *  subdomain wildcards supported). Both are required — an egress secret
+ *  with no destination or auth type can't be bound, and the resolver
+ *  fails closed on an empty host list. */
 export function secret(
   name: string,
-  opts: { var?: string } = {},
+  opts: { type: AuthType; hosts: string[]; var?: string },
 ): EnvValue {
+  if (!AUTH_TYPES.includes(opts.type)) {
+    throw new TypeError(
+      `secret type must be one of {${AUTH_TYPES.join(", ")}}, got ${JSON.stringify(opts.type)}`,
+    );
+  }
+  if (!Array.isArray(opts.hosts) || opts.hosts.length === 0) {
+    throw new TypeError(
+      "secret hosts must be a non-empty array (claim 12: a secret must be bound to a destination)",
+    );
+  }
   return {
     kind: "secret_ref",
     ref: {
-      name,
+      allowed_hosts: [...opts.hosts],
+      auth_type: opts.type,
       mount: { kind: "env", var: opts.var ?? name },
+      name,
     },
   };
 }

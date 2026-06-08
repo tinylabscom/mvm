@@ -28,7 +28,7 @@ import mvm
     resources=mvm.resources(cpu_cores=1, memory_mb=512),
     network=mvm.network(mode="deny", allow_https=["api.openai.com"]),
     env={
-        "OPENAI_API_KEY": mvm.secret("openai-api-key"),
+        "OPENAI_API_KEY": mvm.secret("openai-api-key", type="bearer", hosts=["api.openai.com"]),
     },
     entrypoint=mvm.entrypoint_function(
         module="tool",
@@ -53,7 +53,7 @@ export const run = mvm.app({
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
   network: mvm.network({ mode: "deny", allow_https: ["api.openai.com"] }),
   env: {
-    OPENAI_API_KEY: mvm.secret("openai-api-key"),
+    OPENAI_API_KEY: mvm.secret("openai-api-key", { type: "bearer", hosts: ["api.openai.com"] }),
   },
   entrypoint: mvm.entrypointFunction({
     module: "tool",
