@@ -21,6 +21,18 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
+use crate::substitution_client;
+
+/// Guest-local TCP port the forward proxy listens on; the workload's
+/// `HTTP_PROXY`/`HTTPS_PROXY` points here. Loopback-only — never exposed off the
+/// guest. Distinct from the vsock ports in [`crate::vsock`].
+pub const FORWARD_PROXY_PORT: u16 = 18080;
+
+/// The `HTTP_PROXY` value the workload's env is set to.
+pub fn proxy_env_url() -> String {
+    format!("http://127.0.0.1:{FORWARD_PROXY_PORT}")
+}
+
 /// Cap on a single proxied request we'll buffer (defensive — the workload is
 /// our own tenant, but a runaway request shouldn't OOM the proxy).
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -146,6 +158,20 @@ fn reason_phrase(status: u16) -> &'static str {
         503 => "Service Unavailable",
         _ => "Status",
     }
+}
+
+/// Start the guest-local forward proxy: bind loopback [`FORWARD_PROXY_PORT`] and
+/// serve, relaying each request to the host substitution endpoint over vsock
+/// (`vsock_uds_path` is the backend's vsock multiplexer socket). Blocks; the
+/// guest init runs it on its own thread. This is the production entry point —
+/// `serve` + `substitution_client::substitute` are the unit-tested parts it
+/// composes.
+pub fn start_forward_proxy(vsock_uds_path: String, relay_timeout_secs: u64) -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", FORWARD_PROXY_PORT))
+        .with_context(|| format!("binding forward proxy on 127.0.0.1:{FORWARD_PROXY_PORT}"))?;
+    serve(&listener, move |req| {
+        substitution_client::substitute(&vsock_uds_path, req, relay_timeout_secs)
+    })
 }
 
 /// Serve the guest-local forward proxy on `listener`: for each connection, read
@@ -355,6 +381,12 @@ mod tests {
             "got: {out}"
         );
         assert!(out.ends_with("substitution refused: destination not bound"));
+    }
+
+    #[test]
+    fn proxy_env_url_is_loopback_on_the_proxy_port() {
+        assert_eq!(proxy_env_url(), "http://127.0.0.1:18080");
+        assert_eq!(FORWARD_PROXY_PORT, 18080);
     }
 
     #[test]
