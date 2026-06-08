@@ -8,16 +8,17 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
-# Architectural invariant #1 (.github/workflows/architecture.yml): this
-# crate IS per-VM substrate — one supervisor process per guest VM. Its
-# Rust listeners are legitimate per-VM substrate servers, not orchestration
+# Architectural invariant #1 (.github/workflows/architecture.yml, category 10):
+# this crate IS per-VM substrate — one supervisor process per guest VM. Its Rust
+# listeners are legitimate per-VM substrate servers, not orchestration
 # control-plane servers. Plan 152 WS-A added the first such listener: the
 # `mvm-libkrun-supervisor` binds the host side of the `listen=false`
-# workload-exit control vsock port (`<vm_state_dir>/vsock-5251.sock`) to
-# capture a one-shot workload's exit code before poweroff. WS-B's Vz
-# supervisor will host the same per-VM listeners.
+# workload-exit control vsock port (`<vm_state_dir>/vsock-5251.sock`) to capture
+# a one-shot workload's exit code before poweroff. WS-B's Vz supervisor hosts the
+# same family — its per-port vsock proxy (`<socket_dir>/vsock-<port>.sock`)
+# splices host agent-RPC into the guest's VZVirtioSocketDevice.
 [package.metadata.mvm.architecture]
-substrate_server_category = "per-VM supervisor host processes (workload-exit control listener + future per-VM provider listeners)"
+substrate_server_category = "per-VM supervisor host processes (workload-exit control listener + vsock proxy + future per-VM provider listeners)"
 
 # libkrun supervisor — requires the libkrun-sys FFI feature, so the
 # default `cargo build --workspace` skips it on hosts without libkrun.h

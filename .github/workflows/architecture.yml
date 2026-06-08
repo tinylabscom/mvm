@@ -93,6 +93,14 @@ jobs:
   #      guest's `AF_VSOCK(cid, GUEST_AGENT_PORT)`. Per-VM developer
   #      substrate (same family as the in-guest addon vsock bridge,
   #      category 7), not a control-plane server. Plan 166 Phase 2.
+  #  10. Per-VM supervisor host processes — `mvm-vm-host`. The Rust-native
+  #      Vz supervisor (Plan 152 WS-B) binds a per-port vsock proxy
+  #      (`<socket_dir>/vsock-<port>.sock`) that splices host agent-RPC
+  #      connections into the guest's `VZVirtioSocketDevice`, mirroring the
+  #      Swift supervisor it replaces; the crate declares
+  #      `[package.metadata.mvm.architecture].substrate_server_category`.
+  #      Per-VM provider plumbing (same family as category 3), spawned by the
+  #      backend for a single guest — not a multi-tenant control-plane server.
   #
   # The in-guest vsock agent in `mvm-guest` is also excluded — it
   # runs *inside* the microVM, not on the host.
