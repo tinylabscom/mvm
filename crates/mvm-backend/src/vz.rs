@@ -972,13 +972,30 @@ fn build_supervisor_config(
     state_dir: &Path,
     gvproxy: &host_gvproxy::HostGvproxyInfo,
 ) -> Result<vz::SupervisorConfig> {
-    // Plan 112 Phase 3c — defense-in-depth validation. The resolved
-    // AuditSubstrate isn't yet threaded into vz::SupervisorConfig
-    // (Vz drainer is a follow-up), but the tenant_id / vm_name
-    // allowlist check fires here so an unsafe value never reaches
-    // the Swift supervisor.
-    let _substrate =
+    // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
+    // validation). Plan 152 WS-B slice 8 threads it into the Rust-native
+    // supervisor's config so it runs the in-process flow-audited gvproxy bridge
+    // (payload_tap). When the producer threaded an AdmittedPlan in (`tenant_id`
+    // Some), the substrate carries the resolved paths; otherwise it's all-None
+    // and the supervisor direct-attaches gvproxy.
+    let substrate =
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
+    // Signed-plan + bundle envelopes from VmStartConfig, as JSON Values the
+    // supervisor decodes into the typed plan + bundle for the bridge.
+    let plan = match config.plan_json.as_deref() {
+        Some(s) => Some(
+            serde_json::from_str(s)
+                .map_err(|e| anyhow!("parse VmStartConfig.plan_json as JSON: {e}"))?,
+        ),
+        None => None,
+    };
+    let bundle = match config.bundle_json.as_deref() {
+        Some(s) => Some(
+            serde_json::from_str(s)
+                .map_err(|e| anyhow!("parse VmStartConfig.bundle_json as JSON: {e}"))?,
+        ),
+        None => None,
+    };
     let state_dir_str = state_dir.to_string_lossy().into_owned();
     let vsock_dir = state_dir.join("vsock").to_string_lossy().into_owned();
     let console_log = state_dir.join("console.log").to_string_lossy().into_owned();
@@ -1081,15 +1098,22 @@ fn build_supervisor_config(
         // boot path; the restore path constructs its own config in
         // `build_restore_supervisor_config` below.
         startup_mode: vz::StartupMode::Boot,
-        // Audit substrate (Plan 152 WS-B slice 8) — populated by the producer
-        // wiring step so the Rust supervisor runs the in-process flow-audited
-        // gvproxy bridge. None until then (direct gvproxy attach, no audit).
-        tenant_id: None,
-        plan: None,
-        bundle: None,
-        audit_dir: None,
-        gateway_audit_socket: None,
-        signing_key_path: None,
+        // Audit substrate (Plan 152 WS-B slice 8) — threaded from the admitted
+        // plan so the Rust supervisor runs the in-process flow-audited gvproxy
+        // bridge. All-None for an un-admitted (dev / builder) start → direct
+        // gvproxy attach.
+        tenant_id: substrate.tenant_id,
+        plan,
+        bundle,
+        audit_dir: substrate
+            .audit_dir
+            .map(|p| p.to_string_lossy().into_owned()),
+        gateway_audit_socket: substrate
+            .gateway_audit_socket
+            .map(|p| p.to_string_lossy().into_owned()),
+        signing_key_path: substrate
+            .signing_key_path
+            .map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
