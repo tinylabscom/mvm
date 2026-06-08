@@ -83,7 +83,9 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C 
       no enforcement; option (a) VmStartConfig plumbing deferred to a future
       promotion. Documented in ADR-002 + CLAUDE.md.
   [x] Phase B StorageProvider local/encrypted(macOS)/CAS/snapshot + MountProvider+S3
-  [ ] Phase B Linux LUKS2 arm (MVM_LIVE_LUKS, Linux CI) + S3 live-bucket validation
+  [x] Phase B Linux LUKS2 arm (#729, live-verified on Linux VM) + S3 coverage
+      S3-free (#732: from_s3_config validation + LocalFileSystem sync)
+  [x] Phase C PostRestore host sender (#734) — the warm-start prerequisite
   [ ] Phase C warm-start (FC live-memory / Vz save-restore / libkrun disk) —
       gated on the host PostRestore sender (absent) + Plan 152 WS-B
 
