@@ -68,6 +68,20 @@ const VSOCK_REQUEST: &str = "MVM_VZ_PARITY_VSOCK_REQUEST";
 /// real launch path does.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
+/// Override for [`DEFAULT_CMDLINE`]. The committed default boots the dev `/init`,
+/// whose shell self-exits on console EOF — fine for boot parity, but too
+/// short-lived for the control-verb / save-restore gates (the guest can power
+/// off mid-test). Export this to a long-lived PID 1 (e.g.
+/// `console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000`) so the guest
+/// stays up while the verbs run.
+const CMDLINE_OVERRIDE: &str = "MVM_VZ_PARITY_CMDLINE";
+
+/// Resolve the boot cmdline: [`CMDLINE_OVERRIDE`] if exported, else
+/// [`DEFAULT_CMDLINE`].
+fn cmdline() -> String {
+    std::env::var(CMDLINE_OVERRIDE).unwrap_or_else(|_| DEFAULT_CMDLINE.to_string())
+}
+
 /// Build the minimal bootable [`SupervisorConfig`] both supervisors must accept
 /// identically: one rootfs disk, a vsock device, capture-only console, a control
 /// socket, no network (the smallest config that still exercises the full boot
@@ -80,7 +94,7 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
         pid_file_name: Some("vz.pid".to_string()),
         kernel: KernelConfig {
             path: kernel.to_string(),
-            cmdline: DEFAULT_CMDLINE.to_string(),
+            cmdline: cmdline(),
             initrd_path: None,
         },
         resources: ResourceConfig {
@@ -425,6 +439,9 @@ fn probe_save_restore(
     let mut child = spawn_with_config(bin, &boot_cfg)?;
     let control_ready = wait_for_running(&control_sock, Instant::now() + Duration::from_secs(30));
     let save_reply = if control_ready {
+        // VZ rejects saveMachineStateToURL unless the VM is paused first
+        // (VZErrorDomain:3 "state 'running' is invalid for saving").
+        let _ = send_command(&control_sock, "PAUSE");
         send_command(&control_sock, &format!("SAVE {}", snapshot.display())).ok()
     } else {
         None
@@ -436,6 +453,9 @@ fn probe_save_restore(
     // Phase 2 — restore in a fresh supervisor against the same disk copy.
     let restore_reached_running = if snapshot_written {
         let restore_dir = root.join("restore");
+        // The supervisor opens its console log under vm_state_dir on boot; create
+        // the dir first or restore fails with ENOENT before it ever reaches VZ.
+        std::fs::create_dir_all(&restore_dir).expect("create restore state dir");
         let mut restore_cfg = build_boot_config(label, kernel, &rootfs_copy, &restore_dir);
         restore_cfg.startup_mode = StartupMode::Restore {
             snapshot_path: snapshot.to_string_lossy().into_owned(),
@@ -487,7 +507,7 @@ fn boot_config_matches_the_decoded_contract() {
     // use, so a drift in the shared schema fails here, not at boot.
     let back: SupervisorConfig = serde_json::from_str(&json).expect("decode");
     assert_eq!(back.kernel.path, "/k/vmlinux");
-    assert_eq!(back.kernel.cmdline, DEFAULT_CMDLINE);
+    assert_eq!(back.kernel.cmdline, cmdline());
     assert_eq!(back.disks.len(), 1);
     assert_eq!(back.disks[0].path, "/r/rootfs.ext4");
     assert_eq!(back.vsock.ports, vec![5252]);
@@ -654,55 +674,71 @@ fn vsock_roundtrip_parity_swift_vs_rust() {
     );
 }
 
+/// Rust control-verb correctness (Plan 152 WS-B). Swift is probed for information
+/// only: it self-deadlocks on the first async VZ control op — `synchronousVZCall`
+/// does `sema.wait()` on the VM's own serial dispatch queue while the completion
+/// handler is dispatched back to that same queue, so the queue wedges after the
+/// first verb. The Rust supervisor's serial-queue→tokio bridge avoids this (the
+/// reason WS-B exists). We assert Rust is correct; Swift divergence is logged, not
+/// failed, because Swift is being retired. Set `MVM_VZ_PARITY_CMDLINE` to a
+/// long-lived guest so the VM stays up across the sequence.
 #[test]
-fn control_verb_parity_swift_vs_rust() {
+fn control_verbs_rust_correct() {
     let Some((swift, rust, kernel, rootfs)) = live_env() else {
         eprintln!(
-            "SKIP control_verb_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} to run the live control-verb parity gate."
+            "SKIP control_verbs_rust_correct: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, {ROOTFS} \
+             (+ {CMDLINE_OVERRIDE} for a long-lived guest) to run the live control-verb gate."
         );
         return;
     };
-    // Stateful but symmetric: both supervisors get the same sequence, so the
-    // replies must match step-for-step. BALLOON/SAVE/RESTORE join once the boot
-    // config carries a balloon device and the save/restore slice lands.
     let verbs = ["STATUS", "PAUSE", "RESUME", "STATUS"];
-    let swift_replies =
-        probe_control_verbs(&swift, &kernel, &rootfs, &verbs, "swift").expect("swift probe");
+    let expected: Vec<Option<String>> = vec![
+        Some("OK running".to_string()),
+        Some("OK".to_string()),
+        Some("OK".to_string()),
+        Some("OK running".to_string()),
+    ];
     let rust_replies =
         probe_control_verbs(&rust, &kernel, &rootfs, &verbs, "rust").expect("rust probe");
-
-    assert!(
-        swift_replies.iter().any(Option::is_some),
-        "Swift supervisor answered no control verbs — fix the fixture before judging parity"
-    );
     assert_eq!(
-        rust_replies, swift_replies,
-        "Rust supervisor diverged from Swift on control verbs: rust={rust_replies:?} \
-         swift={swift_replies:?}"
+        rust_replies, expected,
+        "Rust supervisor control verbs incorrect: got {rust_replies:?}, want {expected:?}"
     );
+    // Informational only — Swift's known serial-queue deadlock is expected.
+    if let Ok(swift_replies) = probe_control_verbs(&swift, &kernel, &rootfs, &verbs, "swift")
+        && swift_replies != rust_replies
+    {
+        eprintln!("note: Swift diverges (known deadlock, being retired): swift={swift_replies:?}");
+    }
 }
 
+/// Rust save/restore correctness (Plan 152 WS-B slice 6). Swift is informational:
+/// it deadlocks on SAVE (same serial-queue bug as the control verbs). We assert
+/// the Rust supervisor writes a snapshot + machine-id sidecar and that a fresh
+/// supervisor restores it to a running guest. Needs `MVM_VZ_PARITY_CMDLINE` set to
+/// a long-lived guest (macOS 14+).
 #[test]
-fn save_restore_parity_swift_vs_rust() {
+fn save_restore_rust_correct() {
     let Some((swift, rust, kernel, rootfs)) = live_env() else {
         eprintln!(
-            "SKIP save_restore_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} to run the live save/restore parity gate (macOS 14+)."
+            "SKIP save_restore_rust_correct: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, {ROOTFS} \
+             (+ {CMDLINE_OVERRIDE} for a long-lived guest) to run the live save/restore gate (macOS 14+)."
         );
         return;
     };
-    let swift_outcome = probe_save_restore(&swift, &kernel, &rootfs, "swift").expect("swift probe");
     let rust_outcome = probe_save_restore(&rust, &kernel, &rootfs, "rust").expect("rust probe");
-
     assert!(
-        swift_outcome.snapshot_written && swift_outcome.restore_reached_running,
-        "Swift supervisor could not save+restore — fix the fixture (macOS 14+?) before judging \
-         parity: {swift_outcome:?}"
+        rust_outcome.snapshot_written
+            && rust_outcome.sidecar_written
+            && rust_outcome.restore_reached_running,
+        "Rust supervisor save/restore failed: {rust_outcome:?}"
     );
-    assert_eq!(
-        rust_outcome, swift_outcome,
-        "Rust supervisor diverged from Swift on save/restore: rust={rust_outcome:?} \
-         swift={swift_outcome:?}"
-    );
+    // Informational only — Swift's known serial-queue deadlock is expected.
+    if let Ok(swift_outcome) = probe_save_restore(&swift, &kernel, &rootfs, "swift")
+        && swift_outcome != rust_outcome
+    {
+        eprintln!(
+            "note: Swift diverges on save/restore (known deadlock, being retired): {swift_outcome:?}"
+        );
+    }
 }

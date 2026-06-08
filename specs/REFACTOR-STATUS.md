@@ -40,13 +40,18 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
-PLAN 152 — Rust-native VZ supervisor            🟡 design locked
+PLAN 152 — Rust-native VZ supervisor            🟡 Rust supervisor landed; finalize next
   [x] WS-A exit channel (vsock + PID-1 helper) — PR #698 (merged)
-  [x] WS-B threading decision (serial queue) — PR #697
-  [ ] WS-B the actual Swift→Rust rewrite (~1,450 LOC)
-  [ ] WS-C snapshot/restore + fork
+  [x] WS-B threading decision (serial queue) — PR #697 (merged)
+  [x] WS-B Swift→Rust rewrite (boot/vsock/control/snapshot/flow-audit) — PR #700 (merged)
+  [x] WS-B parity gate (Swift↔Rust subprocess harness) — PR #703 (merged)
+  [x] WS-B gate hardening + Rust live-validated boot/control/save/restore — this PR
+  [x] WS-E VZ-config hardening (validateSaveRestore gate, NAT MAC pin) — folded into #700
+  [ ] WS-B finalize: flip resolve_supervisor_path to the Rust bin + delete Swift crate
+  [ ] WS-C fork primitive (snapshot/restore already in #700)
   [ ] WS-D nested KVM (/dev/kvm in guest)
-  [ ] WS-E VZ-config hardening
+  NOTE: Swift control socket has a serial-queue deadlock (PAUSE/RESUME/SAVE);
+  Rust fixes it — gate now asserts Rust correctness, Swift is informational.
 
 PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
   [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)
@@ -54,8 +59,9 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [x] WS-5 B session --continue/--resume/--ephemeral — PR #667
   [x] WS-4 resumable + honest-cost dev-image download — PR #667
   [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
-  [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173
-  [ ] WS-1 warm pool / WS-2 checkpoint+fork  (gated on 152 WS-B)
+  [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173 / PR #726 (merged)
+  [~] WS-3 follow-up: doctor probes ALL sign targets — PR #728 (open)
+  [ ] WS-1 warm pool / WS-2 checkpoint+fork  (UNBLOCKED — 152 WS-B landed #700)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 
