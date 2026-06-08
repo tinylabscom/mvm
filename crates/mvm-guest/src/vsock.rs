@@ -2168,7 +2168,7 @@ pub fn send_exec_streaming<F>(
     command: &str,
     stdin: Option<String>,
     timeout_secs: u64,
-    mut on_event: F,
+    on_event: F,
 ) -> Result<ExecEvent>
 where
     F: FnMut(&ExecEvent),
@@ -2180,7 +2180,17 @@ where
         timeout_secs: Some(timeout_secs),
     };
     write_frame(stream, &req)?;
+    read_exec_stream(stream, on_event)
+}
 
+/// Read an `ExecEvent` response stream from `stream`: invoke `on_event`
+/// for each non-terminal chunk, return the terminal `Exit`. The caller
+/// must have already done the protocol hello and written the request
+/// frame (`Exec` or `RunCode` — both stream `ExecEvent`). Plan 159 WS-5 E.
+pub fn read_exec_stream<F>(stream: &mut UnixStream, mut on_event: F) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
     loop {
         let resp: GuestResponse = read_frame(stream)?;
         let event = match resp {
@@ -5347,5 +5357,31 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ExecEvent::Stdout { ref chunk } if chunk == b"hi\n"));
         assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn read_exec_stream_collects_until_exit() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stderr {
+                    chunk: b"e".to_vec(),
+                }),
+            )
+            .unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 2 }),
+            )
+            .unwrap();
+        });
+        let mut got = Vec::new();
+        let term = read_exec_stream(&mut host, |e| got.push(e.clone())).unwrap();
+        guest_handle.join().unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
+        assert!(matches!(term, ExecEvent::Exit { code: 2 }));
     }
 }
