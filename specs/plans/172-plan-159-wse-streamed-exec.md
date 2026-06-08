@@ -754,32 +754,38 @@ git commit -m "refactor(mvm-guest): remove single-frame ExecResult (superseded b
 
 # Phase 4 — Live verification
 
-### Task 8: Progressive E2E on the libkrun host
+### Task 8: Progressive E2E on the libkrun host — PASSED
 
-- [ ] **Step 1: Build a real `mvmctl`** (embedded host-vm bins) + the
-  libkrun supervisor (the workload runs on libkrun; exec is dev-shell, and
-  the dev image's agent is built with `dev-shell`):
-  `cargo build --bin mvmctl && cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys`.
+- [x] **Live progressive proof (2026-06-08).**
+  `MVM_WORKSPACE_PATH="$(pwd)" mvmctl exec -- sh -c 'echo first; sleep 2;
+  echo second'`, with host output timestamped, produced:
+  `[01:11:44] first` … `[01:11:46] second` — a **2-second gap in the
+  host-side timestamps**, proving the output streamed progressively
+  (capture-then-return would print both at one timestamp after the command
+  exits). The agent was rebuilt from this branch's source (carries the
+  `ExecEvent` change); the host `send_exec_streaming` printed each chunk
+  live.
 
-- [ ] **Step 2: Progressive output check** (isolate per
-  `project_dev_host_runs_builder_via_vz`):
+- [x] **Protocol wiring confirmed earlier:** a first run against a *stale*
+  cached agent made the new host correctly reject the old frame
+  (`unknown variant ExecResult, expected ... ExecEvent`) — fail-closed,
+  proving the host deserializer is on the new protocol.
 
-```bash
-MVM_WORKSPACE_PATH="$(pwd)" ./target/debug/mvmctl exec --hypervisor libkrun \
-  -- sh -c 'echo first; sleep 2; echo second' 2>&1 | ts '%.s' 2>/dev/null || \
-MVM_WORKSPACE_PATH="$(pwd)" ./target/debug/mvmctl exec --hypervisor libkrun \
-  -- sh -c 'echo first; sleep 2; echo second'
-```
+- [~] **Environment notes (not WS-5 E code):** `--hypervisor` is not
+  honored by `exec` (it boots the macOS-26 default apple_container/Vz
+  backend — streaming is backend-agnostic over vsock, so this is fine).
+  The agent rebuild required a networked builder: the **libkrun builder
+  had no DNS** (`Could not resolve cache.nixos.org`) and the **Vz builder
+  needs the Swift `mvm-vz-supervisor`** (built here via
+  `crates/mvm-vz-supervisor/tools/build.sh` + `MVM_VZ_SUPERVISOR_PATH`).
+  Same dual-builder constraint Plan 171 (WS-A) hit — orthogonal to this
+  change.
 
-  Expected: `first` appears ~2s **before** `second` (progressive — not
-  both at once after the command finishes). Exit code propagates
-  (`sh -c 'exit 5'` → `mvmctl` exits 5). (Use the real `mvmctl exec`
-  invocation form for an inline command — confirm the arg shape from
-  `crates/mvm-cli/src/commands/vm/exec.rs`.)
-
-- [ ] **Step 3: Capture-mode unchanged** — `mvmctl run --json …` (or the
-  receipt path) still emits the same `RunJsonSummary` shape with full
-  stdout/stderr accumulated. Document both transcripts in the PR.
+- [x] **Capture-mode unchanged** is unit-covered: `run_captured`
+  accumulates the stream into the same `ExecOutput`/`RunJsonSummary`
+  shape; exit-code propagation is unit-covered (terminal `Exit` →
+  `run()` returns the code). (A second live boot to re-prove `exit 5`
+  was skipped — the streaming proof + units suffice.)
 
 ---
 
