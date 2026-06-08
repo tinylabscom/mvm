@@ -220,3 +220,66 @@ Defense-in-depth additions on top of the trait-level requirements:
   Plan 97 §"mvmd integration".
 - **Windows host support via WHP.** Cataloged as a separate
   initiative — see [#428](https://github.com/tinylabscom/mvm/issues/428).
+
+## Addendum (2026-06-07): Rust-native supervisor — threading model (Plan 152 WS-B)
+
+Plan 152 reverses Plan 97's "keep the Swift supervisor" call: the VZ
+supervisor moves to a Rust `[[bin]]` in `mvm-vm-host`, still a separate
+per-VM codesigned process. The entitled-TCB invariant was always about
+process separation, not language — `mvmctl` stays unentitled, the supervisor
+carries `com.apple.security.virtualization` alone. `objc2`,
+`objc2-virtualization`, `block2`, and `dispatch2` are already workspace deps
+(the `apple_container` backend uses them), so the move adds no third-party
+dependency. This addendum records the one decision WS-B was gated on — the
+supervisor's threading model — from which the rest of WS-B follows.
+
+**Decision: a private serial `DispatchQueue` + `VZVirtualMachineDelegate`,
+not a main-thread `CFRunLoop`.** The shipping Swift supervisor already runs
+exactly this shape: one serial `DispatchQueue("mvm.vz.supervisor")` passed to
+`VZVirtualMachine(configuration:queue:)` services the VM, the control socket,
+the vsock proxy, and the SIGTERM/SIGINT sources; the delegate's `guestDidStop`
+/ `didStopWithError` fire on that queue; the start path blocks on a
+`DispatchSemaphore`. Porting it 1:1 — `dispatch2` serial queue,
+`declare_class!` delegate, `block2::RcBlock` completion handlers,
+`QueueBound<Send>` for the `!Send` `Retained` handles — makes the mandatory
+parity matrix a true apples-to-apples comparison of a known-good design,
+which is the risk posture re-implementing a security-sensitive component
+demands.
+
+A main-thread `CFRunLoop` (one reviewed reference's model, and roughly what
+`apple_container` does with NSRunLoop) was rejected. For a one-VM-per-process
+supervisor it pins VZ to the main thread, still needs worker threads for the
+control socket + vsock proxy, forces `main()` to be a runloop pump contending
+with the async I/O runtime for thread ownership, and diverges from the proven
+design for no payoff.
+
+**I/O layer: a tokio current-thread runtime, never blocking accept loops.**
+The control socket and vsock proxy run on a single-threaded tokio reactor
+(`tokio = { features = ["rt", …] }` — `rt`, deliberately not
+`rt-multi-thread`); the dup'd guest vsock fd is driven through `AsyncFd` and
+spliced with `copy_bidirectional`, which gives correct half-close and
+backpressure without a hand-written state machine. tokio is already in the
+workspace lock and `AsyncFd` needs its reactor regardless, so this buys async
+I/O at no new dependency cost. The supervisor then runs two single-purpose
+schedulers: the VZ serial dispatch queue (libdispatch) owns every VZ API
+call; the current-thread tokio reactor owns I/O. tokio tasks hop onto the VZ
+queue only for the VZ calls themselves (`connect(toPort:)`, `pause`/`resume`/
+`save`/`restore`), getting results back over a `oneshot`. `dispatch2`
+`DispatchSource` read sources — a zero-new-dep, even-more-1:1 port of the
+Swift sources — were considered and rejected: they would mean hand-rolling
+the bidirectional splice, the wrong place to economize.
+
+**`unsafe` surface.** Exactly one `unsafe impl Send for QueueBound<Retained<…>>`,
+under the invariant that the wrapped handle is dereferenced only inside a
+closure dispatched onto the VZ serial queue, never from a tokio worker. Each
+`unsafe` block cites that invariant.
+
+Security posture is unchanged from the per-claim table above. The rewrite
+keeps the signed/audited `ExecutionPlan` admission (claim 8), the
+capture-only console lockdown, the resource-cap parity check, and the
+codesigned separate-process entitlement boundary — `apple_container::
+ensure_signed()` is extended to sign the Rust binary with
+`com.apple.security.virtualization`. The Swift crate is deleted only after the
+WS-B parity matrix (boot, vsock round-trip, every control verb, save/restore)
+is green; the entitled-TCB / drop-Swift rationale is the deferred Plan 97
+note, now resolved.

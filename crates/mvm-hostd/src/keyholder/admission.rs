@@ -22,6 +22,18 @@ use super::substitution::{Placeholder, SubstitutionRegistry};
 /// workload sends the placeholder where its credential would go.
 pub type HandedPlaceholders = Vec<(String, Placeholder)>;
 
+/// The guest env vars to inject for these secrets: each secret's mount var set
+/// to its **opaque placeholder** — never the value (claim 13). The supervisor
+/// adds these to the workload's environment at launch; the workload reads
+/// `OPENAI_API_KEY` etc. and gets a placeholder, which the forward proxy
+/// substitutes on egress.
+pub fn secret_placeholder_env(handed: &HandedPlaceholders) -> Vec<(String, String)> {
+    handed
+        .iter()
+        .map(|(var, placeholder)| (var.clone(), placeholder.as_str().to_string()))
+        .collect()
+}
+
 /// Errors from assembling the registry at admission.
 #[derive(Debug, thiserror::Error)]
 pub enum AssembleError {
@@ -120,6 +132,13 @@ mod tests {
         assert_eq!(secret_ref.name, "openai");
         assert_eq!(secret_ref.auth_type, AuthType::Bearer);
         assert_eq!(secret_ref.allowed_hosts, vec!["api.openai.com"]);
+
+        // The guest env carries the var → placeholder, never a value.
+        let env = secret_placeholder_env(&handed);
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "OPENAI_API_KEY");
+        assert_eq!(env[0].1, placeholder.as_str());
+        assert!(env[0].1.starts_with("mvm-secret-"));
     }
 
     #[test]

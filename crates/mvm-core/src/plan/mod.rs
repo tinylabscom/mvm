@@ -41,7 +41,9 @@ pub use bundle::{
     signature_from_base64, signature_to_base64, verify_plan_bundle, write_bundle,
 };
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
-pub use signing::{PlanVerifyError, SignedExecutionPlan, sign_plan, verify_plan};
+pub use signing::{
+    PlanVerifyError, SignedExecutionPlan, secrets_from_signed_json, sign_plan, verify_plan,
+};
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditTaxonomy,
     DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef, HostShareGrant, KeyRotationSpec, Nonce,

@@ -355,6 +355,19 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.exited` — fires after a waited-for workload powers off,
+    /// carrying its captured exit code. Plan 152 WS-A.
+    pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.exited",
+            [
+                ("exit_code".to_string(), exit_code.to_string()),
+                ("backend".to_string(), backend.to_string()),
+            ],
+        )
+    }
+
     /// Emit `plan.failed` — fires on any error path between admission
     /// and successful boot. `class` is a short tag (`backend-start`,
     /// `snapshot-restore`, etc.) the operator can grep for; `message`
@@ -581,6 +594,23 @@ mod tests {
         // And the single-entry chain still verifies.
         let count = verify_audit_chain(&dir.path().join("local.jsonl"), &vk).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn emit_exited_writes_plan_exited_with_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-EX");
+        emitter.emit_exited(&plan, 3, "libkrun").unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("plan.exited"));
+        assert!(content.contains("\"3\""));
+        assert!(content.contains("\"libkrun\""));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 
     #[test]

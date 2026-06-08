@@ -461,17 +461,28 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
             mvm_guest::vsock::GUEST_AGENT_PORT,
         )
     {
-        let req = mvm_guest::vsock::GuestRequest::Exec {
-            command: "uname -r".to_string(),
-            stdin: None,
-            timeout_secs: Some(5),
-        };
         // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
-        super::super::shared::emit_vsock_rpc_audit(DEV_VM_NAME, &req);
-        if let Ok(mvm_guest::vsock::GuestResponse::ExecResult { stdout, .. }) =
-            mvm_guest::vsock::send_request(&mut stream, &req)
+        super::super::shared::emit_vsock_rpc_audit(
+            DEV_VM_NAME,
+            &mvm_guest::vsock::GuestRequest::Exec {
+                command: "uname -r".to_string(),
+                stdin: None,
+                timeout_secs: Some(5),
+            },
+        );
+        // Best-effort kernel probe via streaming exec (Plan 159 WS-5 E).
+        let mut out_buf: Vec<u8> = Vec::new();
+        if mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, 5, |event| {
+            if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
+                out_buf.extend_from_slice(chunk);
+            }
+        })
+        .is_ok()
         {
-            ui::info(&format!("  Kernel:  {}", stdout.trim()));
+            ui::info(&format!(
+                "  Kernel:  {}",
+                String::from_utf8_lossy(&out_buf).trim()
+            ));
         }
     }
 

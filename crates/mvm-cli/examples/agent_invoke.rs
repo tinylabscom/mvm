@@ -26,14 +26,16 @@ fn main() -> anyhow::Result<()> {
     let stdout = RefCell::new(Vec::<u8>::new());
     let stderr = RefCell::new(Vec::<u8>::new());
     let terminal =
-        mvm_guest::vsock::send_run_entrypoint(&mut stream, payload, 30, |event| match event {
-            mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
-                stdout.borrow_mut().extend_from_slice(chunk)
+        mvm_guest::vsock::send_run_entrypoint(&mut stream, payload, 30, Vec::new(), |event| {
+            match event {
+                mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
+                    stdout.borrow_mut().extend_from_slice(chunk)
+                }
+                mvm_guest::vsock::EntrypointEvent::Stderr { chunk } => {
+                    stderr.borrow_mut().extend_from_slice(chunk)
+                }
+                _ => {}
             }
-            mvm_guest::vsock::EntrypointEvent::Stderr { chunk } => {
-                stderr.borrow_mut().extend_from_slice(chunk)
-            }
-            _ => {}
         })?;
 
     println!("STDOUT: {}", String::from_utf8_lossy(&stdout.borrow()));

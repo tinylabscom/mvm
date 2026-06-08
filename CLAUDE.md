@@ -484,3 +484,13 @@ macOS / Linux Host
 - Active sprint spec: `specs/SPRINT.md`
 - Completed sprints archived to: `specs/backlog/` (e.g. `specs/backlog/01-foundation.md`)
 - When a sprint is completed, rename `specs/SPRINT.md` to `specs/backlog/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint
+
+## Refactor status
+
+We are in the middle of a major multi-plan refactor. `specs/REFACTOR-STATUS.md`
+is the hand-maintained rollup of every in-flight plan's workstream checkboxes.
+**Keep it current.** Whenever you land, merge, or descope a workstream in any
+plan, tick/strike the matching box in `specs/REFACTOR-STATUS.md` in the SAME
+change and bump its "Last updated" date. It is a quick index, not the source of
+truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the
+rollup.
