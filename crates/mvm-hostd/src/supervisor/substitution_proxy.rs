@@ -322,6 +322,109 @@ impl SubstitutionService {
         }
     }
 
+    /// Accept loop for the transparent egress **terminator** (Plan 129 stage
+    /// 1b): the host nft `nat` chain REDIRECTs a guest's outbound TCP here, we
+    /// recover the original destination via `SO_ORIGINAL_DST`, substitute any
+    /// secret placeholder in the request (claim-12 bind-checked), and splice
+    /// the request to the real destination — returning its response verbatim.
+    ///
+    /// Linux-only: `SO_ORIGINAL_DST` is an `SOL_IP` getsockopt. The substitution
+    /// core ([`terminator::handler::handle_request`]) and the splice
+    /// ([`terminator::listener::forward_http_raw`]) are sync + blocking, so each
+    /// connection's syscalls (orig-dst, request read, forward, write-back) run
+    /// on `spawn_blocking` threads, off the reactor. A failure on one connection
+    /// is logged and the socket dropped — never fatal to the loop.
+    #[cfg(target_os = "linux")]
+    pub async fn serve_terminator(self: Arc<Self>, listener: tokio::net::TcpListener) {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let me = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = me.handle_terminator_connection(stream).await {
+                            tracing::warn!(error = %e, "terminator connection failed");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "terminator accept failed; stopping");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Handle one redirected guest connection: recover orig-dst, read the
+    /// request, substitute + forward, write the response back. claim-12
+    /// fail-closed is enforced inside `handle_request` (it refuses an unbound
+    /// destination / unknown placeholder before the forward runs); on refusal
+    /// we log and close WITHOUT forwarding.
+    #[cfg(target_os = "linux")]
+    async fn handle_terminator_connection(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> anyhow::Result<()> {
+        use crate::keyholder::{SubstitutionEndpoint, find_placeholder};
+        use crate::supervisor::terminator;
+        use std::io::Write;
+
+        // The orig-dst getsockopt + bounded request read are blocking syscalls.
+        let mut std_stream = stream.into_std()?;
+        std_stream.set_nonblocking(false)?;
+        let (mut std_stream, orig_dst, raw) = tokio::task::spawn_blocking(move || {
+            let orig_dst = terminator::orig_dst::original_dst(&std_stream)?;
+            let raw = terminator::read::read_http_request(&mut std_stream)?;
+            anyhow::Ok((std_stream, orig_dst, raw))
+        })
+        .await??;
+
+        // Capture audit metadata before substitution consumes the request —
+        // same as the UDS/vsock `process` path. resolve_meta touches no value,
+        // so this is claim-13 safe.
+        let req = terminator::request::proxy_request_from_origin_form(&raw, orig_dst)?;
+        let endpoint = SubstitutionEndpoint::new(&self.registry, self.resolver.as_ref());
+        let destination = destination_host(&req.url).ok();
+        let substituted: Vec<(String, AuthType)> = req
+            .headers
+            .iter()
+            .filter_map(|(_, v)| find_placeholder(v))
+            .filter_map(|ph| endpoint.resolve_meta(ph))
+            .collect();
+        drop(req);
+
+        // Substitution + the raw forward leg are sync; run them off the reactor.
+        // Clone the Arcs the closure needs (it must be 'static — can't borrow
+        // &self across spawn_blocking); the endpoint is rebuilt inside.
+        let registry = Arc::clone(&self.registry);
+        let resolver = Arc::clone(&self.resolver);
+        let forwarded = tokio::task::spawn_blocking(move || {
+            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            terminator::handler::handle_request(&raw, orig_dst, &endpoint, |prepared, dst| {
+                terminator::listener::forward_http_raw(prepared, dst)
+            })
+        })
+        .await?;
+
+        let resp = match forwarded {
+            Ok(resp) => resp,
+            Err(e) => {
+                // claim-12 fail-closed: refusal closes the socket, no forward.
+                tracing::warn!(error = %e, "terminator refused or forward failed; closing");
+                return Ok(());
+            }
+        };
+
+        self.audit_substitutions(&substituted, destination.as_deref())
+            .await;
+
+        tokio::task::spawn_blocking(move || {
+            std_stream.write_all(&resp)?;
+            std_stream.flush()
+        })
+        .await??;
+        Ok(())
+    }
+
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
         let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
         let resp = self.process(wire).await;
