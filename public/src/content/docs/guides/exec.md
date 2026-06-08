@@ -85,7 +85,7 @@ the VM stops, the ext4 image is mounted host-side and `rsync -aH
 files are updated, and files removed inside the guest are removed on
 the host.
 
-This is the equivalent of cco's writable project directory --
+This is the equivalent of an external sandbox-wrapper CLI's writable project directory --
 exactly what you want for a coding agent that needs to edit your repo.
 
 #### Trade-offs

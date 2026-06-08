@@ -69,6 +69,7 @@ fn default_health_timeout() -> u64 {
 /// Runtime status of a single integration on a guest.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum IntegrationStatus {
     /// Integration is running and connected.
     Active,
@@ -86,6 +87,7 @@ pub enum IntegrationStatus {
 
 /// Result of a single health check execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IntegrationHealthResult {
     /// Whether the health check passed (exit code 0).
     pub healthy: bool,
@@ -97,6 +99,7 @@ pub struct IntegrationHealthResult {
 
 /// Full state report for a single integration (returned by guest agent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IntegrationStateReport {
     pub name: String,
     pub status: IntegrationStatus,

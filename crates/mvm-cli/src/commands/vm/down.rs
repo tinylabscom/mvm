@@ -18,14 +18,21 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    // Use Apple Container backend on macOS 26+, otherwise default (Firecracker).
-    let backend = if mvm_core::platform::current().has_apple_containers() {
-        AnyBackend::from_hypervisor("apple-container")
-    } else {
-        AnyBackend::default_backend()
+    // Platform default for VMs with no pid-file marker (Apple Container /
+    // Docker track state out-of-band, so `for_started_vm` returns None).
+    let platform_default = || {
+        if mvm_core::platform::current().has_apple_containers() {
+            AnyBackend::from_hypervisor("apple-container")
+        } else {
+            AnyBackend::default_backend()
+        }
     };
     match args.name.as_deref() {
         Some(n) => {
+            // Dispatch to the backend that actually started this VM
+            // (resolved from its state-dir pid marker) so a QEMU/libkrun
+            // VM is stopped by its own VMM, not the platform default.
+            let backend = AnyBackend::for_started_vm(n).unwrap_or_else(platform_default);
             // ADR-053 §3 / plan 74 W2: persist the `Stopping`
             // readiness milestone BEFORE the backend stop call so a
             // concurrent `mvmctl ls --json` running during the stop
@@ -60,15 +67,33 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
         None => {
             // Plan-38 §"Boundary statement": fleet/multi-VM is mvmd's job.
-            // `mvmctl down` (no args) just stops every running VM.
-            let result = backend.stop_all();
-            let outcome = if result.is_ok() {
+            // `mvmctl down` (no args) just stops every running VM — across
+            // every backend, each dispatched to its owning VMM so QEMU /
+            // libkrun VMs are stopped too (not just the platform default).
+            let registry_path = mvm::vm::name_registry::registry_path();
+            let mut last_err = None;
+            for vm in AnyBackend::list_all() {
+                let backend = AnyBackend::for_started_vm(&vm.name).unwrap_or_else(platform_default);
+                record_vm_readiness(&vm.name, InstanceReadiness::Stopping);
+                match backend.stop(&VmId::from(vm.name.as_str())) {
+                    Ok(()) => {
+                        if let Ok(mut registry) =
+                            mvm::vm::name_registry::VmNameRegistry::load(&registry_path)
+                        {
+                            registry.deregister(&vm.name);
+                            let _ = registry.save(&registry_path);
+                        }
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            let outcome = if last_err.is_none() {
                 "stop_all_ok"
             } else {
                 "stop_all_failed"
             };
             mvm_core::audit_emit!(VmStop, "{outcome}");
-            result
+            last_err.map_or(Ok(()), Err)
         }
     }
 }

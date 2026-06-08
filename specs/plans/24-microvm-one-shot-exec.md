@@ -4,15 +4,15 @@
 
 ## Context
 
-[cco](https://github.com/nikvdp/cco) is a thin wrapper that runs Claude Code (or any command) inside a sandbox, automatically picking the strongest available backend (`sandbox-exec` on macOS → `bubblewrap` on Linux → Docker fallback). Its UX is the interesting part:
+An external thin sandbox-wrapper CLI (referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`) runs Claude Code (or any command) inside a sandbox, automatically picking the strongest available backend (`sandbox-exec` on macOS → `bubblewrap` on Linux → Docker fallback). Its UX is the interesting part:
 
 ```
-cco "write a hello world script"
-cco --command "bash"
-cco --add-dir ~/configs:ro --env API_KEY=sk-123 --packages terraform "..."
+wrap "write a hello world script"
+wrap --command "bash"
+wrap --add-dir ~/configs:ro --env API_KEY=sk-123 --packages terraform "..."
 ```
 
-One command, transparent stdio, automatic teardown. The proposal is to offer the same shape with a Firecracker microVM as the sandbox — a strictly stronger isolation boundary than anything cco offers.
+One command, transparent stdio, automatic teardown. The proposal is to offer the same shape with a Firecracker microVM as the sandbox — a strictly stronger isolation boundary than anything that wrapper offers.
 
 Most of the primitives already exist; the work is glue plus one new capability (host-directory mount).
 
@@ -95,9 +95,9 @@ The CLI's `Commands::Exec` variant constructs `ExecRequest::Inline`. A later `Co
 ### Out of scope for v1 (explicitly)
 
 - Writable `--add-dir` / virtio-fs / 9p — needs separate design.
-- Persistent sessions (`cco --persist=...`).
+- Persistent sessions (that wrapper's `--persist=...`).
 - Auto-snapshot warming. We use whatever snapshot the template already has.
-- `--packages` package install at runtime (cco's apt install). Bake into the template instead.
+- `--packages` package install at runtime (that wrapper's apt install). Bake into the template instead.
 - Reading mvmforge `launch.json` and invoking its entrypoint — deferred but the `ExecTarget` enum reserves the slot.
 
 ## Platform caveats

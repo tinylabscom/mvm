@@ -21,8 +21,8 @@
 //!   `ProcKill`) return the matching success variant of [`ProcResult`].
 //!   `ProcStart` mints a deterministic `proc-<N>` token from an atomic
 //!   counter.
-//! - **Read-only verbs** (`FsRead`, `FsStat`, `FsList`, `ProcList`,
-//!   `ProcWait`) return empty / zero-state responses — they exist to
+//! - **Read-only verbs** (`FsRead`, `FsStat`, `FsList`, `FsDiff`,
+//!   `ProcList`, `ProcWait`) return empty / zero-state responses — they exist to
 //!   keep the wire surface complete for the pinned no-emit tests in
 //!   plan 66 W4, not to model real filesystem / proc state.
 //! - **Everything else** comes back as `GuestResponse::Error` so a
@@ -363,6 +363,14 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
             GuestResponse::ProcWaitEvent(ProcWaitEvent::Exit { code: 0 })
         }
 
+        // ── Filesystem diff (Plan 169) ──────────────────────────────
+        // Mock VMs have no overlay to walk; report no changes so
+        // `mvmctl diff --hypervisor mock` succeeds rather than hitting
+        // the loud catch-all.
+        GuestRequest::FsDiff => GuestResponse::FsDiffResult {
+            changes: Vec::new(),
+        },
+
         // ── Catch-all: every other verb fails loud ──────────────────
         other => GuestResponse::Error {
             message: format!(
@@ -376,9 +384,19 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_guest::vsock::{send_fs_request, send_proc_request};
+    use mvm_guest::vsock::{
+        connect_to, query_fs_diff_on, send_fs_request, send_proc_request, send_proc_request_on,
+        send_proc_wait_on, vsock_uds_path,
+    };
     use std::collections::BTreeMap;
     use tempfile::TempDir;
+
+    /// Connect a CONNECT-handshaked stream to a running mock agent —
+    /// the same shape `mvm::vsock_transport::for_vm(...).connect(...)`
+    /// hands the backend-agnostic `*_on` helpers (Plan 169).
+    fn connect_stream(dir: &TempDir) -> std::os::unix::net::UnixStream {
+        connect_to(&vsock_uds_path(&dir.path().to_string_lossy()), 5).expect("connect mock stream")
+    }
 
     fn make_vm_dir() -> TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -547,5 +565,44 @@ mod tests {
             (FsResult::Write { bytes_written: 1 }, FsResult::Write { bytes_written: 2 }) => {}
             other => panic!("expected 1-byte / 2-byte writes, got {other:?}"),
         }
+    }
+
+    // ── Plan 169: stream-based `*_on` entry points round-trip ────────
+    // These drive the new backend-agnostic helpers directly on a
+    // CONNECT-handshaked stream (what `vsock_transport::for_vm` yields
+    // for QEMU/libkrun), instead of the dir-based wrappers.
+
+    #[test]
+    fn send_proc_request_on_round_trips_proc_list() {
+        let dir = make_vm_dir();
+        let agent = MockGuestAgent::start(dir.path()).expect("start agent");
+        let _ = &agent;
+        let mut stream = connect_stream(&dir);
+        let result = send_proc_request_on(&mut stream, GuestRequest::ProcList).expect("proc list");
+        match result {
+            ProcResult::List { processes } => assert!(processes.is_empty()),
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_proc_wait_on_streams_to_terminal_event() {
+        let dir = make_vm_dir();
+        let agent = MockGuestAgent::start(dir.path()).expect("start agent");
+        let _ = &agent;
+        let mut stream = connect_stream(&dir);
+        let terminal =
+            send_proc_wait_on(&mut stream, "proc-1", None, |_| {}).expect("proc wait stream");
+        assert!(matches!(terminal, ProcWaitEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn query_fs_diff_on_round_trips_empty_changes() {
+        let dir = make_vm_dir();
+        let agent = MockGuestAgent::start(dir.path()).expect("start agent");
+        let _ = &agent;
+        let mut stream = connect_stream(&dir);
+        let changes = query_fs_diff_on(&mut stream).expect("fs diff");
+        assert!(changes.is_empty());
     }
 }

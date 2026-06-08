@@ -47,6 +47,13 @@ pub const GUEST_AGENT_PORT: u32 = 5252;
 /// format: a single 4-byte little-endian `i32`. Plan 152 WS-A.
 pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 
+/// vsock port the host substitution endpoint (Plan 129 / ADR-067 §1) is exposed
+/// on. The in-guest forward proxy connects here; the host bin maps it to the
+/// UDS where `SubstitutionService` listens. Distinct from the removed 5300/5301
+/// secrets channel (ADR-062). NOTE: exposing this port end-to-end needs the
+/// host-side proxy port-allowlist (W1.3) to admit it — part of the bin glue.
+pub const SUBSTITUTION_PORT: u32 = 5253;
+
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;
@@ -116,6 +123,7 @@ pub fn adaptive_backoff(attempt: u32) -> Duration {
 /// unit, so the attribute applies cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestRequest {
     /// Negotiate guest-agent protocol compatibility and capabilities
     /// before dispatching capability-dependent requests. ADR-053 /
@@ -525,6 +533,7 @@ fn default_true() -> bool {
 /// elide subsystems they don't care about in tests / fixtures.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ComponentState {
     /// Subsystem is not configured for this image (no policy → no
     /// state machine to advance). Wire-stable distinct from `Ready`.
@@ -555,6 +564,7 @@ pub enum ComponentState {
 /// `integrations_ready_ms`, `probes_ready_ms`) stay `None` for now.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BootTimingReport {
     /// Milliseconds from agent process start to vsock bind/listen.
     /// Always present once the agent has bound — this number is the
@@ -599,6 +609,7 @@ pub struct BootTimingReport {
 /// reports with `..Default::default()`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReadinessReport {
     /// Vsock listener bound and accepting. Always `Ready` if the
     /// agent could respond at all.
@@ -782,6 +793,7 @@ impl GuestRequest {
 /// host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestResponse {
     /// Guest-agent protocol negotiation succeeded. ADR-053 / plan 74 W1.
     ProtocolHelloAck {
@@ -921,6 +933,7 @@ pub enum GuestResponse {
 /// guest fail loudly on drift instead of accepting arbitrary strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestCapability {
     Ping,
     IntegrationStatus,
@@ -940,6 +953,7 @@ pub enum GuestCapability {
 /// Required remediation for a host/guest protocol mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProtocolUpgradeAction {
     UpgradeHost,
     RebuildGuest,
@@ -1028,6 +1042,7 @@ pub fn protocol_hello_response(
 /// (Renamed from `ShareResult` per plan 45 §D5.)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum VolumeMountResult {
     /// `MountVolume` succeeded. `canonical_path` is the
     /// post-validation path the agent actually mounted at — same
@@ -1047,6 +1062,7 @@ pub enum VolumeMountResult {
 /// (Renamed from `ShareErrorKind` per plan 45 §D5.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum VolumeMountErrorKind {
     /// `guest_path` is empty / not absolute / contains `..` /
     /// embedded NUL.
@@ -1074,6 +1090,7 @@ pub enum VolumeMountErrorKind {
 /// fields past the host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcResult {
     /// `ProcStart` succeeded — `pid_token` is the opaque handle the
     /// host uses for the rest of the process's lifetime.
@@ -1100,6 +1117,7 @@ pub enum ProcResult {
 /// Per-process metadata returned by `ProcList`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProcInfo {
     pub pid_token: String,
     /// RFC 3339 timestamp.
@@ -1114,6 +1132,7 @@ pub struct ProcInfo {
 /// Lifecycle state of a tracked process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcState {
     Running,
     Exited(i32),
@@ -1127,6 +1146,7 @@ pub enum ProcState {
 /// `ProcWaitEvent::Error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcErrorKind {
     /// `pid_token` doesn't match any known process. Either the
     /// host fabricated it or the agent reaped the process record.
@@ -1160,6 +1180,7 @@ pub enum ProcErrorKind {
 /// `is_terminal()` just like for `EntrypointEvent`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProcWaitEvent {
     /// Bytes from the process's stdout.
     Stdout { chunk: Vec<u8> },
@@ -1215,6 +1236,7 @@ impl ProcWaitEvent {
 /// data past the host's deserializer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsResult {
     /// Bytes read. `total_size` is the on-disk size at read time so
     /// callers can detect short reads even when `content.len() <
@@ -1246,6 +1268,7 @@ pub enum FsResult {
 /// One entry in an `FsList` response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FsEntry {
     /// Bare entry name (no leading directory component).
     pub name: String,
@@ -1258,6 +1281,7 @@ pub struct FsEntry {
 /// Type of a filesystem entry returned by `FsList` / `FsStat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsEntryKind {
     File,
     Dir,
@@ -1268,6 +1292,7 @@ pub enum FsEntryKind {
 /// Stat metadata for a single filesystem entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FsStat {
     /// Canonical (post-`realpath`) path the agent operated on. Lets
     /// the host detect when a symlink resolution surprised it.
@@ -1287,6 +1312,7 @@ pub struct FsStat {
 /// host can branch on `kind` without parsing message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsErrorKind {
     /// Path was rejected by the agent's policy (deny-list,
     /// canonicalization failed, symlink crossed the deny-list).
@@ -1316,6 +1342,7 @@ pub enum FsErrorKind {
 /// A single filesystem change detected since boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FsChange {
     /// Path relative to the filesystem root.
     pub path: String,
@@ -1328,6 +1355,7 @@ pub struct FsChange {
 /// Kind of filesystem change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FsChangeKind {
     Created,
     Modified,
@@ -1348,6 +1376,7 @@ pub enum FsChangeKind {
 /// the host already reads frames in a loop until terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum EntrypointEvent {
     /// Bytes from the wrapper's stdout.
     Stdout { chunk: Vec<u8> },
@@ -1425,6 +1454,7 @@ impl EntrypointEvent {
 /// breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RunEntrypointError {
     /// Inbound stdin or buffered stdout/stderr exceeded the cap
     /// configured for the call.
@@ -2296,22 +2326,25 @@ pub fn exec_at(
 /// the diff.
 pub fn query_fs_diff(instance_dir: &str) -> Result<Vec<FsChange>> {
     let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::FsDiff)?;
-
-    match resp {
-        GuestResponse::FsDiffResult { changes } => Ok(changes),
-        GuestResponse::Error { message } => {
-            bail!("Guest fs-diff error: {}", message);
-        }
-        _ => bail!("Unexpected response to FsDiff"),
-    }
+    query_fs_diff_on(&mut stream)
 }
 
 /// Query filesystem diff at a specific UDS path.
 pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
     let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
-    let resp = send_request(&mut stream, &GuestRequest::FsDiff)?;
+    query_fs_diff_on(&mut stream)
+}
 
+/// Query filesystem diff on an already-connected stream. Backend-agnostic
+/// entry point for `mvmctl diff` — the stream comes from
+/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM
+/// (Plan 169). `FsDiff` is part of the filesystem RPC surface, so this drives
+/// the plan 74 W1 hello prelude requiring `FilesystemRpc` exactly like
+/// [`send_fs_request_on`] — the dir-based wrappers used to skip the hello,
+/// which a hard-cutover agent (ADR-053) would reject.
+pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    let resp = send_request(stream, &GuestRequest::FsDiff)?;
     match resp {
         GuestResponse::FsDiffResult { changes } => Ok(changes),
         GuestResponse::Error { message } => {
@@ -2323,8 +2356,20 @@ pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
 
 /// Dispatch a non-streaming process-control request to a running
 /// VM and return the `ProcResult`. Single-frame surface — the
-/// streaming `ProcWait` verb has its own helper below.
+/// streaming `ProcWait` verb has its own helper below. Dir-based
+/// wrapper over [`send_proc_request_on`] for callers that still pass
+/// an instance dir (mvmd, mock).
 pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcResult> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    send_proc_request_on(&mut stream, req)
+}
+
+/// Dispatch a non-streaming process-control verb on an already-connected
+/// stream and return the `ProcResult`. The backend-agnostic entry point:
+/// the host CLI obtains the stream from `mvm::vsock_transport::for_vm(name)`
+/// so `mvmctl proc` works regardless of which VMM launched the VM
+/// (Plan 169). `send_proc_request` is the dir-based wrapper over this.
+pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<ProcResult> {
     debug_assert!(matches!(
         req,
         GuestRequest::ProcStart { .. }
@@ -2333,9 +2378,8 @@ pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcRe
             | GuestRequest::ProcSendInput { .. }
             | GuestRequest::ProcKill { .. }
     ));
-    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    require_capabilities(&mut stream, &[GuestCapability::ProcessRpc])?;
-    let resp = send_request(&mut stream, &req)?;
+    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
+    let resp = send_request(stream, &req)?;
     match resp {
         GuestResponse::ProcResult(r) => Ok(r),
         GuestResponse::Error { message } => {
@@ -2347,22 +2391,36 @@ pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcRe
 
 /// Stream `ProcWait` events for `pid_token`. Calls `on_event` for
 /// every non-terminal frame and returns the terminal event. Mirrors
-/// the host shape of `send_run_entrypoint`.
+/// the host shape of `send_run_entrypoint`. Dir-based wrapper over
+/// [`send_proc_wait_on`].
 pub fn send_proc_wait<F: FnMut(&ProcWaitEvent)>(
     instance_dir: &str,
     pid_token: &str,
     timeout_secs: Option<u64>,
-    mut on_event: F,
+    on_event: F,
 ) -> Result<ProcWaitEvent> {
     let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    require_capabilities(&mut stream, &[GuestCapability::ProcessRpc])?;
+    send_proc_wait_on(&mut stream, pid_token, timeout_secs, on_event)
+}
+
+/// Stream `ProcWait` events on an already-connected stream. Backend-agnostic
+/// entry point for `mvmctl proc wait` — the stream comes from
+/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM
+/// (Plan 169). Mirrors the host shape of [`send_run_entrypoint`].
+pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
+    stream: &mut UnixStream,
+    pid_token: &str,
+    timeout_secs: Option<u64>,
+    mut on_event: F,
+) -> Result<ProcWaitEvent> {
+    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
     let req = GuestRequest::ProcWait {
         pid_token: pid_token.to_string(),
         timeout_secs,
     };
-    write_frame(&mut stream, &req)?;
+    write_frame(stream, &req)?;
     loop {
-        let resp: GuestResponse = read_frame(&mut stream)?;
+        let resp: GuestResponse = read_frame(stream)?;
         match resp {
             GuestResponse::ProcWaitEvent(ev) => {
                 if ev.is_terminal() {
@@ -2394,8 +2452,19 @@ pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult
             | GuestRequest::FsMove { .. }
     ));
     let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
-    require_capabilities(&mut stream, &[GuestCapability::FilesystemRpc])?;
-    let resp = send_request(&mut stream, &req)?;
+    send_fs_request_on(&mut stream, req)
+}
+
+/// Dispatch a single FS RPC on an already-connected stream and return the
+/// `FsResult`. The backend-agnostic entry point: the host CLI obtains the
+/// stream from `mvm::vsock_transport::for_vm(name)` (which resolves the
+/// right socket per backend — Firecracker's `v.sock`, or the per-port UNIX
+/// socket libkrun/QEMU expose), so `fs`/`cp` work regardless of which VMM
+/// launched the VM (Plan 169). `send_fs_request` is the dir-based wrapper
+/// over this for callers that still pass an instance dir (mvmd, mock).
+pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<FsResult> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    let resp = send_request(stream, &req)?;
     match resp {
         GuestResponse::FsResult(r) => Ok(r),
         GuestResponse::Error { message } => bail!("Guest FS RPC transport error: {}", message),

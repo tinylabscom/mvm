@@ -336,7 +336,7 @@ name, guest path, copied byte count, and effective copy options, but not the
 host endpoint.
 
 `mvmctl exec` boots a fresh transient microVM, runs a single command, and tears it
-down on exit — like `cco` or `docker run --rm`, but with a Firecracker microVM
+down on exit — like an external sandbox-wrapper CLI or `docker run --rm`, but with a Firecracker microVM
 as the sandbox. **Dev-mode only**: the guest agent's Exec handler is compiled in
 only when the `dev-shell` Cargo feature is enabled. Production guest builds omit
 the feature, so the handler is not present in the binary at all.

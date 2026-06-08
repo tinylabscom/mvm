@@ -84,11 +84,32 @@ path = "tests/bin/entrypoint_test_wrapper.rs"
 test = false
 doctest = false
 
+# Plan 124 D1 — emits the host↔guest RPC protocol JSON Schema. Gated by
+# `required-features = ["schema"]` so it (and `schemars`) is excluded from
+# the default/prod build, exactly like mvm-libkrun-supervisor's
+# `libkrun-sys` gate. Run via `cargo run -p mvm-guest --features schema
+# --bin emit_protocol_schema`.
+[[bin]]
+name = "emit_protocol_schema"
+path = "src/bin/emit_protocol_schema.rs"
+required-features = ["schema"]
+test = false
+doctest = false
+
 [features]
 dev-shell = []
+# Plan 124 D1 — derive `schemars::JsonSchema` on the host↔guest wire types
+# (`GuestRequest`/`GuestResponse` + their tree) so the `emit_protocol_schema`
+# bin can emit the protocol schema (the SDK-codegen SSOT). Off by default:
+# the schema is a build-time codegen input, never linked into the runtime
+# agent, so the lean-agent closure (Plan 124 A) stays schemars-free. Pulls
+# `mvm-core/schema` for the shared `AgentProfile`/`BackpressureReason` types.
+schema = ["dep:schemars", "mvm-core/schema"]
 
 [dependencies]
 mvm-core.workspace = true
+# Only under `schema` (protocol-schema codegen) — see the feature above.
+schemars = { version = "0.8", optional = true }
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true

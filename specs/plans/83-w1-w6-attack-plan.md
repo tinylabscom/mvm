@@ -52,7 +52,7 @@ Everything else is parallel-safe.
 | 2     | W4 SDK lifecycle   | Biggest adoption move; `mvm-sdk` crate already ported, lifecycle missing | 4-6 weeks   |
 | 3     | W1 OCI ingest      | Opens the Docker-shaped audience; new code surface                       | 4-6 weeks   |
 | 4     | W2 network policy  | Prerequisite for W3; deny-by-default + DNS pin + L7 proxy + SNI/Host    | 4-6 weeks    |
-| 5     | W3 secret placeholders | The microsandbox-headline differentiator; rides on W2's proxy        | 3-4 weeks    |
+| 5     | W3 secret placeholders | The earlier external sandbox runtime's headline differentiator; rides on W2's proxy (external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`) | 3-4 weeks    |
 | 6     | W6 filesystem      | Lowest marketing weight; mostly conformance tests + capability flags    | 2-3 weeks    |
 
 Total: ~18-27 contributor-weeks.
@@ -378,7 +378,7 @@ docs that quote the number sit on the status-table page.
 4. Doc page in `public/src/content/docs/reference/performance.md`
    with the published numbers + methodology link.
 
-**Risk.** Numbers that disappoint. Microsandbox markets
+**Risk.** Numbers that disappoint. The earlier external sandbox runtime markets
 <100ms; we may be at 200-500ms on Firecracker cold boot with
 audit append and plan signing in the path. That is OK — publish
 the truth + warm-pool/snapshot numbers separately. Do not try to

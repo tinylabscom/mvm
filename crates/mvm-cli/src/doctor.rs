@@ -192,6 +192,31 @@ fn stage0_status_check() -> Check {
     }
 }
 
+/// One-line summary of a dry-run convergence report for `doctor`
+/// (Plan 170 WS-A). Pure so it's testable without touching the registry.
+fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
+    let n = report.reconciled_count();
+    if n == 0 {
+        "clean".to_string()
+    } else {
+        format!("{n} record(s) would be reconciled (run `mvmctl reconcile`)")
+    }
+}
+
+/// Surface registry/runtime drift (Plan 170 WS-A / ADR-074) without
+/// healing it: a dry-run convergence pass, reported as `clean` or a
+/// count. Informational — drift self-heals at the next state-touching
+/// command, so `ok` is always true.
+fn registry_drift_check() -> Check {
+    let report = mvm::vm::reconcile::converge(&mvm::vm::reconcile::ConvergeOpts { dry_run: true });
+    Check {
+        name: "registry drift",
+        category: "platform",
+        ok: true,
+        info: registry_drift_summary(&report),
+    }
+}
+
 pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     // ── Prerequisites (user must install before bootstrap) ───────
     let mut checks = vec![
@@ -251,6 +276,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(docker_check(plat));
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
+    checks.push(registry_drift_check());
 
     checks.push(disk_space_check(false));
 
@@ -2438,6 +2464,20 @@ mod tests {
         // And honestly-`false` backends should not be silently dropped.
         assert_eq!(support.get("docker"), Some(&false));
         assert_eq!(support.get("apple-container"), Some(&false));
+    }
+
+    #[test]
+    fn registry_drift_summary_reports_clean_and_counts() {
+        use mvm::vm::reconcile::ConvergeReport;
+        let clean = ConvergeReport::default();
+        assert_eq!(registry_drift_summary(&clean), "clean");
+
+        let mut drifted = ConvergeReport::default();
+        drifted.dead_process_reaped.push("vm1".to_string());
+        drifted.orphan_state_reaped.push("ghost".to_string());
+        let s = registry_drift_summary(&drifted);
+        assert!(s.starts_with("2 record(s) would be reconciled"), "{s}");
+        assert!(s.contains("mvmctl reconcile"));
     }
 
     #[test]

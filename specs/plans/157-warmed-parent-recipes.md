@@ -1,4 +1,4 @@
-# Plan 157 — Warmed parent recipes (forkd-inspired)
+# Plan 157 — Warmed parent recipes (fork/snapshot-sibling-inspired)
 
 > Number 157 is the next free integer (`main` tops out at 156: 156 binary-size-reduction,
 > 155 portable-runnable-artifacts, 154 cloud-hypervisor-tier1-parity). `xtask
@@ -7,33 +7,35 @@
 
 ## Context
 
-[forkd](https://github.com/deeplethe/forkd) is the closest public sibling to mvm
-(Firecracker microVMs, Rust, agent sandboxing, an explicit security posture). Its
-`recipes/` directory ships **rootfs recipes** — a per-environment `build.sh` plus a
-shared `scripts/build-rootfs.sh` — that turn a public OCI image into a **pre-warmed
-parent**. `recipes/postgres-fixture` is the canonical one: it runs `initdb`, starts
-the postmaster, emits a line-JSON ready handshake, then idles; `forkd snapshot`
-freezes that primed state and `forkd fork -n` fans out children that get a
-ready-to-query DB in ~10 ms instead of ~2 s.
+The closest public sibling to mvm — a Rust Firecracker-microVM fork/snapshot tool
+for agent sandboxing with an explicit security posture (referred to obliquely per
+[[feedback_no_competitor_names_anywhere]]; trait key in auto-memory
+`reference_external_sandbox_control_plane_oblique_key`) — ships **rootfs recipes** in
+its `recipes/` directory: a per-environment `build.sh` plus a shared
+`scripts/build-rootfs.sh` that turn a public OCI image into a **pre-warmed parent**.
+`recipes/postgres-fixture` is the canonical one: it runs `initdb`, starts the
+postmaster, emits a line-JSON ready handshake, then idles; its `snapshot` command
+freezes that primed state and `fork -n` fans out children that get a ready-to-query
+DB in ~10 ms instead of ~2 s.
 
 Two findings from reviewing those recipes set the scope of this plan.
 
 **1. The rootfs *mechanism* is not worth adopting — mvm already has the secure
-equivalent.** forkd's `scripts/build-rootfs.sh` is `docker pull` → `docker export | tar`
+equivalent.** That sibling's `scripts/build-rootfs.sh` is `docker pull` → `docker export | tar`
 → `mkfs.ext4 -d` on the host. That collides head-on with two standing mvm invariants:
 no Docker/containers anywhere near the image path, and ext4 is never materialized on
 the host (it runs in the builder VM — ADR-050). mvm already converts OCI → ext4 with
 `mvm_oci::unpack::unpack_layer` + `mvm_build::oci_to_rootfs::materialize_to_ext4` +
 `seal_with_verity`, pure-Rust, in the builder VM, with cosign + provenance + audit
 (claim 14, `specs/claims/claim-10-oci-image-provenance.md`). **Rebuilding that against
-forkd's shell pipeline is an explicit non-goal** — it would regress integrity.
+that shell pipeline is an explicit non-goal** — it would regress integrity.
 
-**2. forkd bakes warm state *into a writable rootfs*; mvm structurally can't — and
+**2. The sibling bakes warm state *into a writable rootfs*; mvm structurally can't — and
 that exposes a real gap.** mvm's workload rootfs is read-only, dm-verity'd, and
 provenance-pinned (claims 3 / 14). Mutable warm state — an initialized `initdb` data
 dir, a running postmaster, primed caches — cannot live inside a verity rootfs without
 throwing away the verity tree and the provenance chain. So a "warmed parent" in mvm
-necessarily decomposes into **three** layers where forkd has one:
+necessarily decomposes into **three** layers where that tool has one:
 
 | Layer | Holds | mvm home | Status |
 |---|---|---|---|
@@ -72,7 +74,7 @@ verity/provenance/audit chain.
 
 **Core decision, stated up front: mvm does not warm the rootfs.** A warmed parent is
 an immutable verity rootfs (already built) + a sealed warm overlay/volume (disk) + a
-memory snapshot (RAM). forkd's "bake into one writable rootfs" model is rejected as a
+memory snapshot (RAM). The sibling's "bake into one writable rootfs" model is rejected as a
 verity/provenance regression.
 
 **Prereqs / sequencing.** The disk-warm legs (Phases A, B, and the libkrun disk-only
@@ -260,14 +262,14 @@ silently degrade (matches Plan 148 / 123 posture).
 - Live BRANCH of a *running* parent — Plan 148 Phase B (a measured go/no-go, not a
   commitment).
 - Rebuilding the OCI → ext4 rootfs builder — already exists (`unpack_layer` +
-  `materialize_to_ext4` + `seal_with_verity`); explicitly **not** adopting forkd's
-  `scripts/build-rootfs.sh`.
+  `materialize_to_ext4` + `seal_with_verity`); explicitly **not** adopting that
+  sibling's `scripts/build-rootfs.sh`.
 
 ## Candidate recipes (target menu)
 
-Expressed as mvm catalog entries with a `WarmupSpec`, drawn from forkd's recipe set:
+Expressed as mvm catalog entries with a `WarmupSpec`, drawn from the sibling's recipe set:
 `postgres-fixture` (initdb + postmaster), `jupyter-kernel`, `node`, `code-interpreter`,
-`python-numpy`. Note forkd's own recipes are thin — `python-numpy` has *no* warmup
+`python-numpy`. Note the sibling's own recipes are thin — `python-numpy` has *no* warmup
 (just `apt install python3-numpy`); only `postgres-fixture` truly warms — so this is a
 **target list, not a borrowed design**. `postgres-fixture` is the natural first
 recipe (it exercises the full disk + memory freeze).

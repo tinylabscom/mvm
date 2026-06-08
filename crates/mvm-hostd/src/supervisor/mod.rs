@@ -72,7 +72,14 @@ pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
+/// Plan 129 / ADR-067 §4 + claim 13 — chain-signed `secret.substituted` /
+/// `secret.placeholder_dropped` audit events (metadata only, never the value).
+pub mod secret_audit;
 pub mod secrets_scanner;
+/// Plan 129 / ADR-067 §1 — host substitution endpoint request preparation
+/// (placeholder → real credential, binding-checked). The forward leg + the
+/// guest-facing listener are separate transport steps.
+pub mod substitution_proxy;
 // Plan 104 W1b.2a — supervisor-side UDS proxy clients for the three
 // broker subprocesses (mvm-broker, mvm-host-signer,
 // mvm-audit-signer; ADR-062 dropped mvm-secrets-dispatcher).

@@ -1,0 +1,3098 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Protocol",
+  "description": "Schema root: both wire directions under one document so the shared `$defs` (`FsResult`, `ProcResult`, `EntrypointEvent`, …) are emitted once and the generated clients reference a single definition set.",
+  "type": "object",
+  "required": [
+    "request",
+    "response"
+  ],
+  "properties": {
+    "request": {
+      "$ref": "#/definitions/GuestRequest"
+    },
+    "response": {
+      "$ref": "#/definitions/GuestResponse"
+    }
+  },
+  "definitions": {
+    "AgentProfile": {
+      "description": "Profile baked into an mvm guest image. Determines the set of vsock verbs the guest agent's dispatcher will accept; dev-only verbs (`Exec`, `ConsoleOpen`, `ProcStart`, `RunCode`, filesystem RPC, port forwarding) are rejected pre-handler when the image declares `SealedProd`.\n\n**Source of truth.** The profile is declared by the image config — `/etc/mvm/security.json` on a sealed-prod image lives on a dm-verity rootfs (ADR-002 §W3), so the value cannot be widened at runtime: any modification breaks the verity hash and the kernel panics in `mvm-verity-init` before userspace. The loader treats absence of the policy file as an unprovisioned dev image (`SecurityPolicy::dev_defaults`).\n\n**Builder uses a different protocol.** `mvm-builder-agent`'s wire type is `HostVmRequest`, not `GuestRequest`; the `Builder` profile is reserved for any future `GuestRequest` variant that only makes sense during a build. No current variant is `BuilderOnly`, so the value is wire-stable but unused for the tenant agent today.",
+      "oneOf": [
+        {
+          "description": "Hardened production guest. Only ADR-002 production-safe verbs pass the dispatcher gate.",
+          "type": "string",
+          "enum": [
+            "sealed-prod"
+          ]
+        },
+        {
+          "description": "Development guest. Adds shell exec, process RPC, filesystem RPC, console, port forwarding, and `RunCode`.",
+          "type": "string",
+          "enum": [
+            "dev"
+          ]
+        },
+        {
+          "description": "Builder-VM agent. Reserved for `BuilderOnly`-classified verbs when the builder protocol moves to `GuestRequest`; today the builder agent speaks `HostVmRequest` exclusively.",
+          "type": "string",
+          "enum": [
+            "builder"
+          ]
+        }
+      ]
+    },
+    "BackpressureReason": {
+      "description": "Why a streaming or queued operation is currently throttled.\n\nClosed enum: every reason is named, and drift between host and guest fails the serde `deny_unknown_fields`-equivalent path (variants must match). Detail strings carried alongside this enum in W4 are bounded and redacted — never argv / env / stdin / stdout / stderr / filesystem paths.",
+      "oneOf": [
+        {
+          "description": "Host could not reach the guest agent within the configured grace period. Typically resolves on the next probe.",
+          "type": "string",
+          "enum": [
+            "guest_agent_unavailable"
+          ]
+        },
+        {
+          "description": "One or more integration readiness probes are still pending.",
+          "type": "object",
+          "required": [
+            "service_health_pending"
+          ],
+          "properties": {
+            "service_health_pending": {
+              "type": "object",
+              "required": [
+                "pending"
+              ],
+              "properties": {
+                "pending": {
+                  "description": "Names of services whose readiness scripts have not yet reported success. Echoed verbatim — never user payload.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "The host is not draining the data-plane stream fast enough, so the guest is holding back to honor the frame cap.",
+          "type": "string",
+          "enum": [
+            "output_consumer_slow"
+          ]
+        },
+        {
+          "description": "Bounded input ring is saturated. The producer must wait.",
+          "type": "string",
+          "enum": [
+            "input_buffer_full"
+          ]
+        },
+        {
+          "description": "A chunked artifact transfer is paused (typically host disk pressure or quota).",
+          "type": "string",
+          "enum": [
+            "artifact_transfer_blocked"
+          ]
+        },
+        {
+          "description": "The shared builder VM is occupied by another build; this run is queued behind it.",
+          "type": "string",
+          "enum": [
+            "builder_busy"
+          ]
+        }
+      ]
+    },
+    "BootTimingReport": {
+      "description": "Per-phase monotonic boot timings in milliseconds since the agent process started.\n\nPlan 76 Phase 4 fills in the full per-phase set. Phase 2 wires `agent_started_ms`, `vsock_bound_ms`, `first_accept_ms`, and `entrypoint_ready_ms` so callers can already display the cold-path timing breakdown. Fields populated by Phase 4 (`warm_pool_ready_ms`, `integrations_ready_ms`, `probes_ready_ms`) stay `None` for now.",
+      "type": "object",
+      "properties": {
+        "agent_started_ms": {
+          "description": "Milliseconds from agent process start to vsock bind/listen. Always present once the agent has bound — this number is the dominant signal for early-readiness regressions.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "entrypoint_ready_ms": {
+          "description": "Milliseconds from agent start to `entrypoint = Ready` (or `Failed`). `None` while still `Starting`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "first_accept_ms": {
+          "description": "Milliseconds from agent start to the first accepted host connection. `None` until the first `accept()` returns.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "integrations_ready_ms": {
+          "description": "Filled in by Phase 4. `None` for now.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "probes_ready_ms": {
+          "description": "Filled in by Phase 4. `None` for now.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "vsock_bound_ms": {
+          "description": "Milliseconds from agent start to a successful `bind+listen` pair on the control port. Same anchor as `agent_started_ms` today; reserved for diverging if a future Phase 4 refactor splits \"process started\" from \"socket created\".",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "warm_pool_ready_ms": {
+          "description": "Filled in by Phase 4. `None` for now.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ComponentState": {
+      "description": "State of a single guest subsystem during boot.\n\n`Disabled` is distinct from `Ready` — a missing optional subsystem (no integrations declared, no warm pool configured, no probes registered) reports `Disabled`, while a present-and-warmed subsystem reports `Ready`. This lets the host UX distinguish \"the workload doesn't use X\" from \"X is still warming\".\n\n`Default` is `Disabled` — the most-conservative semantically correct value (= \"this subsystem isn't configured\"). Lets constructors of `ReadinessReport` use `..Default::default()` to elide subsystems they don't care about in tests / fixtures.",
+      "oneOf": [
+        {
+          "description": "Subsystem is not configured for this image (no policy → no state machine to advance). Wire-stable distinct from `Ready`.",
+          "type": "string",
+          "enum": [
+            "disabled"
+          ]
+        },
+        {
+          "description": "Subsystem is initializing in the background.",
+          "type": "string",
+          "enum": [
+            "starting"
+          ]
+        },
+        {
+          "description": "Subsystem is up and accepting work.",
+          "type": "string",
+          "enum": [
+            "ready"
+          ]
+        },
+        {
+          "description": "Subsystem failed to initialize. `message` is a short human- readable reason; no secrets / paths beyond what the host already knows.",
+          "type": "object",
+          "required": [
+            "failed"
+          ],
+          "properties": {
+            "failed": {
+              "type": "object",
+              "required": [
+                "message"
+              ],
+              "properties": {
+                "message": {
+                  "description": "Short human-readable failure reason. Stable enough for an operator to recognise, not a structured cause — pair with stderr logs for diagnosis.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "EntrypointEvent": {
+      "description": "One event in the streaming response of a `RunEntrypoint` call. ADR-007 / plan 41 W1.\n\n`Stdout` / `Stderr` carry bytes from the wrapper's respective streams. `Exit` and `Error` are terminal — they end the response stream for one call. The agent emits exactly one terminal event per call.\n\nv1 buffers each stream fully before sending one `Stdout` and one `Stderr` event (sizes bounded by agent caps). v2 may chunk progressively without changing the type or the protocol shape: the host already reads frames in a loop until terminal.",
+      "oneOf": [
+        {
+          "description": "Bytes from the wrapper's stdout.",
+          "type": "object",
+          "required": [
+            "Stdout"
+          ],
+          "properties": {
+            "Stdout": {
+              "type": "object",
+              "required": [
+                "chunk"
+              ],
+              "properties": {
+                "chunk": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Bytes from the wrapper's stderr.",
+          "type": "object",
+          "required": [
+            "Stderr"
+          ],
+          "properties": {
+            "Stderr": {
+              "type": "object",
+              "required": [
+                "chunk"
+              ],
+              "properties": {
+                "chunk": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "One control-channel record from the wrapper's fd-3 (Plan-0010 §B4 / phase 4 of the upstream-mvm coordination work in `specs/upstream-mvm-prompt.md`).\n\nfd-3 is a separate stream the wrapper writes structured records to — error envelopes, captured logs when capture is on, etc. — that user code cannot spoof by writing to stderr. stdout / stderr keep streaming user-visible bytes verbatim.\n\nThe on-the-fd-3-wire frame format is:\n\n```text header_len:  u32 LE   (4 bytes; max 64 KiB) header_json: bytes    (header_len bytes; UTF-8 JSON object) payload_len: u32 LE   (4 bytes; max bounded by call caps) payload:     bytes    (payload_len bytes; opaque) ```\n\n`header_json` is a JSON object with at minimum `{\"kind\": \"<str>\"}`. The agent re-emits the header as `header_json: String` and the payload bytes as `payload: Vec<u8>` — no agent-side parsing beyond the framing. The host (`mvmctl invoke` and downstream SDKs) decides what to do with each record kind.\n\n**Wiring status (phase 4a):** the variant ships ahead of any emitter. Agents at this version do not yet open fd-3 in the child or emit `Control` events; phase 4b lands fd-3 wiring in the cold path (`execute()`), phase 4c in the warm-process pool, and the wrapper templates flip from stderr-envelope to fd-3-envelope at the same time. Hosts that see a `Control` event must already know how to consume it, so this variant is added eagerly to keep host/guest deserializers in lockstep.",
+          "type": "object",
+          "required": [
+            "Control"
+          ],
+          "properties": {
+            "Control": {
+              "type": "object",
+              "required": [
+                "header_json",
+                "payload"
+              ],
+              "properties": {
+                "header_json": {
+                  "description": "JSON-encoded record header (deserialized by the host into a kind-specific struct). Agent does not parse beyond UTF-8 validation.",
+                  "type": "string"
+                },
+                "payload": {
+                  "description": "Opaque per-record payload. Empty for envelope-style records; used for raw bytes on log-style records.",
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Wrapper exited with the given code. Terminal.",
+          "type": "object",
+          "required": [
+            "Exit"
+          ],
+          "properties": {
+            "Exit": {
+              "type": "object",
+              "required": [
+                "code"
+              ],
+              "properties": {
+                "code": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Agent-side condition that prevented or interrupted the call (cap breach, timeout, busy session, missing entrypoint, crashed wrapper, internal failure). Terminal.",
+          "type": "object",
+          "required": [
+            "Error"
+          ],
+          "properties": {
+            "Error": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/RunEntrypointError"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "FsChange": {
+      "description": "A single filesystem change detected since boot.",
+      "type": "object",
+      "required": [
+        "kind",
+        "path",
+        "size"
+      ],
+      "properties": {
+        "kind": {
+          "description": "Type of change.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/FsChangeKind"
+            }
+          ]
+        },
+        "path": {
+          "description": "Path relative to the filesystem root.",
+          "type": "string"
+        },
+        "size": {
+          "description": "File size in bytes (0 for deleted files).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "FsChangeKind": {
+      "description": "Kind of filesystem change.",
+      "type": "string",
+      "enum": [
+        "created",
+        "modified",
+        "deleted"
+      ]
+    },
+    "FsEntry": {
+      "description": "One entry in an `FsList` response.",
+      "type": "object",
+      "required": [
+        "kind",
+        "name",
+        "size"
+      ],
+      "properties": {
+        "kind": {
+          "description": "File type. `Other` covers sockets, FIFOs, devices.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/FsEntryKind"
+            }
+          ]
+        },
+        "name": {
+          "description": "Bare entry name (no leading directory component).",
+          "type": "string"
+        },
+        "size": {
+          "description": "Size in bytes, or `0` for non-files.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "FsEntryKind": {
+      "description": "Type of a filesystem entry returned by `FsList` / `FsStat`.",
+      "type": "string",
+      "enum": [
+        "file",
+        "dir",
+        "symlink",
+        "other"
+      ]
+    },
+    "FsErrorKind": {
+      "description": "Class of error returned in `FsResult::Error`. Closed enum so the host can branch on `kind` without parsing message text.",
+      "oneOf": [
+        {
+          "description": "Path was rejected by the agent's policy (deny-list, canonicalization failed, symlink crossed the deny-list).",
+          "type": "string",
+          "enum": [
+            "PolicyDenied"
+          ]
+        },
+        {
+          "description": "Path doesn't exist.",
+          "type": "string",
+          "enum": [
+            "NotFound"
+          ]
+        },
+        {
+          "description": "Caller does not have permission for this op (uid 901 EPERM).",
+          "type": "string",
+          "enum": [
+            "PermissionDenied"
+          ]
+        },
+        {
+          "description": "Target already exists where the verb required absence.",
+          "type": "string",
+          "enum": [
+            "AlreadyExists"
+          ]
+        },
+        {
+          "description": "Size / count cap exceeded (e.g. `length > 16 MiB`, `recursive` walk would exceed cap).",
+          "type": "string",
+          "enum": [
+            "CapExceeded"
+          ]
+        },
+        {
+          "description": "Tried to rename across filesystems (`EXDEV`).",
+          "type": "string",
+          "enum": [
+            "CrossDevice"
+          ]
+        },
+        {
+          "description": "`recursive=false` on a non-empty directory.",
+          "type": "string",
+          "enum": [
+            "DirectoryNotEmpty"
+          ]
+        },
+        {
+          "description": "Underlying I/O error (look at `message` for detail).",
+          "type": "string",
+          "enum": [
+            "IoError"
+          ]
+        },
+        {
+          "description": "Path canonicalization succeeded but produced a path the agent refuses to operate on (e.g. `/proc/self`).",
+          "type": "string",
+          "enum": [
+            "BadPath"
+          ]
+        },
+        {
+          "description": "Other / unclassified.",
+          "type": "string",
+          "enum": [
+            "Other"
+          ]
+        }
+      ]
+    },
+    "FsResult": {
+      "description": "Result of a filesystem RPC call. Closed enum with `deny_unknown_fields` so a compromised agent can't smuggle extra data past the host's deserializer.",
+      "oneOf": [
+        {
+          "description": "Bytes read. `total_size` is the on-disk size at read time so callers can detect short reads even when `content.len() < requested length`.",
+          "type": "object",
+          "required": [
+            "Read"
+          ],
+          "properties": {
+            "Read": {
+              "type": "object",
+              "required": [
+                "content",
+                "total_size"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                },
+                "total_size": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Bytes successfully written.",
+          "type": "object",
+          "required": [
+            "Write"
+          ],
+          "properties": {
+            "Write": {
+              "type": "object",
+              "required": [
+                "bytes_written"
+              ],
+              "properties": {
+                "bytes_written": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Directory listing. `truncated` is `true` when the entry count exceeded the agent's per-call cap.",
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "type": "object",
+              "required": [
+                "entries",
+                "truncated"
+              ],
+              "properties": {
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/FsEntry"
+                  }
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "File / directory metadata.",
+          "type": "object",
+          "required": [
+            "Stat"
+          ],
+          "properties": {
+            "Stat": {
+              "$ref": "#/definitions/FsStat"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Directory created (no payload).",
+          "type": "string",
+          "enum": [
+            "Mkdir"
+          ]
+        },
+        {
+          "description": "Removed `entries_removed` filesystem entries (1 for a single file/dir, more under `recursive=true`).",
+          "type": "object",
+          "required": [
+            "Remove"
+          ],
+          "properties": {
+            "Remove": {
+              "type": "object",
+              "required": [
+                "entries_removed"
+              ],
+              "properties": {
+                "entries_removed": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Move / rename completed.",
+          "type": "string",
+          "enum": [
+            "Move"
+          ]
+        },
+        {
+          "description": "Verb-specific error. Distinct from `GuestResponse::Error`, which is reserved for transport-layer failures the agent can't attribute to a specific verb.",
+          "type": "object",
+          "required": [
+            "Error"
+          ],
+          "properties": {
+            "Error": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/FsErrorKind"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "FsStat": {
+      "description": "Stat metadata for a single filesystem entry.",
+      "type": "object",
+      "required": [
+        "canonical_path",
+        "kind",
+        "mode",
+        "size"
+      ],
+      "properties": {
+        "canonical_path": {
+          "description": "Canonical (post-`realpath`) path the agent operated on. Lets the host detect when a symlink resolution surprised it.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/FsEntryKind"
+        },
+        "mode": {
+          "description": "Unix mode bits (e.g. `0o100644`). Always present; on backends without a unix mode the agent reports a best-effort equivalent.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "mtime": {
+          "description": "Modification timestamp as RFC 3339, or `None` if the underlying fs doesn't expose mtime.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GuestCapability": {
+      "description": "Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "ping",
+            "integration_status",
+            "entrypoint_status",
+            "run_entrypoint",
+            "filesystem_rpc",
+            "process_rpc",
+            "console",
+            "volume_mount",
+            "update_idle_timeout"
+          ]
+        },
+        {
+          "description": "Plan 76 Phase 2 — `ReadinessStatus` returns `GuestResponse::ReadinessStatusReport(ReadinessReport)`. `mvmctl wait` / `mvmctl boot-report` require this capability.",
+          "type": "string",
+          "enum": [
+            "readiness"
+          ]
+        }
+      ]
+    },
+    "GuestRequest": {
+      "description": "Request sent from host to guest vsock agent.\n\n`#[serde(deny_unknown_fields)]` is load-bearing: ADR-002 §W4.1 requires the guest agent to refuse frames whose JSON contains fields the deserializer doesn't recognise, on the principle that silent acceptance of unknown fields is a deserialization-bug gadget waiting to happen. Today every variant is a struct or unit, so the attribute applies cleanly.",
+      "oneOf": [
+        {
+          "description": "Negotiate guest-agent protocol compatibility and capabilities before dispatching capability-dependent requests. ADR-053 / plan 74 W1.",
+          "type": "object",
+          "required": [
+            "ProtocolHello"
+          ],
+          "properties": {
+            "ProtocolHello": {
+              "type": "object",
+              "required": [
+                "host_protocol_version",
+                "host_version",
+                "min_supported_version",
+                "requested_capabilities"
+              ],
+              "properties": {
+                "host_protocol_version": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "host_version": {
+                  "type": "string"
+                },
+                "min_supported_version": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "requested_capabilities": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/GuestCapability"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Query current worker status.",
+          "type": "string",
+          "enum": [
+            "WorkerStatus"
+          ]
+        },
+        {
+          "description": "Request sleep preparation. Guest should: 1. Finish/checkpoint in-flight OpenClaw work 2. Flush data to disk 3. Drop page cache 4. ACK with SleepPrepAck",
+          "type": "object",
+          "required": [
+            "SleepPrep"
+          ],
+          "properties": {
+            "SleepPrep": {
+              "type": "object",
+              "required": [
+                "drain_timeout_secs"
+              ],
+              "properties": {
+                "drain_timeout_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Signal wake — guest should reinitialize connections and refresh secrets.",
+          "type": "string",
+          "enum": [
+            "Wake"
+          ]
+        },
+        {
+          "description": "Health probe.",
+          "type": "string",
+          "enum": [
+            "Ping"
+          ]
+        },
+        {
+          "description": "Query status of all managed integrations.",
+          "type": "string",
+          "enum": [
+            "IntegrationStatus"
+          ]
+        },
+        {
+          "description": "Checkpoint named integrations before sleep. Sent before SleepPrep so integrations can persist session state.",
+          "type": "object",
+          "required": [
+            "CheckpointIntegrations"
+          ],
+          "properties": {
+            "CheckpointIntegrations": {
+              "type": "object",
+              "required": [
+                "integrations"
+              ],
+              "properties": {
+                "integrations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Query status of all loaded probes.",
+          "type": "string",
+          "enum": [
+            "ProbeStatus"
+          ]
+        },
+        {
+          "description": "Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).",
+          "type": "object",
+          "required": [
+            "Exec"
+          ],
+          "properties": {
+            "Exec": {
+              "type": "object",
+              "required": [
+                "command"
+              ],
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "stdin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "timeout_secs": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Run the image's baked entrypoint program with the given stdin piped in and stdout/stderr captured. ADR-007 / plan 41 W1.\n\nThis is the production-safe call surface. The agent reads the entrypoint path from `/etc/mvm/entrypoint` at boot, validates it (verity-partition, mode, ownership), and that resolved path is the only program `RunEntrypoint` will spawn. There is no argv override, no shell, no env injection beyond what the wrapper template defines at image build time.\n\nThe response is a stream of `EntrypointEvent` frames terminated by `EntrypointEvent::Exit` or `EntrypointEvent::Error`. v1 emits one `Stdout` chunk + one `Stderr` chunk + a terminal event (buffered up to caps); v2 may chunk progressively without changing the wire shape.\n\nCaps and timeouts are enforced agent-side (W2). The wire frame size is bounded by `MAX_FRAME_SIZE`.",
+          "type": "object",
+          "required": [
+            "RunEntrypoint"
+          ],
+          "properties": {
+            "RunEntrypoint": {
+              "type": "object",
+              "required": [
+                "stdin",
+                "timeout_secs"
+              ],
+              "properties": {
+                "stdin": {
+                  "description": "Bytes piped to the wrapper's stdin.",
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                },
+                "timeout_secs": {
+                  "description": "Wall-clock timeout for the call, in seconds. The agent kills the wrapper on overrun and emits `EntrypointEvent::Error { kind: Timeout }`.",
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Signal post-restore: remount drives and restart services.",
+          "type": "string",
+          "enum": [
+            "PostRestore"
+          ]
+        },
+        {
+          "description": "Request filesystem diff (changes since boot, from overlay or snapshot).",
+          "type": "string",
+          "enum": [
+            "FsDiff"
+          ]
+        },
+        {
+          "description": "Start a vsock→TCP port forwarder for the given guest port. The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and forwards each connection to `localhost:guest_port`.",
+          "type": "object",
+          "required": [
+            "StartPortForward"
+          ],
+          "properties": {
+            "StartPortForward": {
+              "type": "object",
+              "required": [
+                "guest_port"
+              ],
+              "properties": {
+                "guest_port": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Open an interactive PTY console session (dev-mode only). The guest allocates a PTY, spawns a shell, and listens on a dedicated vsock data port for raw byte streaming.",
+          "type": "object",
+          "required": [
+            "ConsoleOpen"
+          ],
+          "properties": {
+            "ConsoleOpen": {
+              "type": "object",
+              "required": [
+                "cols",
+                "rows"
+              ],
+              "properties": {
+                "cols": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                },
+                "rows": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Close an active console session.",
+          "type": "object",
+          "required": [
+            "ConsoleClose"
+          ],
+          "properties": {
+            "ConsoleClose": {
+              "type": "object",
+              "required": [
+                "session_id"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Resize the PTY window for an active console session.",
+          "type": "object",
+          "required": [
+            "ConsoleResize"
+          ],
+          "properties": {
+            "ConsoleResize": {
+              "type": "object",
+              "required": [
+                "cols",
+                "rows",
+                "session_id"
+              ],
+              "properties": {
+                "cols": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                },
+                "rows": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                },
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Query whether the agent's boot-time entrypoint validation succeeded. Used by `mvmctl doctor` to confirm a running guest can actually serve `RunEntrypoint`. ADR-007 / plan 41 W5. Prod-safe — reveals no secrets, takes no inputs.",
+          "type": "string",
+          "enum": [
+            "EntrypointStatus"
+          ]
+        },
+        {
+          "description": "Query structured readiness across every guest subsystem (control plane, entrypoint, warm pool, integrations, probes, volumes) plus per-phase boot timings. Plan 76 Phase 2.\n\nProd-safe — the response carries no secrets and reveals only state the host already chose to provision (via image config / drop-in files). Designed to be the verb that responds first after vsock bind, so a host can begin streaming progress UX before entrypoint validation or warm-pool warmup finish.\n\nDistinct from `EntrypointStatus` (which is entrypoint-only and returns a flat `EntrypointStatusReport`): `ReadinessStatus` reports the *full* boot phase set with `ComponentState` per component, and is intended to be polled (`mvmctl wait`).",
+          "type": "string",
+          "enum": [
+            "ReadinessStatus"
+          ]
+        },
+        {
+          "description": "Read up to `length` bytes from `path`, optionally starting at `offset`. The agent enforces `length` ≤ a hard cap (default 16 MiB); callers wanting larger reads must use the streaming surface (lands in W2).",
+          "type": "object",
+          "required": [
+            "FsRead"
+          ],
+          "properties": {
+            "FsRead": {
+              "type": "object",
+              "required": [
+                "length",
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "description": "`true` to follow symlinks during canonicalization. Default `true` for read; the host CLI may toggle to `false` for TOCTOU-resistant audits.",
+                  "default": true,
+                  "type": "boolean"
+                },
+                "length": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "offset": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Write `content` to `path`. Small-content path; large writes must use the streaming surface (W2).",
+          "type": "object",
+          "required": [
+            "FsWrite"
+          ],
+          "properties": {
+            "FsWrite": {
+              "type": "object",
+              "required": [
+                "content",
+                "mode",
+                "path"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                },
+                "create_parents": {
+                  "description": "Create parent directories if missing.",
+                  "default": false,
+                  "type": "boolean"
+                },
+                "follow_symlinks": {
+                  "description": "Defaults to `false` for write — TOCTOU-safe default since a malicious symlink could redirect the write.",
+                  "default": false,
+                  "type": "boolean"
+                },
+                "mode": {
+                  "description": "File mode for newly-created files (e.g. `0o644`). Ignored when overwriting an existing file (existing perms kept).",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "List entries in `path`. Cap: 4096 entries; truncated flag set in the response when exceeded.",
+          "type": "object",
+          "required": [
+            "FsList"
+          ],
+          "properties": {
+            "FsList": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Stat `path`. `follow_symlinks=false` returns metadata about the symlink itself (`lstat`).",
+          "type": "object",
+          "required": [
+            "FsStat"
+          ],
+          "properties": {
+            "FsStat": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Create directory at `path`. With `parents=true` the call behaves like `mkdir -p`.",
+          "type": "object",
+          "required": [
+            "FsMkdir"
+          ],
+          "properties": {
+            "FsMkdir": {
+              "type": "object",
+              "required": [
+                "mode",
+                "path"
+              ],
+              "properties": {
+                "mode": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "parents": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Remove `path`. With `recursive=true` the call walks subtrees; the agent caps the walked-entry count to bound work.",
+          "type": "object",
+          "required": [
+            "FsRemove"
+          ],
+          "properties": {
+            "FsRemove": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "description": "Defaults to `false` for remove; symlink-following on remove is a known footgun.",
+                  "default": false,
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "recursive": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Rename `from` to `to`. Refuses to cross filesystem boundaries (returns `Errno::XDEV` rather than copy-then-delete).",
+          "type": "object",
+          "required": [
+            "FsMove"
+          ],
+          "properties": {
+            "FsMove": {
+              "type": "object",
+              "required": [
+                "from",
+                "to"
+              ],
+              "properties": {
+                "follow_symlinks": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Spawn a new process. Returns a `pid_token` string the host uses to refer to the process for the rest of its lifetime — the token is opaque to the host so a buggy or malicious caller can never address a process it didn't start.\n\nChildren spawned this way inherit the agent's bounding-set (`--bounding-set=-all --no-new-privs` per ADR-002 §W4.5); the handler additionally `process_group(0)`s and sets `RLIMIT_CORE=0` to avoid coredump exfil. argv is validated against an allowlist before exec.",
+          "type": "object",
+          "required": [
+            "ProcStart"
+          ],
+          "properties": {
+            "ProcStart": {
+              "type": "object",
+              "required": [
+                "argv"
+              ],
+              "properties": {
+                "argv": {
+                  "description": "Argument vector. `argv[0]` is the executable to spawn.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "cwd": {
+                  "description": "Working directory inside the guest. `None` = process inherits the agent's cwd.",
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "env": {
+                  "description": "Environment variables. Replaces (does not extend) the agent's environment.",
+                  "default": {},
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "stdin": {
+                  "description": "Initial stdin bytes. Further input goes via `ProcSendInput`.",
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                },
+                "timeout_secs": {
+                  "description": "Optional wall-clock kill on overrun. `None` = no agent- imposed timeout; the caller can still send SIGTERM via `ProcSignal` or `ProcKill`.",
+                  "default": null,
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "List processes currently tracked by the agent's PID-token map. Includes still-running and recently-exited entries until the agent reaps them (default: keep for 60 s after exit).",
+          "type": "string",
+          "enum": [
+            "ProcList"
+          ]
+        },
+        {
+          "description": "Send `signum` to the process named by `pid_token`. Common signals are 15 (SIGTERM) and 2 (SIGINT); for SIGKILL use the dedicated `ProcKill` verb so the audit chain captures the explicit-force semantics.",
+          "type": "object",
+          "required": [
+            "ProcSignal"
+          ],
+          "properties": {
+            "ProcSignal": {
+              "type": "object",
+              "required": [
+                "pid_token",
+                "signum"
+              ],
+              "properties": {
+                "pid_token": {
+                  "type": "string"
+                },
+                "signum": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Append `bytes` to the process's stdin. Capped per call by the agent (default 1 MiB) and per process (default 16 MiB ring buffer); `ProcResult::InputAccepted` reports actual bytes written.",
+          "type": "object",
+          "required": [
+            "ProcSendInput"
+          ],
+          "properties": {
+            "ProcSendInput": {
+              "type": "object",
+              "required": [
+                "bytes",
+                "pid_token"
+              ],
+              "properties": {
+                "bytes": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                },
+                "pid_token": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Wait for the process named by `pid_token` to exit, with an optional timeout. Response is a stream of `ProcWaitEvent` frames (stdout/stderr chunks) terminated by an `Exit`, `Killed`, `TimedOut`, or `Error` event.",
+          "type": "object",
+          "required": [
+            "ProcWait"
+          ],
+          "properties": {
+            "ProcWait": {
+              "type": "object",
+              "required": [
+                "pid_token"
+              ],
+              "properties": {
+                "pid_token": {
+                  "type": "string"
+                },
+                "timeout_secs": {
+                  "default": null,
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Send SIGKILL to the process named by `pid_token`. Distinct from `ProcSignal { signum: 9 }` so the audit emit can be typed `ProcKilled` instead of a generic signal event.",
+          "type": "object",
+          "required": [
+            "ProcKill"
+          ],
+          "properties": {
+            "ProcKill": {
+              "type": "object",
+              "required": [
+                "pid_token"
+              ],
+              "properties": {
+                "pid_token": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Mount a virtio-fs volume inside the guest. The host has already attached the device and the agent only needs to run the in-guest mount(2) call. `volume_name` is the virtio-fs tag string the device was created with — named per plan 45 to align with the `Volume` wire type. (Replaces the former `MountShare` per plan 45 §D5.)",
+          "type": "object",
+          "required": [
+            "MountVolume"
+          ],
+          "properties": {
+            "MountVolume": {
+              "type": "object",
+              "required": [
+                "guest_path",
+                "read_only",
+                "volume_name"
+              ],
+              "properties": {
+                "guest_path": {
+                  "type": "string"
+                },
+                "read_only": {
+                  "type": "boolean"
+                },
+                "volume_name": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Unmount a previously-mounted volume. `force = false` returns `EBUSY` when the kernel reports active fds; the caller passes `force = true` to demand a lazy detach. (Replaces the former `UnmountShare` per plan 45 §D5.)",
+          "type": "object",
+          "required": [
+            "UnmountVolume"
+          ],
+          "properties": {
+            "UnmountVolume": {
+              "type": "object",
+              "required": [
+                "force",
+                "guest_path"
+              ],
+              "properties": {
+                "force": {
+                  "type": "boolean"
+                },
+                "guest_path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Update the warm-process pool's idle-recycle timeout. Workers that have been idle (no in-flight call) longer than `secs` are recycled at the next sweep. `secs == 0` disables idle-based recycling — only `max_calls_per_worker` and `max_rss_mb` triggers remain.\n\nThis is the substrate-side mirror of `mvmctl session set-timeout <id> <secs>`: the host writes the new value into the session record, then dispatches this verb so the agent's pool sees the same value. A best-effort dispatch — if the agent is unreachable the host record still wins on the next `mvmctl session reap`.",
+          "type": "object",
+          "required": [
+            "UpdateIdleTimeout"
+          ],
+          "properties": {
+            "UpdateIdleTimeout": {
+              "type": "object",
+              "required": [
+                "secs"
+              ],
+              "properties": {
+                "secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Run user-supplied source code in the wrapper's native interpreter. Dev-only — gated behind the agent's `dev-shell` feature flag, same fence as `Exec`. The host (`mvmctl session run-code`) provides additional gating: the session must be `mode=Dev`.\n\nThe interpreter is selected by reading `/etc/mvm/wrapper.json` at dispatch time: - `language = \"python\"` → `python3 -c <code>` - `language = \"node\"`   → `node -e <code>`\n\nOther values, or a missing/unparseable wrapper.json, refuse with a wire-stable error message.\n\n**v1 is stateless** — each call spawns a fresh interpreter process, so `from foo import bar` in call 1 isn't visible in call 2. A future v2 (Plan-0010 §run-code Choice A) routes through the warm-process pool's wrapper for stateful eval across calls; the wire shape stays identical, the dispatch flips inside the agent.",
+          "type": "object",
+          "required": [
+            "RunCode"
+          ],
+          "properties": {
+            "RunCode": {
+              "type": "object",
+              "required": [
+                "code",
+                "timeout_secs"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "timeout_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "GuestResponse": {
+      "description": "Response from guest vsock agent to host.\n\nSame `deny_unknown_fields` discipline as `GuestRequest` — a compromised guest must not be able to slip extra fields past the host's deserializer.",
+      "oneOf": [
+        {
+          "description": "Guest-agent protocol negotiation succeeded. ADR-053 / plan 74 W1.",
+          "type": "object",
+          "required": [
+            "ProtocolHelloAck"
+          ],
+          "properties": {
+            "ProtocolHelloAck": {
+              "type": "object",
+              "required": [
+                "agent_protocol_version",
+                "agent_version",
+                "capabilities",
+                "min_supported_version"
+              ],
+              "properties": {
+                "agent_protocol_version": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "agent_version": {
+                  "type": "string"
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/GuestCapability"
+                  }
+                },
+                "min_supported_version": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Guest-agent protocol negotiation failed before dispatch.",
+          "type": "object",
+          "required": [
+            "ProtocolMismatch"
+          ],
+          "properties": {
+            "ProtocolMismatch": {
+              "type": "object",
+              "required": [
+                "agent_protocol_version",
+                "host_protocol_version",
+                "message",
+                "required_action"
+              ],
+              "properties": {
+                "agent_protocol_version": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "host_protocol_version": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "message": {
+                  "type": "string"
+                },
+                "required_action": {
+                  "$ref": "#/definitions/ProtocolUpgradeAction"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Worker status with optional last-busy timestamp.",
+          "type": "object",
+          "required": [
+            "WorkerStatus"
+          ],
+          "properties": {
+            "WorkerStatus": {
+              "type": "object",
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "last_busy_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Sleep preparation acknowledgement.",
+          "type": "object",
+          "required": [
+            "SleepPrepAck"
+          ],
+          "properties": {
+            "SleepPrepAck": {
+              "type": "object",
+              "required": [
+                "success"
+              ],
+              "properties": {
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "success": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Wake acknowledgement.",
+          "type": "object",
+          "required": [
+            "WakeAck"
+          ],
+          "properties": {
+            "WakeAck": {
+              "type": "object",
+              "required": [
+                "success"
+              ],
+              "properties": {
+                "success": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Pong.",
+          "type": "string",
+          "enum": [
+            "Pong"
+          ]
+        },
+        {
+          "description": "Error from guest agent.",
+          "type": "object",
+          "required": [
+            "Error"
+          ],
+          "properties": {
+            "Error": {
+              "type": "object",
+              "required": [
+                "message"
+              ],
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "The dispatcher refused this verb because the active `AgentProfile` does not allow it (plan 76 Phase 1). Distinct from `Error { message }` so SDK callers can branch on capability without parsing message text — analogous to `ProcErrorKind::UnsupportedInProduction` for process RPC, but at the protocol layer rather than per-handler.",
+          "type": "object",
+          "required": [
+            "UnsupportedInProfile"
+          ],
+          "properties": {
+            "UnsupportedInProfile": {
+              "type": "object",
+              "required": [
+                "profile",
+                "verb"
+              ],
+              "properties": {
+                "profile": {
+                  "description": "Active profile on the agent that rejected the call.",
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/AgentProfile"
+                    }
+                  ]
+                },
+                "verb": {
+                  "description": "`verb_name()` of the rejected request. Wire-stable.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Per-integration status report.",
+          "type": "object",
+          "required": [
+            "IntegrationStatusReport"
+          ],
+          "properties": {
+            "IntegrationStatusReport": {
+              "type": "object",
+              "required": [
+                "integrations"
+              ],
+              "properties": {
+                "integrations": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IntegrationStateReport"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of checkpointing integrations before sleep.",
+          "type": "object",
+          "required": [
+            "CheckpointResult"
+          ],
+          "properties": {
+            "CheckpointResult": {
+              "type": "object",
+              "required": [
+                "failed",
+                "success"
+              ],
+              "properties": {
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "failed": {
+                  "description": "Names of integrations that failed to checkpoint.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "success": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Per-probe status report.",
+          "type": "object",
+          "required": [
+            "ProbeStatusReport"
+          ],
+          "properties": {
+            "ProbeStatusReport": {
+              "type": "object",
+              "required": [
+                "probes"
+              ],
+              "properties": {
+                "probes": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/ProbeResult"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of an Exec request.",
+          "type": "object",
+          "required": [
+            "ExecResult"
+          ],
+          "properties": {
+            "ExecResult": {
+              "type": "object",
+              "required": [
+                "exit_code",
+                "stderr",
+                "stdout"
+              ],
+              "properties": {
+                "exit_code": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "stderr": {
+                  "type": "string"
+                },
+                "stdout": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "One event in the response stream of a `RunEntrypoint` call. ADR-007 / plan 41 W1.\n\nThe agent emits a sequence of these in response to a single `RunEntrypoint` request, terminated by an `EntrypointEvent` whose `is_terminal` returns true (`Exit` or `Error`). The host reads frames in a loop until terminal.",
+          "type": "object",
+          "required": [
+            "EntrypointEvent"
+          ],
+          "properties": {
+            "EntrypointEvent": {
+              "$ref": "#/definitions/EntrypointEvent"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Post-restore acknowledgement.",
+          "type": "object",
+          "required": [
+            "PostRestoreAck"
+          ],
+          "properties": {
+            "PostRestoreAck": {
+              "type": "object",
+              "required": [
+                "success"
+              ],
+              "properties": {
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "success": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Filesystem diff result.",
+          "type": "object",
+          "required": [
+            "FsDiffResult"
+          ],
+          "properties": {
+            "FsDiffResult": {
+              "type": "object",
+              "required": [
+                "changes"
+              ],
+              "properties": {
+                "changes": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/FsChange"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Port forward started successfully.",
+          "type": "object",
+          "required": [
+            "PortForwardStarted"
+          ],
+          "properties": {
+            "PortForwardStarted": {
+              "type": "object",
+              "required": [
+                "guest_port",
+                "vsock_port"
+              ],
+              "properties": {
+                "guest_port": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0.0
+                },
+                "vsock_port": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Console PTY session opened. Connect to `data_port` for raw I/O.",
+          "type": "object",
+          "required": [
+            "ConsoleOpened"
+          ],
+          "properties": {
+            "ConsoleOpened": {
+              "type": "object",
+              "required": [
+                "data_port",
+                "session_id"
+              ],
+              "properties": {
+                "data_port": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Console PTY session ended (shell exited).",
+          "type": "object",
+          "required": [
+            "ConsoleExited"
+          ],
+          "properties": {
+            "ConsoleExited": {
+              "type": "object",
+              "required": [
+                "exit_code",
+                "session_id"
+              ],
+              "properties": {
+                "exit_code": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Console resize acknowledged.",
+          "type": "object",
+          "required": [
+            "ConsoleResized"
+          ],
+          "properties": {
+            "ConsoleResized": {
+              "type": "object",
+              "required": [
+                "session_id"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of an `EntrypointStatus` query. ADR-007 / plan 41 W5.\n\n`ok = true` means the agent successfully validated `/etc/mvm/entrypoint` at boot and will serve `RunEntrypoint`. `ok = false` means validation failed — `path` carries the resolved path attempt (or the marker contents if resolution itself failed) and `detail` carries a human-readable reason.",
+          "type": "object",
+          "required": [
+            "EntrypointStatusReport"
+          ],
+          "properties": {
+            "EntrypointStatusReport": {
+              "type": "object",
+              "required": [
+                "ok"
+              ],
+              "properties": {
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of a `ReadinessStatus` query. Plan 76 Phase 2. Snapshot of every component plus per-phase timings.",
+          "type": "object",
+          "required": [
+            "ReadinessStatusReport"
+          ],
+          "properties": {
+            "ReadinessStatusReport": {
+              "$ref": "#/definitions/ReadinessReport"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of a filesystem RPC call. The single top-level variant keeps `GuestResponse` from sprawling — the `FsResult` sub-enum carries the per-verb shapes. W1 / A1.",
+          "type": "object",
+          "required": [
+            "FsResult"
+          ],
+          "properties": {
+            "FsResult": {
+              "$ref": "#/definitions/FsResult"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of a non-streaming process-control verb (`ProcStart`, `ProcList`, `ProcSignal`, `ProcSendInput`, `ProcKill`). W1 / A2.",
+          "type": "object",
+          "required": [
+            "ProcResult"
+          ],
+          "properties": {
+            "ProcResult": {
+              "$ref": "#/definitions/ProcResult"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "One event in the streaming response of a `ProcWait` call. Mirrors the `EntrypointEvent` shape — the agent emits `Stdout`/`Stderr` chunks (capped per chunk by the wire frame limit) terminated by exactly one of `Exit` / `Killed` / `TimedOut` / `Error`.",
+          "type": "object",
+          "required": [
+            "ProcWaitEvent"
+          ],
+          "properties": {
+            "ProcWaitEvent": {
+              "$ref": "#/definitions/ProcWaitEvent"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Result of a `MountVolume` / `UnmountVolume` call. Single-frame surface; closed sub-enum carries the per-verb shape. (Renamed from `ShareResult` per plan 45 §D5.)",
+          "type": "object",
+          "required": [
+            "VolumeMountResult"
+          ],
+          "properties": {
+            "VolumeMountResult": {
+              "$ref": "#/definitions/VolumeMountResult"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Acknowledgement for `UpdateIdleTimeout`. `applied_secs` is the value the agent is now enforcing — `0` means the warm-process pool isn't active on this guest (cold-path-only build), so the host reaper is the only enforcement.",
+          "type": "object",
+          "required": [
+            "UpdateIdleTimeoutAck"
+          ],
+          "properties": {
+            "UpdateIdleTimeoutAck": {
+              "type": "object",
+              "required": [
+                "applied_secs",
+                "previous_secs"
+              ],
+              "properties": {
+                "applied_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "previous_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IntegrationHealthResult": {
+      "description": "Result of a single health check execution.",
+      "type": "object",
+      "required": [
+        "checked_at",
+        "detail",
+        "healthy"
+      ],
+      "properties": {
+        "checked_at": {
+          "description": "ISO 8601 timestamp of when this check ran.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Human-readable detail (\"ok\" on success, stderr or exit code on failure).",
+          "type": "string"
+        },
+        "healthy": {
+          "description": "Whether the health check passed (exit code 0).",
+          "type": "boolean"
+        }
+      }
+    },
+    "IntegrationStateReport": {
+      "description": "Full state report for a single integration (returned by guest agent).",
+      "type": "object",
+      "required": [
+        "name",
+        "status"
+      ],
+      "properties": {
+        "health": {
+          "description": "Latest health check result, if a health_cmd is configured.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IntegrationHealthResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_checkpoint_at": {
+          "description": "ISO timestamp of last successful checkpoint.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "state_size_bytes": {
+          "description": "Bytes of state data on disk.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "status": {
+          "$ref": "#/definitions/IntegrationStatus"
+        }
+      }
+    },
+    "IntegrationStatus": {
+      "description": "Runtime status of a single integration on a guest.",
+      "oneOf": [
+        {
+          "description": "Integration is running and connected.",
+          "type": "string",
+          "enum": [
+            "active"
+          ]
+        },
+        {
+          "description": "Integration is paused (e.g. during checkpoint).",
+          "type": "string",
+          "enum": [
+            "paused"
+          ]
+        },
+        {
+          "description": "Integration has an error.",
+          "type": "object",
+          "required": [
+            "error"
+          ],
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Integration is not yet initialized.",
+          "type": "string",
+          "enum": [
+            "pending"
+          ]
+        },
+        {
+          "description": "Integration is within its startup grace period — health checks are running but failures are suppressed until the grace window expires.",
+          "type": "string",
+          "enum": [
+            "starting"
+          ]
+        }
+      ]
+    },
+    "ProbeResult": {
+      "description": "Result of running a single probe.",
+      "type": "object",
+      "required": [
+        "checked_at",
+        "detail",
+        "healthy",
+        "name"
+      ],
+      "properties": {
+        "checked_at": {
+          "description": "ISO 8601 timestamp of when this probe ran.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Human-readable detail (stderr for exit_code mode, error message on failure).",
+          "type": "string"
+        },
+        "healthy": {
+          "description": "Whether the probe passed (exit code 0).",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Probe name.",
+          "type": "string"
+        },
+        "output": {
+          "description": "Parsed stdout JSON (only for json output_format, None otherwise)."
+        }
+      }
+    },
+    "ProcErrorKind": {
+      "description": "Class of error returned in `ProcResult::Error` and `ProcWaitEvent::Error`.",
+      "oneOf": [
+        {
+          "description": "`pid_token` doesn't match any known process. Either the host fabricated it or the agent reaped the process record.",
+          "type": "string",
+          "enum": [
+            "UnknownToken"
+          ]
+        },
+        {
+          "description": "The agent failed to spawn the child (executable missing, EACCES, ENOMEM, etc.).",
+          "type": "string",
+          "enum": [
+            "SpawnFailed"
+          ]
+        },
+        {
+          "description": "Per-child seccomp / setpriv envelope failed to apply. Agent refuses to spawn an un-confined child.",
+          "type": "string",
+          "enum": [
+            "SecurityEnvelopeFailed"
+          ]
+        },
+        {
+          "description": "argv was empty, argv\\[0\\] was empty / not absolute / on a disallowed path.",
+          "type": "string",
+          "enum": [
+            "InvalidArgv"
+          ]
+        },
+        {
+          "description": "One or more env keys / values failed validation (charset, length).",
+          "type": "string",
+          "enum": [
+            "InvalidEnv"
+          ]
+        },
+        {
+          "description": "`cwd` failed canonicalization or hit the deny-list.",
+          "type": "string",
+          "enum": [
+            "BadCwd"
+          ]
+        },
+        {
+          "description": "Per-VM concurrent-process cap or per-call byte cap exceeded.",
+          "type": "string",
+          "enum": [
+            "CapExceeded"
+          ]
+        },
+        {
+          "description": "Returned by prod builds whose handler module was stripped per ADR-002 §W4.3. Lets SDK callers branch on capability.",
+          "type": "string",
+          "enum": [
+            "UnsupportedInProduction"
+          ]
+        },
+        {
+          "description": "Other / unclassified.",
+          "type": "string",
+          "enum": [
+            "Other"
+          ]
+        }
+      ]
+    },
+    "ProcInfo": {
+      "description": "Per-process metadata returned by `ProcList`.",
+      "type": "object",
+      "required": [
+        "argv0",
+        "pid_token",
+        "started_at",
+        "state"
+      ],
+      "properties": {
+        "argv0": {
+          "description": "argv\\[0\\] for display only — the agent does not expose the full argv over the wire (it could echo secrets the caller passed in via env / stdin).",
+          "type": "string"
+        },
+        "pid_token": {
+          "type": "string"
+        },
+        "started_at": {
+          "description": "RFC 3339 timestamp.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ProcState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcResult": {
+      "description": "Result of a non-streaming process-control verb. Closed enum with `deny_unknown_fields` so a compromised agent can't smuggle extra fields past the host's deserializer.",
+      "oneOf": [
+        {
+          "description": "`ProcStart` succeeded — `pid_token` is the opaque handle the host uses for the rest of the process's lifetime.",
+          "type": "object",
+          "required": [
+            "Started"
+          ],
+          "properties": {
+            "Started": {
+              "type": "object",
+              "required": [
+                "pid_token"
+              ],
+              "properties": {
+                "pid_token": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`ProcList` snapshot. Order is agent-defined (typically by `started_at`).",
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "type": "object",
+              "required": [
+                "processes"
+              ],
+              "properties": {
+                "processes": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/ProcInfo"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`ProcSignal` delivered.",
+          "type": "string",
+          "enum": [
+            "Signaled"
+          ]
+        },
+        {
+          "description": "`ProcSendInput` accepted some/all of the bytes. `bytes_accepted` may be less than the request's `bytes.len()` if the per-process input ring buffer would overflow.",
+          "type": "object",
+          "required": [
+            "InputAccepted"
+          ],
+          "properties": {
+            "InputAccepted": {
+              "type": "object",
+              "required": [
+                "bytes_accepted"
+              ],
+              "properties": {
+                "bytes_accepted": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`ProcKill` issued SIGKILL.",
+          "type": "string",
+          "enum": [
+            "Killed"
+          ]
+        },
+        {
+          "description": "Verb-specific error. Distinct from `GuestResponse::Error`, which is reserved for transport-layer failures.",
+          "type": "object",
+          "required": [
+            "Error"
+          ],
+          "properties": {
+            "Error": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/ProcErrorKind"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ProcState": {
+      "description": "Lifecycle state of a tracked process.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "running"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "exited"
+          ],
+          "properties": {
+            "exited": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Process was killed by signal `i32`.",
+          "type": "object",
+          "required": [
+            "killed"
+          ],
+          "properties": {
+            "killed": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Process exceeded its `timeout_secs`; agent killed the pgroup.",
+          "type": "string",
+          "enum": [
+            "timed_out"
+          ]
+        }
+      ]
+    },
+    "ProcWaitEvent": {
+      "description": "One event in the streaming response of a `ProcWait` call. Terminal events end the stream — the host loops on `is_terminal()` just like for `EntrypointEvent`.",
+      "oneOf": [
+        {
+          "description": "Bytes from the process's stdout.",
+          "type": "object",
+          "required": [
+            "Stdout"
+          ],
+          "properties": {
+            "Stdout": {
+              "type": "object",
+              "required": [
+                "chunk"
+              ],
+              "properties": {
+                "chunk": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Bytes from the process's stderr.",
+          "type": "object",
+          "required": [
+            "Stderr"
+          ],
+          "properties": {
+            "Stderr": {
+              "type": "object",
+              "required": [
+                "chunk"
+              ],
+              "properties": {
+                "chunk": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0.0
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Process exited with the given code. Terminal.",
+          "type": "object",
+          "required": [
+            "Exit"
+          ],
+          "properties": {
+            "Exit": {
+              "type": "object",
+              "required": [
+                "code"
+              ],
+              "properties": {
+                "code": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Process was killed by signal. Terminal.",
+          "type": "object",
+          "required": [
+            "Killed"
+          ],
+          "properties": {
+            "Killed": {
+              "type": "object",
+              "required": [
+                "signal"
+              ],
+              "properties": {
+                "signal": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`timeout_secs` elapsed; agent killed the process group. Terminal.",
+          "type": "string",
+          "enum": [
+            "TimedOut"
+          ]
+        },
+        {
+          "description": "Agent-side condition prevented the wait (unknown token, internal failure, prod-stripped). Terminal.",
+          "type": "object",
+          "required": [
+            "Error"
+          ],
+          "properties": {
+            "Error": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/ProcErrorKind"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "A streaming resource is throttled (ADR-053 §5 / plan 74 W4). **Non-terminal.** The agent emits this on the rising edge of a backpressure condition — typically the host-side stdout/ stderr buffer crossing its high-water mark. The wait loop continues; subsequent `Stdout` / `Stderr` / terminal events signal that flow has resumed.\n\n`detail` is a bounded, redacted human-readable hint (operator-facing). It **never** carries argv, env, stdin, stdout, stderr, or filesystem paths — see ADR-053's payload invariant.",
+          "type": "object",
+          "required": [
+            "Backpressure"
+          ],
+          "properties": {
+            "Backpressure": {
+              "type": "object",
+              "required": [
+                "detail",
+                "reason"
+              ],
+              "properties": {
+                "detail": {
+                  "type": "string"
+                },
+                "reason": {
+                  "$ref": "#/definitions/BackpressureReason"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ProtocolUpgradeAction": {
+      "description": "Required remediation for a host/guest protocol mismatch.",
+      "type": "string",
+      "enum": [
+        "upgrade_host",
+        "rebuild_guest",
+        "downgrade_host"
+      ]
+    },
+    "ReadinessReport": {
+      "description": "Snapshot of agent readiness at the moment of a `ReadinessStatus` call.\n\nPlan 76 Phase 2 §\"Early control-plane readiness\". Used by host callers (`mvmctl wait`, `mvmctl up --timings`, `mvmctl doctor`) to distinguish:\n\n- \"control plane is up, workload not yet warm\" → invoke would block; the host can stream progress to the user - \"entrypoint validation failed\" → invoke would fail fast with a typed error; the host can surface the validation message - \"optional subsystem failed\" → invoke is still safe; the host surfaces a warning\n\n`Default` composes the `Default` impls of each field — every component is `Disabled`, the profile is `SealedProd`, all timings are `None`. Tests and fixtures can construct partial reports with `..Default::default()`.",
+      "type": "object",
+      "required": [
+        "boot_millis",
+        "control_plane",
+        "entrypoint",
+        "integrations",
+        "probes",
+        "profile",
+        "volumes",
+        "warm_pool"
+      ],
+      "properties": {
+        "boot_millis": {
+          "description": "Per-phase monotonic timings.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/BootTimingReport"
+            }
+          ]
+        },
+        "control_plane": {
+          "description": "Vsock listener bound and accepting. Always `Ready` if the agent could respond at all.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentState"
+            }
+          ]
+        },
+        "entrypoint": {
+          "description": "`/etc/mvm/entrypoint` validation result. Gates `RunEntrypoint` — a request submitted while `Starting` returns `RunEntrypointError::NotReady`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentState"
+            }
+          ]
+        },
+        "integrations": {
+          "description": "Drop-in integration scan + health loop. `Disabled` if no `/etc/mvm/integrations.d/*.json` files present.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentState"
+            }
+          ]
+        },
+        "probes": {
+          "description": "Drop-in probe scan + probe loop. `Disabled` if no `/etc/mvm/probes.d/*.json` files present.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentState"
+            }
+          ]
+        },
+        "profile": {
+          "description": "Active agent profile. Same value the dispatcher uses for the `allowed_in` gate.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentProfile"
+            }
+          ]
+        },
+        "volumes": {
+          "description": "Volume-mount state — wire-stable placeholder. `Disabled` in v1 (mount/unmount are on-demand verbs, not boot state).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentState"
+            }
+          ]
+        },
+        "warm_pool": {
+          "description": "Warm-process pool readiness. `Disabled` for cold-tier images; `Ready` once the `after_start.sh` probe passes.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ComponentState"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RunEntrypointError": {
+      "description": "Kind of agent-side error reported via `EntrypointEvent::Error`. ADR-007 / plan 41 W1.\n\nThe variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.",
+      "oneOf": [
+        {
+          "description": "Inbound stdin or buffered stdout/stderr exceeded the cap configured for the call.",
+          "type": "string",
+          "enum": [
+            "PayloadCap"
+          ]
+        },
+        {
+          "description": "The wrapper exceeded `timeout_secs`. Agent killed the process group.",
+          "type": "string",
+          "enum": [
+            "Timeout"
+          ]
+        },
+        {
+          "description": "Another `RunEntrypoint` is in flight on this VM. M12: agents serialize per-VM; concurrency comes from pool growth.",
+          "type": "string",
+          "enum": [
+            "Busy"
+          ]
+        },
+        {
+          "description": "The wrapper process died unexpectedly (signal, OOM, etc.).",
+          "type": "string",
+          "enum": [
+            "WrapperCrashed"
+          ]
+        },
+        {
+          "description": "Entrypoint validation has not yet completed. Plan 76 Phase 2: the agent binds vsock early and validates entrypoint in the background, so a host that races `RunEntrypoint` ahead of `ReadinessStatus { entrypoint: Ready }` gets this back rather than `EntrypointInvalid` (which would imply a permanent failure). Hosts should poll readiness, not retry blindly.",
+          "type": "string",
+          "enum": [
+            "NotReady"
+          ]
+        },
+        {
+          "description": "`/etc/mvm/entrypoint` is missing, fails validation (symlink crossing FS, wrong perms, off the verity partition), or otherwise can't be loaded. Reported per-call even though the validation runs at agent boot.",
+          "type": "string",
+          "enum": [
+            "EntrypointInvalid"
+          ]
+        },
+        {
+          "description": "The session backing this call was killed externally (host invoked `mvmctl session kill <id>`) while the call was in flight. Synthesized host-side by `mvmctl invoke` / `session attach` after detecting a transport-level connection drop coincident with a session record marked `Killed`. The agent itself does not emit this — it would be torn down with the VM before it could.",
+          "type": "string",
+          "enum": [
+            "SessionKilled"
+          ]
+        },
+        {
+          "description": "Other agent-internal failure — file I/O, vsock framing, inter-process plumbing. Look at `message` for detail.",
+          "type": "string",
+          "enum": [
+            "InternalError"
+          ]
+        }
+      ]
+    },
+    "VolumeMountErrorKind": {
+      "description": "Class of error returned in `VolumeMountResult::Error`. Closed enum so the host can branch on `kind` without parsing message text. (Renamed from `ShareErrorKind` per plan 45 §D5.)",
+      "oneOf": [
+        {
+          "description": "`guest_path` is empty / not absolute / contains `..` / embedded NUL.",
+          "type": "string",
+          "enum": [
+            "BadPath"
+          ]
+        },
+        {
+          "description": "`guest_path` resolved to a deny-prefix or fell outside the allow-roots configured for this image.",
+          "type": "string",
+          "enum": [
+            "PolicyDenied"
+          ]
+        },
+        {
+          "description": "`volume_name` is empty, too long, or contains characters virtio-fs won't accept as a tag.",
+          "type": "string",
+          "enum": [
+            "BadVolumeName"
+          ]
+        },
+        {
+          "description": "`mount(2)` returned a non-EBUSY error (no virtiofsd, kernel missing virtio_fs module, etc.).",
+          "type": "string",
+          "enum": [
+            "MountFailed"
+          ]
+        },
+        {
+          "description": "`umount(2)` returned EBUSY and `force = false` — caller must retry with `force = true` to lazy-detach.",
+          "type": "string",
+          "enum": [
+            "Busy"
+          ]
+        },
+        {
+          "description": "Underlying I/O error not mapped above.",
+          "type": "string",
+          "enum": [
+            "IoError"
+          ]
+        },
+        {
+          "description": "Any other unclassified failure.",
+          "type": "string",
+          "enum": [
+            "Other"
+          ]
+        }
+      ]
+    },
+    "VolumeMountResult": {
+      "description": "Result of a virtio-fs volume mount operation. (Renamed from `ShareResult` per plan 45 §D5.)",
+      "oneOf": [
+        {
+          "description": "`MountVolume` succeeded. `canonical_path` is the post-validation path the agent actually mounted at — same shape as input but with trailing slashes normalised.",
+          "type": "object",
+          "required": [
+            "Mounted"
+          ],
+          "properties": {
+            "Mounted": {
+              "type": "object",
+              "required": [
+                "canonical_path"
+              ],
+              "properties": {
+                "canonical_path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`UnmountVolume` succeeded.",
+          "type": "string",
+          "enum": [
+            "Unmounted"
+          ]
+        },
+        {
+          "description": "Verb-specific error.",
+          "type": "object",
+          "required": [
+            "Error"
+          ],
+          "properties": {
+            "Error": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/VolumeMountErrorKind"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

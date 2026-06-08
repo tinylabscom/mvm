@@ -10,6 +10,9 @@ pub mod builder_agent;
 #[cfg(feature = "dev-shell")]
 pub mod console;
 pub mod entrypoint;
+/// Plan 129 / ADR-067 §1 (model ii) — in-guest forward-proxy front: parses a
+/// workload's proxied request into a `WireRequest` for the substitution client.
+pub mod forward_proxy;
 pub mod fs_rpc;
 /// Plan 122 D — guest-side VMGenID reseed. On a snapshot resume the host
 /// delivers a fresh generation token; when it changes (a clone, not a
@@ -32,6 +35,10 @@ pub mod probes;
 /// units. Folded in from the former `mvm-runner` crate (plan 121 A1).
 pub mod runner;
 pub mod runtime_config;
+/// Plan 129 / ADR-067 §1 — in-guest substitution client: relays a secret-bearing
+/// request to the host substitution endpoint over vsock (the relay half of the
+/// guest-local forward proxy).
+pub mod substitution_client;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;

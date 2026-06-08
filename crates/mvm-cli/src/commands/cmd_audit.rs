@@ -132,6 +132,29 @@ fn emit_unbound(recorder: &Recorder, event: String, extras: Vec<(String, String)
 }
 
 impl Commands {
+    /// Whether this command reads or mutates VM lifecycle state and so
+    /// warrants the cheap reconcile-on-entry convergence pass (Plan 170
+    /// WS-A / ADR-074). Read-only, VM-agnostic commands (`doctor`, `ls`
+    /// of caches, build/compile, config, …) skip it. `reconcile` itself
+    /// is excluded — it *is* the convergence pass, run with its own opts.
+    pub(super) fn touches_vm_state(&self) -> bool {
+        matches!(
+            self,
+            // Lifecycle mutate/read on the local single-host path.
+            Commands::Up(_)
+                | Commands::Down(_)
+                | Commands::Run(_)
+                | Commands::Console(_)
+                | Commands::Dev(_)
+                | Commands::Pause(_)
+                | Commands::Resume(_)
+                | Commands::Snapshot(_)
+                // `ls` is the local "status" surface — converging first
+                // means stale dead records never show up in the listing.
+                | Commands::Ls(_)
+        )
+    }
+
     /// Canonical clap-subcommand name for this variant. Used as the
     /// `<verb>` slot in `cmd.<verb>.*` audit events. The values
     /// MUST match the names emitted by `clap::Command::get_name()`
@@ -169,6 +192,7 @@ impl Commands {
             Commands::Catalog(_) => "catalog",
             Commands::Console(_) => "console",
             Commands::Cache(_) => "cache",
+            Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
             Commands::Receipt(_) => "receipt",
@@ -195,6 +219,7 @@ impl Commands {
             Commands::Artifact(_) => "artifact",
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",
+            Commands::QemuVsockBridge(_) => "__qemu-vsock-bridge",
         }
     }
 }

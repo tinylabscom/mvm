@@ -135,6 +135,7 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
 
 const SECRET_SUB: &[(&str, AuditPosture)] = &[
     ("put", AuditPosture::Emits("SecretPut")),
+    ("set", AuditPosture::Emits("SecretSet")),
     ("get", AuditPosture::Emits("SecretGet")),
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("SecretRm")),
@@ -300,6 +301,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
     ("build", AuditPosture::Emits("TemplateBuild")),
     ("persistent-builder", AuditPosture::InteractiveOrControl),
+    // Plan 166 Phase 2 — hidden internal helper: a long-running host-side
+    // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
+    // plumbing spawned by `mvm_backend::qemu`; never emits audit events.
+    ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
     // SDK port Phase 2c — renders a `Workload` IR to a flake +
     // sidecars at the user-supplied --out path. Doesn't touch the
     // audit chain. ReadOnly w.r.t. host state.
@@ -314,6 +319,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
+    // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
+    // path emits one `RegistryReconcile` per healed drift item.
+    ("reconcile", AuditPosture::Emits("RegistryReconcile")),
     ("mcp", AuditPosture::InteractiveOrControl),
     ("secret", AuditPosture::DelegatesToSub(SECRET_SUB)),
     ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
@@ -486,9 +494,11 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestTagRemove",
         "NetworkCreate",
         "NetworkRemove",
+        "RegistryReconcile",
         "SecretGet",
         "SecretPut",
         "SecretRm",
+        "SecretSet",
         "SandboxGc",
         "SessionStart",
         "SlotPrune",

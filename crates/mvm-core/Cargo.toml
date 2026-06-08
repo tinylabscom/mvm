@@ -58,6 +58,9 @@ rand.workspace = true
 # large sigstore OIDC/TUF/Rekor graph only under `manifest-verify`, so
 # the default mvm-core build stays async/runtime-free.
 sigstore = { version = "0.13", default-features = false, features = ["bundle", "sigstore-trust-root", "rustls-tls"], optional = true }
+# Plan 124 D1 — only under the `schema` feature (protocol-schema codegen);
+# 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
+schemars = { version = "0.8", optional = true }
 
 # `default` is empty: the default `mvm-core` build is runtime-free
 # (plan 126 B5 PR-2). The hostd IPC transport pulls tokio only behind
@@ -93,6 +96,12 @@ manifest-verify = [
 attestation-tpm2 = []
 attestation-sev-snp = []
 attestation-tdx = []
+# Plan 124 D1 — derive `schemars::JsonSchema` on the protocol types the
+# host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
+# `mvm-guest`'s `emit_protocol_schema` bin can emit the protocol schema.
+# Off by default: the schema is a build-time codegen input, never linked
+# into the runtime. Keeps the default closure schemars-free.
+schema = ["dep:schemars"]
 
 [dev-dependencies]
 # `OsRng` for generating fresh ed25519 keys in signed_config tests

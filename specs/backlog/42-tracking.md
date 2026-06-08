@@ -10466,10 +10466,10 @@ Status: Completed
 13 - [Never mention smolvm in repo text files or content](feedback_no_smolvm_in_repo.md) — keep that name out of SPRINT.md, plans, ADRs, code comments, commit messages.
 14 - [Always work in a git worktree, never the main checkout](feedback_always_use_git_worktrees.md) — user runs parallel sessions; share `.git/` via worktrees so they don't race the index/stash.
 15 - [Replace a problematic dep, don't stack workarounds](feedback_replace_over_workaround.md) — when a third-party dep causes repeated friction, propose architectural replacement, not hack-stacks; vendoring as a bounded bridge is OK.
-16 - [Builder VM via libkrun shipped; microsandbox fully removed (commit b02a5e8)](project_builder_vm_being_replaced.md) — Plan 72 W0-W6 done; Stage 0 on macOS is Apple Container, on Linux is libkrun directly; microsandbox is gone.
+16 - [Builder VM via libkrun shipped; the removed predecessor sandbox fully removed (commit b02a5e8)](project_builder_vm_being_replaced.md) — Plan 72 W0-W6 done; Stage 0 on macOS is Apple Container, on Linux is libkrun directly; the removed predecessor sandbox is gone (external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`).
 17 - [libkrun integration gotchas](reference_libkrun_gotchas.md) — Homebrew tap is `slp/krun`, cmdline must say `console=hvc0`, `add_vsock_port2(listen=true)` is the right vsock mode, `start_enter` calls `exit()` so one supervisor per VM, SIGTERM handling is brittle under `Command::spawn`. Saves an hour of re-discovery.
-18 - [microsandbox is GONE — Stage 0 is Apple Container (macOS) / libkrun](project_stage0_via_docker.md) — removed in commit b02a5e8; zero codebase hits; never reference it as current behavior.
-19 - [mvm-oci is OCI import/export, not the microsandbox replacement](project_mvm_oci_role.md) — Plan 75's prose can mislead; libkrun + other backends replace microsandbox; mvm-oci is the user-facing OCI ingest/export feature.
+18 - [the removed predecessor sandbox is GONE — Stage 0 is Apple Container (macOS) / libkrun](project_stage0_via_docker.md) — removed in commit b02a5e8; zero codebase hits; never reference it as current behavior.
+19 - [mvm-oci is OCI import/export, not the predecessor-sandbox replacement](project_mvm_oci_role.md) — Plan 75's prose can mislead; libkrun + other backends replace the removed predecessor sandbox; mvm-oci is the user-facing OCI ingest/export feature.
 20 - [Plan 72 W5.D end-to-end fix list](project_plan72_w5d_endtoend_fixes.md) — nine sequential bugs from kernel-panic to RAM cap that block `mvmctl dev up`; surface order matters, read `<vm_state_dir>/console.log` first.
 21 - [Spec numbering has no CI uniqueness gate](project_spec_numbering_chaos.md) — parallel-session PRs regularly land at duplicate plan/ADR numbers on `main`; check open PRs + main before claiming a slot, don't unilaterally renumber others' work.
 22 - [Lima is fully removed (2026-05-14)](project_lima_removed.md) — no `--lima` flag, no `vm/lima.rs`, no fallback; remaining `limactl` call sites in `lifecycle.rs`/`image.rs`/`linux_env.rs` docstrings are legacy debt to delete, not preserve.
@@ -10490,8 +10490,8 @@ Status: Completed
 Diff: /Users/auser/.claude/projects/-Users-auser-work-tinylabs-mvmco-mvm/memory/MEMORY.md
 ```
 
-- [microsandbox is GONE — Stage 0 is Apple Container (macOS) / libkrun](project_stage0_via_docker.md) — removed in commit b02a5e8; zero codebase hits; never reference it as current behavior.
-- [mvm-oci is OCI import/export, not the microsandbox replacement](project_mvm_oci_role.md) — Plan 75's prose can mislead; libkrun + other backends replace microsandbox; mvm-oci is the user-facing OCI ingest/export feature.
+- [the removed predecessor sandbox is GONE — Stage 0 is Apple Container (macOS) / libkrun](project_stage0_via_docker.md) — removed in commit b02a5e8; zero codebase hits; never reference it as current behavior.
+- [mvm-oci is OCI import/export, not the predecessor-sandbox replacement](project_mvm_oci_role.md) — Plan 75's prose can mislead; libkrun + other backends replace the removed predecessor sandbox; mvm-oci is the user-facing OCI ingest/export feature.
 - [Plan 72 W5.D end-to-end fix list](project_plan72_w5d_endtoend_fixes.md) — nine sequential bugs from kernel-panic to RAM cap that block `mvmctl dev up`; surface order matters, read `<vm_state_dir>/console.log` first.
 - [Builder VM inner-build stderr is at ~/.cache/mvm/builder-vm/jobs/<id>/nix-stderr.log](reference_builder_vm_nix_stderr_log.md) — `/job` is a virtio-fs share, real per-derivation errors are on the host the whole time.
 - [Spec numbering has no CI uniqueness gate](project_spec_numbering_chaos.md) — parallel-session PRs regularly land at duplicate plan/ADR numbers on `main`; check open PRs + main before claiming a slot, don't unilaterally renumber others' work.

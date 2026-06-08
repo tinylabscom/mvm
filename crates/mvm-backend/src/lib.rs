@@ -68,6 +68,8 @@ pub mod network_provider;
 /// `apple_container` backend dispatch (`AppleContainerBackend`) stays in
 /// `apple_container.rs`; this is the lower-level interface it drives.
 pub mod providers;
+/// Plan 166 Phase 2 / ADR-072 — QEMU workload runtime backend (dev/test).
+pub mod qemu;
 // Plan 97 Phase B — Vz (Apple Virtualization.framework) backend.
 // Currently a skeleton: trait surface + capabilities + security profile
 // + availability probe; lifecycle methods land in a follow-up slice.
@@ -83,6 +85,7 @@ pub use docker::DockerBackend;
 pub use libkrun::LibkrunBackend;
 pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 pub use mock::MockBackend;
+pub use qemu::QemuBackend;
 pub use vz::VzBackend;
 
 /// Crate-wide test serialization for tests that mutate `HOME` or

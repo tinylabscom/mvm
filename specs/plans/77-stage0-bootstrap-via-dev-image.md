@@ -19,7 +19,7 @@ Make `mvmctl dev up` work on a source-checkout contributor host when the builder
 
 ## Why this exists
 
-PR #230 ("Drop microsandbox backend") removed the only local Stage 0 path that built `~/.cache/mvm/builder-vm/<arch>/{vmlinux,rootfs.ext4}` from the in-repo `nix/images/builder-vm/flake.nix`. Its successor (Plan 75: mvm-oci + libkrun Stage 0) shipped only W0 (claims hygiene + ADRs). With Stage 0 unwired, source-checkout dev hosts whose builder VM cache is missing have **no path forward** — the only fallback is a GitHub release download, which contradicts two hard invariants now recorded in AGENTS.md and CLAUDE.md:
+PR #230 (which dropped the earlier external sandbox runtime backend — external project referred to obliquely per [[feedback_no_competitor_names_anywhere]]; trait key in auto-memory `reference_external_sandbox_control_plane_oblique_key`) removed the only local Stage 0 path that built `~/.cache/mvm/builder-vm/<arch>/{vmlinux,rootfs.ext4}` from the in-repo `nix/images/builder-vm/flake.nix`. Its successor (Plan 75: mvm-oci + libkrun Stage 0) shipped only W0 (claims hygiene + ADRs). With Stage 0 unwired, source-checkout dev hosts whose builder VM cache is missing have **no path forward** — the only fallback is a GitHub release download, which contradicts two hard invariants now recorded in AGENTS.md and CLAUDE.md:
 
 1. **No prebuilt builder VM artifact, ever — until we cut a release.**
 2. **Source-checkout builds never depend on mvm-published artifacts** (existing ADR-046 rule).

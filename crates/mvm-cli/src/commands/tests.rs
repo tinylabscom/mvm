@@ -35,6 +35,10 @@ fn top_level_command_summaries_stay_short() {
     let longest_allowed = 72;
     let long_summaries = cli_command()
         .get_subcommands()
+        // Hidden internal commands (e.g. `__qemu-vsock-bridge`) never
+        // appear in user-facing help, so the summary-length UX rule
+        // doesn't apply to them.
+        .filter(|cmd| !cmd.is_hide_set())
         .filter_map(|cmd| {
             cmd.get_about().and_then(|about| {
                 let about = about.to_string();
@@ -2857,4 +2861,35 @@ fn test_session_attach_resume_parses() {
         }
         _ => panic!("expected session attach"),
     }
+}
+
+// -------- Plan 170 WS-A: reconcile-on-entry gate --------
+
+fn touches(argv: &[&str]) -> bool {
+    Cli::try_parse_from(argv)
+        .unwrap()
+        .command
+        .touches_vm_state()
+}
+
+#[test]
+fn state_touching_commands_trigger_entry_convergence() {
+    // Lifecycle mutate/read commands run the cheap converge pass.
+    assert!(touches(&["mvmctl", "up"]));
+    assert!(touches(&["mvmctl", "down"]));
+    assert!(touches(&["mvmctl", "console", "myvm"]));
+    assert!(touches(&["mvmctl", "pause", "myvm"]));
+    assert!(touches(&["mvmctl", "ls"]));
+    assert!(touches(&["mvmctl", "dev", "status"]));
+}
+
+#[test]
+fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
+    assert!(!touches(&["mvmctl", "doctor"]));
+    assert!(!touches(&["mvmctl", "catalog", "list"]));
+    assert!(!touches(&["mvmctl", "audit", "tail"]));
+    assert!(!touches(&["mvmctl", "cache", "info"]));
+    // `reconcile` is the convergence verb itself — must not double-run on entry.
+    assert!(!touches(&["mvmctl", "reconcile"]));
+    assert!(!touches(&["mvmctl", "reconcile", "--dry-run"]));
 }

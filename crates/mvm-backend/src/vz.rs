@@ -1050,7 +1050,19 @@ fn build_supervisor_config(
         network: Some(vz::NetworkConfig::Gvproxy {
             socket_path: gvproxy.socket_path.to_string_lossy().into_owned(),
             mac: host_gvproxy::derive_mac(&config.name),
-            events_ingest_socket_path: Some(events_ingest_socket_path(&config.name)),
+            // Only request the claim-10 audit bridge when the drainer will
+            // actually bind the ingest socket — i.e. an admitted workload
+            // (plan_json + tenant_id), the same gate as `spawn_vz_drainer`.
+            // Without admission the drainer is skipped; requesting the bridge
+            // anyway makes the Swift supervisor's mandatory connect() fail
+            // (errno=2) and the VM die before boot — the `up --dev
+            // --hypervisor vz` crash. None → Swift takes the plain gvproxy
+            // attachment (no bridge), mirroring libkrun's legacy path.
+            events_ingest_socket_path: if config.plan_json.is_some() && config.tenant_id.is_some() {
+                Some(events_ingest_socket_path(&config.name))
+            } else {
+                None
+            },
         }),
         balloon: Some(vz::BalloonConfig {
             enabled: true,
@@ -1548,6 +1560,12 @@ mod tests {
         };
         cfg.kernel_path = Some("/abs/vmlinux".into());
         cfg.rootfs_path = "/abs/rootfs.ext4".into();
+        // Admitted workload: plan_json + tenant_id present, so the drainer
+        // runs and the bridge is requested (the events_ingest assertion
+        // below). The no-admission branch is covered separately by
+        // `build_supervisor_config_omits_events_ingest_without_admission`.
+        cfg.plan_json = Some("{}".into());
+        cfg.tenant_id = Some("local".into());
         let state_dir = Path::new("/tmp/vz-smoke-state");
         // Plan 102 W6.A.5 — build_supervisor_config now takes
         // HostGvproxyInfo (the host-side gvproxy lifecycle's
@@ -1594,10 +1612,46 @@ mod tests {
                 );
                 assert!(
                     events_ingest_socket_path.is_some(),
-                    "events_ingest_socket_path should be populated for W6.A.5 Vz bridge"
+                    "events_ingest_socket_path should be populated for an admitted workload (W6.A.5 Vz bridge)"
                 );
             }
             None => panic!("network should be Some(Gvproxy {{ .. }}) after W6.A.5"),
+        }
+    }
+
+    #[test]
+    fn build_supervisor_config_omits_events_ingest_without_admission() {
+        // No plan_json/tenant_id — the default `up --dev` / no-bridge path.
+        // `spawn_vz_drainer` is skipped for this case, so nothing binds the
+        // events-ingest socket. The Vz bridge must therefore NOT request it,
+        // or the Swift supervisor's mandatory connect() fails errno=2 and the
+        // VM dies before boot (the `up --dev --hypervisor vz` crash). Gate the
+        // request on the same condition as the drainer.
+        let mut cfg = VmStartConfig {
+            name: "no-admit".into(),
+            cpus: 1,
+            memory_mib: 512,
+            ..Default::default()
+        };
+        cfg.kernel_path = Some("/abs/vmlinux".into());
+        cfg.rootfs_path = "/abs/rootfs.ext4".into();
+        assert!(cfg.plan_json.is_none() && cfg.tenant_id.is_none());
+        let state_dir = Path::new("/tmp/vz-no-admit-state");
+        let gvproxy_info = host_gvproxy::HostGvproxyInfo {
+            socket_path: state_dir.join("gvproxy.sock"),
+            pid: 0,
+        };
+        let built =
+            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        match built.network {
+            Some(vz::NetworkConfig::Gvproxy {
+                events_ingest_socket_path,
+                ..
+            }) => assert!(
+                events_ingest_socket_path.is_none(),
+                "events_ingest must be None without admission (no drainer binds it); got {events_ingest_socket_path:?}"
+            ),
+            None => panic!("network should be Some(Gvproxy {{ .. }})"),
         }
     }
 

@@ -85,6 +85,14 @@ jobs:
   #      `mvm-secrets-dispatcher`). These UDS listeners are VM-local
   #      broker/signer helpers spawned by the supervisor for a single
   #      workload, not multi-tenant control-plane servers.
+  #   9. QEMU workload host-side vsock bridge
+  #      (`crates/mvm-backend/src/qemu.rs`). QEMU's virtio-vsock speaks
+  #      real AF_VSOCK, but the shared agent client connects to the
+  #      per-port Unix-domain socket libkrun/Firecracker expose; the
+  #      QEMU backend binds that UDS and splices each connection to the
+  #      guest's `AF_VSOCK(cid, GUEST_AGENT_PORT)`. Per-VM developer
+  #      substrate (same family as the in-guest addon vsock bridge,
+  #      category 7), not a control-plane server. Plan 166 Phase 2.
   #
   # The in-guest vsock agent in `mvm-guest` is also excluded — it
   # runs *inside* the microVM, not on the host.
@@ -186,6 +194,7 @@ jobs:
               --glob '!crates/deps/libkrun-sys/src/gvproxy.rs' \
               --glob '!crates/mvm-backend/src/mock_guest_agent.rs' \
               --glob '!crates/mvm-guest-helpers/src/addon_vsock_bridge.rs' \
+              --glob '!crates/mvm-backend/src/qemu.rs' \
               -e "$PATTERNS" \
               crates/ src/ \
               || true)
