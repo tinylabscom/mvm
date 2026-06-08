@@ -3390,6 +3390,7 @@ dependencies = [
  "block2",
  "dispatch2",
  "ed25519-dalek",
+ "libc",
  "libkrun-sys",
  "mvm-backend",
  "mvm-build",

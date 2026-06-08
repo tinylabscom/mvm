@@ -69,12 +69,14 @@ tracing-subscriber = { workspace = true }
 # Vz supervisor lifecycle: serial-queue dispatch bridged to async, SIGTERM
 # handling, the terminal-state watch. rt (not rt-multi-thread) — one VM per
 # process, all VZ calls serialize on the VM's own dispatch queue.
-tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "net", "io-util"] }
 
 # Apple Virtualization.framework objc2 stack — macOS-only, already in the
 # workspace lock (mvm-backend's apple_container path carries the same set, so
 # no new third-party dependency). Plan 152 WS-B §"Dependency wash".
 [target.'cfg(target_os = "macos")'.dependencies]
+# vsock proxy: dup() the guest connection fd → AsyncFd splice.
+libc = { workspace = true }
 block2 = "0.6"
 dispatch2 = "0.3"
 objc2 = "0.6"
@@ -105,6 +107,7 @@ objc2-virtualization = { version = "0.3", features = [
     "VZSocketDeviceConfiguration",
     "VZVirtioSocketDevice",
     "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketConnection",
 ] }
 
 [dev-dependencies]

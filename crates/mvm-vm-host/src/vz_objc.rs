@@ -23,9 +23,13 @@
 //! payload_tap are the next WS-B slices.
 
 use std::cell::Cell;
-use std::path::Path;
+use std::io;
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 
 use anyhow::{Result, anyhow, bail};
 use block2::RcBlock;
@@ -39,11 +43,15 @@ use objc2_virtualization::{
     VZGenericPlatformConfiguration, VZLinuxBootLoader, VZSharedDirectory, VZSingleDirectoryShare,
     VZVirtioBlockDeviceConfiguration, VZVirtioConsoleDeviceSerialPortConfiguration,
     VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
-    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
-    VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
-    VZVirtualMachineState,
+    VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration,
+    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
+    VZVirtualMachineConfiguration, VZVirtualMachineDelegate, VZVirtualMachineState,
 };
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::UnixListener;
 use tokio::sync::{oneshot, watch};
+use tokio::task::JoinHandle;
 
 use mvm_build::vz::{StartupMode, SupervisorConfig};
 
@@ -94,7 +102,9 @@ fn collapse_state(s: VZVirtualMachineState) -> RunState {
 /// A private serial dispatch queue. `Virtualization.framework` requires every
 /// `VZVirtualMachine` operation to run on the queue the VM was created with;
 /// this wraps it with an `async` dispatch that bridges the GCD callback back
-/// to tokio without blocking a thread.
+/// to tokio without blocking a thread. Cloneable (the inner queue is
+/// reference-counted) so each vsock-proxy task can hop onto the VM's queue.
+#[derive(Clone)]
 struct SerialQueue {
     inner: DispatchRetained<DispatchQueue>,
 }
@@ -221,6 +231,143 @@ fn nsurl_from_path(path: &str) -> Retained<NSURL> {
 }
 
 // ---------------------------------------------------------------------------
+// vsock byte stream (guest connection fd → AsyncFd)
+// ---------------------------------------------------------------------------
+
+/// Carries a `VZVirtioSocketConnection` across the dispatch-queue → tokio hop.
+/// Non-`Send` on its own; sound because we only ever touch its fd (via `dup`),
+/// which is thread-safe — the retained object just keeps the fd alive.
+struct SendableConnection(Retained<VZVirtioSocketConnection>);
+
+// SAFETY: only the fd is used after the hop; fds are thread-safe.
+unsafe impl Send for SendableConnection {}
+
+/// Keeps the objc connection alive for as long as the stream's dup'd fd is in
+/// use. No objc methods are called after construction.
+struct ConnectionHandle {
+    _connection: Retained<VZVirtioSocketConnection>,
+}
+
+// SAFETY: only retained to defer deallocation; never touched concurrently.
+unsafe impl Send for ConnectionHandle {}
+unsafe impl Sync for ConnectionHandle {}
+
+/// A bidirectional async byte stream over a guest vsock connection. Wraps the
+/// connection's (dup'd, non-blocking) fd in `AsyncFd`, so it composes with
+/// `tokio::io::copy_bidirectional`. Ported idiom — the framework hands us a
+/// POSIX fd on connect, which we own independently via `dup`.
+struct VsockStream {
+    fd: AsyncFd<OwnedFd>,
+    _connection: Arc<ConnectionHandle>,
+}
+
+impl VsockStream {
+    fn from_connection(connection: Retained<VZVirtioSocketConnection>) -> Result<Self> {
+        // SAFETY: fileDescriptor() returns the framework-owned POSIX fd.
+        let raw = unsafe { connection.fileDescriptor() };
+        if raw < 0 {
+            bail!("vsock connection has a closed file descriptor");
+        }
+        // dup so our lifetime is independent of the objc connection; VZ keeps
+        // the original.
+        // SAFETY: `raw` is a valid open fd from the framework.
+        let dup = unsafe { libc::dup(raw) };
+        if dup < 0 {
+            bail!("dup vsock fd: {}", io::Error::last_os_error());
+        }
+        // SAFETY: `dup` is a valid fd we own; set non-blocking for AsyncFd.
+        let flags = unsafe { libc::fcntl(dup, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(dup, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            // SAFETY: closing the fd we just opened.
+            unsafe { libc::close(dup) };
+            bail!("set O_NONBLOCK on vsock fd: {}", io::Error::last_os_error());
+        }
+        // SAFETY: transfer ownership of the dup'd fd to OwnedFd.
+        let owned = unsafe { OwnedFd::from_raw_fd(dup) };
+        Ok(Self {
+            fd: AsyncFd::new(owned).map_err(|e| anyhow!("register vsock fd with tokio: {e}"))?,
+            _connection: Arc::new(ConnectionHandle {
+                _connection: connection,
+            }),
+        })
+    }
+}
+
+impl AsyncRead for VsockStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            let mut guard = match self.fd.poll_read_ready(cx) {
+                Poll::Ready(Ok(g)) => g,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+            let unfilled = buf.initialize_unfilled();
+            let fd = self.fd.as_fd().as_raw_fd();
+            // SAFETY: reading a valid fd into a sized buffer.
+            let n = unsafe { libc::read(fd, unfilled.as_mut_ptr().cast(), unfilled.len()) };
+            if n >= 0 {
+                buf.advance(n as usize);
+                return Poll::Ready(Ok(()));
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                guard.clear_ready();
+                continue;
+            }
+            return Poll::Ready(Err(err));
+        }
+    }
+}
+
+impl AsyncWrite for VsockStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let mut guard = match self.fd.poll_write_ready(cx) {
+                Poll::Ready(Ok(g)) => g,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+            let fd = self.fd.as_fd().as_raw_fd();
+            // SAFETY: writing a valid buffer to a valid fd.
+            let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+            if n >= 0 {
+                return Poll::Ready(Ok(n as usize));
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                guard.clear_ready();
+                continue;
+            }
+            return Poll::Ready(Err(err));
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let fd = self.fd.as_fd().as_raw_fd();
+        // SAFETY: SHUT_WR on a valid fd; ENOTCONN is benign (already closed).
+        if unsafe { libc::shutdown(fd, libc::SHUT_WR) } < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::NotConnected {
+                return Poll::Ready(Err(err));
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VM handle + supervisor
 // ---------------------------------------------------------------------------
 
@@ -237,14 +384,79 @@ unsafe impl Send for VmHandle {}
 // SAFETY: shared access is funnelled through the same serial queue.
 unsafe impl Sync for VmHandle {}
 
+/// Cheaply-clonable connector to a running VM's vsock device. Each vsock-proxy
+/// task holds one so it can dial the guest (`connectToPort`) on the VM's queue
+/// without sharing the whole supervisor.
+#[derive(Clone)]
+struct VmConn {
+    queue: SerialQueue,
+    handle: Arc<VmHandle>,
+}
+
+impl VmConn {
+    /// Dial the guest's vsock `port`, returning a byte stream. The
+    /// `connectToPort` call runs on the VM's queue; the `AsyncFd` stream is
+    /// built back on the tokio thread (it needs the reactor).
+    async fn connect(&self, port: u32) -> Result<VsockStream> {
+        let (tx, rx) = oneshot::channel::<Result<SendableConnection>>();
+        let tx = Cell::new(Some(tx));
+        let handle = Arc::clone(&self.handle);
+        self.queue
+            .dispatch(move || {
+                // SAFETY: socketDevices() is a queue-bound property accessor.
+                let devices = unsafe { handle.vm.socketDevices() };
+                let device = devices
+                    .to_vec()
+                    .into_iter()
+                    .next()
+                    .and_then(|d| Retained::downcast::<VZVirtioSocketDevice>(d).ok());
+                let Some(device) = device else {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(Err(anyhow!("VM has no virtio-socket device")));
+                    }
+                    return;
+                };
+                let block = RcBlock::new(
+                    move |conn: *mut VZVirtioSocketConnection, err: *mut NSError| {
+                        let result = if !err.is_null() {
+                            // SAFETY: non-null per the check; valid in-callback.
+                            Err(anyhow!("{}", ns_error_to_string(unsafe { &*err })))
+                        } else if conn.is_null() {
+                            Err(anyhow!("vsock connect returned a null connection"))
+                        } else {
+                            // SAFETY: non-null framework connection; retain it.
+                            unsafe { Retained::retain(conn) }
+                                .map(SendableConnection)
+                                .ok_or_else(|| anyhow!("failed to retain vsock connection"))
+                        };
+                        if let Some(tx) = tx.take() {
+                            let _ = tx.send(result);
+                        }
+                    },
+                );
+                // SAFETY: connectToPort_completionHandler must run on the queue.
+                unsafe { device.connectToPort_completionHandler(port, &block) };
+            })
+            .await?;
+        let conn = rx
+            .await
+            .map_err(|_| anyhow!("vsock connect completion handler was never called"))??;
+        VsockStream::from_connection(conn.0)
+    }
+}
+
 /// One Vz guest, driven from Rust. Created with [`VzSupervisor::boot`], which
 /// builds the config, instantiates the VM on its queue, installs the delegate,
-/// and cold-boots it.
+/// binds the vsock host proxy, and cold-boots it.
 pub struct VzSupervisor {
     handle: Arc<VmHandle>,
     queue: SerialQueue,
     state_tx: watch::Sender<RunState>,
     state_rx: watch::Receiver<RunState>,
+    /// Per-port vsock proxy accept loops; aborted on [`shutdown`](Self::shutdown).
+    vsock_tasks: Vec<JoinHandle<()>>,
+    /// Bound `vsock-<port>.sock` paths, unlinked on shutdown.
+    vsock_paths: Vec<PathBuf>,
 }
 
 impl VzSupervisor {
@@ -259,6 +471,10 @@ impl VzSupervisor {
         let queue = SerialQueue::new(&label);
         let (state_tx, state_rx) = watch::channel(RunState::Pending);
         let delegate_tx = state_tx.clone();
+
+        // Captured before `config` is moved into the create closure.
+        let vsock_dir = config.vsock.socket_dir.clone();
+        let vsock_ports = config.vsock.ports.clone();
 
         let config = config.clone();
         let queue_inner = queue.clone_inner();
@@ -284,14 +500,68 @@ impl VzSupervisor {
             })
             .await??;
 
-        let this = Self {
+        let mut this = Self {
             handle,
             queue,
             state_tx,
             state_rx,
+            vsock_tasks: Vec::new(),
+            vsock_paths: Vec::new(),
         };
+        // Bind the host-side vsock proxy before start, so a client (mvmctl /
+        // mvmd) can reach the guest agent the moment it boots — the Swift
+        // supervisor's ordering.
+        this.start_vsock_proxy(&vsock_dir, &vsock_ports)?;
         this.start().await?;
         Ok(this)
+    }
+
+    fn connector(&self) -> VmConn {
+        VmConn {
+            queue: self.queue.clone(),
+            handle: Arc::clone(&self.handle),
+        }
+    }
+
+    /// Bind one `<socket_dir>/vsock-<port>.sock` (mode 0700) UNIX listener per
+    /// requested guest port and spawn an accept loop that dials the guest and
+    /// splices the two. The host-dials-guest direction mvmctl's agent RPC uses.
+    fn start_vsock_proxy(&mut self, socket_dir: &str, ports: &[u32]) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        if ports.is_empty() {
+            return Ok(());
+        }
+        let dir = Path::new(socket_dir);
+        std::fs::create_dir_all(dir).map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| anyhow!("chmod 0700 {}: {e}", dir.display()))?;
+        for &port in ports {
+            let path = dir.join(format!("vsock-{port}.sock"));
+            // UnixListener::bind fails on a stale socket file — best-effort unlink.
+            let _ = std::fs::remove_file(&path);
+            let listener =
+                UnixListener::bind(&path).map_err(|e| anyhow!("bind {}: {e}", path.display()))?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| anyhow!("chmod 0700 {}: {e}", path.display()))?;
+            self.vsock_tasks.push(tokio::spawn(run_port_proxy(
+                self.connector(),
+                listener,
+                port,
+            )));
+            self.vsock_paths.push(path);
+        }
+        Ok(())
+    }
+
+    /// Abort the vsock proxy accept loops and unlink their sockets. Best-effort;
+    /// process exit would reap them anyway, but this keeps the state dir clean.
+    pub fn shutdown(&self) {
+        for task in &self.vsock_tasks {
+            task.abort();
+        }
+        for path in &self.vsock_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     async fn start(&self) -> Result<()> {
@@ -357,6 +627,33 @@ impl VzSupervisor {
                 bail!("state channel closed before the guest reached a terminal state");
             }
         }
+    }
+}
+
+/// Accept loop for one proxied vsock port: each host connection dials the guest
+/// and is spliced to it until either side closes. Per-connection failures are
+/// logged and dropped; the loop only ends if the listener itself errors.
+async fn run_port_proxy(conn: VmConn, listener: UnixListener, port: u32) {
+    loop {
+        let host = match listener.accept().await {
+            Ok((stream, _addr)) => stream,
+            Err(e) => {
+                tracing::warn!(port, error = %e, "vsock accept failed; stopping port proxy");
+                return;
+            }
+        };
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            match conn.connect(port).await {
+                Ok(mut guest) => {
+                    let mut host = host;
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut host, &mut guest).await {
+                        tracing::debug!(port, error = %e, "vsock bridge closed with error");
+                    }
+                }
+                Err(e) => tracing::warn!(port, error = %e, "vsock connect to guest failed"),
+            }
+        });
     }
 }
 

@@ -86,6 +86,7 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
+        supervisor.shutdown();
         remove_pid_file(&config);
         Ok::<i32, anyhow::Error>(code)
     })?;
