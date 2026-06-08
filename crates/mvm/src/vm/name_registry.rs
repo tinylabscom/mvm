@@ -59,6 +59,14 @@ pub struct VmRegistration {
     /// with `readiness` — both are `Some` or both are `None`.
     #[serde(default)]
     pub last_readiness_change_at: Option<String>,
+    /// RFC 3339 timestamp of the last observed guest activity — console
+    /// attach, vsock agent request, or a successful `wake` (Plan 170 WS-B).
+    /// Drives the activity-driven idle reaper. `#[serde(default)]` keeps
+    /// pre-WS-B records loadable; `None` means "never touched", which the
+    /// reaper treats as `registered_at` so a just-registered VM isn't
+    /// instantly idle.
+    #[serde(default)]
+    pub last_active: Option<String>,
 }
 
 fn default_auto_resume() -> bool {
@@ -128,6 +136,7 @@ impl VmNameRegistry {
                 paused: false,
                 readiness: None,
                 last_readiness_change_at: None,
+                last_active: None,
             },
         );
         Ok(())
@@ -139,6 +148,24 @@ impl VmNameRegistry {
         match self.vms.get_mut(name) {
             Some(reg) => {
                 reg.expires_at = expires_at;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Record observed guest activity (Plan 170 WS-B). Returns
+    /// `Ok(true)` if updated, `Ok(false)` if the name is unknown.
+    /// Callers pass the timestamp explicitly so fixtures stay
+    /// deterministic, mirroring [`set_readiness`](Self::set_readiness).
+    pub fn touch_last_active(
+        &mut self,
+        name: &str,
+        now_rfc3339: impl Into<String>,
+    ) -> Result<bool> {
+        match self.vms.get_mut(name) {
+            Some(reg) => {
+                reg.last_active = Some(now_rfc3339.into());
                 Ok(true)
             }
             None => Ok(false),
@@ -439,6 +466,63 @@ mod tests {
     fn set_expires_at_returns_false_for_unknown_vm() {
         let mut reg = VmNameRegistry::default();
         assert!(!reg.set_expires_at("ghost", Some("x".to_string())).unwrap());
+    }
+
+    // -------- last_active / idle activity (Plan 170 WS-B) --------
+
+    #[test]
+    fn last_active_defaults_none_on_new_registration() {
+        let mut reg = VmNameRegistry::default();
+        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        assert!(reg.lookup("vm1").unwrap().last_active.is_none());
+    }
+
+    #[test]
+    fn touch_last_active_sets_timestamp_and_returns_false_for_unknown() {
+        let mut reg = VmNameRegistry::default();
+        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        assert!(
+            reg.touch_last_active("vm1", "2026-01-01T00:00:00Z")
+                .unwrap()
+        );
+        assert_eq!(
+            reg.lookup("vm1").unwrap().last_active.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        // A later touch overwrites.
+        assert!(
+            reg.touch_last_active("vm1", "2026-01-01T00:05:00Z")
+                .unwrap()
+        );
+        assert_eq!(
+            reg.lookup("vm1").unwrap().last_active.as_deref(),
+            Some("2026-01-01T00:05:00Z")
+        );
+        // Unknown VM → Ok(false), no error.
+        assert!(
+            !reg.touch_last_active("ghost", "2026-01-01T00:00:00Z")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn last_active_roundtrips_and_legacy_json_defaults_none() {
+        // Roundtrip a touched record.
+        let mut reg = VmNameRegistry::default();
+        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.touch_last_active("vm1", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let json = serde_json::to_string(&reg).unwrap();
+        let parsed: VmNameRegistry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.lookup("vm1").unwrap().last_active.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        // A record persisted before WS-B (no last_active key) still loads.
+        let legacy = r#"{"vms":{"old":{"vm_dir":"/tmp/old","network":"default",
+            "guest_ip":null,"slot_index":0,"registered_at":"2024-01-01T00:00:00Z"}}}"#;
+        let parsed: VmNameRegistry = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.lookup("old").unwrap().last_active.is_none());
     }
 
     #[test]
