@@ -46,7 +46,6 @@ mod builder;
 mod ctor;
 mod emit;
 mod error;
-mod runtime_substitution;
 
 /// The canonical `Workload` IR — validate, canonicalize, hash, hooks,
 /// addon, version. Folded in from the former `mvm-ir` crate (plan 121
@@ -109,10 +108,6 @@ pub use error::{BuildError, EmitError};
 pub use runtime::{
     KNOWN_BASE_IMAGES, LowerError, RecordedOp, RuntimeRecording, SandboxCreate, compile_recording,
     resolve_base_image,
-};
-pub use runtime_substitution::{
-    AwsCredentials, SubstitutionError, aws_credentials_from_placeholders,
-    clear_substitution_handlers, is_placeholder, register_substitution_handler, substitute,
 };
 
 // IR type re-exports — public surface aliases consumed by downstream
