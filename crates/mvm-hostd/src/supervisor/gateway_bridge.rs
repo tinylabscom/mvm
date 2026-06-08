@@ -228,6 +228,16 @@ pub enum BridgeEndpoints {
     /// Swift; Swift writes NDJSON `FlowEvent`s over this unix
     /// stream to the Rust ingest task.
     VzIngest { events_socket_path: PathBuf },
+    /// Rust-native Vz supervisor + gvproxy (Plan 152 WS-B slice 8). The
+    /// supervisor owns a SOCK_DGRAM socketpair — one half is the guest NIC
+    /// (`VZFileHandleNetworkDeviceAttachment`), the other (`supervisor_fd`,
+    /// already connected) faces the bridge. The bridge shuffles datagrams
+    /// between it and gvproxy in-process, with the same observer + chain-signing
+    /// pipeline as the libkrun gvproxy path — no Swift, no NDJSON drainer.
+    VzGvproxy {
+        supervisor_fd: OwnedFd,
+        gvproxy_socket_path: PathBuf,
+    },
 }
 
 /// Per-VM bridge config. The supervisor binary fills this from
@@ -628,6 +638,21 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     cfg.vm_name.clone(),
                     flow_policy.clone(),
                     event_tx,
+                )
+                .await;
+            }
+            BridgeEndpoints::VzGvproxy {
+                supervisor_fd,
+                gvproxy_socket_path,
+            } => {
+                run_vz_gvproxy_bridge(
+                    supervisor_fd,
+                    gvproxy_socket_path,
+                    cfg.vm_name.clone(),
+                    cfg.plan.tenant.0.clone(),
+                    cfg.policy.clone(),
+                    event_tx,
+                    wiring,
                 )
                 .await;
             }
@@ -1292,6 +1317,280 @@ fn gvproxy_outbound_bind_path(supervisor_listen_path: &std::path::Path) -> PathB
 }
 
 // ============================================================================
+// Rust-native Vz + gvproxy bridge (SOCK_DGRAM shuffle, Plan 152 WS-B slice 8)
+// ============================================================================
+
+/// In-process gvproxy splice for the Rust Vz supervisor. Runs the same
+/// datagram-shuffle, observer, and chain-signing pipeline as
+/// [`run_libkrun_gvproxy_bridge`], but the guest-facing socket is the
+/// supervisor's already-connected half of a SOCK_DGRAM socketpair (the VM holds
+/// the other half via a file-handle net attachment) — so `recv`/`send`, not
+/// `recv_from`/`send_to` with peer caching.
+async fn run_vz_gvproxy_bridge(
+    supervisor_fd: OwnedFd,
+    gvproxy_socket_path: PathBuf,
+    vm_name: String,
+    tenant: String,
+    policy: Arc<dyn FlowPolicy>,
+    event_tx: mpsc::Sender<FlowEvent>,
+    wiring: ObserverWiring,
+) {
+    use tokio::net::UnixDatagram;
+
+    // Guest-facing: the connected socketpair half the supervisor owns.
+    let inbound = {
+        let std_sock = std::os::unix::net::UnixDatagram::from(supervisor_fd);
+        if let Err(e) = std_sock.set_nonblocking(true) {
+            tracing::error!(error = %e, "vz-gvproxy bridge: set_nonblocking on supervisor fd");
+            return;
+        }
+        match UnixDatagram::from_std(std_sock) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "vz-gvproxy bridge: wrap supervisor fd");
+                return;
+            }
+        }
+    };
+
+    // gvproxy-facing: bound to a real pathname (gvproxy rejects empty-address
+    // peers; macOS never autobinds AF_UNIX datagram sockets) + connected.
+    let outbound_bind_path = gvproxy_outbound_bind_path(&gvproxy_socket_path);
+    let _ = std::fs::remove_file(&outbound_bind_path);
+    let outbound = match UnixDatagram::bind(&outbound_bind_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                path = %outbound_bind_path.display(),
+                error = %e,
+                "vz-gvproxy bridge: failed to bind gvproxy-facing socket"
+            );
+            return;
+        }
+    };
+    if let Err(e) = outbound.connect(&gvproxy_socket_path) {
+        tracing::error!(
+            path = %gvproxy_socket_path.display(),
+            error = %e,
+            "vz-gvproxy bridge: failed to connect to gvproxy"
+        );
+        return;
+    }
+
+    let flow_egress = format!("{vm_name}-egress");
+    let flow_ingress = format!("{vm_name}-ingress");
+    let mut egress_opened = false;
+    let mut ingress_opened = false;
+
+    let inbound = Arc::new(inbound);
+    let outbound = Arc::new(outbound);
+
+    let mtu = wiring.mtu;
+    let policy_a = policy.clone();
+    let event_a = event_tx.clone();
+    let inbound_a = inbound.clone();
+    let outbound_a = outbound.clone();
+    let flow_egress_a = flow_egress.clone();
+    let observers_a = wiring.observers.clone();
+    let latency_a = wiring.latency.clone();
+    let killed_flows_a = wiring.killed_flows.clone();
+    let substitution_a = wiring.substitution.clone();
+    let scan_a = wiring.scan.clone();
+    let vm_name_a = vm_name.clone();
+    let tenant_a = tenant.clone();
+
+    // Egress: guest → gvproxy.
+    let egress = async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = match inbound_a.recv(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => return Err::<(), std::io::Error>(e),
+            };
+            if !egress_opened {
+                match policy_a.evaluate(&FlowDecisionCtx {
+                    direction: FlowDirection::Egress,
+                    dest_ip: None,
+                    dest_port: None,
+                    sni_hostname: None,
+                    url_path: None,
+                }) {
+                    FlowAction::Allow => {
+                        let _ = event_a
+                            .send(FlowEvent {
+                                flow_id: flow_egress_a.clone(),
+                                direction: FlowDirection::Egress,
+                                kind: FlowEventKind::Opened,
+                            })
+                            .await;
+                        egress_opened = true;
+                    }
+                    FlowAction::Drop { reason: _ } => {
+                        let _ = event_a
+                            .send(FlowEvent {
+                                flow_id: flow_egress_a.clone(),
+                                direction: FlowDirection::Egress,
+                                kind: FlowEventKind::Closed {
+                                    reason: FlowCloseReason::PolicyDropped,
+                                },
+                            })
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+
+            let raw = &buf[..n];
+            if flow_is_killed(&killed_flows_a, raw).await {
+                continue;
+            }
+            let ctx = PacketCtx {
+                vm_name: &vm_name_a,
+                tenant: &tenant_a,
+                direction: FlowDirection::Egress,
+                flow_id: &flow_egress_a,
+            };
+            match run_packet_pipeline(
+                &observers_a,
+                substitution_a.as_ref(),
+                scan_a.as_ref(),
+                ctx,
+                raw,
+                mtu,
+                &latency_a,
+            ) {
+                PacketDecision::Forward { frame, .. } => {
+                    outbound_a.send(&frame).await?;
+                }
+                PacketDecision::Kill {
+                    observer,
+                    reason,
+                    flow_key,
+                } => {
+                    if let Some(k) = flow_key {
+                        killed_flows_a.lock().await.insert(k);
+                    }
+                    let _ = event_a
+                        .send(FlowEvent {
+                            flow_id: flow_egress_a.clone(),
+                            direction: FlowDirection::Egress,
+                            kind: FlowEventKind::ObserverFault {
+                                observer: observer.to_string(),
+                                reason: reason.as_str().to_string(),
+                            },
+                        })
+                        .await;
+                }
+            }
+            latency_a.write_scrape_file();
+        }
+    };
+
+    let policy_b = policy.clone();
+    let event_b = event_tx.clone();
+    let inbound_b = inbound.clone();
+    let outbound_b = outbound.clone();
+    let flow_ingress_b = flow_ingress.clone();
+    let observers_b = wiring.observers.clone();
+    let latency_b = wiring.latency.clone();
+    let killed_flows_b = wiring.killed_flows.clone();
+    let substitution_b = wiring.substitution.clone();
+    let scan_b = wiring.scan.clone();
+    let vm_name_b = vm_name.clone();
+    let tenant_b = tenant.clone();
+
+    // Ingress: gvproxy → guest (the inbound socketpair half is connected).
+    let ingress = async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = match outbound_b.recv(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => return Err::<(), std::io::Error>(e),
+            };
+            if !ingress_opened {
+                match policy_b.evaluate(&FlowDecisionCtx {
+                    direction: FlowDirection::Ingress,
+                    dest_ip: None,
+                    dest_port: None,
+                    sni_hostname: None,
+                    url_path: None,
+                }) {
+                    FlowAction::Allow => {
+                        let _ = event_b
+                            .send(FlowEvent {
+                                flow_id: flow_ingress_b.clone(),
+                                direction: FlowDirection::Ingress,
+                                kind: FlowEventKind::Opened,
+                            })
+                            .await;
+                        ingress_opened = true;
+                    }
+                    FlowAction::Drop { reason: _ } => {
+                        let _ = event_b
+                            .send(FlowEvent {
+                                flow_id: flow_ingress_b.clone(),
+                                direction: FlowDirection::Ingress,
+                                kind: FlowEventKind::Closed {
+                                    reason: FlowCloseReason::PolicyDropped,
+                                },
+                            })
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+
+            let raw = &buf[..n];
+            if flow_is_killed(&killed_flows_b, raw).await {
+                continue;
+            }
+            let ctx = PacketCtx {
+                vm_name: &vm_name_b,
+                tenant: &tenant_b,
+                direction: FlowDirection::Ingress,
+                flow_id: &flow_ingress_b,
+            };
+            match run_packet_pipeline(
+                &observers_b,
+                substitution_b.as_ref(),
+                scan_b.as_ref(),
+                ctx,
+                raw,
+                mtu,
+                &latency_b,
+            ) {
+                PacketDecision::Forward { frame, .. } => {
+                    inbound_b.send(&frame).await?;
+                }
+                PacketDecision::Kill {
+                    observer,
+                    reason,
+                    flow_key,
+                } => {
+                    if let Some(k) = flow_key {
+                        killed_flows_b.lock().await.insert(k);
+                    }
+                    let _ = event_b
+                        .send(FlowEvent {
+                            flow_id: flow_ingress_b.clone(),
+                            direction: FlowDirection::Ingress,
+                            kind: FlowEventKind::ObserverFault {
+                                observer: observer.to_string(),
+                                reason: reason.as_str().to_string(),
+                            },
+                        })
+                        .await;
+                }
+            }
+            latency_b.write_scrape_file();
+        }
+    };
+
+    let _ = tokio::join!(egress, ingress);
+    let _ = std::fs::remove_file(&outbound_bind_path);
+}
+
+// ============================================================================
 // Vz ingest bridge (Swift writes NDJSON FlowEvents over unix-stream)
 // ============================================================================
 
@@ -1864,6 +2163,68 @@ mod tests {
         assert!(parsed.l4_payload.windows(6).any(|w| w == b"XXXXXX"));
         assert!(!parsed.l4_payload.windows(6).any(|w| w == b"SECRET"));
         bridge_task.abort();
+    }
+
+    // Vz gvproxy bridge: end-to-end datagram shuffle via a real socketpair +
+    // gvproxy-stub socket (no VM). Mirrors the libkrun gvproxy path with the
+    // supervisor's connected socketpair half as the guest-facing socket.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vz_gvproxy_bridge_shuffles_datagrams_both_ways() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixDatagram as StdUd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+
+        // Guest half (test) ↔ supervisor half (bridge).
+        let (guest_std, sup_std) = StdUd::pair().unwrap();
+        guest_std.set_nonblocking(true).unwrap();
+        let guest = tokio::net::UnixDatagram::from_std(guest_std).unwrap();
+        let supervisor_fd = OwnedFd::from(sup_std);
+
+        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
+        let task = tokio::spawn(run_vz_gvproxy_bridge(
+            supervisor_fd,
+            gvproxy_path.clone(),
+            "vm-test".to_string(),
+            "t".to_string(),
+            policy,
+            tx,
+            wiring_with(vec![]),
+        ));
+
+        // Egress: guest → gvproxy, byte-identical, with an Opened event.
+        let f1 = tcp_egress_frame(b"from-guest");
+        guest.send(&f1).await.unwrap();
+        let mut buf = vec![0u8; 65536];
+        let (n, _peer) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            gvproxy.recv_from(&mut buf),
+        )
+        .await
+        .expect("egress in time")
+        .unwrap();
+        assert_eq!(&buf[..n], &f1[..]);
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event in time")
+            .expect("event");
+        assert!(matches!(ev.kind, FlowEventKind::Opened));
+        assert_eq!(ev.direction, FlowDirection::Egress);
+
+        // Ingress: gvproxy → guest (sent to the bridge's gvproxy-facing path).
+        let outbound = gvproxy_outbound_bind_path(&gvproxy_path);
+        let f2 = tcp_egress_frame(b"from-gvproxy");
+        gvproxy.send_to(&f2, &outbound).await.unwrap();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), guest.recv(&mut buf))
+            .await
+            .expect("ingress in time")
+            .unwrap();
+        assert_eq!(&buf[..n], &f2[..]);
+
+        task.abort();
     }
 
     // -----------------------------------------------------------------

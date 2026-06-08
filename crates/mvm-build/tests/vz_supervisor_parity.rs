@@ -107,6 +107,15 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
                 .into_owned(),
         ),
         startup_mode: Default::default(),
+        // Audit substrate (Plan 152 WS-B slice 8): absent for the parity
+        // fixture — the gate exercises the no-network boot path, not the
+        // flow-audited bridge. `has_audit_substrate()` stays false.
+        tenant_id: None,
+        plan: None,
+        bundle: None,
+        audit_dir: None,
+        gateway_audit_socket: None,
+        signing_key_path: None,
     }
 }
 
