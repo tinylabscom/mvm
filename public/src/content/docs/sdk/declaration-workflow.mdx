@@ -48,7 +48,7 @@ import mvm
     network=mvm.network(mode="deny"),
     env={
         "MODEL_PATH": mvm.literal("/data/model.bin"),
-        "API_KEY": mvm.secret("agent-api-key"),
+        "API_KEY": mvm.secret("agent-api-key", type="bearer", hosts=["api.example.com"]),
     },
     entrypoint=mvm.entrypoint_function(
         module="tool",

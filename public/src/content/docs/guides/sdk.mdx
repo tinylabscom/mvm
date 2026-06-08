@@ -35,7 +35,7 @@ import mvm
     ),
     env={
         "MODEL_PATH": mvm.literal("/data/model.pt"),
-        "API_KEY": mvm.secret("api-key"),
+        "API_KEY": mvm.secret("api-key", type="bearer", hosts=["api.example.com"]),
     },
     before_start="export HELLO_BANNER='hi'",
     after_start=mvm.hook(["curl", "-fsS", "http://127.0.0.1:8080/health"]),

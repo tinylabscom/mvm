@@ -62,7 +62,10 @@ describe("Sandbox.commands.start", () => {
   it("encodes env with secret refs", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb.commands.start(["python", "run.py"], {
-      env: { MODE: "prod", API_KEY: mvm.secret("api-key") },
+      env: {
+        MODE: "prod",
+        API_KEY: mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
+      },
     });
     const op = mvm.currentRecording()!.ops[0] as Extract<
       mvm.RecordedOpWire,
