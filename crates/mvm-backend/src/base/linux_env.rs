@@ -186,35 +186,32 @@ impl AppleContainerEnv {
         let mut stream = self.connect_with_auto_start()?;
 
         let wrapped = format!("{SUDO_SHIM}\n{script}");
-        let resp = mvm_guest::vsock::send_request(
+        let mut out_buf: Vec<u8> = Vec::new();
+        let mut err_buf: Vec<u8> = Vec::new();
+        // Plan 159 WS-5 E: accumulate streamed ExecEvent chunks.
+        let terminal = mvm_guest::vsock::send_exec_streaming(
             &mut stream,
-            &mvm_guest::vsock::GuestRequest::Exec {
-                command: wrapped,
-                stdin: None,
-                timeout_secs: Some(timeout_secs),
+            &wrapped,
+            None,
+            timeout_secs,
+            |event| match event {
+                mvm_guest::vsock::ExecEvent::Stdout { chunk } => out_buf.extend_from_slice(chunk),
+                mvm_guest::vsock::ExecEvent::Stderr { chunk } => err_buf.extend_from_slice(chunk),
+                _ => {}
             },
         )
         .with_context(|| format!("Failed to execute command in dev VM '{}'", self.vm_id))?;
 
-        match resp {
-            mvm_guest::vsock::GuestResponse::ExecResult {
-                exit_code,
-                stdout,
-                stderr,
-            } => {
+        match terminal {
+            mvm_guest::vsock::ExecEvent::Exit { code } => {
                 use std::os::unix::process::ExitStatusExt;
                 Ok(Output {
-                    status: std::process::ExitStatus::from_raw(exit_code << 8),
-                    stdout: stdout.into_bytes(),
-                    stderr: stderr.into_bytes(),
+                    status: std::process::ExitStatus::from_raw(code << 8),
+                    stdout: out_buf,
+                    stderr: err_buf,
                 })
             }
-            mvm_guest::vsock::GuestResponse::Error { message } => {
-                anyhow::bail!("Dev VM exec error: {message}");
-            }
-            other => {
-                anyhow::bail!("Unexpected response from dev VM: {other:?}");
-            }
+            other => anyhow::bail!("unexpected terminal exec event from dev VM: {other:?}"),
         }
     }
 }
