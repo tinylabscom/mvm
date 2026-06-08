@@ -3,8 +3,8 @@ title: Sandbox parity status
 description: Which sandbox-parity claims mvm makes today, and which are Preview, Planned, or deliberately Not claimed. Backed by ADR-048 and the cargo xtask check-doc-claims lint.
 ---
 
-mvm makes seven sandbox-parity claims relative to microsandbox's
-published positioning. Each claim has a defined gate
+mvm makes seven sandbox-parity claims relative to the earlier external sandbox
+runtime's published positioning. Each claim has a defined gate
 ([ADR-048](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/048-claim-safe-sandbox-parity.md))
 and a current status. Public docs and release notes use the language
 in this table — anything stronger is enforced by the
