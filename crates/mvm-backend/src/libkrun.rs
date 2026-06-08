@@ -62,6 +62,12 @@ const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// means `mvmctl stop` returns in 2 s instead of 5 s.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Upper bound for `wait()` (Plan 152 WS-A `up --wait`): how long to wait
+/// for the guest's one-shot workload to finish and report its exit code via
+/// `<vm_state_dir>/workload.exit`. A workload that exceeds this (or crashes
+/// without reporting) fails closed to `VmExitStatus::UNKNOWN`.
+const WORKLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
@@ -472,18 +478,26 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
-        // Block until the supervisor (and thus the guest) exits, then read
-        // the captured workload exit code. Plan 152 WS-A.
-        let pid_path = vm_libkrun_pid(&id.0);
+        // Poll for the captured exit code to appear. The guest writes
+        // `workload.exit` (and the supervisor persists it) BEFORE the guest
+        // powers off — the Plan 152 WS-A ack handshake guarantees the
+        // ordering — so its presence is the reliable "workload finished"
+        // signal. We deliberately do NOT poll supervisor PID liveness: on a
+        // busy host the dead supervisor's PID can be reused by another
+        // process, making a liveness check spin forever. Bounded so a guest
+        // that crashes without reporting fails closed to UNKNOWN.
+        let state_dir = vm_state_dir(&id.0);
+        let deadline = Instant::now() + WORKLOAD_WAIT_TIMEOUT;
         loop {
-            match read_pid(&pid_path) {
-                Some(pid) if pid_alive(pid) => {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                _ => break,
+            let status = read_exit_status_from(&state_dir);
+            if status != mvm_core::vm_backend::VmExitStatus::UNKNOWN {
+                return Ok(status);
             }
+            if Instant::now() >= deadline {
+                return Ok(mvm_core::vm_backend::VmExitStatus::UNKNOWN);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        Ok(read_exit_status_from(&vm_state_dir(&id.0)))
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
