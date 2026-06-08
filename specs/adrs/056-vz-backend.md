@@ -283,3 +283,31 @@ ensure_signed()` is extended to sign the Rust binary with
 WS-B parity matrix (boot, vsock round-trip, every control verb, save/restore)
 is green; the entitled-TCB / drop-Swift rationale is the deferred Plan 97
 note, now resolved.
+
+## Addendum (2026-06-08) — Swift supervisor removed; Rust is the sole VZ supervisor
+
+Plan 152 WS-B is complete. The Rust-native `objc2` supervisor (`mvm-vm-host`
+`[[bin]] mvm-vz-supervisor`, landed in #700, live-validated boot / vsock /
+control / save-restore) is now the **only** VZ supervisor. The Swift crate
+(`crates/mvm-vz-supervisor/`), its `tools/build.sh` / `Package.swift` /
+`Entitlements.plist`, and the `mvm-build/build.rs` auto-build hook are deleted;
+`resolve_supervisor_path` (in `mvm-backend::vz` and the doctor chain) resolves
+only the cargo-built Rust binary (override → adjacent-to-exe → release
+`~/.mvm/bin/`), mirroring `mvm-libkrun-supervisor`.
+
+**Motivating defect.** Running the WS-B parity gate live on macOS 26 revealed the
+Swift control socket **self-deadlocks** on async VZ ops: `synchronousVZCall`
+does `sema.wait()` on the VM's own serial `DispatchQueue` while
+`vm.pause/resume/save`'s completion handler is dispatched back to that same
+queue, wedging it after the first verb. The Rust supervisor's serial-queue→tokio
+bridge (the WS-B threading decision) avoids this. Because the Swift baseline was
+broken on PAUSE/RESUME/SAVE, byte-for-byte parity was unachievable and
+undesirable; the gate (`crates/mvm-build/tests/vz_supervisor_parity.rs`) now
+asserts **Rust correctness** directly rather than equivalence to a buggy
+baseline.
+
+**Follow-ups (tracked, not in this change):** dead-code sweep of the legacy
+`BridgeEndpoints::VzIngest` + `mvm-vz-drainer` NDJSON ingest path (superseded by
+the Rust supervisor's in-process `VzGvproxy` splice); the `workflow_dispatch` vz
+lanes in `ci-full.yml` also carried pre-existing `-p mvm-vz` staleness from the
+Plan 121 crate consolidation (repointed to `mvm-build`/`mvm-vm-host` here).

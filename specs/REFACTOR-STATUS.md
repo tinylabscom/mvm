@@ -40,13 +40,17 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
-PLAN 152 — Rust-native VZ supervisor            🟡 design locked
+PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
   [x] WS-A exit channel (vsock + PID-1 helper) — PR #698 (merged)
-  [x] WS-B threading decision (serial queue) — PR #697
-  [ ] WS-B the actual Swift→Rust rewrite (~1,450 LOC)
-  [ ] WS-C snapshot/restore + fork
-  [ ] WS-D nested KVM (/dev/kvm in guest)
-  [ ] WS-E VZ-config hardening
+  [x] WS-B threading decision (serial queue) — PR #697 (merged)
+  [x] WS-B Swift→Rust rewrite (boot/vsock/control/snapshot/flow-audit) — PR #700 (merged)
+  [x] WS-B parity gate (#703) → Rust-only after Swift deletion (plan-174)
+  [x] WS-B finalize: resolver→Rust bin + DELETE Swift crate — plan-174
+  [x] WS-E VZ-config hardening (validateSaveRestore, MAC pin) — folded into #700
+  [ ] WS-C fork primitive (snapshot/restore done in #700) — separate workstream
+  [ ] WS-D nested KVM (/dev/kvm in guest) — separate workstream
+  NOTE: Swift control socket self-deadlocked on async VZ ops; Rust fixes it
+  (ADR-056 addendum). Deferred: VzIngest/mvm-vz-drainer dead-code sweep.
 
 PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
   [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)

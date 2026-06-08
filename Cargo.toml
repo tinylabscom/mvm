@@ -13,9 +13,9 @@ members = [
     # `mvm-supervisor → mvm-backend → mvm-libkrun` cycle. Produces the
     # `mvm-libkrun-supervisor` binary that mvm-backend's spawner
     # resolves at runtime.
-    # Plan 97 Phase B — type-safe interface to the Swift
-    # `mvm-vz-supervisor` binary. Pure data + path resolution; no FFI,
-    # no Swift dep. Parallel role to `mvm-libkrun` for the Vz backend.
+    # Plan 97 Phase B — type-safe `SupervisorConfig` + path resolution
+    # for the Rust-native `mvm-vz-supervisor` bin. Pure data; no FFI.
+    # Parallel role to `mvm-libkrun` for the Vz backend.
     "crates/mvm-backend",
     "crates/mvm",
     "crates/mvm-build",
@@ -65,10 +65,10 @@ members = [
     # packet loop touches untrusted bytes. Linux-only at runtime; the
     # crate compiles as inert stubs on macOS / Windows so workspace
     # builds stay green for non-Linux contributors.
-    # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary. Closes
-    # Plan 112's "Vz carve-out" by binding the Swift `mvm-vz-supervisor`'s
-    # `events_ingest_socket_path` and threading the NDJSON `FlowEventWire`
-    # stream through `mvm-supervisor`'s chain-signing audit pipeline.
+    # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary (legacy
+    # NDJSON ingest path; superseded by the Rust supervisor's in-process
+    # VzGvproxy splice, retained pending a dead-code sweep). Threads the
+    # `FlowEventWire` stream through the chain-signing audit pipeline.
     # Parallel role to `mvm-libkrun-supervisor` for the Vz backend.
     # Plan 113 §Task 12 / ADR-064 — per-VM Firecracker bridge sidecar.
     # Linux-only at runtime; the file-level `cfg(target_os = "linux")`

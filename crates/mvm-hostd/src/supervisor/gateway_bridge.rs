@@ -14,11 +14,10 @@
 //!   SOCK_DGRAM (vfkit unixgram); gvproxy creates a listener,
 //!   bridge binds an outer listener libkrun connects to, shuffles
 //!   datagrams both ways. SOCK_DGRAM preserves packet boundaries.
-//! - [`BridgeEndpoints::VzIngest`] — Vz on macOS Apple Silicon.
-//!   Splice happens in Swift (`mvm-vz-supervisor::Network.swift`);
-//!   Swift writes opaque NDJSON `FlowEvent`s over a unix-stream
-//!   to a Rust ingest socket, which forwards into the same mpsc
-//!   → signer pipeline.
+//! - [`BridgeEndpoints::VzIngest`] — legacy Vz NDJSON `FlowEvent` ingest
+//!   path from the (now-removed) Swift supervisor. Superseded by the
+//!   Rust supervisor's in-process `VzGvproxy` splice (Plan 152 WS-B
+//!   slice 8); retained pending a dead-code sweep follow-up.
 //!
 //! All three feed one `mpsc::Sender<FlowEvent>` into a per-VM
 //! `signer_task` that is the **sole** caller of
