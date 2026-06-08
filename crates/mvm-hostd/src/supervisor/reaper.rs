@@ -32,7 +32,8 @@ const MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// Outcome of a single `tick()` for one VM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReapOutcome {
-    /// VM had no TTL or its TTL has not yet elapsed.
+    /// VM had no TTL or its TTL has not yet elapsed, and it is not idle
+    /// (or idle-sleep is not configured).
     Skipped,
     /// VM was reaped (teardown invoked, registry record removed).
     Reaped { name: String },
@@ -43,6 +44,12 @@ pub enum ReapOutcome {
     /// VM expired, but the teardown callback returned an error. The
     /// registry record is *kept* so the next tick retries.
     TeardownFailed { name: String, error: String },
+    /// VM was idle past its idle-timeout and got slept (sleep callback
+    /// invoked, registry record kept with `paused = true`). Plan 170 WS-B.
+    IdleSlept { name: String },
+    /// VM was idle, but the sleep callback returned an error. The record
+    /// is left running (not paused) so the next tick retries.
+    SleepFailed { name: String, error: String },
 }
 
 /// Callback invoked when a VM's TTL has elapsed and the reaper is
@@ -51,9 +58,76 @@ pub enum ReapOutcome {
 /// failures.
 pub type TeardownFn = Box<dyn Fn(&str, &VmRegistration) -> Result<(), String> + Send + Sync>;
 
+/// Callback invoked when a VM has been idle past its idle-timeout and the
+/// reaper is about to put it to sleep (drain/pause — the *trigger*, not a
+/// new sleep mechanism: see Plan 170 WS-B). The implementation performs the
+/// backend-appropriate sleep (drain+snapshot for snapshot-capable backends,
+/// clean stop with data disk + TAP retained for libkrun/apple-container).
+/// Returning `Err` leaves the VM running so the next tick retries; the
+/// reaper itself flips `paused = true` in the registry on success.
+pub type SleepFn = Box<dyn Fn(&str, &VmRegistration) -> Result<(), String> + Send + Sync>;
+
+/// Per-VM tag whose value (whole seconds) overrides the global idle
+/// timeout for one workload — e.g. a long-lived service tagged
+/// `idle_timeout_secs=0` opts out, a scratch box tags a tighter bound.
+pub const IDLE_TIMEOUT_TAG: &str = "idle_timeout_secs";
+
+/// Env var carrying the global idle timeout (whole seconds). Unset or
+/// unparseable → idle-sleep is off (opt-in), so a plain `mvmctl start` is
+/// unchanged unless the operator asks for density.
+pub const IDLE_TIMEOUT_ENV: &str = "MVM_IDLE_TIMEOUT";
+
+/// Idle-sleep configuration the reaper consults per tick. Held as
+/// `Option` on [`Reaper`] so the default (TTL-only) path is byte-for-byte
+/// the pre-WS-B behavior — mvmd and any other consumer that builds a
+/// `Reaper::new(...)` without opting in see no change.
+pub struct IdleConfig {
+    /// Backend-appropriate sleep callback (see [`SleepFn`]).
+    pub sleep: SleepFn,
+    /// Global idle timeout, applied to any VM without an
+    /// [`IDLE_TIMEOUT_TAG`] override. `None` = no global default (idle
+    /// fires only for VMs carrying the per-VM tag).
+    pub default_timeout: Option<Duration>,
+}
+
+/// Read the global idle timeout from [`IDLE_TIMEOUT_ENV`] (whole
+/// seconds). `None` when unset, empty, unparseable, or zero — zero means
+/// "off", matching the opt-in posture.
+pub fn global_idle_timeout_from_env() -> Option<Duration> {
+    let raw = std::env::var(IDLE_TIMEOUT_ENV).ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Resolve the effective idle timeout for one record: the per-VM
+/// [`IDLE_TIMEOUT_TAG`] override if present and parseable, else
+/// `default`. A tag value of `0` (or a parseable override) wins over the
+/// default — including `0` to explicitly opt a workload out.
+pub fn resolve_idle_timeout(reg: &VmRegistration, default: Option<Duration>) -> Option<Duration> {
+    if let Some(raw) = reg.tags.get(IDLE_TIMEOUT_TAG) {
+        return raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|secs| (secs > 0).then(|| Duration::from_secs(secs)));
+    }
+    default
+}
+
+/// Elapsed time since the record was last active. Keys off `last_active`,
+/// falling back to `registered_at` when never touched (so a freshly
+/// registered VM isn't instantly idle). `None` if neither timestamp
+/// parses or the timestamp is in the future (clock skew).
+pub fn idle_elapsed(reg: &VmRegistration, now: DateTime<Utc>) -> Option<Duration> {
+    let raw = reg.last_active.as_deref().unwrap_or(&reg.registered_at);
+    let since = mvm_core::util::time::parse_iso8601(raw)?;
+    (now - since).to_std().ok()
+}
+
 pub struct Reaper {
     registry_path: PathBuf,
     teardown: TeardownFn,
+    idle: Option<IdleConfig>,
 }
 
 impl Reaper {
@@ -61,12 +135,24 @@ impl Reaper {
         Self {
             registry_path,
             teardown,
+            idle: None,
         }
     }
 
+    /// Opt into activity-driven idle-sleep (Plan 170 WS-B). Without this
+    /// the reaper is TTL-only, exactly as before. Builder-style so the
+    /// existing `Reaper::new(path, teardown)` call sites are unchanged.
+    pub fn with_idle_sleep(mut self, sleep: SleepFn, default_timeout: Option<Duration>) -> Self {
+        self.idle = Some(IdleConfig {
+            sleep,
+            default_timeout,
+        });
+        self
+    }
+
     /// Run a single sweep. Returns the per-VM outcomes; persists the
-    /// updated registry to disk only if at least one record was
-    /// removed.
+    /// updated registry to disk only if something actually changed (a
+    /// record was reaped, or an idle VM was slept and marked paused).
     pub fn tick(&self, now: DateTime<Utc>) -> Vec<ReapOutcome> {
         let mut registry = match VmNameRegistry::load(&self.registry_path) {
             Ok(r) => r,
@@ -75,13 +161,15 @@ impl Reaper {
             // best-effort.
             Err(_) => return Vec::new(),
         };
-        let outcomes = sweep(&mut registry, now, &self.teardown);
+        let outcomes = sweep(&mut registry, now, &self.teardown, self.idle.as_ref());
 
         // Only re-save the registry if something actually changed.
-        if outcomes
-            .iter()
-            .any(|o| matches!(o, ReapOutcome::Reaped { .. }))
-        {
+        if outcomes.iter().any(|o| {
+            matches!(
+                o,
+                ReapOutcome::Reaped { .. } | ReapOutcome::IdleSlept { .. }
+            )
+        }) {
             let _ = registry.save(&self.registry_path);
         }
         outcomes
@@ -89,13 +177,22 @@ impl Reaper {
 }
 
 /// Pure-logic sweep — testable without filesystem.
+///
+/// Per record, in precedence order: a malformed `expires_at` is reported
+/// and left in place; an **elapsed** TTL hard-reaps (teardown + deregister)
+/// as it always has; otherwise, when idle-sleep is configured, an idle VM
+/// past its (per-VM or global) timeout is *slept* (sleep callback + flip
+/// `paused = true`, record kept) so WS-C's wake can bring it back. TTL
+/// wins over idle — a VM whose TTL has elapsed is reaped, not slept.
 fn sweep(
     registry: &mut VmNameRegistry,
     now: DateTime<Utc>,
     teardown: &TeardownFn,
+    idle: Option<&IdleConfig>,
 ) -> Vec<ReapOutcome> {
     let mut outcomes = Vec::new();
     let mut to_remove = Vec::new();
+    let mut to_pause = Vec::new();
 
     // Snapshot the iteration so we can mutate `registry.vms` after.
     let snapshot: BTreeMap<String, VmRegistration> = registry
@@ -105,31 +202,54 @@ fn sweep(
         .collect();
 
     for (name, reg) in snapshot {
-        let Some(raw) = reg.expires_at.as_deref() else {
-            outcomes.push(ReapOutcome::Skipped);
-            continue;
-        };
-        let Some(expires) = mvm_core::util::time::parse_iso8601(raw) else {
-            outcomes.push(ReapOutcome::MalformedExpiry {
-                name: name.clone(),
-                raw: raw.to_string(),
-            });
-            continue;
-        };
-        if expires > now {
-            outcomes.push(ReapOutcome::Skipped);
-            continue;
-        }
-        match teardown(&name, &reg) {
-            Ok(()) => {
-                to_remove.push(name.clone());
-                outcomes.push(ReapOutcome::Reaped { name });
+        // ── TTL (terminal, wins over idle) ──────────────────────────
+        if let Some(raw) = reg.expires_at.as_deref() {
+            let Some(expires) = mvm_core::util::time::parse_iso8601(raw) else {
+                outcomes.push(ReapOutcome::MalformedExpiry {
+                    name: name.clone(),
+                    raw: raw.to_string(),
+                });
+                continue;
+            };
+            if expires <= now {
+                match teardown(&name, &reg) {
+                    Ok(()) => {
+                        to_remove.push(name.clone());
+                        outcomes.push(ReapOutcome::Reaped { name });
+                    }
+                    Err(e) => outcomes.push(ReapOutcome::TeardownFailed { name, error: e }),
+                }
+                continue;
             }
-            Err(e) => outcomes.push(ReapOutcome::TeardownFailed { name, error: e }),
         }
+
+        // ── Idle-sleep (opt-in; TTL not yet elapsed) ────────────────
+        if let Some(cfg) = idle
+            && reg.auto_resume
+            && !reg.paused
+            && let Some(timeout) = resolve_idle_timeout(&reg, cfg.default_timeout)
+            && idle_elapsed(&reg, now).is_some_and(|e| e > timeout)
+        {
+            match (cfg.sleep)(&name, &reg) {
+                Ok(()) => {
+                    to_pause.push(name.clone());
+                    outcomes.push(ReapOutcome::IdleSlept { name });
+                }
+                Err(e) => outcomes.push(ReapOutcome::SleepFailed { name, error: e }),
+            }
+            continue;
+        }
+
+        outcomes.push(ReapOutcome::Skipped);
     }
+
     for name in to_remove {
         registry.deregister(&name);
+    }
+    // Mark slept VMs paused so the next tick skips them (idle requires
+    // `!paused`) and `mvmctl ls` shows them as sleeping until woken.
+    for name in to_pause {
+        let _ = registry.set_paused(&name, true);
     }
     outcomes
 }
@@ -185,7 +305,7 @@ mod tests {
         let mut reg = registry_with_one(None);
         let now = Utc::now();
         let teardown = deregister_only_teardown();
-        let outcomes = sweep(&mut reg, now, &teardown);
+        let outcomes = sweep(&mut reg, now, &teardown, None);
         assert_eq!(outcomes, vec![ReapOutcome::Skipped]);
         assert!(reg.lookup("vm1").is_some());
     }
@@ -197,7 +317,7 @@ mod tests {
         let raw = future.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut reg = registry_with_one(Some(&raw));
         let teardown = deregister_only_teardown();
-        let outcomes = sweep(&mut reg, now, &teardown);
+        let outcomes = sweep(&mut reg, now, &teardown, None);
         assert_eq!(outcomes, vec![ReapOutcome::Skipped]);
         assert!(reg.lookup("vm1").is_some());
     }
@@ -209,7 +329,7 @@ mod tests {
         let raw = past.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut reg = registry_with_one(Some(&raw));
         let teardown = deregister_only_teardown();
-        let outcomes = sweep(&mut reg, now, &teardown);
+        let outcomes = sweep(&mut reg, now, &teardown, None);
         assert_eq!(
             outcomes,
             vec![ReapOutcome::Reaped {
@@ -224,7 +344,7 @@ mod tests {
         let mut reg = registry_with_one(Some("not a real timestamp"));
         let now = Utc::now();
         let teardown = deregister_only_teardown();
-        let outcomes = sweep(&mut reg, now, &teardown);
+        let outcomes = sweep(&mut reg, now, &teardown, None);
         assert_eq!(
             outcomes,
             vec![ReapOutcome::MalformedExpiry {
@@ -244,7 +364,7 @@ mod tests {
         let raw = past.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut reg = registry_with_one(Some(&raw));
         let teardown: TeardownFn = Box::new(|_, _| Err("backend down".to_string()));
-        let outcomes = sweep(&mut reg, now, &teardown);
+        let outcomes = sweep(&mut reg, now, &teardown, None);
         assert!(matches!(
             outcomes.as_slice(),
             [ReapOutcome::TeardownFailed { name, .. }] if name == "vm1"
@@ -267,7 +387,7 @@ mod tests {
             assert_eq!(registration.vm_dir, "/tmp/vm1");
             Ok(())
         });
-        let _ = sweep(&mut reg, now, &teardown);
+        let _ = sweep(&mut reg, now, &teardown, None);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -345,5 +465,234 @@ mod tests {
         let path = PathBuf::from("/definitely/does/not/exist/vm-names.json");
         let reaper = Reaper::new(path, deregister_only_teardown());
         assert!(reaper.tick(Utc::now()).is_empty());
+    }
+
+    // -------- Idle-sleep (Plan 170 WS-B) --------
+
+    /// One registration with controllable activity/auto-resume/paused/tag.
+    fn idle_registry(
+        last_active_secs_ago: i64,
+        auto_resume: bool,
+        paused: bool,
+        tag: Option<&str>,
+    ) -> (VmNameRegistry, DateTime<Utc>) {
+        let now = Utc::now();
+        let mut tags = BTreeMap::new();
+        if let Some(t) = tag {
+            tags.insert(IDLE_TIMEOUT_TAG.to_string(), t.to_string());
+        }
+        let mut reg = VmNameRegistry::default();
+        reg.register_with_metadata(RegisterParams {
+            name: "vm1",
+            vm_dir: "/tmp/vm1",
+            network: "default",
+            guest_ip: None,
+            slot_index: 0,
+            tags,
+            expires_at: None,
+            auto_resume,
+        })
+        .unwrap();
+        let la = (now - chrono::Duration::seconds(last_active_secs_ago))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        reg.touch_last_active("vm1", la).unwrap();
+        if paused {
+            reg.set_paused("vm1", true).unwrap();
+        }
+        (reg, now)
+    }
+
+    /// A sleep callback that counts calls; never fails.
+    fn counting_sleep(counter: Arc<AtomicUsize>) -> SleepFn {
+        Box::new(move |_name, _reg| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    fn idle_cfg(sleep: SleepFn, default_secs: Option<u64>) -> IdleConfig {
+        IdleConfig {
+            sleep,
+            default_timeout: default_secs.map(Duration::from_secs),
+        }
+    }
+
+    #[test]
+    fn idle_elapsed_prefers_last_active_then_registered_at() {
+        let now = Utc::now();
+        let mut reg = registry_with_one(None);
+        // No last_active → falls back to registered_at (~now) → tiny elapsed.
+        let e = idle_elapsed(reg.lookup("vm1").unwrap(), now).unwrap();
+        assert!(e < Duration::from_secs(5));
+        // With last_active 120s ago → ~120s elapsed.
+        let la = (now - chrono::Duration::seconds(120))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        reg.touch_last_active("vm1", la).unwrap();
+        let e = idle_elapsed(reg.lookup("vm1").unwrap(), now).unwrap();
+        assert!(
+            e >= Duration::from_secs(115) && e <= Duration::from_secs(125),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_idle_timeout_tag_overrides_default() {
+        let (reg, _) = idle_registry(0, true, false, Some("30"));
+        assert_eq!(
+            resolve_idle_timeout(reg.lookup("vm1").unwrap(), Some(Duration::from_secs(600))),
+            Some(Duration::from_secs(30))
+        );
+        // Tag "0" opts the workload out even when a global default exists.
+        let (reg, _) = idle_registry(0, true, false, Some("0"));
+        assert_eq!(
+            resolve_idle_timeout(reg.lookup("vm1").unwrap(), Some(Duration::from_secs(600))),
+            None
+        );
+        // No tag → the default applies.
+        let (reg, _) = idle_registry(0, true, false, None);
+        assert_eq!(
+            resolve_idle_timeout(reg.lookup("vm1").unwrap(), Some(Duration::from_secs(600))),
+            Some(Duration::from_secs(600))
+        );
+    }
+
+    #[test]
+    fn sweep_sleeps_idle_vm_and_marks_paused() {
+        let (mut reg, now) = idle_registry(120, true, false, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), Some(60));
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert_eq!(
+            outcomes,
+            vec![ReapOutcome::IdleSlept {
+                name: "vm1".to_string()
+            }]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Record kept, now paused — so the next tick won't re-sleep it.
+        assert!(reg.lookup("vm1").unwrap().paused);
+    }
+
+    #[test]
+    fn sweep_idle_run_twice_sleeps_once() {
+        let (mut reg, now) = idle_registry(120, true, false, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), Some(60));
+        let _ = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        let second = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert_eq!(
+            second,
+            vec![ReapOutcome::Skipped],
+            "paused VM must not re-sleep"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn sweep_does_not_sleep_when_not_yet_idle() {
+        let (mut reg, now) = idle_registry(10, true, false, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), Some(60));
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert_eq!(outcomes, vec![ReapOutcome::Skipped]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn sweep_never_sleeps_when_auto_resume_false() {
+        let (mut reg, now) = idle_registry(120, false, false, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), Some(60));
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert_eq!(outcomes, vec![ReapOutcome::Skipped]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn sweep_idle_off_by_default_without_config() {
+        // No IdleConfig → idle never fires even for a long-idle VM.
+        let (mut reg, now) = idle_registry(99999, true, false, None);
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), None);
+        assert_eq!(outcomes, vec![ReapOutcome::Skipped]);
+        assert!(!reg.lookup("vm1").unwrap().paused);
+    }
+
+    #[test]
+    fn sweep_idle_tag_enables_without_global_default() {
+        // default_timeout None, but the per-VM tag sets 60s → sleeps.
+        let (mut reg, now) = idle_registry(120, true, false, Some("60"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), None);
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert_eq!(
+            outcomes,
+            vec![ReapOutcome::IdleSlept {
+                name: "vm1".to_string()
+            }]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn sweep_ttl_wins_over_idle() {
+        // VM is both expired (TTL) and idle — TTL reaps, idle is not invoked.
+        let now = Utc::now();
+        let past = (now - chrono::Duration::seconds(60))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut reg = registry_with_one(Some(&past));
+        let la = (now - chrono::Duration::seconds(120))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        reg.touch_last_active("vm1", la).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), Some(60));
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert_eq!(
+            outcomes,
+            vec![ReapOutcome::Reaped {
+                name: "vm1".to_string()
+            }]
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "idle sleep must not fire when TTL reaps"
+        );
+        assert!(reg.lookup("vm1").is_none());
+    }
+
+    #[test]
+    fn sweep_sleep_failure_keeps_vm_running() {
+        let (mut reg, now) = idle_registry(120, true, false, None);
+        let cfg = IdleConfig {
+            sleep: Box::new(|_, _| Err("drain timed out".to_string())),
+            default_timeout: Some(Duration::from_secs(60)),
+        };
+        let outcomes = sweep(&mut reg, now, &deregister_only_teardown(), Some(&cfg));
+        assert!(matches!(
+            outcomes.as_slice(),
+            [ReapOutcome::SleepFailed { name, .. }] if name == "vm1"
+        ));
+        // Left running for the next tick to retry — not paused.
+        assert!(!reg.lookup("vm1").unwrap().paused);
+    }
+
+    #[test]
+    fn global_idle_timeout_from_env_parses_and_treats_zero_as_off() {
+        // SAFETY: process-isolated under nextest; set + clear within the test.
+        unsafe { std::env::set_var(IDLE_TIMEOUT_ENV, "45") };
+        assert_eq!(
+            global_idle_timeout_from_env(),
+            Some(Duration::from_secs(45))
+        );
+        unsafe { std::env::set_var(IDLE_TIMEOUT_ENV, "0") };
+        assert_eq!(global_idle_timeout_from_env(), None);
+        unsafe { std::env::set_var(IDLE_TIMEOUT_ENV, "garbage") };
+        assert_eq!(global_idle_timeout_from_env(), None);
+        unsafe { std::env::remove_var(IDLE_TIMEOUT_ENV) };
+        assert_eq!(global_idle_timeout_from_env(), None);
     }
 }

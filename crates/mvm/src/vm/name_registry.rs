@@ -481,19 +481,28 @@ mod tests {
     fn touch_last_active_sets_timestamp_and_returns_false_for_unknown() {
         let mut reg = VmNameRegistry::default();
         reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
-        assert!(reg.touch_last_active("vm1", "2026-01-01T00:00:00Z").unwrap());
+        assert!(
+            reg.touch_last_active("vm1", "2026-01-01T00:00:00Z")
+                .unwrap()
+        );
         assert_eq!(
             reg.lookup("vm1").unwrap().last_active.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
         // A later touch overwrites.
-        assert!(reg.touch_last_active("vm1", "2026-01-01T00:05:00Z").unwrap());
+        assert!(
+            reg.touch_last_active("vm1", "2026-01-01T00:05:00Z")
+                .unwrap()
+        );
         assert_eq!(
             reg.lookup("vm1").unwrap().last_active.as_deref(),
             Some("2026-01-01T00:05:00Z")
         );
         // Unknown VM → Ok(false), no error.
-        assert!(!reg.touch_last_active("ghost", "2026-01-01T00:00:00Z").unwrap());
+        assert!(
+            !reg.touch_last_active("ghost", "2026-01-01T00:00:00Z")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -501,7 +510,8 @@ mod tests {
         // Roundtrip a touched record.
         let mut reg = VmNameRegistry::default();
         reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
-        reg.touch_last_active("vm1", "2026-01-01T00:00:00Z").unwrap();
+        reg.touch_last_active("vm1", "2026-01-01T00:00:00Z")
+            .unwrap();
         let json = serde_json::to_string(&reg).unwrap();
         let parsed: VmNameRegistry = serde_json::from_str(&json).unwrap();
         assert_eq!(
