@@ -18,6 +18,7 @@
 //!
 //! - `STDOUT TEXT`        — write `TEXT\n` to stdout
 //! - `STDERR TEXT`        — write `TEXT\n` to stderr
+//! - `ENV NAME`           — write `NAME=<value>\n` (or `NAME=<unset>\n`) to stdout
 //! - `CAT_STDIN`          — copy remaining stdin to stdout, no newline
 //! - `FD3_HEX HEX`        — hex-decode HEX, write raw bytes to fd 3
 //! - `SLEEP_MS N`         — sleep N milliseconds
@@ -63,6 +64,14 @@ fn main() {
                 let mut err = io::stderr().lock();
                 writeln!(err, "{arg}").unwrap();
                 err.flush().unwrap();
+            }
+            "ENV" => {
+                let mut out = io::stdout().lock();
+                match std::env::var(arg) {
+                    Ok(v) => writeln!(out, "{arg}={v}").unwrap(),
+                    Err(_) => writeln!(out, "{arg}=<unset>").unwrap(),
+                }
+                out.flush().unwrap();
             }
             "CAT_STDIN" => {
                 let mut out = io::stdout().lock();

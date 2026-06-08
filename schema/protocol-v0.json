@@ -931,6 +931,24 @@
                 "timeout_secs"
               ],
               "properties": {
+                "env": {
+                  "description": "Env vars injected into the workload after `env_clear()` (Plan 129: `HTTP_PROXY` + secret placeholder vars). Empty for a plain call; omitted on the wire defaults to empty.",
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "maxItems": 2,
+                    "minItems": 2
+                  }
+                },
                 "stdin": {
                   "description": "Bytes piped to the wrapper's stdin.",
                   "type": "array",

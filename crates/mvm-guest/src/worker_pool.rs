@@ -342,6 +342,7 @@ impl WorkerPool {
         self: &Arc<Self>,
         stdin: Vec<u8>,
         timeout_secs: u64,
+        env: Vec<(String, String)>,
     ) -> Result<DispatchOutcome, DispatchError> {
         // Plan 73 Followup E: refuse dispatch until the after_start
         // probe has succeeded. Cheap atomic load on the hot path.
@@ -356,7 +357,7 @@ impl WorkerPool {
         let cancelled = Arc::new(AtomicBool::new(false));
         let watchdog = spawn_watchdog(pgid, timeout_secs, Arc::clone(&cancelled));
 
-        let result = run_one_call(&mut handle, stdin, timeout_secs);
+        let result = run_one_call(&mut handle, stdin, timeout_secs, env);
         cancelled.store(true, Ordering::Release);
         let _ = watchdog.join();
 
@@ -565,10 +566,12 @@ fn run_one_call(
     handle: &mut WorkerHandle,
     stdin: Vec<u8>,
     timeout_secs: u64,
+    env: Vec<(String, String)>,
 ) -> Result<WorkerCallResponse, WorkerCallError> {
     let req = WorkerCallRequest {
         stdin,
         timeout_secs,
+        env,
     };
     write_pipe_frame(&mut handle.stdin, &req)
         .map_err(|e| WorkerCallError::Crash(format!("write request frame: {e}")))?;
