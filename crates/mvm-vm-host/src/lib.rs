@@ -13,3 +13,11 @@
 
 pub mod exit_capture;
 pub mod firecracker_bridge;
+
+// Rust-native Vz supervisor objc2 bridge (Plan 152 WS-B). macOS-only — the
+// objc2 Virtualization.framework stack only exists there; the
+// `mvm-vz-supervisor` bin is the sole consumer. Kept in the lib (not inline in
+// the bin) so the config→VZ translation and the dispatch/delegate bridge get
+// unit coverage independent of a live VM boot.
+#[cfg(target_os = "macos")]
+pub mod vz_objc;
