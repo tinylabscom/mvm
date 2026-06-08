@@ -383,15 +383,39 @@ def literal(value: str) -> _ir.EnvValue1:
     )
 
 
-def secret(name: str, *, var: str | None = None) -> _ir.EnvValue2:
-    """Reference a named secret from the host keystore. ``var`` is the
-    env-var name inside the guest; defaults to ``name`` itself when
-    omitted. The supervisor's ``KeystoreReleaser`` resolves the value
-    at admission time — the SDK only declares the reference.
+def secret(
+    name: str,
+    *,
+    type: str,
+    hosts: list[str],
+    var: str | None = None,
+) -> _ir.EnvValue2:
+    """Reference a named secret from the host keystore for egress
+    substitution (ADR-067 / Plan 129). The guest only ever receives an
+    opaque placeholder in the env var ``var`` (defaults to ``name``); the
+    host substitution endpoint injects/signs the real credential on
+    outbound requests and never lets it enter the guest.
+
+    ``type`` is how the credential authenticates the request — one of
+    ``bearer`` / ``basic`` / ``sigv4`` / ``hmac``. ``hosts`` is the
+    allow-list of destinations the substituted credential may reach
+    (claim 12); ``*.`` subdomain wildcards are supported. Both are
+    required — an egress secret with no declared destination or auth
+    type can't be bound, and the resolver fails closed on an empty host
+    list.
     """
+    try:
+        auth = _ir.AuthType(type)
+    except ValueError:
+        allowed = ", ".join(t.value for t in _ir.AuthType)
+        raise ValueError(f"secret type must be one of {{{allowed}}}, got {type!r}") from None
+    if not hosts:
+        raise ValueError("secret hosts must be non-empty (claim 12: a secret must be bound to a destination)")
     return _ir.EnvValue2(
         kind=_kind_value(_ir.EnvValue2, "secret_ref"),
         ref=_ir.SecretRef(
+            allowed_hosts=list(hosts),
+            auth_type=auth,
             mount=_ir.SecretMount1(
                 kind=_kind_value(_ir.SecretMount1, "env"),
                 var=var if var is not None else name,
