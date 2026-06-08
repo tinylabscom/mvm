@@ -48,11 +48,28 @@ on the guest *and* leak today.
    non-SDK (plan-declared)** — on the box (the example workload + a non-SDK plan
    with `.secrets`). Verify the guest's env/fs hold only the placeholder, never
    the value.
-2. **Wire `SecretsScanner` + `PiiRedactor` into `build_egress_scan`** (the live
-   gateway-bridge ScanStage path the workload VMs use), fail-closed, and
-   box-validate that an **undeclared** secret-shaped / PII payload on egress is
-   dropped/redacted + audited — not just a placeholder. This is the backstop that
-   makes "without the SDK / undeclared" safe.
+2. **Wire a redacting secret/PII ScanStage into `build_egress_scan`** (the live
+   gateway-bridge ScanStage path the workload VMs use). **Behavior decided
+   (2026-06-08): an undeclared-but-detected secret is REDACTED IN-PLACE — the
+   matched bytes are replaced with a mask (e.g. `XXX`) and the request CONTINUES
+   without the secret.** This is a `Verdict::Modify` (rebuild-the-packet) path,
+   NOT a whole-request drop (`PlaceholderLeakScan` drops on a leaked placeholder;
+   this masks). Reuse the existing pieces: `SecretsScanner` (`DEFAULT_RULES`,
+   secret-shaped regex) + `PiiRedactor` (already does mask-replacement) for
+   detection/masking, and the `SubstitutionStage` `Verdict::Modify` /
+   packet-rebuild pattern for the in-place edit. Audit each redaction (claim-13
+   style: category + destination, never the value).
+   - Rationale: a workload that needs a credential should **declare** it (→
+     substitution → the real value is injected and never on the guest). An
+     undeclared secret that shows up on egress is scrubbed to `XXX` rather than
+     blocking the whole request — the request proceeds credential-less (likely a
+     downstream 401, the correct signal to declare it), and the secret never
+     leaves. Box-validate: an undeclared secret-shaped / PII payload on egress
+     comes out masked (`XXX`), the rest of the request intact, and the redaction
+     is audited.
+   - (Keep `PlaceholderLeakScan`'s drop for leaked *placeholders* — a placeholder
+     escaping raw is a host/transport bug, fail-closed; a real secret-shaped blob
+     is a workload mistake, mask-and-continue.)
 
 > Decide whether Phase E is in this session's scope or its own follow-up, but the
 > invariant is not fully satisfied until #2 ships. Substitution (#1) is the
