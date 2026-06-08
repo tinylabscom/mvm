@@ -25,6 +25,68 @@ fn main() {
     std::process::exit(1);
 }
 
+/// Ad-hoc entitlements plist applied at first launch. Virtualization-only — the
+/// `hypervisor` entitlement is libkrun's; the Vz supervisor only instantiates a
+/// `VZVirtualMachine`, which `Hypervisor.framework` rejects from an unsigned
+/// process. Mirrors `crates/mvm-vz-supervisor/Entitlements.plist`.
+#[cfg(target_os = "macos")]
+const VZ_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+    <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+    \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+    <plist version=\"1.0\"><dict>\n\
+    <key>com.apple.security.virtualization</key><true/>\n\
+    </dict></plist>";
+
+/// Self-sign ad-hoc with the virtualization entitlement, then re-exec — we ship
+/// the bin unsigned, and VZ start is rejected without it. Mirrors
+/// `apple_container::ensure_signed` (virtualization-only). The `MVM_VZ_SIGNED`
+/// guard prevents an exec loop; `exec()` preserves the pid and the stdin pipe
+/// the spawner writes the config to, so this is transparent to `mvm_backend::vz`.
+/// Best-effort: a signing failure logs and proceeds so the real entitlement
+/// error from `start()` is what surfaces.
+#[cfg(target_os = "macos")]
+fn ensure_self_signed() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    if std::env::var("MVM_VZ_SIGNED").as_deref() == Ok("1") {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if let Ok(out) = Command::new("codesign")
+        .args(["-d", "--entitlements", "-", "--xml"])
+        .arg(&exe)
+        .output()
+        && out.status.success()
+        && String::from_utf8_lossy(&out.stdout).contains("com.apple.security.virtualization")
+    {
+        return;
+    }
+    let ent = std::env::temp_dir().join("mvm-vz-supervisor-entitlements.plist");
+    if std::fs::write(&ent, VZ_ENTITLEMENTS_PLIST).is_err() {
+        return;
+    }
+    let signed = Command::new("codesign")
+        .args(["--sign", "-", "--force", "--entitlements"])
+        .arg(&ent)
+        .arg(&exe)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !signed {
+        eprintln!("mvm-vz-supervisor: ad-hoc codesign failed; VM start may be rejected");
+        return;
+    }
+    let err = Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .env("MVM_VZ_SIGNED", "1")
+        .exec();
+    eprintln!("mvm-vz-supervisor: re-exec after signing failed: {err}");
+    std::process::exit(1);
+}
+
 #[cfg(target_os = "macos")]
 fn main() -> anyhow::Result<()> {
     use std::io::Read;
@@ -35,6 +97,9 @@ fn main() -> anyhow::Result<()> {
 
     use mvm_build::vz::SupervisorConfig;
     use mvm_vm_host::vz_objc::{VzSupervisor, remove_pid_file, write_pid_file};
+
+    // Sign + re-exec before anything else (preserves the stdin pipe).
+    ensure_self_signed();
 
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
