@@ -21,16 +21,16 @@ use base64::engine::general_purpose::STANDARD as B64;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
-use mvm_core::crypto::secret_store::SecretStore;
+use mvm_core::crypto::secret_store::{SecretStore, default_secret_store};
 use mvm_core::plan::SecretBinding;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_sdk::ir::AuthType;
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
-    AssembleError, BindingStore, HandedPlaceholders, LocalResolver, SecretResolver,
-    SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
-    find_placeholder,
+    AssembleError, BindingStore, FileBindingStore, HandedPlaceholders, LocalResolver,
+    SecretResolver, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
+    find_placeholder, secret_placeholder_env,
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::secret_audit::emit_secret_substituted;
@@ -141,6 +141,110 @@ pub enum FromPlanError {
     Assemble(#[from] AssembleError),
     #[error(transparent)]
     Forward(#[from] ForwardError),
+}
+
+/// Egress substitution wired for a VM that's about to boot: the running
+/// service to serve on the host (vsock for QEMU/Firecracker, per-port UDS for
+/// libkrun), plus the workload env that was persisted to the per-VM handoff
+/// sidecar.
+pub struct PreparedSubstitution {
+    /// The host endpoint to `serve`/`serve_vsock` for the VM's lifetime.
+    pub service: Arc<SubstitutionService>,
+    /// The env written to the handoff sidecar: the opaque placeholder vars +
+    /// `HTTP_PROXY`/`HTTPS_PROXY`. Exposed for callers that also set the guest
+    /// launch env directly; the sidecar is the source `mvmctl invoke` reads.
+    pub env: Vec<(String, String)>,
+}
+
+/// Errors preparing egress substitution at boot.
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareError {
+    #[error(transparent)]
+    FromPlan(#[from] FromPlanError),
+    /// Opening the host default binding/secret stores failed.
+    #[error(transparent)]
+    Store(#[from] anyhow::Error),
+    /// Persisting the per-VM handoff sidecar failed. Propagated (not swallowed)
+    /// because a workload booted believing its secrets are wired, when the
+    /// invoke path can't read them, would silently lose egress credentials.
+    #[error("write substitution handoff for {vm}: {source}")]
+    Handoff { vm: String, source: std::io::Error },
+}
+
+/// Prepare egress substitution for `vm_name` from its admitted plan's secret
+/// bindings, using the host's default binding + secret stores (the same ones
+/// `mvmctl secret set` writes). `Ok(None)` when the plan binds no secrets —
+/// nothing to wire, and `mvmctl invoke` finds no sidecar (its no-injected-env
+/// default). See [`prepare_substitution_with_stores`] for the injectable form.
+pub fn prepare_substitution(
+    plan_secrets: &[SecretBinding],
+    tenant: &str,
+    vm_name: &str,
+    proxy_url: &str,
+    forward_timeout_secs: u64,
+) -> Result<Option<PreparedSubstitution>, PrepareError> {
+    if plan_secrets.is_empty() {
+        return Ok(None);
+    }
+    let bindings = FileBindingStore::default_location()?;
+    let secret_store: Arc<dyn SecretStore> = default_secret_store().into();
+    prepare_substitution_with_stores(
+        plan_secrets,
+        tenant,
+        vm_name,
+        proxy_url,
+        forward_timeout_secs,
+        &bindings,
+        secret_store,
+    )
+}
+
+/// [`prepare_substitution`] over caller-supplied stores (tests inject
+/// tempdir-backed `FileBindingStore`/`FileSecretStore`).
+///
+/// Mints the registry + service via [`SubstitutionService::from_plan`], builds
+/// the workload env (each secret's opaque placeholder + `HTTP_PROXY`/
+/// `HTTPS_PROXY` → `proxy_url`), and writes it to the per-VM handoff sidecar
+/// (`mvm_core::substitution_handoff`) so `mvmctl invoke` injects it into the
+/// `RunEntrypoint` call. No real secret value reaches the sidecar (claim 13);
+/// the placeholders resolve only host-side at serve time.
+pub fn prepare_substitution_with_stores(
+    plan_secrets: &[SecretBinding],
+    tenant: &str,
+    vm_name: &str,
+    proxy_url: &str,
+    forward_timeout_secs: u64,
+    bindings: &dyn BindingStore,
+    secret_store: Arc<dyn SecretStore>,
+) -> Result<Option<PreparedSubstitution>, PrepareError> {
+    if plan_secrets.is_empty() {
+        return Ok(None);
+    }
+    let (service, handed) = SubstitutionService::from_plan(
+        plan_secrets,
+        tenant,
+        bindings,
+        secret_store,
+        forward_timeout_secs,
+    )?;
+
+    let mut env = secret_placeholder_env(&handed);
+    // Route the workload's egress through the guest-local forward proxy. curl/
+    // libcurl honor only the lowercase names, most other runtimes the
+    // uppercase — set both so every workload's HTTP client picks it up.
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        env.push((key.to_string(), proxy_url.to_string()));
+    }
+
+    let handoff = mvm_core::substitution_handoff::SubstitutionHandoff { env: env.clone() };
+    mvm_core::substitution_handoff::write(vm_name, &handoff).map_err(|source| {
+        PrepareError::Handoff {
+            vm: vm_name.to_string(),
+            source,
+        }
+    })?;
+
+    Ok(Some(PreparedSubstitution { service, env }))
 }
 
 /// Forwards a prepared (credential-substituted) request to the real
@@ -905,6 +1009,102 @@ mod server_tests {
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
         assert!(handed[0].1.as_str().starts_with("mvm-secret-"));
+    }
+
+    #[test]
+    fn prepare_substitution_none_when_no_secrets() {
+        // Returns before touching any store or the sidecar.
+        let dir = tempdir().unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        let secret_store: Arc<dyn SecretStore> =
+            Arc::new(FileSecretStore::with_dir(dir.path().join("secrets")));
+        let out = prepare_substitution_with_stores(
+            &[],
+            "local",
+            "vm1",
+            "http://127.0.0.1:18080",
+            30,
+            &bindings,
+            secret_store,
+        )
+        .unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn prepare_substitution_writes_sidecar_with_placeholder_and_proxy() {
+        use crate::keyholder::SecretBindingMeta;
+        use mvm_core::plan::{SecretBinding, SecretSource};
+
+        // The sidecar write targets `vm_state_dir`, which reads MVM_DATA_DIR;
+        // serialize the env mutation so shared-process `cargo test` is honest.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let dir = tempdir().unwrap();
+        let prev = std::env::var_os("MVM_DATA_DIR");
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            )
+            .unwrap();
+        // No value set: prepare mints placeholders from the binding only — the
+        // value is resolved host-side at serve time, never here.
+        let secret_store: Arc<dyn SecretStore> =
+            Arc::new(FileSecretStore::with_dir(dir.path().join("secrets")));
+
+        let plan = [SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }];
+        let prepared = prepare_substitution_with_stores(
+            &plan,
+            "local",
+            "vm1",
+            "http://127.0.0.1:18080",
+            30,
+            &bindings,
+            secret_store,
+        )
+        .unwrap()
+        .expect("plan binds a secret");
+
+        let get = |k: &str| {
+            prepared
+                .env
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("HTTP_PROXY").as_deref(), Some("http://127.0.0.1:18080"));
+        assert_eq!(
+            get("https_proxy").as_deref(),
+            Some("http://127.0.0.1:18080")
+        );
+        assert!(get("OPENAI_API_KEY").unwrap().starts_with("mvm-secret-"));
+
+        // The persisted sidecar matches and carries no secret value.
+        let sidecar = mvm_core::substitution_handoff::read("vm1")
+            .unwrap()
+            .expect("sidecar written");
+        assert_eq!(sidecar.env, prepared.env);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
+            }
+        }
     }
 
     #[tokio::test]
