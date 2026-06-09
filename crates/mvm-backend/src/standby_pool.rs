@@ -101,6 +101,38 @@ impl SupervisorStandbyPool {
             Err(e) => Err(e).with_context(|| format!("remove {}", dir.display())),
         }
     }
+
+    /// Reap standbys that are dead (pid gone) or expired (`now - spawned > ttl`). For a
+    /// still-live expired standby, SIGTERM the supervisor first, then remove its dir.
+    /// Returns the reaped ids. Idle entitled processes must never accumulate (Plan 118
+    /// §"B-ii residual risk" item 3) — `cache prune` calls this on a timer.
+    pub fn reap_stale(&self, ttl: std::time::Duration, now: u64) -> Result<Vec<String>> {
+        let ttl_secs = ttl.as_secs();
+        let mut reaped = Vec::new();
+        for h in self.list()? {
+            let alive = pid_alive(h.pid);
+            let expired = now.saturating_sub(h.spawned_unix_secs) > ttl_secs;
+            if !alive || expired {
+                if alive {
+                    // Live but expired — stop the entitled supervisor before dropping state.
+                    // SAFETY: SIGTERM to a pid this host spawned; a stale pid is a no-op.
+                    unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+                }
+                self.remove(&h.id)?;
+                reaped.push(h.id);
+            }
+        }
+        Ok(reaped)
+    }
+}
+
+/// Seconds since the Unix epoch (best-effort; clamps a pre-epoch clock to 0). The reaper's
+/// `now` argument so callers can inject a fixed clock in tests.
+pub fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `kill(pid, 0)` liveness — 0 ⇒ the process exists (W1.2 reaper precedent).
@@ -198,6 +230,44 @@ mod tests {
         assert!(tmp.path().join("s1").exists());
         pool.remove("s1").unwrap();
         assert!(!tmp.path().join("s1").exists());
+    }
+
+    #[test]
+    fn reap_removes_dead_and_expired_keeps_live_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let now = now_unix_secs();
+        // Live + recent (spawned now) → kept.
+        let mut keep = handle("keep", "aa", StandbyState::Idle);
+        keep.spawned_unix_secs = now;
+        pool.record(&keep).unwrap();
+        // Dead pid → reaped regardless of age.
+        let mut dead = handle("dead", "aa", StandbyState::Idle);
+        dead.pid = 999_999;
+        dead.spawned_unix_secs = now;
+        pool.record(&dead).unwrap();
+        // Live but spawned long ago → expired → reaped (SIGTERM'd then removed). Use a
+        // real throwaway child so the reaper's SIGTERM hits a safe pid, not the test runner.
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut old = handle("old", "aa", StandbyState::Idle);
+        old.pid = sleeper.id();
+        old.spawned_unix_secs = 1;
+        pool.record(&old).unwrap();
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(3600), now)
+            .unwrap();
+        assert!(reaped.contains(&"dead".to_string()));
+        assert!(reaped.contains(&"old".to_string()));
+        assert!(!reaped.contains(&"keep".to_string()));
+        assert!(pool.load("keep").is_ok());
+        assert!(pool.load("dead").is_err());
+        assert!(pool.load("old").is_err());
+        // The live-expired standby's supervisor was SIGTERM'd.
+        let _ = sleeper.wait();
     }
 
     #[test]
