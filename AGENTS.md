@@ -186,11 +186,13 @@ work belongs in. Duplicated logic drifts out of sync, doubles the test surface,
 and is the single most common source of bugs in this repo. If an existing helper
 is *almost* right, extend or generalize it — don't fork a second copy.
 
-- **Use the helpers.** All `~/.mvm` paths go through `mvm-core::config` helpers
-  (`vm_state_dir`, `mvm_keys_dir`, …) — never build paths inline. Shell/VM ops go
-  through the `ShellEnvironment`/`BuildEnvironment` traits. Find the established
-  helper and call it; if one is missing, add it where it belongs and call it from
-  every site.
+- **Use the helpers.** All `~/.mvm` **and** `~/.cache/mvm` paths go through
+  `mvm-core::config` helpers (`vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
+  **never** build them inline with `std::env::var("HOME")` + `.join(...)`, which
+  silently ignores `MVM_DATA_DIR` / `MVM_CACHE_DIR` / XDG and breaks parallel-worktree
+  isolation. Shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
+  Find the established helper and call it; if one is missing, add it where it belongs
+  and call it from every site.
 - **Small, single-purpose functions.** Prefer many small functions that each do
   one thing and are trivially unit-testable over one large function with branches
   and side effects tangled together. If you can't write a focused test for it, it
