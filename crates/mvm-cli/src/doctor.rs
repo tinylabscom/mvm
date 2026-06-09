@@ -159,7 +159,37 @@ struct DoctorReport {
     /// Ordered by `BTreeMap`'s natural backend-name order so JSON
     /// output is deterministic.
     balloon_support: BTreeMap<String, bool>,
+    /// Per-backend warm-start tier + the Linux fast-resume substrate probe
+    /// (plan 123 Phase C). Surfaces the honest capability matrix — Firecracker
+    /// live-memory, Vz save/restore, libkrun disk-only — so a user can predict
+    /// which backend resumes from RAM vs. reboots from disk.
+    warm_start: WarmStartReport,
     all_ok: bool,
+}
+
+/// Per-backend warm-start capability + Linux fast-resume substrate, surfaced
+/// under `warm_start` in `mvmctl doctor --json` (plan 123 C4).
+#[derive(Debug, Serialize)]
+struct WarmStartReport {
+    /// Backend name → warm-start tier label (`SnapshotCapability::label`).
+    /// `BTreeMap` for deterministic JSON ordering, like `balloon_support`.
+    backends: BTreeMap<String, &'static str>,
+    /// The Linux-only fast-resume substrate (NBD module, HugeTLB reservation).
+    /// `null` off Linux — the substrate backs Firecracker's live-memory path,
+    /// which only runs on KVM; macOS reports per-backend tiers but N/A here.
+    substrate: Option<WarmStartSubstrate>,
+}
+
+/// Linux fast-resume substrate probe (plan 123 C2): the kernel pieces the
+/// Firecracker UFFD/NBD/hugepages resume recipe needs.
+#[derive(Debug, Serialize)]
+struct WarmStartSubstrate {
+    /// `/sys/module/nbd` present — the NBD module is loaded (Firecracker
+    /// serves the resumed rootfs over NBD).
+    nbd_module_loaded: bool,
+    /// `/proc/sys/vm/nr_hugepages` > 0 — 2 MB hugepages reserved for the UFFD
+    /// memfile backing a live-memory resume.
+    hugetlb_reserved: bool,
 }
 
 /// Plan 93 Phase 3 — surface the last Stage 0 builder-VM bootstrap
@@ -311,6 +341,9 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     // ── Balloon capability per backend ────────────────────────────
     let balloon_support = collect_balloon_support();
 
+    // ── Warm-start capability per backend (plan 123 Phase C) ───────
+    let warm_start = collect_warm_start_support();
+
     // ── Workflow filter (plan 74 W5) ──────────────────────────────
     // When `--workflow <name>` is set, drop checks whose category
     // is not in the workflow's relevant set. The filter is applied
@@ -334,6 +367,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
         checks,
         security_posture,
         balloon_support,
+        warm_start,
         all_ok,
     };
 
@@ -401,6 +435,7 @@ fn render_text(report: &DoctorReport) {
     }
     render_security_posture(&report.security_posture);
     render_balloon_support(&report.balloon_support);
+    render_warm_start_support(&report.warm_start);
 }
 
 /// Enumerate every backend's `capabilities().balloon`. The doctor
@@ -447,6 +482,100 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
             "  · No backend on this host advertises virtio-balloon. \
              `mem_initial` in mvm.toml will be ignored at boot.",
         );
+    }
+}
+
+// ── Warm-start capability (plan 123 Phase C) ──────────────────────
+
+/// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
+/// probe the fast-resume substrate. Surfaced so a user knows which backend
+/// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
+/// from a disk snapshot (libkrun) before relying on a warm start.
+fn collect_warm_start_support() -> WarmStartReport {
+    // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
+    // because save/restore is a warm-start tier worth surfacing.
+    let names = [
+        "firecracker",
+        "cloud-hypervisor",
+        "apple-container",
+        "docker",
+        "libkrun",
+        "qemu",
+        "vz",
+    ];
+    let mut backends = BTreeMap::new();
+    for name in names {
+        let b = AnyBackend::from_hypervisor(name);
+        backends.insert(b.name().to_string(), b.snapshot_capability().label());
+    }
+    WarmStartReport {
+        backends,
+        substrate: collect_warm_start_substrate(),
+    }
+}
+
+/// `<sys_module>/nbd` exists ⇒ the NBD kernel module is loaded. Pure so it's
+/// testable without `/sys`. Only `collect_warm_start_substrate` (Linux) and
+/// the unit tests call it; off Linux the non-test build has no caller.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn nbd_module_loaded_at(sys_module: &std::path::Path) -> bool {
+    sys_module.join("nbd").exists()
+}
+
+/// Parse `/proc/sys/vm/nr_hugepages`; > 0 ⇒ hugepages reserved. Pure so it's
+/// testable cross-platform; a non-numeric/empty read is "none reserved".
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn hugetlb_reserved_from(nr_hugepages: &str) -> bool {
+    nr_hugepages
+        .trim()
+        .parse::<u64>()
+        .map(|n| n > 0)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn collect_warm_start_substrate() -> Option<WarmStartSubstrate> {
+    let nr = std::fs::read_to_string("/proc/sys/vm/nr_hugepages").unwrap_or_default();
+    Some(WarmStartSubstrate {
+        nbd_module_loaded: nbd_module_loaded_at(std::path::Path::new("/sys/module")),
+        hugetlb_reserved: hugetlb_reserved_from(&nr),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn collect_warm_start_substrate() -> Option<WarmStartSubstrate> {
+    None
+}
+
+/// Print the warm-start matrix in `mvmctl doctor` text mode. One line per
+/// backend, then the Linux substrate (or N/A off Linux).
+fn render_warm_start_support(r: &WarmStartReport) {
+    let title = "Warm-start capability (per backend)";
+    println!("\n{}", title);
+    println!("{}", "-".repeat(title.len()));
+    for (backend, tier) in &r.backends {
+        ui::status_line(&format!("  {backend}:"), tier);
+    }
+    match &r.substrate {
+        Some(s) => {
+            ui::status_line(
+                "  substrate · NBD module",
+                if s.nbd_module_loaded {
+                    "loaded"
+                } else {
+                    "not loaded"
+                },
+            );
+            ui::status_line(
+                "  substrate · HugeTLB",
+                if s.hugetlb_reserved {
+                    "reserved"
+                } else {
+                    "none reserved"
+                },
+            );
+        }
+        None => ui::status_line("  substrate (Linux fast-resume)", "N/A (Linux-only)"),
     }
 }
 
@@ -854,7 +983,7 @@ fn vz_check(plat: Platform) -> Check {
 /// Order:
 ///
 /// 1. `MVM_VZ_SUPERVISOR_PATH` (explicit override)
-/// 2. Source-checkout `crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/debug/`
+/// 2. Adjacent to `mvmctl` (source-checkout `target/<profile>/` or installed layout)
 /// 3. Release-installed `~/.mvm/bin/mvm-vz-supervisor-<mvmctl-version>`
 fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
@@ -875,19 +1004,16 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     // Source-checkout path — workspace root is wherever `mvmctl`'s
     // build manifest sits; we can't introspect that from a doctor
     // function compiled into the binary, but we can probe the path
-    // relative to the workspace inferred from `current_exe` when
-    // the binary is running from `target/.../mvmctl`.
+    // adjacent to `mvmctl` — the cargo-built Rust `[[bin]]` lands next to
+    // the `mvmctl` exe in source-checkout (`target/<profile>/`) and in
+    // installed layouts, mirroring the VzBackend resolver.
     if let Ok(exe) = std::env::current_exe()
-        && let Some(workspace_root) = workspace_root_from_target_layout(&exe)
+        && let Some(dir) = exe.parent()
     {
-        let candidate = workspace_root
-            .join("crates/mvm-vz-supervisor/.build")
-            .join(arch_apple_macosx())
-            .join("debug")
-            .join("mvm-vz-supervisor");
+        let candidate = dir.join("mvm-vz-supervisor");
         if candidate.is_file() {
             let info = format!(
-                "supervisor at {} (source-checkout build)",
+                "supervisor at {} (adjacent / source-checkout build)",
                 candidate.display()
             );
             return (Some(candidate), info);
@@ -905,8 +1031,9 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     }
     (
         None,
-        "supervisor binary NOT FOUND — build via `crates/mvm-vz-supervisor/tools/build.sh` \
-         before `mvmctl up --backend vz`"
+        "supervisor binary NOT FOUND — build via \
+         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor` before \
+         `mvmctl up --backend vz`"
             .to_string(),
     )
 }
@@ -919,8 +1046,8 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
 ///   permitted to use Virtualization.framework).
 /// - `Some(false)` — codesign ran successfully but the entitlement is
 ///   absent from the binary. `mvmctl up --backend vz` will fail with
-///   an opaque framework error; rebuilding via `tools/build.sh` fixes
-///   it.
+///   an opaque framework error; the supervisor self-signs the
+///   entitlement on first launch, so a fresh run fixes it.
 /// - `None` — codesign couldn't be invoked (not on PATH, or the
 ///   binary path is wrong). Surfaced as `entitlement ?` in doctor; not
 ///   a hard failure because we can't distinguish "tooling unavailable"
@@ -987,28 +1114,6 @@ fn vz_runtime_probe(supervisor_path: &std::path::Path) -> Option<VzProbeResult> 
 /// drive it without invoking the supervisor.
 fn parse_vz_probe_output(stdout: &[u8]) -> Option<VzProbeResult> {
     serde_json::from_slice::<VzProbeResult>(stdout).ok()
-}
-
-/// Walk up from `target/<profile>/<exe>` to the workspace root.
-/// Returns `None` when the exe is not running from a cargo target
-/// layout (e.g. `cargo install` placed it under `~/.cargo/bin/`),
-/// which is correct — in that case there is no source checkout to
-/// probe.
-fn workspace_root_from_target_layout(exe: &std::path::Path) -> Option<std::path::PathBuf> {
-    let parent = exe.parent()?; // target/<profile>
-    let target = parent.parent()?; // target
-    if target.file_name().and_then(|n| n.to_str()) != Some("target") {
-        return None;
-    }
-    target.parent().map(std::path::Path::to_path_buf)
-}
-
-fn arch_apple_macosx() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64-apple-macosx"
-    } else {
-        "x86_64-apple-macosx"
-    }
 }
 
 fn docker_check(plat: Platform) -> Check {
@@ -2142,32 +2247,70 @@ fn security_snapshot_dirs_check() -> Check {
     }
 }
 
-/// macOS-only: VM launch needs the VZ + Hypervisor entitlements on the
-/// running binary. Off macOS the question is n/a.
+/// macOS-only: every sign target (mvmctl plus the supervisor binaries) needs
+/// the VZ and Hypervisor entitlements. Probes all paths from
+/// `collect_sign_targets` so an unsigned supervisor is not left unreported.
+/// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    let exe = std::env::current_exe().ok();
-    let present = exe
-        .as_deref()
-        .and_then(mvm_backend::providers::apple_container::entitlements_present);
-    match present {
-        None => Check {
+    use mvm_backend::providers::apple_container::{collect_sign_targets, entitlements_present};
+    let targets = collect_sign_targets();
+    // `entitlements_present` returns `None` off macOS for every path, so if
+    // the first target gives `None` the whole check is n/a.
+    let probed: Vec<(std::path::PathBuf, Option<bool>)> = targets
+        .into_iter()
+        .map(|p| {
+            let r = entitlements_present(&p);
+            (p, r)
+        })
+        .collect();
+    signing_check_from_probes(&probed)
+}
+
+/// Pure mapping: per-target probe results → Check. Separate so tests can
+/// drive it with fixture data without invoking codesign or the filesystem.
+fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> Check {
+    // All None → not on macOS; the question is n/a.
+    if probes.iter().all(|(_, r)| r.is_none()) {
+        return Check {
             name: "signing",
             category: "security",
             ok: true,
             info: "n/a (macOS only)".to_string(),
-        },
-        Some(true) => Check {
+        };
+    }
+    // Collect names of targets that are verifiably unsigned (Some(false)).
+    let unsigned: Vec<String> = probes
+        .iter()
+        .filter_map(|(p, r)| {
+            if *r == Some(false) {
+                Some(
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("<unknown>")
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    if unsigned.is_empty() {
+        Check {
             name: "signing",
             category: "security",
             ok: true,
-            info: "VZ + Hypervisor entitlements present".to_string(),
-        },
-        Some(false) => Check {
+            info: "VZ + Hypervisor entitlements present on all sign targets".to_string(),
+        }
+    } else {
+        Check {
             name: "signing",
             category: "security",
             ok: false,
-            info: "entitlements missing — run `mvmctl sign`".to_string(),
-        },
+            info: format!(
+                "entitlements missing on: {} — run `mvmctl sign`",
+                unsigned.join(", ")
+            ),
+        }
     }
 }
 
@@ -2343,7 +2486,7 @@ mod tests {
     fn entitlement_probe_parses_plist_without_entitlement() {
         // A binary that codesign succeeds against but carries no entitlements
         // (or carries a different set) — operator needs to rebuild via
-        // tools/build.sh.
+        // `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
         let stdout = br#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
@@ -2362,6 +2505,115 @@ mod tests {
         // broken" — the doctor's None-path is reserved for "couldn't run
         // codesign at all".
         assert!(!entitlement_present_in_codesign_output(b""));
+    }
+
+    // ── signing_check_from_probes unit tests ────────────────────────
+
+    #[test]
+    fn signing_check_all_none_is_na() {
+        // Off macOS every probe returns None → n/a, ok: true.
+        let probes = vec![(std::path::PathBuf::from("/usr/local/bin/mvmctl"), None)];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok);
+        assert!(c.info.contains("n/a"), "expected n/a, got: {}", c.info);
+    }
+
+    #[test]
+    fn signing_check_all_signed_is_ok() {
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                Some(true),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok, "all signed → ok; got: {}", c.info);
+        assert!(
+            c.info.contains("all sign targets"),
+            "expected 'all sign targets', got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_one_unsigned_supervisor_is_not_ok() {
+        // mvmctl signed, supervisor unsigned — doctor must NOT report OK.
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                Some(false),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(!c.ok, "unsigned supervisor must fail; got: {}", c.info);
+        assert!(
+            c.info.contains("mvm-vz-supervisor"),
+            "info must name the unsigned target; got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("mvmctl sign"),
+            "info must carry the remediation hint; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_mixed_none_and_false_treats_false_as_unsigned() {
+        // Some targets return None (probe failed / tooling unavailable),
+        // others return Some(false) (verifiably unsigned). The None ones
+        // must not be counted as "unsigned" — only confirmed Some(false)
+        // targets appear in the remediation list.
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-libkrun-supervisor"),
+                None,
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                Some(false),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(!c.ok, "at least one Some(false) → not ok; got: {}", c.info);
+        assert!(
+            c.info.contains("mvm-vz-supervisor"),
+            "must name the unsigned binary; got: {}",
+            c.info
+        );
+        assert!(
+            !c.info.contains("mvm-libkrun-supervisor"),
+            "None probe must not be listed as unsigned; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_all_unknown_probes_is_ok() {
+        // All probes return None → on macOS this means codesign wasn't
+        // available for every target (treated as "unknown, not a failure").
+        // The n/a branch fires only when ALL are None.
+        let probes = vec![
+            (std::path::PathBuf::from("/usr/local/bin/mvmctl"), None),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                None,
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok, "all None → n/a, ok; got: {}", c.info);
     }
 
     #[test]
@@ -2467,6 +2719,64 @@ mod tests {
     }
 
     #[test]
+    fn collect_warm_start_support_reports_per_backend_tier() {
+        let r = collect_warm_start_support();
+        // The honest per-backend warm-start matrix (plan 123 Phase C).
+        assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
+        assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
+        assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
+        // A backend with no warm-start support must not be silently dropped.
+        assert_eq!(r.backends.get("docker"), Some(&"unsupported"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn warm_start_substrate_is_none_off_linux() {
+        // The NBD/HugeTLB fast-resume substrate is Linux-only; macOS reports
+        // the per-backend tier but N/A for the substrate.
+        assert!(collect_warm_start_support().substrate.is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn warm_start_substrate_is_probed_on_linux() {
+        // On Linux the substrate is probed (values depend on the host; we only
+        // assert it's present, not loaded).
+        assert!(collect_warm_start_support().substrate.is_some());
+    }
+
+    #[test]
+    fn hugetlb_reserved_from_parses_count() {
+        assert!(!hugetlb_reserved_from("0\n"));
+        assert!(hugetlb_reserved_from("128\n"));
+        assert!(!hugetlb_reserved_from("garbage"));
+        assert!(!hugetlb_reserved_from(""));
+    }
+
+    #[test]
+    fn nbd_module_loaded_at_detects_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!nbd_module_loaded_at(tmp.path()));
+        std::fs::create_dir(tmp.path().join("nbd")).unwrap();
+        assert!(nbd_module_loaded_at(tmp.path()));
+    }
+
+    #[test]
+    fn doctor_report_serializes_warm_start() {
+        let json = serde_json::to_string(&DoctorReport {
+            workflow: None,
+            checks: vec![],
+            security_posture: collect_security_posture(),
+            balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
+            all_ok: true,
+        })
+        .unwrap();
+        assert!(json.contains("\"warm_start\""), "{json}");
+        assert!(json.contains("\"live-memory\""), "{json}");
+    }
+
+    #[test]
     fn registry_drift_summary_reports_clean_and_counts() {
         use mvm::vm::reconcile::ConvergeReport;
         let clean = ConvergeReport::default();
@@ -2492,6 +2802,7 @@ mod tests {
             }],
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
             all_ok: true,
         };
         let json = serde_json::to_string(&report).unwrap();
@@ -2514,6 +2825,7 @@ mod tests {
             checks: vec![],
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
             all_ok: true,
         };
         let json = serde_json::to_string(&report).unwrap();

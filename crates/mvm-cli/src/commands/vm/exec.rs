@@ -43,9 +43,9 @@ pub(in crate::commands) struct Args {
     /// carried by `--launch-plan`.
     #[arg(short, long)]
     pub env: Vec<String>,
-    /// Per-command timeout in seconds (default: 60)
-    #[arg(long, default_value = "60")]
-    pub timeout: u64,
+    /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
+    #[arg(long)]
+    pub timeout: Option<u64>,
     /// Path to an mvmforge document — either the `launch.json` artifact
     /// from `mvmforge compile` (top-level `entrypoint`) or the Workload IR
     /// manifest from `mvmforge emit` (top-level `apps[]`). The resolved
@@ -104,9 +104,9 @@ pub(in crate::commands) struct RunArgs {
     /// Disabled by `--profile restrictive`.
     #[arg(short, long)]
     pub env: Vec<String>,
-    /// Per-command timeout in seconds (default: 60)
-    #[arg(long, default_value = "60")]
-    pub timeout: u64,
+    /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
+    #[arg(long)]
+    pub timeout: Option<u64>,
     /// Write a signed execution receipt to this path. The receipt records
     /// command/env/mount hashes, output hashes, and exit status; it never
     /// stores raw argv, env values, stdout, or stderr.
@@ -454,8 +454,13 @@ fn build_exec_request(
                 "Using OCI image {} ({})",
                 cached.reference, cached.resolved_digest
             ));
-            emit_oci_run_admission(&cached, args.cpus, u64::from(memory_mib), args.timeout)
-                .context("admitting OCI image provenance for mvmctl run --image")?;
+            emit_oci_run_admission(
+                &cached,
+                args.cpus,
+                u64::from(memory_mib),
+                args.timeout.unwrap_or(60),
+            )
+            .context("admitting OCI image provenance for mvmctl run --image")?;
             if cached.pulled {
                 let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
                 mvm_core::audit_emit!(
@@ -745,7 +750,7 @@ impl RunPreflightSummary {
                 cpus: args.cpus,
                 memory: args.memory.clone(),
                 memory_mib,
-                timeout_secs: args.timeout,
+                timeout_secs: args.timeout.unwrap_or(60),
             },
             image,
             receipt: RunPreflightReceipt {
@@ -857,7 +862,7 @@ impl ReceiptInput {
             command,
             env_keys,
             add_dirs,
-            timeout_secs: args.timeout,
+            timeout_secs: args.timeout.unwrap_or(60),
         })
     }
 }
@@ -1013,7 +1018,7 @@ mod tests {
             profile,
             add_dir: Vec::new(),
             env: Vec::new(),
-            timeout: 60,
+            timeout: Some(60),
             receipt: None,
             json: false,
             dry_run: false,

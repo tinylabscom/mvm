@@ -1,20 +1,18 @@
 //! Plan 97 Phase B foundation — type-safe interface to
 //! `mvm-vz-supervisor`.
 //!
-//! The Vz backend (`mvm-backend::VzBackend`, lands in a follow-up
-//! slice) constructs a [`SupervisorConfig`], serializes it to JSON,
-//! and pipes it to the Swift supervisor binary on stdin. The Swift
-//! side decodes against an equivalent `Codable` schema in
-//! `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/Config.swift`
+//! The Vz backend (`mvm-backend::VzBackend`) constructs a
+//! [`SupervisorConfig`], serializes it to JSON, and pipes it to the
+//! Rust-native `mvm-vz-supervisor` binary on stdin, which decodes it
 //! with strict deny-unknown-fields semantics — ADR-002 claim 5 rests
-//! on those two decoders rejecting the same inputs.
+//! on that decoder rejecting malformed input (fuzzed in security.yml).
 //!
-//! Pure data + path resolution. No FFI, no Swift toolchain dep, no
-//! Vz framework binding. This crate compiles on every host the
-//! workspace targets, including Linux contributors who never touch
-//! the Vz code path (`has_vz()` returns `false` there). The Swift
-//! supervisor's actual build is gated on macOS via
-//! `crates/mvm-vz-supervisor/tools/build.sh`.
+//! Pure data + path resolution. No FFI, no Vz framework binding. This
+//! crate compiles on every host the workspace targets, including Linux
+//! contributors who never touch the Vz code path (`has_vz()` returns
+//! `false` there). The supervisor binary itself is the objc2 `[[bin]]`
+//! in `mvm-vm-host`, built via
+//! `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
 
 use std::path::PathBuf;
 
@@ -22,7 +20,7 @@ use std::path::PathBuf;
 
 /// JSON payload the host pipes to `mvm-vz-supervisor` on stdin.
 ///
-/// The schema **must** stay in lockstep with the Swift `Config.swift`
+/// The schema **must** stay in lockstep with the Rust `SupervisorConfig`
 /// decoder — both sides apply deny-unknown-fields. Adding a field
 /// requires landing both edits in the same PR (and the Phase A
 /// equivalence fuzz corpus catches drift in CI).
@@ -86,6 +84,32 @@ pub struct SupervisorConfig {
     /// a configured boot loader on restore).
     #[serde(default, skip_serializing_if = "StartupMode::is_default")]
     pub startup_mode: StartupMode,
+
+    // ── Audit substrate (Plan 152 WS-B slice 8 — flow-audited networking) ──
+    // The Rust-native Vz supervisor runs the Plan 141 gateway bridge in-process
+    // (payload_tap), so it needs the same admitted-plan + signing inputs the
+    // libkrun supervisor's config carries. All optional + omitted-when-absent so
+    // pre-slice-8 configs (and the dev/builder VM, which has no audit substrate)
+    // round-trip unchanged. When present, the supervisor splices the guest NIC
+    // through the bridge to gvproxy and chain-signs every flow event.
+    /// Owning tenant id (audit chain partition key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// `SignedExecutionPlan` envelope (JSON) the host admitted + signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<serde_json::Value>,
+    /// `PolicyBundle` (JSON), when the admitted plan pinned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<serde_json::Value>,
+    /// Audit chain directory (`~/.mvm/audit/`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_dir: Option<String>,
+    /// Gateway audit subscriber socket (`~/.mvm/audit/gateway-<vm>.sock`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_audit_socket: Option<String>,
+    /// Host Ed25519 signing key (mode 0600) the chain signer re-reads per start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key_path: Option<String>,
 }
 
 /// How the supervisor brings the VM up.
@@ -160,6 +184,17 @@ impl SupervisorConfig {
     /// hashing should layer a canonicalizer on top.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
+    }
+
+    /// True when the config carries a full audit substrate — the trigger for
+    /// the in-process flow-audited gvproxy bridge (Plan 152 WS-B slice 8).
+    /// Without it (dev / builder VMs) the supervisor direct-attaches gvproxy.
+    pub fn has_audit_substrate(&self) -> bool {
+        self.plan.is_some()
+            && self.tenant_id.is_some()
+            && self.audit_dir.is_some()
+            && self.gateway_audit_socket.is_some()
+            && self.signing_key_path.is_some()
     }
 }
 
@@ -343,27 +378,18 @@ pub fn supervisor_binary_path(home: &std::path::Path, mvmctl_version: &str) -> P
         .join(format!("{SUPERVISOR_BIN_PREFIX}{mvmctl_version}"))
 }
 
-/// Source-checkout layout: the Swift Package Manager build output
-/// lives under `<workspace>/crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/<config>/`.
-/// CLAUDE.md "Source-checkout builds never depend on mvm-published
-/// artifacts" — a contributor running `cargo run` from the workspace
-/// must use whatever the local `tools/build.sh` produced, not the
-/// `~/.mvm/bin/` release path.
+/// Source-checkout layout: the Rust-native `mvm-vz-supervisor` is a cargo
+/// `[[bin]]` in `mvm-vm-host`, so a workspace build lands in the cargo target
+/// dir. CLAUDE.md "Source-checkout builds never depend on mvm-published
+/// artifacts" — a contributor who has `cargo build -p mvm-vm-host --bin
+/// mvm-vz-supervisor`'d the bin uses that, not the `~/.mvm/bin/` release path.
+/// (The resolver's adjacent-to-exe probe covers `cargo run`; this is the
+/// fallback when `mvmctl` is invoked from outside `target/`.)
 pub fn source_tree_binary_path(workspace_root: &std::path::Path) -> PathBuf {
-    let arch = current_arch_triple_macos();
     workspace_root
-        .join("crates/mvm-vz-supervisor/.build")
-        .join(arch)
+        .join("target")
         .join("debug")
         .join("mvm-vz-supervisor")
-}
-
-fn current_arch_triple_macos() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64-apple-macosx"
-    } else {
-        "x86_64-apple-macosx"
-    }
 }
 
 // MARK: - Errors
@@ -423,6 +449,12 @@ mod tests {
             balloon: None,
             control_socket_path: None,
             startup_mode: StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
         }
     }
 
@@ -530,7 +562,7 @@ mod tests {
         // The Swift supervisor threads `read_only` onto
         // `VZSharedDirectory(readOnly:)`, so the wire format must
         // carry the field as `read_only` (snake_case) to match the
-        // strict-keys decoder in Config.swift.
+        // strict-keys decoder in the Rust SupervisorConfig.
         let mut cfg = minimal_config();
         cfg.virtio_fs = vec![
             VirtioFsShare {

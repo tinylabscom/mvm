@@ -40,7 +40,7 @@
 //! tap packet bytes; observers requiring `payload_tap` capability
 //! refuse at `Pipeline::observe` time with
 //! `BuildError::CapabilityMismatch`. A future plan extends Swift
-//! `Config.swift` to close that gap.
+//! the Rust `SupervisorConfig` to close that gap.
 
 use std::io::Read;
 use std::path::PathBuf;

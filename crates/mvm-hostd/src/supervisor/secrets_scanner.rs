@@ -38,7 +38,7 @@
 //!   This inspector trusts the proxy to hand it bounded bytes.
 
 use async_trait::async_trait;
-use regex::bytes::RegexSet;
+use regex::bytes::{Regex, RegexSet};
 
 use crate::supervisor::inspector::{Inspector, InspectorVerdict, RequestCtx};
 
@@ -122,6 +122,9 @@ pub const DEFAULT_RULES: &[SecretRule] = &[
 pub struct SecretsScanner {
     set: RegexSet,
     rule_names: Vec<&'static str>,
+    /// Per-rule compiled `Regex` (same source pattern as `set`) — used by
+    /// [`Self::redact`] to extract match spans for in-place masking.
+    regexes: Vec<Regex>,
 }
 
 impl SecretsScanner {
@@ -133,7 +136,15 @@ impl SecretsScanner {
         let patterns: Vec<&str> = rules.iter().map(|r| r.pattern).collect();
         let set = RegexSet::new(&patterns)?;
         let rule_names = rules.iter().map(|r| r.name).collect();
-        Ok(Self { set, rule_names })
+        let regexes = patterns
+            .iter()
+            .map(|p| Regex::new(p))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            set,
+            rule_names,
+            regexes,
+        })
     }
 
     /// Convenience constructor with the curated [`DEFAULT_RULES`]
@@ -151,6 +162,27 @@ impl SecretsScanner {
             .into_iter()
             .map(|idx| self.rule_names[idx])
             .collect()
+    }
+
+    /// Replace every secret-pattern match in `body` with
+    /// `mask`, returning the redacted bytes + the rule names that fired
+    /// (stable order). Plan 129 Phase E mask-and-continue: an undeclared
+    /// secret-shaped blob on egress is scrubbed in place rather than
+    /// dropping the request. `(body.to_vec(), [])` unchanged when nothing
+    /// matches.
+    pub fn redact(&self, body: &[u8], mask: &[u8]) -> (Vec<u8>, Vec<&'static str>) {
+        let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
+        if candidate_indices.is_empty() {
+            return (body.to_vec(), Vec::new());
+        }
+        let mut out = body.to_vec();
+        let mut fired: Vec<&'static str> = Vec::with_capacity(candidate_indices.len());
+        for idx in candidate_indices {
+            // Every match of a secret rule is masked (no validators here).
+            out = self.regexes[idx].replace_all(&out, mask).into_owned();
+            fired.push(self.rule_names[idx]);
+        }
+        (out, fired)
     }
 }
 
@@ -193,6 +225,25 @@ mod tests {
         let scanner = SecretsScanner::with_default_rules();
         let mut c = RequestCtx::new("example.com", 443, "/");
         assert!(scanner.inspect(&mut c).await.is_allow());
+    }
+
+    #[test]
+    fn redact_masks_secret_match_and_passes_clean_body() {
+        let s = SecretsScanner::with_default_rules();
+        let key = "sk-".to_owned() + &"a".repeat(48); // openai_api_key shape
+        let body = format!("auth Bearer {key} trailing").into_bytes();
+        let (out, fired) = s.redact(&body, b"XXX");
+        let masked = String::from_utf8_lossy(&out);
+        assert!(!masked.contains(&key), "secret not masked: {masked}");
+        assert!(
+            masked.contains("XXX") && masked.contains("trailing"),
+            "got {masked}"
+        );
+        assert!(fired.contains(&"openai_api_key"), "fired={fired:?}");
+
+        let (clean, none) = s.redact(b"no secrets here", b"XXX");
+        assert_eq!(clean, b"no secrets here");
+        assert!(none.is_empty());
     }
 
     #[tokio::test]

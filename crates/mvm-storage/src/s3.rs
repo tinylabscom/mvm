@@ -12,10 +12,12 @@
 //! transfer. Calling resolve from inside another tokio runtime would need the
 //! caller to offload it (a mvm-backend integration concern — B4 follow-up).
 //!
-//! Only the sync-to-cache path is unit-tested here (in-memory store). The
-//! real `AmazonS3` construction in [`S3MountProvider::from_s3_config`] is the
-//! network leg — compile-checked under `--features s3`, exercised against a
-//! live bucket in higher tiers.
+//! Tested without any S3/AWS/minio: the sync logic is generic over
+//! `ObjectStore`, exercised against both `InMemory` and the real on-disk
+//! `LocalFileSystem`. `from_s3_config`'s only S3-specific step is building an
+//! `AmazonS3` from env — `AmazonS3Builder::build()` is offline (no request
+//! until a list/get), so its input-validation leg is unit-tested directly; the
+//! wire behaviour beyond that is `object_store`'s own tested concern.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -257,5 +259,72 @@ mod tests {
         // relative path under the cache root), not an escape.
         let contained = contained_join(tmp.path(), "/data/sub").unwrap();
         assert!(contained.starts_with(tmp.path()));
+    }
+
+    #[test]
+    fn from_s3_config_rejects_missing_bucket() {
+        // `from_s3_config`'s only S3-specific leg is input validation +
+        // *offline* client construction (`AmazonS3Builder::build()` issues no
+        // network call — the wire behaviour is object_store's own tested
+        // concern, not ours, so no live/MinIO bucket is needed to cover this).
+        // A config without `bucket` must fail with a clear, field-named error
+        // before any client is built.
+        let tmp = tempfile::tempdir().unwrap();
+        // Match (not expect_err): the Ok type S3MountProvider isn't Debug.
+        match S3MountProvider::from_s3_config(&serde_json::json!({ "prefix": "data/" }), tmp.path())
+        {
+            Err(MountError::Volume(VolumeError::Other(msg))) => {
+                assert!(
+                    msg.contains("bucket"),
+                    "error must name the missing field: {msg}"
+                );
+            }
+            Ok(_) => panic!("missing bucket must be rejected"),
+            Err(other) => panic!("expected a clear missing-bucket error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn syncs_nested_keys_from_a_real_on_disk_object_store() {
+        // The sync logic is generic over `ObjectStore`, so validating it needs
+        // no S3/AWS/MinIO: drive it against object_store's real on-disk
+        // `LocalFileSystem` (genuine filesystem-backed list/get, unlike the
+        // `InMemory` HashMap). Proves nested keys mirror into subdirectories
+        // under the cache dir and the prefix isolates what's synced.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(store_dir.path()).unwrap(),
+        );
+        let seed_rt = tokio::runtime::Runtime::new().unwrap();
+        seed_rt.block_on(async {
+            for (key, body) in [
+                ("data/top.txt", &b"TOP"[..]),
+                ("data/sub/deep.txt", &b"DEEP"[..]),
+                ("other/skip.txt", &b"SKIP"[..]),
+            ] {
+                store
+                    .put(&ObjPath::from(key), Bytes::copy_from_slice(body).into())
+                    .await
+                    .unwrap();
+            }
+        });
+        drop(seed_rt);
+
+        let cache = tempfile::tempdir().unwrap();
+        let provider = S3MountProvider::new(store, cache.path()).unwrap();
+        let src = MountSource::External {
+            provider: "s3".into(),
+            config: serde_json::json!({ "bucket": "b", "prefix": "data/" }),
+        };
+        match provider.resolve(&src).unwrap() {
+            Mountable::HostPath(p) => {
+                assert_eq!(std::fs::read(p.join("top.txt")).unwrap(), b"TOP");
+                // Nested key mirrors into a subdirectory under the cache dir.
+                assert_eq!(std::fs::read(p.join("sub/deep.txt")).unwrap(), b"DEEP");
+                // Outside the prefix → never synced.
+                assert!(!p.join("skip.txt").exists());
+            }
+            other => panic!("expected HostPath cache dir, got {other:?}"),
+        }
     }
 }

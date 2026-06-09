@@ -3,7 +3,7 @@
 // reads on stdin.
 //
 // The Rust parser is the canonical schema; the Swift `JSONDecoder` in
-// `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/Config.swift`
+// the Rust `SupervisorConfig` schema
 // mirrors it field-for-field with deny-unknown-fields semantics
 // (`StrictKeys` protocol). The intent of the corpus equivalence
 // assertion (Plan 97 Phase A checklist item) is "the Rust and Swift

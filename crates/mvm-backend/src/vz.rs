@@ -3,8 +3,8 @@
 //! Plan 97 / ADR-056. Tier 2 microVM backend for macOS 13+ that runs
 //! the workload directly on the host (no nested Firecracker, no
 //! libkrun in the path). Lifecycle delegates to a per-VM
-//! `mvm-vz-supervisor` Swift subprocess (lives in
-//! `crates/mvm-vz-supervisor/`) — same one-process-per-VM contract
+//! Rust-native `mvm-vz-supervisor` (the objc2 `[[bin]]` in
+//! `mvm-vm-host`) — same one-process-per-VM contract
 //! `LibkrunBackend` uses, swapped underneath.
 //!
 //! ## Why opt-in only
@@ -949,7 +949,7 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
 /// follow-up plan after Phase 3c — until then, the substrate's
 /// path values are computed but not threaded into
 /// `vz::SupervisorConfig` (which would also require lockstep Swift
-/// `Config.swift` decoder updates per the schema deny-unknown-fields
+/// the Rust `SupervisorConfig` decoder updates per the schema deny-unknown-fields
 /// contract). The Swift bridge already writes flow events to
 /// `events_ingest_socket_path` (PR #487 commit 7); the drainer
 /// closes the loop.
@@ -972,13 +972,30 @@ fn build_supervisor_config(
     state_dir: &Path,
     gvproxy: &host_gvproxy::HostGvproxyInfo,
 ) -> Result<vz::SupervisorConfig> {
-    // Plan 112 Phase 3c — defense-in-depth validation. The resolved
-    // AuditSubstrate isn't yet threaded into vz::SupervisorConfig
-    // (Vz drainer is a follow-up), but the tenant_id / vm_name
-    // allowlist check fires here so an unsafe value never reaches
-    // the Swift supervisor.
-    let _substrate =
+    // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
+    // validation). Plan 152 WS-B slice 8 threads it into the Rust-native
+    // supervisor's config so it runs the in-process flow-audited gvproxy bridge
+    // (payload_tap). When the producer threaded an AdmittedPlan in (`tenant_id`
+    // Some), the substrate carries the resolved paths; otherwise it's all-None
+    // and the supervisor direct-attaches gvproxy.
+    let substrate =
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
+    // Signed-plan + bundle envelopes from VmStartConfig, as JSON Values the
+    // supervisor decodes into the typed plan + bundle for the bridge.
+    let plan = match config.plan_json.as_deref() {
+        Some(s) => Some(
+            serde_json::from_str(s)
+                .map_err(|e| anyhow!("parse VmStartConfig.plan_json as JSON: {e}"))?,
+        ),
+        None => None,
+    };
+    let bundle = match config.bundle_json.as_deref() {
+        Some(s) => Some(
+            serde_json::from_str(s)
+                .map_err(|e| anyhow!("parse VmStartConfig.bundle_json as JSON: {e}"))?,
+        ),
+        None => None,
+    };
     let state_dir_str = state_dir.to_string_lossy().into_owned();
     let vsock_dir = state_dir.join("vsock").to_string_lossy().into_owned();
     let console_log = state_dir.join("console.log").to_string_lossy().into_owned();
@@ -1081,6 +1098,22 @@ fn build_supervisor_config(
         // boot path; the restore path constructs its own config in
         // `build_restore_supervisor_config` below.
         startup_mode: vz::StartupMode::Boot,
+        // Audit substrate (Plan 152 WS-B slice 8) — threaded from the admitted
+        // plan so the Rust supervisor runs the in-process flow-audited gvproxy
+        // bridge. All-None for an un-admitted (dev / builder) start → direct
+        // gvproxy attach.
+        tenant_id: substrate.tenant_id,
+        plan,
+        bundle,
+        audit_dir: substrate
+            .audit_dir
+            .map(|p| p.to_string_lossy().into_owned()),
+        gateway_audit_socket: substrate
+            .gateway_audit_socket
+            .map(|p| p.to_string_lossy().into_owned()),
+        signing_key_path: substrate
+            .signing_key_path
+            .map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -1093,11 +1126,10 @@ fn build_supervisor_config(
 /// 2. A binary named `mvm-vz-supervisor` adjacent to the current
 ///    executable — the layout produced by `cargo install` /
 ///    Homebrew bottles that ship `mvmctl` alongside it.
-/// 3. The source-checkout build output under
-///    `crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/<config>/`
-///    (CLAUDE.md "Source-checkout builds never depend on
-///    mvm-published artifacts"); this matters during local dev
-///    when `mvmctl` is `cargo run` from the workspace root.
+/// 3. The source-checkout build output at
+///    `<workspace>/target/debug/mvm-vz-supervisor` (the cargo `[[bin]]`
+///    in `mvm-vm-host`); this matters during local dev when `mvmctl`
+///    is `cargo run` from the workspace root.
 /// 4. The version-pinned release layout `~/.mvm/bin/mvm-vz-supervisor-<version>`.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
@@ -1136,11 +1168,10 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     bail!(
         "mvm-vz-supervisor binary not found. Looked for: \
          $MVM_VZ_SUPERVISOR_PATH, alongside the current exe, \
-         crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/debug/mvm-vz-supervisor \
-         (source-checkout), and ~/.mvm/bin/mvm-vz-supervisor-{} \
-         (release-installed). Run `MVM_VZ_BUILD_SUPERVISOR=1 cargo build \
-         -p mvm-vz` to build it via the mvm-vz build script, or invoke \
-         `crates/mvm-vz-supervisor/tools/build.sh` directly.",
+         <workspace>/target/debug/mvm-vz-supervisor (source-checkout), and \
+         ~/.mvm/bin/mvm-vz-supervisor-{} (release-installed). Build it with \
+         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`, or set \
+         MVM_VZ_SUPERVISOR_PATH=/abs/path/to/the/binary.",
         env!("CARGO_PKG_VERSION")
     );
 }

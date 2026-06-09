@@ -1,11 +1,11 @@
 //! Plan 97 Phase E — Rust client for the `mvm-vz-supervisor`
 //! control socket.
 //!
-//! The Swift supervisor binds a `SOCK_STREAM` unix socket at
+//! The supervisor binds a `SOCK_STREAM` unix socket at
 //! `<vm_state_dir>/control.sock` mode 0700 and accepts newline-framed
-//! text commands (see
-//! `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/ControlSocket.swift`
-//! for the verb list + response shape). This module wraps the dial +
+//! text commands (the verb list + response shape live in the
+//! Rust-native supervisor's control socket in `mvm-vm-host`). This
+//! module wraps the dial +
 //! send + readline + parse cycle into a small synchronous client
 //! `VzBackend` uses for `pause` / `resume` / `balloon_set_target` and
 //! the snapshot verbs.

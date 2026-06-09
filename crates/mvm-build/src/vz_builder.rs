@@ -336,6 +336,13 @@ fn build_vz_supervisor_config(
         balloon: None,
         control_socket_path: None,
         startup_mode: crate::vz::StartupMode::Boot,
+        // Builder VMs are trusted dev-tier — no claim-10 flow audit.
+        tenant_id: None,
+        plan: None,
+        bundle: None,
+        audit_dir: None,
+        gateway_audit_socket: None,
+        signing_key_path: None,
     })
 }
 
@@ -918,10 +925,9 @@ pub fn resolve_vz_supervisor_path() -> Result<PathBuf, BuilderVmError> {
     Err(BuilderVmError::ExtractionFailed(format!(
         "mvm-vz-supervisor binary not found. Looked for: \
          $MVM_VZ_SUPERVISOR_PATH, alongside the current exe, \
-         crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/debug/mvm-vz-supervisor \
-         (source-checkout), and ~/.mvm/bin/mvm-vz-supervisor-{} \
-         (release-installed). Build via \
-         `crates/mvm-vz-supervisor/tools/build.sh`.",
+         <workspace>/target/debug/mvm-vz-supervisor (source-checkout), and \
+         ~/.mvm/bin/mvm-vz-supervisor-{} (release-installed). Build it with \
+         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.",
         env!("CARGO_PKG_VERSION")
     )))
 }
@@ -1265,6 +1271,13 @@ fn build_vz_persistent_supervisor_config(
         balloon: None,
         control_socket_path: None,
         startup_mode: crate::vz::StartupMode::Boot,
+        // Builder VMs are trusted dev-tier — no claim-10 flow audit.
+        tenant_id: None,
+        plan: None,
+        bundle: None,
+        audit_dir: None,
+        gateway_audit_socket: None,
+        signing_key_path: None,
     })
 }
 

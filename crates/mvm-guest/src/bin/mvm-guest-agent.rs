@@ -967,16 +967,17 @@ fn handle_proc_wait_streaming(
 }
 
 /// `Exec` streaming arm — writes intermediate `ExecEvent` Stdout/Stderr
-/// frames to the connection and returns the terminal `Exit` for the
-/// dispatch loop to write last. Mirrors `handle_run_entrypoint` /
+/// frames to the connection and returns the terminal `Exit` or `TimedOut`
+/// for the dispatch loop to write last. Mirrors `handle_run_entrypoint` /
 /// `handle_proc_wait_streaming`. Plan 159 WS-5 E. (dev-shell only)
 #[cfg(feature = "dev-shell")]
 fn do_exec_streaming(
     file: &mut std::fs::File,
     command: &str,
     stdin_data: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> GuestResponse {
-    let terminal = mvm_guest::exec_stream::stream_exec(command, stdin_data, |ev| {
+    let terminal = mvm_guest::exec_stream::stream_exec(command, stdin_data, timeout_secs, |ev| {
         write_response(file, &GuestResponse::ExecEvent(ev));
     });
     GuestResponse::ExecEvent(terminal)
@@ -1002,7 +1003,7 @@ fn read_wrapper_language() -> Option<String> {
 /// instead, providing stateful eval across calls. Wire shape stays
 /// identical — the dispatch flips inside this function.
 #[cfg(feature = "dev-shell")]
-fn do_run_code(file: &mut std::fs::File, code: &str, _timeout_secs: u64) -> GuestResponse {
+fn do_run_code(file: &mut std::fs::File, code: &str, timeout_secs: Option<u64>) -> GuestResponse {
     let lang = match read_wrapper_language() {
         Some(l) => l,
         None => {
@@ -1045,7 +1046,7 @@ fn do_run_code(file: &mut std::fs::File, code: &str, _timeout_secs: u64) -> Gues
         interp_flag,
         shell_quote_for_sh(code)
     );
-    do_exec_streaming(file, &shell_command, None)
+    do_exec_streaming(file, &shell_command, None, timeout_secs)
 }
 
 /// Single-quote `s` for `/bin/sh` consumption: doubles up embedded
@@ -2121,10 +2122,10 @@ fn handle_client(
         GuestRequest::Exec {
             command,
             stdin,
-            timeout_secs: _,
+            timeout_secs,
         } => {
             eprintln!("[audit] exec request: {:?}", command);
-            do_exec_streaming(&mut file, &command, stdin.as_deref())
+            do_exec_streaming(&mut file, &command, stdin.as_deref(), timeout_secs)
         }
 
         #[cfg(not(feature = "dev-shell"))]

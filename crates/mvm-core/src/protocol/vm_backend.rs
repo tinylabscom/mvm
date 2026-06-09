@@ -427,6 +427,71 @@ pub enum SnapshotCapability {
     Unsupported,
 }
 
+impl SnapshotCapability {
+    /// Stable lowercase token for doctor / audit output.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SnapshotCapability::LiveMemory => "live-memory",
+            SnapshotCapability::SaveRestore => "save-restore",
+            SnapshotCapability::DiskOnly => "disk-only",
+            SnapshotCapability::Unsupported => "unsupported",
+        }
+    }
+
+    /// Strength ordering: a richer tier can always serve a weaker warm-start
+    /// (a live-memory backend can disk-reboot), never the reverse.
+    const fn rank(self) -> u8 {
+        match self {
+            SnapshotCapability::LiveMemory => 3,
+            SnapshotCapability::SaveRestore => 2,
+            SnapshotCapability::DiskOnly => 1,
+            SnapshotCapability::Unsupported => 0,
+        }
+    }
+
+    /// Whether a backend at this tier can honor a request for `requested`.
+    /// Used to fail closed on an over-request (e.g. live-memory asked of
+    /// libkrun's disk-only) rather than silently degrade — plan 123 C4.
+    pub const fn satisfies(self, requested: SnapshotCapability) -> bool {
+        self.rank() >= requested.rank()
+    }
+}
+
+/// Why a warm-start request could not be honored. Typed so the caller gets a
+/// recovery action instead of a silent degrade (ADR-053, plan 123 C4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarmStartError {
+    /// The backend's snapshot tier can't satisfy the requested tier. Carries
+    /// both tiers and a hint naming the action the caller should take.
+    Unsupported {
+        requested: SnapshotCapability,
+        available: SnapshotCapability,
+        hint: String,
+    },
+    /// The warm-start machinery failed (snapshot missing, disk reboot failed).
+    Failed(String),
+}
+
+impl fmt::Display for WarmStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WarmStartError::Unsupported {
+                requested,
+                available,
+                hint,
+            } => write!(
+                f,
+                "warm-start tier '{}' not supported by this backend (available: '{}'); {hint}",
+                requested.label(),
+                available.label(),
+            ),
+            WarmStartError::Failed(why) => write!(f, "warm-start failed: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for WarmStartError {}
+
 /// Snapshot of a VM's virtio-balloon state, returned by
 /// [`VmBackend::balloon_state`].
 ///
@@ -629,6 +694,39 @@ pub trait VmBackend: Send + Sync {
         SnapshotCapability::Unsupported
     }
 
+    /// Warm-start a VM, requesting at least the `requested` snapshot tier.
+    ///
+    /// Fails closed: if [`snapshot_capability`](Self::snapshot_capability)
+    /// cannot satisfy `requested` (e.g. live-memory asked of libkrun's
+    /// disk-only), returns [`WarmStartError::Unsupported`] carrying a
+    /// recovery hint (ADR-053) — never a silent cold boot. When the tier
+    /// admits the request but the backend wires no warm-start path, the
+    /// default returns [`WarmStartError::Failed`] rather than fabricating a
+    /// VM; backends that implement warm-start (libkrun disk-only — plan 123
+    /// C4; Firecracker live-memory — C2; Vz save/restore — C3) override this.
+    fn warm_start(
+        &self,
+        _config: &VmStartConfig,
+        requested: SnapshotCapability,
+    ) -> std::result::Result<VmId, WarmStartError> {
+        let available = self.snapshot_capability();
+        if !available.satisfies(requested) {
+            return Err(WarmStartError::Unsupported {
+                requested,
+                available,
+                hint: format!(
+                    "this backend warm-starts at the '{}' tier; re-run with that tier \
+                     or `mvmctl up` for a cold boot",
+                    available.label()
+                ),
+            });
+        }
+        Err(WarmStartError::Failed(format!(
+            "{}: warm-start is not wired for this backend yet",
+            self.name()
+        )))
+    }
+
     /// Start a new VM from the given configuration.
     ///
     /// Returns the [`VmId`] assigned to the running VM.
@@ -812,6 +910,120 @@ mod tests {
             SnapshotCapability::default(),
             SnapshotCapability::Unsupported
         );
+    }
+
+    #[test]
+    fn snapshot_capability_labels_are_stable_tokens() {
+        // doctor renders these per backend; keep them stable, lowercase,
+        // delimiter-free tokens.
+        assert_eq!(SnapshotCapability::LiveMemory.label(), "live-memory");
+        assert_eq!(SnapshotCapability::SaveRestore.label(), "save-restore");
+        assert_eq!(SnapshotCapability::DiskOnly.label(), "disk-only");
+        assert_eq!(SnapshotCapability::Unsupported.label(), "unsupported");
+    }
+
+    #[test]
+    fn snapshot_capability_satisfies_weaker_or_equal_requests() {
+        use SnapshotCapability::*;
+        // A tier satisfies its own request and any weaker one.
+        assert!(LiveMemory.satisfies(LiveMemory));
+        assert!(LiveMemory.satisfies(DiskOnly));
+        assert!(SaveRestore.satisfies(DiskOnly));
+        assert!(DiskOnly.satisfies(DiskOnly));
+        // libkrun (DiskOnly) cannot honor a live-memory request — the C4 case.
+        assert!(!DiskOnly.satisfies(LiveMemory));
+        assert!(!DiskOnly.satisfies(SaveRestore));
+        assert!(!Unsupported.satisfies(DiskOnly));
+    }
+
+    // A backend that declares a tier but wires no warm-start operation —
+    // exercises the trait's fail-closed default.
+    struct TierOnlyBackend(SnapshotCapability);
+    impl VmBackend for TierOnlyBackend {
+        fn name(&self) -> &str {
+            "tier-only"
+        }
+        fn capabilities(&self) -> VmCapabilities {
+            VmCapabilities::default()
+        }
+        fn snapshot_capability(&self) -> SnapshotCapability {
+            self.0
+        }
+        fn stop(&self, _id: &VmId) -> Result<()> {
+            Ok(())
+        }
+        fn stop_all(&self) -> Result<()> {
+            Ok(())
+        }
+        fn pause(&self, _id: &VmId) -> Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _id: &VmId) -> Result<()> {
+            Ok(())
+        }
+        fn status(&self, _id: &VmId) -> Result<VmStatus> {
+            Ok(VmStatus::Stopped)
+        }
+        fn list(&self) -> Result<Vec<VmInfo>> {
+            Ok(vec![])
+        }
+        fn logs(&self, _id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
+            Ok(String::new())
+        }
+        fn is_available(&self) -> Result<bool> {
+            Ok(true)
+        }
+        fn install(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_warm_start_fails_closed_on_over_request() {
+        // DiskOnly backend, live-memory request → typed Unsupported, not a
+        // silent cold boot. The hint must name a recovery action.
+        let b = TierOnlyBackend(SnapshotCapability::DiskOnly);
+        let cfg = VmStartConfig::default();
+        match b.warm_start(&cfg, SnapshotCapability::LiveMemory) {
+            Err(WarmStartError::Unsupported {
+                requested,
+                available,
+                hint,
+            }) => {
+                assert_eq!(requested, SnapshotCapability::LiveMemory);
+                assert_eq!(available, SnapshotCapability::DiskOnly);
+                assert!(!hint.is_empty());
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_warm_start_is_unimplemented_when_tier_admits() {
+        // Tier admits the request, but the default wires no operation — it
+        // must fail closed (Failed), never fabricate a VmId.
+        let b = TierOnlyBackend(SnapshotCapability::DiskOnly);
+        let cfg = VmStartConfig::default();
+        match b.warm_start(&cfg, SnapshotCapability::DiskOnly) {
+            Err(WarmStartError::Failed(_)) => {}
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn warm_start_error_unsupported_carries_tiers_and_hint() {
+        let err = WarmStartError::Unsupported {
+            requested: SnapshotCapability::LiveMemory,
+            available: SnapshotCapability::DiskOnly,
+            hint: "use `mvmctl up` for a cold boot".to_string(),
+        };
+        let msg = err.to_string();
+        // Display names both tiers and surfaces the recovery action (ADR-053).
+        assert!(msg.contains("live-memory"), "{msg}");
+        assert!(msg.contains("disk-only"), "{msg}");
+        assert!(msg.contains("mvmctl up"), "{msg}");
+        // It's a real std error so callers can `?`/box it.
+        let _: &dyn std::error::Error = &err;
     }
 
     #[test]

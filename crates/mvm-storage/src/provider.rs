@@ -20,15 +20,33 @@ use mvm_core::volume::{VolumeError, VolumeName};
 #[derive(Debug, Clone)]
 pub struct VolumeSpec {
     name: VolumeName,
+    /// Backing-store size in MiB. `None` lets the provider pick its default.
+    /// Only the block-backed arms need it — [`LocalStorage`] and the non-Linux
+    /// per-file encrypted arm grow on demand and ignore it; the Linux LUKS2 arm
+    /// sizes its image from it. Optional so `new` stays single-arg.
+    size_mib: Option<u64>,
 }
 
 impl VolumeSpec {
     pub fn new(name: VolumeName) -> Self {
-        Self { name }
+        Self {
+            name,
+            size_mib: None,
+        }
+    }
+
+    /// Pin the backing-store size (MiB) for the block-backed arms.
+    pub fn with_size_mib(mut self, size_mib: u64) -> Self {
+        self.size_mib = Some(size_mib);
+        self
     }
 
     pub fn name(&self) -> &VolumeName {
         &self.name
+    }
+
+    pub fn size_mib(&self) -> Option<u64> {
+        self.size_mib
     }
 }
 

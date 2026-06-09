@@ -345,7 +345,7 @@ falls below Tier 1).
 | Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + (macOS 14+) snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Opt-in via `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun as the macOS default (ADR-056). |
 | libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; shipped as the cross-platform default per ADR-013. macOS arm64/x86_64 + Linux-without-KVM hosts land here. |
 | Docker | ❌ shared host kernel | ❌ container runtime is L2=host kernel | ❌ shared with host | ✅ | ✅ | **Tier 3** — claims 1, 2, 3 do *not* hold; 4, 6, 7 hold; 5 N/A (unix socket). |
-| microvm.nix (QEMU) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claims 3 partial; QEMU's larger device model raises L2 audit cost. |
+| microvm.nix (QEMU) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claims 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (Plan 166): selected by `mvm` for a Linux dev/test loop, never by `mvmd` — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately *not* wired into its start path (see the egress-enforcement note below). |
 
 **Tier discipline**: Tier 1 is the production default and the only
 tier that carries the *full* ADR-002 promise. Tier 2 carries six of
@@ -361,6 +361,26 @@ auto-selected defaults.
 doctor) renders this matrix per-host with the active backend
 highlighted and prints a loud `MVM_ACK_DOCKER_TIER`-suppressible
 warning banner whenever Tier 3 is auto-selected.
+
+**Claim-10 egress enforcement coverage (Plan 123 Phase A).** Claim 10's
+default-deny egress is enforced at the host-side network chokepoint of the
+two backends that run untrusted workloads: **Firecracker** via the nftables
+`SupervisorEgressEnforcer` / `install_default_deny` (a default-deny ruleset on
+the TAP, with the per-tenant allow-list layered on by the L4 gate), and
+**libkrun** via the gateway-bridge `PlanFlowPolicy` (a deny-by-default
+flow-open gate derived from the admitted plan's resolved policy) composed with
+the always-on `MandatoryDenyEgressScan` + per-tenant `L4PolicyScan` /
+`DnsSinkholeScan` packet scans. Both derive the same posture from the same
+`NetworkPolicy` through their respective seams. **microvm.nix (QEMU) is
+intentionally excluded**: it is a `mvm`-only dev/test backend (Plan 166), never
+reached by `mvmd`, so it carries no untrusted multi-tenant workload and there
+is no admission flow to source a policy from — forcing `deny_all()` onto its
+start path would simply break all egress for a local dev loop. If QEMU were
+ever promoted to a workload-bearing tier, claim-10 would have to be plumbed
+through its start path first (`VmStartConfig` carries no egress-policy field
+today); that is a deliberate future decision, not a Phase A gap. This refines
+the "Network policy enforcement at hypervisor level" non-goal below, which
+predates Plan 123's host-side enforcement.
 
 ## Consequences
 
@@ -393,8 +413,12 @@ warning banner whenever Tier 3 is auto-selected.
 - **Network policy enforcement at hypervisor level.** The
   `network_policy` field exists in `mvm-core` and the seccomp tier
   filters network syscalls, but the hypervisor itself doesn't enforce
-  guest egress destinations beyond NAT vs. tap. Noted, not addressed
-  in this ADR; potential follow-up.
+  guest egress destinations beyond NAT vs. tap. *Superseded for the
+  workload-bearing backends by Plan 123 Phase A* — egress is now
+  enforced at the host-side network chokepoint (Firecracker nftables
+  default-deny + libkrun gateway-bridge `PlanFlowPolicy`/scans; see the
+  claim-10 egress-enforcement note under the per-backend tier matrix).
+  Still a non-goal for the dev/test-only QEMU backend.
 
 ## Reversal cost
 
