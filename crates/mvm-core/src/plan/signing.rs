@@ -80,6 +80,19 @@ pub fn secrets_from_signed_json(plan_json: &str) -> Result<Vec<SecretBinding>, s
     Ok(plan.secrets)
 }
 
+/// Extract the `tenant` id from a serialised `SignedExecutionPlan` envelope.
+///
+/// The Firecracker launch path (Plan 129 Task 5B) reads the admitted plan from
+/// disk (`plan.json`) and needs the tenant to scope the substitution endpoint's
+/// binding store — but, unlike `VmStartConfig`, `FlakeRunConfig` carries no
+/// out-of-band tenant field. Same trust posture as `secrets_from_signed_json`:
+/// the signature was checked at admission (ADR-041); the host is in the TCB.
+pub fn tenant_from_signed_json(plan_json: &str) -> Result<String, serde_json::Error> {
+    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
+    Ok(plan.tenant.0)
+}
+
 /// Verify a signed plan against a set of trusted keys, returning the
 /// parsed `ExecutionPlan` on success.
 ///
@@ -246,6 +259,20 @@ mod tests {
             &secrets[0].source,
             SecretSource::Keystore { address } if address == "openai"
         ));
+    }
+
+    #[test]
+    fn tenant_extracted_from_signed_envelope() {
+        let plan = sample_plan(); // tenant == "tenant-a"
+        let (sk, _vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let json = serde_json::to_string(&signed).unwrap();
+        assert_eq!(tenant_from_signed_json(&json).unwrap(), "tenant-a");
+    }
+
+    #[test]
+    fn tenant_from_non_envelope_json_errors() {
+        assert!(tenant_from_signed_json("{\"not\":\"a plan\"}").is_err());
     }
 
     #[test]
