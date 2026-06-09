@@ -70,6 +70,9 @@ schemars = { version = "0.8", optional = true }
 # -e no-dev` carries no `tokio` so this can't silently regress.
 [features]
 default = []
+# Expose `plan::signing::test_support` (shared `ExecutionPlan` fixtures) to
+# other crates' test builds without shipping the fixtures in a release build.
+test-support = []
 # The hostd IPC async transport in `protocol` (mvmd ↔ mvm-hostd control
 # channel: read/write_frame + send/recv request/response). The only
 # async surface in mvm-core besides `manifest-verify`; gated so the
