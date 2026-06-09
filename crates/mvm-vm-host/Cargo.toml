@@ -136,6 +136,11 @@ libkrun-sys = { workspace = true }
 mvm-hostd = { workspace = true }
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
+# Plan 118 WS-1 1b standby_pool_live test — drive the real LibkrunBackend
+# spawn_standby/claim_standby through the trait (already a normal dep).
+mvm-backend = { workspace = true }
+# Standby liveness/reap (kill(pid,0)/SIGTERM) in the live test.
+libc = { workspace = true }
 
 [features]
 default = []
