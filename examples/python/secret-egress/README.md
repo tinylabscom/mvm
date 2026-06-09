@@ -7,7 +7,7 @@ guest**.
 
 Demonstrates:
 
-- `mvm.secret("echo-key", type="bearer", hosts=["postman-echo.com"], var="API_KEY")`
+- `mvm.secret("echo-key", type="bearer", hosts=["httpbin.org"], var="API_KEY")`
   — the egress binding. `type` is how the credential authenticates
   (`bearer` / `basic` / `sigv4` / `hmac`); `hosts` is the claim-12 allow-list of
   destinations it may reach (`*.` subdomain wildcards supported).
@@ -19,7 +19,7 @@ Demonstrates:
 
 ## How the secret reaches the host (not the guest)
 
-1. **Host stores it** — `mvmctl secret set echo-key --host postman-echo.com
+1. **Host stores it** — `mvmctl secret set echo-key --host httpbin.org
    --type bearer --value -` writes the encrypted value + its binding into
    `~/.mvm` (never the guest).
 2. **Boot** — `mvmctl up` spawns the per-VM substitution endpoint (the only
@@ -35,7 +35,7 @@ never on argv):
 
 ```sh
 printf '%s' "$REAL_KEY" | mvmctl secret set echo-key \
-    --host postman-echo.com --type bearer --value -
+    --host httpbin.org --type bearer --value -
 ```
 
 Compile the app to local boot artifacts, then boot it on a `/dev/kvm` host:
@@ -56,7 +56,7 @@ fleet is a separate `mvmd` concern; this is the local dev/test path. The
 runtime substitution is exercised per the boot-e2e runbook in
 `specs/plans/129-secrets-subsystem.md`.
 
-`postman-echo.com/get` reflects the request headers, so the returned JSON shows
+`httpbin.org/get` reflects the request headers, so the returned JSON shows
 the substituted credential reached the destination — proving the guest only
 ever held the placeholder. A request to any host **not** in `hosts=[...]` is
 refused before it leaves the host (claim 12).
