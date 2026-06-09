@@ -492,6 +492,92 @@ impl fmt::Display for WarmStartError {
 
 impl std::error::Error for WarmStartError {}
 
+// ---------------------------------------------------------------------------
+// Supervisor standby pool — Plan 118 WS-1 1b
+// ---------------------------------------------------------------------------
+
+/// How a prelaunched standby is to be set up (Plan 118 WS-1 1b). Backend-agnostic:
+/// the caller (the launch path) fills this in; the backend's [`VmBackend::spawn_standby`]
+/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`).
+#[derive(Debug, Clone)]
+pub struct StandbySpec {
+    /// Stable id for this standby (also the `~/.mvm/pool/<id>/` dir name).
+    pub id: String,
+    /// Kernel image path the standby pre-loads.
+    pub kernel_path: String,
+    /// Lowercase-hex sha256 of the kernel image — the base-compat match key.
+    pub kernel_sha256: String,
+    /// Host-signer key path (claim 8) the standby re-verifies the attach plan against.
+    pub signing_key_path: std::path::PathBuf,
+    /// Expected envelope signer id (`host:{hostname}`) — the attach plan must match it.
+    pub signer_id: String,
+    /// Per-spawn binding nonce (hex of 32 random bytes); the attach must echo it.
+    pub binding_nonce: String,
+    /// Control UDS the standby binds and blocks on (0700 in a 0700 dir, nonce in path).
+    pub control_socket: std::path::PathBuf,
+    /// Per-VM state dir the standby writes its pid into.
+    pub vm_state_dir: String,
+}
+
+/// A recorded, live standby (persisted as `~/.mvm/pool/<id>/standby.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandbyHandle {
+    pub id: String,
+    pub control_socket: std::path::PathBuf,
+    pub pid: u32,
+    pub kernel_sha256: String,
+    pub binding_nonce: String,
+    pub spawned_unix_secs: u64,
+    pub state: StandbyState,
+}
+
+impl StandbyHandle {
+    /// Base-compat: a launch may claim this standby only if its plan resolves to the
+    /// same kernel image. v1 is default-kernel-only; multi-kernel keying is deferred
+    /// (SPRINT.md). Exact sha256 match — no silent wrong-kernel boot.
+    pub fn matches_kernel(&self, kernel_sha256: &str) -> bool {
+        self.kernel_sha256 == kernel_sha256
+    }
+}
+
+/// Lifecycle state of a recorded standby.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandbyState {
+    /// Spawned, blocked on its control UDS, not yet claimed.
+    Idle,
+    /// An attach was sent; the standby is booting or has booted.
+    Claimed,
+}
+
+/// What to attach to a claimed standby — the workload-specific half (the admitted,
+/// signed plan + rootfs + audit substrate). Backend-agnostic.
+#[derive(Debug, Clone)]
+pub struct StandbyClaim {
+    /// Workload rootfs ext4.
+    pub rootfs_path: String,
+    pub tenant_id: String,
+    pub audit_dir: std::path::PathBuf,
+    pub gateway_audit_socket: std::path::PathBuf,
+    pub gateway_events_socket: Option<std::path::PathBuf>,
+    /// JSON-encoded signed `ExecutionPlan` envelope (claim 8).
+    pub plan_json: String,
+    /// JSON-encoded `PolicyBundle`, if any.
+    pub bundle_json: Option<String>,
+}
+
+/// Why a standby spawn/claim failed. Fail-closed: every variant means the caller must
+/// fall back to a cold boot, never silently proceed without the workload.
+#[derive(Debug, thiserror::Error)]
+pub enum StandbyError {
+    #[error("{backend}: standby pool is not supported by this backend")]
+    Unsupported { backend: String },
+    #[error("spawn standby: {0}")]
+    SpawnFailed(String),
+    #[error("claim standby: {0}")]
+    ClaimFailed(String),
+}
+
 /// Snapshot of a VM's virtio-balloon state, returned by
 /// [`VmBackend::balloon_state`].
 ///
@@ -901,6 +987,33 @@ pub trait VmBackend: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standby_handle_serde_roundtrip_and_kernel_match() {
+        let h = StandbyHandle {
+            id: "standby-abc".into(),
+            control_socket: "/p/standby-abc/control-deadbeef.sock".into(),
+            pid: 4242,
+            kernel_sha256: "a".repeat(64),
+            binding_nonce: "deadbeef".repeat(8),
+            spawned_unix_secs: 1_700_000_000,
+            state: StandbyState::Idle,
+        };
+        let json = serde_json::to_string(&h).unwrap();
+        let back: StandbyHandle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "standby-abc");
+        assert_eq!(back.state, StandbyState::Idle);
+        assert!(back.matches_kernel(&"a".repeat(64)));
+        assert!(!back.matches_kernel(&"b".repeat(64)));
+    }
+
+    #[test]
+    fn standby_error_is_std_error() {
+        fn assert_err<E: std::error::Error>(_: &E) {}
+        assert_err(&StandbyError::Unsupported {
+            backend: "x".into(),
+        });
+    }
 
     #[test]
     fn snapshot_capability_defaults_to_unsupported() {
