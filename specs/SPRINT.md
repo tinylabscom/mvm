@@ -2533,3 +2533,34 @@ Tracked as GitHub issues so they're individually grabbable:
 - [x] Docs parity maintenance — added a lifecycle-matrix SDK guide separating current CLI support, current Python/TypeScript SDK support, and runtime parity targets.
 - [x] Docs parity maintenance — added a control-surfaces architecture page covering CLI, SDKs, MCP stdio, console, guest RPC, and not-claimed local management surfaces.
 - [x] Docs parity maintenance — added a platform-support reference page covering Linux, macOS, Windows future work, Docker fallback, host/backend status, and guest target strings.
+
+### Plan 118 WS-1 1b — supervisor warm pool: deferred follow-ups
+
+1a (#748) + 1b-i (#751, mechanism) + 1b-ii (reaper + doctor column + `mvmctl pool
+warm/status` + bench state-dir fix) shipped. Remaining, individually grabbable:
+
+- [ ] **`up`/`run` auto-claim wiring.** `claim_or_cold` is closure-ready (it builds the
+  `StandbyClaim` per the selected standby so the name-keyed audit substrate
+  `gateway-<vm>.sock` resolves for the standby-id). The wiring is held back on two
+  coupled items: (a) a claimed VM runs under its **standby-id** (its vsock socket dir is
+  baked at spawn), so `up.rs` must rebind the ~40 downstream `vm_name` references for a
+  warm launch — risky surgery in the core command; (b) a claim forces the supervisor's
+  **`run_with_bridge`** path (the attach carries tenant+plan+audit), which `up.rs:~1906`
+  documents as not-working-by-default on libkrun ("gvproxy vfkit socket empty") — though
+  that comment predates Plan 123 Phase A (#727/#647) wiring egress policy *live* on the
+  libkrun bridge, so it may be stale. **First step: confirm a libkrun bridge-path boot
+  works end-to-end** (run the `#[ignore]`'d `valid_attach_boots_and_agent_reachable`), then
+  do the name-rebind. Until then `up` always cold-boots; `mvmctl pool warm` pre-spawns
+  standbys but nothing auto-claims them.
+- [ ] **`--warm-pool-size` flag on `up`** (threads to `VmStartConfig.warm_pool_size` +
+  replenish-on-use) — lands with the auto-claim, since replenish without claim only
+  accumulates unclaimed standbys.
+- [ ] **Multi-kernel pool keying.** v1 is default-kernel + default-resources only
+  (`StandbyCompat` = kernel sha256 + vcpus + mem; non-matching launches cold-boot).
+  Generalize to per-(kernel,shape) targets + eviction once a second shape is common.
+- [ ] **Honour an explicit `--name` / extra `--volume`s for warm launches.** v1 only
+  claims for auto-named, volume-less launches (1a's attach threads only the rootfs; a
+  claimed VM is named by standby-id).
+- [ ] **Committed bench baseline + cold-vs-warm delta.** The state-dir fix unblocks the
+  probe; a real baseline still needs a freshly-built `default-microvm` image (rides
+  PR-10a's deferral).

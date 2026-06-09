@@ -1116,6 +1116,15 @@ git commit -m "test(backend): libkrun-live standby spawn->claim->boot + wrong-no
 
 # PR 1b-ii — lifecycle / ops
 
+> **Status (2026-06-09):** **Landed** — Task 9 (reaper + cache-prune), Task 10 (doctor
+> standby column + `AnyBackend` delegates), Task 11 (bench state-dir fix), **plus** the
+> re-scoped `mvmctl pool warm/status` command + the shared `resolve_effective_hypervisor`.
+> `claim_or_cold` was made closure-ready (per-standby audit substrate). **Deferred to a
+> focused follow-up** (see SPRINT.md §"Plan 118 WS-1 1b"): the `up`/`run` auto-claim wiring
+> (needs an in-`up.rs` name-rebind — a claimed VM runs under its standby-id — and a
+> confirmed libkrun bridge boot), `--warm-pool-size` + replenish-on-use (Tasks 7/13),
+> multi-kernel keying, honour-`--name`/volumes, and the committed bench delta (Task 12).
+
 > Continue on the same branch after 1b-i merges (or restack onto 1a if 1a merged first).
 
 ## Task 9: Reaper TTL + `cache prune` integration

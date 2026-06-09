@@ -70,9 +70,11 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [x] WS-4 resumable + honest-cost dev-image download — PR #667
   [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
   [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173
-  [~] WS-1 warm pool (Plan 118): 1a prelaunched-supervisor primitive landed
-      (base/attach split + attach-time plan re-verify + fuzz + a–e ladder,
-      PR #748); 1b pool/up-claim/bench remains
+  [~] WS-1 warm pool (Plan 118): 1a primitive (#748) + 1b-i mechanism (#751,
+      trait seam + registry + libkrun impl) + 1b-ii (reaper + cache-prune,
+      doctor standby column, `mvmctl pool warm/status`, bench state-dir fix)
+      landed; remaining: `up`/`run` auto-claim (name-rebind + bridge confirm),
+      `--warm-pool-size`, multi-kernel keying, committed bench delta (SPRINT.md)
   [ ] WS-2 checkpoint+fork  (152 WS-B done; unblocked)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
