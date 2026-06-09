@@ -112,6 +112,22 @@ fn destination_host(url: &str) -> Result<String, ProxyError> {
         .ok_or_else(|| ProxyError::BadUrl(url.to_string()))
 }
 
+/// Capture per-secret audit metadata (name + auth-type) for every header that
+/// carries a known placeholder — BEFORE substitution consumes the request.
+/// `resolve_meta` touches no secret value, so this is claim-13 safe. Shared by
+/// the UDS/vsock `process` path and the terminator path so their two audit
+/// emissions can't drift.
+fn collect_substituted_meta(
+    endpoint: &SubstitutionEndpoint<'_>,
+    headers: &[(String, String)],
+) -> Vec<(String, AuthType)> {
+    headers
+        .iter()
+        .filter_map(|(_, v)| find_placeholder(v))
+        .filter_map(|ph| endpoint.resolve_meta(ph))
+        .collect()
+}
+
 // ============================================================================
 // Transport — the host-local listener + the real-TLS forward leg (D-T2)
 // ============================================================================
@@ -322,6 +338,120 @@ impl SubstitutionService {
         }
     }
 
+    /// Accept loop for the transparent egress **terminator** (Plan 129 stage
+    /// 1b): the host nft `nat` chain REDIRECTs a guest's outbound TCP here, we
+    /// recover the original destination via `SO_ORIGINAL_DST`, substitute any
+    /// secret placeholder in the request (claim-12 bind-checked), and splice
+    /// the request to the real destination — returning its response verbatim.
+    ///
+    /// Linux-only: `SO_ORIGINAL_DST` is an `SOL_IP` getsockopt. The substitution
+    /// core ([`terminator::handler::handle_request`]) and the splice
+    /// ([`terminator::listener::forward_http_raw`]) are sync + blocking, so each
+    /// connection's syscalls (orig-dst, request read, forward, write-back) run
+    /// on `spawn_blocking` threads, off the reactor. A failure on one connection
+    /// is logged and the socket dropped — never fatal to the loop.
+    ///
+    /// `timeout` is the configured per-connection I/O deadline (the endpoint's
+    /// `forward_timeout_secs`), applied to BOTH the untrusted guest-facing socket
+    /// (read+write) and the upstream forward leg. Without it a guest that sends a
+    /// partial header or stops reading mid-write-back would park a blocking-pool
+    /// thread forever — a bounded pool means a hostile guest could exhaust it.
+    #[cfg(target_os = "linux")]
+    pub async fn serve_terminator(
+        self: Arc<Self>,
+        listener: tokio::net::TcpListener,
+        timeout: std::time::Duration,
+    ) {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let me = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = me.handle_terminator_connection(stream, timeout).await {
+                            tracing::warn!(error = %e, "terminator connection failed");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "terminator accept failed; stopping");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Handle one redirected guest connection: recover orig-dst, read the
+    /// request, substitute + forward, write the response back. claim-12
+    /// fail-closed is enforced inside `handle_request` (it refuses an unbound
+    /// destination / unknown placeholder before the forward runs); on refusal
+    /// we log and close WITHOUT forwarding.
+    #[cfg(target_os = "linux")]
+    async fn handle_terminator_connection(
+        &self,
+        stream: tokio::net::TcpStream,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        use crate::keyholder::SubstitutionEndpoint;
+        use crate::supervisor::terminator;
+        use std::io::Write;
+
+        // The orig-dst getsockopt + bounded request read are blocking syscalls.
+        // The redirected socket is UNTRUSTED: set read+write deadlines so a guest
+        // that never completes its header (`\r\n\r\n`) or stalls mid-write-back
+        // can't park this blocking-pool thread forever (bounded pool ⇒ DoS).
+        let mut std_stream = stream.into_std()?;
+        std_stream.set_nonblocking(false)?;
+        std_stream.set_read_timeout(Some(timeout))?;
+        std_stream.set_write_timeout(Some(timeout))?;
+        let (mut std_stream, orig_dst, raw) = tokio::task::spawn_blocking(move || {
+            let orig_dst = terminator::orig_dst::original_dst(&std_stream)?;
+            let raw = terminator::read::read_http_request(&mut std_stream)?;
+            anyhow::Ok((std_stream, orig_dst, raw))
+        })
+        .await??;
+
+        // Capture audit metadata before substitution consumes the request —
+        // same as the UDS/vsock `process` path (shared helper so they can't
+        // drift). resolve_meta touches no value, so this is claim-13 safe.
+        let req = terminator::request::proxy_request_from_origin_form(&raw, orig_dst)?;
+        let endpoint = SubstitutionEndpoint::new(&self.registry, self.resolver.as_ref());
+        let destination = destination_host(&req.url).ok();
+        let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        drop(req);
+
+        // Substitution + the raw forward leg are sync; run them off the reactor.
+        // Clone the Arcs the closure needs (it must be 'static — can't borrow
+        // &self across spawn_blocking); the endpoint is rebuilt inside.
+        let registry = Arc::clone(&self.registry);
+        let resolver = Arc::clone(&self.resolver);
+        let forwarded = tokio::task::spawn_blocking(move || {
+            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            terminator::handler::handle_request(&raw, orig_dst, &endpoint, |prepared, dst| {
+                terminator::listener::forward_http_raw(prepared, dst, timeout)
+            })
+        })
+        .await?;
+
+        let resp = match forwarded {
+            Ok(resp) => resp,
+            Err(e) => {
+                // claim-12 fail-closed: refusal closes the socket, no forward.
+                tracing::warn!(error = %e, "terminator refused or forward failed; closing");
+                return Ok(());
+            }
+        };
+
+        self.audit_substitutions(&substituted, destination.as_deref())
+            .await;
+
+        tokio::task::spawn_blocking(move || {
+            std_stream.write_all(&resp)?;
+            std_stream.flush()
+        })
+        .await??;
+        Ok(())
+    }
+
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
         let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
         let resp = self.process(wire).await;
@@ -372,15 +502,9 @@ impl SubstitutionService {
         let registry: &SubstitutionRegistry = &self.registry;
         let endpoint = SubstitutionEndpoint::new(registry, self.resolver.as_ref());
         // Capture audit metadata (name + auth-type per substituted secret, and
-        // the destination) before `prepare_request` consumes `req`. resolve_meta
-        // touches no value, so this is claim-13 safe.
+        // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
-        let substituted: Vec<(String, AuthType)> = req
-            .headers
-            .iter()
-            .filter_map(|(_, v)| find_placeholder(v))
-            .filter_map(|ph| endpoint.resolve_meta(ph))
-            .collect();
+        let substituted = collect_substituted_meta(&endpoint, &req.headers);
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
