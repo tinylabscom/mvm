@@ -510,8 +510,13 @@ pub struct StandbySpec {
     pub id: String,
     /// Kernel image path the standby pre-loads.
     pub kernel_path: String,
-    /// Lowercase-hex sha256 of the kernel image — the base-compat match key.
+    /// Lowercase-hex sha256 of the kernel image — part of the base-compat key.
     pub kernel_sha256: String,
+    /// vCPU count fixed at spawn (libkrun `set_vm_config` runs from the base
+    /// KrunContext, before attach — so a launch needing a different count cold-boots).
+    pub vcpus: u8,
+    /// Guest memory (MiB) fixed at spawn — same reasoning as `vcpus`.
+    pub mem_mib: u32,
     /// Host-signer key path (claim 8) the standby re-verifies the attach plan against.
     pub signing_key_path: std::path::PathBuf,
     /// Expected envelope signer id (`host:{hostname}`) — the attach plan must match it.
@@ -524,6 +529,18 @@ pub struct StandbySpec {
     pub vm_state_dir: String,
 }
 
+/// The base-compat key — everything a libkrun standby fixes at spawn and therefore must
+/// match the workload exactly, else the launch cold-boots. v1 is default-kernel +
+/// default-resources only; multi-kernel/multi-shape keying is deferred (SPRINT.md). The
+/// "no extra volumes" half of compat is enforced at the launch path (a standby declares
+/// none), not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandbyCompat {
+    pub kernel_sha256: String,
+    pub vcpus: u8,
+    pub mem_mib: u32,
+}
+
 /// A recorded, live standby (persisted as `~/.mvm/pool/<id>/standby.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyHandle {
@@ -531,17 +548,27 @@ pub struct StandbyHandle {
     pub control_socket: std::path::PathBuf,
     pub pid: u32,
     pub kernel_sha256: String,
+    pub vcpus: u8,
+    pub mem_mib: u32,
     pub binding_nonce: String,
     pub spawned_unix_secs: u64,
     pub state: StandbyState,
 }
 
 impl StandbyHandle {
-    /// Base-compat: a launch may claim this standby only if its plan resolves to the
-    /// same kernel image. v1 is default-kernel-only; multi-kernel keying is deferred
-    /// (SPRINT.md). Exact sha256 match — no silent wrong-kernel boot.
-    pub fn matches_kernel(&self, kernel_sha256: &str) -> bool {
-        self.kernel_sha256 == kernel_sha256
+    /// The base-compat key this standby was spawned with.
+    pub fn compat(&self) -> StandbyCompat {
+        StandbyCompat {
+            kernel_sha256: self.kernel_sha256.clone(),
+            vcpus: self.vcpus,
+            mem_mib: self.mem_mib,
+        }
+    }
+
+    /// A launch may claim this standby only if its kernel **and** fixed resources match
+    /// exactly — no silent wrong-kernel or wrong-size boot.
+    pub fn is_compatible(&self, want: &StandbyCompat) -> bool {
+        &self.compat() == want
     }
 }
 
@@ -1030,12 +1057,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn standby_handle_serde_roundtrip_and_kernel_match() {
+    fn standby_handle_serde_roundtrip_and_compat_match() {
         let h = StandbyHandle {
             id: "standby-abc".into(),
             control_socket: "/p/standby-abc/control-deadbeef.sock".into(),
             pid: 4242,
             kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
             binding_nonce: "deadbeef".repeat(8),
             spawned_unix_secs: 1_700_000_000,
             state: StandbyState::Idle,
@@ -1044,8 +1073,16 @@ mod tests {
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "standby-abc");
         assert_eq!(back.state, StandbyState::Idle);
-        assert!(back.matches_kernel(&"a".repeat(64)));
-        assert!(!back.matches_kernel(&"b".repeat(64)));
+        let want = StandbyCompat {
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+        };
+        assert!(back.is_compatible(&want));
+        // wrong kernel, wrong cpus, and wrong mem each break compat.
+        assert!(!back.is_compatible(&StandbyCompat { kernel_sha256: "b".repeat(64), ..want.clone() }));
+        assert!(!back.is_compatible(&StandbyCompat { vcpus: 4, ..want.clone() }));
+        assert!(!back.is_compatible(&StandbyCompat { mem_mib: 2048, ..want }));
     }
 
     #[test]
@@ -1061,6 +1098,8 @@ mod tests {
             id: "standby-x".into(),
             kernel_path: "/k/vmlinux".into(),
             kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
             signing_key_path: "/keys/host-signer.ed25519".into(),
             signer_id: "host:test".into(),
             binding_nonce: "ab".repeat(32),
@@ -1096,6 +1135,8 @@ mod tests {
                 control_socket: "/p/s.sock".into(),
                 pid: 1,
                 kernel_sha256: "a".repeat(64),
+                vcpus: 2,
+                mem_mib: 1024,
                 binding_nonce: "ab".repeat(32),
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
