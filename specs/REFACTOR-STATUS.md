@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + undeclared egress redaction landed (box-validated); SDK-free transparent-terminator core landed (#735), FC wiring + e2e next
+PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + undeclared redaction (box-validated); SDK-free terminator core (#735) + FC wiring (#744) landed; live FC e2e deferred to a bringup/debug session
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -35,10 +35,15 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   — SDK-free egress (transparent terminator) · direction 2026-06-08 · branch feat/plan-129-egress-terminator · draft PR #735 · plan: specs/notes/plan-129-stage1b-2-transparent-terminator-plan.md ("Resume state")
   [x] SDK secret() type/hosts + ADR-049 retire             — PR #722/#723
   [x] passt-redirect feasibility PoC (nft OUTPUT + SO_ORIGINAL_DST) — GREEN on box
-  [x] terminator core (orig_dst, request parse, handler, reader) — 4 commits, reviewed
-  [ ] terminator listener + EndpointConfig wiring          — Task 4 (Linux)
-  [ ] passt --runas + scoped nft redirect at launch        — Task 5 (Linux)
-  [ ] box e2e: generic curl http, SDK-free, audited        — Task 0/6
+  [x] terminator core (orig_dst, request parse, handler, reader) — reviewed — PR #735 (merged)
+  [x] terminator listener + raw-http forward + EndpointConfig wiring — Task 4 — PR #735 (merged)
+  [x] redirect mechanism box-validated: nft prerouting iifname<tap> REDIRECT + SO_ORIGINAL_DST (Task 0')
+  [x] FC wiring: EgressRedirect (nft TAP redirect) + wire_egress_substitution + stop_vm reap — Task 5 — PR #744 (merged)
+      (mechanism corrected: FC=TAP+nft NAT, not passt/skuid; passt path deferred to libkrun)
+  [ ] live SDK-free FC box e2e — Task 6 — DEFERRED to a bringup/debug session
+      (prompt: specs/prompts/129-fc-bringup-debug.md). Gated on: published default
+      x86_64 kernel is bzImage not ELF vmlinux (#746); FC guest-agent reachability;
+      the local secret-launch glue below
   [ ] Stage 2: name-constrained CA + https termination     — ADR-006
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
