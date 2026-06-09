@@ -29,7 +29,12 @@
 
 **Design refinement that changes Task 4 (already applied in code):** the plan's original `handle(stream, …)` (which called the Linux-only `original_dst` inline, making it un-testable off-Linux) was split. The testable core is now `handler::handle_request(raw: &[u8], orig_dst: SocketAddr, endpoint, forward)`. **Task 4's Linux-gated listener** is the glue that does, per accepted connection: `original_dst(&stream)` → `read::read_http_request(&mut stream)` → `handle_request(&raw, orig_dst, &endpoint, forward)` → write the returned bytes back. Use that shape, not the original `handle`.
 
-**Remaining:** Task 0 (box confirm — do first), Task 4 (listener glue + `EndpointConfig.terminator_listen` wiring), Task 5 (passt `--runas` + scoped `nft` redirect at launch), Task 6 (box e2e), then Stage 2 (CA/`https`).
+**Remaining:** Task 5 (passt `--runas` + scoped `nft` redirect at launch), Task 6 (box e2e), then Stage 2 (CA/`https`). Task 0 ✅ PASS (skuid scoping confirmed — see RESULT under Task 0). Task 4 ✅ DONE + reviewed (commits `3201006c`/`53f5b2b1`).
+
+**⚠️ BLOCKER for Task 5/6 — backend/networking premise gap (found 2026-06-09):** Task 5's nft `meta skuid` redirect needs guest egress to flow through a **passt process under a dedicated uid**. But the substitution-endpoint moat (`spawn_substitution_endpoint`, which the terminator reuses) is wired **only into the QEMU backend** (`crates/mvm-backend/src/qemu.rs`), and QEMU uses **user-mode slirp networking** (`-netdev user,id=n0`, qemu.rs:191-197) — slirp egress exits as the *host user's* uid, so `skuid` cannot isolate guest egress from the host's own. The passt-based backends (the Firecracker `mvm-firecracker-bridge` bin — which already spawns hash-verified passt — and libkrun-on-Linux) do **not** yet spawn the substitution endpoint. So as wired today, **no backend has both a passt-under-a-uid egress path AND the substitution endpoint**, which Task 5/6 require. Resolution options (pick before building Task 5):
+  1. **QEMU → passt (surgical):** when `!plan_secrets.is_empty()`, swap QEMU's slirp for passt-under-a-dedicated-uid + install the skuid redirect + set `terminator_listen`; default (no-secret) path stays slirp. Keeps the box demo on `--hypervisor qemu` (as Task 0/6 assume). Cost: QEMU↔passt fd/socket plumbing, MTU, must not regress the existing vsock substitution path.
+  2. **Firecracker:** wire `spawn_substitution_endpoint` into the Firecracker bridge (it already runs passt), add `--runas` + skuid redirect there, run Task 6 e2e on Firecracker (the box is `rvproxy-firecracker`; the `--hypervisor qemu` in Task 0/6 is the stale bit). Cost: replicate the endpoint spawn into a second backend; the bridge is Landlock/seccomp-jailed so nft + setuid-drop is fiddlier.
+  Task 0's PoC validated the `skuid` mechanism itself on real passt; this gap is purely *which backend* carries it. Escalated to the user 2026-06-09.
 
 **Box phase setup (Tasks 0/6 + Linux integration):** the box is `root@88.99.197.234`; `/root/mvm-129` does NOT exist — clone off `origin/main` and `cargo build -p mvm-cli -p mvm-libkrun-supervisor --features libkrun-sys`. Isolate from any parallel session with a dedicated `MVM_CACHE_DIR=/root/.cache/mvm-129` + `MVM_DATA_DIR=/root/.mvm-129`. Boot via `mvmctl up --hypervisor qemu --builder qemu`. Known gotchas (see memory): cold-cache Stage 0 can panic (#576) — warm the cache; a workload `/init` may exit ~5s on input-less console — verify with a long-lived workload + `examples/agent_ping`, and read `<vm_state_dir>/console.log`. Feasibility + the nft scoping mechanism are proven (memory `reference_passt_outbound_nft_redirectable`): scope the redirect to passt's uid via `meta skuid` so only guest egress is intercepted, never the host's own.
 
@@ -41,7 +46,7 @@ Confirms the integration the synthetic PoC couldn't (production passt, not pasta
 
 **Box:** `root@88.99.197.234`, worktree `/root/mvm-129` (create off `origin/main`).
 
-- [ ] **Step 1: Stand up the worktree + build on the box**
+- [x] **Step 1: Stand up the worktree + build on the box** (Tier A needs no mvmctl build — validated the mechanism directly)
 
 ```bash
 ssh root@88.99.197.234 'git -C /root clone --no-checkout file:///root/mvm-mirror mvm-129 2>/dev/null; \
@@ -51,7 +56,7 @@ ssh root@88.99.197.234 'git -C /root clone --no-checkout file:///root/mvm-mirror
 
 (If no local mirror, clone from the GitHub remote. Use a dedicated `MVM_CACHE_DIR=/root/.cache/mvm-129` / `MVM_DATA_DIR=/root/.mvm-129` to isolate from any parallel session per memory `project_dev_host_runs_builder_via_vz`.)
 
-- [ ] **Step 2: Manually reproduce the production interception, end to end**
+- [x] **Step 2: Manually reproduce the production interception, end to end** (Tier A stub-listener variant — see RESULT below)
 
 Run a long-lived guest workload (so passt stays up), find passt's pid/uid, install the scoped redirect to a stub `SO_ORIGINAL_DST` listener (the `/tmp/passt-redirect-poc.sh` listener), and `mvmctl exec`/console a `curl http://<bound-host>/` from the guest:
 
@@ -66,7 +71,9 @@ nft add rule ip poc0 output meta skuid $PASST_UID tcp dport 80 redirect to :9999
 
 Expected: the stub listener logs `ORIGINAL_DST=<host-ip>:80` from the guest's curl, and the host's own `curl http://example.com` is NOT captured (skuid scoping holds).
 
-- [ ] **Step 3: Record the result** in this file (PASS/FAIL + the captured line). If skuid scoping doesn't isolate guest-from-host, fall back to a cgroup match (`socket cgroupv2 level N "mvm-passt-<vm>"`) and note it — that becomes Task 5's mechanism instead.
+- [x] **Step 3: Record the result** in this file (PASS/FAIL + the captured line). If skuid scoping doesn't isolate guest-from-host, fall back to a cgroup match (`socket cgroupv2 level N "mvm-passt-<vm>"`) and note it — that becomes Task 5's mechanism instead.
+
+**RESULT (2026-06-08) — PASS (Tier A, decisive).** On `root@88.99.197.234`: a low-priv uid `mvmpasst` (uid 1002), an `ip poc0` table with `chain output { type nat hook output priority -100 }` and `meta skuid 1002 tcp dport 80 redirect to :9999`, and a stub `SO_ORIGINAL_DST` listener. `sudo -u mvmpasst curl http://1.1.1.1/` → listener logged `ORIGINAL_DST=1.1.1.1:80` (pre-REDIRECT dest recovered). Root's own `curl http://8.8.8.8/` was **NOT** captured (no second log line) — **skuid scoping isolates guest-uid egress from the host's own**. `meta skuid` is confirmed as Task 5's mechanism; no cgroup fallback needed. Box left clean (table deleted, uid removed, listener killed). Tier B (real passt under `--runas` carrying guest traffic) folds into Task 6's full VM e2e rather than a separate manual run.
 
 ---
 
@@ -311,13 +318,15 @@ where
 
 **Files:** Create `crates/mvm-hostd/src/supervisor/terminator/listener.rs`; Modify `crates/mvm-hostd/src/supervisor/substitution_endpoint.rs` (`EndpointConfig` gains `terminator_listen: Option<SocketAddr>`; `assemble` spawns the terminator listener when set, alongside the existing vsock one).
 
-- [ ] **Step 1: Write the failing test** — `EndpointConfig` round-trips the new optional field; `assemble` with `terminator_listen: Some(127.0.0.1:0)` returns a service that binds a TCP listener (assert it accepts a connection). Default `None` preserves today's behaviour.
+- [x] **Step 1: Write the failing test** — `EndpointConfig` round-trips the new optional field; `assemble` with `terminator_listen: Some(127.0.0.1:0)` returns a service that binds a TCP listener (assert it accepts a connection). Default `None` preserves today's behaviour.
 
-- [ ] **Step 2: Run it (fails)**
+- [x] **Step 2: Run it (fails)**
 
-- [ ] **Step 3: Implement** the listener (accept loop → `handle(stream, &endpoint, real_forward)` per connection, errors logged not fatal — same shape as `forward_proxy::serve`), and thread `terminator_listen` through `EndpointConfig`/`parse`/`assemble`. The real forwarder dials `orig_dst` over http and reads the response (reuse the existing forwarder type if it exposes a host:port dial; otherwise a thin `std::net::TcpStream` write/read for Stage 1b).
+- [x] **Step 3: Implement** the listener (accept loop → `handle(stream, &endpoint, real_forward)` per connection, errors logged not fatal — same shape as `forward_proxy::serve`), and thread `terminator_listen` through `EndpointConfig`/`parse`/`assemble`. The real forwarder dials `orig_dst` over http and reads the response (reuse the existing forwarder type if it exposes a host:port dial; otherwise a thin `std::net::TcpStream` write/read for Stage 1b).
 
-- [ ] **Step 4: Run it (passes)**; **Step 5: Commit** — `"feat(terminator): TCP listener wired into the substitution endpoint (plan 129 stage 1b)"`
+- [x] **Step 4: Run it (passes)**; **Step 5: Commit** — `"feat(terminator): TCP listener wired into the substitution endpoint (plan 129 stage 1b)"`
+
+**DONE (2026-06-08, commits `3201006c` + review-fix `53f5b2b1`):** `serve_terminator(self: Arc<Self>, listener, timeout)` on `SubstitutionService` (Linux-gated); `terminator/listener.rs` with `forward_http_raw` (thin raw-TCP splice, configured timeout, 16 MiB-bounded read-to-EOF) + `prepared_to_origin_form_bytes` (origin-form, forces `Connection: close`, rejects CR/LF header injection); `EndpointConfig.terminator_listen: Option<SocketAddr>`; bin runs the terminator concurrently with the primary transport. Spec + code-quality reviewed (gating DoS fix: read/write timeouts on the untrusted guest socket; configured `forward_timeout_secs` threaded through). 805 mvm-hostd tests green; Linux cross-clippy clean.
 
 ---
 
