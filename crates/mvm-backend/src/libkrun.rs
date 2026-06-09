@@ -26,8 +26,9 @@
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
-    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
+    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
 };
+use mvm_storage::snapshot::SnapshotUpper;
 
 use crate::base::ui;
 use libkrun_sys::{KrunContext, SupervisorConfig};
@@ -467,6 +468,49 @@ impl VmBackend for LibkrunBackend {
         bail!(
             "resume is not supported by the libkrun backend (upstream C API does not expose vCPU pause)"
         )
+    }
+
+    fn warm_start(
+        &self,
+        config: &VmStartConfig,
+        requested: SnapshotCapability,
+    ) -> std::result::Result<VmId, WarmStartError> {
+        // libkrun has no memory snapshot; a live-memory (or save/restore)
+        // request fails closed with a recovery action rather than silently
+        // cold-booting (plan 123 C4 / ADR-053).
+        let available = SnapshotCapability::DiskOnly;
+        if !available.satisfies(requested) {
+            return Err(WarmStartError::Unsupported {
+                requested,
+                available,
+                hint: "libkrun has no live-memory snapshot — use the Firecracker (Linux) or \
+                       Vz (macOS 26+) backend for a live-memory resume, or `mvmctl up` for a \
+                       cold boot"
+                    .to_string(),
+            });
+        }
+
+        // Disk-only warm-start = fast reboot from a copy-on-write disk
+        // snapshot: boot a private writable clone of the golden rootfs so the
+        // base image stays immutable across resumes (Phase B3 `SnapshotUpper`).
+        let base = Path::new(&config.rootfs_path);
+        let base_dir = base.parent().ok_or_else(|| {
+            WarmStartError::Failed(format!("rootfs has no parent: {}", base.display()))
+        })?;
+        let base_name = base.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+            WarmStartError::Failed(format!("rootfs has no file name: {}", base.display()))
+        })?;
+        let upper = vm_state_dir(&config.name).join("warm-upper");
+        let snap = SnapshotUpper::new(base_dir, &upper)
+            .map_err(|e| WarmStartError::Failed(format!("open disk snapshot: {e}")))?;
+        let warm_rootfs = snap
+            .materialize_image(base_name)
+            .map_err(|e| WarmStartError::Failed(format!("materialize warm rootfs: {e}")))?;
+
+        let mut warm = config.clone();
+        warm.rootfs_path = warm_rootfs.to_string_lossy().into_owned();
+        self.start(&warm)
+            .map_err(|e| WarmStartError::Failed(e.to_string()))
     }
 
     fn status(&self, id: &VmId) -> Result<VmStatus> {

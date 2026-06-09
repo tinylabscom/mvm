@@ -40,6 +40,28 @@ impl SnapshotUpper {
         Ok(std::fs::read(safe_join(&self.base, rel)?)?)
     }
 
+    /// Materialize a private, writable boot image from a single base file,
+    /// leaving the golden base untouched. Returns the upper-side path, ready
+    /// to boot from for a disk-only warm-start (libkrun, plan 123 C4): the
+    /// base stays immutable, per-instance writes land in the clone, and a
+    /// re-resume reuses the existing clone rather than clobbering it.
+    ///
+    /// NOTE: a plain byte copy today — on a reflink-capable FS (APFS
+    /// `clonefile`, Linux `FICLONE`) this should be a CoW clone so warm-start
+    /// stays O(1); tracked as a follow-up. The COW *semantics* (immutable
+    /// base) hold regardless.
+    pub fn materialize_image(&self, rel: &str) -> Result<PathBuf, VolumeError> {
+        let base = safe_join(&self.base, rel)?;
+        let target = safe_join(&self.upper, rel)?;
+        if !target.exists() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&base, &target)?;
+        }
+        Ok(target)
+    }
+
     /// Write `rel` into the upper (copy-up). The base is untouched.
     pub fn write(&self, rel: &str, bytes: &[u8]) -> Result<(), VolumeError> {
         let target = safe_join(&self.upper, rel)?;
@@ -94,6 +116,45 @@ mod tests {
             b"BASE_A",
             "base file must remain immutable"
         );
+    }
+
+    #[test]
+    fn materialize_image_clones_base_into_a_private_writable_upper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let upper = tmp.path().join("upper");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("rootfs.ext4"), b"GOLDEN").unwrap();
+
+        let snap = SnapshotUpper::new(&base, &upper).unwrap();
+        let warm = snap.materialize_image("rootfs.ext4").unwrap();
+
+        // The warm rootfs lives in the upper and carries the base bytes.
+        assert_eq!(warm, upper.join("rootfs.ext4"));
+        assert_eq!(std::fs::read(&warm).unwrap(), b"GOLDEN");
+
+        // Writing through the warm clone never touches the golden base.
+        std::fs::write(&warm, b"DIRTY_INSTANCE").unwrap();
+        assert_eq!(
+            std::fs::read(base.join("rootfs.ext4")).unwrap(),
+            b"GOLDEN",
+            "golden base must stay immutable"
+        );
+
+        // A second resume reuses the existing warm clone (no re-copy that
+        // would clobber instance state).
+        let warm2 = snap.materialize_image("rootfs.ext4").unwrap();
+        assert_eq!(warm2, warm);
+        assert_eq!(std::fs::read(&warm2).unwrap(), b"DIRTY_INSTANCE");
+    }
+
+    #[test]
+    fn materialize_image_rejects_traversal_and_missing_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap = SnapshotUpper::new(tmp.path().join("base"), tmp.path().join("upper")).unwrap();
+        assert!(snap.materialize_image("../escape.ext4").is_err());
+        // Base image absent → error, not a silent empty rootfs.
+        assert!(snap.materialize_image("nope.ext4").is_err());
     }
 
     #[test]
