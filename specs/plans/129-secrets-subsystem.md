@@ -103,18 +103,41 @@ endpoint validation above**); this ties them on a real QEMU guest.
    >   never brought `lo` up (the kernel creates it DOWN) → `ENETUNREACH` to
    >   `127.0.0.1` — fixed by an `ip link set lo up` early in PID-1 init. Either
    >   alone is insufficient.
-   > - ⏳ **Destination-sees-real-credential — pending box re-validation** with
-   >   #749's full loopback fix (#745 + #749 combined). The remaining residual
-   >   risk is only the real-QEMU guest→host vsock-relay leg (proven over loopback
-   >   CID in #710, not yet guest→host CID 2). Tracked below.
+   > - ✅ **Guest→host vsock relay (CID 2) works on real QEMU:** with the loopback
+   >   fix, the live-guest request reaches the host endpoint and a response comes
+   >   back through the full chain (no longer a connection error). The earlier
+   >   residual-risk vsock leg is proven.
+   > - ✅ **Substitution works on the live-guest path:** the endpoint resolves the
+   >   guest's placeholder and substitutes the real credential (no
+   >   `unknown placeholder`; the `mvm-secret-` placeholder is never on the wire).
+   >   Two example bugs were fixed en route: a `User-Agent` that began with the
+   >   reserved `mvm-secret-` prefix (the endpoint treated it as a 2nd placeholder
+   >   → refused), and postman-echo bot-filtering urllib's UA — example now sends
+   >   an explicit UA and targets `httpbin.org` (a clean http header-echo).
+   > - 🔴 **Destination-sees-real-credential still blocked — new bug found:** the
+   >   endpoint's forward leg uses `hardened_client_builder`'s
+   >   `SsrfFilteringResolver`, which **hardcodes port 443** in its DNS lookup
+   >   (`tools/http_hardening.rs`). reqwest uses the resolver's port, so an
+   >   **`http://`** forward connects to **:443 and sends plain HTTP** → the
+   >   destination returns `400 "plain HTTP request was sent to HTTPS port"`. The
+   >   forward-proxy live-guest path is http-only (https CONNECT-tunnels, above),
+   >   so it *always* hits this. (#710 worked because it forwarded **https** →
+   >   443 is correct there.) This is a real bug in **shared** http-hardening
+   >   tooling (web_fetch / MCP tools also use it) — the fix must make SSRF
+   >   filtering **port-aware** (or move it to a connect-layer check) without
+   >   breaking https callers. Tracked below.
 
 ### Deferred follow-ups (surfaced by the local-launch e2e)
 
-- [ ] **Live secret-egress on QEMU (box re-validation)** — with #749's loopback
-      fix the forward-proxy ↔ vsock-relay ↔ endpoint path should complete;
-      re-validate destination-sees-real-credential + claim-12 refusal +
-      redact-to-`XXX` on QEMU (#745 + #749). Residual risk: the real-QEMU
-      guest→host vsock-relay leg (CID 2), proven only over loopback CID in #710.
+- [ ] **SSRF resolver hardcodes port 443 → breaks http egress forwards** (the
+      current blocker for destination-sees-real-credential). `SsrfFilteringResolver`
+      in `tools/http_hardening.rs` resolves with port 443; reqwest uses the
+      resolver's port, so an `http://` forward hits :443 with plain HTTP. Make
+      SSRF filtering port-aware (honor the URL's port) or move it to a
+      connect-layer check; don't break the https callers (web_fetch, MCP tools).
+      Then the live-guest forward-proxy e2e (destination-sees-real-credential +
+      claim-12 + redact-to-`XXX`) should close — everything *before* the forward
+      leg is on-box validated (loopback, vsock relay, substitution).
 - [ ] **Forward proxy + `https`/`CONNECT`** — standard clients tunnel `https`
       through `HTTP_PROXY` via `CONNECT`, hiding headers from the proxy, so
       substitution only works for `http`/absolute-form today. TLS-destination
