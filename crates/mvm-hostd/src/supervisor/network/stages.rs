@@ -81,6 +81,28 @@ pub struct RedactingSubstitution {
     pii: PiiRedactor,
 }
 
+/// The rule categories that fired during a [`RedactingSubstitution::redact_bytes`]
+/// pass — secret-pattern names then PII-rule names. Names only, never the matched
+/// bytes (claim-13 discipline), so this is safe to carry into an audit entry.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RedactionHits {
+    pub secrets: Vec<&'static str>,
+    pub pii: Vec<&'static str>,
+}
+
+impl RedactionHits {
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty() && self.pii.is_empty()
+    }
+
+    /// Fold another pass's categories in (used when redacting several fields —
+    /// e.g. each header value + the body — of one request).
+    pub fn merge(&mut self, other: RedactionHits) {
+        self.secrets.extend(other.secrets);
+        self.pii.extend(other.pii);
+    }
+}
+
 impl RedactingSubstitution {
     /// The curated secret-pattern + PII rulesets (`DEFAULT_RULES`).
     pub fn with_default_rules() -> Self {
@@ -88,6 +110,26 @@ impl RedactingSubstitution {
             secrets: SecretsScanner::with_default_rules(),
             pii: PiiRedactor::with_default_rules(),
         }
+    }
+
+    /// Mask undeclared secret-shaped + PII runs in `payload`, returning the
+    /// rewritten bytes and the categories that fired. Returns `None` when the
+    /// payload is clean (the caller forwards it unchanged). Secret-shaped first,
+    /// then PII; both mask to [`REDACTION_MASK`].
+    ///
+    /// This is the single redaction definition shared by both host-side egress
+    /// chokepoints — the packet-level gateway bridge (`substitute`, libkrun/FC)
+    /// and the request-level substitution endpoint (`substitution_proxy`,
+    /// QEMU + any backend that routes egress through the per-VM endpoint) — so
+    /// the two scrub identically with no drift. Plan 129 Phase E / ADR-067.
+    pub fn redact_bytes(&self, payload: &[u8]) -> Option<(Vec<u8>, RedactionHits)> {
+        let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
+        let (after_pii, pii) = self.pii.redact(&after_secrets);
+        let hits = RedactionHits { secrets, pii };
+        if hits.is_empty() {
+            return None; // clean payload — pass through unchanged.
+        }
+        Some((after_pii, hits))
     }
 }
 
@@ -97,22 +139,17 @@ impl SubstitutionStage for RedactingSubstitution {
     }
 
     fn substitute(&self, _ctx: &PacketCtx<'_>, pkt: &ParsedPacket<'_>) -> Option<Vec<u8>> {
-        // Secret-shaped first, then PII; both mask to REDACTION_MASK.
-        let (after_secrets, secret_hits) = self.secrets.redact(pkt.l4_payload, REDACTION_MASK);
-        let (after_pii, pii_hits) = self.pii.redact(&after_secrets);
-        if secret_hits.is_empty() && pii_hits.is_empty() {
-            return None; // clean payload — pass through unchanged.
-        }
+        let (redacted, hits) = self.redact_bytes(pkt.l4_payload)?;
         // Observability only: the categories that fired + the destination,
         // never the matched bytes (claim-13 discipline).
         tracing::warn!(
             dst = %pkt.five_tuple.dst_ip,
             dst_port = pkt.five_tuple.dst_port,
-            secrets = ?secret_hits,
-            pii = ?pii_hits,
+            secrets = ?hits.secrets,
+            pii = ?hits.pii,
             "egress redactor masked undeclared secret/PII content"
         );
-        Some(after_pii)
+        Some(redacted)
     }
 }
 

@@ -12,13 +12,18 @@ Set the secret on the host first (the value is piped, never on argv):
     printf '%s' "$REAL_KEY" | mvmctl secret set echo-key \
         --host postman-echo.com --type bearer --value -
 
-A workload referencing a *managed* secret is admitted through the deploy/plan
-(admission) flow, which synthesizes the signed plan that spawns the per-VM
-substitution endpoint at boot. `mvmctl compile` (local boot artifacts, no
-admission) refuses managed secret refs by design — see the README for the run
-flow. `postman-echo.com/get` reflects the request headers, so the response
-shows the **real** credential reached the destination while the workload only
-ever held the placeholder; any host not in `hosts=[...]` is refused (claim 12).
+Run it locally on a /dev/kvm host:
+
+    mvmctl compile examples/python/secret-egress/app.py --out /tmp/secret-egress
+    mvmctl up --flake /tmp/secret-egress
+
+`compile` strips the managed `SecretRef` out of the baked image (secret-free
+rootfs) and records it in `workload.json`; `up` lowers that into a signed
+`ExecutionPlan.secrets` and admits it, spawning the per-VM substitution
+endpoint at boot. `postman-echo.com/get` reflects the request headers, so the
+response shows the **real** credential reached the destination while the
+workload only ever held the placeholder; any host not in `hosts=[...]` is
+refused (claim 12).
 """
 
 import os

@@ -608,6 +608,28 @@ fn resolve_deps_volume_binding(
     resolve_deps_volume_binding_with_cache(workload_ir_path, build_mode, None)
 }
 
+/// Resolve the Workload IR path the admission flow lowers into `plan.secrets`.
+///
+/// An explicit `--from-workload-ir` always wins. Otherwise, when `--flake`
+/// points at a local directory a `mvmctl compile` run wrote `workload.json`
+/// into, default to it. This makes a secret-declaring compiled artifact
+/// (`mvmctl up --flake <out>`) lower its managed `SecretRef`s — and so spawn
+/// the per-VM substitution endpoint at boot — without the user re-naming the
+/// IR by hand. It also closes a footgun: the secrets are lowered whenever the
+/// artifact declares them, so a forgotten flag can't silently boot a workload
+/// without the binding it needs. A remote/attr flake ref or a missing file
+/// yields `None` (a plain flake, no managed secrets). Plan 129 / ADR-067.
+fn resolve_workload_ir_path(
+    from_workload_ir: Option<&std::path::Path>,
+    flake_ref: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if let Some(p) = from_workload_ir {
+        return Some(p.to_path_buf());
+    }
+    let candidate = std::path::Path::new(flake_ref?).join("workload.json");
+    candidate.is_file().then_some(candidate)
+}
+
 fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_sdk::ir::Workload>> {
@@ -1006,7 +1028,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let seccomp_tier: mvm_core::crypto::seccomp::SeccompTier =
         args.seccomp.parse().context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
-    let lowered_plan_secrets = load_workload_ir(args.from_workload_ir.as_deref())?
+    // `--from-workload-ir`, or the `workload.json` a compiled `--flake`
+    // artifact carries (Plan 129 / ADR-067). Resolved once, used for both
+    // secret lowering and the deps-volume binding below.
+    let effective_workload_ir =
+        resolve_workload_ir_path(args.from_workload_ir.as_deref(), args.flake.as_deref());
+    let lowered_plan_secrets = load_workload_ir(effective_workload_ir.as_deref())?
         .map(|workload| lower_workload_secrets(&workload))
         .unwrap_or_default();
     let plan_secret_release = lowered_plan_secrets.secret_release;
@@ -1104,7 +1131,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         no_supervisor: args.no_supervisor,
         bundle_pin: args.bundle_pin.as_deref(),
         build_mode,
-        workload_ir_path: args.from_workload_ir.as_deref(),
+        workload_ir_path: effective_workload_ir.as_deref(),
         up_json: args.up_json,
         services_health_timeout_secs: cfg.effective_services_health_timeout_secs(),
         wait: args.wait,
@@ -3588,6 +3615,37 @@ mod resolve_deps_volume_tests {
         let binding =
             resolve_deps_volume_binding(None, mvm_build::pipeline::BuildMode::Prod).unwrap();
         assert!(binding.is_none());
+    }
+
+    #[test]
+    fn explicit_from_workload_ir_wins() {
+        let p = std::path::Path::new("/some/explicit/ir.json");
+        let got = resolve_workload_ir_path(Some(p), Some("/ignored/flake/dir"));
+        assert_eq!(got.as_deref(), Some(p));
+    }
+
+    #[test]
+    fn discovers_workload_json_in_compiled_flake_dir() {
+        // A `mvmctl compile` artifact carries `workload.json`; `up --flake <dir>`
+        // must default to it so managed secrets are lowered without the flag.
+        let tmp = tempfile::tempdir().unwrap();
+        let flake = tmp.path().join("artifact");
+        std::fs::create_dir_all(&flake).unwrap();
+        let ir = flake.join("workload.json");
+        std::fs::write(&ir, "{}").unwrap();
+        let got = resolve_workload_ir_path(None, flake.to_str());
+        assert_eq!(got.as_deref(), Some(ir.as_path()));
+    }
+
+    #[test]
+    fn plain_flake_without_workload_json_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flake = tmp.path().join("plain");
+        std::fs::create_dir_all(&flake).unwrap();
+        assert!(resolve_workload_ir_path(None, flake.to_str()).is_none());
+        // A remote/attr flake ref is not a local dir → None, no panic.
+        assert!(resolve_workload_ir_path(None, Some("github:foo/bar#worker")).is_none());
+        assert!(resolve_workload_ir_path(None, None).is_none());
     }
 
     #[test]

@@ -38,21 +38,23 @@ printf '%s' "$REAL_KEY" | mvmctl secret set echo-key \
     --host postman-echo.com --type bearer --value -
 ```
 
-A workload that references a **managed** secret is admitted through the
-**deploy / plan (admission) flow** — that path synthesizes a signed
-`ExecutionPlan` carrying the secret binding, which is what spawns the per-VM
-substitution endpoint at boot. `mvmctl compile` (which emits *local* boot
-artifacts with no admission) deliberately **refuses** managed secret refs:
+Compile the app to local boot artifacts, then boot it on a `/dev/kvm` host:
 
-```text
-$ mvmctl compile examples/python/secret-egress/app.py --out /tmp/x
-Error: managed secret refs are not supported by `mvmctl compile` local boot
-artifacts yet ... Use deploy/plan flows for managed refs ...
+```sh
+mvmctl compile examples/python/secret-egress/app.py --out /tmp/secret-egress
+mvmctl up --flake /tmp/secret-egress
 ```
 
-So drive this example through the admission/deploy flow (the fleet path —
-`mvmd`), not `compile`. The runtime substitution itself is exercised on a
-`/dev/kvm` host per the boot-e2e runbook in `specs/plans/129-secrets-subsystem.md`.
+`mvmctl compile` strips the managed `SecretRef` out of the baked image — the
+rootfs is secret-free by construction, the guest var is injected as an opaque
+placeholder only at boot — and writes the binding into `workload.json`, the
+admission input. `mvmctl up` auto-discovers `/tmp/secret-egress/workload.json`,
+lowers its `SecretRef` into a signed `ExecutionPlan.secrets`, and admits it —
+which is what spawns the per-VM substitution endpoint at boot. (Pass
+`--from-workload-ir <path>` to point elsewhere.) Deploying to a multi-tenant
+fleet is a separate `mvmd` concern; this is the local dev/test path. The
+runtime substitution is exercised per the boot-e2e runbook in
+`specs/plans/129-secrets-subsystem.md`.
 
 `postman-echo.com/get` reflects the request headers, so the returned JSON shows
 the substituted credential reached the destination — proving the guest only
