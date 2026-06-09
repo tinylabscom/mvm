@@ -81,7 +81,7 @@ PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density →
   [~] WS-D wake-on-request — owned by mvmd
   (WS-B/C/D density belongs to mvmd, not mvm — see plan-170 banner)
 
-PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C deferred (gated)
+PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1+C4 done; C2/C3 gated
   [x] Phase A claims-gated lift (A1/L1, A2, A3, A4, L3-A)
   [x] A2/A4 per-tenant enforce: libkrun PlanFlowPolicy deny-by-default
       (mirrors FC install_default_deny) + per-tenant DnsSinkholeScan
@@ -93,8 +93,16 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C 
   [x] Phase B Linux LUKS2 arm (#729, live-verified on Linux VM) + S3 coverage
       S3-free (#732: from_s3_config validation + LocalFileSystem sync)
   [x] Phase C PostRestore host sender (#734) — the warm-start prerequisite
-  [ ] Phase C warm-start (FC live-memory / Vz save-restore / libkrun disk) —
-      gated on the host PostRestore sender (absent) + Plan 152 WS-B
+  [x] C1 SnapshotCapability enum + per-backend disposition
+  [x] C4 warm-start operation seam: typed WarmStartError (ADR-053 hint) +
+      SnapshotCapability::{label,satisfies} + fail-closed VmBackend::warm_start
+      default; libkrun disk-only (SnapshotUpper clone of golden rootfs);
+      doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
+  [ ] C2 Firecracker live-memory fast-resume (UFFD/NBD/hugepages + VMGenID
+      delivery) — live-KVM-gated
+  [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
+  [ ] C4 warm-start CLI/RPC wiring + live disk-snapshot agent_ping —
+      rides the C2/C3 snapshot RPC (no verb invokes warm_start yet)
 
 PLAN 126 — Dependency reduction                 🔴 ~10%
   [x] A1 re-baseline
