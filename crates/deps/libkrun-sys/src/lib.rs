@@ -1456,6 +1456,215 @@ impl SupervisorConfig {
     }
 }
 
+/// Workload-**independent** supervisor config — everything a prelaunched
+/// standby (Plan 118 WS-1 1a) sets up before it knows which workload it will
+/// run. Carries no rootfs and no plan; those arrive in the
+/// [`SupervisorAttachConfig`] over the control UDS. `krun.rootfs_path` MUST be
+/// `None` — [`SupervisorConfig::from_base_and_attach`] rejects a base that
+/// already carries one (it would shadow the workload rootfs).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorBaseConfig {
+    /// Workload-independent guest config: kernel, vcpus/ram, vsock wiring,
+    /// console, `host_listen_ports`. `rootfs_path` must be `None`.
+    pub krun: KrunContext,
+    /// Per-VM state dir (`~/.mvm/vms/<name>/`) — see [`SupervisorConfig::vm_state_dir`].
+    pub vm_state_dir: String,
+    /// PID file name inside `vm_state_dir`; defaults to `libkrun.pid`.
+    #[serde(default)]
+    pub pid_file_name: Option<String>,
+    /// `~/.mvm/keys/host-signer.ed25519` — host signing key. Source of the
+    /// **public** key the attach-time plan re-verify checks against (claim 8;
+    /// no new key). Carried in base because it is host identity, not workload.
+    pub signing_key_path: std::path::PathBuf,
+    /// Expected envelope `signer_id` (`host:{hostname}`). The attach plan must
+    /// be signed by this id, else `verify_plan` reports `UnknownSigner`.
+    pub signer_id: String,
+    /// Per-spawn binding nonce (hex of 32 random bytes). The attach must echo
+    /// it; a standby with a different nonce rejects (cross-standby replay).
+    pub binding_nonce: String,
+    /// Control UDS the standby binds and blocks on. Mode `0700`, in a `0700`
+    /// dir, with the binding nonce embedded in the path.
+    pub control_socket_path: std::path::PathBuf,
+    /// Bridge crash policy — see [`BridgeRestartPolicy`].
+    #[serde(default)]
+    pub bridge_restart_policy: BridgeRestartPolicy,
+}
+
+/// Workload-**specific** supervisor config — the bytes that arrive over the
+/// control UDS at attach. The only attacker-reachable-post-spawn surface
+/// (fuzzed by `fuzz_attach_message`). The plan re-verify in
+/// `mvm_vm_host::prelaunch` is what makes accepting these bytes safe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorAttachConfig {
+    /// Echoed binding nonce — must equal `base.binding_nonce`.
+    pub binding_nonce: String,
+    /// Workload rootfs ext4 (`krun add_disk "root"`).
+    pub rootfs_path: String,
+    /// Per-tenant chain file name (`<audit_dir>/<tenant_id>.jsonl`).
+    pub tenant_id: String,
+    /// `~/.mvm/audit/` — chain files + per-VM subscriber sockets.
+    pub audit_dir: std::path::PathBuf,
+    /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket.
+    pub gateway_audit_socket: std::path::PathBuf,
+    /// Vz-only ingest socket; ignored on libkrun (in-process bridge).
+    #[serde(default)]
+    pub gateway_events_socket: Option<std::path::PathBuf>,
+    /// JSON-encoded `SignedExecutionPlan` envelope — same carrier shape as
+    /// `SupervisorConfig.plan`. Required (the warm path always carries a plan).
+    pub plan: serde_json::Value,
+    /// JSON-encoded `PolicyBundle`, optional even when `plan` is set.
+    #[serde(default)]
+    pub bundle: Option<serde_json::Value>,
+}
+
+/// Failure modes of [`SupervisorConfig::from_base_and_attach`]. The plan
+/// re-verify failures live in `mvm_vm_host::prelaunch::AttachVerifyError` —
+/// this leaf crate can't depend on `mvm-core::plan`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttachMergeError {
+    /// The attach's echoed binding nonce != the base's binding nonce.
+    BindingNonceMismatch,
+    /// The base already carried a rootfs — it would shadow the workload's.
+    BaseHasRootfs,
+}
+
+impl std::fmt::Display for AttachMergeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BindingNonceMismatch => {
+                f.write_str("attach binding nonce does not match the standby's")
+            }
+            Self::BaseHasRootfs => {
+                f.write_str("base config already carries a rootfs (would shadow the workload)")
+            }
+        }
+    }
+}
+impl std::error::Error for AttachMergeError {}
+
+impl SupervisorConfig {
+    /// Merge a prelaunched standby's [`SupervisorBaseConfig`] with the
+    /// [`SupervisorAttachConfig`] received over the control UDS, validating the
+    /// echoed binding nonce, into a whole `SupervisorConfig` the existing
+    /// `run_with_bridge` path consumes verbatim. Does **not** verify the plan
+    /// signature — that is `mvm_vm_host::prelaunch::verify_and_merge_attach`'s
+    /// job (this crate is a leaf with no `mvm-core` dep).
+    pub fn from_base_and_attach(
+        base: SupervisorBaseConfig,
+        attach: SupervisorAttachConfig,
+    ) -> Result<SupervisorConfig, AttachMergeError> {
+        if attach.binding_nonce != base.binding_nonce {
+            return Err(AttachMergeError::BindingNonceMismatch);
+        }
+        if base.krun.rootfs_path.is_some() {
+            return Err(AttachMergeError::BaseHasRootfs);
+        }
+        let mut krun = base.krun;
+        krun.rootfs_path = Some(attach.rootfs_path);
+        Ok(SupervisorConfig {
+            krun,
+            vm_state_dir: base.vm_state_dir,
+            pid_file_name: base.pid_file_name,
+            tenant_id: Some(attach.tenant_id),
+            audit_dir: Some(attach.audit_dir),
+            gateway_audit_socket: Some(attach.gateway_audit_socket),
+            gateway_events_socket: attach.gateway_events_socket,
+            signing_key_path: Some(base.signing_key_path),
+            plan: Some(attach.plan),
+            bundle: attach.bundle,
+            bridge_restart_policy: base.bridge_restart_policy,
+        })
+    }
+}
+
+#[cfg(test)]
+mod base_attach_tests {
+    use super::*;
+
+    fn base() -> SupervisorBaseConfig {
+        // Kernel-only base: a standby carries NO workload rootfs. Build a
+        // KrunContext then null the rootfs the new() constructor sets.
+        let mut krun = KrunContext::new("standby-0", "/k/vmlinux", "/placeholder");
+        krun.rootfs_path = None;
+        SupervisorBaseConfig {
+            krun,
+            vm_state_dir: "/run/mvm/standby-0".into(),
+            pid_file_name: None,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "aa".repeat(32),
+            control_socket_path: "/run/mvm/standby-0/control-aa.sock".into(),
+            bridge_restart_policy: BridgeRestartPolicy::HardFail,
+        }
+    }
+
+    fn attach(nonce: &str) -> SupervisorAttachConfig {
+        SupervisorAttachConfig {
+            binding_nonce: nonce.to_string(),
+            rootfs_path: "/vol/rootfs.ext4".into(),
+            tenant_id: "tenant-a".into(),
+            audit_dir: "/audit".into(),
+            gateway_audit_socket: "/audit/gateway-standby-0.sock".into(),
+            gateway_events_socket: None,
+            plan: serde_json::json!({"envelope": "stub"}),
+            bundle: None,
+        }
+    }
+
+    #[test]
+    fn merge_happy_path_sets_rootfs_and_workload_fields() {
+        let cfg = SupervisorConfig::from_base_and_attach(base(), attach(&"aa".repeat(32))).unwrap();
+        assert_eq!(cfg.krun.rootfs_path.as_deref(), Some("/vol/rootfs.ext4"));
+        assert_eq!(cfg.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            cfg.signing_key_path.as_deref().and_then(|p| p.to_str()),
+            Some("/keys/host-signer.ed25519")
+        );
+        assert_eq!(cfg.vm_state_dir, "/run/mvm/standby-0");
+        assert!(cfg.plan.is_some());
+    }
+
+    #[test]
+    fn merge_rejects_binding_nonce_mismatch() {
+        let err =
+            SupervisorConfig::from_base_and_attach(base(), attach(&"bb".repeat(32))).unwrap_err();
+        assert!(matches!(err, AttachMergeError::BindingNonceMismatch));
+    }
+
+    #[test]
+    fn merge_rejects_base_that_already_carries_a_rootfs() {
+        let mut b = base();
+        b.krun.rootfs_path = Some("/leftover.ext4".into());
+        let err =
+            SupervisorConfig::from_base_and_attach(b, attach(&"aa".repeat(32))).unwrap_err();
+        assert!(matches!(err, AttachMergeError::BaseHasRootfs));
+    }
+
+    #[test]
+    fn attach_config_denies_unknown_fields() {
+        let json = serde_json::json!({
+            "binding_nonce": "aa", "rootfs_path": "/r", "tenant_id": "t",
+            "audit_dir": "/a", "gateway_audit_socket": "/a/g.sock",
+            "plan": {}, "surprise": true
+        });
+        assert!(serde_json::from_value::<SupervisorAttachConfig>(json).is_err());
+    }
+
+    #[test]
+    fn base_and_whole_configs_are_serde_disjoint() {
+        // A bare (legacy) SupervisorConfig JSON must NOT parse as a base
+        // (missing binding_nonce/control_socket_path/signing_key_path/signer_id),
+        // so the bin's wrapper-key dispatch can never misroute legacy callers.
+        let whole = serde_json::json!({
+            "krun": serde_json::to_value(KrunContext::new("n", "/k", "/r")).unwrap(),
+            "vm_state_dir": "/s"
+        });
+        assert!(serde_json::from_value::<SupervisorBaseConfig>(whole).is_err());
+    }
+}
+
 /// `~/.mvm/keys/` resolver. Centralised so the signing-key
 /// validation in [`SupervisorConfig::validate_audit_substrate`]
 /// can be tested without env mutation across multiple sites.
