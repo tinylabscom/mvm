@@ -69,5 +69,12 @@ def call_api() -> str:
             "User-Agent": "mvm-secret-egress-example/1.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
-        return response.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+            return response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        # Surface the body, not just the status line: when the host substitution
+        # endpoint refuses/fails the forward it returns the reason as the 502
+        # body (`WireResponse::Refused`), which is otherwise lost.
+        body = exc.read().decode("utf-8", "replace")
+        return f"HTTP {exc.code}: {body}"
