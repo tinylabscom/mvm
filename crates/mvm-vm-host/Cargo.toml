@@ -129,6 +129,13 @@ tempfile = { workspace = true }
 # Shared ExecutionPlan fixtures (`plan::signing::test_support::sample_plan`) for
 # the prelaunch verify tests — feature-gated so it never ships in a release build.
 mvm-core = { workspace = true, features = ["test-support"] }
+# Prelaunch live/process integration test (tests/prelaunch_live.rs): build the
+# base/attach configs, frame the attach, sign a plan. All already normal deps —
+# re-listed here so the integration-test target (a separate crate) can use them.
+libkrun-sys = { workspace = true }
+mvm-hostd = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [features]
 default = []
