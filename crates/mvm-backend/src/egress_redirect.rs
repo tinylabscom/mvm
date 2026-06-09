@@ -5,9 +5,23 @@
 //! means ONLY traffic arriving on this guest's tap is redirected — the host's
 //! own egress never is. nft (box is nft-only); needs CAP_NET_ADMIN (the FC
 //! launch path is already privileged). RAII: Drop tears the table down.
+//!
+//! Lives in `mvm-backend` (not `mvm-hostd`) because the Firecracker launch path
+//! here is its sole consumer and `mvm-hostd → mvm-backend` already; pulling it
+//! up into `mvm-hostd` would cycle. The module is self-contained (nft + argv),
+//! so co-locating it with the backend that wires it costs nothing.
 
 use anyhow::{Context, Result, bail};
 use std::process::Command;
+
+/// Per-VM terminator port = base + slot index, so concurrent slots never share
+/// a host-side terminator port. `u16` is wide enough; slot index is `u8`.
+pub const TERMINATOR_PORT_BASE: u16 = 18080;
+
+/// Derive this VM's terminator port from its 0-based slot index.
+pub fn terminator_port_for(slot_index: u8) -> u16 {
+    TERMINATOR_PORT_BASE + slot_index as u16
+}
 
 /// RAII handle for a per-VM nft redirect table. `Drop` tears it down so an
 /// early return in the caller never strands a half-built table.
@@ -102,6 +116,39 @@ impl EgressRedirect {
     pub fn teardown(&self) -> Result<()> {
         nft(&["delete", "table", "ip", &self.table])
     }
+
+    /// Forget the RAII guard without tearing the table down. The FC launch path
+    /// installs the redirect for a VM that *keeps running* after
+    /// `run_from_build` returns, so the table must outlive the handle; `stop_vm`
+    /// removes it by name via [`teardown_by_name`]. Calling this is the
+    /// deliberate, safe leak of the nft table (not the process).
+    pub fn persist(self) {
+        // Drop-skip: `into_inner`-style consume so `Drop` never runs.
+        std::mem::forget(self);
+    }
+}
+
+/// Remove a VM's redirect table by name, reconstructing it from `vm_name`.
+/// Idempotent: a missing table (VM had no secrets, or already cleaned) is not
+/// an error. Used by the FC `stop_vm` teardown, which has only the VM name —
+/// not the live [`EgressRedirect`] handle (it was `persist`ed at launch).
+pub fn teardown_by_name(vm_name: &str) -> Result<()> {
+    let table = redirect_table_name(vm_name);
+    // `nft delete table` errors on a missing table; swallow that one case so a
+    // secret-free VM (no table installed) stops cleanly. Any other failure
+    // (e.g. nft missing) propagates so the caller can log it.
+    let output = Command::new("nft")
+        .args(["delete", "table", "ip", &table])
+        .output()
+        .with_context(|| format!("spawn nft delete table ip {table}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("No such file or directory") || stderr.contains("does not exist") {
+        return Ok(());
+    }
+    bail!("nft delete table ip {table} failed: {stderr}");
 }
 
 impl Drop for EgressRedirect {
@@ -149,5 +196,13 @@ mod tests {
     #[test]
     fn redirect_table_name_keeps_alnum_and_underscore() {
         assert_eq!(redirect_table_name("vm_01AZ"), "mvm_egress_vm_01AZ");
+    }
+
+    #[test]
+    fn terminator_port_offsets_from_base_by_slot_index() {
+        assert_eq!(terminator_port_for(0), TERMINATOR_PORT_BASE);
+        assert_eq!(terminator_port_for(1), TERMINATOR_PORT_BASE + 1);
+        assert_eq!(terminator_port_for(7), TERMINATOR_PORT_BASE + 7);
+        assert_eq!(terminator_port_for(255), TERMINATOR_PORT_BASE + 255);
     }
 }

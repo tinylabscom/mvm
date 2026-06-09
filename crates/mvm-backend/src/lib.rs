@@ -50,6 +50,10 @@ pub mod ch_runtime;
 pub mod cloud_hypervisor;
 pub mod compat;
 pub mod docker;
+/// Plan 129 Task 5 — per-VM transparent egress redirect (nft prerouting
+/// REDIRECT scoped to the guest TAP) steering guest :80 to the host-side
+/// substitution terminator. Linux-only mechanism; consumed by the FC path.
+pub mod egress_redirect;
 pub mod firecracker;
 pub mod handle_registry;
 pub mod image;
@@ -70,6 +74,9 @@ pub mod network_provider;
 pub mod providers;
 /// Plan 166 Phase 2 / ADR-072 — QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Plan 129 — shared per-VM substitution-endpoint spawn/reap helpers used by
+/// the QEMU + Firecracker launch paths (one impl, no drift).
+pub(crate) mod substitution_spawn;
 // Plan 97 Phase B — Vz (Apple Virtualization.framework) backend.
 // Currently a skeleton: trait surface + capabilities + security profile
 // + availability probe; lifecycle methods land in a follow-up slice.
