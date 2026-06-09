@@ -892,6 +892,20 @@ git commit -m "feat(cli): warm-pool StandbySpec builder — kernel sha256 + bind
 
 ## Task 7: Claim-on-launch + `--warm-pool-size` + `pool warm` (mvm-cli)
 
+> **RE-SCOPED DURING EXECUTION (2026-06-09).** `up.rs` turned out to have **five**
+> `backend.start` sites across direct-boot / re-exec / wait paths — wiring auto-claim into
+> that admission-heavy code is delicate and deserves isolated review, and both the
+> `mvmctl pool` command and the `up` auto-claim need the same default-kernel + hypervisor
+> resolution. So Task 7 was split:
+> - **Landed in 1b-i:** the orchestration *helpers* — `claim_or_cold` (fail-open to cold)
+>   + `warm_to_target` + the `StandbySpec` builder — unit-tested against a stub backend
+>   (`crates/mvm-cli/src/commands/pool.rs`, `#[allow(dead_code)]` until wired).
+> - **Moved to 1b-ii:** the `mvmctl pool warm [N]` / `pool status` **command**, the
+>   `--warm-pool-size` flag on `up`, and the **claim-on-launch + replenish wiring** into
+>   the `up`/`run` path (the fragile part, with the shared kernel/hypervisor resolution).
+>
+> The remainder of this task as originally written is the 1b-ii work.
+
 Wire it into the launch path: on `up`/`run`, if `warm_pool_size > 0` and a compatible idle
 standby exists, claim it; else cold-boot. After a successful launch, warm the pool toward
 target (the explicit-fill half of UX option A). Add `mvmctl pool warm [N]`.
