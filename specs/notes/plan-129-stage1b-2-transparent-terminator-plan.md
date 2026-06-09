@@ -31,10 +31,7 @@
 
 **Remaining:** Task 5 (passt `--runas` + scoped `nft` redirect at launch), Task 6 (box e2e), then Stage 2 (CA/`https`). Task 0 ✅ PASS (skuid scoping confirmed — see RESULT under Task 0). Task 4 ✅ DONE + reviewed (commits `3201006c`/`53f5b2b1`).
 
-**⚠️ BLOCKER for Task 5/6 — backend/networking premise gap (found 2026-06-09):** Task 5's nft `meta skuid` redirect needs guest egress to flow through a **passt process under a dedicated uid**. But the substitution-endpoint moat (`spawn_substitution_endpoint`, which the terminator reuses) is wired **only into the QEMU backend** (`crates/mvm-backend/src/qemu.rs`), and QEMU uses **user-mode slirp networking** (`-netdev user,id=n0`, qemu.rs:191-197) — slirp egress exits as the *host user's* uid, so `skuid` cannot isolate guest egress from the host's own. The passt-based backends (the Firecracker `mvm-firecracker-bridge` bin — which already spawns hash-verified passt — and libkrun-on-Linux) do **not** yet spawn the substitution endpoint. So as wired today, **no backend has both a passt-under-a-uid egress path AND the substitution endpoint**, which Task 5/6 require. Resolution options (pick before building Task 5):
-  1. **QEMU → passt (surgical):** when `!plan_secrets.is_empty()`, swap QEMU's slirp for passt-under-a-dedicated-uid + install the skuid redirect + set `terminator_listen`; default (no-secret) path stays slirp. Keeps the box demo on `--hypervisor qemu` (as Task 0/6 assume). Cost: QEMU↔passt fd/socket plumbing, MTU, must not regress the existing vsock substitution path.
-  2. **Firecracker:** wire `spawn_substitution_endpoint` into the Firecracker bridge (it already runs passt), add `--runas` + skuid redirect there, run Task 6 e2e on Firecracker (the box is `rvproxy-firecracker`; the `--hypervisor qemu` in Task 0/6 is the stale bit). Cost: replicate the endpoint spawn into a second backend; the bridge is Landlock/seccomp-jailed so nft + setuid-drop is fiddlier.
-  Task 0's PoC validated the `skuid` mechanism itself on real passt; this gap is purely *which backend* carries it. Escalated to the user 2026-06-09.
+**✅ RESOLVED (2026-06-09) — Option 2 (Firecracker), with a mechanism correction.** The premise gap (substitution endpoint wired only on QEMU/slirp; `skuid` needs a passt-uid) was resolved by targeting **Firecracker** — but FC's egress is **TAP + nft NAT**, NOT passt, so the redirect mechanism changed from `meta skuid` (OUTPUT) to **`nat prerouting iifname "<tap>"`** (naturally guest-scoped; no passt, no uid). Re-validated on the box (PASS — see Task 5). No `passt.rs`/`--runas` change. Box is nft-only. See Task 5 for the corrected design; `[[project_plan_129_terminator_backend_gap]]`.
 
 **Box phase setup (Tasks 0/6 + Linux integration):** the box is `root@88.99.197.234`; `/root/mvm-129` does NOT exist — clone off `origin/main` and `cargo build -p mvm-cli -p mvm-libkrun-supervisor --features libkrun-sys`. Isolate from any parallel session with a dedicated `MVM_CACHE_DIR=/root/.cache/mvm-129` + `MVM_DATA_DIR=/root/.mvm-129`. Boot via `mvmctl up --hypervisor qemu --builder qemu`. Known gotchas (see memory): cold-cache Stage 0 can panic (#576) — warm the cache; a workload `/init` may exit ~5s on input-less console — verify with a long-lived workload + `examples/agent_ping`, and read `<vm_state_dir>/console.log`. Feasibility + the nft scoping mechanism are proven (memory `reference_passt_outbound_nft_redirectable`): scope the redirect to passt's uid via `meta skuid` so only guest egress is intercepted, never the host's own.
 
@@ -330,67 +327,33 @@ where
 
 ---
 
-### Task 5: passt under a dedicated uid + scoped nft redirect at launch
+### Task 5: per-VM nft REDIRECT on the guest TAP + endpoint/terminator wiring (Firecracker)
 
-**Files:** Modify `crates/deps/libkrun-sys/src/passt.rs` (`spawn`/`passt_args` accept a `runas_uid: Option<u32>` → append `--runas <uid>:<uid>`); Create `crates/mvm-hostd/src/supervisor/egress_redirect.rs` (install/teardown the nft rule); wire both at the per-VM launch site (`crates/mvm-vm-host/src/bin/mvm-libkrun-supervisor.rs` + the QEMU/firecracker bridge bins) so the redirect's uid matches passt's `--runas` and the terminator port matches Task 4's listener.
+**MECHANISM CORRECTION (2026-06-09 — supersedes the original passt/skuid design).** Investigation of the actual backends found: the **Firecracker** egress path is **TAP + nft/iptables NAT** (`crates/mvm-backend/src/network_provider.rs:8-10` — "this one only owns the iptables-on-TAP egress mechanism"; gvproxy/passt is the *libkrun* path). There is **no passt-under-a-uid** on Firecracker, so `meta skuid` (what Task 0 validated) does **not** apply. The guest's egress arrives on the per-VM **TAP interface** and is routed/NAT'd (FORWARD/POSTROUTING) — so the transparent redirect must match the **incoming TAP interface** in `nat prerouting`, which is naturally guest-scoped (the host's own egress never enters via the tap). No dedicated uid, no `passt --runas`, no `passt.rs` change. **The box is nft-only (no iptables).**
 
-- [ ] **Step 1: Write the failing test** — `passt_args(fd, pid, Some(60123))` includes `--runas 60123:60123`; `EgressRedirect::nft_argv(table, uid, port)` produces the exact rule tokens (`["add","rule","ip",&table,"output","meta","skuid","60123","tcp","dport","80","redirect","to",":18080"]`). Pure-function tests; the live `nft` call is covered by Task 6.
+**Re-validated on the box (2026-06-09 — PASS):** a netns+veth standing in for a TAP-fed guest behind the bridge MASQUERADE; rule `nft add rule ip <t> prerouting iifname "<iface>" tcp dport 80 redirect to :<port>` (chain `type nat hook prerouting priority -100`). Guest curl → captured `ORIGINAL_DST=1.1.1.1:80`; host's own egress (not via the iface) NOT captured. The terminator listener bound `0.0.0.0:<port>` receives the REDIRECTed forwarded connection (PREROUTING REDIRECT lands the packet on the host).
+
+**Files:** Create `crates/mvm-hostd/src/supervisor/egress_redirect.rs` (`EgressRedirect::install(vm, tap_iface, term_port)` / `Drop` teardown + a pure `nft_rule_argv(table, iface, port)` for unit tests). Wire into the **Firecracker parent context** (`crates/mvm-backend/src/microvm.rs` `run_from_build` + `stop_vm` — the bridge child is Landlock-confined and can't run `nft`, so install in the unconfined parent), gated on `mvm_core::plan::secrets_from_signed_json(plan_json)` being non-empty (`plan_json` is already read at `spawn_fc_bridge`/available; the tap name comes from the slot/network provision). Replicate `qemu.rs::spawn_substitution_endpoint` for FC but set `terminator_listen: Some(0.0.0.0:<per-VM port>)` (per-VM port = a base + `slot.index` to avoid host-wide collisions) and record the endpoint PID + write `substitution-env.json` (consumed by `mvmctl invoke`'s `substitution_env`, the existing guest env-injection path).
+
+- [ ] **Step 1: Write the failing test** — `EgressRedirect::nft_rule_argv("mvm_egress_x", "tap-x", 18080)` produces the exact tokens for `add rule ip mvm_egress_x prerouting iifname "tap-x" tcp dport 80 redirect to :18080`. Pure-function test; the live `nft` call + the FC wiring are covered by Task 6.
 
 - [ ] **Step 2: Run it (fails)**
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement** `egress_redirect.rs`: per-VM table `mvm_egress_<sanitized-vm>`, a `nat prerouting` chain (priority -100), and the iifname-scoped REDIRECT rule built from `nft_rule_argv`; `install` runs the `nft` calls, `Drop`/explicit `teardown` runs `nft delete table ip <table>`. Then wire FC `run_from_build`/`stop_vm`: when the plan carries secrets, spawn the substitution endpoint (vsock transport + `terminator_listen: Some(0.0.0.0:<port>)`), then `EgressRedirect::install(vm, tap, port)`; on stop, reap the endpoint PID, drop the redirect table, remove `substitution-env.json`. Gate everything on secrets; fail closed (roll back the FC boot if the endpoint/redirect can't come up, mirroring qemu.rs).
 
-```rust
-// egress_redirect.rs — scope the redirect to the VM's passt uid so we steer
-// ONLY guest egress, never the host's own (the PoC's key finding).
-use anyhow::{Result, bail};
+- [ ] **Step 4: Run it (passes)**; **Step 5: Commit** — `"feat(terminator): per-VM TAP nft REDIRECT + FC endpoint/terminator wiring (plan 129 stage 1b)"`
 
-pub struct EgressRedirect { table: String }
-
-impl EgressRedirect {
-    pub fn install(vm: &str, passt_uid: u32, term_port: u16) -> Result<Self> {
-        let table = format!("mvm_egress_{}", vm.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
-        nft(&["add", "table", "ip", &table])?;
-        nft(&["add", "chain", "ip", &table, "output", "{ type nat hook output priority -100 ; }"])?;
-        for a in Self::nft_argv(&table, passt_uid, term_port) {
-            // built as one vec; run as a single nft call
-            let _ = a; break;
-        }
-        nft(&Self::nft_argv(&table, passt_uid, term_port).iter().map(String::as_str).collect::<Vec<_>>())?;
-        Ok(Self { table })
-    }
-
-    pub fn nft_argv(table: &str, uid: u32, port: u16) -> Vec<String> {
-        ["add","rule","ip",table,"output","meta","skuid",&uid.to_string(),
-         "tcp","dport","80","redirect","to",&format!(":{port}")]
-            .into_iter().map(String::from).collect()
-    }
-}
-
-impl Drop for EgressRedirect {
-    fn drop(&mut self) { let _ = nft(&["delete", "table", "ip", &self.table]); }
-}
-
-fn nft(args: &[&str]) -> Result<()> {
-    let st = std::process::Command::new("nft").args(args).status()?;
-    if !st.success() { bail!("nft {args:?} failed"); }
-    Ok(())
-}
-```
-
-(Allocate the per-VM uid deterministically, e.g. a fixed base + a per-VM offset, or a dedicated `mvm-passt` system uid range; record the choice in the supervisor config. The terminator only runs when the plan carries secrets — gate both the `--runas` and the redirect on `!plan_secrets.is_empty()`.)
-
-- [ ] **Step 4: Run it (passes)**; **Step 5: Commit** — `"feat(terminator): scoped nft redirect + passt --runas at launch (plan 129 stage 1b)"`
+(Original passt/skuid `egress_redirect` sketch removed — it targeted the libkrun passt path; Firecracker uses TAP. A future libkrun-on-Linux terminator could add the skuid variant Task 0 validated, but that is out of scope for the FC slice.)
 
 ---
 
 ### Task 6: Box e2e — generic `http` client, SDK-free, audited
 
-**Files:** none (validation). Append the result to this file.
+**Files:** none (validation). Append the result to this file. **Backend: Firecracker on the box** (the box is `rvproxy-firecracker`; `/dev/kvm` present → `auto_select` lands on Firecracker). The redirect is the validated TAP/`iifname` mechanism, NOT skuid.
 
-- [ ] **Step 1:** On the box, store + bind a secret, then `mvmctl run --secret demo:127.0.0.1` (Stage-1 `--secret` from the sibling plan, or the SDK `secret()` example workload) with a guest entrypoint doing `curl -s http://127.0.0.1:<echo>/ -H "Authorization: Bearer $demo"` where `$demo` holds the placeholder.
-- [ ] **Step 2:** Assert the echo destination received `Authorization: Bearer <real value>`, not the placeholder; the guest `console.log` shows only `mvm-secret-…`; `mvmctl audit verify` exits 0 and a `secret.substituted` entry exists with no secret bytes.
-- [ ] **Step 3:** Assert the host's own egress is untouched (a host-side `curl http://127.0.0.1:<echo>/` is NOT intercepted — skuid scoping holds).
+- [ ] **Step 1:** On the box, store + bind a secret to a bound host, boot a secret-bearing FC workload, then `mvmctl invoke <vm> ...` (its `substitution_env` injects the `(var → placeholder)` pairs the endpoint wrote at boot) with a guest entrypoint doing `curl -s http://<bound-host>/ -H "Authorization: Bearer $TOKEN"` where `$TOKEN` holds the placeholder. The endpoint's `terminator_listen` + the per-VM `nat prerouting iifname "<tap>"` REDIRECT steer the guest's :80 egress to the terminator.
+- [ ] **Step 2:** Assert the destination received `Authorization: Bearer <real value>`, not the placeholder; the guest holds only `mvm-secret-…`; `mvmctl audit verify` exits 0 and a `secret.substituted` entry exists with no secret bytes.
+- [ ] **Step 3:** Assert the host's own egress is untouched (a host-side `curl http://<bound-host>/` is NOT intercepted — the `iifname` match only catches traffic arriving on the guest tap).
 - [ ] **Step 4:** Record PASS/FAIL + log paths here.
 
 ---
