@@ -45,6 +45,13 @@ serde_json = { workspace = true, optional = true }
 # reqwest/rustls closure only when enabled.
 s3 = ["dep:object_store", "dep:futures", "dep:serde_json"]
 
+# Linux-only: the LUKS2 EncryptedStorage arm stages the DEK in a 0600 tempfile
+# for `cryptsetup --key-file` (byte-exact, unlike newline-truncating stdin).
+# tempfile is already a workspace + dev dep; this just promotes it to a normal
+# dep on Linux. Non-Linux builds keep it dev-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+tempfile.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true

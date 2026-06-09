@@ -211,6 +211,87 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
     Ok(sidecar)
 }
 
+// ============================================================================
+// Post-restore signal (Plan 123 Phase C — the host-side sender)
+// ============================================================================
+
+/// Outcome of signaling `PostRestore` to a resumed guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreOutcome {
+    /// The guest agent acknowledged the post-restore signal succeeded
+    /// (its `PostRestoreAck.success`). `false` means the agent answered
+    /// but reported a failure (e.g. its SIGUSR1 → PID 1 kill failed).
+    pub acknowledged: bool,
+    /// Free-form detail from the agent's ack (e.g. "post-restore signal
+    /// sent to init"), surfaced to the operator.
+    pub detail: Option<String>,
+}
+
+/// Sends the `PostRestore` signal to a resumed guest so it finishes coming
+/// back: the agent maps `PostRestore` to `SIGUSR1 → PID 1`, which remounts
+/// the config/secrets drives and restarts services. Backend-agnostic — the
+/// production impl ([`VsockPostRestoreSignal`]) routes through the same
+/// `vsock_transport::for_vm` dispatcher every other host→agent RPC uses;
+/// tests inject a mock. This is the seam Plan 123 Phase C needed: the guest
+/// has handled `GuestRequest::PostRestore` all along, but nothing on the host
+/// sent it after a snapshot restore.
+pub trait PostRestoreSignal {
+    fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome>;
+}
+
+/// After a snapshot restore resumes vCPUs, signal the guest to finish
+/// re-establishing itself. An *unacknowledged* signal is an error: the VM is
+/// running at the hypervisor level but its drives may be unmounted, so the
+/// resume is not actually complete — fail closed and let the operator retry
+/// (`PostRestore` is safe to re-send; SIGUSR1 just re-runs the remount).
+pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
+    vm_name: &str,
+    signal: &S,
+) -> Result<PostRestoreOutcome> {
+    let outcome = signal
+        .post_restore(vm_name)
+        .with_context(|| format!("signaling post-restore to {vm_name}"))?;
+    if !outcome.acknowledged {
+        let detail = outcome
+            .detail
+            .as_deref()
+            .map(|d| format!(": {d}"))
+            .unwrap_or_default();
+        bail!(
+            "VM {vm_name} resumed but the guest did not acknowledge post-restore{detail} \
+             — config/secrets drives may be unmounted; re-run `mvmctl resume`"
+        );
+    }
+    Ok(outcome)
+}
+
+/// Production [`PostRestoreSignal`] — sends `GuestRequest::PostRestore` over
+/// the backend-agnostic vsock transport (Firecracker / libkrun / Apple
+/// Container, selected per VM by `vsock_transport::for_vm`). Not unit-tested
+/// here (needs a live guest agent); the orchestration in
+/// [`signal_post_restore`] is what the tests cover, mirroring the
+/// `FirecrackerIO` / `CannedIO` split on [`SnapshotIO`].
+pub struct VsockPostRestoreSignal;
+
+impl PostRestoreSignal for VsockPostRestoreSignal {
+    fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
+        use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, send_request};
+        let transport = crate::vsock_transport::for_vm(vm_name)
+            .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
+        let mut stream = transport
+            .connect(GUEST_AGENT_PORT)
+            .with_context(|| format!("connecting to guest agent on {vm_name}"))?;
+        match send_request(&mut stream, &GuestRequest::PostRestore)? {
+            GuestResponse::PostRestoreAck { success, detail } => Ok(PostRestoreOutcome {
+                acknowledged: success,
+                detail,
+            }),
+            GuestResponse::Error { message } => bail!("guest post-restore error: {message}"),
+            other => bail!("unexpected response to PostRestore: {other:?}"),
+        }
+    }
+}
+
 /// Encrypt `vmstate.bin` and `mem.bin` in place under the tenant
 /// DEK, when one is available. No-op when no DEK is configured —
 /// the resulting snapshot stays unencrypted, HMAC-only (Phase 1 /
@@ -910,5 +991,64 @@ mod tests {
             chained.contains("encrypted") && chained.contains("tenant DEK"),
             "want missing-DEK refusal, got: {chained}"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Plan 123 Phase C — post-restore signal orchestration
+    // ──────────────────────────────────────────────────────────────
+
+    /// Mock `PostRestoreSignal` returning a canned result, so the
+    /// `signal_post_restore` failure policy is testable without a guest.
+    struct MockSignal(Result<PostRestoreOutcome>);
+
+    impl PostRestoreSignal for MockSignal {
+        fn post_restore(&self, _vm_name: &str) -> Result<PostRestoreOutcome> {
+            match &self.0 {
+                Ok(o) => Ok(o.clone()),
+                Err(e) => bail!("{e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn signal_post_restore_ok_when_guest_acknowledges() {
+        let signal = MockSignal(Ok(PostRestoreOutcome {
+            acknowledged: true,
+            detail: Some("post-restore signal sent to init".into()),
+        }));
+        let outcome = signal_post_restore("vm-1", &signal).unwrap();
+        assert!(outcome.acknowledged);
+    }
+
+    #[test]
+    fn signal_post_restore_errors_when_guest_reports_failure() {
+        // The agent answered but its SIGUSR1 failed → the VM is up but
+        // degraded; resume must fail closed and name the detail.
+        let signal = MockSignal(Ok(PostRestoreOutcome {
+            acknowledged: false,
+            detail: Some("kill failed: no such process".into()),
+        }));
+        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("did not acknowledge"), "got: {msg}");
+        assert!(msg.contains("kill failed"), "detail must surface: {msg}");
+    }
+
+    #[test]
+    fn signal_post_restore_propagates_transport_error() {
+        // A transport/connect failure surfaces as Err with context, not a
+        // silent success that would leave the guest unsignaled.
+        let signal = MockSignal(Err(anyhow::anyhow!("connection refused")));
+        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        let chained: String = err
+            .chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            chained.contains("signaling post-restore"),
+            "context: {chained}"
+        );
+        assert!(chained.contains("connection refused"), "cause: {chained}");
     }
 }
