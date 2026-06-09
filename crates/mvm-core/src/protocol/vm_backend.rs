@@ -121,6 +121,11 @@ pub struct VmStartConfig {
     /// has no `.mvmpkg` pin (the common case). Same "do not log"
     /// rule as `plan_json`.
     pub bundle_json: Option<String>,
+    /// Plan 118 WS-1 1b — target warm-pool size. `0` (default) = feature off: no
+    /// standbys, no idle RAM, no control UDS, no behaviour change. A future
+    /// Firecracker standby reads the same field (it's why this lives on the
+    /// backend-agnostic config, not a libkrun-specific knob).
+    pub warm_pool_size: u32,
 }
 
 /// A host:guest port mapping, backend-agnostic.
@@ -813,6 +818,42 @@ pub trait VmBackend: Send + Sync {
         )))
     }
 
+    /// Does this backend support a prelaunched-supervisor standby pool (Plan 118
+    /// WS-1 1b)? Opt-in, default `false` — orthogonal to [`snapshot_capability`]
+    /// (snapshot = restore a booted VM; standby = pre-pay spawn/setup latency).
+    ///
+    /// [`snapshot_capability`]: Self::snapshot_capability
+    fn supports_standby_pool(&self) -> bool {
+        false
+    }
+
+    /// Spawn a prelaunched standby per `spec`, detached, blocked on its control UDS
+    /// before any boot. Returns a [`StandbyHandle`] the pool records. Fail-closed:
+    /// the default refuses so a backend opts in explicitly (mirrors [`warm_start`]).
+    ///
+    /// [`warm_start`]: Self::warm_start
+    fn spawn_standby(
+        &self,
+        _spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
+    /// Claim an idle standby: send its one-shot attach (the admitted signed plan +
+    /// rootfs + audit substrate), which the supervisor re-verifies before boot.
+    /// Returns the booted VM's [`VmId`]. Fail-closed default.
+    fn claim_standby(
+        &self,
+        _handle: &StandbyHandle,
+        _claim: &StandbyClaim,
+    ) -> std::result::Result<VmId, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
     /// Start a new VM from the given configuration.
     ///
     /// Returns the [`VmId`] assigned to the running VM.
@@ -1013,6 +1054,62 @@ mod tests {
         assert_err(&StandbyError::Unsupported {
             backend: "x".into(),
         });
+    }
+
+    fn sample_standby_spec() -> StandbySpec {
+        StandbySpec {
+            id: "standby-x".into(),
+            kernel_path: "/k/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "ab".repeat(32),
+            control_socket: "/p/standby-x/control.sock".into(),
+            vm_state_dir: "/p/standby-x".into(),
+        }
+    }
+
+    fn sample_standby_claim() -> StandbyClaim {
+        StandbyClaim {
+            rootfs_path: "/vol/rootfs.ext4".into(),
+            tenant_id: "tenant-a".into(),
+            audit_dir: "/audit".into(),
+            gateway_audit_socket: "/audit/g.sock".into(),
+            gateway_events_socket: None,
+            plan_json: "{}".into(),
+            bundle_json: None,
+        }
+    }
+
+    #[test]
+    fn standby_pool_defaults_are_fail_closed() {
+        // TierOnlyBackend opts into no standby pool — the trait defaults must refuse.
+        let b = TierOnlyBackend(SnapshotCapability::DiskOnly);
+        assert!(!b.supports_standby_pool());
+        match b.spawn_standby(&sample_standby_spec()) {
+            Err(StandbyError::Unsupported { backend }) => assert_eq!(backend, "tier-only"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        match b.claim_standby(
+            &StandbyHandle {
+                id: "s".into(),
+                control_socket: "/p/s.sock".into(),
+                pid: 1,
+                kernel_sha256: "a".repeat(64),
+                binding_nonce: "ab".repeat(32),
+                spawned_unix_secs: 1,
+                state: StandbyState::Idle,
+            },
+            &sample_standby_claim(),
+        ) {
+            Err(StandbyError::Unsupported { backend }) => assert_eq!(backend, "tier-only"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn warm_pool_size_defaults_to_zero() {
+        assert_eq!(VmStartConfig::default().warm_pool_size, 0);
     }
 
     #[test]
