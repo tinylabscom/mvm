@@ -18,7 +18,8 @@ use std::process::Command;
 /// a host-side terminator port. `u16` is wide enough; slot index is `u8`.
 pub const TERMINATOR_PORT_BASE: u16 = 18080;
 
-/// Derive this VM's terminator port from its 0-based slot index.
+/// Derive this VM's terminator port from its 0-based slot index. The `u8`
+/// `slot_index` caps the sum at 18080+255, so the `u16` add can't overflow.
 pub fn terminator_port_for(slot_index: u8) -> u16 {
     TERMINATOR_PORT_BASE + slot_index as u16
 }
