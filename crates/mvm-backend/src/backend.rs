@@ -570,6 +570,30 @@ impl AnyBackend {
         self.inner().snapshot_capability()
     }
 
+    /// Plan 118 WS-1 1b — does this backend support a prelaunched-supervisor standby
+    /// pool? See [`VmBackend::supports_standby_pool`]. Only libkrun does today.
+    pub fn supports_standby_pool(&self) -> bool {
+        self.inner().supports_standby_pool()
+    }
+
+    /// Spawn a prelaunched standby. See [`VmBackend::spawn_standby`].
+    pub fn spawn_standby(
+        &self,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
+    {
+        self.inner().spawn_standby(spec)
+    }
+
+    /// Claim an idle standby. See [`VmBackend::claim_standby`].
+    pub fn claim_standby(
+        &self,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+        claim: &mvm_core::vm_backend::StandbyClaim,
+    ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        self.inner().claim_standby(handle, claim)
+    }
+
     /// Warm-start a VM at (at least) the requested snapshot tier. See
     /// [`VmBackend::warm_start`] — fails closed with a typed error on an
     /// over-request rather than degrading to a cold boot (plan 123 C4).
