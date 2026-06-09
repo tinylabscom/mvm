@@ -114,6 +114,16 @@ pub(in crate::commands) struct Args {
     #[arg(long, value_name = "NAME")]
     pub r#fn: Option<String>,
 
+    /// Dispatch into an **already-running** workload (e.g. one booted by
+    /// `mvmctl up --name <NAME>`) instead of booting a transient VM. The
+    /// positional `MANIFEST` is reinterpreted as the running VM's name. The
+    /// workload's substitution endpoint + its boot-minted placeholders
+    /// (Plan 129 / ADR-067) are reused, so a secret-declaring `up` workload's
+    /// entrypoint runs with live egress substitution. The VM is left running
+    /// (no teardown) — reap it with `mvmctl down <NAME>`.
+    #[arg(long, conflicts_with_all = ["keep_alive", "fresh", "reset", "no_vm"])]
+    pub attach: bool,
+
     /// **Dev shortcut** — bypass VM boot and run the workload's
     /// wrapper directly on the host. Exercises the full wire contract
     /// (encode → wrapper → user function → encode → decode) without
@@ -176,6 +186,24 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         let stdin_bytes = read_stdin_payload(args.stdin.as_deref())?;
         let exit_code = super::invoke_no_vm::run(&args, stdin_bytes)?;
         std::process::exit(exit_code);
+    }
+    if args.attach {
+        // Plan 129 / ADR-067: dispatch into an already-running workload by
+        // name (booted by `mvmctl up --name <NAME>`), reusing its substitution
+        // endpoint + boot-minted placeholders. `dispatch` injects the workload's
+        // substitution env (HTTP_PROXY + placeholders) via `substitution_env`,
+        // so a secret-declaring entrypoint runs with live egress substitution.
+        // No transient boot, no teardown — the VM is the user's to reap.
+        let stdin_bytes = read_stdin_payload(args.stdin.as_deref())?;
+        ui::info(&format!(
+            "invoke: dispatching into running workload '{}'",
+            args.manifest
+        ));
+        let exit_code = dispatch(&args.manifest, stdin_bytes, args.timeout, None)?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return Ok(());
     }
     if args.reset {
         ui::warn(
@@ -525,6 +553,28 @@ fn exit_code_for(event: &mvm_guest::vsock::EntrypointEvent) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_flag_parses_and_conflicts_with_boot_flags() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            args: Args,
+        }
+        // `invoke <name> --attach` parses and sets the flag.
+        let w = Wrap::try_parse_from(["x", "myvm", "--attach"]).unwrap();
+        assert!(w.args.attach);
+        assert_eq!(w.args.manifest, "myvm");
+        // --attach is incompatible with the transient-boot flags (it dispatches
+        // into an already-running workload, never boots a VM).
+        for flag in ["--keep-alive", "--fresh", "--reset", "--no-vm"] {
+            assert!(
+                Wrap::try_parse_from(["x", "myvm", "--attach", flag]).is_err(),
+                "--attach must conflict with {flag}"
+            );
+        }
+    }
 
     #[test]
     fn test_exit_code_normal_exit_zero() {
