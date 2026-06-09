@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-08**
+**Last updated: 2026-06-09**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated; ~98%
+PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + undeclared egress redaction landed (box-validated); SDK-free transparent-terminator core landed (#735), FC wiring + e2e next
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -32,9 +32,20 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [x] invoke injects HTTP_PROXY+placeholders; guest forward proxy — PR #718
   [x] on-box endpoint validation: real AF_VSOCK + real encrypted store
       (placeholder mint, substitution success, claim-12 refuse) — 2026-06-08
+  — SDK-free egress (transparent terminator) · direction 2026-06-08 · branch feat/plan-129-egress-terminator · draft PR #735 · plan: specs/notes/plan-129-stage1b-2-transparent-terminator-plan.md ("Resume state")
+  [x] SDK secret() type/hosts + ADR-049 retire             — PR #722/#723
+  [x] passt-redirect feasibility PoC (nft OUTPUT + SO_ORIGINAL_DST) — GREEN on box
+  [x] terminator core (orig_dst, request parse, handler, reader) — 4 commits, reviewed
+  [ ] terminator listener + EndpointConfig wiring          — Task 4 (Linux)
+  [ ] passt --runas + scoped nft redirect at launch        — Task 5 (Linux)
+  [ ] box e2e: generic curl http, SDK-free, audited        — Task 0/6
+  [ ] Stage 2: name-constrained CA + https termination     — ADR-006
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)
+  [x] Phase E: undeclared secret/PII egress redact-to-XXX detector
+      (RedactingSubstitution mask-and-continue; PiiRedactor/SecretsScanner
+      redact()) wired always-on into the gateway bridge — PR #733
   [ ] local secret-workload launch via admission flow (compile refuses managed
       refs → deploy/plan path; the user-facing local boot gap) — plan 129
   [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
@@ -78,7 +89,7 @@ PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density →
   [~] WS-D wake-on-request — owned by mvmd
   (WS-B/C/D density belongs to mvmd, not mvm — see plan-170 banner)
 
-PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C deferred (gated)
+PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1+C4 done; C2/C3 gated
   [x] Phase A claims-gated lift (A1/L1, A2, A3, A4, L3-A)
   [x] A2/A4 per-tenant enforce: libkrun PlanFlowPolicy deny-by-default
       (mirrors FC install_default_deny) + per-tenant DnsSinkholeScan
@@ -90,8 +101,21 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C 
   [x] Phase B Linux LUKS2 arm (#729, live-verified on Linux VM) + S3 coverage
       S3-free (#732: from_s3_config validation + LocalFileSystem sync)
   [x] Phase C PostRestore host sender (#734) — the warm-start prerequisite
-  [ ] Phase C warm-start (FC live-memory / Vz save-restore / libkrun disk) —
-      gated on the host PostRestore sender (absent) + Plan 152 WS-B
+  [x] C1 SnapshotCapability enum + per-backend disposition
+  [x] C4 warm-start operation seam: typed WarmStartError (ADR-053 hint) +
+      SnapshotCapability::{label,satisfies} + fail-closed VmBackend::warm_start
+      default; libkrun disk-only (SnapshotUpper clone of golden rootfs);
+      doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
+  [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
+  [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
+  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
+
+PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
+  [ ] T1 VMGenID delivery on PostRestore (token payload + GenIdReseeder dispatch)
+  [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
+  [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base
+  [ ] T4 FirecrackerBackend::warm_start override + mvmctl verb + agent_ping e2e
+  (Vz=152 WS-C; libkrun disk-only done #741; reflink clone = 123 C4 follow-up)
 
 PLAN 126 — Dependency reduction                 🔴 ~10%
   [x] A1 re-baseline

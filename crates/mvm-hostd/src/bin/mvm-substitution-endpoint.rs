@@ -53,8 +53,11 @@ fn main() -> Result<()> {
     let (service, handed) = assemble(&cfg).context("assembling substitution service")?;
 
     // Bind BEFORE the handshake so the backend knows the endpoint is reachable
-    // the moment it reads the ready line — no listen/connect race at boot.
+    // the moment it reads the ready line — no listen/connect race at boot. The
+    // terminator listener (Plan 129 stage 1b) binds here too when configured,
+    // so the nft redirect target is live before the guest boots.
     let bound = bind_transport(&cfg.transport)?;
+    let terminator = bind_terminator(cfg.terminator_listen)?;
 
     // Ready handshake: report the minted (guest var → placeholder) pairs on
     // stdout so the backend can set them in the guest launch env, then boot.
@@ -75,7 +78,10 @@ fn main() -> Result<()> {
         .build()
         .context("tokio runtime build failed")?;
 
-    runtime.block_on(serve(service, bound))
+    // One configured deadline for the forward leg AND the untrusted guest socket
+    // (terminator). The UDS/vsock path already honors this via ReqwestForwarder.
+    let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
+    runtime.block_on(serve(service, bound, terminator, forward_timeout))
 }
 
 /// A bound, listening transport. QEMU uses an AF_VSOCK listener; the in-process
@@ -116,11 +122,56 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
     }
 }
 
-/// Run the accept loop until the listener errors (or the process is killed).
+/// Bind the transparent egress terminator's TCP listener, if configured. Bound
+/// here (outside the runtime, set non-blocking) so it's reachable before the
+/// ready handshake — the nft redirect target must be live before the guest
+/// boots. Linux-only: the terminator recovers the original destination via
+/// `SO_ORIGINAL_DST`, an `SOL_IP` getsockopt with no portable equivalent.
+fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net::TcpListener>> {
+    let Some(addr) = addr else {
+        return Ok(None);
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let listener = std::net::TcpListener::bind(addr)
+            .with_context(|| format!("terminator TCP bind on {addr} failed"))?;
+        listener.set_nonblocking(true)?;
+        info!(terminator_addr = %addr, "egress terminator bound");
+        Ok(Some(listener))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = addr;
+        anyhow::bail!("egress terminator (terminator_listen) is linux-only");
+    }
+}
+
+/// Run the primary substitution accept loop, plus the terminator accept loop
+/// when one is bound, until a listener errors (or the process is killed). The
+/// loops run concurrently: a terminated guest reaches the substitution channel
+/// (placeholder-bearing requests) AND the redirected terminator path.
 async fn serve(
     service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
     bound: Bound,
+    terminator: Option<std::net::TcpListener>,
+    forward_timeout: std::time::Duration,
 ) -> Result<()> {
+    // Spawn the terminator loop first so it's accepting while the primary loop
+    // owns the task. On non-Linux `terminator` is always None (bind bails).
+    #[cfg(target_os = "linux")]
+    let terminator_task = match terminator {
+        Some(std_listener) => {
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .context("adopting terminator TCP listener into the tokio runtime")?;
+            Some(tokio::spawn(
+                std::sync::Arc::clone(&service).serve_terminator(listener, forward_timeout),
+            ))
+        }
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = (terminator, forward_timeout);
+
     match bound {
         Bound::Uds(std_listener) => {
             let listener = tokio::net::UnixListener::from_std(std_listener)
@@ -129,6 +180,11 @@ async fn serve(
         }
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => service.serve_vsock(listener).await,
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(task) = terminator_task {
+        task.abort();
     }
     Ok(())
 }

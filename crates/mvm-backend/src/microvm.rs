@@ -726,6 +726,27 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         );
     }
 
+    // Plan 129 Task 5B — when the admitted plan carries secret bindings, stand
+    // up this VM's transparent egress moat now that the guest is healthy:
+    //   1. spawn the per-VM substitution endpoint with the terminator listener
+    //      bound on a per-slot host port (Task 4), and
+    //   2. install the nft TAP prerouting REDIRECT that steers the guest's
+    //      outbound :80 to that terminator (Task 5A).
+    // Fail closed: a secret-bearing workload must not keep running without its
+    // substitution path, so any failure rolls the VM back. Linux-only (nft +
+    // the FC path itself). The plan source is the same `plan.json` the bridge
+    // parsed; a missing/unsigned file means a legacy/non-admitted boot with no
+    // secrets — nothing to install.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = wire_egress_substitution(config, &abs_dir) {
+        // Roll back the running VM + its network. The guards were about to be
+        // defused; instead let them fire by returning before defuse — but the
+        // bridge watchdog already detached, so tear down explicitly.
+        warn!(vm = %config.slot.name, "egress substitution wiring failed; rolling back VM: {e}");
+        let _ = stop_vm(&config.slot.name);
+        return Err(e);
+    }
+
     // VM is fully started — defuse guards so normal stop path handles cleanup
     fc_guard.defuse();
     tap_guard.defuse();
@@ -1074,6 +1095,23 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let abs_dir = format!("{}/{}", abs_vms, name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
+
+    // Plan 129 Task 5B — tear down this VM's egress substitution moat BEFORE the
+    // not-running early return. The endpoint is a live host process holding the
+    // workload's DECRYPTED secrets and the nft REDIRECT table outlives the guest;
+    // if an FC VM crashes/OOMs on its own, a later `stop_vm` must still reap the
+    // moat — decrypted secrets must not outlive the guest, even on a crash. Both
+    // are best-effort + idempotent (no-op when the VM carried no secrets). The
+    // substitution sidecars live under `vm_state_dir(name)`, NOT the VMS_DIR
+    // `abs_dir`. Mirrors qemu.rs ordering (reap-before-not-running-return).
+    crate::substitution_spawn::reap_substitution_endpoint(
+        &mvm_core::config::vm_state_dir(name),
+        name,
+    );
+    #[cfg(target_os = "linux")]
+    if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
+        warn!(vm = %name, "remove egress redirect table: {e}");
+    }
 
     if !firecracker::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
@@ -2282,6 +2320,74 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
         current_exe.as_deref(),
         &manifest_dir,
     )
+}
+
+/// Plan 129 Task 5B — stand up this VM's transparent egress substitution moat
+/// (endpoint + terminator + nft TAP REDIRECT) when the admitted plan carries
+/// secret bindings. Called after the FC guest is healthy.
+///
+/// The plan lives at `vm_state_dir(name)/plan.json` (the same file
+/// `spawn_fc_bridge` parses — `mvm_data_dir()/vms/<name>`, NOT the `abs_dir`
+/// VMS_DIR tree). The substitution pid + env sidecars also land under
+/// `vm_state_dir` so the invoke path's `vm_substitution_env_path` lookup
+/// resolves identically to the QEMU backend.
+///
+/// Fail-closed: any error propagates so the caller rolls back the VM. A
+/// missing/unsigned `plan.json` (legacy / non-admitted boot) or a plan with no
+/// secrets is a clean no-op — there's nothing to substitute.
+///
+/// The installed [`EgressRedirect`] is `persist`ed (not dropped): the VM keeps
+/// running after this returns, and `stop_vm` removes the nft table by name.
+#[cfg(target_os = "linux")]
+fn wire_egress_substitution(config: &FlakeRunConfig, _abs_dir: &str) -> Result<()> {
+    use crate::egress_redirect::{EgressRedirect, terminator_port_for};
+    use crate::substitution_spawn::spawn_substitution_endpoint;
+    use std::net::SocketAddr;
+
+    let name = &config.slot.name;
+    let state_dir = mvm_core::config::vm_state_dir(name);
+    let plan_path = state_dir.join("plan.json");
+    let plan_json = match std::fs::read_to_string(&plan_path) {
+        Ok(s) => s,
+        // No admitted plan ⇒ legacy/non-admitted boot ⇒ no secrets, no moat.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "read plan.json at {} for egress substitution: {e}",
+                plan_path.display()
+            ));
+        }
+    };
+
+    // Decode secrets; a non-signed/legacy placeholder plan_json simply has none.
+    let secrets = match mvm_core::plan::secrets_from_signed_json(&plan_json) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(vm = %name, error = %e, "plan.json not a decodable signed plan; skipping egress substitution");
+            return Ok(());
+        }
+    };
+    if secrets.is_empty() {
+        return Ok(());
+    }
+
+    let tenant = mvm_core::plan::tenant_from_signed_json(&plan_json)
+        .map_err(|e| anyhow::anyhow!("extract tenant from plan.json: {e}"))?;
+
+    // Per-slot terminator port so concurrent VMs never collide host-side.
+    let term_port = terminator_port_for(config.slot.index);
+    // 0.0.0.0: a PREROUTING REDIRECT delivers the forwarded packet to a local
+    // socket on the host, so the terminator must accept on the host's addrs.
+    let listen = SocketAddr::from(([0, 0, 0, 0], term_port));
+    spawn_substitution_endpoint(name, &state_dir, &tenant, &secrets, Some(listen))?;
+
+    // Install the nft TAP REDIRECT, then persist the handle: the table must
+    // outlive this stack frame (the VM keeps running); `stop_vm` tears it down
+    // by name. If install fails, the spawned endpoint is reaped by the caller's
+    // rollback (`stop_vm` → `reap_substitution_endpoint`).
+    let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
+    redirect.persist();
+    Ok(())
 }
 
 /// Spawn the `mvm-firecracker-bridge` sibling. Creates a UNIX

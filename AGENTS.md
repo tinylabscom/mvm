@@ -177,6 +177,56 @@ Rules:
 
 **NEVER** use `.unwrap()` in production code. Always use `.expect("descriptive message")` instead, so that if a panic occurs, the error message explains what went wrong and where. `.unwrap()` is only acceptable in test code (`#[cfg(test)]` modules and `tests/` directories).
 
+## Reuse First; Compose Small, Testable Units
+
+**Never reimplement functionality that already exists.** Before writing anything,
+search for an existing helper, type, trait impl, or crate that already does the
+job — `grep`/`rg` the workspace, check the facade re-exports, read the module the
+work belongs in. Duplicated logic drifts out of sync, doubles the test surface,
+and is the single most common source of bugs in this repo. If an existing helper
+is *almost* right, extend or generalize it — don't fork a second copy.
+
+- **Use the helpers.** All `~/.mvm` **and** `~/.cache/mvm` paths go through
+  `mvm-core::config` helpers (`vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
+  **never** build them inline with `std::env::var("HOME")` + `.join(...)`, which
+  silently ignores `MVM_DATA_DIR` / `MVM_CACHE_DIR` / XDG and breaks parallel-worktree
+  isolation. Shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
+  Find the established helper and call it; if one is missing, add it where it belongs
+  and call it from every site.
+- **Small, single-purpose functions.** Prefer many small functions that each do
+  one thing and are trivially unit-testable over one large function with branches
+  and side effects tangled together. If you can't write a focused test for it, it
+  is too big — split it.
+- **Test the code — always, no exceptions.** Every new or changed function, type,
+  trait impl, and code path ships with tests in the same change: positive path,
+  negative/error path, and edge cases. This is not optional and not deferrable —
+  "no task is done without tests" (see "Definition of Done" and "Test
+  Expectations"). Write the test alongside (or before) the code, not after the
+  fact. A helper you extracted to be testable that has no test is not done. If a
+  function can fail, prove it returns `Err` (never panics) with a test.
+- **Make illegal states unrepresentable.** Lean on the type system: newtypes over
+  bare `String`/`u64` IDs, enums over stringly-typed flags, `Option`/`Result` over
+  sentinel values. Push invariants into types so the compiler enforces them and
+  fewer runtime checks (and tests) are even needed.
+- **Don't over-abstract (YAGNI).** Reach for a trait/builder/generic when there is
+  a *real* second case or genuine construction complexity — not speculatively. The
+  goal is the simplest design that's reusable and testable, not maximal
+  indirection. Match the existing pattern; don't invent a framework.
+- **Builder pattern for multi-field construction.** Types with more than a couple
+  of fields (especially optional ones) get a builder rather than a long positional
+  constructor. This also kills `clippy::too_many_arguments` at the source instead
+  of suppressing it.
+- **Traits for behavior that varies.** When behavior differs by backend, env, or
+  mode, express it as a trait with impls (see `VmBackend`, `ShellEnvironment`) —
+  never a `match` on an enum scattered across call sites. One impl is one path,
+  not the only path (see "Never lock into a single VMM").
+- **Structs over loose tuples/params.** Group related values into a named struct
+  (a config/params struct) so the shape is documented and testable, rather than
+  threading bare arguments through many layers.
+
+When in doubt, find the existing pattern in the codebase and follow it exactly —
+match the surrounding naming, idiom, and module layout. Consistency is a feature.
+
 ## No Placeholders in Plans or Code
 
 **NEVER** write placeholders in plans, ADRs, or code that ships. This includes:
