@@ -66,13 +66,12 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] `invoke <name> --attach` dispatches RunEntrypoint into the running `up`
       workload (reuses endpoint + placeholders); function body runs with the
       injected proxy+placeholder env
-  [x] guest loopback blackhole fixed → PR #749 (netinit must not blackhole its
-      own `lo`; it was killing the forward proxy)
+  [x] guest loopback made functional → PR #749: netinit must not blackhole its
+      own `lo` (EINVAL) AND /init must bring `lo` up (ENETUNREACH) — both were
+      broken, killing the forward proxy. The two together complete the loopback
   [ ] live guest-FUNCTION egress e2e (destination sees real cred / claim-12 /
-      redact-to-XXX): blocked behind #749 on a further egress-transport issue —
-      post-fix the workload egress fails ENETUNREACH (guest `lo`/`init`
-      networking + forward-proxy↔vsock-relay). Needs a dev/console image; tracked
-      as a deferred follow-up in plan 129. Substitution+claim-12 proven (#710)
+      redact-to-XXX): the loopback chain is fixed in #749; pending box
+      re-validation on QEMU (#745 + #749 combined). Substitution+claim-12 (#710)
   [ ] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
       + endpoint) — deferred follow-up
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
