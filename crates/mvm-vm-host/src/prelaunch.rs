@@ -87,7 +87,9 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
     use ed25519_dalek::SigningKey;
-    use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig};
+    use libkrun_sys::{
+        BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
+    };
     use mvm_core::plan::signing::test_support::sample_plan;
     use mvm_core::plan::{ExecutionPlan, NonceStore, sign_plan};
     use std::io::Write;
@@ -139,7 +141,11 @@ mod tests {
         serde_json::to_vec(&attach).unwrap()
     }
 
-    fn signed_envelope(plan: &ExecutionPlan, key: &SigningKey, signer_id: &str) -> serde_json::Value {
+    fn signed_envelope(
+        plan: &ExecutionPlan,
+        key: &SigningKey,
+        signer_id: &str,
+    ) -> serde_json::Value {
         serde_json::to_value(sign_plan(plan, key, signer_id)).unwrap()
     }
 
@@ -161,9 +167,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (kp, key) = write_key(dir.path());
         let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
-        let bytes = attach_bytes("WRONG", signed_envelope(&plan_around(now), &key, "host:test"));
+        let bytes = attach_bytes(
+            "WRONG",
+            signed_envelope(&plan_around(now), &key, "host:test"),
+        );
         let mut store = NonceStore::new();
-        let err = verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
+        let err =
+            verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
         assert!(matches!(err, AttachVerifyError::Merge(_)));
     }
 
@@ -173,9 +183,13 @@ mod tests {
         let (kp, _real) = write_key(dir.path());
         let attacker = SigningKey::from_bytes(&[9u8; 32]); // not the on-disk key
         let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
-        let bytes = attach_bytes(NONCE, signed_envelope(&plan_around(now), &attacker, "host:test"));
+        let bytes = attach_bytes(
+            NONCE,
+            signed_envelope(&plan_around(now), &attacker, "host:test"),
+        );
         let mut store = NonceStore::new();
-        let err = verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
+        let err =
+            verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
         assert!(matches!(err, AttachVerifyError::PlanVerify(_)));
     }
 
@@ -189,7 +203,8 @@ mod tests {
         // Verify an hour after the window closed.
         let later = plan_now + Duration::hours(1);
         let mut store = NonceStore::new();
-        let err = verify_and_merge_attach(base(kp, "host:test"), &bytes, later, &mut store).unwrap_err();
+        let err =
+            verify_and_merge_attach(base(kp, "host:test"), &bytes, later, &mut store).unwrap_err();
         assert!(matches!(err, AttachVerifyError::Validity(_)));
     }
 
@@ -203,7 +218,8 @@ mod tests {
         let mut store = NonceStore::new();
         // First admit succeeds; second (same store, same plan) is a replay.
         verify_and_merge_attach(base(kp.clone(), "host:test"), &bytes, now, &mut store).unwrap();
-        let err = verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
+        let err =
+            verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
         assert!(matches!(err, AttachVerifyError::Validity(_)));
     }
 }

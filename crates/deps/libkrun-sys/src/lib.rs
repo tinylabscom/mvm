@@ -1637,8 +1637,7 @@ mod base_attach_tests {
     fn merge_rejects_base_that_already_carries_a_rootfs() {
         let mut b = base();
         b.krun.rootfs_path = Some("/leftover.ext4".into());
-        let err =
-            SupervisorConfig::from_base_and_attach(b, attach(&"aa".repeat(32))).unwrap_err();
+        let err = SupervisorConfig::from_base_and_attach(b, attach(&"aa".repeat(32))).unwrap_err();
         assert!(matches!(err, AttachMergeError::BaseHasRootfs));
     }
 
