@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_core::vm_backend::{StandbyHandle, StandbyState};
+use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
 
 /// Filename of the per-standby metadata JSON inside its dir.
 const HANDLE_FILE: &str = "standby.json";
@@ -66,22 +66,21 @@ impl SupervisorStandbyPool {
         Ok(out)
     }
 
-    /// Pick a live, idle standby whose kernel matches — the claim candidate. `None`
-    /// means "no compatible warm standby; cold-boot." Skips claimed and dead entries.
-    pub fn select_idle_for_kernel(&self, kernel_sha256: &str) -> Result<Option<StandbyHandle>> {
+    /// Pick a live, idle standby compatible with `want` (kernel + fixed resources) — the
+    /// claim candidate. `None` means "no compatible warm standby; cold-boot." Skips
+    /// claimed and dead entries.
+    pub fn select_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
         Ok(self.list()?.into_iter().find(|h| {
-            h.state == StandbyState::Idle && h.matches_kernel(kernel_sha256) && pid_alive(h.pid)
+            h.state == StandbyState::Idle && h.is_compatible(want) && pid_alive(h.pid)
         }))
     }
 
-    /// Count of live idle standbys for a kernel — drives replenish-to-target.
-    pub fn idle_count_for_kernel(&self, kernel_sha256: &str) -> Result<usize> {
+    /// Count of live idle standbys compatible with `want` — drives replenish-to-target.
+    pub fn idle_count_compatible(&self, want: &StandbyCompat) -> Result<usize> {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|h| {
-                h.state == StandbyState::Idle && h.matches_kernel(kernel_sha256) && pid_alive(h.pid)
-            })
+            .filter(|h| h.state == StandbyState::Idle && h.is_compatible(want) && pid_alive(h.pid))
             .count())
     }
 
@@ -117,7 +116,7 @@ fn set_mode_0700(p: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::vm_backend::{StandbyHandle, StandbyState};
+    use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
 
     fn handle(id: &str, kernel: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
@@ -125,9 +124,19 @@ mod tests {
             control_socket: format!("/p/{id}/control.sock").into(),
             pid: std::process::id(), // a live pid so liveness passes
             kernel_sha256: kernel.into(),
+            vcpus: 2,
+            mem_mib: 1024,
             binding_nonce: "ab".repeat(32),
             spawned_unix_secs: 1,
             state,
+        }
+    }
+
+    fn compat(kernel: &str) -> StandbyCompat {
+        StandbyCompat {
+            kernel_sha256: kernel.into(),
+            vcpus: 2,
+            mem_mib: 1024,
         }
     }
 
@@ -154,9 +163,19 @@ mod tests {
         pool.record(&handle("wrong-kernel", "bb", StandbyState::Idle))
             .unwrap();
 
-        let picked = pool.select_idle_for_kernel("aa").unwrap();
+        let picked = pool.select_idle_compatible(&compat("aa")).unwrap();
         assert_eq!(picked.unwrap().id, "good");
-        assert!(pool.select_idle_for_kernel("cc").unwrap().is_none());
+        assert!(pool.select_idle_compatible(&compat("cc")).unwrap().is_none());
+    }
+
+    #[test]
+    fn select_idle_skips_resource_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut big = handle("big", "aa", StandbyState::Idle);
+        big.vcpus = 8; // same kernel, different cpus → not compatible
+        pool.record(&big).unwrap();
+        assert!(pool.select_idle_compatible(&compat("aa")).unwrap().is_none());
     }
 
     #[test]
@@ -176,6 +195,6 @@ mod tests {
         pool.record(&handle("a", "aa", StandbyState::Idle)).unwrap();
         pool.record(&handle("b", "aa", StandbyState::Claimed))
             .unwrap();
-        assert_eq!(pool.idle_count_for_kernel("aa").unwrap(), 1);
+        assert_eq!(pool.idle_count_compatible(&compat("aa")).unwrap(), 1);
     }
 }
