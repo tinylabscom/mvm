@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-08**
+**Last updated: 2026-06-09**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated; ~98%
+PLAN 129 — Secrets / SigV4 substitution         🟢 both tiers landed (declared substitution + undeclared egress redaction); box-validated
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -35,6 +35,9 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)
+  [x] Phase E: undeclared secret/PII egress redact-to-XXX detector
+      (RedactingSubstitution mask-and-continue; PiiRedactor/SecretsScanner
+      redact()) wired always-on into the gateway bridge — PR #733
   [ ] local secret-workload launch via admission flow (compile refuses managed
       refs → deploy/plan path; the user-facing local boot gap) — plan 129
   [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
@@ -78,7 +81,7 @@ PLAN 170 — Host lifecycle convergence           ✅ mvm-side done (density →
   [~] WS-D wake-on-request — owned by mvmd
   (WS-B/C/D density belongs to mvmd, not mvm — see plan-170 banner)
 
-PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C deferred (gated)
+PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1+C4 done; C2/C3 gated
   [x] Phase A claims-gated lift (A1/L1, A2, A3, A4, L3-A)
   [x] A2/A4 per-tenant enforce: libkrun PlanFlowPolicy deny-by-default
       (mirrors FC install_default_deny) + per-tenant DnsSinkholeScan
@@ -90,8 +93,16 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C 
   [x] Phase B Linux LUKS2 arm (#729, live-verified on Linux VM) + S3 coverage
       S3-free (#732: from_s3_config validation + LocalFileSystem sync)
   [x] Phase C PostRestore host sender (#734) — the warm-start prerequisite
-  [ ] Phase C warm-start (FC live-memory / Vz save-restore / libkrun disk) —
-      gated on the host PostRestore sender (absent) + Plan 152 WS-B
+  [x] C1 SnapshotCapability enum + per-backend disposition
+  [x] C4 warm-start operation seam: typed WarmStartError (ADR-053 hint) +
+      SnapshotCapability::{label,satisfies} + fail-closed VmBackend::warm_start
+      default; libkrun disk-only (SnapshotUpper clone of golden rootfs);
+      doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
+  [ ] C2 Firecracker live-memory fast-resume (UFFD/NBD/hugepages + VMGenID
+      delivery) — live-KVM-gated
+  [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
+  [ ] C4 warm-start CLI/RPC wiring + live disk-snapshot agent_ping —
+      rides the C2/C3 snapshot RPC (no verb invokes warm_start yet)
 
 PLAN 126 — Dependency reduction                 🔴 ~10%
   [x] A1 re-baseline
