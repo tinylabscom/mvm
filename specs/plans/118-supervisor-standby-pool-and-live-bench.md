@@ -378,8 +378,8 @@ process-spawn delta, not the headline number.
 
 ### PR-10b — supervisor standby pool
 
-> **1a landed** (the supervisor *primitive*) on branch
-> `feat/plan-118-ws1-layer1a` — config split, prelaunched flow with the
+> **1a landed** (the supervisor *primitive*) in PR #748
+> (`feat/plan-118-ws1-layer1a`) — config split, prelaunched flow with the
 > mandatory attach-time plan re-verify, fuzz target, and the (a)–(e) rejection
 > ladder. The boxes below tagged **(1a)** are done; the rest are **1b** (the
 > pool + `up` integration + bench delta). See

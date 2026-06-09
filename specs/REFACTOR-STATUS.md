@@ -72,7 +72,7 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173
   [~] WS-1 warm pool (Plan 118): 1a prelaunched-supervisor primitive landed
       (base/attach split + attach-time plan re-verify + fuzz + a–e ladder,
-      feat/plan-118-ws1-layer1a); 1b pool/up-claim/bench remains
+      PR #748); 1b pool/up-claim/bench remains
   [ ] WS-2 checkpoint+fork  (152 WS-B done; unblocked)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)

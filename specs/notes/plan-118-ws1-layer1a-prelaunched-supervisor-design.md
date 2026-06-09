@@ -1,6 +1,6 @@
 # Design — WS-1 Layer 1a: prelaunched libkrun supervisor (base/attach split)
 
-> **Status (2026-06-09): Implemented (1a)** on branch `feat/plan-118-ws1-layer1a`.
+> **Status (2026-06-09): Implemented (1a)** — PR #748 (`feat/plan-118-ws1-layer1a`).
 > First sub-project of Plan 159 WS-1 (warm pool). Implements **Plan 118 PR-10b's
 > supervisor primitive** (`specs/plans/118-supervisor-standby-pool-and-live-bench.md`)
 > — the security-sensitive core — as its own PR: the base/attach config split, the
