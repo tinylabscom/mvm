@@ -60,18 +60,17 @@ endpoint validation above**); this ties them on a real QEMU guest.
    it into `plan.secrets` (`lower_workload_secrets`). **Built:**
    `examples/python/secret-egress/` (declares a bearer secret bound to
    postman-echo.com).
-3. **Run** — through the **admission / deploy (plan) flow**, NOT `mvmctl compile`.
-   > ⚠️ **Finding (2026-06-08):** `mvmctl compile` (local boot artifacts, no
-   > admission) **refuses managed secret refs** ("Use deploy/plan flows for
-   > managed refs"). The substitution endpoint is spawned only on the *admitted*
-   > plan path, and `mvmctl up` takes `--flake`/`--manifest` (not an app+secrets
-   > directly). So the user-facing local secret-workload boot is an
-   > admission/deploy concern (the fleet path, `mvmd` — consistent with
-   > deploy/tenant lifecycle living in mvmd), not a local `compile→up`. The
-   > egress *mechanism* is complete + box-validated (endpoint over real AF_VSOCK
-   > + real store: mint / substitute / claim-12 refuse); wiring an end-to-end
-   > local secret-workload **launch** through admission is the remaining gap,
-   > tracked here.
+3. **Run** — `mvmctl compile <app> --out <dir>` then `mvmctl up --flake <dir>`.
+   > ✅ **Resolved (2026-06-09): local secret-workload launch is wired (mvm's
+   > domain).** Scope decision: admission (`admit_for_run`/`admit_plan_for_boot`),
+   > the local secret store (`~/.mvm`), and the per-VM substitution endpoint all
+   > live in mvm — admission ≠ deploy/tenant/`--prod` (those stay in mvmd). So
+   > the dev/test launch on a `/dev/kvm` box is mvm-local. `mvmctl compile` now
+   > **strips** the managed `SecretRef` from the baked image (secret-free rootfs;
+   > the guest var is a boot-injected placeholder) and emits `workload.json`;
+   > `mvmctl up --flake <dir>` auto-discovers it, lowers `plan.secrets`, admits,
+   > and the QEMU backend spawns the endpoint (#717). The earlier "mvmd-only"
+   > lean predated #717/#718 landing the endpoint spawn *in mvm*.
 4. **Assert**: the echo response shows the **real** credential (substitution
    happened host-side), `~/.mvm/vms/<vm>/substitution.pid` existed during the
    run and is gone after `stop`, and a request to an **unbound** host is refused

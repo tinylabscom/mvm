@@ -51,9 +51,13 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] Phase E: undeclared secret/PII egress redact-to-XXX detector
       (RedactingSubstitution mask-and-continue; PiiRedactor/SecretsScanner
       redact()) wired always-on into the gateway bridge — PR #733
-  [ ] local secret-workload launch via admission flow (compile refuses managed
-      refs → deploy/plan path; the user-facing local boot gap) — plan 129
-  [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
+  [x] Phase E uniform coverage: same RedactingSubstitution wired into the
+      per-VM substitution endpoint (request-level), so every backend routing
+      egress through it scrubs identically; claim-13 `secret.redacted` audit
+  [x] local secret-workload launch (mvm's domain): compile strips SecretRef
+      from the baked image + emits workload.json; `up --flake <dir>`
+      auto-discovers it → lowers plan.secrets → admits → endpoint spawn
+  [ ] full guest-VM boot e2e on the dev-kvm box — runbook in plan 129
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
 PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift

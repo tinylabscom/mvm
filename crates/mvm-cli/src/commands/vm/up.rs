@@ -630,6 +630,22 @@ fn resolve_workload_ir_path(
     candidate.is_file().then_some(candidate)
 }
 
+/// Whether `up` threads the signed plan + tenant (`populate_audit_substrate`)
+/// onto the backend `VmStartConfig`. Two independent consumers want it:
+///
+/// - **QEMU substitution endpoint** (Plan 129 / ADR-067): spawned when the
+///   admitted plan carries secrets — `QemuBackend::start` reads
+///   `config.plan_json` + `tenant_id` to launch the per-VM moat. QEMU has **no**
+///   gateway-bridge path, so threading the plan only enables the endpoint;
+///   always do it for QEMU.
+/// - **libkrun/Vz gateway-bridge** factory: those backends branch into the
+///   bridge supervisor on `plan_json` presence, and that gvproxy wiring isn't
+///   working end-to-end yet, so it stays opt-in behind `MVM_GATEWAY_BRIDGE=1`
+///   (`gateway_bridge_enabled`); the default keeps them on the legacy path.
+fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> bool {
+    gateway_bridge_enabled || hypervisor == "qemu"
+}
+
 fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_sdk::ir::Workload>> {
@@ -1942,11 +1958,17 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
             .map(|v| v == "1")
             .unwrap_or(false);
-        if gateway_bridge_enabled && let Some(ctx) = admission_main.as_ref() {
+        if should_thread_signed_plan(gateway_bridge_enabled, effective_hypervisor)
+            && let Some(ctx) = admission_main.as_ref()
+        {
             populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
             // Plan 113 §Task 13 — stash plan.json + bundle.json for the
-            // Firecracker bridge sidecar to read at spawn time.
-            stash_plan_for_bridge(&start_config)?;
+            // Firecracker bridge sidecar to read at spawn time. Bridge-only:
+            // the QEMU substitution endpoint reads the in-memory config, so it
+            // needs no on-disk copy (and must not overwrite the persisted plan).
+            if gateway_bridge_enabled {
+                stash_plan_for_bridge(&start_config)?;
+            }
         }
 
         // Apple Container with -d: install a launchd agent instead of
@@ -3615,6 +3637,24 @@ mod resolve_deps_volume_tests {
         let binding =
             resolve_deps_volume_binding(None, mvm_build::pipeline::BuildMode::Prod).unwrap();
         assert!(binding.is_none());
+    }
+
+    #[test]
+    fn qemu_threads_signed_plan_for_substitution_endpoint() {
+        // The QEMU per-VM substitution endpoint reads config.plan_json /
+        // tenant_id to spawn when the plan carries secrets — it must be threaded
+        // even with the libkrun/Vz gateway bridge off (the default).
+        assert!(should_thread_signed_plan(false, "qemu"));
+        assert!(should_thread_signed_plan(true, "qemu"));
+    }
+
+    #[test]
+    fn libkrun_threads_signed_plan_only_under_gateway_bridge_flag() {
+        // libkrun/Vz branch into the (not-yet-working) bridge factory on
+        // plan_json presence, so the default keeps them on the legacy path.
+        assert!(!should_thread_signed_plan(false, "libkrun"));
+        assert!(!should_thread_signed_plan(false, "vz"));
+        assert!(should_thread_signed_plan(true, "libkrun"));
     }
 
     #[test]
