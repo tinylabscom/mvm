@@ -60,6 +60,10 @@ mvm-build = { workspace = true }
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow = { workspace = true }
+# Plan 118 WS-1 1a — prelaunch attach verify: G4 validity window (`check_window`
+# takes `chrono::DateTime<Utc>`) + typed `AttachVerifyError`.
+chrono = { workspace = true }
+thiserror = "1"
 ed25519-dalek = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -122,11 +126,16 @@ objc2-virtualization = { version = "0.3", features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Shared ExecutionPlan fixtures (`plan::signing::test_support::sample_plan`) for
+# the prelaunch verify tests — feature-gated so it never ships in a release build.
+mvm-core = { workspace = true, features = ["test-support"] }
 
 [features]
 default = []
 # Build the libkrun supervisor bin against libkrun's FFI.
 libkrun-sys = ["libkrun-sys/libkrun-sys"]
+# Live-boot integration tests (dev host with libkrun). Never in CI's no-VM lanes.
+libkrun-live = ["libkrun-sys"]
 
 [lints]
 workspace = true

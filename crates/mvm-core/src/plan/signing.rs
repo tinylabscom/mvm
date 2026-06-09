@@ -152,16 +152,21 @@ pub fn verify_plan(
     Ok(plan)
 }
 
-#[cfg(test)]
-mod tests {
+/// Test-support fixtures shared across crates. Gated so it never ships in a
+/// non-test build but is reachable from other crates' `#[cfg(test)]` code via
+/// the `test-support` feature (e.g. `mvm-vm-host`'s prelaunch verify tests need
+/// a valid `ExecutionPlan` to sign, and duplicating this ~50-line literal would
+/// drift). `mvm-core`'s own tests use it through `test` directly.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
     use crate::plan::types::*;
     use chrono::{TimeZone, Utc};
-    use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 
-    pub(crate) fn sample_plan() -> ExecutionPlan {
+    /// A minimal valid `ExecutionPlan` with a fixed validity window + nonce.
+    /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
+    pub fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
@@ -216,6 +221,15 @@ mod tests {
             shares: Vec::new(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::sample_plan;
+    use super::*;
+    use crate::plan::types::*;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
 
     fn fresh_key() -> (SigningKey, VerifyingKey) {
         let sk = SigningKey::generate(&mut OsRng);
