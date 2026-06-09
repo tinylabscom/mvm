@@ -52,9 +52,16 @@ def call_api() -> str:
     # set by the host to the in-guest forward proxy; the request is relayed to
     # the host endpoint, which substitutes the real Bearer credential before
     # making the real request to the bound host.
+    #
+    # The request is plain `http://` so urllib sends it to the proxy in
+    # absolute-form (`GET http://postman-echo.com/get HTTP/1.1` + headers) — the
+    # form the forward proxy parses to read the placeholder. (An `https://` URL
+    # via HTTP_PROXY makes urllib issue a `CONNECT` tunnel instead, which hides
+    # the headers from the proxy; SDK-configured clients that send absolute-form
+    # are the path to credential substitution on TLS destinations.)
     placeholder = os.environ["API_KEY"]
     request = urllib.request.Request(
-        "https://postman-echo.com/get",
+        "http://postman-echo.com/get",
         headers={"Authorization": f"Bearer {placeholder}"},
     )
     with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
