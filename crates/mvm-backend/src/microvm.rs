@@ -1096,6 +1096,23 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
 
+    // Plan 129 Task 5B — tear down this VM's egress substitution moat BEFORE the
+    // not-running early return. The endpoint is a live host process holding the
+    // workload's DECRYPTED secrets and the nft REDIRECT table outlives the guest;
+    // if an FC VM crashes/OOMs on its own, a later `stop_vm` must still reap the
+    // moat — decrypted secrets must not outlive the guest, even on a crash. Both
+    // are best-effort + idempotent (no-op when the VM carried no secrets). The
+    // substitution sidecars live under `vm_state_dir(name)`, NOT the VMS_DIR
+    // `abs_dir`. Mirrors qemu.rs ordering (reap-before-not-running-return).
+    crate::substitution_spawn::reap_substitution_endpoint(
+        &mvm_core::config::vm_state_dir(name),
+        name,
+    );
+    #[cfg(target_os = "linux")]
+    if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
+        warn!(vm = %name, "remove egress redirect table: {e}");
+    }
+
     if !firecracker::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
         return Ok(());
@@ -1144,20 +1161,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
                 warn!("network teardown: {e}");
             }
         }
-    }
-
-    // Plan 129 Task 5B — tear down this VM's egress substitution moat (if it
-    // had one): reap the endpoint so its decrypted secrets don't outlive the
-    // guest, and remove the nft TAP REDIRECT table. Both are best-effort +
-    // idempotent (no-op when the VM carried no secrets). The substitution
-    // sidecars live under `vm_state_dir(name)`, NOT the VMS_DIR `abs_dir`.
-    crate::substitution_spawn::reap_substitution_endpoint(
-        &mvm_core::config::vm_state_dir(name),
-        name,
-    );
-    #[cfg(target_os = "linux")]
-    if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
-        warn!(vm = %name, "remove egress redirect table: {e}");
     }
 
     // Remove the VM directory
@@ -2319,27 +2322,6 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Spawn the `mvm-firecracker-bridge` sibling. Creates a UNIX
-/// socketpair, clears `O_CLOEXEC` on both halves in the child via
-/// `CommandExt::pre_exec` so they survive `execve`, then pipes the
-/// `BridgeConfigJson` document to the child's stdin. Both fds stay
-/// owned by the child; the parent closes its handles via
-/// `libc::close` after spawn so the supervisor process doesn't leak
-/// an fd per VM boot.
-///
-/// Reads `plan.json` (required) + `bundle.json` (optional) from the
-/// per-VM state dir `~/.mvm/vms/<vm_name>/` where the producer
-/// (`stash_plan_for_bridge` in `mvm-cli`) wrote them at mode 0600.
-///
-/// Returns an [`AttachedBridgeGuard`] still holding the `Child`; the
-/// caller either lets it fall out of scope on early-return (the Drop
-/// impl kills + waits the child) or calls
-/// [`detach_and_spawn_bridge_watchdog`] after the FC VM confirms boot
-/// to detach the handle and start the watchdog.
-///
-/// `vm_name` labels the bridge thread + audit chain `vm` field;
-/// `abs_dir` is the FC VM's state dir inside the host's filesystem
-/// (where `fc.pid` lands so the watchdog can find it).
 /// Plan 129 Task 5B — stand up this VM's transparent egress substitution moat
 /// (endpoint + terminator + nft TAP REDIRECT) when the admitted plan carries
 /// secret bindings. Called after the FC guest is healthy.
@@ -2408,6 +2390,27 @@ fn wire_egress_substitution(config: &FlakeRunConfig, _abs_dir: &str) -> Result<(
     Ok(())
 }
 
+/// Spawn the `mvm-firecracker-bridge` sibling. Creates a UNIX
+/// socketpair, clears `O_CLOEXEC` on both halves in the child via
+/// `CommandExt::pre_exec` so they survive `execve`, then pipes the
+/// `BridgeConfigJson` document to the child's stdin. Both fds stay
+/// owned by the child; the parent closes its handles via
+/// `libc::close` after spawn so the supervisor process doesn't leak
+/// an fd per VM boot.
+///
+/// Reads `plan.json` (required) + `bundle.json` (optional) from the
+/// per-VM state dir `~/.mvm/vms/<vm_name>/` where the producer
+/// (`stash_plan_for_bridge` in `mvm-cli`) wrote them at mode 0600.
+///
+/// Returns an [`AttachedBridgeGuard`] still holding the `Child`; the
+/// caller either lets it fall out of scope on early-return (the Drop
+/// impl kills + waits the child) or calls
+/// [`detach_and_spawn_bridge_watchdog`] after the FC VM confirms boot
+/// to detach the handle and start the watchdog.
+///
+/// `vm_name` labels the bridge thread + audit chain `vm` field;
+/// `abs_dir` is the FC VM's state dir inside the host's filesystem
+/// (where `fc.pid` lands so the watchdog can find it).
 #[cfg(target_os = "linux")]
 fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> {
     use std::io::Write;
