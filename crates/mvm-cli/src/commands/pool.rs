@@ -18,7 +18,7 @@ use mvm_backend::backend::AnyBackend;
 use mvm_backend::standby_pool::SupervisorStandbyPool;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
-    StandbyClaim, StandbyCompat, StandbySpec, StandbyState, VmBackend, VmId,
+    StandbyClaim, StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend, VmId,
 };
 use sha2::{Digest, Sha256};
 
@@ -82,12 +82,20 @@ pub enum LaunchDecision {
 /// Try to claim an idle standby compatible with `want`; **fail open to cold boot**. On a
 /// claim error the standby is removed (it's spent/broken), never left idle, so the next
 /// launch doesn't keep retrying a dead standby.
-pub fn claim_or_cold(
+///
+/// `make_claim` builds the [`StandbyClaim`] **for the selected standby's id** — the audit
+/// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
+/// standby-id, so the caller must compute those paths against `handle.id`. A `make_claim`
+/// error also fails open to cold boot (and reaps the reserved standby).
+pub fn claim_or_cold<F>(
     pool: &SupervisorStandbyPool,
     backend: &dyn VmBackend,
     want: &StandbyCompat,
-    claim: &StandbyClaim,
-) -> Result<LaunchDecision> {
+    make_claim: F,
+) -> Result<LaunchDecision>
+where
+    F: FnOnce(&StandbyHandle) -> Result<StandbyClaim>,
+{
     if !backend.supports_standby_pool() {
         return Ok(LaunchDecision::ColdBoot);
     }
@@ -96,7 +104,15 @@ pub fn claim_or_cold(
     };
     // Reserve it so a concurrent launch won't double-claim.
     pool.mark_claimed(&handle.id)?;
-    match backend.claim_standby(&handle, claim) {
+    let claim = match make_claim(&handle) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(standby = %handle.id, error = %e, "build claim failed; cold-booting");
+            let _ = pool.remove(&handle.id);
+            return Ok(LaunchDecision::ColdBoot);
+        }
+    };
+    match backend.claim_standby(&handle, &claim) {
         Ok(vm_id) => {
             // The standby has become the VM; drop its pool entry (the control UDS is
             // one-shot). The VM now lives under its vms/<id> state dir.
@@ -344,7 +360,8 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         pool.record(&idle_handle("s1", "aa")).unwrap();
         let backend = StubBackend::new(true);
-        let decision = claim_or_cold(&pool, &backend, &compat("aa"), &sample_claim()).unwrap();
+        let decision =
+            claim_or_cold(&pool, &backend, &compat("aa"), |_h| Ok(sample_claim())).unwrap();
         assert_eq!(decision, LaunchDecision::Claimed(VmId("s1".into())));
         assert!(backend.claimed.load(Ordering::SeqCst));
         assert!(
@@ -358,7 +375,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
         let backend = StubBackend::new(true);
-        let decision = claim_or_cold(&pool, &backend, &compat("aa"), &sample_claim()).unwrap();
+        let decision =
+            claim_or_cold(&pool, &backend, &compat("aa"), |_h| Ok(sample_claim())).unwrap();
         assert_eq!(decision, LaunchDecision::ColdBoot);
         assert!(!backend.claimed.load(Ordering::SeqCst));
     }
@@ -369,7 +387,8 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         pool.record(&idle_handle("s1", "aa")).unwrap();
         let backend = StubBackend::new(false);
-        let decision = claim_or_cold(&pool, &backend, &compat("aa"), &sample_claim()).unwrap();
+        let decision =
+            claim_or_cold(&pool, &backend, &compat("aa"), |_h| Ok(sample_claim())).unwrap();
         assert_eq!(decision, LaunchDecision::ColdBoot);
         assert!(
             pool.load("s1").is_err(),

@@ -8,11 +8,13 @@ mod image;
 mod kernel;
 mod manifest;
 mod ops;
-/// Plan 118 WS-1 1b — supervisor warm-pool launch glue (StandbySpec builder +
-/// claim-or-cold + warm-to-target). The consumers — the `mvmctl pool` command and the
-/// `up`/`run` auto-claim path — land in the 1b-ii follow-up, which shares the
-/// default-kernel + hypervisor resolution they need; the mechanism + helpers + unit tests
-/// ship here. `allow(dead_code)` until that wiring lands.
+/// Plan 118 WS-1 1b — supervisor warm-pool launch glue + the `mvmctl pool` command. The
+/// `mvmctl pool warm/status` command, the `StandbySpec` builder, and `warm_to_target` are
+/// live here. `claim_or_cold` (closure-ready for the per-standby audit substrate) is the
+/// last unwired piece: the `up`/`run` auto-claim needs an in-`up.rs` name-rebind (a
+/// claimed VM runs under its standby-id) + the gateway-bridge path confirmed working —
+/// scoped as a focused follow-up. `allow(dead_code)` covers `claim_or_cold`/`LaunchDecision`
+/// until then.
 #[allow(dead_code)]
 mod pool;
 mod qemu_bridge;
