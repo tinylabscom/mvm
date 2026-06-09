@@ -106,11 +106,16 @@ PLAN 123 — Network / storage / warm-start        🟢 Phase A done; B done; C1
       SnapshotCapability::{label,satisfies} + fail-closed VmBackend::warm_start
       default; libkrun disk-only (SnapshotUpper clone of golden rootfs);
       doctor warm-start matrix + Linux NBD/HugeTLB substrate probe
-  [ ] C2 Firecracker live-memory fast-resume (UFFD/NBD/hugepages + VMGenID
-      delivery) — live-KVM-gated
+  [ ] C2 Firecracker live-memory fast-resume — carved out → Plan 175
   [ ] C3 Vz save/restore (macOS 26+) — owned by Plan 152 WS-C
-  [ ] C4 warm-start CLI/RPC wiring + live disk-snapshot agent_ping —
-      rides the C2/C3 snapshot RPC (no verb invokes warm_start yet)
+  [ ] C4 warm-start CLI/RPC wiring — carved out → Plan 175 (rides C2)
+
+PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-gated; Plan 123 C2 carve-out)
+  [ ] T1 VMGenID delivery on PostRestore (token payload + GenIdReseeder dispatch)
+  [ ] T2 UFFD/NBD/hugepages fast-resume substrate (diff snapshot + lazy paging)
+  [ ] T3 SIGUSR1 "primed" ready-barrier for a deterministic warm base
+  [ ] T4 FirecrackerBackend::warm_start override + mvmctl verb + agent_ping e2e
+  (Vz=152 WS-C; libkrun disk-only done #741; reflink clone = 123 C4 follow-up)
 
 PLAN 126 — Dependency reduction                 🔴 ~10%
   [x] A1 re-baseline
