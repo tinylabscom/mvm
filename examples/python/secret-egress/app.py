@@ -62,7 +62,12 @@ def call_api() -> str:
     placeholder = os.environ["API_KEY"]
     request = urllib.request.Request(
         "http://postman-echo.com/get",
-        headers={"Authorization": f"Bearer {placeholder}"},
+        headers={
+            "Authorization": f"Bearer {placeholder}",
+            # postman-echo bot-filters urllib's default User-Agent (HTTP 403);
+            # send an explicit one so it echoes the (substituted) request back.
+            "User-Agent": "mvm-secret-egress-example/1.0",
+        },
     )
     with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
         return response.read().decode("utf-8")
