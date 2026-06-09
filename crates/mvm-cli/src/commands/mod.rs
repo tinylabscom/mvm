@@ -130,6 +130,8 @@ pub(in crate::commands) enum Commands {
     Console(vm::console::Args),
     /// Manage the XDG cache directory (~/.cache/mvm)
     Cache(ops::cache::Args),
+    /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
+    Pool(pool::Args),
     /// Converge the VM name registry with on-disk runtime state
     Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
@@ -342,6 +344,7 @@ pub fn run() -> Result<()> {
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
+        Commands::Pool(a) => pool::run(&cli, a, &cfg),
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),

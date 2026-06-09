@@ -570,6 +570,12 @@ impl AnyBackend {
         self.inner().snapshot_capability()
     }
 
+    /// Borrow the wrapped backend as `&dyn VmBackend` — for callers (the warm-pool
+    /// orchestration helpers) that are generic over `VmBackend` rather than the enum.
+    pub fn as_vm_backend(&self) -> &dyn VmBackend {
+        self.inner()
+    }
+
     /// Plan 118 WS-1 1b — does this backend support a prelaunched-supervisor standby
     /// pool? See [`VmBackend::supports_standby_pool`]. Only libkrun does today.
     pub fn supports_standby_pool(&self) -> bool {
