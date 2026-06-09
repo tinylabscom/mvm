@@ -110,7 +110,7 @@ fn wrong_nonce_attach_is_refused_without_boot() {
         plan: serde_json::json!({ "ignored": "never-reached" }),
         bundle: None,
     };
-    mvm_hostd::framing::write_json_frame_sync(&mut stream, &attach).unwrap();
+    libkrun_sys::framing::write_json_frame_sync(&mut stream, &attach).unwrap();
 
     let code = wait_code(&mut child, Duration::from_secs(10));
     // ExitCode::from(6) — the prelaunch "attach refused" arm.

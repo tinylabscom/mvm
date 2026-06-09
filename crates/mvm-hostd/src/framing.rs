@@ -100,46 +100,11 @@ where
     serde_json::from_slice(&body).map_err(FrameError::Decode)
 }
 
-/// Synchronous sibling of [`write_json_frame`] for the same-uid UDS control
-/// channels that run *without* a tokio runtime. The libkrun supervisor's
-/// prelaunch accept path (Plan 118 WS-1 1a) runs before `start_enter`, so it
-/// can't park a runtime. Same wire format — 4-byte BE length + JSON body.
-pub fn write_json_frame_sync<W, T>(stream: &mut W, value: &T) -> Result<(), FrameError>
-where
-    W: std::io::Write + ?Sized,
-    T: serde::Serialize,
-{
-    let body = serde_json::to_vec(value).map_err(FrameError::Encode)?;
-    let len: u32 = body
-        .len()
-        .try_into()
-        .map_err(|_| FrameError::LengthOverflow)?;
-    stream.write_all(&len.to_be_bytes())?;
-    stream.write_all(&body)?;
-    Ok(())
-}
-
-/// Synchronous sibling of [`read_json_frame`]. Enforces `max_frame_bytes` on
-/// the length prefix **before** allocating the body — same gate-1 invariant as
-/// the async path (a hostile `length_prefix = u32::MAX` must not OOM the reader).
-pub fn read_json_frame_sync<R, T>(stream: &mut R, max_frame_bytes: usize) -> Result<T, FrameError>
-where
-    R: std::io::Read + ?Sized,
-    T: serde::de::DeserializeOwned,
-{
-    let mut len_buf = [0u8; FRAME_LEN_BYTES];
-    stream.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > max_frame_bytes {
-        return Err(FrameError::TooLarge {
-            size: len,
-            cap: max_frame_bytes,
-        });
-    }
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body)?;
-    serde_json::from_slice(&body).map_err(FrameError::Decode)
-}
+// NB: the *sync* length-prefixed framing the libkrun supervisor control channel uses
+// (Plan 118 WS-1 1a/1b) lives in `libkrun_sys::framing` — colocated with the
+// `Supervisor*Config` wire types it frames, and reachable by the `mvm-backend` writer
+// (`claim_standby`) which cannot depend on `mvm-hostd` (cycle). This module keeps the
+// async tokio variants its own same-uid channels use.
 
 #[cfg(test)]
 mod tests {
@@ -214,45 +179,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FrameError::Decode(_)));
-    }
-
-    #[test]
-    fn sync_round_trips_a_json_frame() {
-        let msg = Msg {
-            kind: "ping".into(),
-            n: 7,
-        };
-        let mut buf = Vec::new();
-        write_json_frame_sync(&mut buf, &msg).unwrap();
-        let body_len = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
-        assert_eq!(body_len, buf.len() - FRAME_LEN_BYTES);
-        let mut cursor = std::io::Cursor::new(buf);
-        let got: Msg = read_json_frame_sync(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap();
-        assert_eq!(got, msg);
-    }
-
-    #[test]
-    fn sync_rejects_oversize_length_prefix_before_alloc() {
-        let mut framed = Vec::new();
-        framed.extend_from_slice(&u32::MAX.to_be_bytes());
-        let mut cursor = std::io::Cursor::new(framed);
-        let err = read_json_frame_sync::<_, Msg>(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap_err();
-        assert!(matches!(
-            err,
-            FrameError::TooLarge {
-                size,
-                cap: DEFAULT_MAX_FRAME_BYTES
-            } if size == u32::MAX as usize
-        ));
-    }
-
-    #[test]
-    fn sync_truncated_body_is_an_io_error() {
-        let mut framed = Vec::new();
-        framed.extend_from_slice(&16u32.to_be_bytes());
-        framed.extend_from_slice(b"abcd");
-        let mut cursor = std::io::Cursor::new(framed);
-        let err = read_json_frame_sync::<_, Msg>(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap_err();
-        assert!(matches!(err, FrameError::Io(_)));
     }
 }

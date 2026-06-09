@@ -54,6 +54,12 @@ pub mod passt;
 #[cfg(target_family = "unix")]
 pub mod gvproxy;
 
+// Plan 118 WS-1 1b — sync length-prefixed JSON framing for the supervisor control
+// channels. Colocated with the `Supervisor*Config` wire types it frames so both the
+// `mvm-backend` writer (`claim_standby`) and the supervisor-bin reader reach it without
+// a dependency cycle (`mvm-backend` can't depend on `mvm-hostd`).
+pub mod framing;
+
 /// Cross-module env mutation serializer. Both `passt::tests` and
 /// `gvproxy::tests` mutate `$PATH` to verify their `NotInstalled`
 /// error paths; `cargo test`'s default parallelism would race them

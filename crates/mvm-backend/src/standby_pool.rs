@@ -70,9 +70,10 @@ impl SupervisorStandbyPool {
     /// claim candidate. `None` means "no compatible warm standby; cold-boot." Skips
     /// claimed and dead entries.
     pub fn select_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
-        Ok(self.list()?.into_iter().find(|h| {
-            h.state == StandbyState::Idle && h.is_compatible(want) && pid_alive(h.pid)
-        }))
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|h| h.state == StandbyState::Idle && h.is_compatible(want) && pid_alive(h.pid)))
     }
 
     /// Count of live idle standbys compatible with `want` — drives replenish-to-target.
@@ -144,7 +145,8 @@ mod tests {
     fn record_then_load_roundtrips_under_pool_root() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        pool.record(&handle("s1", "aa", StandbyState::Idle)).unwrap();
+        pool.record(&handle("s1", "aa", StandbyState::Idle))
+            .unwrap();
         let loaded = pool.load("s1").unwrap();
         assert_eq!(loaded.id, "s1");
         assert_eq!(loaded.state, StandbyState::Idle);
@@ -159,13 +161,18 @@ mod tests {
         let mut dead = handle("dead", "aa", StandbyState::Idle);
         dead.pid = 999_999; // not a live pid
         pool.record(&dead).unwrap();
-        pool.record(&handle("good", "aa", StandbyState::Idle)).unwrap();
+        pool.record(&handle("good", "aa", StandbyState::Idle))
+            .unwrap();
         pool.record(&handle("wrong-kernel", "bb", StandbyState::Idle))
             .unwrap();
 
         let picked = pool.select_idle_compatible(&compat("aa")).unwrap();
         assert_eq!(picked.unwrap().id, "good");
-        assert!(pool.select_idle_compatible(&compat("cc")).unwrap().is_none());
+        assert!(
+            pool.select_idle_compatible(&compat("cc"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -175,14 +182,19 @@ mod tests {
         let mut big = handle("big", "aa", StandbyState::Idle);
         big.vcpus = 8; // same kernel, different cpus → not compatible
         pool.record(&big).unwrap();
-        assert!(pool.select_idle_compatible(&compat("aa")).unwrap().is_none());
+        assert!(
+            pool.select_idle_compatible(&compat("aa"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn remove_deletes_the_standby_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        pool.record(&handle("s1", "aa", StandbyState::Idle)).unwrap();
+        pool.record(&handle("s1", "aa", StandbyState::Idle))
+            .unwrap();
         assert!(tmp.path().join("s1").exists());
         pool.remove("s1").unwrap();
         assert!(!tmp.path().join("s1").exists());

@@ -1080,9 +1080,18 @@ mod tests {
         };
         assert!(back.is_compatible(&want));
         // wrong kernel, wrong cpus, and wrong mem each break compat.
-        assert!(!back.is_compatible(&StandbyCompat { kernel_sha256: "b".repeat(64), ..want.clone() }));
-        assert!(!back.is_compatible(&StandbyCompat { vcpus: 4, ..want.clone() }));
-        assert!(!back.is_compatible(&StandbyCompat { mem_mib: 2048, ..want }));
+        assert!(!back.is_compatible(&StandbyCompat {
+            kernel_sha256: "b".repeat(64),
+            ..want.clone()
+        }));
+        assert!(!back.is_compatible(&StandbyCompat {
+            vcpus: 4,
+            ..want.clone()
+        }));
+        assert!(!back.is_compatible(&StandbyCompat {
+            mem_mib: 2048,
+            ..want
+        }));
     }
 
     #[test]
