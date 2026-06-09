@@ -212,7 +212,10 @@ fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
     let listener = match bind_control_socket(&sock_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("prelaunch: bind control socket {}: {e}", sock_path.display());
+            eprintln!(
+                "prelaunch: bind control socket {}: {e}",
+                sock_path.display()
+            );
             return ExitCode::from(3);
         }
     };
@@ -229,16 +232,14 @@ fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
 
     // Read the length-prefixed attach frame, then re-encode to bytes for the
     // pure verifier (which owns the deny_unknown_fields decode + plan verify).
-    let attach_value: serde_json::Value = match mvm_hostd::framing::read_json_frame_sync(
-        &mut stream,
-        MAX_ATTACH_BYTES,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("prelaunch: read attach frame: {e}");
-            return ExitCode::from(5);
-        }
-    };
+    let attach_value: serde_json::Value =
+        match mvm_hostd::framing::read_json_frame_sync(&mut stream, MAX_ATTACH_BYTES) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("prelaunch: read attach frame: {e}");
+                return ExitCode::from(5);
+            }
+        };
     let attach_bytes = match serde_json::to_vec(&attach_value) {
         Ok(b) => b,
         Err(e) => {

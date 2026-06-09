@@ -114,7 +114,11 @@ fn wrong_nonce_attach_is_refused_without_boot() {
 
     let code = wait_code(&mut child, Duration::from_secs(10));
     // ExitCode::from(6) — the prelaunch "attach refused" arm.
-    assert_eq!(code, Some(6), "wrong-nonce attach must be refused with exit 6");
+    assert_eq!(
+        code,
+        Some(6),
+        "wrong-nonce attach must be refused with exit 6"
+    );
 
     // No workload-exit control socket should ever have been bound (that only
     // happens in dispatch_config, which a refused attach never reaches).

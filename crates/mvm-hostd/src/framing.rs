@@ -236,8 +236,7 @@ mod tests {
         let mut framed = Vec::new();
         framed.extend_from_slice(&u32::MAX.to_be_bytes());
         let mut cursor = std::io::Cursor::new(framed);
-        let err =
-            read_json_frame_sync::<_, Msg>(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap_err();
+        let err = read_json_frame_sync::<_, Msg>(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap_err();
         assert!(matches!(
             err,
             FrameError::TooLarge {
@@ -253,8 +252,7 @@ mod tests {
         framed.extend_from_slice(&16u32.to_be_bytes());
         framed.extend_from_slice(b"abcd");
         let mut cursor = std::io::Cursor::new(framed);
-        let err =
-            read_json_frame_sync::<_, Msg>(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap_err();
+        let err = read_json_frame_sync::<_, Msg>(&mut cursor, DEFAULT_MAX_FRAME_BYTES).unwrap_err();
         assert!(matches!(err, FrameError::Io(_)));
     }
 }
