@@ -88,14 +88,26 @@ endpoint validation above**); this ties them on a real QEMU guest.
    >   `substitution-env.json = [["API_KEY","mvm-secret-…"]]`, the real value
    >   never present. The "never on the microVM" guarantee, validated live.
    > - ✅ Endpoint **lifecycle**: alive during the run, reaped on `down`.
-   > - ⏳ **Destination-sees-real-credential via a live guest FUNCTION** is NOT
-   >   yet exercisable: the function-trigger verb (`invoke`) boots its **own**
-   >   transient VM via `boot_session_vm`, which deliberately **skips plan-64
-   >   admission** (no endpoint), so it can't drive the compiled secret artifact;
-   >   and the long-running `up` VM has no entrypoint-trigger verb. Wiring the
-   >   **invoke/exec transient path through admission + endpoint** is a distinct
-   >   gap (the "serverless secret-function" leg). Substitution + claim-12 over
-   >   real guest→host AF_VSOCK is already proven in isolation (#710).
+   > - ✅ **`invoke <name> --attach`** dispatches a `RunEntrypoint` into the
+   >   running `up` workload, reusing its endpoint + boot-minted placeholders —
+   >   the function body runs with the injected `HTTP_PROXY` + placeholder env.
+   >   (The ephemeral serverless `invoke <artifact>` path stays a follow-up:
+   >   `boot_session_vm` skips plan-64 admission + auto-selects a non-endpoint
+   >   backend.)
+   > - ✅ **Guest loopback blackhole fixed:** `MANDATORY_DENY_RANGES` included
+   >   `127.0.0.0/8`, and netinit's interface-agnostic blackhole route for it
+   >   killed the guest's own `lo` → the forward proxy was unreachable (EINVAL).
+   >   `install_mandatory_deny` now skips loopback (`Report.skipped_loopback`);
+   >   the netinit report confirms `skipped_loopback:["127.0.0.0/8"]` and the
+   >   workload→proxy `EINVAL` is gone.
+   > - ⏳ **Destination-sees-real-credential still blocked** on a *further*
+   >   egress-transport issue: after the loopback fix the workload's egress now
+   >   fails `ENETUNREACH` (no route to `127.0.0.1`), pointing at guest `/init`
+   >   not configuring `lo` and/or the forward-proxy↔vsock-relay leg. This is
+   >   the forward-proxy/guest-networking layer (overlaps the Plan 129 egress
+   >   terminator work), not the launch glue. Needs holistic debugging on a
+   >   dev/console image, not blind rebuilds. Substitution + claim-12 over real
+   >   guest→host AF_VSOCK is proven in isolation (#710).
 
 ### Original plan status (2026-06-07) — host + guest Rust foundation landed; remaining = boot + 2 design decisions
 
