@@ -66,7 +66,9 @@ def call_api() -> str:
             "Authorization": f"Bearer {placeholder}",
             # postman-echo bot-filters urllib's default User-Agent (HTTP 403);
             # send an explicit one so it echoes the (substituted) request back.
-            "User-Agent": "mvm-secret-egress-example/1.0",
+            # NB: must NOT contain the reserved `mvm-secret-` placeholder prefix,
+            # or the host endpoint treats this header as a placeholder too.
+            "User-Agent": "mvm-egress-example/1.0",
         },
     )
     try:
