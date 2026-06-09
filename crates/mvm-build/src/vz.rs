@@ -1,20 +1,18 @@
 //! Plan 97 Phase B foundation — type-safe interface to
 //! `mvm-vz-supervisor`.
 //!
-//! The Vz backend (`mvm-backend::VzBackend`, lands in a follow-up
-//! slice) constructs a [`SupervisorConfig`], serializes it to JSON,
-//! and pipes it to the Swift supervisor binary on stdin. The Swift
-//! side decodes against an equivalent `Codable` schema in
-//! `crates/mvm-vz-supervisor/Sources/mvm-vz-supervisor/Config.swift`
+//! The Vz backend (`mvm-backend::VzBackend`) constructs a
+//! [`SupervisorConfig`], serializes it to JSON, and pipes it to the
+//! Rust-native `mvm-vz-supervisor` binary on stdin, which decodes it
 //! with strict deny-unknown-fields semantics — ADR-002 claim 5 rests
-//! on those two decoders rejecting the same inputs.
+//! on that decoder rejecting malformed input (fuzzed in security.yml).
 //!
-//! Pure data + path resolution. No FFI, no Swift toolchain dep, no
-//! Vz framework binding. This crate compiles on every host the
-//! workspace targets, including Linux contributors who never touch
-//! the Vz code path (`has_vz()` returns `false` there). The Swift
-//! supervisor's actual build is gated on macOS via
-//! `crates/mvm-vz-supervisor/tools/build.sh`.
+//! Pure data + path resolution. No FFI, no Vz framework binding. This
+//! crate compiles on every host the workspace targets, including Linux
+//! contributors who never touch the Vz code path (`has_vz()` returns
+//! `false` there). The supervisor binary itself is the objc2 `[[bin]]`
+//! in `mvm-vm-host`, built via
+//! `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
 
 use std::path::PathBuf;
 
@@ -22,7 +20,7 @@ use std::path::PathBuf;
 
 /// JSON payload the host pipes to `mvm-vz-supervisor` on stdin.
 ///
-/// The schema **must** stay in lockstep with the Swift `Config.swift`
+/// The schema **must** stay in lockstep with the Rust `SupervisorConfig`
 /// decoder — both sides apply deny-unknown-fields. Adding a field
 /// requires landing both edits in the same PR (and the Phase A
 /// equivalence fuzz corpus catches drift in CI).
@@ -380,27 +378,18 @@ pub fn supervisor_binary_path(home: &std::path::Path, mvmctl_version: &str) -> P
         .join(format!("{SUPERVISOR_BIN_PREFIX}{mvmctl_version}"))
 }
 
-/// Source-checkout layout: the Swift Package Manager build output
-/// lives under `<workspace>/crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/<config>/`.
-/// CLAUDE.md "Source-checkout builds never depend on mvm-published
-/// artifacts" — a contributor running `cargo run` from the workspace
-/// must use whatever the local `tools/build.sh` produced, not the
-/// `~/.mvm/bin/` release path.
+/// Source-checkout layout: the Rust-native `mvm-vz-supervisor` is a cargo
+/// `[[bin]]` in `mvm-vm-host`, so a workspace build lands in the cargo target
+/// dir. CLAUDE.md "Source-checkout builds never depend on mvm-published
+/// artifacts" — a contributor who has `cargo build -p mvm-vm-host --bin
+/// mvm-vz-supervisor`'d the bin uses that, not the `~/.mvm/bin/` release path.
+/// (The resolver's adjacent-to-exe probe covers `cargo run`; this is the
+/// fallback when `mvmctl` is invoked from outside `target/`.)
 pub fn source_tree_binary_path(workspace_root: &std::path::Path) -> PathBuf {
-    let arch = current_arch_triple_macos();
     workspace_root
-        .join("crates/mvm-vz-supervisor/.build")
-        .join(arch)
+        .join("target")
         .join("debug")
         .join("mvm-vz-supervisor")
-}
-
-fn current_arch_triple_macos() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64-apple-macosx"
-    } else {
-        "x86_64-apple-macosx"
-    }
 }
 
 // MARK: - Errors
@@ -573,7 +562,7 @@ mod tests {
         // The Swift supervisor threads `read_only` onto
         // `VZSharedDirectory(readOnly:)`, so the wire format must
         // carry the field as `read_only` (snake_case) to match the
-        // strict-keys decoder in Config.swift.
+        // strict-keys decoder in the Rust SupervisorConfig.
         let mut cfg = minimal_config();
         cfg.virtio_fs = vec![
             VirtioFsShare {

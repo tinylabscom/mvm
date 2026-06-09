@@ -854,7 +854,7 @@ fn vz_check(plat: Platform) -> Check {
 /// Order:
 ///
 /// 1. `MVM_VZ_SUPERVISOR_PATH` (explicit override)
-/// 2. Source-checkout `crates/mvm-vz-supervisor/.build/<arch>-apple-macosx/debug/`
+/// 2. Adjacent to `mvmctl` (source-checkout `target/<profile>/` or installed layout)
 /// 3. Release-installed `~/.mvm/bin/mvm-vz-supervisor-<mvmctl-version>`
 fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
@@ -875,19 +875,16 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     // Source-checkout path — workspace root is wherever `mvmctl`'s
     // build manifest sits; we can't introspect that from a doctor
     // function compiled into the binary, but we can probe the path
-    // relative to the workspace inferred from `current_exe` when
-    // the binary is running from `target/.../mvmctl`.
+    // adjacent to `mvmctl` — the cargo-built Rust `[[bin]]` lands next to
+    // the `mvmctl` exe in source-checkout (`target/<profile>/`) and in
+    // installed layouts, mirroring the VzBackend resolver.
     if let Ok(exe) = std::env::current_exe()
-        && let Some(workspace_root) = workspace_root_from_target_layout(&exe)
+        && let Some(dir) = exe.parent()
     {
-        let candidate = workspace_root
-            .join("crates/mvm-vz-supervisor/.build")
-            .join(arch_apple_macosx())
-            .join("debug")
-            .join("mvm-vz-supervisor");
+        let candidate = dir.join("mvm-vz-supervisor");
         if candidate.is_file() {
             let info = format!(
-                "supervisor at {} (source-checkout build)",
+                "supervisor at {} (adjacent / source-checkout build)",
                 candidate.display()
             );
             return (Some(candidate), info);
@@ -905,8 +902,9 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
     }
     (
         None,
-        "supervisor binary NOT FOUND — build via `crates/mvm-vz-supervisor/tools/build.sh` \
-         before `mvmctl up --backend vz`"
+        "supervisor binary NOT FOUND — build via \
+         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor` before \
+         `mvmctl up --backend vz`"
             .to_string(),
     )
 }
@@ -919,8 +917,8 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
 ///   permitted to use Virtualization.framework).
 /// - `Some(false)` — codesign ran successfully but the entitlement is
 ///   absent from the binary. `mvmctl up --backend vz` will fail with
-///   an opaque framework error; rebuilding via `tools/build.sh` fixes
-///   it.
+///   an opaque framework error; the supervisor self-signs the
+///   entitlement on first launch, so a fresh run fixes it.
 /// - `None` — codesign couldn't be invoked (not on PATH, or the
 ///   binary path is wrong). Surfaced as `entitlement ?` in doctor; not
 ///   a hard failure because we can't distinguish "tooling unavailable"
@@ -987,28 +985,6 @@ fn vz_runtime_probe(supervisor_path: &std::path::Path) -> Option<VzProbeResult> 
 /// drive it without invoking the supervisor.
 fn parse_vz_probe_output(stdout: &[u8]) -> Option<VzProbeResult> {
     serde_json::from_slice::<VzProbeResult>(stdout).ok()
-}
-
-/// Walk up from `target/<profile>/<exe>` to the workspace root.
-/// Returns `None` when the exe is not running from a cargo target
-/// layout (e.g. `cargo install` placed it under `~/.cargo/bin/`),
-/// which is correct — in that case there is no source checkout to
-/// probe.
-fn workspace_root_from_target_layout(exe: &std::path::Path) -> Option<std::path::PathBuf> {
-    let parent = exe.parent()?; // target/<profile>
-    let target = parent.parent()?; // target
-    if target.file_name().and_then(|n| n.to_str()) != Some("target") {
-        return None;
-    }
-    target.parent().map(std::path::Path::to_path_buf)
-}
-
-fn arch_apple_macosx() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64-apple-macosx"
-    } else {
-        "x86_64-apple-macosx"
-    }
 }
 
 fn docker_check(plat: Platform) -> Check {
@@ -2381,7 +2357,7 @@ mod tests {
     fn entitlement_probe_parses_plist_without_entitlement() {
         // A binary that codesign succeeds against but carries no entitlements
         // (or carries a different set) — operator needs to rebuild via
-        // tools/build.sh.
+        // `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
         let stdout = br#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>

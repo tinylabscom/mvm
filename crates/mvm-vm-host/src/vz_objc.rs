@@ -1,7 +1,7 @@
 //! Rust-native Vz supervisor objc2 bridge (Plan 152 WS-B).
 //!
 //! Drives Apple's `Virtualization.framework` directly from Rust via the
-//! `objc2` stack — the replacement for the Swift `crates/mvm-vz-supervisor`.
+//! `objc2` stack — the replacement for the (removed) Swift supervisor.
 //! One guest per process; nothing depends on this as a library beyond the
 //! sibling `mvm-vz-supervisor` `[[bin]]`.
 //!

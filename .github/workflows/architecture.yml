@@ -55,7 +55,7 @@ jobs:
   #      audit sockets in `crates/mvm-supervisor/src/gateway_bridge.rs`
   #      and `crates/mvm-supervisor/src/gateway_audit.rs`. These are
   #      VM-local telemetry substrate: a Rust ingest socket receives
-  #      NDJSON flow events from the Swift Vz bridge, and a sibling
+  #      NDJSON flow events from the legacy Vz ingest bridge, and a sibling
   #      UDS fan-out socket exposes the same signed-audit stream to
   #      local subscribers (`nc -U`). They do not accept control-plane
   #      commands or host multi-tenant orchestration state.
@@ -97,7 +97,7 @@ jobs:
   #      Vz supervisor (Plan 152 WS-B) binds a per-port vsock proxy
   #      (`<socket_dir>/vsock-<port>.sock`) that splices host agent-RPC
   #      connections into the guest's `VZVirtioSocketDevice`, mirroring the
-  #      Swift supervisor it replaces; the crate declares
+  #      former Swift supervisor it replaced; the crate declares
   #      `[package.metadata.mvm.architecture].substrate_server_category`.
   #      Per-VM provider plumbing (same family as category 3), spawned by the
   #      backend for a single guest — not a multi-tenant control-plane server.

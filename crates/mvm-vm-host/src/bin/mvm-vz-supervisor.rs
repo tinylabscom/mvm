@@ -28,7 +28,7 @@ fn main() {
 /// Ad-hoc entitlements plist applied at first launch. Virtualization-only — the
 /// `hypervisor` entitlement is libkrun's; the Vz supervisor only instantiates a
 /// `VZVirtualMachine`, which `Hypervisor.framework` rejects from an unsigned
-/// process. Mirrors `crates/mvm-vz-supervisor/Entitlements.plist`.
+/// process. Mirrors the virtualization entitlement self-signed at launch.
 #[cfg(target_os = "macos")]
 const VZ_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
     <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \

@@ -634,11 +634,8 @@ jobs:
     name: Apple (release-only)
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
-    # The mvm-vz/build.rs Swift supervisor build is opt-in (see the
-    # comment at the top of crates/mvm-vz/build.rs). This lane is the
-    # release-tag macOS gate, so it must build the supervisor.
-    env:
-      MVM_VZ_BUILD_SUPERVISOR: "1"
+    # `cargo build --all-targets` builds the Rust-native mvm-vz-supervisor
+    # (a workspace `[[bin]]` in mvm-vm-host) — no Swift build step.
     steps:
       - uses: actions/checkout@v6
 
@@ -752,10 +749,10 @@ jobs:
         run: cargo clippy -p libkrun-sys --features libkrun-sys --all-targets -- -D warnings
 
   # ── Lane: Vz / Virtualization.framework (macOS, paths-gated) ──
-  # Plan 97 §"macOS minor-version compatibility matrix". Runs the
-  # Swift package build + Rust mvm-vz/mvm-backend test surface on
-  # macos-latest. No untrusted inputs are interpolated into run:
-  # blocks — only matrix.runner, steps.filter.outputs.vz, runner.os.
+  # Plan 97 §"macOS minor-version compatibility matrix". Builds the
+  # Rust-native mvm-vz-supervisor (mvm-vm-host) + the mvm-backend vz
+  # test surface on macos-latest. No untrusted inputs are interpolated
+  # into run: blocks — only matrix.runner, steps.filter.outputs.vz, runner.os.
   vz-macos:
     name: Vz / Virtualization.framework (${{ matrix.runner }})
     if: github.event_name == 'workflow_dispatch'
@@ -765,10 +762,6 @@ jobs:
         runner:
           - macos-latest  # current shipping; covers Apple Container coexistence
     runs-on: ${{ matrix.runner }}
-    # The mvm-vz/build.rs Swift supervisor build is opt-in; this lane
-    # is the dedicated vz exercise so it must build the supervisor.
-    env:
-      MVM_VZ_BUILD_SUPERVISOR: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -778,8 +771,7 @@ jobs:
         with:
           filters: |
             vz:
-              - 'crates/mvm-vz/**'
-              - 'crates/mvm-vz-supervisor/**'
+              - 'crates/mvm-vm-host/**'
               - 'crates/mvm-backend/src/vz.rs'
               - 'crates/mvm-backend/Cargo.toml'
               - 'crates/mvm-build/src/vz_builder.rs'
@@ -809,16 +801,15 @@ jobs:
           key: ${{ runner.os }}-cargo-vz-${{ matrix.runner }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-vz-${{ matrix.runner }}-
 
-      # mvm-vz's build.rs invokes
-      # crates/mvm-vz-supervisor/tools/build.sh (swift build + codesign).
-      # GHA macOS runners ship Xcode and a Swift toolchain by default.
-      - name: Build the Swift supervisor + Rust crates
+      # The Rust-native mvm-vz-supervisor is a cargo [[bin]] in mvm-vm-host;
+      # `cargo build` produces it — no Swift toolchain / tools/build.sh.
+      - name: Build the vz supervisor + Rust crates
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        run: cargo build -p mvm-vz -p mvm-backend
+        run: cargo build -p mvm-vm-host --bin mvm-vz-supervisor -p mvm-build -p mvm-backend
 
       - name: Test mvm-vz (config + path resolution + MAC validation)
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        run: cargo test -p mvm-vz
+        run: cargo test -p mvm-build vz
 
       - name: Test mvm-backend (Vz module)
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
@@ -850,7 +841,7 @@ jobs:
 
       - name: Clippy mvm-vz + mvm-backend vz module
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        run: cargo clippy -p mvm-vz -p mvm-backend --all-targets -- -D warnings
+        run: cargo clippy -p mvm-build -p mvm-backend --all-targets -- -D warnings
 
       # Plan 98 Phase 3 §3.4 — assert auto-detect picks Vz on
       # macos-latest **only** if the host actually reports macOS 26+
@@ -866,29 +857,12 @@ jobs:
           cargo test -p mvm-build --features builder-vm --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
-      - name: Verify supervisor binary has the virtualization entitlement
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        # Plan 97 Phase A — mvm-vz-supervisor must carry
-        # com.apple.security.virtualization after the build. Catches
-        # a regression in tools/build.sh codesigning.
-        run: |
-          ARCH="$(uname -m)"
-          BIN="crates/mvm-vz-supervisor/.build/${ARCH}-apple-macosx/debug/mvm-vz-supervisor"
-          test -x "$BIN" || { echo "supervisor binary missing at $BIN" >&2; exit 1; }
-          codesign -d --entitlements - "$BIN" 2>&1 | grep -q 'com.apple.security.virtualization' \
-            || { echo 'supervisor missing com.apple.security.virtualization entitlement' >&2; exit 1; }
-
-      - name: Smoke — empty stdin / unknown field rejection
-        if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        # The supervisor's strict-keys decoder (ADR-002 claim 5
-        # foundation) must reject unknown fields with exit 2.
-        run: |
-          ARCH="$(uname -m)"
-          BIN="crates/mvm-vz-supervisor/.build/${ARCH}-apple-macosx/debug/mvm-vz-supervisor"
-          printf '' | "$BIN" 2>&1 | grep -q 'empty stdin' \
-            || { echo 'empty-stdin path did not produce the expected message' >&2; exit 1; }
-          printf '{"unexpected_key":1}' | "$BIN" 2>&1 | grep -q 'unknown field' \
-            || { echo 'unknown-field rejection regressed' >&2; exit 1; }
+      # NOTE (Plan 152 WS-B finalize): the former Swift-bin entitlement +
+      # empty-stdin/unknown-field smoke steps were removed — they hardcoded the
+      # deleted `crates/mvm-vz-supervisor/.build` path. The Rust bin self-signs
+      # the virtualization entitlement at runtime (not at build time), and the
+      # strict-keys SupervisorConfig decoder is fuzzed in security.yml
+      # (`fuzz_supervisor_config`). Rust-bin equivalents are a tracked follow-up.
 
   # ── Lane: Vz on macOS 26 (Apple Silicon, opt-in self-hosted) ──
   #
@@ -918,10 +892,6 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.MACOS_26_AVAILABLE == 'true' }}
     runs-on: [self-hosted, macOS, ARM64, macos-26]
     continue-on-error: true
-    # The mvm-vz/build.rs Swift supervisor build is opt-in; this lane
-    # exercises vz on macOS 26 so it must build the supervisor.
-    env:
-      MVM_VZ_BUILD_SUPERVISOR: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -931,8 +901,7 @@ jobs:
         with:
           filters: |
             vz:
-              - 'crates/mvm-vz/**'
-              - 'crates/mvm-vz-supervisor/**'
+              - 'crates/mvm-vm-host/**'
               - 'crates/mvm-backend/src/vz.rs'
               - 'crates/mvm-backend/src/apple_container.rs'
               - 'crates/mvm-backend/Cargo.toml'
@@ -958,19 +927,19 @@ jobs:
           key: ${{ runner.os }}-cargo-vz-macos26-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-vz-macos26-
 
-      - name: Build the Swift supervisor + Rust crates
+      - name: Build the vz supervisor + Rust crates
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        run: cargo build -p mvm-vz -p mvm-backend
+        run: cargo build -p mvm-vm-host --bin mvm-vz-supervisor -p mvm-build -p mvm-backend
 
       - name: Test mvm-vz + mvm-backend vz module
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
         run: |
-          cargo test -p mvm-vz
+          cargo test -p mvm-build vz
           cargo test -p mvm-backend vz
 
       - name: Clippy mvm-vz + mvm-backend vz module
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'
-        run: cargo clippy -p mvm-vz -p mvm-backend --all-targets -- -D warnings
+        run: cargo clippy -p mvm-build -p mvm-backend --all-targets -- -D warnings
 
       - name: Apple Container coexistence smoke
         if: steps.filter.outputs.vz == 'true' || github.ref == 'refs/heads/main'

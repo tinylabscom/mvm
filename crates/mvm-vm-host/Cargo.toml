@@ -39,7 +39,7 @@ name = "mvm-firecracker-bridge"
 path = "src/bin/mvm-firecracker-bridge.rs"
 
 # Rust-native Vz supervisor (Plan 152 WS-B) — the objc2 reimplementation of
-# the Swift crates/mvm-vz-supervisor. macOS-only at runtime; the bin self-gates
+# the (removed) Swift supervisor. macOS-only at runtime; the bin self-gates
 # to a stub main() on other targets so non-macOS workspace builds stay green.
 # The Virtualization.framework objc2 stack lives in the macOS target table
 # below and the lib's cfg(target_os="macos") `vz_objc` module.

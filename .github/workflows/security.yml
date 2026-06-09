@@ -287,12 +287,11 @@ jobs:
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
-        # Plan 97 / ADR-002 claim 5 / ADR-056 — the mvm-vz-supervisor
-        # Swift binary reads SupervisorConfig JSON on stdin. The Rust
-        # shape this fuzzes is the canonical schema; the Swift
-        # JSONDecoder mirrors it with deny-unknown-fields semantics.
-        # A panic-free Rust decoder is the foundation for the Rust to
-        # Swift corpus equivalence assertion.
+        # Plan 97 / ADR-002 claim 5 / ADR-056 — the Rust-native
+        # mvm-vz-supervisor reads this SupervisorConfig JSON on stdin
+        # with deny-unknown-fields semantics. A panic-free decoder on
+        # arbitrary input is the strict-keys trust boundary (ADR-002
+        # claim 5 foundation).
         run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
 
       - name: Fuzz OCI unpack_layer

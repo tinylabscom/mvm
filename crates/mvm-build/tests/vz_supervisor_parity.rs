@@ -1,45 +1,37 @@
-//! Plan 152 WS-B parity gate — Swift vs Rust `mvm-vz-supervisor`.
+//! Plan 152 WS-B gate — Rust-native `mvm-vz-supervisor` correctness.
 //!
-//! The mandatory gate that must be green **before** the Swift supervisor
-//! (`crates/mvm-vz-supervisor/`) is deleted: the Rust-native objc2 supervisor
-//! must match the Swift one on boot, vsock round-trip, every control verb, and
-//! save/restore. This file is authored independently of the supervisor
-//! implementation (Plan 152 WS-B is built on a separate branch) — the gate is
-//! deliberately written by a different hand than the code it judges.
+//! Originally a Swift-vs-Rust parity gate; the Swift supervisor was removed in
+//! the WS-B finalization (it self-deadlocked on async VZ control ops — its
+//! `synchronousVZCall` blocked the VM's serial dispatch queue awaiting a
+//! completion dispatched to that same queue). The Rust-native objc2 supervisor
+//! replaces it, so this gate now asserts the **Rust** supervisor is correct on
+//! boot, vsock round-trip, every control verb, and save/restore.
 //!
-//! **Why this is a subprocess harness, not a linked one.** Both supervisors are
-//! standalone binaries that read a [`SupervisorConfig`] JSON on stdin. We drive
-//! them as child processes resolved by path, never linking
+//! **Why this is a subprocess harness, not a linked one.** The supervisor is a
+//! standalone binary that reads a [`SupervisorConfig`] JSON on stdin. We drive
+//! it as a child process resolved by path, never linking
 //! `Virtualization.framework` into the test binary itself. That keeps the gate
 //! runnable on a normal dev Mac: a test binary that links VZ gets SIGKILL'd by
 //! the macOS codesign/amfid path (see the `mvm-backend` test caveat), so this
-//! harness lives in the VZ-free `mvm-build` crate and speaks to the supervisors
-//! only over stdin + the per-VM unix sockets they expose.
+//! harness lives in the VZ-free `mvm-build` crate and speaks to the supervisor
+//! only over stdin + the per-VM unix sockets it exposes.
 //!
-//! **Gating.** The live comparison needs two built+signed supervisor binaries
-//! and a bootable kernel+rootfs. Those come from the environment so the test is
-//! a no-op skip on a machine without them (a plain `cargo test` host, CI Linux,
+//! **Gating.** The live tests need a built+signed supervisor binary and a
+//! bootable kernel+rootfs. Those come from the environment so the test is a
+//! no-op skip on a machine without them (a plain `cargo test` host, CI Linux,
 //! GitHub macOS runners that lack Hypervisor.framework) and runs for real on the
 //! self-hosted `vz-macos-26` runner or a dev Mac that exports them:
 //!
 //! ```text
-//! MVM_VZ_PARITY_SWIFT_BIN=/abs/path/to/swift/mvm-vz-supervisor   # tools/build.sh output
-//! MVM_VZ_PARITY_RUST_BIN=/abs/path/to/rust/mvm-vz-supervisor     # cargo --bin output, codesigned
-//! MVM_VZ_PARITY_KERNEL=/abs/path/to/vmlinux                      # uncompressed
+//! MVM_VZ_PARITY_RUST_BIN=/abs/path/to/mvm-vz-supervisor   # cargo --bin output, codesigned
+//! MVM_VZ_PARITY_KERNEL=/abs/path/to/vmlinux               # uncompressed
 //! MVM_VZ_PARITY_ROOTFS=/abs/path/to/rootfs.ext4
+//! MVM_VZ_PARITY_CMDLINE="console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000"  # long-lived guest
 //! ```
 //!
-//! Both supervisor binaries share the name `mvm-vz-supervisor`, so they are
-//! addressed by explicit path, never by name resolution.
-//!
-//! Slices: P1 boot + graceful-stop + exit-code parity; P2 vsock proxy round-trip
-//! parity (identical request bytes → identical reply bytes through each
-//! supervisor's per-port proxy); P3 control-verb parity (STATUS/PAUSE/RESUME
-//! replies match step-for-step); P4 save/restore parity (`SAVE` a snapshot, then
-//! restore it in a fresh supervisor). P3/P4 are staged ahead of the Rust control
-//! socket + snapshot slices, so they report the gap until those land. Plus the
-//! pure config/contract/round-trip/codec helpers. (BALLOON joins P3 once the
-//! boot config carries a balloon device.)
+//! Slices: boot + graceful-stop; vsock proxy round-trip; control verbs
+//! (STATUS/PAUSE/RESUME); save/restore (`SAVE` a snapshot, restore it in a fresh
+//! supervisor). Plus the pure config/contract/round-trip/codec helpers.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -51,7 +43,6 @@ use mvm_build::vz::{
     DiskConfig, KernelConfig, ResourceConfig, StartupMode, SupervisorConfig, VsockConfig,
 };
 
-const SWIFT_BIN: &str = "MVM_VZ_PARITY_SWIFT_BIN";
 const RUST_BIN: &str = "MVM_VZ_PARITY_RUST_BIN";
 const KERNEL: &str = "MVM_VZ_PARITY_KERNEL";
 const ROOTFS: &str = "MVM_VZ_PARITY_ROOTFS";
@@ -68,6 +59,19 @@ const VSOCK_REQUEST: &str = "MVM_VZ_PARITY_VSOCK_REQUEST";
 /// real launch path does.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
+/// Override for [`DEFAULT_CMDLINE`]. The committed default boots the dev `/init`,
+/// whose shell self-exits on console EOF — fine for boot, too short-lived for the
+/// control-verb / save-restore gates (the guest can power off mid-test). Export
+/// this to a long-lived PID 1 (e.g.
+/// `console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000`) on the live
+/// runner so the guest stays up across the sequence.
+const CMDLINE_OVERRIDE: &str = "MVM_VZ_PARITY_CMDLINE";
+
+/// Resolve the boot cmdline: [`CMDLINE_OVERRIDE`] if exported, else [`DEFAULT_CMDLINE`].
+fn cmdline() -> String {
+    std::env::var(CMDLINE_OVERRIDE).unwrap_or_else(|_| DEFAULT_CMDLINE.to_string())
+}
+
 /// Build the minimal bootable [`SupervisorConfig`] both supervisors must accept
 /// identically: one rootfs disk, a vsock device, capture-only console, a control
 /// socket, no network (the smallest config that still exercises the full boot
@@ -80,7 +84,7 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
         pid_file_name: Some("vz.pid".to_string()),
         kernel: KernelConfig {
             path: kernel.to_string(),
-            cmdline: DEFAULT_CMDLINE.to_string(),
+            cmdline: cmdline(),
             initrd_path: None,
         },
         resources: ResourceConfig {
@@ -425,6 +429,9 @@ fn probe_save_restore(
     let mut child = spawn_with_config(bin, &boot_cfg)?;
     let control_ready = wait_for_running(&control_sock, Instant::now() + Duration::from_secs(30));
     let save_reply = if control_ready {
+        // VZ rejects saveMachineStateToURL on a running VM (VZErrorDomain:3);
+        // pause first, as the real backend snapshot path does.
+        let _ = send_command(&control_sock, "PAUSE");
         send_command(&control_sock, &format!("SAVE {}", snapshot.display())).ok()
     } else {
         None
@@ -436,6 +443,9 @@ fn probe_save_restore(
     // Phase 2 — restore in a fresh supervisor against the same disk copy.
     let restore_reached_running = if snapshot_written {
         let restore_dir = root.join("restore");
+        // The supervisor opens its console log under vm_state_dir on boot; create
+        // the dir first or restore ENOENTs before it ever reaches VZ.
+        std::fs::create_dir_all(&restore_dir).expect("create restore state dir");
         let mut restore_cfg = build_boot_config(label, kernel, &rootfs_copy, &restore_dir);
         restore_cfg.startup_mode = StartupMode::Restore {
             snapshot_path: snapshot.to_string_lossy().into_owned(),
@@ -463,14 +473,13 @@ fn probe_save_restore(
     })
 }
 
-/// Returns the four live-test paths, or `None` (with an explanatory skip note)
+/// Returns the three live-test paths, or `None` (with an explanatory skip note)
 /// when any is unset — the live gate is opt-in via environment.
-fn live_env() -> Option<(PathBuf, PathBuf, String, String)> {
-    let swift = std::env::var_os(SWIFT_BIN)?;
+fn live_env() -> Option<(PathBuf, String, String)> {
     let rust = std::env::var_os(RUST_BIN)?;
     let kernel = std::env::var(KERNEL).ok()?;
     let rootfs = std::env::var(ROOTFS).ok()?;
-    Some((PathBuf::from(swift), PathBuf::from(rust), kernel, rootfs))
+    Some((PathBuf::from(rust), kernel, rootfs))
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +496,7 @@ fn boot_config_matches_the_decoded_contract() {
     // use, so a drift in the shared schema fails here, not at boot.
     let back: SupervisorConfig = serde_json::from_str(&json).expect("decode");
     assert_eq!(back.kernel.path, "/k/vmlinux");
-    assert_eq!(back.kernel.cmdline, DEFAULT_CMDLINE);
+    assert_eq!(back.kernel.cmdline, cmdline());
     assert_eq!(back.disks.len(), 1);
     assert_eq!(back.disks[0].path, "/r/rootfs.ext4");
     assert_eq!(back.vsock.ports, vec![5252]);
@@ -588,46 +597,35 @@ fn restore_config_round_trips_as_restore_mode() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn boot_parity_swift_vs_rust() {
-    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+fn boot_rust_correct() {
+    let Some((rust, kernel, rootfs)) = live_env() else {
         eprintln!(
-            "SKIP boot_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, {ROOTFS} \
-             to run the live Plan 152 WS-B parity gate (needs a VZ-capable host)."
+            "SKIP boot_rust_correct: set {RUST_BIN}, {KERNEL}, {ROOTFS} \
+             to run the live Plan 152 WS-B boot gate (needs a VZ-capable host)."
         );
         return;
     };
-    assert!(
-        swift.is_file(),
-        "{SWIFT_BIN} not a file: {}",
-        swift.display()
-    );
     assert!(rust.is_file(), "{RUST_BIN} not a file: {}", rust.display());
 
-    let swift_outcome = probe_boot(&swift, &kernel, &rootfs, "swift").expect("swift probe");
-    let rust_outcome = probe_boot(&rust, &kernel, &rootfs, "rust").expect("rust probe");
-
+    let outcome = probe_boot(&rust, &kernel, &rootfs, "rust").expect("rust probe");
     assert!(
-        swift_outcome.reached_running,
-        "Swift supervisor failed to reach running — fix the fixture before judging parity"
-    );
-    assert_eq!(
-        rust_outcome, swift_outcome,
-        "Rust supervisor diverged from Swift on boot/exit: rust={rust_outcome:?} swift={swift_outcome:?}"
+        outcome.reached_running,
+        "Rust supervisor failed to reach running: {outcome:?}"
     );
 }
 
 #[test]
-fn vsock_roundtrip_parity_swift_vs_rust() {
-    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+fn vsock_roundtrip_rust_correct() {
+    let Some((rust, kernel, rootfs)) = live_env() else {
         eprintln!(
-            "SKIP vsock_roundtrip_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} (+ {VSOCK_REQUEST}) to run the live vsock proxy parity gate."
+            "SKIP vsock_roundtrip_rust_correct: set {RUST_BIN}, {KERNEL}, \
+             {ROOTFS} (+ {VSOCK_REQUEST}) to run the live vsock proxy gate."
         );
         return;
     };
     let Some(request_path) = std::env::var_os(VSOCK_REQUEST) else {
         eprintln!(
-            "SKIP vsock_roundtrip_parity_swift_vs_rust: set {VSOCK_REQUEST} to a file of request \
+            "SKIP vsock_roundtrip_rust_correct: set {VSOCK_REQUEST} to a file of request \
              bytes the guest agent answers on the vsock port (e.g. a captured agent ping)."
         );
         return;
@@ -638,71 +636,57 @@ fn vsock_roundtrip_parity_swift_vs_rust() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5252);
 
-    let swift_reply = probe_vsock_roundtrip(&swift, &kernel, &rootfs, port, &request, "swift")
-        .expect("swift probe");
-    let rust_reply =
+    let reply =
         probe_vsock_roundtrip(&rust, &kernel, &rootfs, port, &request, "rust").expect("rust probe");
-
     assert!(
-        swift_reply.is_some(),
-        "Swift supervisor returned no vsock reply on port {port} — fix the fixture/agent before \
-         judging parity"
-    );
-    assert_eq!(
-        rust_reply, swift_reply,
-        "Rust supervisor diverged from Swift on the vsock round-trip (port {port})"
+        reply.is_some(),
+        "Rust supervisor returned no vsock reply on port {port}"
     );
 }
 
+/// Rust control-verb correctness. (Swift was removed in the WS-B finalization;
+/// its control socket self-deadlocked on async VZ ops — `synchronousVZCall`
+/// blocked the VM's serial queue awaiting a completion dispatched to that same
+/// queue. The Rust serial-queue→tokio bridge fixes it.) Set
+/// `MVM_VZ_PARITY_CMDLINE` to a long-lived guest so the VM stays up across the
+/// sequence.
 #[test]
-fn control_verb_parity_swift_vs_rust() {
-    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+fn control_verbs_rust_correct() {
+    let Some((rust, kernel, rootfs)) = live_env() else {
         eprintln!(
-            "SKIP control_verb_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} to run the live control-verb parity gate."
+            "SKIP control_verbs_rust_correct: set {RUST_BIN}, {KERNEL}, {ROOTFS} \
+             (+ {CMDLINE_OVERRIDE} for a long-lived guest) to run the live control-verb gate."
         );
         return;
     };
-    // Stateful but symmetric: both supervisors get the same sequence, so the
-    // replies must match step-for-step. BALLOON/SAVE/RESTORE join once the boot
-    // config carries a balloon device and the save/restore slice lands.
     let verbs = ["STATUS", "PAUSE", "RESUME", "STATUS"];
-    let swift_replies =
-        probe_control_verbs(&swift, &kernel, &rootfs, &verbs, "swift").expect("swift probe");
-    let rust_replies =
-        probe_control_verbs(&rust, &kernel, &rootfs, &verbs, "rust").expect("rust probe");
-
-    assert!(
-        swift_replies.iter().any(Option::is_some),
-        "Swift supervisor answered no control verbs — fix the fixture before judging parity"
-    );
+    let expected: Vec<Option<String>> = vec![
+        Some("OK running".to_string()),
+        Some("OK".to_string()),
+        Some("OK".to_string()),
+        Some("OK running".to_string()),
+    ];
+    let replies = probe_control_verbs(&rust, &kernel, &rootfs, &verbs, "rust").expect("rust probe");
     assert_eq!(
-        rust_replies, swift_replies,
-        "Rust supervisor diverged from Swift on control verbs: rust={rust_replies:?} \
-         swift={swift_replies:?}"
+        replies, expected,
+        "Rust supervisor control verbs incorrect: got {replies:?}, want {expected:?}"
     );
 }
 
+/// Rust save/restore correctness (Plan 152 WS-B slice 6). Needs
+/// `MVM_VZ_PARITY_CMDLINE` set to a long-lived guest (macOS 14+).
 #[test]
-fn save_restore_parity_swift_vs_rust() {
-    let Some((swift, rust, kernel, rootfs)) = live_env() else {
+fn save_restore_rust_correct() {
+    let Some((rust, kernel, rootfs)) = live_env() else {
         eprintln!(
-            "SKIP save_restore_parity_swift_vs_rust: set {SWIFT_BIN}, {RUST_BIN}, {KERNEL}, \
-             {ROOTFS} to run the live save/restore parity gate (macOS 14+)."
+            "SKIP save_restore_rust_correct: set {RUST_BIN}, {KERNEL}, {ROOTFS} \
+             (+ {CMDLINE_OVERRIDE} for a long-lived guest) to run the live save/restore gate (macOS 14+)."
         );
         return;
     };
-    let swift_outcome = probe_save_restore(&swift, &kernel, &rootfs, "swift").expect("swift probe");
-    let rust_outcome = probe_save_restore(&rust, &kernel, &rootfs, "rust").expect("rust probe");
-
+    let outcome = probe_save_restore(&rust, &kernel, &rootfs, "rust").expect("rust probe");
     assert!(
-        swift_outcome.snapshot_written && swift_outcome.restore_reached_running,
-        "Swift supervisor could not save+restore — fix the fixture (macOS 14+?) before judging \
-         parity: {swift_outcome:?}"
-    );
-    assert_eq!(
-        rust_outcome, swift_outcome,
-        "Rust supervisor diverged from Swift on save/restore: rust={rust_outcome:?} \
-         swift={swift_outcome:?}"
+        outcome.snapshot_written && outcome.sidecar_written && outcome.restore_reached_running,
+        "Rust supervisor save/restore failed: {outcome:?}"
     );
 }
