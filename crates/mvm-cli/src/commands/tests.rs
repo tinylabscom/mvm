@@ -2420,6 +2420,30 @@ fn test_cache_prune() {
 }
 
 #[test]
+fn test_pool_warm_parses_optional_count() {
+    // Plan 118 WS-1 1b — `mvmctl pool warm` (default count) and `pool warm N`.
+    assert!(Cli::try_parse_from(["mvmctl", "pool", "warm"]).is_ok());
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "3"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action: pool::PoolAction::Warm { count },
+        }) => assert_eq!(count, Some(3)),
+        _ => panic!("Expected Pool Warm command"),
+    }
+}
+
+#[test]
+fn test_pool_status_parses_json_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "status", "--json"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action: pool::PoolAction::Status { json },
+        }) => assert!(json),
+        _ => panic!("Expected Pool Status command"),
+    }
+}
+
+#[test]
 fn test_cache_prune_dry_run() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--dry-run"]).unwrap();
     match cli.command {

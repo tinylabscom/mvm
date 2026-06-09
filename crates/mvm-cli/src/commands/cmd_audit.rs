@@ -192,6 +192,7 @@ impl Commands {
             Commands::Catalog(_) => "catalog",
             Commands::Console(_) => "console",
             Commands::Cache(_) => "cache",
+            Commands::Pool(_) => "pool",
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",

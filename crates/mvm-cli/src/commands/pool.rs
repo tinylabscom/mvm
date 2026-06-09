@@ -13,13 +13,18 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use clap::{Args as ClapArgs, Subcommand};
+use mvm_backend::backend::AnyBackend;
 use mvm_backend::standby_pool::SupervisorStandbyPool;
-use mvm_core::vm_backend::{StandbyClaim, StandbyCompat, StandbySpec, VmBackend, VmId};
+use mvm_core::user_config::MvmConfig;
+use mvm_core::vm_backend::{
+    StandbyClaim, StandbyCompat, StandbySpec, StandbyState, VmBackend, VmId,
+};
 use sha2::{Digest, Sha256};
 
-// NB: the `mvmctl pool` command (1b-ii) resolves `signer_id` via
-// `super::vm::host_signer::host_signer_id()` and passes it into these helpers; the
-// helpers themselves stay signer-agnostic (they take `signer_id` as a parameter).
+use super::Cli;
+use super::env::apple_container::ensure_default_microvm_image;
+use super::vm::host_signer;
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
@@ -371,4 +376,162 @@ mod tests {
             "a failed standby is removed, not left idle"
         );
     }
+}
+
+// ── `mvmctl pool` command (Plan 118 WS-1 1b) ────────────────────────────────────────
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct Args {
+    #[command(subcommand)]
+    pub action: PoolAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(in crate::commands) enum PoolAction {
+    /// Pre-spawn idle supervisor standbys for the default-microVM launch shape so a later
+    /// `up` is fast. Default count 1. Only the libkrun backend has a standby pool today.
+    Warm {
+        /// How many idle standbys to warm the pool toward (default 1).
+        count: Option<u32>,
+    },
+    /// Show the standby pool — recorded standbys and their idle/claimed state.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The default launch shape the warm pool targets: default-microVM kernel + the config's
+/// default cpus/mem + the effective hypervisor. Both `pool warm` and the `up` auto-claim
+/// resolve through the same pieces so a warmed standby is claimable by a default `up`.
+struct WarmShape {
+    backend: AnyBackend,
+    backend_name: String,
+    kernel: std::path::PathBuf,
+    vcpus: u8,
+    mem_mib: u32,
+}
+
+fn resolve_warm_shape(cfg: &MvmConfig) -> Result<WarmShape> {
+    let backend_name = super::shared::resolve_effective_hypervisor("firecracker");
+    let backend = AnyBackend::from_hypervisor(&backend_name);
+    let (kernel, _rootfs) = ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
+        .context("resolve default-microvm kernel for the warm pool")?;
+    let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    Ok(WarmShape {
+        backend,
+        backend_name,
+        kernel: std::path::PathBuf::from(kernel),
+        vcpus,
+        mem_mib: cfg.default_memory_mib,
+    })
+}
+
+pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
+    let pool = SupervisorStandbyPool::open()?;
+    match args.action {
+        PoolAction::Status { json } => run_status(&pool, json),
+        PoolAction::Warm { count } => run_warm(&pool, cfg, count.unwrap_or(1)),
+    }
+}
+
+fn run_warm(pool: &SupervisorStandbyPool, cfg: &MvmConfig, target: u32) -> Result<()> {
+    let shape = resolve_warm_shape(cfg)?;
+    if !shape.backend.supports_standby_pool() {
+        crate::ui::warn(&format!(
+            "backend '{}' has no supervisor standby pool (only libkrun does today); \
+             nothing warmed.",
+            shape.backend_name
+        ));
+        return Ok(());
+    }
+    // Ensure the host signer exists — the standby re-verifies the attach plan against it.
+    let signer = host_signer::load_or_init()?;
+    let spawned = warm_to_target(
+        pool,
+        &WarmParams {
+            backend: shape.backend.as_vm_backend(),
+            kernel: &shape.kernel,
+            vcpus: shape.vcpus,
+            mem_mib: shape.mem_mib,
+            signer_id: &host_signer::host_signer_id(),
+            signing_key_path: &signer.secret_path,
+            target,
+        },
+    )?;
+    if spawned == 0 {
+        crate::ui::info(&format!("Pool already at or above target {target}."));
+    } else {
+        crate::ui::success(&format!(
+            "Warmed {spawned} standby(s) toward target {target}."
+        ));
+    }
+    crate::ui::info(
+        "Note: a warm `up` claim boots through the gateway-bridge supervisor path \
+         (MVM_GATEWAY_BRIDGE=1); the default `up` cold-boots.",
+    );
+    Ok(())
+}
+
+/// Machine-readable `pool status --json` shape.
+#[derive(serde::Serialize)]
+struct PoolStatus {
+    idle: usize,
+    claimed: usize,
+    standbys: Vec<PoolStatusEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct PoolStatusEntry {
+    id: String,
+    state: &'static str,
+    pid: u32,
+    kernel_sha256: String,
+    vcpus: u8,
+    mem_mib: u32,
+}
+
+fn run_status(pool: &SupervisorStandbyPool, json: bool) -> Result<()> {
+    let standbys = pool.list()?;
+    let idle = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Idle)
+        .count();
+    let claimed = standbys.len() - idle;
+    let report = PoolStatus {
+        idle,
+        claimed,
+        standbys: standbys
+            .iter()
+            .map(|h| PoolStatusEntry {
+                id: h.id.clone(),
+                state: match h.state {
+                    StandbyState::Idle => "idle",
+                    StandbyState::Claimed => "claimed",
+                },
+                pid: h.pid,
+                kernel_sha256: h.kernel_sha256.clone(),
+                vcpus: h.vcpus,
+                mem_mib: h.mem_mib,
+            })
+            .collect(),
+    };
+    if json {
+        crate::json_out::emit_json(&report)?;
+        return Ok(());
+    }
+    println!("Supervisor standby pool: {idle} idle, {claimed} claimed");
+    for e in &report.standbys {
+        println!(
+            "  {} · {} · pid {} · {} vcpu / {} MiB · kernel {}",
+            e.id,
+            e.state,
+            e.pid,
+            e.vcpus,
+            e.mem_mib,
+            &e.kernel_sha256[..e.kernel_sha256.len().min(12)]
+        );
+    }
+    Ok(())
 }

@@ -1280,22 +1280,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // matches the rest of the codebase: native KVM → Apple Container
     // (macOS 26+) → libkrun (typical macOS 13-25 contributor box with
     // the slp/krun Homebrew tap) → Docker (Tier 3 fallback).
-    let effective_hypervisor = if hypervisor == "firecracker" {
-        let plat = mvm_core::platform::current();
-        if plat.has_kvm() {
-            "firecracker" // native KVM — production Tier 1
-        } else if plat.has_apple_containers() {
-            "apple-container" // macOS 26+ Apple Silicon
-        } else if plat.has_libkrun() {
-            "libkrun" // macOS 13-25 with libkrun installed
-        } else if plat.has_docker() {
-            "docker" // universal Tier 3 fallback (banner emitted)
-        } else {
-            "firecracker" // surfaces a clear "not available" error
-        }
-    } else {
-        hypervisor
-    };
+    // Shared with `mvmctl pool` (Plan 118 WS-1 1b) so both agree on the effective backend.
+    let effective_hypervisor_owned = super::super::shared::resolve_effective_hypervisor(hypervisor);
+    let effective_hypervisor: &str = &effective_hypervisor_owned;
 
     // ADR-002 / plan 53: emit a loud, suppressible banner when the
     // active backend is not a hardware-isolated microVM. Today this
