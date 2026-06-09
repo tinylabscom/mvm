@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-08**
+**Last updated: 2026-06-09**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated; ~98%
+PLAN 129 — Secrets / SigV4 substitution         🟢 both tiers landed (declared substitution + undeclared egress redaction); box-validated
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -35,6 +35,9 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 core done & box-validated
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)
+  [x] Phase E: undeclared secret/PII egress redact-to-XXX detector
+      (RedactingSubstitution mask-and-continue; PiiRedactor/SecretsScanner
+      redact()) wired always-on into the gateway bridge — PR #733
   [ ] local secret-workload launch via admission flow (compile refuses managed
       refs → deploy/plan path; the user-facing local boot gap) — plan 129
   [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
