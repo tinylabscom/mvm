@@ -77,6 +77,26 @@ endpoint validation above**); this ties them on a real QEMU guest.
    (502 from the forward proxy / `WireResponse::Refused`). Confirms guest→host
    AF_VSOCK (CID 2:5253) + endpoint substitution + the forward leg.
 
+   > **Box validation (2026-06-09, dev-kvm `88.99.197.234`, QEMU):**
+   > - ✅ `compile` produces a **secret-free image** (`launch.json` env `{}`),
+   >   `workload.json` carries the `SecretRef`.
+   > - ✅ `up --flake <dir>` auto-discovers `workload.json` → admits a plan whose
+   >   `.secrets` carry the binding → **spawns `mvm-substitution-endpoint`**.
+   >   (Required a fix: the main `up` path only threaded the signed plan to the
+   >   backend under `MVM_GATEWAY_BRIDGE=1`; QEMU now threads it unconditionally.)
+   > - ✅ The **guest holds only the placeholder** —
+   >   `substitution-env.json = [["API_KEY","mvm-secret-…"]]`, the real value
+   >   never present. The "never on the microVM" guarantee, validated live.
+   > - ✅ Endpoint **lifecycle**: alive during the run, reaped on `down`.
+   > - ⏳ **Destination-sees-real-credential via a live guest FUNCTION** is NOT
+   >   yet exercisable: the function-trigger verb (`invoke`) boots its **own**
+   >   transient VM via `boot_session_vm`, which deliberately **skips plan-64
+   >   admission** (no endpoint), so it can't drive the compiled secret artifact;
+   >   and the long-running `up` VM has no entrypoint-trigger verb. Wiring the
+   >   **invoke/exec transient path through admission + endpoint** is a distinct
+   >   gap (the "serverless secret-function" leg). Substitution + claim-12 over
+   >   real guest→host AF_VSOCK is already proven in isolation (#710).
+
 ### Original plan status (2026-06-07) — host + guest Rust foundation landed; remaining = boot + 2 design decisions
 
 **Merged to `main` (12 PRs):** the entire unit/integration-testable Rust surface —

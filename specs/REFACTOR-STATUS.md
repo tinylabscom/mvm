@@ -56,8 +56,19 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
       egress through it scrubs identically; claim-13 `secret.redacted` audit
   [x] local secret-workload launch (mvm's domain): compile strips SecretRef
       from the baked image + emits workload.json; `up --flake <dir>`
-      auto-discovers it → lowers plan.secrets → admits → endpoint spawn
-  [ ] full guest-VM boot e2e on the dev-kvm box — runbook in plan 129
+      auto-discovers it → lowers plan.secrets → admits → endpoint spawn.
+      Fixed: main `up` path only threaded the signed plan to the backend under
+      MVM_GATEWAY_BRIDGE=1, so the QEMU endpoint never spawned — now QEMU
+      threads it unconditionally (libkrun/Vz stay flag-gated)
+  [x] box-validated on QEMU (dev-kvm): secret-free image (launch.env={}),
+      guest holds ONLY the placeholder (substitution-env.json), endpoint
+      spawns at boot + is reaped on `down`
+  [ ] live guest-FUNCTION egress substitution e2e (destination sees the real
+      credential): blocked on the invoke/exec transient path going through
+      admission+endpoint — `boot_session_vm` deliberately skips plan-64
+      admission, so `invoke` boots its own endpoint-less VM and can't drive the
+      compiled secret artifact. Substitution + claim-12 over real guest→host
+      AF_VSOCK already proven (#710). The function-trigger leg is a distinct gap
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
 PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
