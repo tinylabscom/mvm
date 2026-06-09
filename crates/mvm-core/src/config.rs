@@ -339,6 +339,20 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// `<mvm_data_dir>/pool/` — the supervisor standby pool root (Plan 118 WS-1 1b).
+/// Each idle standby gets a `pool/<id>/` subdir holding its control UDS +
+/// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_DATA_DIR`
+/// surfaces as an error rather than silently writing entitled processes' state to
+/// `/tmp`.
+pub fn mvm_pool_dir() -> std::io::Result<std::path::PathBuf> {
+    Ok(mvm_data_dir_strict()?.join("pool"))
+}
+
+/// `<mvm_data_dir>/pool/<id>/` for a single standby.
+pub fn pool_standby_dir(id: &str) -> std::io::Result<std::path::PathBuf> {
+    Ok(mvm_pool_dir()?.join(id))
+}
+
 /// Filename of libkrun's per-port vsock listener socket: `vsock-<port>.sock`.
 /// The single source of truth for the name. Callers that already hold the
 /// per-VM dir (e.g. a `VsockTransport` constructed from an explicit dir)
@@ -622,6 +636,21 @@ mod tests {
         assert_eq!(
             mvm_data_dir_strict().unwrap(),
             std::path::PathBuf::from("/custom/data")
+        );
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
+    fn pool_dirs_live_under_mvm_data_dir() {
+        let _g = env_lock();
+        unsafe { std::env::set_var("MVM_DATA_DIR", "/custom/data") };
+        assert_eq!(
+            mvm_pool_dir().unwrap(),
+            std::path::PathBuf::from("/custom/data/pool")
+        );
+        assert_eq!(
+            pool_standby_dir("standby-abc").unwrap(),
+            std::path::PathBuf::from("/custom/data/pool/standby-abc")
         );
         unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
