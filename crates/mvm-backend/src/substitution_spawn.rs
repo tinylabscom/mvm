@@ -198,3 +198,21 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
         libc::kill(pid, sig);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `stop_vm` reaps the moat BEFORE its not-running early return (so a crashed
+    // VM's decrypted-secret endpoint can't outlive the guest). That ordering is
+    // only safe because reap is a no-op when nothing exists — assert it here.
+    #[test]
+    fn reap_is_noop_when_nothing_exists() {
+        let dir = std::env::temp_dir().join(format!("mvm-reap-noop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        reap_substitution_endpoint(&dir, "nonexistent-vm");
+        // Idempotent: a second call on the same empty dir is still clean.
+        reap_substitution_endpoint(&dir, "nonexistent-vm");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
