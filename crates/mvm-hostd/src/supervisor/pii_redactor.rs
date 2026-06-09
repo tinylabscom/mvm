@@ -296,7 +296,46 @@ impl PiiRedactor {
         }
         hits
     }
+
+    /// Replace every *validated* rule match in `body` with
+    /// [`REDACTION_MASK`], returning the redacted bytes + the rule names
+    /// that fired (stable order, no dups). The Plan 129 Phase E
+    /// mask-and-continue path: an undeclared PII run on egress is scrubbed
+    /// in place rather than dropping the request. A match that fails its
+    /// validator (e.g. a 16-digit run that isn't Luhn-valid) is left
+    /// intact — the same precision `scan` uses, so we never mangle
+    /// non-PII. Returns `(body.to_vec(), [])` unchanged when nothing fires.
+    pub fn redact(&self, body: &[u8]) -> (Vec<u8>, Vec<&'static str>) {
+        let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
+        if candidate_indices.is_empty() {
+            return (body.to_vec(), Vec::new());
+        }
+        let mut out = body.to_vec();
+        let mut fired: Vec<&'static str> = Vec::new();
+        for idx in candidate_indices {
+            let rule = &self.rules[idx];
+            let mut hit = false;
+            let replaced = self.regexes[idx].replace_all(&out, |caps: &regex::bytes::Captures| {
+                let m = caps.get(0).expect("capture group 0 always present");
+                if match_passes_validator(rule, m.as_bytes()) {
+                    hit = true;
+                    REDACTION_MASK.to_vec()
+                } else {
+                    m.as_bytes().to_vec()
+                }
+            });
+            out = replaced.into_owned();
+            if hit {
+                fired.push(rule.name);
+            }
+        }
+        (out, fired)
+    }
 }
+
+/// The token an undeclared secret/PII match is replaced with on egress
+/// (Plan 129 Phase E). Fixed + short; the matched bytes never leave the host.
+pub const REDACTION_MASK: &[u8] = b"XXX";
 
 /// True iff at least one regex match in `body` survives the rule's
 /// post-validator (or the rule has no validator). Stops at the first
@@ -304,7 +343,19 @@ impl PiiRedactor {
 fn rule_passes_validator(rule: &PiiRule, re: &Regex, body: &[u8]) -> bool {
     match rule.validator {
         None => true,
-        Some(PiiValidator::Luhn) => re.find_iter(body).any(|m| luhn_valid(m.as_bytes())),
+        Some(PiiValidator::Luhn) => re
+            .find_iter(body)
+            .any(|m| match_passes_validator(rule, m.as_bytes())),
+    }
+}
+
+/// True iff a single regex match's bytes survive the rule's post-validator
+/// (or the rule has no validator). The per-match form `redact` needs to
+/// decide whether *this* match should be masked.
+fn match_passes_validator(rule: &PiiRule, m: &[u8]) -> bool {
+    match rule.validator {
+        None => true,
+        Some(PiiValidator::Luhn) => luhn_valid(m),
     }
 }
 
@@ -373,6 +424,38 @@ mod tests {
 
     fn ctx_with_body(body: &[u8]) -> RequestCtx {
         RequestCtx::new("api.openai.com", 443, "/v1/chat").with_body(body.to_vec())
+    }
+
+    #[test]
+    fn redact_masks_validated_matches_and_leaves_non_validated() {
+        let r = PiiRedactor::with_default_rules();
+        // email (no validator), a Luhn-valid card, and a Luhn-INVALID 16-digit
+        // run (4111…1112 — last digit broken) that must be left untouched.
+        let body = b"mail a@b.com good 4111111111111111 bad 4111111111111112 end";
+        let (out, fired) = r.redact(body);
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("a@b.com"), "email not masked: {s}");
+        assert!(
+            !s.contains("4111111111111111"),
+            "valid card not masked: {s}"
+        );
+        assert!(
+            s.contains("4111111111111112"),
+            "non-Luhn run wrongly masked: {s}"
+        );
+        assert!(s.contains("XXX"), "no redaction mask present: {s}");
+        assert!(
+            fired.contains(&"email") && fired.contains(&"credit_card"),
+            "fired={fired:?}"
+        );
+    }
+
+    #[test]
+    fn redact_passes_clean_body_through_unchanged() {
+        let r = PiiRedactor::with_default_rules();
+        let (out, fired) = r.redact(b"nothing sensitive here");
+        assert_eq!(out, b"nothing sensitive here");
+        assert!(fired.is_empty());
     }
 
     // ---- Luhn helper unit tests ----
