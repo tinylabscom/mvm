@@ -75,9 +75,16 @@ untouched):
 2. Bind the control UDS (`0700`, in a `0700` dir, nonce in the path); accept **one**
    connection with a per-connection timeout.
 3. Read the `SupervisorAttachConfig` (length-prefixed JSON, `deny_unknown_fields`).
-4. Verify: echoed binding nonce == base nonce; then the **existing plan re-verify**
-   (signature + G4 + nonce) that `run_with_bridge` already runs — reuse it, do not
-   fork a second verifier.
+4. Verify: echoed binding nonce == base nonce; then **add** a plan re-verify on this
+   path. ⚠️ The cold path **deliberately skips** re-verify (`mvm-libkrun-supervisor.rs:204-217`:
+   the host admitted + the stdin pipe is a private parent→child channel, trusted under
+   ADR-002 — extract, don't re-verify). The warm path's control UDS is **same-uid-reachable**,
+   so it is *not* a trusted private channel: the supervisor MUST `mvm_core::plan::verify_plan`
+   (Ed25519 signature, against the host-signer **public** key derived from `signing_key_path`)
+   + the **G4 validity window** + **nonce-replay**, mirroring `mvm-hostd::supervisor::aggregate`'s
+   gate. This is the load-bearing invariant — Plan 118 named it but it is NOT yet implemented
+   (the cold path's extract-only is why). Reuse `verify_plan` + the aggregate G4/nonce logic;
+   do not fork a second verifier.
 5. Merge base+attach → `SupervisorConfig`; hand to the existing `run_with_bridge`
    (which `start_enter`s). One-shot: any verification failure or timeout exits
    non-zero **without** `start_enter`.
