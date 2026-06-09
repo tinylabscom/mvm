@@ -63,12 +63,19 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] box-validated on QEMU (dev-kvm): secret-free image (launch.env={}),
       guest holds ONLY the placeholder (substitution-env.json), endpoint
       spawns at boot + is reaped on `down`
-  [ ] live guest-FUNCTION egress substitution e2e (destination sees the real
-      credential): blocked on the invoke/exec transient path going through
-      admission+endpoint — `boot_session_vm` deliberately skips plan-64
-      admission, so `invoke` boots its own endpoint-less VM and can't drive the
-      compiled secret artifact. Substitution + claim-12 over real guest→host
-      AF_VSOCK already proven (#710). The function-trigger leg is a distinct gap
+  [x] `invoke <name> --attach` dispatches RunEntrypoint into the running `up`
+      workload (reuses endpoint + placeholders); function body runs with the
+      injected proxy+placeholder env
+  [x] guest loopback blackhole fixed → PR #749 (netinit must not blackhole its
+      own `lo`; it was killing the forward proxy)
+  [ ] live guest-FUNCTION egress e2e (destination sees real cred / claim-12 /
+      redact-to-XXX): blocked behind #749 on a further egress-transport issue —
+      post-fix the workload egress fails ENETUNREACH (guest `lo`/`init`
+      networking + forward-proxy↔vsock-relay). Needs a dev/console image; tracked
+      as a deferred follow-up in plan 129. Substitution+claim-12 proven (#710)
+  [ ] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
+      + endpoint) — deferred follow-up
+  [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
 PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift

@@ -94,20 +94,38 @@ endpoint validation above**); this ties them on a real QEMU guest.
    >   (The ephemeral serverless `invoke <artifact>` path stays a follow-up:
    >   `boot_session_vm` skips plan-64 admission + auto-selects a non-endpoint
    >   backend.)
-   > - ✅ **Guest loopback blackhole fixed:** `MANDATORY_DENY_RANGES` included
-   >   `127.0.0.0/8`, and netinit's interface-agnostic blackhole route for it
-   >   killed the guest's own `lo` → the forward proxy was unreachable (EINVAL).
-   >   `install_mandatory_deny` now skips loopback (`Report.skipped_loopback`);
-   >   the netinit report confirms `skipped_loopback:["127.0.0.0/8"]` and the
-   >   workload→proxy `EINVAL` is gone.
+   > - ✅ **Guest loopback blackhole fixed (split to PR #749):** netinit's
+   >   interface-agnostic blackhole route for `127.0.0.0/8` (in
+   >   `MANDATORY_DENY_RANGES`) killed the guest's own `lo`, so the forward proxy
+   >   was unreachable (EINVAL). `install_mandatory_deny` now skips loopback
+   >   (`Report.skipped_loopback`); on-box the netinit report confirms
+   >   `skipped_loopback:["127.0.0.0/8"]` and the workload→proxy `EINVAL` is gone.
    > - ⏳ **Destination-sees-real-credential still blocked** on a *further*
-   >   egress-transport issue: after the loopback fix the workload's egress now
-   >   fails `ENETUNREACH` (no route to `127.0.0.1`), pointing at guest `/init`
-   >   not configuring `lo` and/or the forward-proxy↔vsock-relay leg. This is
-   >   the forward-proxy/guest-networking layer (overlaps the Plan 129 egress
-   >   terminator work), not the launch glue. Needs holistic debugging on a
-   >   dev/console image, not blind rebuilds. Substitution + claim-12 over real
+   >   egress-transport issue (follow-up — see below): after #749 the workload's
+   >   egress fails `ENETUNREACH` (no route to `127.0.0.1`), pointing at guest
+   >   `/init` not configuring `lo` and/or the forward-proxy↔vsock-relay leg.
+   >   This is the forward-proxy/guest-networking layer (overlaps the egress
+   >   terminator work), not the launch glue. Substitution + claim-12 over real
    >   guest→host AF_VSOCK is proven in isolation (#710).
+
+### Deferred follow-ups (surfaced by the local-launch e2e)
+
+- [ ] **Live secret-egress on QEMU** — finish the
+      forward-proxy ↔ guest-`lo`/`/init`-networking ↔ vsock-relay path so a live
+      guest function's egress reaches the host endpoint; validate
+      destination-sees-real-credential + claim-12 refusal + redact-to-`XXX` on a
+      **dev/console** image (prod images give no shell to introspect). Blocked
+      behind PR #749 + the `ENETUNREACH` finding above.
+- [ ] **Forward proxy + `https`/`CONNECT`** — standard clients tunnel `https`
+      through `HTTP_PROXY` via `CONNECT`, hiding headers from the proxy, so
+      substitution only works for `http`/absolute-form today. TLS-destination
+      support needs the proxy to handle `CONNECT` (or the SDK to ship an
+      absolute-form client). The example uses `http://` for this reason.
+- [ ] **Ephemeral serverless `invoke <artifact>`** — today `invoke --attach`
+      dispatches into a running `up` workload; the one-shot ephemeral form needs
+      the `boot_session_vm`/exec transient path wired through plan-64 admission +
+      endpoint spawn + QEMU selection (a cross-subsystem change to the
+      template/session-VM world).
 
 ### Original plan status (2026-06-07) — host + guest Rust foundation landed; remaining = boot + 2 design decisions
 
