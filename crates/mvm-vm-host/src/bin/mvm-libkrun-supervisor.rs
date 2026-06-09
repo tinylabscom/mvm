@@ -233,7 +233,7 @@ fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
     // Read the length-prefixed attach frame, then re-encode to bytes for the
     // pure verifier (which owns the deny_unknown_fields decode + plan verify).
     let attach_value: serde_json::Value =
-        match mvm_hostd::framing::read_json_frame_sync(&mut stream, MAX_ATTACH_BYTES) {
+        match libkrun_sys::framing::read_json_frame_sync(&mut stream, MAX_ATTACH_BYTES) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("prelaunch: read attach frame: {e}");
