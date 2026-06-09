@@ -148,6 +148,18 @@ pub struct Report {
     /// v6 entries were deliberately not attempted, not silently
     /// missing.
     pub skipped_ipv6: Vec<IpNet>,
+    /// Loopback ranges (`127.0.0.0/8`) are intentionally **not**
+    /// blackholed inside the guest: a blackhole route is
+    /// interface-agnostic, so it would also kill the guest's own `lo`
+    /// — breaking the Plan 129 forward proxy on `127.0.0.1` and any
+    /// local service. The host-loopback-via-bridge threat
+    /// `MANDATORY_DENY_RANGES` guards against is enforced host-side
+    /// (the L4 / nft egress enforcers on the bridge), which still
+    /// carry the full range list. Reported so the skip is observable,
+    /// not silent. `#[serde(default)]` keeps older report JSON
+    /// (without this field) parseable.
+    #[serde(default)]
+    pub skipped_loopback: Vec<IpNet>,
 }
 
 impl Report {
@@ -156,6 +168,7 @@ impl Report {
             installed: Vec::new(),
             failed: Vec::new(),
             skipped_ipv6: Vec::new(),
+            skipped_loopback: Vec::new(),
         }
     }
 
@@ -230,6 +243,17 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
     for cidr in mvm_core::network_policy::mandatory_deny_ranges() {
         if !cidr.network().is_ipv4() {
             report.skipped_ipv6.push(cidr);
+            continue;
+        }
+        // Never blackhole the guest's own loopback. A blackhole route matches
+        // by destination regardless of interface, so blackholing 127.0.0.0/8
+        // kills guest-internal loopback (the Plan 129 forward proxy on
+        // 127.0.0.1:18080, and any local service) — not just host loopback
+        // reached via a misconfigured bridge. That host-side threat is the
+        // host bridge / L4 enforcer's job; they still carry the full
+        // `MANDATORY_DENY_RANGES`. Skip-and-report, never silently.
+        if categorize(&cidr) == "loopback" {
+            report.skipped_loopback.push(cidr);
             continue;
         }
         let category = categorize_v4(&cidr).to_string();
@@ -551,19 +575,19 @@ mod tests {
     }
 
     #[test]
-    fn install_calls_installer_for_every_ipv4_entry() {
+    fn install_calls_installer_for_every_ipv4_entry_except_loopback() {
         let mock = MockInstaller::new();
         let report = install_mandatory_deny(&mock);
-        // Every IPv4 entry in `MANDATORY_DENY_RANGES` should have
-        // exactly one call. Mirror the const's IPv4 entry count
-        // exactly so a future const edit that adds a v4 entry
-        // also has to update this test.
-        let v4_count = mvm_core::network_policy::mandatory_deny_ranges()
+        // Every IPv4 entry in `MANDATORY_DENY_RANGES` is blackholed except
+        // loopback (skipped so the guest's own `lo` survives — see
+        // `install_skips_loopback_*`). Mirror the const's count so a future
+        // edit that adds a v4 entry also has to update this test.
+        let v4_installable = mvm_core::network_policy::mandatory_deny_ranges()
             .iter()
-            .filter(|n| n.network().is_ipv4())
+            .filter(|n| n.network().is_ipv4() && categorize(n) != "loopback")
             .count();
-        assert_eq!(mock.recorded().len(), v4_count);
-        assert_eq!(report.installed.len(), v4_count);
+        assert_eq!(mock.recorded().len(), v4_installable);
+        assert_eq!(report.installed.len(), v4_installable);
         assert!(report.failed.is_empty());
     }
 
@@ -583,6 +607,29 @@ mod tests {
                 "installer was called with non-v4 CIDR {recorded}"
             );
         }
+    }
+
+    #[test]
+    fn install_skips_loopback_so_guest_internal_loopback_survives() {
+        // A guest must not blackhole its own loopback: a blackhole route for
+        // 127.0.0.0/8 is interface-agnostic and kills guest-internal loopback,
+        // including the Plan 129 forward proxy on 127.0.0.1. The host-loopback
+        // threat stays handled host-side with the full range list.
+        let mock = MockInstaller::new();
+        let report = install_mandatory_deny(&mock);
+        let loopback: IpNet = "127.0.0.0/8".parse().unwrap();
+        assert!(
+            !mock.recorded().contains(&loopback),
+            "guest installed a blackhole for its own loopback (breaks the forward proxy)"
+        );
+        assert!(
+            !report.installed.iter().any(|r| r.cidr == loopback),
+            "loopback must not appear in installed routes"
+        );
+        assert!(
+            report.skipped_loopback.contains(&loopback),
+            "the loopback skip must be reported"
+        );
     }
 
     #[test]
