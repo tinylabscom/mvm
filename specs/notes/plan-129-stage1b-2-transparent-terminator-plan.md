@@ -29,7 +29,7 @@
 
 **Design refinement that changes Task 4 (already applied in code):** the plan's original `handle(stream, …)` (which called the Linux-only `original_dst` inline, making it un-testable off-Linux) was split. The testable core is now `handler::handle_request(raw: &[u8], orig_dst: SocketAddr, endpoint, forward)`. **Task 4's Linux-gated listener** is the glue that does, per accepted connection: `original_dst(&stream)` → `read::read_http_request(&mut stream)` → `handle_request(&raw, orig_dst, &endpoint, forward)` → write the returned bytes back. Use that shape, not the original `handle`.
 
-**Remaining:** Task 5 (passt `--runas` + scoped `nft` redirect at launch), Task 6 (box e2e), then Stage 2 (CA/`https`). Task 0 ✅ PASS (skuid scoping confirmed — see RESULT under Task 0). Task 4 ✅ DONE + reviewed (commits `3201006c`/`53f5b2b1`).
+**Status (2026-06-09):** Task 0 ✅, Task 4 ✅ (PR #735, **merged**), Task 5 ✅ (PR #744, **merged** — FC TAP `nft prerouting iifname` redirect + endpoint/terminator wiring). **Task 6 (live box e2e) DEFERRED** to a dedicated bringup/debug session — kickoff prompt at `specs/prompts/129-fc-bringup-debug.md`. The FC microVM now boots on the box, but the live SDK-free e2e is gated on: the published default x86_64 kernel being a bzImage not an ELF vmlinux (issue **#746**), FC guest-agent reachability, and the local secret-launch glue (`specs/prompts/129-local-admission-launch.md`). Then Stage 2 (CA/`https`, ADR-006).
 
 **✅ RESOLVED (2026-06-09) — Option 2 (Firecracker), with a mechanism correction.** The premise gap (substitution endpoint wired only on QEMU/slirp; `skuid` needs a passt-uid) was resolved by targeting **Firecracker** — but FC's egress is **TAP + nft NAT**, NOT passt, so the redirect mechanism changed from `meta skuid` (OUTPUT) to **`nat prerouting iifname "<tap>"`** (naturally guest-scoped; no passt, no uid). Re-validated on the box (PASS — see Task 5). No `passt.rs`/`--runas` change. Box is nft-only. See Task 5 for the corrected design; `[[project_plan_129_terminator_backend_gap]]`.
 
@@ -335,13 +335,13 @@ where
 
 **Files:** Create `crates/mvm-hostd/src/supervisor/egress_redirect.rs` (`EgressRedirect::install(vm, tap_iface, term_port)` / `Drop` teardown + a pure `nft_rule_argv(table, iface, port)` for unit tests). Wire into the **Firecracker parent context** (`crates/mvm-backend/src/microvm.rs` `run_from_build` + `stop_vm` — the bridge child is Landlock-confined and can't run `nft`, so install in the unconfined parent), gated on `mvm_core::plan::secrets_from_signed_json(plan_json)` being non-empty (`plan_json` is already read at `spawn_fc_bridge`/available; the tap name comes from the slot/network provision). Replicate `qemu.rs::spawn_substitution_endpoint` for FC but set `terminator_listen: Some(0.0.0.0:<per-VM port>)` (per-VM port = a base + `slot.index` to avoid host-wide collisions) and record the endpoint PID + write `substitution-env.json` (consumed by `mvmctl invoke`'s `substitution_env`, the existing guest env-injection path).
 
-- [ ] **Step 1: Write the failing test** — `EgressRedirect::nft_rule_argv("mvm_egress_x", "tap-x", 18080)` produces the exact tokens for `add rule ip mvm_egress_x prerouting iifname "tap-x" tcp dport 80 redirect to :18080`. Pure-function test; the live `nft` call + the FC wiring are covered by Task 6.
+- [x] **Step 1: Write the failing test** — `EgressRedirect::nft_rule_argv("mvm_egress_x", "tap-x", 18080)` produces the exact tokens for `add rule ip mvm_egress_x prerouting iifname "tap-x" tcp dport 80 redirect to :18080`. Pure-function test; the live `nft` call + the FC wiring are covered by Task 6.
 
 - [ ] **Step 2: Run it (fails)**
 
 - [ ] **Step 3: Implement** `egress_redirect.rs`: per-VM table `mvm_egress_<sanitized-vm>`, a `nat prerouting` chain (priority -100), and the iifname-scoped REDIRECT rule built from `nft_rule_argv`; `install` runs the `nft` calls, `Drop`/explicit `teardown` runs `nft delete table ip <table>`. Then wire FC `run_from_build`/`stop_vm`: when the plan carries secrets, spawn the substitution endpoint (vsock transport + `terminator_listen: Some(0.0.0.0:<port>)`), then `EgressRedirect::install(vm, tap, port)`; on stop, reap the endpoint PID, drop the redirect table, remove `substitution-env.json`. Gate everything on secrets; fail closed (roll back the FC boot if the endpoint/redirect can't come up, mirroring qemu.rs).
 
-- [ ] **Step 4: Run it (passes)**; **Step 5: Commit** — `"feat(terminator): per-VM TAP nft REDIRECT + FC endpoint/terminator wiring (plan 129 stage 1b)"`
+- [x] **Step 4: Run it (passes)**; **Step 5: Commit** — landed as PR #744 (5A `EgressRedirect` + 5B FC wiring + review fix), merged squash `8c3a327b`.
 
 (Original passt/skuid `egress_redirect` sketch removed — it targeted the libkrun passt path; Firecracker uses TAP. A future libkrun-on-Linux terminator could add the skuid variant Task 0 validated, but that is out of scope for the FC slice.)
 
