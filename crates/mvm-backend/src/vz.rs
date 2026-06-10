@@ -861,6 +861,7 @@ impl crate::checkpoint::VmFullRestore for VzBackend {
         memory: &std::path::Path,
         machine_id: &std::path::Path,
     ) -> anyhow::Result<()> {
+        refuse_if_running(target_vm)?;
         use crate::checkpoint::VmFullControl as _;
         let target_rootfs = VzVmFullControl::new(target_vm)
             .rootfs_path()
@@ -1646,6 +1647,18 @@ fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe { libc::kill(pid, sig) };
 }
 
+/// Bail if `target_vm` is currently running. Called before any disk mutation
+/// so callers never corrupt a live VM's rootfs.
+fn refuse_if_running(target_vm: &str) -> anyhow::Result<()> {
+    let pid_path = vm_state_dir(target_vm).join(PID_FILE_NAME);
+    if let Some(pid) = read_pid(&pid_path)
+        && pid_alive(pid)
+    {
+        anyhow::bail!("VM '{target_vm}' is running; stop it before restoring a checkpoint");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2413,6 +2426,53 @@ mod tests {
                 );
             }
             other => panic!("expected Restore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_refuses_running_target_before_touching_disk() {
+        use crate::checkpoint::VmFullRestore as _;
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        // Simulate a live supervisor: write vz.pid with the test process's PID.
+        let state_dir = tmp.path().join("vms").join("target-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join(PID_FILE_NAME), pid.to_string()).unwrap();
+
+        // Sentinel: the target rootfs must NOT be created by a refused restore.
+        let target_rootfs = state_dir.join("rootfs.ext4");
+        assert!(!target_rootfs.exists(), "pre-condition: rootfs absent");
+
+        let err = VzBackend
+            .restore(
+                "target-vm",
+                std::path::Path::new("/nonexistent/rootfs.ext4"),
+                std::path::Path::new("/nonexistent/memory.bin"),
+                std::path::Path::new("/nonexistent/machine-id"),
+            )
+            .expect_err("must refuse restore into a running VM");
+
+        assert!(
+            err.to_string().contains("running"),
+            "error mentions 'running': {err}"
+        );
+        // rootfs must be untouched — the guard fired before the clone.
+        assert!(
+            !target_rootfs.exists(),
+            "rootfs not created by refused restore"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
         }
     }
 }
