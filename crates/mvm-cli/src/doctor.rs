@@ -229,6 +229,32 @@ fn stage0_status_check() -> Check {
     }
 }
 
+/// Surface the builder VM store's on-disk presence + size (#640). Host-side we
+/// can't verify nix-store integrity (that needs booting the VM), so this is
+/// informational: present/absent + size, with the `cache repair` recovery path
+/// noted. `ok` is always true — an absent store just means a cold first build,
+/// and a present-but-degraded store isn't host-detectable without a build.
+fn builder_store_check() -> Check {
+    // The repair dry-run is a pure read: it returns (existed, bytes, path)
+    // without removing anything.
+    let info = match mvm_build::builder_vm::clear_builder_store(true) {
+        Ok(s) if s.existed => format!(
+            "present ({:.1} GiB) at {} — if `dev up` fails with a dangling-store \
+             error, run `mvmctl cache repair`",
+            s.bytes_freed as f64 / (1024.0 * 1024.0 * 1024.0),
+            s.path,
+        ),
+        Ok(s) => format!("absent ({} — first `dev up` builds it)", s.path),
+        Err(e) => format!("could not stat builder store: {e}"),
+    };
+    Check {
+        name: "builder store",
+        category: "tools",
+        ok: true,
+        info,
+    }
+}
+
 /// One-line summary of a dry-run convergence report for `doctor`
 /// (Plan 170 WS-A). Pure so it's testable without touching the registry.
 fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
@@ -313,6 +339,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(docker_check(plat));
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
+    checks.push(builder_store_check());
     checks.push(registry_drift_check());
 
     checks.push(disk_space_check(false));

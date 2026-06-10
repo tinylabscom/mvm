@@ -12,7 +12,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{cp, diff, forward, fs, pause, proc, sandbox, session, set_ttl, volume, wait};
+use super::{
+    checkpoint, cp, diff, forward, fs, pause, proc, sandbox, session, set_ttl, volume, wait,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -28,6 +30,8 @@ pub(in crate::commands) enum VmCmd {
     Resume(pause::ResumeArgs),
     /// Manage sealed instance snapshots (`ls`, `rm`)
     Snapshot(pause::SnapshotArgs),
+    /// Capture, list, remove, or fork rootfs checkpoints
+    Checkpoint(checkpoint::CheckpointArgs),
     /// Copy one file between the host and a running VM
     Cp(cp::Args),
     /// Run filesystem RPC against a VM
@@ -64,6 +68,7 @@ impl VmCmd {
             VmCmd::Pause(_) => "pause",
             VmCmd::Resume(_) => "resume",
             VmCmd::Snapshot(_) => "snapshot",
+            VmCmd::Checkpoint(_) => "checkpoint",
             VmCmd::Cp(_) => "cp",
             VmCmd::Fs(_) => "fs",
             VmCmd::Proc(_) => "proc",
@@ -84,6 +89,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Pause(a) => pause::run_pause(cli, a, cfg),
         VmCmd::Resume(a) => pause::run_resume(cli, a, cfg),
         VmCmd::Snapshot(a) => pause::run_snapshot(cli, a, cfg),
+        VmCmd::Checkpoint(a) => checkpoint::run_checkpoint(cli, a),
         VmCmd::Cp(a) => cp::run(cli, a, cfg),
         VmCmd::Fs(a) => fs::run(cli, a, cfg),
         VmCmd::Proc(a) => proc::run(cli, a, cfg),

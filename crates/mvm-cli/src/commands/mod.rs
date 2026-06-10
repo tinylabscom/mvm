@@ -116,7 +116,7 @@ pub(in crate::commands) enum Commands {
     Exec(vm::exec::Args),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
-    /// Operate on a running VM (pause, snapshot, cp, fs, proc, …)
+    /// Operate on a running VM (pause, snapshot, checkpoint, cp, fs, …)
     Vm(vm::group::Args),
     /// Manage local secret namespaces
     Secret(ops::secret::Args),

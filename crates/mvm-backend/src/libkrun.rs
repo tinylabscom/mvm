@@ -328,6 +328,10 @@ impl VmBackend for LibkrunBackend {
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
             balloon: false,
+            // libkrun runs on macOS but the rootfs lives in a regular
+            // file, not an APFS clone-eligible volume mount; no
+            // clonefile shortcut here.
+            fs_quick_checkpoint: false,
         }
     }
 

@@ -2,6 +2,7 @@
 
 pub(super) mod artifact;
 pub(super) mod audit_chain;
+pub(super) mod checkpoint;
 pub(super) mod console;
 pub(super) mod cp;
 pub(super) mod diff;

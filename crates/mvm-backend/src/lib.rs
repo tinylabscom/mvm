@@ -37,6 +37,7 @@ pub mod apple_container;
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
+pub mod checkpoint;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate (plan 121 A2). It lives here, not
@@ -97,6 +98,14 @@ pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;
+
+/// Plan 129 Stage 2 — the per-VM egress-TLS cert/key split helper. `mvmctl up`
+/// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
+/// pushed onto the drive, the key is persisted host-side for the terminator
+/// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
+pub use substitution_spawn::{
+    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, build_egress_tls_delivery,
+};
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from

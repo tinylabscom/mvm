@@ -93,6 +93,18 @@ impl SubstitutionRegistry {
     pub fn resolve(&self, token: &str) -> Option<&SecretRef> {
         self.map.get(&Placeholder(token.to_string()))
     }
+
+    /// Whether any secret in this session is bound to `host` (a [`host_matches`]
+    /// hit against some `SecretRef.allowed_hosts`). The transparent `https`
+    /// terminator uses this for its terminate-vs-splice decision: it MITM-
+    /// terminates only hosts a workload secret may reach, and splices everything
+    /// else untouched. (claim 12 is still enforced per-request at substitution
+    /// time — this is the coarse gate that avoids decrypting unbound traffic.)
+    pub fn host_is_bound(&self, host: &str) -> bool {
+        self.map
+            .values()
+            .any(|r| r.allowed_hosts.iter().any(|p| host_matches(p, host)))
+    }
 }
 
 /// Errors from the substitution endpoint.
@@ -246,6 +258,20 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn host_is_bound_matches_only_registered_allowed_hosts() {
+        let mut reg = SubstitutionRegistry::new();
+        reg.mint(bearer_ref("openai", &["api.openai.com", "*.example.com"]));
+        // Exact + wildcard hits.
+        assert!(reg.host_is_bound("api.openai.com"));
+        assert!(reg.host_is_bound("sub.example.com"));
+        // Misses: unbound host, and a non-matching wildcard depth.
+        assert!(!reg.host_is_bound("evil.example.org"));
+        assert!(!reg.host_is_bound("example.com"));
+        // Empty registry binds nothing.
+        assert!(!SubstitutionRegistry::new().host_is_bound("api.openai.com"));
     }
 
     fn signing_ref(name: &str, auth: AuthType, hosts: &[&str]) -> SecretRef {

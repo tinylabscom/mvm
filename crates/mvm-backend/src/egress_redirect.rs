@@ -47,9 +47,14 @@ fn redirect_table_name(vm: &str) -> String {
     format!("mvm_egress_{sanitized}")
 }
 
-/// The pure, unit-tested core: exact argv tokens for the redirect rule.
-/// argv form needs NO quotes around the iface — quoting is shell-only.
-pub fn nft_rule_argv(table: &str, tap_iface: &str, term_port: u16) -> Vec<String> {
+/// Guest destination ports steered to the terminator. `:80` is the Stage 1b
+/// cleartext path; `:443` is the Stage 2 TLS-termination path — the terminator
+/// recovers which one via `SO_ORIGINAL_DST` and branches accordingly.
+pub const REDIRECTED_DPORTS: [u16; 2] = [80, 443];
+
+/// The pure, unit-tested core: exact argv tokens for one redirect rule matching
+/// `dport`. argv form needs NO quotes around the iface — quoting is shell-only.
+pub fn nft_rule_argv(table: &str, tap_iface: &str, dport: u16, term_port: u16) -> Vec<String> {
     vec![
         "add".into(),
         "rule".into(),
@@ -60,7 +65,7 @@ pub fn nft_rule_argv(table: &str, tap_iface: &str, term_port: u16) -> Vec<String
         tap_iface.into(),
         "tcp".into(),
         "dport".into(),
-        "80".into(),
+        dport.to_string(),
         "redirect".into(),
         "to".into(),
         format!(":{term_port}"),
@@ -102,9 +107,14 @@ impl EgressRedirect {
                 "prerouting",
                 "{ type nat hook prerouting priority -100 ; }",
             ])?;
-            let rule = nft_rule_argv(&table, tap_iface, term_port);
-            let rule_ref: Vec<&str> = rule.iter().map(String::as_str).collect();
-            nft(&rule_ref)
+            // One REDIRECT rule per steered dport (:80 cleartext, :443 TLS) into
+            // the same per-VM table — the terminator demuxes via SO_ORIGINAL_DST.
+            for dport in REDIRECTED_DPORTS {
+                let rule = nft_rule_argv(&table, tap_iface, dport, term_port);
+                let rule_ref: Vec<&str> = rule.iter().map(String::as_str).collect();
+                nft(&rule_ref)?;
+            }
+            Ok(())
         })();
 
         if let Err(e) = r {
@@ -164,7 +174,7 @@ mod tests {
 
     #[test]
     fn nft_rule_argv_exact_tokens() {
-        let got = nft_rule_argv("mvm_egress_demo", "tap-demo", 18080);
+        let got = nft_rule_argv("mvm_egress_demo", "tap-demo", 80, 18080);
         let want: Vec<String> = vec![
             "add",
             "rule",
@@ -184,6 +194,23 @@ mod tests {
         .map(String::from)
         .collect();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn install_redirects_both_80_and_443_to_the_terminator() {
+        // Stage 2: the terminator handles both cleartext (:80) and TLS (:443);
+        // the redirect must steer BOTH guest ports to the same terminator port
+        // (SO_ORIGINAL_DST recovers which one it was). Assert the per-port rule
+        // argv for each — the pure core the side-effecting install emits.
+        let p443 = nft_rule_argv("mvm_egress_demo", "tap-demo", 443, 18080);
+        assert_eq!(p443[9], "443");
+        assert_eq!(p443.last().unwrap(), ":18080");
+        let p80 = nft_rule_argv("mvm_egress_demo", "tap-demo", 80, 18080);
+        assert_eq!(p80[9], "80");
+        assert_eq!(p80.last().unwrap(), ":18080");
+        // Same table + iface + target port; only the matched dport differs.
+        assert_eq!(&p80[..9], &p443[..9]);
+        assert_eq!(REDIRECTED_DPORTS, [80, 443]);
     }
 
     #[test]

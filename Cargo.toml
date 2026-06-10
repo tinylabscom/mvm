@@ -179,6 +179,12 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hmac = "0.12"
 rand = "0.8"
+# Plan 129 Stage 2 (ADR-006): mint the per-VM name-constrained egress CA /
+# intermediate / leaf certs for transparent https substitution. 0.13+ for the
+# `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the
+# aws-lc-rs default). Sync (no tokio) so it lives behind mvm-core's `egress-ca`
+# feature without breaking the runtime-free default build.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
 # `secrecy` wraps secret-carrying types so accidental `Debug`/`Display`
 # becomes a compile error. Plan 63 W2 — `SecretBox<T>` pass on every
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
@@ -204,6 +210,13 @@ opendal = { version = "0.50", features = ["services-s3"] }
 
 # HTTP client (for CLI upgrade)
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+# Plan 129 Stage 2 — the egress terminator's server-side TLS (terminate the
+# guest's https to bound hosts under the per-VM name-constrained intermediate).
+# `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
+# Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 
 # Name generation
 names = { version = "0.14", default-features = false }

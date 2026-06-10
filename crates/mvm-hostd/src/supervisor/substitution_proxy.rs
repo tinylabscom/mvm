@@ -108,7 +108,7 @@ pub fn prepare_request(
 }
 
 /// The destination host (no port) from an absolute URL.
-fn destination_host(url: &str) -> Result<String, ProxyError> {
+pub(crate) fn destination_host(url: &str) -> Result<String, ProxyError> {
     Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
@@ -120,7 +120,7 @@ fn destination_host(url: &str) -> Result<String, ProxyError> {
 /// `resolve_meta` touches no secret value, so this is claim-13 safe. Shared by
 /// the UDS/vsock `process` path and the terminator path so their two audit
 /// emissions can't drift.
-fn collect_substituted_meta(
+pub(crate) fn collect_substituted_meta(
     endpoint: &SubstitutionEndpoint<'_>,
     headers: &[(String, String)],
 ) -> Vec<(String, AuthType)> {
@@ -276,6 +276,10 @@ pub struct SubstitutionService {
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
     recorder: Option<Recorder>,
+    /// Plan 129 Stage 2 — the per-VM name-constrained intermediate the `https`
+    /// terminator mints per-SNI leaves under. `None` ⇒ no TLS leg (Stage 1b
+    /// `http`-only). Set from `EndpointConfig.tls_intermediate` at assemble.
+    tls_intermediate: Option<Arc<mvm_core::crypto::egress_ca::VmIntermediate>>,
 }
 
 impl SubstitutionService {
@@ -290,6 +294,7 @@ impl SubstitutionService {
             forwarder,
             redactor: RedactingSubstitution::with_default_rules(),
             recorder: None,
+            tls_intermediate: None,
         }
     }
 
@@ -297,6 +302,16 @@ impl SubstitutionService {
     /// `secret.substituted` entry (metadata only — claim 13).
     pub fn with_recorder(mut self, recorder: Recorder) -> Self {
         self.recorder = Some(recorder);
+        self
+    }
+
+    /// Plan 129 Stage 2 — attach the per-VM egress intermediate so the
+    /// terminator can terminate bound-host `https`. Absent ⇒ `http`-only.
+    pub fn with_tls_intermediate(
+        mut self,
+        intermediate: mvm_core::crypto::egress_ca::VmIntermediate,
+    ) -> Self {
+        self.tls_intermediate = Some(Arc::new(intermediate));
         self
     }
 
@@ -312,12 +327,16 @@ impl SubstitutionService {
         bindings: &dyn BindingStore,
         secret_store: Arc<dyn SecretStore>,
         forward_timeout_secs: u64,
+        tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
     ) -> Result<(Arc<Self>, HandedPlaceholders), FromPlanError> {
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
         let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
-        let service = Arc::new(Self::new(Arc::new(registry), resolver, forwarder));
-        Ok((service, handed))
+        let mut service = Self::new(Arc::new(registry), resolver, forwarder);
+        if let Some(intermediate) = tls_intermediate {
+            service = service.with_tls_intermediate(intermediate);
+        }
+        Ok((Arc::new(service), handed))
     }
 
     /// Accept loop: one routed request per connection, framed JSON, a task per
@@ -433,14 +452,30 @@ impl SubstitutionService {
         // The redirected socket is UNTRUSTED: set read+write deadlines so a guest
         // that never completes its header (`\r\n\r\n`) or stalls mid-write-back
         // can't park this blocking-pool thread forever (bounded pool ⇒ DoS).
-        let mut std_stream = stream.into_std()?;
+        let std_stream = stream.into_std()?;
         std_stream.set_nonblocking(false)?;
         std_stream.set_read_timeout(Some(timeout))?;
         std_stream.set_write_timeout(Some(timeout))?;
-        let (mut std_stream, orig_dst, raw) = tokio::task::spawn_blocking(move || {
+
+        // Recover the original destination first (cheap getsockopt) so we can
+        // branch http(:80, Stage 1b) vs https(:443, Stage 2) before reading.
+        let (std_stream, orig_dst) = tokio::task::spawn_blocking(move || {
             let orig_dst = terminator::orig_dst::original_dst(&std_stream)?;
+            anyhow::Ok((std_stream, orig_dst))
+        })
+        .await??;
+
+        if orig_dst.port() == 443 {
+            return self
+                .handle_https_terminator(std_stream, orig_dst, timeout)
+                .await;
+        }
+
+        // ── Stage 1b: cleartext :80 ──
+        let mut std_stream = std_stream;
+        let (mut std_stream, raw) = tokio::task::spawn_blocking(move || {
             let raw = terminator::read::read_http_request(&mut std_stream)?;
-            anyhow::Ok((std_stream, orig_dst, raw))
+            anyhow::Ok((std_stream, raw))
         })
         .await??;
 
@@ -484,6 +519,78 @@ impl SubstitutionService {
         })
         .await??;
         Ok(())
+    }
+
+    /// Stage 2 (`:443`): peek the ClientHello SNI, then **terminate** TLS for a
+    /// bound host (mint a leaf under the per-VM intermediate, decrypt, substitute,
+    /// re-originate over the hardened reqwest forwarder) or **splice** an unbound
+    /// host straight through without decrypting. Fail-closed: a bound host whose
+    /// substitution refuses closes the socket without forwarding (claim 12).
+    #[cfg(target_os = "linux")]
+    async fn handle_https_terminator(
+        &self,
+        std_stream: std::net::TcpStream,
+        orig_dst: std::net::SocketAddr,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        use crate::keyholder::SubstitutionEndpoint;
+        use crate::supervisor::terminator::tls;
+
+        // Peek the SNI without consuming the stream (blocking).
+        let (std_stream, sni) = tokio::task::spawn_blocking(move || {
+            let sni = tls::peek_sni(&std_stream)?;
+            anyhow::Ok((std_stream, sni))
+        })
+        .await??;
+
+        // Terminate ONLY a host bound by some workload secret, and only when we
+        // hold the per-VM intermediate. Everything else is spliced end-to-end —
+        // never decrypted (zero added host visibility over substitution's needs).
+        let bound_sni = sni.filter(|s| self.registry.host_is_bound(s));
+        let (intermediate, sni) = match (self.tls_intermediate.clone(), bound_sni) {
+            (Some(intermediate), Some(sni)) => (intermediate, sni),
+            _ => {
+                return tokio::task::spawn_blocking(move || {
+                    tls::splice_unbound(std_stream, orig_dst, timeout)
+                })
+                .await?;
+            }
+        };
+
+        let config = Arc::new(tls::server_config_for_sni(&intermediate, &sni)?);
+        let registry = Arc::clone(&self.registry);
+        let resolver = Arc::clone(&self.resolver);
+        let forwarder = Arc::clone(&self.forwarder);
+        let handle = tokio::runtime::Handle::current();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            tls::terminate_and_substitute(std_stream, config, orig_dst, &endpoint, |prepared| {
+                // The upstream leg reuses the hardened reqwest forwarder (TLS +
+                // system roots + SSRF filter); block_on is safe on a blocking
+                // thread. reqwest decoded the body, so we re-frame the response.
+                let resp = handle
+                    .block_on(forwarder.forward(prepared.clone()))
+                    .map_err(|e| anyhow::anyhow!("upstream forward: {e}"))?;
+                Ok(tls::serialize_http_response(
+                    resp.status,
+                    &resp.headers,
+                    &resp.body,
+                ))
+            })
+        })
+        .await?;
+
+        match outcome {
+            Ok(o) => {
+                self.audit_substitutions(&o.substituted, o.destination.as_deref())
+                    .await;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "https terminator refused or failed; closing");
+                Ok(())
+            }
+        }
     }
 
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
@@ -1189,7 +1296,8 @@ mod server_tests {
             },
         }];
         let (_service, handed) =
-            SubstitutionService::from_plan(&plan, "local", &bindings, secret_store, 30).unwrap();
+            SubstitutionService::from_plan(&plan, "local", &bindings, secret_store, 30, None)
+                .unwrap();
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
         assert!(handed[0].1.as_str().starts_with("mvm-secret-"));

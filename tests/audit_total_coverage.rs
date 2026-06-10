@@ -112,6 +112,7 @@ const VM_SUB: &[(&str, AuditPosture)] = &[
     ("pause", AuditPosture::Emits("VmStop")),
     ("resume", AuditPosture::Emits("VmStart")),
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
     ("cp", AuditPosture::Emits("VmFileCopy")),
     ("fs", AuditPosture::Emits("VmFsMutate")),
     ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
@@ -160,12 +161,23 @@ const NETWORK_SUB: &[(&str, AuditPosture)] = &[
 const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("prune", AuditPosture::Emits("CachePrune")),
+    // #640 — clears a degraded builder store; emits CachePrune on the real run
+    // (op=builder_store_repair). A `--dry-run` is read-only, but the posture
+    // tracks the acting path.
+    ("repair", AuditPosture::Emits("CachePrune")),
 ];
 
 // Plan 118 WS-1 1b — `mvmctl pool`.
 const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("warm", AuditPosture::Emits("PoolWarm")),
     ("status", AuditPosture::ReadOnly),
+];
+
+const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
+    ("create", AuditPosture::Emits("CheckpointCreated")),
+    ("fork", AuditPosture::Emits("CheckpointForked")),
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::ReadOnly),
 ];
 
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
@@ -521,6 +533,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestAliasSet",
         "ManifestTagAdd",
         "ManifestTagRemove",
+        "CheckpointCreated",
+        "CheckpointForked",
         "NetworkCreate",
         "NetworkRemove",
         "PoolWarm",

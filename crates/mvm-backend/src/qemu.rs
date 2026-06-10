@@ -89,6 +89,7 @@ impl VmBackend for QemuBackend {
             // User-mode (slirp) networking — no host TAP device.
             tap_networking: false,
             balloon: false,
+            fs_quick_checkpoint: false,
         }
     }
 
@@ -252,6 +253,9 @@ impl VmBackend for QemuBackend {
                         &state_dir,
                         tenant,
                         &secrets,
+                        None,
+                        // No transparent terminator on slirp ⇒ no TLS leg, so no
+                        // per-VM intermediate (https termination is FC-scoped).
                         None,
                     ) {
                         rollback_qemu(&state_dir, &pid_file);

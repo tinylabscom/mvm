@@ -17,7 +17,9 @@ use super::image;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
-use super::vm::{console, cp, down, exec, forward, group, pause, sandbox, session, up, volume};
+use super::vm::{
+    checkpoint, console, cp, down, exec, forward, group, pause, sandbox, session, up, volume,
+};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -1831,6 +1833,74 @@ fn test_snapshot_ls_json_parses() {
         Commands::Vm(group::Args {
             action: group::VmCmd::Snapshot(pause::SnapshotArgs {
                 command: pause::SnapshotCmd::Ls { json: true }
+            })
+        })
+    ));
+}
+
+// --- Checkpoint CLI tests ---
+
+#[test]
+fn test_checkpoint_create_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "create",
+        "myvm",
+        "--tag",
+        "gold",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create { .. }
+            })
+        })
+    ));
+}
+
+#[test]
+fn test_checkpoint_fork_parses() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "vm",
+            "checkpoint",
+            "fork",
+            "ckpt-abc",
+            "--new-id",
+            "child"
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn test_checkpoint_fork_rejects_traversal_new_id() {
+    // --new-id must not allow a path component that escapes the VM state dir.
+    let r = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "fork",
+        "ckpt-abc",
+        "--new-id",
+        "../escape",
+    ]);
+    assert!(r.is_err());
+}
+
+#[test]
+fn test_checkpoint_ls_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "ls", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Ls { json: true }
             })
         })
     ));

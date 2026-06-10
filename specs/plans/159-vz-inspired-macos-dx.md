@@ -185,23 +185,24 @@ Clone the reference's **tiered, fail-closed checkpoint model** and bring
 snapshots to the `apple_container` runtime tier (currently
 `snapshots=false`).
 
-- [ ] Two classes, fail-closed (no silent degradation): `fs_quick`
+- [~] Two classes, fail-closed (no silent degradation): `fs_quick`
       (default) backed by our existing **APFS CoW** rootfs clone (fast,
-      filesystem-only); `vm_full` backed by `saveMachineStateToURL` /
-      `restoreMachineStateFromURL` (memory state, macOS 14+). Reject
-      `vm_full` with a hard error when the backend can't honor it.
-- [ ] First-class **fork**: branch a new sandbox lineage from a
+      filesystem-only) — **landed PR1**; `vm_full` backed by
+      `saveMachineStateToURL` / `restoreMachineStateFromURL` (memory state,
+      macOS 14+) — **PR2**. Reject `vm_full` with a hard error when the
+      backend can't honor it.
+- [x] First-class **fork**: branch a new sandbox lineage from a
       checkpoint (`fork <ckpt> [--new-id]`), reusing the per-instance CoW
       clone we already do.
 - [ ] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
       (the reference's `diff` verb), for inspecting what a fork changed.
-- [ ] `--tag` to pin a checkpoint against GC; untagged ones follow cache
+- [x] `--tag` to pin a checkpoint against GC; untagged ones follow cache
       retention (`cache prune` already exists — extend it).
-- [ ] Flip `apple_container` `capabilities()` to advertise the supported
+- [x] Flip `apple_container` `capabilities()` to advertise the supported
       classes; wire `mvmctl pause/resume` + a `snapshot`/`checkpoint`
       verb to the VZ path (today `pause.rs::snapshot_io_for` is
       Firecracker-only).
-- [ ] Bind every checkpoint to the snapshot crypto/audit spine (Plan 97
+- [x] Bind every checkpoint to the snapshot crypto/audit spine (Plan 97
       E / 140) — a checkpoint is signed + recorded, like a Firecracker
       snapshot. Do not ship an unaudited fork primitive.
 

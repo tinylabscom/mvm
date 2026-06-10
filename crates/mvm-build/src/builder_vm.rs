@@ -401,6 +401,25 @@ pub enum BuilderVmError {
     #[error("nix build failed inside builder sandbox: {0}")]
     NixBuildFailed(String),
 
+    /// The persistent builder Nix store has a dangling/GC'd path — every build
+    /// re-evals to the same missing path and fails identically, so `dev up`
+    /// appears to "loop" (#640). Distinguished from a generic build failure so
+    /// the user gets the one-line recovery instead of an opaque nix error.
+    #[error(
+        "the builder VM's Nix store has a dangling/garbage-collected path — \
+         a previous `nix-collect-garbage` removed a store path the cached builder \
+         image still references, so every `dev up` fails identically.\n\
+         Recover with:\n    mvmctl cache repair\n\
+         (or `rm -rf {cache_dir}`), then re-run `mvmctl dev up` — the builder \
+         image rebuilds from scratch.\n\
+         Inner nix error: {detail}\nFull log: {log_path}"
+    )]
+    DegradedBuilderStore {
+        cache_dir: String,
+        log_path: String,
+        detail: String,
+    },
+
     /// Artifact extraction failed (missing rootfs, permissions,
     /// extraction-dir issue).
     #[error("extracting artifacts from builder sandbox: {0}")]
@@ -423,6 +442,92 @@ pub enum BuilderVmError {
         /// full pre- and post-panic kernel output is preserved.
         console_log_path: String,
     },
+}
+
+/// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear
+/// to recover a degraded builder store (#640). Lives here (ungated) so the build
+/// error path can name the recovery dir; the `builder-vm`-gated builder modules
+/// delegate to this for a single source of truth.
+pub fn builder_vm_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm")
+}
+
+/// Detect nix's dangling-store-path signature in a build's stderr (#640): a
+/// `/nix/store/...` path the build references was garbage-collected, so the eval
+/// fails with `error: path '/nix/store/<hash>...' does not exist`. Matched
+/// precisely — a quoted `/nix/store/` path **and** "does not exist" on the same
+/// line — so an unrelated "does not exist" (a user's missing source file) does
+/// not trip the degraded-store recovery hint. Returns the matched line for the
+/// error `detail`.
+pub fn dangling_store_path_line(stderr: &str) -> Option<&str> {
+    stderr.lines().find(|line| {
+        line.contains("does not exist")
+            && line.contains("/nix/store/")
+            && (line.contains("path '") || line.contains("path \""))
+    })
+}
+
+/// Outcome of a builder-store repair (#640).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BuilderStoreRepair {
+    /// The builder-VM cache dir that was (or would be) cleared.
+    pub path: String,
+    /// Whether the dir existed (a fresh host has nothing to repair).
+    pub existed: bool,
+    /// Bytes that were (or, under `dry_run`, would be) freed.
+    pub bytes_freed: u64,
+    /// `true` when only reporting — nothing was removed.
+    pub dry_run: bool,
+}
+
+/// Recover a degraded builder Nix store (#640) by removing the builder-VM cache
+/// dir so the next `dev up` / `build` cold-rebuilds it clean — the documented
+/// `rm -rf ~/.cache/mvm/builder-vm` recovery as a first-class operation. The
+/// whole dir goes (store image + per-VM dirs + job dirs): the store image is the
+/// degraded piece, and the kernel/rootfs/jobs are all rebuildable. `dry_run`
+/// reports what would be freed without deleting.
+///
+/// Intended to run when builds are FAILING on a dangling-store error, so there
+/// is no healthy in-flight build to disturb — callers that auto-repair should
+/// only do so after a [`BuilderVmError::DegradedBuilderStore`].
+pub fn clear_builder_store(dry_run: bool) -> std::io::Result<BuilderStoreRepair> {
+    clear_builder_store_at(&builder_vm_cache_dir(), dry_run)
+}
+
+/// [`clear_builder_store`] with an explicit dir — the unit-testable core.
+pub fn clear_builder_store_at(
+    dir: &std::path::Path,
+    dry_run: bool,
+) -> std::io::Result<BuilderStoreRepair> {
+    let existed = dir.exists();
+    let bytes_freed = if existed { dir_size_bytes(dir) } else { 0 };
+    if existed && !dry_run {
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(BuilderStoreRepair {
+        path: dir.display().to_string(),
+        existed,
+        bytes_freed,
+        dry_run,
+    })
+}
+
+/// Recursive on-disk size in bytes (best-effort: unreadable entries are
+/// skipped). Follows no symlinks — counts the link, not its target.
+fn dir_size_bytes(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&entry.path()));
+        } else {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
 }
 
 /// Stub implementation. Every method returns
@@ -874,6 +979,83 @@ pub fn admit_overlay_aware(rootfs_dir: &Path) -> Result<(), anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dangling_store_line_matches_the_nix_gc_signature() {
+        // The exact #640 signature (single-quoted /nix/store path + does not exist).
+        let stderr = "building...\n\
+             error: path '/nix/store/0ccnxa25whszw7mgbgyzdm4nqc0zwnm8-source/flake.nix' does not exist\n\
+             error: build of '/nix/store/abc.drv' failed\n";
+        let line = dangling_store_path_line(stderr).expect("should match");
+        assert!(line.contains("0ccnxa25whszw7mgbgyzdm4nqc0zwnm8-source"));
+        // Double-quoted nix path form also matches.
+        assert!(
+            dangling_store_path_line("error: path \"/nix/store/xyz-source\" does not exist")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn dangling_store_line_ignores_unrelated_does_not_exist() {
+        // A workload's own missing source file must NOT trip the degraded-store
+        // recovery hint — no /nix/store path on the line.
+        assert!(dangling_store_path_line("error: file 'src/main.rs' does not exist").is_none());
+        // A /nix/store mention without "does not exist" is also not it.
+        assert!(
+            dangling_store_path_line("copying '/nix/store/abc-foo' to the binary cache").is_none()
+        );
+        assert!(dangling_store_path_line("").is_none());
+    }
+
+    #[test]
+    fn degraded_store_error_names_the_recovery_dir_and_command() {
+        let e = BuilderVmError::DegradedBuilderStore {
+            cache_dir: "/home/u/.cache/mvm/builder-vm".into(),
+            log_path: "/tmp/job/nix-stderr.log".into(),
+            detail: "error: path '/nix/store/x-source/flake.nix' does not exist".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("mvmctl cache repair")); // the first-class recovery
+        assert!(msg.contains("rm -rf /home/u/.cache/mvm/builder-vm")); // manual fallback
+        assert!(msg.contains("dev up"));
+        assert!(msg.contains("dangling")); // distinct from a generic build failure
+    }
+
+    #[test]
+    fn builder_vm_cache_dir_honors_mvm_cache_dir() {
+        // Reuse-first: the gated libkrun helper delegates here. Just assert the
+        // path ends in builder-vm (env-isolated check would need a lock).
+        assert!(builder_vm_cache_dir().ends_with("builder-vm"));
+    }
+
+    #[test]
+    fn clear_builder_store_removes_the_dir_and_reports_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("builder-vm");
+        std::fs::create_dir_all(store.join("vms/x")).unwrap();
+        std::fs::write(store.join("nix-store.img"), vec![0u8; 4096]).unwrap();
+        std::fs::write(store.join("vms/x/console.log"), vec![0u8; 100]).unwrap();
+
+        // dry-run: reports freed bytes, removes nothing.
+        let dry = clear_builder_store_at(&store, true).unwrap();
+        assert!(dry.existed && dry.dry_run);
+        assert_eq!(dry.bytes_freed, 4196);
+        assert!(store.exists(), "dry-run must not delete");
+
+        // real: removes the dir, reports the same bytes.
+        let done = clear_builder_store_at(&store, false).unwrap();
+        assert!(done.existed && !done.dry_run);
+        assert_eq!(done.bytes_freed, 4196);
+        assert!(!store.exists(), "repair must remove the store dir");
+    }
+
+    #[test]
+    fn clear_builder_store_is_a_noop_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("builder-vm"); // never created
+        let r = clear_builder_store_at(&store, false).unwrap();
+        assert!(!r.existed && r.bytes_freed == 0);
+    }
 
     #[test]
     fn pinned_image_is_namespaced() {

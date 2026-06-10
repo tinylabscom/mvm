@@ -355,6 +355,50 @@ impl AuditEmitter {
         )
     }
 
+    /// Record that a VM's filesystem state was frozen into an fs_quick
+    /// checkpoint. The label set carries the checkpoint id, class, the
+    /// SHA-256 of the cloned rootfs blob, and the owning VM.
+    pub fn emit_checkpoint_created(
+        &self,
+        plan: &ExecutionPlan,
+        checkpoint_id: &str,
+        class: &str,
+        content_sha256: &str,
+        vm_name: &str,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "checkpoint.created",
+            [
+                ("checkpoint_id".to_string(), checkpoint_id.to_string()),
+                ("class".to_string(), class.to_string()),
+                ("content_sha256".to_string(), content_sha256.to_string()),
+                ("vm_name".to_string(), vm_name.to_string()),
+            ],
+        )
+    }
+
+    /// Record that a new sandbox was branched from a checkpoint via
+    /// copy-on-write. The label set carries the parent and child
+    /// checkpoint ids and the child VM name.
+    pub fn emit_checkpoint_forked(
+        &self,
+        plan: &ExecutionPlan,
+        parent_id: &str,
+        child_id: &str,
+        child_vm_name: &str,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "checkpoint.forked",
+            [
+                ("parent_id".to_string(), parent_id.to_string()),
+                ("child_id".to_string(), child_id.to_string()),
+                ("child_vm_name".to_string(), child_vm_name.to_string()),
+            ],
+        )
+    }
+
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code. Plan 152 WS-A.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
@@ -821,5 +865,41 @@ mod tests {
         // pure-formatting and doesn't need the env var.
         let p = PathBuf::from("/some/dir").join("local.jsonl");
         assert!(p.to_string_lossy().ends_with("local.jsonl"));
+    }
+
+    #[test]
+    fn checkpoint_created_records_id_and_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-C");
+        emitter
+            .emit_checkpoint_created(&plan, "ckpt-abc", "fs_quick", "deadbeef", "myvm")
+            .unwrap();
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("checkpoint.created"));
+        assert!(content.contains("ckpt-abc"));
+        assert!(content.contains("deadbeef"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn checkpoint_forked_records_lineage() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-F");
+        emitter
+            .emit_checkpoint_forked(&plan, "ckpt-parent", "ckpt-child", "childvm")
+            .unwrap();
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("checkpoint.forked"));
+        assert!(content.contains("ckpt-parent"));
+        assert!(content.contains("ckpt-child"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 }

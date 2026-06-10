@@ -167,6 +167,11 @@ pub enum LocalAuditKind {
     /// supervisors + writes `~/.mvm/pool/`); the `detail` field carries
     /// `spawned=<n> target=<n>`.
     PoolWarm,
+    /// `mvmctl checkpoint create` froze a VM's filesystem state into an
+    /// immutable fs_quick checkpoint.
+    CheckpointCreated,
+    /// `mvmctl checkpoint fork` branched a new sandbox from a checkpoint.
+    CheckpointForked,
     // --- Sandbox SDK foundation (fs/proc/share/pause/TTL/tags) ---
     // The verbs below are state-changing CLI surfaces added by the
     // sandbox-SDK foundation work. Each kind names a single mutation

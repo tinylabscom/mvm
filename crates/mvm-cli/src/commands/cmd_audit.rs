@@ -189,7 +189,8 @@ impl Commands {
             Commands::Exec(_) => "exec",
             Commands::Invoke(_) => "invoke",
             // `vm <sub>` delegates to the per-op verb so the audit taxonomy
-            // (cmd.pause.*, cmd.cp.*, …) is unchanged by the grouping.
+            // (cmd.pause.*, cmd.cp.*, cmd.checkpoint.*, …) is unchanged by
+            // the grouping.
             Commands::Vm(a) => a.action.verb_name(),
             Commands::Secret(_) => "secret",
             Commands::Bundle(_) => "bundle",
