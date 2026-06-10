@@ -88,6 +88,14 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+// Plan 178 — operational verbs grouped under `ops <sub>`. Postures unchanged.
+const OPS_SUB: &[(&str, AuditPosture)] = &[
+    ("metrics", AuditPosture::ReadOnly),
+    ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
+    ("config", AuditPosture::Emits("ConfigChange")),
+    ("mcp", AuditPosture::InteractiveOrControl),
+];
+
 // Plan 178 — the single-VM operational verbs grouped under `vm <sub>`. The
 // audit postures are unchanged from when these were top-level (the CLI path
 // moved, the audit taxonomy did not).
@@ -329,9 +337,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     // Operational surfaces.
-    ("metrics", AuditPosture::ReadOnly),
-    ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
-    ("config", AuditPosture::Emits("ConfigChange")),
+    // Plan 178 — metrics/bench/config/mcp grouped under `ops <sub>`.
+    ("ops", AuditPosture::DelegatesToSub(OPS_SUB)),
     ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
@@ -339,7 +346,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
-    ("mcp", AuditPosture::InteractiveOrControl),
     ("secret", AuditPosture::DelegatesToSub(SECRET_SUB)),
     ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
     // Sprint 52 W2 — bundles + trust store.

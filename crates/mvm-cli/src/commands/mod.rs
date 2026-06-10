@@ -104,12 +104,8 @@ pub(in crate::commands) enum Commands {
     /// Print shell configuration (completions + dev aliases) to stdout
     #[command(hide = true)]
     ShellInit(env::shell_init::Args),
-    /// Show runtime metrics (Prometheus text format by default)
-    Metrics(ops::metrics::Args),
-    /// Benchmark microVM operations (e.g. cold launch latency)
-    Bench(ops::bench::Args),
-    /// Read or write global operator config (~/.mvm/config.toml)
-    Config(ops::config::Args),
+    /// Operational / observability commands (metrics, bench, config, mcp)
+    Ops(ops::group::Args),
     /// Remove local mvm state
     Uninstall(env::uninstall::Args),
     /// View the local audit log (~/.mvm/log/audit.jsonl)
@@ -139,8 +135,6 @@ pub(in crate::commands) enum Commands {
     Exec(vm::exec::Args),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
-    /// Expose mvmctl over Model Context Protocol
-    Mcp(ops::mcp::Args),
     /// Operate on a running VM (pause, snapshot, cp, fs, proc, …)
     Vm(vm::group::Args),
     /// Manage local secret namespaces
@@ -229,7 +223,10 @@ pub fn run() -> Result<()> {
         }
         None => LogFormat::Human,
     };
-    if !matches!(cli.command, Commands::Mcp(_)) {
+    // `mvmctl ops mcp` needs stdout reserved for JSON-RPC framing — skip the
+    // default stdout subscriber and let `mvm_mcp` install its stderr-only one.
+    let is_mcp = matches!(&cli.command, Commands::Ops(a) if a.action.is_mcp());
+    if !is_mcp {
         logging::init(log_format);
     }
 
@@ -304,9 +301,7 @@ pub fn run() -> Result<()> {
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
-        Commands::Metrics(a) => ops::metrics::run(&cli, a, &cfg),
-        Commands::Bench(a) => ops::bench::run(&cli, a, &cfg),
-        Commands::Config(a) => ops::config::run(&cli, a, &cfg),
+        Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
         Commands::Uninstall(a) => env::uninstall::run(&cli, a, &cfg),
         Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
         Commands::Validate(a) => build::validate::run(&cli, a, &cfg),
@@ -321,7 +316,6 @@ pub fn run() -> Result<()> {
         Commands::Receipt(a) => vm::exec::run_receipt(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
-        Commands::Mcp(a) => ops::mcp::run(&cli, a, &cfg),
         Commands::Vm(a) => vm::group::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Attest(a) => ops::attest::run(&cli, a, &cfg),

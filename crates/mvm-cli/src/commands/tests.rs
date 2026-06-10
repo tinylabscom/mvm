@@ -1213,33 +1213,40 @@ fn test_image_rm_parses() {
 
 #[test]
 fn test_metrics_command_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "metrics"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Metrics(metrics::Args {
-            json: false,
-            instance: None,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Metrics(metrics::Args {
+                json: false,
+                instance: None,
+            })
         })
     ));
 }
 
 #[test]
 fn test_metrics_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "metrics", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Metrics(metrics::Args {
-            json: true,
-            instance: None,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Metrics(metrics::Args {
+                json: true,
+                instance: None,
+            })
         })
     ));
 }
 
 #[test]
 fn test_metrics_instance_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "metrics", "--instance", "i-abc"]).unwrap();
-    match cli.command {
-        Commands::Metrics(metrics::Args { instance, .. }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics", "--instance", "i-abc"]).unwrap();
+    let Commands::Ops(opsg) = cli.command else {
+        panic!("expected ops group")
+    };
+    match opsg.action {
+        ops::group::OpsCmd::Metrics(metrics::Args { instance, .. }) => {
             assert_eq!(instance.as_deref(), Some("i-abc"));
         }
         _ => panic!("expected Metrics command"),
@@ -1267,20 +1274,25 @@ fn test_prometheus_exposition_has_expected_metrics() {
 
 #[test]
 fn test_config_show_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "config", "show"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "config", "show"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Config(config::Args {
-            action: ConfigAction::Show
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Config(config::Args {
+                action: ConfigAction::Show
+            })
         })
     ));
 }
 
 #[test]
 fn test_config_set_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "config", "set", "dev_vm_cpus", "4"]).unwrap();
-    match cli.command {
-        Commands::Config(config::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "config", "set", "dev_vm_cpus", "4"]).unwrap();
+    let Commands::Ops(opsg) = cli.command else {
+        panic!("expected ops group")
+    };
+    match opsg.action {
+        ops::group::OpsCmd::Config(config::Args {
             action: ConfigAction::Set { key, value },
         }) => {
             assert_eq!(key, "dev_vm_cpus");

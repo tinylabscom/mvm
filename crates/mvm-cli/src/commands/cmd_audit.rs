@@ -179,9 +179,8 @@ impl Commands {
             Commands::Up(_) => "up",
             Commands::Down(_) => "down",
             Commands::ShellInit(_) => "shell-init",
-            Commands::Metrics(_) => "metrics",
-            Commands::Bench(_) => "bench",
-            Commands::Config(_) => "config",
+            // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
+            Commands::Ops(a) => a.action.verb_name(),
             Commands::Uninstall(_) => "uninstall",
             Commands::Audit(_) => "audit",
             Commands::Validate(_) => "validate",
@@ -196,7 +195,6 @@ impl Commands {
             Commands::Receipt(_) => "receipt",
             Commands::Exec(_) => "exec",
             Commands::Invoke(_) => "invoke",
-            Commands::Mcp(_) => "mcp",
             // `vm <sub>` delegates to the per-op verb so the audit taxonomy
             // (cmd.pause.*, cmd.cp.*, …) is unchanged by the grouping.
             Commands::Vm(a) => a.action.verb_name(),

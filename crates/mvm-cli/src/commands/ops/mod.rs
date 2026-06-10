@@ -8,6 +8,7 @@ pub(super) mod bench;
 pub(super) mod bench_probe;
 pub(super) mod cache;
 pub(super) mod config;
+pub(super) mod group;
 pub(super) mod mcp;
 pub(super) mod metrics;
 pub(super) mod network;

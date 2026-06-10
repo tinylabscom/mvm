@@ -746,7 +746,7 @@ fn config_set_emits_config_change_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["config", "set", "default_cpus", "4"])
+        .args(["ops", "config", "set", "default_cpus", "4"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -779,7 +779,7 @@ fn config_show_does_not_emit_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["config", "show"])
+        .args(["ops", "config", "show"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1298,7 +1298,7 @@ fn metrics_does_not_emit_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["metrics"])
+        .args(["ops", "metrics"])
         .output()
         .expect("spawn mvmctl");
     assert!(
