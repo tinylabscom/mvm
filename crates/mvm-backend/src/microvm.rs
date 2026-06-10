@@ -2379,7 +2379,20 @@ fn wire_egress_substitution(config: &FlakeRunConfig, _abs_dir: &str) -> Result<(
     // 0.0.0.0: a PREROUTING REDIRECT delivers the forwarded packet to a local
     // socket on the host, so the terminator must accept on the host's addrs.
     let listen = SocketAddr::from(([0, 0, 0, 0], term_port));
-    spawn_substitution_endpoint(name, &state_dir, &tenant, &secrets, Some(listen))?;
+    // Plan 129 Stage 2 — `mvmctl up` staged the per-VM name-constrained egress
+    // intermediate (cert+key) here when the plan has secrets (the cert also went
+    // onto the guest secrets drive). Hand the KEY to the endpoint so the `https`
+    // terminator can mint per-SNI leaves; it never reaches the guest. Absent ⇒
+    // `http`-only termination (Stage 1b) — no TLS leg.
+    let tls_intermediate = read_egress_intermediate(&state_dir)?;
+    spawn_substitution_endpoint(
+        name,
+        &state_dir,
+        &tenant,
+        &secrets,
+        Some(listen),
+        tls_intermediate,
+    )?;
 
     // Install the nft TAP REDIRECT, then persist the handle: the table must
     // outlive this stack frame (the VM keeps running); `stop_vm` tears it down
@@ -2388,6 +2401,32 @@ fn wire_egress_substitution(config: &FlakeRunConfig, _abs_dir: &str) -> Result<(
     let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
     redirect.persist();
     Ok(())
+}
+
+/// Plan 129 Stage 2 — read the per-VM egress intermediate (`cert_pem` + `key_pem`)
+/// `mvmctl up` persisted at `<state_dir>/egress-intermediate.json` (host-only,
+/// mode 0600). Returns `None` when absent (no https leg) — a missing file is the
+/// Stage 1b / no-secret path, not an error. The key is host-side material only;
+/// it is handed to the terminator endpoint and never written to a guest drive.
+#[cfg(target_os = "linux")]
+fn read_egress_intermediate(state_dir: &std::path::Path) -> Result<Option<(String, String)>> {
+    let path = state_dir.join("egress-intermediate.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    let cert = v["cert_pem"].as_str();
+    let key = v["key_pem"].as_str();
+    match (cert, key) {
+        (Some(c), Some(k)) => Ok(Some((c.to_string(), k.to_string()))),
+        _ => Err(anyhow::anyhow!(
+            "{} missing cert_pem/key_pem",
+            path.display()
+        )),
+    }
 }
 
 /// Spawn the `mvm-firecracker-bridge` sibling. Creates a UNIX

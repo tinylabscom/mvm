@@ -95,6 +95,14 @@ pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;
 
+/// Plan 129 Stage 2 — the per-VM egress-TLS cert/key split helper. `mvmctl up`
+/// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
+/// pushed onto the drive, the key is persisted host-side for the terminator
+/// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
+pub use substitution_spawn::{
+    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, build_egress_tls_delivery,
+};
+
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from
 /// [`crate::base::runtime_meta::HOME_TEST_LOCK`] so the

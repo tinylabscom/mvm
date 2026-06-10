@@ -38,13 +38,16 @@
   - `load_or_init_at(dir)` takes the dir as a param (test-friendly); the `~/.mvm/egress/` config-helper wiring lands with the caller in S2.2.
 - [x] **Step 5: Commit** — `feat(egress-ca): name-constrained per-VM CA (plan 129 stage 2)` (e2ff6b02).
 
-## Task S2.2 — per-run cert delivery to the guest
+## Task S2.2 — per-run cert delivery to the guest ✅ DONE
 
-**Files:** `crates/mvm-backend/src/microvm.rs` (thread the per-VM intermediate cert into the FC guest via the existing secrets-drive channel — `config.secret_files` / `create_dev_secrets_drive`); `crates/mvm-backend/src/substitution_spawn.rs` / `wire_egress_substitution` (mint the intermediate when the plan has secrets, hand the cert to the guest + the intermediate key to the terminator endpoint config).
+**Implemented shape (differs slightly from the original sketch — boot ordering forced the split across crates):** the FC secrets drive is sealed *before* `wire_egress_substitution` runs, so the mint+cert-push happens in `mvmctl up` (`mvm-cli`, where `secret_files` is assembled), not in `wire_egress_substitution`. The key flows forward to the endpoint via a host-only sidecar.
 
-- [ ] **Step 1: Failing test** — given a secret-bearing plan, `wire_egress_substitution` (unit-extractable helper) produces a `DriveFile` carrying the per-VM intermediate **cert** at a fixed guest path (e.g. `/etc/ssl/certs/mvm-egress-<vm>.crt`) and the endpoint config carries the intermediate **key** (terminator side) — assert the key is NOT in the guest-delivered set (only the cert reaches the guest). Reuse the claim-13-style "no key to guest" assertion shape.
-- [ ] **Step 2: Run (fail). Step 3: Implement** — mint intermediate (S2.1), add its cert to `config.secret_files` (so `create_dev_secrets_drive` injects it), pass the key + cert to the `EndpointConfig` (new `tls_intermediate: Option<{cert_pem, key_pem}>` field, `#[serde(default)]`, redacted `Debug`). Gate on `!plan_secrets.is_empty()` (same gate as the redirect).
-- [ ] **Step 4: pass. Step 5: Commit** — `feat(terminator): deliver per-VM egress cert to guest, key to endpoint (plan 129 stage 2)`.
+- [x] **Bound-host provenance (resolved, no fork):** `SecretBinding` is only `{name, source}`; the egress allow-list (`allowed_hosts`) lives in the host **binding store** (`mvm_hostd::keyholder::FileBindingStore`). `stage_egress_tls_delivery` resolves the name-constraint set as the **union of every plan secret's `allowed_hosts`** — the SAME claim-12 allow-list, so the intermediate's `nameConstraints` can never exceed it. Reuse, not a new traversal.
+- [x] **`build_egress_tls_delivery(bound_hosts, ca_dir)`** (`mvm-backend::substitution_spawn`, re-exported): mints under the host CA (`mvm_core::config::egress_ca_dir()`), returns `EgressTlsDelivery { guest_cert: DriveFile, endpoint_cert_pem, endpoint_key_pem }` (redacted `Debug`). Tests: cert-to-guest/key-to-endpoint split + no key in the guest file + redacted Debug.
+- [x] **`mvmctl up` → `stage_egress_tls_delivery`** (both the main + watch-rebuild `secret_files` paths): pushes the cert (`mvm-egress.crt`, mode 0444) onto the guest secrets drive and persists the cert+key to host-only `<vm_state_dir>/egress-intermediate.json` (mode 0600, atomic tmp+rename). No-op without secrets/bindings. Test asserts the cert lands in `secret_files` (no key) and the 0600 sidecar holds the key.
+- [x] **`EndpointConfig.tls_intermediate: Option<TlsIntermediate{cert_pem,key_pem}>`** (`#[serde(default)]`, redacted `Debug`); `spawn_substitution_endpoint` gained a `tls_intermediate` arg → cfg JSON; `wire_egress_substitution` reads the sidecar (`read_egress_intermediate`, Linux) and hands the **key** to the endpoint — never the guest. Tests: serde roundtrip + default-None + Debug-redacts-key.
+- [x] Gates clean: clippy, fmt, `check-core-runtime-free`, `check-no-display-on-secret-types`; 2911 + egress tests green.
+- [x] **Commit** — `feat(terminator): deliver per-VM egress cert to guest, key to endpoint (plan 129 stage 2)`.
 
 ## Task S2.3 — guest trust install
 

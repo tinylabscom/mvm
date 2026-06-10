@@ -253,6 +253,9 @@ impl VmBackend for QemuBackend {
                         tenant,
                         &secrets,
                         None,
+                        // No transparent terminator on slirp ⇒ no TLS leg, so no
+                        // per-VM intermediate (https termination is FC-scoped).
+                        None,
                     ) {
                         rollback_qemu(&state_dir, &pid_file);
                         return Err(e);

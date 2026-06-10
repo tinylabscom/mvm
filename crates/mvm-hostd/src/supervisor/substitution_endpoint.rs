@@ -44,6 +44,29 @@ pub enum EndpointTransport {
     Uds { path: PathBuf },
 }
 
+/// Plan 129 Stage 2 — the per-VM name-constrained intermediate the terminator
+/// terminates bound-host TLS under. The guest trusts the matching cert (delivered
+/// via its secrets drive); the key stays here, in the endpoint process, used only
+/// to mint per-SNI leaves during termination. `cert_pem` is also the guest's
+/// trust anchor, so it's not secret; `key_pem` is — hence the redacted `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsIntermediate {
+    /// The intermediate cert PEM (== the cert the guest trusts).
+    pub cert_pem: String,
+    /// The intermediate private key PEM — never leaves this process.
+    pub key_pem: String,
+}
+
+impl std::fmt::Debug for TlsIntermediate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsIntermediate")
+            .field("cert_pem", &"<intermediate cert>")
+            .field("key_pem", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Config the backend hands the `mvm-substitution-endpoint` subprocess on
 /// stdin at spawn. Carries the workload's secret bindings (NOT values — the
 /// endpoint resolves values itself from the host store) plus where to listen.
@@ -76,6 +99,13 @@ pub struct EndpointConfig {
     /// behaviour — no terminator, no nft redirect.
     #[serde(default)]
     pub terminator_listen: Option<std::net::SocketAddr>,
+    /// Plan 129 Stage 2 — the per-VM egress intermediate (cert+key) the
+    /// transparent `https` terminator (S2.4) terminates bound-host TLS under.
+    /// `None` ⇒ `http`-only termination (Stage 1b) / no TLS leg. Set alongside
+    /// `terminator_listen` when the plan has secrets and the backend delivered
+    /// the matching cert to the guest's trust bundle.
+    #[serde(default)]
+    pub tls_intermediate: Option<TlsIntermediate>,
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -130,6 +160,7 @@ mod tests {
             secret_store_dir: Some(dir.join("secrets")),
             binding_store_dir: Some(dir.join("bindings")),
             terminator_listen: None,
+            tls_intermediate: None,
         }
     }
 
@@ -184,6 +215,45 @@ mod tests {
         // SocketAddr serializes as a plain string in the JSON.
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["terminator_listen"], serde_json::json!("127.0.0.1:9119"));
+    }
+
+    #[test]
+    fn config_defaults_tls_intermediate_to_none() {
+        // Stage 1b configs (no `tls_intermediate`) must still parse — the field
+        // is `#[serde(default)]`, so http-only termination keeps working.
+        let json = serde_json::json!({
+            "tenant_id": "local",
+            "secrets": [],
+            "transport": {"kind": "uds", "path": "/tmp/sub.sock"},
+        });
+        let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(cfg.tls_intermediate.is_none());
+    }
+
+    #[test]
+    fn config_roundtrips_tls_intermediate_when_set() {
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.tls_intermediate = Some(TlsIntermediate {
+            cert_pem: "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nxyz\n-----END PRIVATE KEY-----\n".into(),
+        });
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+    }
+
+    #[test]
+    fn tls_intermediate_debug_redacts_key() {
+        // The endpoint config's Debug must never print the intermediate key.
+        let cfg = EndpointConfig {
+            tls_intermediate: Some(TlsIntermediate {
+                cert_pem: "CERT".into(),
+                key_pem: "-----BEGIN PRIVATE KEY-----SUPERSECRET".into(),
+            }),
+            ..vsock_cfg(vec![], std::path::Path::new("/tmp/x"))
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("SUPERSECRET"), "key leaked via Debug: {dbg}");
+        assert!(dbg.contains("<redacted>"));
     }
 
     #[test]
