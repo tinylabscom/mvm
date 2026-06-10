@@ -73,8 +73,6 @@ pub(in crate::commands) enum Commands {
     Cleanup(env::cleanup::Args),
     /// Show console logs from a running microVM
     Logs(vm::logs::Args),
-    /// Forward a port from a running microVM to localhost
-    Forward(vm::forward::Args),
     /// List running VMs
     Ls(vm::ps::Args),
     /// Check for and install the latest version of mvmctl
@@ -118,8 +116,6 @@ pub(in crate::commands) enum Commands {
     Audit(ops::audit::Args),
     /// Validate a Nix flake before building (runs `nix flake check`)
     Validate(build::validate::Args),
-    /// Show filesystem changes in a running VM
-    Diff(vm::diff::Args),
     /// Manage named dev networks
     Network(ops::network::Args),
     /// Browse the bundled image catalog
@@ -139,33 +135,14 @@ pub(in crate::commands) enum Commands {
     Run(vm::exec::RunArgs),
     /// Verify signed execution receipts emitted by `mvmctl run --receipt`.
     Receipt(vm::exec::ReceiptArgs),
-    /// Inspect and clean sandbox lifecycle state.
-    Sandbox(vm::sandbox::Args),
-    /// Copy one file between the host and a running VM.
-    Cp(vm::cp::Args),
     /// Run one dev command in a transient microVM
     Exec(vm::exec::Args),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
-    /// Manage long-running VM sessions
-    Session(vm::session::Args),
     /// Expose mvmctl over Model Context Protocol
     Mcp(ops::mcp::Args),
-    /// Set or clear a sandbox TTL
-    #[command(name = "set-ttl")]
-    SetTtl(vm::set_ttl::Args),
-    /// Run filesystem RPC against a VM
-    Fs(vm::fs::Args),
-    /// Run process-control RPC against a VM
-    Proc(vm::proc::Args),
-    /// Pause and seal a running VM
-    Pause(vm::pause::PauseArgs),
-    /// Verify and resume a sealed snapshot
-    Resume(vm::pause::ResumeArgs),
-    /// Manage sealed instance snapshots (`ls`, `rm`).
-    Snapshot(vm::pause::SnapshotArgs),
-    /// Manage virtio-fs volume mounts
-    Volume(vm::volume::Args),
+    /// Operate on a running VM (pause, snapshot, cp, fs, proc, …)
+    Vm(vm::group::Args),
     /// Manage local secret namespaces
     Secret(ops::secret::Args),
     /// Emit or verify host attestation reports
@@ -176,10 +153,6 @@ pub(in crate::commands) enum Commands {
     Trust(trust::Args),
     /// Inspect cached application dependencies
     Deps(deps::Args),
-    /// Wait for guest readiness
-    Wait(vm::wait::WaitArgs),
-    /// Print guest readiness and boot timings
-    BootReport(vm::wait::BootReportArgs),
     /// Pack or verify signed `.mvm` artifacts
     Artifact(vm::artifact::Args),
     /// Manage the persistent builder VM
@@ -318,7 +291,6 @@ pub fn run() -> Result<()> {
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
         Commands::Cleanup(a) => env::cleanup::run(&cli, a, &cfg),
         Commands::Logs(a) => vm::logs::run(&cli, a, &cfg),
-        Commands::Forward(a) => vm::forward::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
         Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
@@ -338,7 +310,6 @@ pub fn run() -> Result<()> {
         Commands::Uninstall(a) => env::uninstall::run(&cli, a, &cfg),
         Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
         Commands::Validate(a) => build::validate::run(&cli, a, &cfg),
-        Commands::Diff(a) => vm::diff::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
@@ -348,26 +319,15 @@ pub fn run() -> Result<()> {
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
         Commands::Receipt(a) => vm::exec::run_receipt(&cli, a, &cfg),
-        Commands::Sandbox(a) => vm::sandbox::run(&cli, a, &cfg),
-        Commands::Cp(a) => vm::cp::run(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
-        Commands::Session(a) => vm::session::run(&cli, a, &cfg),
         Commands::Mcp(a) => ops::mcp::run(&cli, a, &cfg),
-        Commands::SetTtl(a) => vm::set_ttl::run(&cli, a, &cfg),
-        Commands::Fs(a) => vm::fs::run(&cli, a, &cfg),
-        Commands::Proc(a) => vm::proc::run(&cli, a, &cfg),
-        Commands::Pause(a) => vm::pause::run_pause(&cli, a, &cfg),
-        Commands::Resume(a) => vm::pause::run_resume(&cli, a, &cfg),
-        Commands::Snapshot(a) => vm::pause::run_snapshot(&cli, a, &cfg),
-        Commands::Volume(a) => vm::volume::run(&cli, a, &cfg),
+        Commands::Vm(a) => vm::group::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Attest(a) => ops::attest::run(&cli, a, &cfg),
         Commands::Bundle(a) => bundle::run(&cli, a, &cfg),
         Commands::Trust(a) => trust::run(&cli, a, &cfg),
         Commands::Deps(a) => deps::run(&cli, a, &cfg),
-        Commands::Wait(a) => vm::wait::run_wait(&cli, a, &cfg),
-        Commands::BootReport(a) => vm::wait::run_boot_report(&cli, a, &cfg),
         Commands::Artifact(a) => vm::artifact::run(&cli, a, &cfg),
         #[cfg(feature = "builder-vm")]
         Commands::PersistentBuilder(a) => build::persistent_builder::run(&cli, a),

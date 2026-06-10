@@ -947,7 +947,7 @@ fn set_ttl_emits_vm_ttl_set_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["set-ttl", "test-ttl-vm", "1h"])
+        .args(["vm", "set-ttl", "test-ttl-vm", "1h"])
         .output()
         .expect("spawn mvmctl set-ttl");
     assert!(
@@ -983,7 +983,7 @@ fn set_ttl_clear_emits_vm_ttl_set_with_cleared_detail() {
 
     let output = sandbox
         .mvmctl()
-        .args(["set-ttl", "test-ttl-clear-vm", "--clear"])
+        .args(["vm", "set-ttl", "test-ttl-clear-vm", "--clear"])
         .output()
         .expect("spawn mvmctl set-ttl --clear");
     assert!(
@@ -1012,7 +1012,7 @@ fn pause_emits_workload_sleep_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["pause", "pause-vm", "--hypervisor", "mock"])
+        .args(["vm", "pause", "pause-vm", "--hypervisor", "mock"])
         .output()
         .expect("spawn mvmctl pause");
     assert!(
@@ -1048,7 +1048,7 @@ fn resume_emits_workload_wake_audit_entry() {
 
     let pause = sandbox
         .mvmctl()
-        .args(["pause", "resume-vm", "--hypervisor", "mock"])
+        .args(["vm", "pause", "resume-vm", "--hypervisor", "mock"])
         .output()
         .expect("spawn mvmctl pause");
     assert!(
@@ -1058,7 +1058,7 @@ fn resume_emits_workload_wake_audit_entry() {
     );
     let resume = sandbox
         .mvmctl()
-        .args(["resume", "resume-vm", "--hypervisor", "mock"])
+        .args(["vm", "resume", "resume-vm", "--hypervisor", "mock"])
         .output()
         .expect("spawn mvmctl resume");
     assert!(
@@ -1159,7 +1159,7 @@ fn snapshot_rm_emits_snapshot_delete_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["snapshot", "rm", "test-snap"])
+        .args(["vm", "snapshot", "rm", "test-snap"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1192,7 +1192,7 @@ fn snapshot_ls_does_not_emit_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["snapshot", "ls"])
+        .args(["vm", "snapshot", "ls"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1506,7 +1506,7 @@ fn session_ls_does_not_emit_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["session", "ls"])
+        .args(["vm", "session", "ls"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1532,7 +1532,7 @@ fn volume_ls_does_not_emit_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["volume", "ls", "test-vm"])
+        .args(["vm", "volume", "ls", "test-vm"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1564,6 +1564,7 @@ fn volume_mount_emits_vm_volume_add_audit_entry() {
         .mvmctl()
         .env("PATH", &probe_path)
         .args([
+            "vm",
             "volume",
             "mount",
             "vol-test-vm",
@@ -1609,6 +1610,7 @@ fn volume_create_emits_volume_create_audit_entry() {
         .mvmctl()
         .env("PATH", &probe_path)
         .args([
+            "vm",
             "volume",
             "create",
             "managed",
@@ -1644,6 +1646,7 @@ fn volume_unlock_and_lock_emit_audit_entries() {
     let create = sandbox
         .mvmctl()
         .args([
+            "vm",
             "volume",
             "create",
             "managed",
@@ -1660,7 +1663,7 @@ fn volume_unlock_and_lock_emit_audit_entries() {
 
     let unlock = sandbox
         .mvmctl()
-        .args(["volume", "unlock", "managed"])
+        .args(["vm", "volume", "unlock", "managed"])
         .output()
         .expect("spawn mvmctl volume unlock");
     assert!(
@@ -1676,7 +1679,7 @@ fn volume_unlock_and_lock_emit_audit_entries() {
 
     let lock = sandbox
         .mvmctl()
-        .args(["volume", "lock", "managed"])
+        .args(["vm", "volume", "lock", "managed"])
         .output()
         .expect("spawn mvmctl volume lock");
     assert!(
@@ -1709,6 +1712,7 @@ fn volume_unmount_emits_vm_volume_remove_audit_entry() {
         .mvmctl()
         .env("PATH", &probe_path)
         .args([
+            "vm",
             "volume",
             "mount",
             "vol-rm-vm",
@@ -1729,7 +1733,7 @@ fn volume_unmount_emits_vm_volume_remove_audit_entry() {
 
     let unmount = sandbox
         .mvmctl()
-        .args(["volume", "unmount", "vol-rm-vm", "/mnt/data"])
+        .args(["vm", "volume", "unmount", "vol-rm-vm", "/mnt/data"])
         .output()
         .expect("spawn mvmctl volume unmount");
     assert!(
@@ -2054,7 +2058,15 @@ fn fs_write_emits_vm_fs_mutate_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["fs", "write", "t-fsw", "/tmp/hello", "--content", "hi"])
+        .args([
+            "vm",
+            "fs",
+            "write",
+            "t-fsw",
+            "/tmp/hello",
+            "--content",
+            "hi",
+        ])
         .output()
         .expect("spawn mvmctl fs write");
     assert!(
@@ -2083,7 +2095,7 @@ fn fs_mkdir_emits_vm_fs_mutate_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["fs", "mkdir", "t-fsmk", "/tmp/newdir"])
+        .args(["vm", "fs", "mkdir", "t-fsmk", "/tmp/newdir"])
         .output()
         .expect("spawn mvmctl fs mkdir");
     assert!(
@@ -2111,7 +2123,7 @@ fn fs_rm_emits_vm_fs_mutate_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["fs", "rm", "t-fsrm", "/tmp/stale"])
+        .args(["vm", "fs", "rm", "t-fsrm", "/tmp/stale"])
         .output()
         .expect("spawn mvmctl fs rm");
     assert!(
@@ -2139,7 +2151,7 @@ fn fs_mv_emits_vm_fs_mutate_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["fs", "mv", "t-fsmv", "/tmp/src", "/tmp/dst"])
+        .args(["vm", "fs", "mv", "t-fsmv", "/tmp/src", "/tmp/dst"])
         .output()
         .expect("spawn mvmctl fs mv");
     assert!(
@@ -2174,7 +2186,7 @@ fn fs_ls_does_not_emit_mutation_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["fs", "ls", "t-fsls", "/tmp"])
+        .args(["vm", "fs", "ls", "t-fsls", "/tmp"])
         .output()
         .expect("spawn mvmctl fs ls");
     assert!(
@@ -2209,7 +2221,7 @@ fn proc_start_emits_vm_proc_start_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["proc", "start", "t-ps", "--", "/bin/true"])
+        .args(["vm", "proc", "start", "t-ps", "--", "/bin/true"])
         .output()
         .expect("spawn mvmctl proc start");
     assert!(
@@ -2237,7 +2249,7 @@ fn proc_signal_emits_vm_proc_signal_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["proc", "signal", "t-psg", "proc-fake-token", "15"])
+        .args(["vm", "proc", "signal", "t-psg", "proc-fake-token", "15"])
         .output()
         .expect("spawn mvmctl proc signal");
     assert!(
@@ -2265,7 +2277,7 @@ fn proc_kill_emits_kill_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["proc", "kill", "t-pk", "proc-fake-token"])
+        .args(["vm", "proc", "kill", "t-pk", "proc-fake-token"])
         .output()
         .expect("spawn mvmctl proc kill");
     assert!(
@@ -2294,6 +2306,7 @@ fn proc_stdin_emits_vm_proc_stdin_audit_entry() {
     let output = sandbox
         .mvmctl()
         .args([
+            "vm",
             "proc",
             "stdin",
             "t-pst",
@@ -2333,7 +2346,7 @@ fn proc_ls_does_not_emit_mutation_audit_entry() {
 
     let output = sandbox
         .mvmctl()
-        .args(["proc", "ls", "t-pls"])
+        .args(["vm", "proc", "ls", "t-pls"])
         .output()
         .expect("spawn mvmctl proc ls");
     assert!(

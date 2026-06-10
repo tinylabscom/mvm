@@ -146,9 +146,8 @@ impl Commands {
                 | Commands::Run(_)
                 | Commands::Console(_)
                 | Commands::Dev(_)
-                | Commands::Pause(_)
-                | Commands::Resume(_)
-                | Commands::Snapshot(_)
+                // Every `vm <sub>` op acts on an existing VM.
+                | Commands::Vm(_)
                 // `ls` is the local "status" surface — converging first
                 // means stale dead records never show up in the listing.
                 | Commands::Ls(_)
@@ -167,7 +166,6 @@ impl Commands {
             Commands::Dev(_) => "dev",
             Commands::Cleanup(_) => "cleanup",
             Commands::Logs(_) => "logs",
-            Commands::Forward(_) => "forward",
             Commands::Ls(_) => "ls",
             Commands::Update(_) => "update",
             Commands::Doctor(_) => "doctor",
@@ -187,7 +185,6 @@ impl Commands {
             Commands::Uninstall(_) => "uninstall",
             Commands::Audit(_) => "audit",
             Commands::Validate(_) => "validate",
-            Commands::Diff(_) => "diff",
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",
             Commands::Console(_) => "console",
@@ -197,26 +194,17 @@ impl Commands {
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
             Commands::Receipt(_) => "receipt",
-            Commands::Sandbox(_) => "sandbox",
-            Commands::Cp(_) => "cp",
             Commands::Exec(_) => "exec",
             Commands::Invoke(_) => "invoke",
-            Commands::Session(_) => "session",
             Commands::Mcp(_) => "mcp",
-            Commands::SetTtl(_) => "set-ttl",
-            Commands::Fs(_) => "fs",
-            Commands::Proc(_) => "proc",
-            Commands::Pause(_) => "pause",
-            Commands::Resume(_) => "resume",
-            Commands::Snapshot(_) => "snapshot",
-            Commands::Volume(_) => "volume",
+            // `vm <sub>` delegates to the per-op verb so the audit taxonomy
+            // (cmd.pause.*, cmd.cp.*, …) is unchanged by the grouping.
+            Commands::Vm(a) => a.action.verb_name(),
             Commands::Secret(_) => "secret",
             Commands::Attest(_) => "attest",
             Commands::Bundle(_) => "bundle",
             Commands::Trust(_) => "trust",
             Commands::Deps(_) => "deps",
-            Commands::Wait(_) => "wait",
-            Commands::BootReport(_) => "boot-report",
             Commands::Artifact(_) => "artifact",
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",

@@ -88,6 +88,26 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+// Plan 178 — the single-VM operational verbs grouped under `vm <sub>`. The
+// audit postures are unchanged from when these were top-level (the CLI path
+// moved, the audit taxonomy did not).
+const VM_SUB: &[(&str, AuditPosture)] = &[
+    ("pause", AuditPosture::Emits("VmStop")),
+    ("resume", AuditPosture::Emits("VmStart")),
+    ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("cp", AuditPosture::Emits("VmFileCopy")),
+    ("fs", AuditPosture::Emits("VmFsMutate")),
+    ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
+    ("diff", AuditPosture::ReadOnly),
+    ("wait", AuditPosture::ReadOnly),
+    ("boot-report", AuditPosture::ReadOnly),
+    ("set-ttl", AuditPosture::Emits("VmTtlSet")),
+    ("forward", AuditPosture::ReadOnly),
+    ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
+    ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
+    ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
+];
+
 // `kernel build` compiles/downloads a microVM kernel into the local
 // cache. Like `compile`, it produces build outputs but doesn't touch the
 // security audit chain — the Stage-0 supply-chain events the compile arm
@@ -283,24 +303,14 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ),
     ("down", AuditPosture::Emits("VmStop")),
     ("logs", AuditPosture::ReadOnly),
-    ("forward", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
-    ("diff", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
     ("run", AuditPosture::InteractiveOrControl),
     ("receipt", AuditPosture::ReadOnly),
-    ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
-    ("cp", AuditPosture::Emits("VmFileCopy")),
     ("exec", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
-    ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
-    ("set-ttl", AuditPosture::Emits("VmTtlSet")),
-    ("fs", AuditPosture::Emits("VmFsMutate")),
-    ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
-    ("pause", AuditPosture::Emits("VmStop")),
-    ("resume", AuditPosture::Emits("VmStart")),
-    ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
-    ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
+    // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
+    ("vm", AuditPosture::DelegatesToSub(VM_SUB)),
     // Build / artifact / registry.
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
@@ -337,11 +347,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
-    // Plan 76 Phase 2 / Phase 4 — host-side readiness UX. Both
-    // verbs are pure vsock reads (`ReadinessStatus`) and never
-    // mutate host or guest state.
-    ("wait", AuditPosture::ReadOnly),
-    ("boot-report", AuditPosture::ReadOnly),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
 ];
