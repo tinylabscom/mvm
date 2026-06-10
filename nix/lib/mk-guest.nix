@@ -310,6 +310,20 @@ let
       /bin/busybox modprobe vmw_vsock_virtio_transport 2>/dev/null || true
     fi
 
+    # Stage 2.27 — bring up the loopback interface. The kernel creates `lo`
+    # administratively DOWN; nothing else in this init ups it, so `127.0.0.1`
+    # has no route and ANY guest-internal loopback service is unreachable
+    # (`connect()` → ENETUNREACH) — the Plan 129 egress forward proxy on
+    # 127.0.0.1:18080, the in-guest addon-dns resolver, and any local service a
+    # workload binds. Must run before the agent (which binds the forward proxy)
+    # and before netinit. `ip` first (canonical), `ifconfig` fallback — both are
+    # busybox applets in the defconfig this image already relies on for
+    # `modprobe`. Non-fatal: a failure logs and leaves loopback down (the prior
+    # behaviour), never wedges PID 1.
+    /bin/busybox ip link set lo up 2>/dev/null \
+      || /bin/busybox ifconfig lo up 2>/dev/null \
+      || echo "mvm-init: WARNING could not bring up loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+
     # Stage 2.3 — user-supplied volumes (`--volume` / MVM_VOLUMES).
     # The host (mvm_core::vm_backend::encode_user_volumes_cmdline) wrote
     # `mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>;...` onto the

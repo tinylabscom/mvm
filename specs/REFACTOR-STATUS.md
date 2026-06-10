@@ -44,7 +44,7 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
       (prompt: specs/prompts/129-fc-bringup-debug.md). Gated on: published default
       x86_64 kernel is bzImage not ELF vmlinux (#746); FC guest-agent reachability;
       the local secret-launch glue below
-  [ ] Stage 2: name-constrained CA + https termination     — ADR-006
+  [ ] Stage 2: name-constrained CA + https termination     — ADR-006; TDD plan: specs/notes/plan-129-stage2-https-ca-tdd-plan.md
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)

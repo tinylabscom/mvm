@@ -149,6 +149,7 @@ mod tests {
             }],
             failed: vec![],
             skipped_ipv6: vec![],
+            skipped_loopback: vec![],
         }
     }
 
@@ -164,6 +165,7 @@ mod tests {
                 reason: "operation not permitted".to_string(),
             }],
             skipped_ipv6: vec![],
+            skipped_loopback: vec![],
         }
     }
 
