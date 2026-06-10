@@ -101,13 +101,14 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
   [x] WS-4 resumable + honest-cost dev-image download — PR #667
   [x] WS-5 E streamed exec (ExecEvent) — PR #712 (plan-172)
   [x] WS-5 E follow-up: enforce exec timeout_secs — plan-173
-  [~] WS-1 warm pool (Plan 118): 1a primitive + 1b-i trait seam/registry/libkrun
+  [x] WS-1 warm pool (Plan 118): 1a primitive + 1b-i trait seam/registry/libkrun
       + 1b-ii reaper/doctor/`mvmctl pool`/bench-fix + 1b-iii up auto-claim
-      (try_warm_claim/replenish/--warm-pool-size, fail-open) — landed (consolidated
-      PR off the #748/#751/#754/#756 stack). Bridge boot LIVE-VALIDATED (exit 7;
-      up.rs "bridge broken" comment stale). Remaining: bundled-kernel compat key so
-      the libkrun mkGuest warm claim fires (kernel absent pre-boot); multi-kernel
-      keying; honour --name/volumes; committed bench delta (SPRINT.md)
+      (try_warm_claim/replenish/--warm-pool-size, fail-open) + bundled-kernel
+      compat key — libkrun mkGuest warm claim FIRES end-to-end (#757/#758,
+      live-validated "Claimed a warm standby"). Bridge boot also live-validated
+      (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
+      SPRINT.md): multi-kernel keying; pool-status liveness filter;
+      home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
   [ ] WS-2 checkpoint+fork  (152 WS-B done; unblocked)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
