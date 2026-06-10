@@ -99,6 +99,69 @@ impl CheckpointStore {
     }
 }
 
+use mvm_core::checkpoint::CheckpointClass;
+
+/// Inputs for an `fs_quick` capture. Grouped into a struct so the call site
+/// reads clearly and we never thread a long positional argument list.
+pub struct CaptureFsQuickParams {
+    pub id: CheckpointId,
+    pub vm_name: String,
+    /// Absolute path to the VM's live rootfs image to clone.
+    pub rootfs: PathBuf,
+    pub supervisor_config_digest: String,
+    pub tag: Option<String>,
+    pub created_unix: u64,
+    /// The caller asserts the VM is stopped or paused-and-synced. A non-quiesced
+    /// capture is refused: an fs_quick checkpoint has no memory, so the rootfs
+    /// must be in a clean, deterministic state.
+    pub quiesced: bool,
+}
+
+fn sha256_file_hex(path: &Path) -> Result<String> {
+    use sha2::Digest;
+    let bytes = std::fs::read(path).with_context(|| format!("hashing {}", path.display()))?;
+    let mut h = sha2::Sha256::new();
+    h.update(&bytes);
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// Freeze a quiesced VM's rootfs into an immutable fs_quick checkpoint via APFS
+/// copy-on-write. Returns the persisted metadata. Audit binding is the caller's
+/// responsibility (it owns the ExecutionPlan + signer).
+pub fn capture_fs_quick(
+    store: &CheckpointStore,
+    params: CaptureFsQuickParams,
+) -> Result<CheckpointMeta> {
+    if !params.quiesced {
+        anyhow::bail!(
+            "refusing fs_quick checkpoint of a non-quiesced VM '{}': stop or pause it first",
+            params.vm_name
+        );
+    }
+    let content_dir = store.content_dir(&params.id);
+    std::fs::create_dir_all(&content_dir)
+        .with_context(|| format!("creating {}", content_dir.display()))?;
+
+    let file_name = params
+        .rootfs
+        .file_name()
+        .context("rootfs path has no file name")?;
+    let dst = content_dir.join(file_name);
+    crate::base::cow::clone_rootfs_for_instance(&params.rootfs, &dst)
+        .context("cloning rootfs into checkpoint content")?;
+
+    let content_sha256 = sha256_file_hex(&dst)?;
+
+    let meta = CheckpointMeta::builder(params.id, CheckpointClass::FsQuick, params.vm_name)
+        .tag(params.tag)
+        .created_unix(params.created_unix)
+        .content_sha256(content_sha256)
+        .supervisor_config_digest(params.supervisor_config_digest)
+        .build();
+    store.write_meta(&meta)?;
+    Ok(meta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +227,54 @@ mod tests {
         let store = CheckpointStore::at(tmp.path());
         let p = store.content_dir(&CheckpointId::new("c1"));
         assert_eq!(p, tmp.path().join("c1").join("content"));
+    }
+
+    use std::io::Write;
+
+    fn write_fake_rootfs(dir: &Path) -> PathBuf {
+        let p = dir.join("rootfs.ext4");
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(b"fake-ext4-bytes").unwrap();
+        p
+    }
+
+    #[test]
+    fn capture_refuses_when_not_quiesced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = write_fake_rootfs(tmp.path());
+        let params = CaptureFsQuickParams {
+            id: CheckpointId::new("c1"),
+            vm_name: "vm".into(),
+            rootfs: rootfs.clone(),
+            supervisor_config_digest: "d".into(),
+            tag: None,
+            created_unix: 7,
+            quiesced: false,
+        };
+        let err = capture_fs_quick(&store, params).unwrap_err();
+        assert!(err.to_string().contains("quiesced"));
+    }
+
+    #[test]
+    fn capture_clones_hashes_and_writes_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = write_fake_rootfs(tmp.path());
+        let params = CaptureFsQuickParams {
+            id: CheckpointId::new("c1"),
+            vm_name: "vm".into(),
+            rootfs,
+            supervisor_config_digest: "d".into(),
+            tag: Some("gold".into()),
+            created_unix: 7,
+            quiesced: true,
+        };
+        let meta = capture_fs_quick(&store, params).unwrap();
+        let content_blob = store.content_dir(&meta.id).join("rootfs.ext4");
+        assert_eq!(std::fs::read(&content_blob).unwrap(), b"fake-ext4-bytes");
+        assert_eq!(meta.content_sha256.len(), 64);
+        assert_eq!(meta.tag.as_deref(), Some("gold"));
+        assert_eq!(store.read_meta(&meta.id).unwrap(), meta);
     }
 }
