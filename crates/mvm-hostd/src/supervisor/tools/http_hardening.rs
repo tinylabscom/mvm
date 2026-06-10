@@ -86,10 +86,14 @@ impl Resolve for SsrfFilteringResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         Box::pin(async move {
-            // The port we pass to `lookup_host` is a placeholder —
-            // reqwest reads the IP out of each `SocketAddr` and
-            // uses the URL's port for the actual connect. 443 is
-            // a reasonable default since most callers are HTTPS.
+            // ⚠️ reqwest connects on the **resolver's** SocketAddr port, NOT
+            // the URL's — so this 443 forces every request through HTTPS:443.
+            // Fine for the HTTPS-only callers (web_fetch, MCP tools), but it
+            // breaks plain `http` (the request hits :443 → "plain HTTP request
+            // was sent to HTTPS port"). HTTP/arbitrary-port callers must use
+            // `resolve_ssrf_safe_ips` + `hardened_client_builder_no_dns` +
+            // `resolve_to_addrs` instead (the `Resolve` trait never sees the
+            // port, so a custom resolver cannot be port-correct).
             let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 443u16))
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
@@ -169,6 +173,42 @@ pub fn filter_ssrf_addrs(
         ));
     }
     Ok(safe)
+}
+
+/// Resolve `host` to its SSRF-safe IP addresses (the IPs only — no port). The
+/// caller pins these to the request's **actual** port (see
+/// [`hardened_client_builder_no_dns`] + `resolve_to_addrs`).
+///
+/// This exists because the [`SsrfFilteringResolver`] above hardcodes port 443
+/// (the `Resolve` trait only hands the resolver the host, never the port), and
+/// reqwest connects on the *resolver's* port — so a plain-`http` forward would
+/// hit the destination's HTTPS port (`400 "plain HTTP request was sent to HTTPS
+/// port"`). Callers that forward to arbitrary URL ports resolve here, then pin
+/// the safe IPs on the URL's real port, keeping SSRF filtering without the port
+/// bug. Errors when the host doesn't resolve or every address is SSRF-blocked.
+pub async fn resolve_ssrf_safe_ips(host: &str) -> Result<Vec<std::net::IpAddr>, String> {
+    // The port handed to `lookup_host` is irrelevant — we keep only the IPs.
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, 0u16))
+        .await
+        .map_err(|e| format!("resolving {host}: {e}"))?
+        .collect();
+    Ok(filter_ssrf_addrs(resolved)?
+        .into_iter()
+        .map(|sa| sa.ip())
+        .collect())
+}
+
+/// A hardened reqwest builder (W1 no-redirect + W7 TLS-1.3 floor + timeout)
+/// **without** the port-hardcoding [`SsrfFilteringResolver`]. Pair it with
+/// `.resolve_to_addrs(host, &[ip:url_port, …])` built from
+/// [`resolve_ssrf_safe_ips`] so SSRF filtering survives while the connection
+/// uses the URL's real port. Use this (not [`hardened_client_builder`]) when the
+/// forward target may be plain `http`.
+pub fn hardened_client_builder_no_dns(timeout_secs: u64) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(reqwest::redirect::Policy::none())
+        .min_tls_version(MIN_TLS_VERSION)
 }
 
 #[cfg(test)]
