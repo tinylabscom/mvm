@@ -122,6 +122,15 @@ const VM_SUB: &[(&str, AuditPosture)] = &[
 // may trigger are emitted by the shared bootstrap, same as `dev`.
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
+// Plan 178 (D1) — build-time verbs grouped under `build <sub>`. `build image`
+// is the former top-level `build`. Postures unchanged.
+const BUILD_SUB: &[(&str, AuditPosture)] = &[
+    ("image", AuditPosture::Emits("TemplateBuild")),
+    ("compile", AuditPosture::ReadOnly),
+    ("validate", AuditPosture::ReadOnly),
+    ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
+];
+
 // Plan 93 Phase 2 Lever 0 — `mvmctl bench microvm-launch`. The live
 // probe boots a throwaway guest through the signed-plan admission path
 // (claim 8), so the documented posture is the same `plan.*`+`VmStart`
@@ -319,21 +328,16 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
     // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
     ("vm", AuditPosture::DelegatesToSub(VM_SUB)),
-    // Build / artifact / registry.
-    ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
+    // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
+    // kernel grouped under `build <sub>`.
+    ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
-    ("build", AuditPosture::Emits("TemplateBuild")),
     ("persistent-builder", AuditPosture::InteractiveOrControl),
     // Plan 166 Phase 2 — hidden internal helper: a long-running host-side
     // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
     // plumbing spawned by `mvm_backend::qemu`; never emits audit events.
     ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
-    // SDK port Phase 2c — renders a `Workload` IR to a flake +
-    // sidecars at the user-supplied --out path. Doesn't touch the
-    // audit chain. ReadOnly w.r.t. host state.
-    ("compile", AuditPosture::ReadOnly),
-    ("validate", AuditPosture::ReadOnly),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     // Operational surfaces.

@@ -9,6 +9,7 @@ use clap::Parser;
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::build::build;
 use super::build::compile;
+use super::build::group as build_group;
 use super::catalog;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
@@ -342,10 +343,21 @@ fn volume_mount_managed_omits_host() {
 
 #[test]
 fn test_build_flake_with_profile() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "build", "--flake", ".", "--profile", "gateway"]).unwrap();
-    match cli.command {
-        Commands::Build(build::Args { flake, profile, .. }) => {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "build",
+        "image",
+        "--flake",
+        ".",
+        "--profile",
+        "gateway",
+    ])
+    .unwrap();
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Image(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert_eq!(profile.as_deref(), Some("gateway"));
         }
@@ -355,9 +367,12 @@ fn test_build_flake_with_profile() {
 
 #[test]
 fn test_build_flake_defaults_to_no_profile() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Build(build::Args { flake, profile, .. }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."]).unwrap();
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Image(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert!(profile.is_none(), "profile should be None when omitted");
         }
@@ -367,9 +382,12 @@ fn test_build_flake_defaults_to_no_profile() {
 
 #[test]
 fn test_build_mvmfile_mode_still_works() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "myimage"]).unwrap();
-    match cli.command {
-        Commands::Build(build::Args { path, flake, .. }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "myimage"]).unwrap();
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Image(build::Args { path, flake, .. }) => {
             assert_eq!(path, "myimage");
             assert!(flake.is_none(), "Mvmfile mode should have no --flake");
         }
@@ -2833,6 +2851,7 @@ fn test_up_no_supervisor_flag_parses() {
 fn test_compile_from_recording_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "build",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -2840,8 +2859,11 @@ fn test_compile_from_recording_parses() {
         "/tmp/out",
     ])
     .expect("parse");
-    match cli.command {
-        Commands::Compile(compile::Args {
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Compile(compile::Args {
             from_recording,
             from_ir,
             entry,
@@ -2867,6 +2889,7 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
     // accept both.
     let err = Cli::try_parse_from([
         "mvmctl",
+        "build",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -2883,10 +2906,13 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
 
 #[test]
 fn test_compile_default_no_from_flags_leaves_them_none() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "compile", "--from-ir", "/tmp/ir.json"]).expect("parse");
-    match cli.command {
-        Commands::Compile(compile::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "compile", "--from-ir", "/tmp/ir.json"])
+        .expect("parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Compile(compile::Args {
             from_ir,
             from_recording,
             ..

@@ -5,7 +5,6 @@ mod cmd_audit;
 mod deps;
 mod env;
 mod image;
-mod kernel;
 mod manifest;
 mod ops;
 /// Plan 118 WS-1 1b — supervisor warm-pool: the `mvmctl pool warm/status` command + the
@@ -81,18 +80,14 @@ pub(in crate::commands) enum Commands {
     Doctor(env::doctor::Args),
     /// Re-sign mvmctl + supervisors with VZ entitlements (macOS)
     Sign(env::sign::Args),
-    /// Build the custom microVM kernels (builder / workload)
-    Kernel(kernel::Args),
     /// Manage built manifest slots
     Manifest(manifest::Args),
     /// Inspect cached OCI images
     Image(image::Args),
     /// Inspect the dm-thin storage pool
     Storage(storage::Args),
-    /// Build a microVM image from a Mvmfile.toml config or Nix flake
-    Build(build::build::Args),
-    /// Compile Workload IR into build artifacts
-    Compile(build::compile::Args),
+    /// Build-time commands (image, compile, validate, kernel)
+    Build(build::group::Args),
     /// Build and run a VM
     ///
     /// If neither `--flake` nor `--manifest` is supplied, the bundled
@@ -110,8 +105,6 @@ pub(in crate::commands) enum Commands {
     Uninstall(env::uninstall::Args),
     /// View the local audit log (~/.mvm/log/audit.jsonl)
     Audit(ops::audit::Args),
-    /// Validate a Nix flake before building (runs `nix flake check`)
-    Validate(build::validate::Args),
     /// Manage named dev networks
     Network(ops::network::Args),
     /// Browse the bundled image catalog
@@ -292,19 +285,16 @@ pub fn run() -> Result<()> {
         Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
         Commands::Sign(a) => env::sign::run(&cli, a, &cfg),
-        Commands::Kernel(a) => kernel::run(&cli, a, &cfg),
+        Commands::Build(a) => build::group::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Image(a) => image::run(&cli, a, &cfg),
         Commands::Storage(a) => storage::run(&cli, a, &cfg),
-        Commands::Build(a) => build::build::run(&cli, a, &cfg),
-        Commands::Compile(a) => build::compile::run(&cli, a, &cfg),
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
         Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
         Commands::Uninstall(a) => env::uninstall::run(&cli, a, &cfg),
         Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
-        Commands::Validate(a) => build::validate::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
