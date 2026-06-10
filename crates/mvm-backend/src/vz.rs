@@ -140,6 +140,13 @@ const DRAINER_PID_FILE_NAME: &str = "vz-drainer.pid";
 /// chain and the host signer.
 const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
 
+/// Canonical path to a VM's persisted supervisor config inside its state dir.
+/// The single source of truth for the file name so callers (e.g. the
+/// checkpoint fork path) never re-spell the literal.
+pub(crate) fn supervisor_config_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(SUPERVISOR_CONFIG_FILE_NAME)
+}
+
 /// How long [`VzBackend::start`] waits for the supervisor to write its
 /// PID file before killing the child and bailing. Matches the libkrun
 /// path's budget.
@@ -932,6 +939,22 @@ impl crate::checkpoint::VmFullControl for VzVmFullControl {
 /// - `startup_mode` → `Restore` against the child's cloned `memory.bin` (and
 ///   inherited `machine-id` sidecar), so the supervisor resumes the captured
 ///   memory state instead of cold-booting the kernel.
+///
+/// Every per-VM *runtime* path (the sockets/dirs/logs `build_supervisor_config`
+/// derives from `state_dir` or from `name`) is rebased onto the child so the
+/// fork writes its own control/vsock/console and connects its own live gvproxy
+/// — never the parent's (which is dead, since the parent is required stopped):
+///
+/// - `vsock.socket_dir`, `control_socket_path`, `console_output_path`, and the
+///   gvproxy `socket_path` are rebased onto `child_state_dir`, reusing the same
+///   basename/sub-path layout the normal builder uses.
+/// - the audit-substrate sockets that key off the VM *name* (gvproxy
+///   `events_ingest_socket_path`, `gateway_audit_socket`) are re-derived for
+///   `child_vm_name` under `~/.mvm/audit/`.
+///
+/// Identity/claim-8 wiring is INHERITED untouched (`tenant_id`, `plan`,
+/// `bundle`, `audit_dir`, `signing_key_path`): the child is the same tenant's
+/// forked workload, not a new admission.
 pub fn build_child_supervisor_config(
     parent_cfg: &vz::SupervisorConfig,
     child_vm_name: &str,
@@ -953,9 +976,45 @@ pub fn build_child_supervisor_config(
             .into_owned();
     }
 
-    // Re-derive the gvproxy MAC for the new identity (it's an explicit field).
-    if let Some(vz::NetworkConfig::Gvproxy { mac, .. }) = cfg.network.as_mut() {
+    // Per-VM runtime sockets/dirs/logs — rebase onto the child's own state dir,
+    // matching the layout `build_supervisor_config` derives from `state_dir`.
+    cfg.vsock.socket_dir = child_state_dir.join("vsock").to_string_lossy().into_owned();
+    cfg.control_socket_path = Some(
+        vz_control::control_socket_path(child_state_dir)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    cfg.console_output_path = Some(
+        child_state_dir
+            .join("console.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    if let Some(vz::NetworkConfig::Gvproxy {
+        mac,
+        socket_path,
+        events_ingest_socket_path,
+    }) = cfg.network.as_mut()
+    {
+        // Re-derive the gvproxy MAC for the new identity (explicit field).
         *mac = host_gvproxy::derive_mac(child_vm_name);
+        // The child boots its OWN gvproxy in its state dir (the spawner starts
+        // it); point the supervisor at that listener, not the parent's dead one.
+        *socket_path = child_state_dir
+            .join(host_gvproxy::SOCKET_FILE_NAME)
+            .to_string_lossy()
+            .into_owned();
+        // Audit ingest socket keys off the VM name under ~/.mvm/audit/ — only
+        // present for an admitted (plan+tenant) parent; re-derive for the child.
+        if events_ingest_socket_path.is_some() {
+            *events_ingest_socket_path = Some(self::events_ingest_socket_path(child_vm_name));
+        }
+    }
+
+    // Audit substrate's per-VM gateway socket also keys off the name.
+    if cfg.gateway_audit_socket.is_some() {
+        cfg.gateway_audit_socket = Some(gateway_audit_socket_path(child_vm_name));
     }
 
     cfg.startup_mode = vz::StartupMode::Restore {
@@ -972,6 +1031,20 @@ pub struct VzChildSupervisorSpawner;
 
 impl crate::checkpoint::ChildSupervisorSpawner for VzChildSupervisorSpawner {
     fn spawn(&self, config: &vz::SupervisorConfig) -> Result<()> {
+        // The child config's gvproxy `socket_path` was rebased onto the child
+        // state dir by `build_child_supervisor_config`; spawn a live gvproxy
+        // there first so the supervisor's connect() finds a listener (mirrors
+        // the boot path in `start()`, which spawns gvproxy before the
+        // supervisor). The parent's gvproxy is gone — the parent is stopped.
+        if matches!(config.network, Some(vz::NetworkConfig::Gvproxy { .. })) {
+            let child_state_dir = PathBuf::from(&config.vm_state_dir);
+            host_gvproxy::spawn_detached(&child_state_dir).map_err(|e| {
+                anyhow!(
+                    "spawn child gvproxy for forked Vz VM '{}': {e}",
+                    config.name
+                )
+            })?;
+        }
         spawn_supervisor_with_config(config)
     }
 }
@@ -1065,6 +1138,17 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
     PathBuf::from(mvm_core::config::mvm_data_dir())
         .join("audit")
         .join(format!("gateway-events-{vm_name}.sock"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Per-VM gateway audit socket path. Mirrors the `gateway-<vm>.sock` shape
+/// `audit_substrate::compute_audit_substrate` derives, so a forked child can
+/// re-key it onto its own name without reaching back into the substrate builder.
+fn gateway_audit_socket_path(vm_name: &str) -> String {
+    PathBuf::from(mvm_core::config::mvm_data_dir())
+        .join("audit")
+        .join(format!("gateway-{vm_name}.sock"))
         .to_string_lossy()
         .into_owned()
 }
@@ -2213,21 +2297,24 @@ mod tests {
                 ports: vec![],
                 socket_dir: "/parent/state/parentvm/vsock".into(),
             },
-            console_output_path: None,
+            console_output_path: Some("/parent/state/parentvm/console.log".into()),
             network: Some(vz::NetworkConfig::Gvproxy {
-                socket_path: "/parent/gv.sock".into(),
+                socket_path: "/parent/state/parentvm/gvproxy.sock".into(),
                 mac: host_gvproxy::derive_mac(name),
-                events_ingest_socket_path: None,
+                events_ingest_socket_path: Some(
+                    "/parent/audit/gateway-events-parentvm.sock".into(),
+                ),
             }),
             balloon: None,
-            control_socket_path: None,
+            control_socket_path: Some("/parent/state/parentvm/control.sock".into()),
             startup_mode: vz::StartupMode::Boot,
-            tenant_id: None,
+            // Identity/claim-8 wiring — inherited untouched by the child builder.
+            tenant_id: Some("tenant-x".into()),
             plan: None,
             bundle: None,
-            audit_dir: None,
-            gateway_audit_socket: None,
-            signing_key_path: None,
+            audit_dir: Some("/parent/audit".into()),
+            gateway_audit_socket: Some("/parent/audit/gateway-parentvm.sock".into()),
+            signing_key_path: Some("/parent/keys/host-signer.ed25519".into()),
         }
     }
 
@@ -2248,11 +2335,71 @@ mod tests {
         assert_eq!(rootfs.path, "/child/state/childvm/rootfs.ext4");
         // MAC re-derived for the new identity (not the parent's).
         match child.network.as_ref().unwrap() {
-            vz::NetworkConfig::Gvproxy { mac, .. } => {
+            vz::NetworkConfig::Gvproxy {
+                mac,
+                socket_path,
+                events_ingest_socket_path,
+            } => {
                 assert_eq!(mac, &host_gvproxy::derive_mac("childvm"));
                 assert_ne!(mac, &host_gvproxy::derive_mac("parentvm"));
+                // gvproxy listener rebased into the child state dir — the child
+                // boots its own gvproxy there, not the parent's dead one.
+                assert!(
+                    socket_path.starts_with("/child/state/childvm/"),
+                    "gvproxy socket_path not rebased: {socket_path}"
+                );
+                assert!(!socket_path.contains("/parent/"));
+                // Audit ingest socket re-keyed onto the child name (it keys off
+                // the VM name under ~/.mvm/audit/, not the state dir).
+                let ev = events_ingest_socket_path.as_deref().unwrap();
+                assert_eq!(ev, self::events_ingest_socket_path("childvm"));
+                assert!(!ev.contains("parentvm"));
             }
         }
+        // Every per-VM runtime socket/dir/log now lives under the child state
+        // dir (NOT the parent's) — the core of the fork-path correctness fix.
+        assert_eq!(child.vsock.socket_dir, "/child/state/childvm/vsock");
+        assert_eq!(
+            child.control_socket_path.as_deref(),
+            Some("/child/state/childvm/control.sock")
+        );
+        assert_eq!(
+            child.console_output_path.as_deref(),
+            Some("/child/state/childvm/console.log")
+        );
+        for field in [
+            child.vsock.socket_dir.as_str(),
+            child.control_socket_path.as_deref().unwrap(),
+            child.console_output_path.as_deref().unwrap(),
+        ] {
+            assert!(
+                field.starts_with("/child/state/childvm/"),
+                "runtime path not rebased onto child: {field}"
+            );
+            assert!(
+                !field.contains("/parent/"),
+                "runtime path leaks parent: {field}"
+            );
+        }
+        // Gateway audit socket re-keyed onto the child name.
+        assert_eq!(
+            child.gateway_audit_socket.as_deref(),
+            Some(gateway_audit_socket_path("childvm").as_str())
+        );
+        assert!(
+            !child
+                .gateway_audit_socket
+                .as_deref()
+                .unwrap()
+                .contains("parentvm")
+        );
+        // Identity / claim-8 wiring INHERITED untouched.
+        assert_eq!(child.tenant_id.as_deref(), Some("tenant-x"));
+        assert_eq!(child.audit_dir.as_deref(), Some("/parent/audit"));
+        assert_eq!(
+            child.signing_key_path.as_deref(),
+            Some("/parent/keys/host-signer.ed25519")
+        );
         // Restore mode pointing at the child's memory + inherited machine-id.
         match &child.startup_mode {
             vz::StartupMode::Restore {

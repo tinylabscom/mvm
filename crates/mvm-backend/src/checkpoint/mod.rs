@@ -151,10 +151,19 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
 /// Child inherits the parent checkpoint's machine-id (boot-id / systemd
 /// machine-id continuity) rather than minting a fresh one. The forked memory
 /// state was captured WITH that identity, so restoring it demands the same id.
+///
+/// COUPLED with [`FORK_ALLOW_PARENT_RUNNING`]: inheriting the machine-id is safe
+/// ONLY because the parent is required stopped. If you ever flip this to mint a
+/// fresh id you must keep the parent stopped (the memory snapshot's id would no
+/// longer match); if you ever allow a running parent you must flip this to a
+/// fresh id. Two live VMs on the same machine-id is the failure mode — never
+/// change one of these without the other.
 const FORK_FRESH_MACHINE_ID: bool = false;
 
 /// Fork requires the parent VM stopped — a live supervisor would race the new
-/// child over the source disks while we clone them.
+/// child over the source disks while we clone them, and (see
+/// [`FORK_FRESH_MACHINE_ID`]) the child inherits the parent's machine-id, which
+/// is only collision-free while the parent isn't running.
 const FORK_ALLOW_PARENT_RUNNING: bool = false;
 
 /// Spawns a forked child's supervisor in restore mode from its rewritten
@@ -250,7 +259,7 @@ pub fn fork_vm_full(
     }
 
     let parent_cfg_path =
-        mvm_core::config::vm_state_dir(&parent.vm_name).join("supervisor-config.json");
+        crate::vz::supervisor_config_path(&mvm_core::config::vm_state_dir(&parent.vm_name));
     let parent_cfg_bytes = std::fs::read(&parent_cfg_path).with_context(|| {
         format!(
             "reading parent supervisor config {}",
@@ -619,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_refuses_vm_full_in_this_pr() {
+    fn fork_checkpoint_redirects_vm_full_to_fork_vm_full() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let m = CheckpointMeta::builder(CheckpointId::new("vf"), CheckpointClass::VmFull, "vm")
