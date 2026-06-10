@@ -378,19 +378,31 @@ process-spawn delta, not the headline number.
 
 ### PR-10b — supervisor standby pool
 
+> **1a landed** (the supervisor *primitive*) in PR #748
+> (`feat/plan-118-ws1-layer1a`) — config split, prelaunched flow with the
+> mandatory attach-time plan re-verify, fuzz target, and the (a)–(e) rejection
+> ladder. The boxes below tagged **(1a)** are done; the rest are **1b** (the
+> pool + `up` integration + bench delta). See
+> `specs/notes/plan-118-ws1-layer1a-implementation-plan.md`.
+
 - [ ] `warm_pool_size: u32` on `VmStartConfig`; `--warm-pool-size`
       CLI wrapper; library "ensure pool at target" entry point.
-- [ ] `SupervisorBaseConfig` (stdin) / `SupervisorAttachConfig`
-      (control UDS) split; both `deny_unknown_fields`.
-- [ ] Prelaunched supervisor: setup → block before `start_enter` →
+- [x] **(1a)** `SupervisorBaseConfig` (stdin) / `SupervisorAttachConfig`
+      (control UDS) split; both `deny_unknown_fields`;
+      `SupervisorConfig::from_base_and_attach` merge.
+- [x] **(1a)** Prelaunched supervisor: setup → block before `start_enter` →
       attach → verify (signature + G4 + nonce + binding nonce) →
-      `start_enter`. One-shot.
+      `start_enter`. One-shot. The attach-time **plan re-verify** (absent on the
+      cold path, which extract-only under ADR-002) is the security crux —
+      `mvm_vm_host::prelaunch::verify_and_merge_attach`.
 - [ ] `SupervisorStandbyPool` under `~/.mvm/pool/<id>/`; control UDS
       `0700` + binding-nonce in path; replenish-on-use; reaper +
-      `cache prune` integration.
-- [ ] `fuzz_attach_message.rs` fuzz target.
-- [ ] Security negative-path tests (a)–(e) above; none reach
-      `start_enter`.
+      `cache prune` integration. *(1a binds the UDS `0700`/nonce-in-path; the
+      pool that owns its lifecycle is 1b.)*
+- [x] **(1a)** `fuzz_attach_message.rs` fuzz target.
+- [x] **(1a)** Security negative-path tests (a)–(e) above; none reach
+      `start_enter` (pure `verify_and_merge_attach` unit ladder) + a
+      `libkrun-live` process-level refusal integration.
 - [ ] Bench delta demonstrated via PR-10a harness.
 - [ ] `warm_pool_size = 0` default-off verified (no standbys, no UDS).
 

@@ -26,17 +26,22 @@
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
-    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
+    StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
 };
 use mvm_storage::snapshot::SnapshotUpper;
 
 use crate::base::ui;
-use libkrun_sys::{KrunContext, SupervisorConfig};
+use libkrun_sys::{
+    BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
+    SupervisorConfig,
+};
 use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// libkrun backend (Linux KVM / macOS Hypervisor.framework).
 pub struct LibkrunBackend;
@@ -98,6 +103,103 @@ const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 /// may carry secret bindings, env vars, or policy refs that resolve
 /// to credentials. They're opaque transport bytes; the supervisor
 /// re-verifies the signed envelope before trusting any decoded field.
+/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring +
+/// the configured virtio-net gateway. **No rootfs** (the cold path sets the workload
+/// rootfs; a 1b prelaunched standby leaves it `None` until claim) and **no user volumes**.
+/// Shared verbatim by `build_supervisor_config` (cold) and `standby_base_config` (warm)
+/// so the two launch paths can't drift.
+fn krun_context_base(
+    name: &str,
+    kernel: &str,
+    vcpus: u8,
+    mem_mib: u32,
+    cmdline: &str,
+    state_dir: &Path,
+) -> KrunContext {
+    // KrunContext::new requires a rootfs arg; we null it immediately — the caller owns
+    // the rootfs decision (Some for cold boot, None for a standby).
+    let mut krun = KrunContext::new(name, kernel, "")
+        .with_resources(vcpus, mem_mib)
+        .with_cmdline(cmdline)
+        .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
+        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
+        // Plan 152 WS-A: workload exit-code capture (listen=false → host binds).
+        .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
+    krun.rootfs_path = None;
+    // Plan 87/88 / ADR-058 / Plan 123 L3-B — select the gateway through the same
+    // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
+    // claim-10 no-bypass bridge). Workload-independent, so it belongs in the base.
+    let scratch = state_dir.to_string_lossy().into_owned();
+    match mvm_build::libkrun_builder::resolve_networking_mode() {
+        mvm_build::libkrun_builder::NetworkingPreference::Gvproxy => {
+            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
+        }
+        mvm_build::libkrun_builder::NetworkingPreference::Passt => {
+            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
+        }
+    }
+}
+
+/// Translate a backend-agnostic [`StandbySpec`] into the 1a `SupervisorBaseConfig`
+/// (workload-independent) the prelaunched supervisor reads on stdin. `rootfs_path` stays
+/// `None` — the workload rootfs arrives in the attach at claim.
+fn standby_base_config(spec: &StandbySpec) -> SupervisorBaseConfig {
+    let krun = krun_context_base(
+        &spec.id,
+        &spec.kernel_path,
+        spec.vcpus,
+        spec.mem_mib,
+        DEFAULT_CMDLINE,
+        Path::new(&spec.vm_state_dir),
+    );
+    SupervisorBaseConfig {
+        krun,
+        vm_state_dir: spec.vm_state_dir.clone(),
+        pid_file_name: None,
+        signing_key_path: spec.signing_key_path.clone(),
+        signer_id: spec.signer_id.clone(),
+        binding_nonce: spec.binding_nonce.clone(),
+        control_socket_path: spec.control_socket.clone(),
+        bridge_restart_policy: BridgeRestartPolicy::HardFail,
+    }
+}
+
+/// Translate a [`StandbyClaim`] into the 1a `SupervisorAttachConfig`, echoing the
+/// standby's binding nonce. `plan_json`/`bundle_json` decode to `serde_json::Value`
+/// carriers (the same shape `SupervisorConfig.plan` uses).
+fn standby_attach_config(
+    claim: &StandbyClaim,
+    binding_nonce: String,
+) -> std::result::Result<SupervisorAttachConfig, StandbyError> {
+    let plan: serde_json::Value = serde_json::from_str(&claim.plan_json)
+        .map_err(|e| StandbyError::ClaimFailed(format!("decode plan_json: {e}")))?;
+    let bundle = match &claim.bundle_json {
+        Some(b) => Some(
+            serde_json::from_str(b)
+                .map_err(|e| StandbyError::ClaimFailed(format!("decode bundle_json: {e}")))?,
+        ),
+        None => None,
+    };
+    Ok(SupervisorAttachConfig {
+        binding_nonce,
+        rootfs_path: claim.rootfs_path.clone(),
+        tenant_id: claim.tenant_id.clone(),
+        audit_dir: claim.audit_dir.clone(),
+        gateway_audit_socket: claim.gateway_audit_socket.clone(),
+        gateway_events_socket: claim.gateway_events_socket.clone(),
+        plan,
+        bundle,
+    })
+}
+
+/// Seconds since the Unix epoch (best-effort; clamps a pre-epoch clock to 0).
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
     let kernel = config
         .kernel_path
@@ -112,37 +214,18 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&uvols);
     }
-    let krun = KrunContext::new(&config.name, kernel, &config.rootfs_path)
-        .with_resources(vcpus, config.memory_mib)
-        .with_cmdline(&cmdline)
-        .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
-        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
-        // Plan 152 WS-A: workload exit-code capture. listen=false means
-        // the HOST supervisor binds the Unix socket; libkrun proxies the
-        // guest's connect() to it. Guest /init connects and writes a
-        // 4-byte LE i32 before powering off; supervisor persists it to
-        // <vm_state_dir>/workload.exit.
-        .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
-    // Plan 87/88 / ADR-058 — configure the virtio-net gateway. TSI was removed
-    // (Plan 102 W6.A): it bypasses virtio-net, so the admitted gateway-audit
-    // bridge refuses it (claim-10 no-bypass). KrunContext defaults to TSI, so an
-    // unconfigured workload would be rejected by `run_supervisor_with_bridge`.
-    // The supervisor spawns the gateway from this declared mode.
-    //
-    // Plan 123 L3-B — select the gateway through the SAME `resolve_networking_mode`
-    // the builder VM uses, so a workload honours `MVM_NETWORKING` consistently
-    // (previously this site hardcoded `cfg!(macos)` and ignored the override).
-    // The default is unchanged (macOS→gvproxy, Linux→passt); an explicit
-    // `MVM_NETWORKING=passt` on macOS resolves to gvproxy (passt is Linux-only).
-    let scratch = state_dir.to_string_lossy().into_owned();
-    let krun = match mvm_build::libkrun_builder::resolve_networking_mode() {
-        mvm_build::libkrun_builder::NetworkingPreference::Gvproxy => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-        mvm_build::libkrun_builder::NetworkingPreference::Passt => {
-            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
-        }
-    };
+    // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
+    // verbatim with the 1b standby spawn so the two paths can't drift. The cold path
+    // then sets the workload rootfs + user volumes below.
+    let mut krun = krun_context_base(
+        &config.name,
+        kernel,
+        vcpus,
+        config.memory_mib,
+        &cmdline,
+        state_dir,
+    );
+    krun.rootfs_path = Some(config.rootfs_path.clone());
 
     // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
     // is a virtio-fs device; a disk image is an extra virtio-blk device.
@@ -157,7 +240,6 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // Rather than make a false ro promise, refuse it and point at the
     // hypervisor-enforced alternatives. (Vz/Firecracker enforce ro shares
     // natively; this restriction is libkrun-specific.)
-    let mut krun = krun;
     for (idx, vol) in config.volumes.iter().enumerate() {
         let tag = format!("uvol{idx}");
         krun = match vol.kind {
@@ -513,6 +595,91 @@ impl VmBackend for LibkrunBackend {
             .map_err(|e| WarmStartError::Failed(e.to_string()))
     }
 
+    fn supports_standby_pool(&self) -> bool {
+        true
+    }
+
+    fn spawn_standby(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let base = standby_base_config(spec);
+        // Pre-create the control-UDS parent dir 0700 (the supervisor re-binds the socket
+        // itself; this only ensures the dir exists with the right mode).
+        if let Some(parent) = spec.control_socket.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| StandbyError::SpawnFailed(format!("create control dir: {e}")))?;
+            let _ = std::fs::set_permissions(
+                parent,
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            );
+        }
+        // The bin dispatches the prelaunch arm on the `prelaunch_base` wrapper key
+        // (1a); legacy callers send a bare SupervisorConfig and are unaffected.
+        let envelope = serde_json::to_vec(&serde_json::json!({ "prelaunch_base": base }))
+            .map_err(|e| StandbyError::SpawnFailed(format!("encode base config: {e}")))?;
+
+        let bin =
+            resolve_supervisor_path().map_err(|e| StandbyError::SpawnFailed(e.to_string()))?;
+        // Capture the standby supervisor's stderr next to its control socket so a standby
+        // that dies before it's claimed leaves a diagnosable trail (it's detached, so there
+        // is no parent to inherit into).
+        let stderr = spec
+            .control_socket
+            .parent()
+            .map(|d| d.join("standby.stderr.log"))
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(Stdio::from)
+            .unwrap_or_else(Stdio::null);
+        let mut child = Command::new(bin)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .spawn()
+            .map_err(|e| StandbyError::SpawnFailed(format!("spawn supervisor: {e}")))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| StandbyError::SpawnFailed("supervisor stdin unavailable".into()))?
+            .write_all(&envelope)
+            .map_err(|e| StandbyError::SpawnFailed(format!("write base config: {e}")))?;
+        // Detached: do NOT wait — the bin blocks on the control UDS until claimed (or
+        // reaped). The dropped `Child` leaves the process running (no kill-on-drop).
+        let pid = child.id();
+
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: now_unix_secs(),
+            state: StandbyState::Idle,
+        })
+    }
+
+    fn claim_standby(
+        &self,
+        handle: &StandbyHandle,
+        claim: &StandbyClaim,
+    ) -> std::result::Result<VmId, StandbyError> {
+        let attach = standby_attach_config(claim, handle.binding_nonce.clone())?;
+        let mut stream = UnixStream::connect(&handle.control_socket).map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "connect control UDS {}: {e}",
+                handle.control_socket.display()
+            ))
+        })?;
+        libkrun_sys::framing::write_json_frame_sync(&mut stream, &attach)
+            .map_err(|e| StandbyError::ClaimFailed(format!("send attach: {e}")))?;
+        // The supervisor re-verifies the attach (1a) then start_enters, writing its pid
+        // into vm_state_dir. The VM is identified by the standby id (its state lives under
+        // vms/<id>/, so stop/status/console resolve it like any cold-booted VM).
+        Ok(VmId(handle.id.clone()))
+    }
+
     fn status(&self, id: &VmId) -> Result<VmStatus> {
         let pid_path = vm_libkrun_pid(&id.0);
         match read_pid(&pid_path) {
@@ -731,6 +898,69 @@ fn read_exit_status_from(state_dir: &std::path::Path) -> mvm_core::vm_backend::V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_standby_spec() -> StandbySpec {
+        StandbySpec {
+            id: "standby-x".into(),
+            kernel_path: "/k/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "ab".repeat(32),
+            control_socket: "/p/standby-x/control-ab.sock".into(),
+            vm_state_dir: "/vms/standby-x".into(),
+        }
+    }
+
+    fn sample_standby_claim() -> StandbyClaim {
+        StandbyClaim {
+            rootfs_path: "/vol/rootfs.ext4".into(),
+            tenant_id: "tenant-a".into(),
+            audit_dir: "/audit".into(),
+            gateway_audit_socket: "/audit/g.sock".into(),
+            gateway_events_socket: None,
+            plan_json: r#"{"signed":"envelope"}"#.into(),
+            bundle_json: None,
+        }
+    }
+
+    #[test]
+    fn standby_spec_translates_to_base_config_with_no_rootfs() {
+        let spec = sample_standby_spec();
+        let base = standby_base_config(&spec);
+        // A standby carries NO workload rootfs — it arrives in the attach.
+        assert!(base.krun.rootfs_path.is_none());
+        assert_eq!(base.binding_nonce, spec.binding_nonce);
+        assert_eq!(base.signer_id, spec.signer_id);
+        assert_eq!(base.control_socket_path, spec.control_socket);
+        assert_eq!(base.krun.vcpus, 2);
+        assert_eq!(base.krun.ram_mib, 1024);
+        // The bin dispatches the prelaunch arm on the `prelaunch_base` wrapper key.
+        let env = serde_json::json!({ "prelaunch_base": base });
+        assert!(env.get("prelaunch_base").is_some());
+    }
+
+    #[test]
+    fn standby_claim_translates_to_attach_config_echoing_nonce() {
+        let attach = standby_attach_config(&sample_standby_claim(), "ab".repeat(32)).unwrap();
+        assert_eq!(attach.binding_nonce, "ab".repeat(32));
+        assert_eq!(attach.rootfs_path, "/vol/rootfs.ext4");
+        assert_eq!(attach.tenant_id, "tenant-a");
+        assert_eq!(attach.plan, serde_json::json!({"signed": "envelope"}));
+        assert!(attach.bundle.is_none());
+    }
+
+    #[test]
+    fn standby_claim_rejects_malformed_plan_json() {
+        let mut claim = sample_standby_claim();
+        claim.plan_json = "not json".into();
+        match standby_attach_config(&claim, "ab".repeat(32)) {
+            Err(StandbyError::ClaimFailed(_)) => {}
+            other => panic!("expected ClaimFailed, got {other:?}"),
+        }
+    }
 
     #[test]
     fn prod_console_attachment_has_no_input() {

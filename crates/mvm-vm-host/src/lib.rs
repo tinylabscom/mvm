@@ -14,6 +14,10 @@
 pub mod exit_capture;
 pub mod firecracker_bridge;
 
+/// Plan 118 WS-1 1a — the prelaunched-supervisor attach verify+merge. Pure
+/// (no VM, no `start_enter`) so the rejection ladder is unit-testable.
+pub mod prelaunch;
+
 // Rust-native Vz supervisor objc2 bridge (Plan 152 WS-B). macOS-only — the
 // objc2 Virtualization.framework stack only exists there; the
 // `mvm-vz-supervisor` bin is the sole consumer. Kept in the lib (not inline in

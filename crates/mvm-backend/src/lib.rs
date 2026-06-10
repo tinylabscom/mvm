@@ -74,6 +74,9 @@ pub mod network_provider;
 pub mod providers;
 /// Plan 166 Phase 2 / ADR-072 — QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Plan 118 WS-1 1b — backend-agnostic supervisor standby pool registry
+/// (`~/.mvm/pool/` state-dir; record/select-idle-by-kernel/remove/reap).
+pub mod standby_pool;
 /// Plan 129 — shared per-VM substitution-endpoint spawn/reap helpers used by
 /// the QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;

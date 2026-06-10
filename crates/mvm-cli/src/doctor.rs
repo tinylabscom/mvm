@@ -178,6 +178,13 @@ struct WarmStartReport {
     /// `null` off Linux — the substrate backs Firecracker's live-memory path,
     /// which only runs on KVM; macOS reports per-backend tiers but N/A here.
     substrate: Option<WarmStartSubstrate>,
+    /// Plan 118 WS-1 1b — backend name → `supports_standby_pool()`. The standby pool
+    /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;
+    /// only libkrun implements it today.
+    standby_pool: BTreeMap<String, bool>,
+    /// Live count of idle standbys recorded under `~/.mvm/pool/` (best-effort; `None` if
+    /// the pool dir can't be read).
+    standby_pool_idle: Option<usize>,
 }
 
 /// Linux fast-resume substrate probe (plan 123 C2): the kernel pieces the
@@ -504,13 +511,26 @@ fn collect_warm_start_support() -> WarmStartReport {
         "vz",
     ];
     let mut backends = BTreeMap::new();
+    let mut standby_pool = BTreeMap::new();
     for name in names {
         let b = AnyBackend::from_hypervisor(name);
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
+        standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
+    // Best-effort live idle count (Plan 118 WS-1 1b). A missing pool dir reads as 0.
+    let standby_pool_idle = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+        .and_then(|p| p.list())
+        .ok()
+        .map(|v| {
+            v.iter()
+                .filter(|h| h.state == mvm_core::vm_backend::StandbyState::Idle)
+                .count()
+        });
     WarmStartReport {
         backends,
         substrate: collect_warm_start_substrate(),
+        standby_pool,
+        standby_pool_idle,
     }
 }
 
@@ -577,6 +597,25 @@ fn render_warm_start_support(r: &WarmStartReport) {
         }
         None => ui::status_line("  substrate (Linux fast-resume)", "N/A (Linux-only)"),
     }
+
+    // Plan 118 WS-1 1b — the standby pool (pre-pay spawn latency), a separate axis from
+    // the snapshot tiers above. Only libkrun implements it today.
+    let pool_title = "Standby pool (per backend)";
+    println!("\n{}", pool_title);
+    println!("{}", "-".repeat(pool_title.len()));
+    for (backend, supported) in &r.standby_pool {
+        ui::status_line(
+            &format!("  {backend}:"),
+            if *supported { "supported" } else { "—" },
+        );
+    }
+    ui::status_line(
+        "  idle standbys",
+        &match r.standby_pool_idle {
+            Some(n) => n.to_string(),
+            None => "unknown".to_string(),
+        },
+    );
 }
 
 // ── Active backend security posture (ADR-002 / plan 53) ──────
@@ -2727,6 +2766,16 @@ mod tests {
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
         // A backend with no warm-start support must not be silently dropped.
         assert_eq!(r.backends.get("docker"), Some(&"unsupported"));
+    }
+
+    #[test]
+    fn collect_warm_start_support_reports_standby_pool_per_backend() {
+        let r = collect_warm_start_support();
+        // Plan 118 WS-1 1b — only libkrun implements the standby pool today; the rest
+        // report honest `false` and must not be silently dropped.
+        assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
+        assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
+        assert_eq!(r.standby_pool.get("docker"), Some(&false));
     }
 
     #[test]

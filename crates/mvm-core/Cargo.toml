@@ -80,6 +80,9 @@ default = []
 # runtime-free default build is unaffected. Enabled by mvm-backend (cert
 # delivery) and mvm-hostd (the TLS terminator).
 egress-ca = ["dep:rcgen"]
+# Expose `plan::signing::test_support` (shared `ExecutionPlan` fixtures) to
+# other crates' test builds without shipping the fixtures in a release build.
+test-support = []
 # The hostd IPC async transport in `protocol` (mvmd ↔ mvm-hostd control
 # channel: read/write_frame + send/recv request/response). The only
 # async surface in mvm-core besides `manifest-verify`; gated so the
