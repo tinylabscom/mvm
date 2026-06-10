@@ -114,6 +114,10 @@ const NETWORK_SUB: &[(&str, AuditPosture)] = &[
 const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("prune", AuditPosture::Emits("CachePrune")),
+    // #640 — clears a degraded builder store; emits CachePrune on the real run
+    // (op=builder_store_repair). A `--dry-run` is read-only, but the posture
+    // tracks the acting path.
+    ("repair", AuditPosture::Emits("CachePrune")),
 ];
 
 // Plan 118 WS-1 1b — `mvmctl pool`.

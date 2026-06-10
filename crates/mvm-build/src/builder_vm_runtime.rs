@@ -605,6 +605,22 @@ pub fn finalize_flake_job(
         let stderr_log = job_dir.join("nix-stderr.log");
         let derivation_tail = read_last_bytes_of(&stderr_log, 4 * 1024)
             .unwrap_or_else(|_| String::from("<nix-stderr.log not present on host>"));
+
+        // #640 — a dangling/GC'd store path makes every `dev up` fail identically
+        // (the user re-runs and "loops"). Detect that exact nix signature and
+        // return the one-line recovery instead of the opaque build error.
+        if let Some(line) = crate::builder_vm::dangling_store_path_line(&derivation_tail)
+            .or_else(|| crate::builder_vm::dangling_store_path_line(&result.stderr_tail))
+        {
+            return Err(BuilderVmError::DegradedBuilderStore {
+                cache_dir: crate::builder_vm::builder_vm_cache_dir()
+                    .display()
+                    .to_string(),
+                log_path: stderr_log.display().to_string(),
+                detail: line.trim().to_string(),
+            });
+        }
+
         return Err(BuilderVmError::NixBuildFailed(format!(
             "guest cmd.sh exited {} — full log: {}\n\
              outer stderr tail (cmd.sh ringbuffer):\n{}\n\
