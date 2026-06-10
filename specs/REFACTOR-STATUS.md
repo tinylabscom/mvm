@@ -103,6 +103,27 @@ PLAN 126 — Dependency reduction                 🔴 ~10%
   [ ] C1/D1 unify + lock gate
 
 PLAN 153 — CLI directory split                  🔴 NOT STARTED
+
+PLAN 176 — Strip spec refs from code comments    🔴 NOT STARTED
+  [ ] worklist + canonical detection regex
+  [ ] pilot batch (7 heaviest files)
+  [ ] fan-out sweep (~2,531 comment hits)
+  [ ] verify just ci green, comment-only diff
+  [ ] check-no-spec-refs-in-comments lint gate
+
+PLAN 177 — Backend consolidation (8→4)           🔴 NOT STARTED  (ADR-076)
+  [ ] Phase 1 delete docker
+  [ ] Phase 1 delete cloud_hypervisor
+  [ ] Phase 1 fold microvm_nix → qemu
+  [ ] Phase 1 prune dead CI lanes
+  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
+      onto supervisor vz + shared console transport + drop apple-container
+
+PLAN 178 — CLI surface consolidation (~56→~8+8)   🔴 NOT STARTED  (ADR-077)
+  [ ] lock grouping map + hide internals
+  [ ] vm/image/build/storage/trust/net/ops groups
+  [ ] dev-env grouping
+  [ ] run-family rationalization (read-first)
 ```
 
 ## Security claims
