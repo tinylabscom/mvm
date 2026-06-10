@@ -57,8 +57,8 @@ pub(in crate::commands) enum CheckpointCmd {
     Fork {
         /// Parent checkpoint id.
         id: String,
-        /// VM name for the forked child. Defaults to `<id>-fork-<unix>`.
-        #[arg(long)]
+        /// Name for the new VM instance (auto-generated if omitted).
+        #[arg(long, value_parser = clap_vm_name)]
         new_id: Option<String>,
     },
 }

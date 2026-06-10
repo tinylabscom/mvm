@@ -1717,6 +1717,20 @@ fn test_checkpoint_fork_parses() {
 }
 
 #[test]
+fn test_checkpoint_fork_rejects_traversal_new_id() {
+    // --new-id must not allow a path component that escapes the VM state dir.
+    let r = Cli::try_parse_from([
+        "mvmctl",
+        "checkpoint",
+        "fork",
+        "ckpt-abc",
+        "--new-id",
+        "../escape",
+    ]);
+    assert!(r.is_err());
+}
+
+#[test]
 fn test_checkpoint_ls_json_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "checkpoint", "ls", "--json"]).unwrap();
     assert!(matches!(
