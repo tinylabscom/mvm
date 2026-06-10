@@ -69,13 +69,14 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] guest loopback made functional → PR #749: netinit must not blackhole its
       own `lo` (EINVAL) AND /init must bring `lo` up (ENETUNREACH) — both were
       broken, killing the forward proxy. The two together complete the loopback
-  [x] live-guest path on-box validated up to the forward leg (#745+#749): loopback
-      reachable, guest→host vsock relay (CID 2) works, endpoint substitutes the
-      placeholder (no unknown-placeholder, placeholder never on the wire)
-  [ ] BLOCKER for destination-sees-real-cred: SsrfFilteringResolver hardcodes
-      port 443 (tools/http_hardening.rs); reqwest uses the resolver's port, so an
-      http forward hits :443 with plain HTTP → 400 "plain HTTP sent to HTTPS port".
-      Shared tooling (web_fetch/MCP too). Fix = port-aware SSRF / connect-layer check
+  [x] FULL live-guest e2e CLOSED on QEMU (#745+#749+#755): destination (httpbin)
+      reflects "Authorization: Bearer REALKEY-…" (REAL credential) while the guest
+      holds only mvm-secret-… — workload→loopback proxy→guest-host vsock→endpoint
+      substitute→real http forward→echo. "A raw secret never enters the microVM"
+      proven end-to-end on a live guest
+  [x] SSRF resolver port-443 bug FIXED → PR #755: forwarder resolves+SSRF-filters
+      itself, pins the safe IPs on the URL's real port (resolve_to_addrs). This
+      closed the e2e (http forwards no longer hit :443). web_fetch/MCP unaffected
   [ ] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
       + endpoint) — deferred follow-up
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
