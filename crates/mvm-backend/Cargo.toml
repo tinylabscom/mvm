@@ -24,7 +24,6 @@ authors.workspace = true
 # Stays in `mvm` (W8 will move):
 #   - firecracker.rs (Lima-era installer helpers)
 #   - microvm.rs (Firecracker lifecycle via `run_in_vm`)
-#   - microvm_nix.rs (Firecracker via microvm.nix runner)
 #   - vm/backend.rs (`AnyBackend` dispatch + `FirecrackerBackend`)
 #
 # `mvm`'s `vm::backend.rs` imports the alt backends from this

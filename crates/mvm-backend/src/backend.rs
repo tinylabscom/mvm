@@ -5,7 +5,7 @@ use mvm_core::vm_backend::{
 };
 
 // W8: every backend variant + the FC support modules live in this
-// crate now. `microvm`, `microvm_nix`, `image` are siblings under
+// crate now. `microvm`, `image` are siblings under
 // `crate::`; the substrate (`config`, `shell`, `runtime_meta`) lives
 // in `mvm-base`.
 use crate::apple_container::AppleContainerBackend;
@@ -17,9 +17,7 @@ use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::vz::VzBackend;
-use crate::{firecracker, microvm, microvm_nix};
-
-pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
+use crate::{firecracker, microvm};
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -330,7 +328,6 @@ impl BackendTier {
 /// backend is active. Each variant delegates to its inner implementation.
 pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
-    MicrovmNix(MicrovmNixBackend),
     AppleContainer(AppleContainerBackend),
     /// libkrun (plan 53 §"Plan E") — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
@@ -361,11 +358,12 @@ impl AnyBackend {
         Self::Firecracker(FirecrackerBackend)
     }
 
-    /// Select backend based on whether the build output includes a
-    /// microvm.nix runner script.
+    /// Select backend based on whether the build output is a non-KVM
+    /// dev/test runner. A runner-style output routes to the QEMU dev/test
+    /// backend (TCG where KVM is absent); otherwise Firecracker.
     pub fn from_build_output(has_runner: bool) -> Self {
         if has_runner {
-            Self::MicrovmNix(MicrovmNixBackend)
+            Self::Qemu(QemuBackend)
         } else {
             Self::Firecracker(FirecrackerBackend)
         }
@@ -381,10 +379,8 @@ impl AnyBackend {
             "apple-container" => Self::AppleContainer(AppleContainerBackend),
             "libkrun" | "krun" => Self::Libkrun(LibkrunBackend),
             "vz" | "virtualization" => Self::Vz(VzBackend),
-            // Plan 166 Phase 2 — `"qemu"` now routes to the real QEMU
-            // workload backend, not the vestigial microvm.nix alias.
-            // `MicrovmNixBackend` stays selectable via `from_build_output`
-            // (a flake that emits a microvm.nix runner), not by name.
+            // Plan 166 Phase 2 — `"qemu"` is the Linux dev/test backend
+            // (KVM where present, TCG fallback).
             "qemu" => Self::Qemu(QemuBackend),
             // Test-only in-memory backend. See `crate::mock`. Routing
             // here from a production caller is a misconfiguration, but
@@ -499,18 +495,15 @@ impl AnyBackend {
             // is well-engineered but not equivalent to
             // Firecracker + jailer + seccomp; plan 76 §"libkrun
             // isolation is not Firecracker isolation". Apple
-            // Container (Virtualization.framework) and microvm.nix
-            // (qemu) also sit here per their existing
-            // `BackendSecurityProfile.tier` strings.
+            // Container (Virtualization.framework) sits here per its
+            // existing `BackendSecurityProfile.tier` string.
             // QEMU: best-case Tier 2 (KVM-accelerated). The TCG (no-KVM)
             // mode is a runtime Tier-3 degradation surfaced by the QEMU
             // backend's `start` banner + doctor, not by this compile-time
             // classification (Plan 166 / ADR-072).
-            Self::Libkrun(_)
-            | Self::AppleContainer(_)
-            | Self::MicrovmNix(_)
-            | Self::Vz(_)
-            | Self::Qemu(_) => BackendTier::Tier2,
+            Self::Libkrun(_) | Self::AppleContainer(_) | Self::Vz(_) | Self::Qemu(_) => {
+                BackendTier::Tier2
+            }
 
             // Tier 3: test-only. Mock is in-memory.
             Self::Mock(_) => BackendTier::Tier3,
@@ -521,7 +514,6 @@ impl AnyBackend {
     fn inner(&self) -> &dyn VmBackend {
         match self {
             Self::Firecracker(b) => b,
-            Self::MicrovmNix(b) => b,
             Self::AppleContainer(b) => b,
             Self::Libkrun(b) => b,
             Self::Vz(b) => b,
@@ -681,31 +673,6 @@ mod tests {
     }
 
     #[test]
-    fn test_microvm_nix_backend_name() {
-        let backend = MicrovmNixBackend;
-        assert_eq!(backend.name(), "microvm-nix");
-    }
-
-    #[test]
-    fn test_microvm_nix_capabilities() {
-        let backend = MicrovmNixBackend;
-        let caps = backend.capabilities();
-        assert!(!caps.pause_resume);
-        assert!(!caps.snapshots);
-        assert!(caps.vsock);
-        assert!(caps.tap_networking);
-    }
-
-    #[test]
-    fn test_microvm_nix_security_profile_tier_2_partial_claim_3() {
-        let backend = MicrovmNixBackend;
-        let profile = backend.security_profile();
-        assert_eq!(profile.tier, "Tier 2");
-        assert!(profile.layer_coverage.is_microvm());
-        assert_eq!(profile.dropped_claims(), vec![3]);
-    }
-
-    #[test]
     fn test_any_backend_dispatches_security_profile_for_firecracker() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let profile = backend.security_profile();
@@ -761,8 +728,10 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_build_output_with_runner() {
+        // A non-KVM dev/test runner output routes to the QEMU backend
+        // (microvm.nix folded into QEMU — ADR-076).
         let backend = AnyBackend::from_build_output(true);
-        assert_eq!(backend.name(), "microvm-nix");
+        assert_eq!(backend.name(), "qemu");
     }
 
     #[test]
@@ -778,14 +747,6 @@ mod tests {
         let backend = AnyBackend::from_hypervisor("qemu");
         assert_eq!(backend.name(), "qemu");
         assert!(matches!(backend, AnyBackend::Qemu(_)));
-    }
-
-    #[test]
-    fn microvm_nix_no_longer_reachable_by_name() {
-        // The "qemu" alias was retired; MicrovmNix is selected via
-        // `from_build_output(true)`, never by hypervisor name.
-        assert_eq!(AnyBackend::from_build_output(true).name(), "microvm-nix");
-        assert_ne!(AnyBackend::from_hypervisor("qemu").name(), "microvm-nix");
     }
 
     #[test]
@@ -943,12 +904,6 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_unsupported_on_microvm_nix() {
-        // MicrovmNix is no longer reachable by name; construct it directly.
-        assert_unsupported_pause_resume(AnyBackend::MicrovmNix(MicrovmNixBackend), "microvm-nix");
-    }
-
-    #[test]
     fn pause_resume_unsupported_on_qemu() {
         assert_unsupported_pause_resume(AnyBackend::from_hypervisor("qemu"), "qemu");
     }
@@ -974,16 +929,6 @@ mod tests {
         assert_eq!(
             AnyBackend::from_hypervisor("libkrun").snapshot_capability(),
             SnapshotCapability::DiskOnly
-        );
-    }
-
-    #[test]
-    fn snapshot_capability_unsupported_on_microvm_nix() {
-        // MicrovmNix is no longer reachable by name (the "qemu" alias was
-        // retired in Plan 166 Phase 2); construct it directly.
-        assert_eq!(
-            AnyBackend::MicrovmNix(MicrovmNixBackend).snapshot_capability(),
-            SnapshotCapability::Unsupported
         );
     }
 
@@ -1049,11 +994,7 @@ mod tests {
         // live VM, but we can check that the bail (if any) for a
         // missing VM does NOT claim the backend itself is unsupported
         // when the capability says it is.
-        let unsupported: &[&str] = &[
-            "libkrun",
-            "qemu", // → microvm-nix
-            "apple-container",
-        ];
+        let unsupported: &[&str] = &["libkrun", "qemu", "apple-container"];
         for &name in unsupported {
             let b = AnyBackend::from_hypervisor(name);
             assert!(

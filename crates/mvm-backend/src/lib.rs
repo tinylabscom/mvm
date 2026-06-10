@@ -9,8 +9,6 @@
 //!   macOS 26+ Apple Virtualization.framework.
 //! - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //!   (Linux KVM / macOS HVF).
-//! - **microvm.nix** (`microvm_nix::MicrovmNixBackend`) — Firecracker
-//!   via the upstream microvm.nix runner.
 //!
 //! Plus the FC support modules: `firecracker` (installer helpers),
 //! `microvm` (lifecycle), `image` (Mvmfile.toml), `network` (TAP/
@@ -53,7 +51,6 @@ pub mod handle_registry;
 pub mod image;
 pub mod libkrun;
 pub mod microvm;
-pub mod microvm_nix;
 pub mod mock;
 pub mod mock_guest_agent;
 pub mod netinit_audit;
@@ -82,7 +79,6 @@ pub mod vz_control;
 pub use apple_container::AppleContainerBackend;
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;
-pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;

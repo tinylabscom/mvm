@@ -1,7 +1,7 @@
 // Plan-60 W7+W8 split:
 //
 //   * Every concrete `VmBackend` impl + the FC support modules
-//     (apple_container, libkrun, firecracker, microvm, microvm_nix,
+//     (apple_container, libkrun, firecracker, microvm,
 //     image, network, backend) live in `mvm-backend`.
 //   * The leaf substrate (`ui`, `runtime_meta`, `cow`,
 //     `snapshot_integrity`) lives in `mvm-base`.
