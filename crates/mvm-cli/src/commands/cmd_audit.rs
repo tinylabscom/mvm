@@ -178,7 +178,6 @@ impl Commands {
             Commands::ShellInit(_) => "shell-init",
             // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
             Commands::Ops(a) => a.action.verb_name(),
-            Commands::Audit(_) => "audit",
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",
             Commands::Console(_) => "console",
@@ -187,16 +186,16 @@ impl Commands {
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
-            Commands::Receipt(_) => "receipt",
             Commands::Exec(_) => "exec",
             Commands::Invoke(_) => "invoke",
             // `vm <sub>` delegates to the per-op verb so the audit taxonomy
             // (cmd.pause.*, cmd.cp.*, …) is unchanged by the grouping.
             Commands::Vm(a) => a.action.verb_name(),
             Commands::Secret(_) => "secret",
-            Commands::Attest(_) => "attest",
             Commands::Bundle(_) => "bundle",
-            Commands::Trust(_) => "trust",
+            // `trust <sub>` delegates: attest/receipt/audit keep their own
+            // verbs, publisher add/list/remove keep `trust`.
+            Commands::Trust(a) => a.action.verb_name(),
             Commands::Deps(_) => "deps",
             Commands::Artifact(_) => "artifact",
             #[cfg(feature = "builder-vm")]

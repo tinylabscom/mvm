@@ -16,6 +16,7 @@ use super::env::{cleanup, dev, init, uninstall};
 use super::image;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
+use super::trust;
 use super::vm::{console, cp, down, exec, forward, group, pause, sandbox, session, up, volume};
 
 use audit::AuditAction;
@@ -1423,24 +1424,30 @@ fn test_uninstall_all_flag_parses() {
 
 #[test]
 fn test_audit_show_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc", "--json"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["mvmctl", "trust", "audit", "show", "plan-abc", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Audit(audit::Args {
-            action: AuditAction::Show {
-                ref plan_id,
-                json: true,
-                ..
-            }
+        Commands::Trust(trust::Args {
+            action: trust::TrustAction::Audit(audit::Args {
+                action: AuditAction::Show {
+                    ref plan_id,
+                    json: true,
+                    ..
+                }
+            })
         }) if plan_id == "plan-abc"
     ));
 }
 
 #[test]
 fn test_audit_tail_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "tail"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "tail"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action:
                 AuditAction::Tail {
                     lines,
@@ -1460,10 +1467,15 @@ fn test_audit_tail_parses() {
 
 #[test]
 fn test_audit_tail_follow_parses() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "audit", "tail", "--follow", "--lines", "50"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "tail", "--follow", "--lines", "50",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action:
                 AuditAction::Tail {
                     lines,
@@ -1481,9 +1493,12 @@ fn test_audit_tail_follow_parses() {
 
 #[test]
 fn test_audit_tail_chain_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "tail", "--chain"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "tail", "--chain"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action: AuditAction::Tail { chain, tenant, .. },
         }) => {
             assert!(chain);
@@ -1495,9 +1510,12 @@ fn test_audit_tail_chain_flag_parses() {
 
 #[test]
 fn test_audit_verify_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "verify"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "verify"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action: AuditAction::Verify { tenant },
         }) => assert_eq!(tenant, "local"),
         _ => panic!("Expected Audit::Verify"),
@@ -1506,9 +1524,13 @@ fn test_audit_verify_parses() {
 
 #[test]
 fn test_audit_verify_with_tenant() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "verify", "--tenant", "acme"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "trust", "audit", "verify", "--tenant", "acme"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action: AuditAction::Verify { tenant },
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
@@ -1517,9 +1539,12 @@ fn test_audit_verify_with_tenant() {
 
 #[test]
 fn test_audit_show_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "show", "plan-abc"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action:
                 AuditAction::Show {
                     plan_id,
@@ -2201,10 +2226,13 @@ fn run_dry_run_json_flags_parse() {
 
 #[test]
 fn receipt_verify_parses() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "receipt", "verify", "/tmp/receipt.json"]).expect("parse");
-    match cli.command {
-        Commands::Receipt(exec::ReceiptArgs {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "receipt", "verify", "/tmp/receipt.json"])
+        .expect("parse");
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Receipt(exec::ReceiptArgs {
             action: exec::ReceiptAction::Verify { path, pubkey: None },
         }) => {
             assert_eq!(path, std::path::Path::new("/tmp/receipt.json"));
@@ -2217,6 +2245,7 @@ fn receipt_verify_parses() {
 fn receipt_verify_pubkey_flag_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "trust",
         "receipt",
         "verify",
         "/tmp/receipt.json",
@@ -2224,8 +2253,11 @@ fn receipt_verify_pubkey_flag_parses() {
         "/tmp/host-signer.pub",
     ])
     .expect("parse");
-    match cli.command {
-        Commands::Receipt(exec::ReceiptArgs {
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Receipt(exec::ReceiptArgs {
             action: exec::ReceiptAction::Verify { path, pubkey },
         }) => {
             assert_eq!(path, std::path::Path::new("/tmp/receipt.json"));
@@ -3118,7 +3150,7 @@ fn state_touching_commands_trigger_entry_convergence() {
 fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     assert!(!touches(&["mvmctl", "doctor"]));
     assert!(!touches(&["mvmctl", "catalog", "list"]));
-    assert!(!touches(&["mvmctl", "audit", "tail"]));
+    assert!(!touches(&["mvmctl", "trust", "audit", "tail"]));
     assert!(!touches(&["mvmctl", "cache", "info"]));
     // `reconcile` is the convergence verb itself — must not double-run on entry.
     assert!(!touches(&["mvmctl", "reconcile"]));

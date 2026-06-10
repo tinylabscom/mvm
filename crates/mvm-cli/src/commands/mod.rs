@@ -95,8 +95,6 @@ pub(in crate::commands) enum Commands {
     ShellInit(env::shell_init::Args),
     /// Operational / observability commands (metrics, bench, config, mcp)
     Ops(ops::group::Args),
-    /// View the local audit log (~/.mvm/log/audit.jsonl)
-    Audit(ops::audit::Args),
     /// Manage named dev networks
     Network(ops::network::Args),
     /// Browse the bundled image catalog
@@ -114,8 +112,6 @@ pub(in crate::commands) enum Commands {
     Init(env::init::Args),
     /// Run one command in a transient microVM
     Run(vm::exec::RunArgs),
-    /// Verify signed execution receipts emitted by `mvmctl run --receipt`.
-    Receipt(vm::exec::ReceiptArgs),
     /// Run one dev command in a transient microVM
     Exec(vm::exec::Args),
     /// Call a VM's baked entrypoint
@@ -124,8 +120,6 @@ pub(in crate::commands) enum Commands {
     Vm(vm::group::Args),
     /// Manage local secret namespaces
     Secret(ops::secret::Args),
-    /// Emit or verify host attestation reports
-    Attest(ops::attest::Args),
     /// Seal or verify portable VM bundles
     Bundle(bundle::Args),
     /// Manage trusted bundle publishers
@@ -282,7 +276,6 @@ pub fn run() -> Result<()> {
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
         Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
-        Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
@@ -291,12 +284,10 @@ pub fn run() -> Result<()> {
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
-        Commands::Receipt(a) => vm::exec::run_receipt(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
         Commands::Vm(a) => vm::group::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
-        Commands::Attest(a) => ops::attest::run(&cli, a, &cfg),
         Commands::Bundle(a) => bundle::run(&cli, a, &cfg),
         Commands::Trust(a) => trust::run(&cli, a, &cfg),
         Commands::Deps(a) => deps::run(&cli, a, &cfg),

@@ -293,6 +293,10 @@ const TRUST_SUB: &[(&str, AuditPosture)] = &[
     ("add", AuditPosture::Emits("TrustAdd")),
     ("list", AuditPosture::ReadOnly),
     ("remove", AuditPosture::Emits("TrustRemove")),
+    // Plan 178 — provenance verbs folded into `trust <sub>`.
+    ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
+    ("receipt", AuditPosture::ReadOnly),
+    ("audit", AuditPosture::ReadOnly),
 ];
 
 // Plan 73 Followup C — sealed deps-volume cache. `deps inspect` is
@@ -329,7 +333,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
     ("run", AuditPosture::InteractiveOrControl),
-    ("receipt", AuditPosture::ReadOnly),
     ("exec", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
     // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
@@ -349,7 +352,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Operational surfaces.
     // Plan 178 — metrics/bench/config/mcp grouped under `ops <sub>`.
     ("ops", AuditPosture::DelegatesToSub(OPS_SUB)),
-    ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
     ("pool", AuditPosture::DelegatesToSub(POOL_SUB)),
@@ -357,7 +359,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
     ("secret", AuditPosture::DelegatesToSub(SECRET_SUB)),
-    ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),

@@ -1218,7 +1218,7 @@ fn audit_tail_does_not_emit_local_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["audit", "tail"])
+        .args(["trust", "audit", "tail"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1249,7 +1249,7 @@ fn audit_verify_does_not_emit_local_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["audit", "verify"])
+        .args(["trust", "audit", "verify"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1764,7 +1764,12 @@ fn audit_show_does_not_emit_local_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["audit", "show", "00000000-0000-0000-0000-000000000000"])
+        .args([
+            "trust",
+            "audit",
+            "show",
+            "00000000-0000-0000-0000-000000000000",
+        ])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1790,7 +1795,7 @@ fn attest_export_does_not_emit_local_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["attest", "export"])
+        .args(["trust", "attest", "export"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1815,7 +1820,7 @@ fn attest_status_does_not_emit_local_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["attest", "status"])
+        .args(["trust", "attest", "status"])
         .output()
         .expect("spawn mvmctl");
     assert!(
