@@ -100,14 +100,13 @@ Landed in four committed slices, each TDD'd:
 
 **Files:** `crates/mvm-backend/src/egress_redirect.rs` (add a `:443` rule alongside `:80`; `nft_rule_argv` currently hardcodes `"80"` — parameterize the dport or emit both rules into the per-VM table); `wire_egress_substitution` unchanged except both ports now steer to the terminator.
 
-- [ ] **Step 1: Failing test** — `EgressRedirect::install` emits redirect rules for **both** 80 and 443 to the terminator port (assert both `nft_rule_argv(..,80)` and `..443)` token vectors are produced). Keep the pure-function test shape from Stage 1b.
-- [ ] **Step 2–4:** Implement (idempotent table holds both rules; Drop/teardown_by_name unchanged — whole-table delete already covers both). **Commit** — `feat(terminator): redirect guest :443 to the terminator (plan 129 stage 2)`.
+- [x] **DONE** (`1e50e4b1`) — `nft_rule_argv` gains a `dport` param; `REDIRECTED_DPORTS = [80, 443]`; `install` emits one rule per port into the per-VM table (terminator demuxes via `SO_ORIGINAL_DST`). Drop/teardown unchanged. Test `install_redirects_both_80_and_443_to_the_terminator`.
 
 ## Task S2.6 — ADR updates
 
 **Files:** `specs/adrs/006-name-constrained-egress-ca.md` (status Proposed → Accepted; record the implemented shape: per-VM intermediate, SNI-gated termination, unbound-splice, the zero-added-visibility argument, and the Python/Node nameConstraints caveat); `specs/adrs/067-secrets-subsystem-egress-substitution.md` (make **proxy-native primary / SDK optional**).
 
-- [ ] Amend both ADRs; cross-link to this plan + #735/#744. Note that scoped name-constrained termination ≠ the rejected blanket MITM. **Commit** — `docs(adr): accept ADR-006; ADR-067 proxy-native primary (plan 129 stage 2)`.
+- [x] **DONE** — ADR-006 status Proposed → **Accepted** with an as-implemented section (per-VM intermediate, SNI-gated termination, unbound-splice, zero-added-visibility argument, Python/Node nameConstraints caveat) cross-linking plan 129 + ADR-067. ADR-067 §1 retitled "proxy-native transparent substitution (SDK optional)" with an update block flipping primary↔SDK and superseding the coverage caveat for bound hosts; the "TLS MITM of all egress" rejected-alternative now distinguishes the scoped name-constrained terminator. **Commit** — `docs(adr): accept ADR-006; ADR-067 proxy-native primary (plan 129 stage 2)`.
 
 ## Task S2.7 — box e2e (`https`, SDK-free) — the headline acceptance
 
