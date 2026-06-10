@@ -141,7 +141,7 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     }
 
     let content_dir = store.content_dir(&parent.id);
-    let blob = first_file_in(&content_dir)?;
+    let blob = only_file_in(&content_dir)?;
     let actual = sha256_file_hex(&blob)?;
     if actual != parent.content_sha256 {
         anyhow::bail!(
@@ -173,16 +173,26 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     Ok(child)
 }
 
-fn first_file_in(dir: &Path) -> Result<PathBuf> {
+/// Return the single regular file in a checkpoint's content dir. An fs_quick
+/// checkpoint holds exactly one blob; more than one means the content was
+/// tampered with or corrupted, so fail loud rather than guess.
+fn only_file_in(dir: &Path) -> Result<PathBuf> {
+    let mut found: Option<PathBuf> = None;
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading content dir {}", dir.display()))?
     {
         let entry = entry?;
         if entry.file_type()?.is_file() {
-            return Ok(entry.path());
+            if found.is_some() {
+                anyhow::bail!(
+                    "checkpoint content dir {} has more than one file; refusing to fork an ambiguous checkpoint",
+                    dir.display()
+                );
+            }
+            found = Some(entry.path());
         }
     }
-    anyhow::bail!("checkpoint content dir {} has no file", dir.display())
+    found.with_context(|| format!("checkpoint content dir {} has no file", dir.display()))
 }
 
 fn sha256_file_hex(path: &Path) -> Result<String> {
@@ -407,6 +417,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("integrity") || err.to_string().contains("sha256"));
+    }
+
+    #[test]
+    fn fork_refuses_multi_file_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        // plant a second file in the content dir
+        std::fs::write(store.content_dir(&parent.id).join("extra.bin"), b"x").unwrap();
+        let err = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("f"),
+                child_vm_name: "c".into(),
+                dest_dir: tmp.path().join("d"),
+                created_unix: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("more than one file"));
     }
 
     #[test]
