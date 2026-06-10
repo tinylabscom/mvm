@@ -51,7 +51,36 @@
 
 ## Task S2.3 — guest trust install
 
-**Files:** `nix/lib/mk-guest.nix` (a boot step that appends any `/etc/ssl/certs/mvm-egress-*.crt` to the trust bundle before the entrypoint) + matching guest `/init` wiring. Honest caveat documented inline.
+> **⚠️ BLOCKED — channel assumption is wrong (found while scoping S2.3, 2026-06-10).**
+> The original sketch ("the secrets drive mounts the cert; the boot step concats
+> it") does **not** hold for the sealed-FC workload path:
+> - `nix/lib/mk-guest.nix`'s `/init` mounts **neither** the `mvm-secrets` nor the
+>   `mvm-config` drive — `grep -ni secret nix/lib/mk-guest.nix` is empty; the only
+>   per-VM mounts are `mvm.uvols` user volumes (kernel cmdline).
+> - The per-VM **runtime overlay** (`/mvm/runtime`, ADR-051) is **verity-sealed**
+>   (build-time roothash via `mvm-verity-init`), so a boot-minted cert can't ride
+>   it either.
+> - The proven per-VM placeholder-env channel is **`invoke.rs`** (the invoke
+>   dispatch injects `HTTP_PROXY` + placeholder vars into the agent-run call) —
+>   **not** the sealed *entrypoint* path that S2.7's generic `curl https://` uses.
+>   No entrypoint-env injection of placeholders for the FC sealed path exists yet
+>   (`rg` for it is empty).
+>
+> **Implication:** S2.2's cert-via-`secret_files` (secrets drive) is **inert on
+> sealed FC** until a real per-VM guest channel exists. The host-side split
+> (key→endpoint) S2.2 landed is still correct; only the guest-delivery leg is
+> affected.
+>
+> **Recommended S2.3 redesign (sealed-rootfs-safe):** deliver the per-VM cert
+> over the **same per-VM channel that carries the entrypoint placeholder env**
+> (to be established — likely a small `/init` step that reads a per-VM mutable
+> source the host writes: kernel cmdline blob, an `/init`-mounted config drive,
+> or an agent/vsock fetch), then write it to a **tmpfs** path (`/run/mvm/
+> egress-ca.crt`) and export `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
+> `NODE_EXTRA_CA_CERTS` pointing at `cat ca-bundle.crt egress-ca.crt`. Tmpfs keeps
+> it writable under dm-verity. **Decide the channel before coding S2.3/S2.7.**
+
+**Files (original sketch — revisit per the block above):** `nix/lib/mk-guest.nix` (a boot step that appends any `/etc/ssl/certs/mvm-egress-*.crt` to the trust bundle before the entrypoint) + matching guest `/init` wiring. Honest caveat documented inline.
 
 - [ ] **Step 1:** Decide the install mechanism (append to `ca-bundle.crt` at boot vs `update-ca-certificates`-style) — the secrets drive mounts the cert; the boot step concatenates it into the trusted bundle the guest's TLS stack reads (`/etc/ssl/certs/ca-bundle.crt`, baked by mkGuest at `mk-guest.nix:809`). Test: a mkGuest fixture / boot-script unit asserts the concat step runs before the entrypoint and only for present `mvm-egress-*.crt`.
 - [ ] **Step 2–4:** Implement + the inline caveat comment (Python/older-Node don't enforce nameConstraints → host allow-list is the boundary). **Commit** — `feat(guest): trust per-VM egress cert at boot (plan 129 stage 2)`.
