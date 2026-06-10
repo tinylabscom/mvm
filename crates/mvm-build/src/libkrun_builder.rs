@@ -1224,7 +1224,7 @@ pub(crate) fn host_arch_tag() -> &'static str {
 /// subdirs in one place. Created lazily by callers — this
 /// function does not touch the filesystem.
 pub(crate) fn builder_vm_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm")
+    crate::builder_vm::builder_vm_cache_dir()
 }
 
 /// Filename of Stage 0's dedicated persistent Nix-store image,

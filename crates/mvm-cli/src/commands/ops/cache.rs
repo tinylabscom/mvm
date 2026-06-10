@@ -45,6 +45,18 @@ pub(in crate::commands) enum CacheAction {
         #[arg(long)]
         json: bool,
     },
+    /// Repair a degraded builder VM store (#640). Clears
+    /// `~/.cache/mvm/builder-vm/` so the next `dev up`/`build` cold-rebuilds it.
+    /// Use this when `dev up` keeps failing with a dangling-store error
+    /// (`error: path '/nix/store/…-source/flake.nix' does not exist`).
+    Repair {
+        /// Print what would be freed without removing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Structured output for `cache info --json`.
@@ -108,6 +120,39 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // and the last Stage 0 source fingerprint.
             for line in &info.detail_lines {
                 println!("{line}");
+            }
+            Ok(())
+        }
+        CacheAction::Repair { dry_run, json } => {
+            let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
+                .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?;
+            if json {
+                crate::json_out::emit_json(&repair)?;
+                return Ok(());
+            }
+            if !repair.existed {
+                ui::info(&format!(
+                    "Builder store {} is already absent — nothing to repair.",
+                    repair.path
+                ));
+            } else if dry_run {
+                ui::info(&format!(
+                    "Would clear builder store {} ({}). Re-run without --dry-run to repair.",
+                    repair.path,
+                    human_bytes(repair.bytes_freed)
+                ));
+            } else {
+                mvm_core::audit_emit!(
+                    CachePrune,
+                    "op=builder_store_repair freed_bytes={} cache_dir={}",
+                    repair.bytes_freed,
+                    repair.path
+                );
+                ui::success(&format!(
+                    "Cleared builder store {} ({} freed). The next `mvmctl dev up` rebuilds it.",
+                    repair.path,
+                    human_bytes(repair.bytes_freed)
+                ));
             }
             Ok(())
         }
