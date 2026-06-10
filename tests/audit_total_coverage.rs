@@ -122,6 +122,15 @@ const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("status", AuditPosture::ReadOnly),
 ];
 
+// Wired into AUDIT_POSTURE once Task 8 registers the checkpoint command.
+#[allow(dead_code)]
+const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
+    ("create", AuditPosture::Emits("CheckpointCreated")),
+    ("fork", AuditPosture::Emits("CheckpointForked")),
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::ReadOnly),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
@@ -499,6 +508,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestAliasSet",
         "ManifestTagAdd",
         "ManifestTagRemove",
+        "CheckpointCreated",
+        "CheckpointForked",
         "NetworkCreate",
         "NetworkRemove",
         "PoolWarm",
