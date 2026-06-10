@@ -197,6 +197,25 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
     Some(format!("mvm.uvols={}", entries.join(";")))
 }
 
+/// Plan 129 Stage 2 — encode the per-VM egress intermediate **cert** (PEM) as a
+/// single `mvm.egress_ca=<hex>` kernel-cmdline token, mirroring `mvm.uvols`.
+/// `/init` decodes it, writes the cert to tmpfs (`/run/mvm/egress-ca.crt`), and
+/// points the guest's TLS trust at a combined bundle so a workload trusts
+/// host-terminated bound-host TLS. The fresh FC boot attaches no secrets drive,
+/// so the cmdline is the only per-VM channel to a sealed guest. Cert-only —
+/// never the key (host-side). `None` for an empty cert (no https leg).
+///
+/// Hex keeps the value a single space/newline-free token the kernel cmdline and
+/// `/proc/cmdline` round-trip. ~1.3 KB for a P-256 intermediate — well within
+/// the kernel `COMMAND_LINE_SIZE`, but kept compact deliberately.
+pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
+    if cert_pem.is_empty() {
+        return None;
+    }
+    let hex: String = cert_pem.bytes().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.egress_ca={hex}"))
+}
+
 /// A file to inject into the guest (config or secret).
 #[derive(Debug, Clone)]
 pub struct VmFile {
@@ -1035,6 +1054,27 @@ mod tests {
     #[test]
     fn encode_user_volumes_cmdline_empty_is_none() {
         assert!(encode_user_volumes_cmdline(&[]).is_none());
+    }
+
+    #[test]
+    fn encode_egress_ca_cmdline_empty_is_none() {
+        assert!(encode_egress_ca_cmdline("").is_none());
+    }
+
+    #[test]
+    fn encode_egress_ca_cmdline_hex_encodes_pem_as_single_token() {
+        let pem = "-----BEGIN CERTIFICATE-----\nAB\n-----END CERTIFICATE-----\n";
+        let got = encode_egress_ca_cmdline(pem).unwrap();
+        assert!(got.starts_with("mvm.egress_ca="));
+        // Single cmdline token — no spaces/newlines survive the hex encoding.
+        assert!(!got.contains(' ') && !got.contains('\n'));
+        // Round-trips: the hex decodes back to the exact PEM bytes.
+        let hex = got.strip_prefix("mvm.egress_ca=").unwrap();
+        let decoded: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(decoded, pem.as_bytes());
     }
 
     #[test]

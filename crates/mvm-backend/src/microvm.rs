@@ -1801,6 +1801,16 @@ pub fn configure_flake_microvm_with_drives_dir(
         format!("root=/dev/vda rw rootwait init=/init {base_args}")
     };
 
+    // Plan 129 Stage 2 — a fresh FC boot attaches no secrets drive, so the per-VM
+    // egress intermediate cert reaches the sealed guest via the kernel cmdline.
+    // `mvmctl up` staged it in `egress-intermediate.json`; `/init` decodes the
+    // `mvm.egress_ca=` token into the guest trust bundle (cert only — the key
+    // stays host-side in the terminator endpoint).
+    let boot_args = match egress_ca_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
+
     ui::info(&format!("Setting boot source: {}", config.vmlinux_path));
     let boot_source = match &effective_initrd {
         Some(initrd) => {
@@ -2401,6 +2411,20 @@ fn wire_egress_substitution(config: &FlakeRunConfig, _abs_dir: &str) -> Result<(
     let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
     redirect.persist();
     Ok(())
+}
+
+/// Plan 129 Stage 2 — the `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
+/// or `None` when the VM has no staged intermediate (no secrets / no https leg).
+/// Reads the **cert** from the per-VM `egress-intermediate.json` sidecar (the key
+/// is never put on the cmdline / in the guest). Best-effort: a malformed/missing
+/// sidecar yields `None` rather than blocking boot — the worst case is the guest
+/// can't trust host-terminated TLS, and the claim-12 host allow-list still holds.
+fn egress_ca_cmdline_token(vm_name: &str) -> Option<String> {
+    let path = mvm_core::config::vm_state_dir(vm_name).join("egress-intermediate.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let cert = v["cert_pem"].as_str()?;
+    mvm_core::vm_backend::encode_egress_ca_cmdline(cert)
 }
 
 /// Plan 129 Stage 2 — read the per-VM egress intermediate (`cert_pem` + `key_pem`)

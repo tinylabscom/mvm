@@ -49,7 +49,32 @@
 - [x] Gates clean: clippy, fmt, `check-core-runtime-free`, `check-no-display-on-secret-types`; 2911 + egress tests green.
 - [x] **Commit** — `feat(terminator): deliver per-VM egress cert to guest, key to endpoint (plan 129 stage 2)`.
 
-## Task S2.3 — guest trust install
+## Task S2.3 — guest trust install ✅ IMPLEMENTED via kernel-cmdline (channel decided)
+
+**Channel decided + confirmed by code:** the fresh FC boot (`configure_microvm` / `configure_flake_microvm_with_drives_dir`) attaches **only the rootfs drive** — the config/secrets `.ext4` are attached **only on snapshot-restore** (`restore_from_template_snapshot`). So a fresh sealed boot's *only* per-VM channel is the **kernel cmdline** (rootfs is verity-sealed). Cert is 648 B PEM / 1296 hex — fits comfortably.
+
+Implemented:
+- [x] **Host encoder** (`mvm_core::vm_backend::encode_egress_ca_cmdline`, `1296`-hex `mvm.egress_ca=<hex(PEM)>`, mirrors `mvm.uvols`) + round-trip test.
+- [x] **Backend wiring** — `egress_ca_cmdline_token(vm_name)` reads the cert from the S2.2 `egress-intermediate.json` sidecar; appended to `configure_flake_microvm_with_drives_dir`'s `boot_args` (cert only — key stays host-side). Verified host build + Linux cross-build.
+- [x] **mkGuest `/init` Stage 2.46** — decode `mvm.egress_ca=` (same hex+sed+printf as uvols) → tmpfs `/run/mvm/egress-ca.crt` → combined bundle (`cat ca-bundle.crt egress-ca.crt`) → export `SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` (bundle) + `NODE_EXTRA_CA_CERTS` (cert). Tmpfs = writable under dm-verity; export reaches the entrypoint (setpriv preserves env). Inline ADR-006 nameConstraints caveat. **Box-validated only** (guest shell; not runnable on a macOS dev host) — proven by S2.7.
+- [x] **Commit** — `feat(guest): trust per-VM egress cert at boot via kernel cmdline (plan 129 stage 2 S2.3)`.
+
+> ### ⚠️ NEW BLOCKER for S2.7 (not S2.3) — placeholder-env-at-boot ordering
+> S2.3 delivers the **cert**. But S2.7's `curl -H "Authorization: Bearer $TOKEN"`
+> also needs `$TOKEN` = the per-run **placeholder** in the sealed entrypoint's
+> env. The placeholder is minted by the substitution endpoint at **spawn**, which
+> happens in `wire_egress_substitution` **post-boot** — after `/init` already ran.
+> So the cmdline can't carry it (chicken-and-egg), and there's no boot-time
+> placeholder-env delivery for a sealed FC entrypoint today (the SDK/invoke path
+> injects it *post-boot* at dispatch, which is why the QEMU e2e used invoke).
+> **Options for S2.7:** (a) mint placeholders **before** boot and put `$TOKEN` on
+> the cmdline too (`mvm.secret_env=<hex>`), decoded by `/init`; (b) the entrypoint
+> fetches its placeholder env from the endpoint over vsock at startup; (c) drive
+> the workload via `invoke` (post-boot) rather than as the boot entrypoint.
+> Decide before S2.7 (which is also gated on FC bringup #746).
+
+---
+### Original blocker note (superseded by the channel decision above)
 
 > **⚠️ BLOCKED — channel assumption is wrong (found while scoping S2.3, 2026-06-10).**
 > The original sketch ("the secrets drive mounts the cert; the boot step concats
