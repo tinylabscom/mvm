@@ -401,6 +401,24 @@ pub enum BuilderVmError {
     #[error("nix build failed inside builder sandbox: {0}")]
     NixBuildFailed(String),
 
+    /// The persistent builder Nix store has a dangling/GC'd path — every build
+    /// re-evals to the same missing path and fails identically, so `dev up`
+    /// appears to "loop" (#640). Distinguished from a generic build failure so
+    /// the user gets the one-line recovery instead of an opaque nix error.
+    #[error(
+        "the builder VM's Nix store has a dangling/garbage-collected path — \
+         a previous `nix-collect-garbage` removed a store path the cached builder \
+         image still references, so every `dev up` fails identically.\n\
+         Recover with:\n    rm -rf {cache_dir}\n\
+         then re-run `mvmctl dev up` (the builder image rebuilds from scratch).\n\
+         Inner nix error: {detail}\nFull log: {log_path}"
+    )]
+    DegradedBuilderStore {
+        cache_dir: String,
+        log_path: String,
+        detail: String,
+    },
+
     /// Artifact extraction failed (missing rootfs, permissions,
     /// extraction-dir issue).
     #[error("extracting artifacts from builder sandbox: {0}")]
@@ -423,6 +441,29 @@ pub enum BuilderVmError {
         /// full pre- and post-panic kernel output is preserved.
         console_log_path: String,
     },
+}
+
+/// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear
+/// to recover a degraded builder store (#640). Lives here (ungated) so the build
+/// error path can name the recovery dir; the `builder-vm`-gated builder modules
+/// delegate to this for a single source of truth.
+pub fn builder_vm_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm")
+}
+
+/// Detect nix's dangling-store-path signature in a build's stderr (#640): a
+/// `/nix/store/...` path the build references was garbage-collected, so the eval
+/// fails with `error: path '/nix/store/<hash>...' does not exist`. Matched
+/// precisely — a quoted `/nix/store/` path **and** "does not exist" on the same
+/// line — so an unrelated "does not exist" (a user's missing source file) does
+/// not trip the degraded-store recovery hint. Returns the matched line for the
+/// error `detail`.
+pub fn dangling_store_path_line(stderr: &str) -> Option<&str> {
+    stderr.lines().find(|line| {
+        line.contains("does not exist")
+            && line.contains("/nix/store/")
+            && (line.contains("path '") || line.contains("path \""))
+    })
 }
 
 /// Stub implementation. Every method returns
@@ -874,6 +915,53 @@ pub fn admit_overlay_aware(rootfs_dir: &Path) -> Result<(), anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dangling_store_line_matches_the_nix_gc_signature() {
+        // The exact #640 signature (single-quoted /nix/store path + does not exist).
+        let stderr = "building...\n\
+             error: path '/nix/store/0ccnxa25whszw7mgbgyzdm4nqc0zwnm8-source/flake.nix' does not exist\n\
+             error: build of '/nix/store/abc.drv' failed\n";
+        let line = dangling_store_path_line(stderr).expect("should match");
+        assert!(line.contains("0ccnxa25whszw7mgbgyzdm4nqc0zwnm8-source"));
+        // Double-quoted nix path form also matches.
+        assert!(
+            dangling_store_path_line("error: path \"/nix/store/xyz-source\" does not exist")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn dangling_store_line_ignores_unrelated_does_not_exist() {
+        // A workload's own missing source file must NOT trip the degraded-store
+        // recovery hint — no /nix/store path on the line.
+        assert!(dangling_store_path_line("error: file 'src/main.rs' does not exist").is_none());
+        // A /nix/store mention without "does not exist" is also not it.
+        assert!(
+            dangling_store_path_line("copying '/nix/store/abc-foo' to the binary cache").is_none()
+        );
+        assert!(dangling_store_path_line("").is_none());
+    }
+
+    #[test]
+    fn degraded_store_error_names_the_recovery_dir_and_command() {
+        let e = BuilderVmError::DegradedBuilderStore {
+            cache_dir: "/home/u/.cache/mvm/builder-vm".into(),
+            log_path: "/tmp/job/nix-stderr.log".into(),
+            detail: "error: path '/nix/store/x-source/flake.nix' does not exist".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("rm -rf /home/u/.cache/mvm/builder-vm"));
+        assert!(msg.contains("dev up"));
+        assert!(msg.contains("dangling")); // distinct from a generic build failure
+    }
+
+    #[test]
+    fn builder_vm_cache_dir_honors_mvm_cache_dir() {
+        // Reuse-first: the gated libkrun helper delegates here. Just assert the
+        // path ends in builder-vm (env-isolated check would need a lock).
+        assert!(builder_vm_cache_dir().ends_with("builder-vm"));
+    }
 
     #[test]
     fn pinned_image_is_namespaced() {
