@@ -28,10 +28,43 @@ use anyhow::{Context, Result, anyhow};
 use mvm_core::crypto::egress_ca::VmIntermediate;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+use mvm_sdk::ir::AuthType;
+
 use super::read::read_http_request;
 use super::request::proxy_request_from_origin_form_https;
 use crate::keyholder::substitution::SubstitutionEndpoint;
-use crate::supervisor::substitution_proxy::{PreparedRequest, prepare_request};
+use crate::supervisor::substitution_proxy::{
+    PreparedRequest, collect_substituted_meta, destination_host, prepare_request,
+};
+
+/// What a terminated connection substituted — handed back so the caller emits
+/// the same `secret.substituted` audit (metadata only, claim 13) the `:80` path
+/// does. Captured from the decrypted request BEFORE substitution.
+pub struct TerminateOutcome {
+    pub substituted: Vec<(String, AuthType)>,
+    pub destination: Option<String>,
+}
+
+/// Peek (without consuming) the ClientHello SNI from a blocking std `TcpStream`.
+/// `Ok(None)` when no SNI is present or a full ClientHello hasn't been buffered
+/// within the peek window — the caller then splices (can't bind-check). The
+/// stream is untouched, so the caller can hand it to a rustls server (bound) or
+/// splice it raw (unbound). Bounded retries cover a ClientHello fragmented
+/// across packets; the socket's read timeout bounds the total wait.
+pub fn peek_sni(stream: &TcpStream) -> std::io::Result<Option<String>> {
+    let mut buf = vec![0u8; MAX_CLIENT_HELLO_PEEK];
+    for _ in 0..8 {
+        let n = stream.peek(&mut buf)?;
+        if let Some(sni) = parse_sni(&buf[..n]) {
+            return Ok(Some(sni));
+        }
+        if n >= buf.len() {
+            break; // full window, still no SNI
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(None)
+}
 
 /// Cap on the bytes we peek looking for the SNI. A ClientHello carrying SNI is
 /// far smaller; this bounds the peek so a guest can't make us buffer unboundedly
@@ -77,7 +110,7 @@ pub fn terminate_and_substitute<S, F>(
     orig_dst: SocketAddr,
     endpoint: &SubstitutionEndpoint<'_>,
     forward: F,
-) -> Result<()>
+) -> Result<TerminateOutcome>
 where
     S: Read + Write,
     F: Fn(&PreparedRequest) -> Result<Vec<u8>>,
@@ -87,13 +120,70 @@ where
 
     let raw = read_http_request(&mut tls).context("read decrypted request")?;
     let req = proxy_request_from_origin_form_https(&raw, orig_dst)?;
+    // Capture audit metadata before substitution consumes the request (claim-13
+    // safe — resolve_meta touches no value), mirroring the `:80` path exactly.
+    let substituted = collect_substituted_meta(endpoint, &req.headers);
+    let destination = destination_host(&req.url).ok();
+
     let prepared =
         prepare_request(endpoint, req).map_err(|e| anyhow!("substitution refused: {e}"))?;
     let resp = forward(&prepared)?;
 
     tls.write_all(&resp).context("write terminated response")?;
     tls.flush().context("flush terminated response")?;
-    Ok(())
+    Ok(TerminateOutcome {
+        substituted,
+        destination,
+    })
+}
+
+/// Serialize a forwarded upstream response to HTTP/1.1 wire bytes for the
+/// terminated TLS stream. reqwest already decoded transfer-encoding, so we drop
+/// the upstream framing headers and emit our own `Content-Length` + `close`.
+pub fn serialize_http_response(status: u16, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128 + body.len());
+    out.extend_from_slice(format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status)).as_bytes());
+    for (k, v) in headers {
+        let lk = k.to_ascii_lowercase();
+        // Drop framing/hop-by-hop headers reqwest already resolved; we re-frame.
+        if matches!(
+            lk.as_str(),
+            "transfer-encoding" | "content-length" | "connection"
+        ) {
+            continue;
+        }
+        // Defensive: never let a header smuggle CRLF into the response.
+        if k.bytes().chain(v.bytes()).any(|b| b == b'\r' || b == b'\n') {
+            continue;
+        }
+        out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
+    }
+    out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(body);
+    out
+}
+
+/// A minimal reason phrase for common statuses; "" for the rest (clients accept
+/// an empty reason phrase per RFC 7230).
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "",
+    }
 }
 
 /// Splice an **unbound**-SNI connection straight through to `orig_dst` without
@@ -439,6 +529,35 @@ mod tests {
         assert_eq!(auth, "Bearer REALTOKEN");
         // And the re-origination URL is https (upstream dialled over TLS).
         assert!(seen.url.starts_with("https://api.openai.com/v1/x"));
+    }
+
+    #[test]
+    fn serialize_http_response_reframes_with_content_length() {
+        let body = b"hello";
+        let out = serialize_http_response(
+            200,
+            &[
+                ("content-type".into(), "text/plain".into()),
+                // framing headers must be dropped + re-emitted
+                ("transfer-encoding".into(), "chunked".into()),
+                ("content-length".into(), "999".into()),
+            ],
+            body,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("content-type: text/plain\r\n"));
+        assert!(!text.contains("chunked"));
+        assert!(text.contains("Content-Length: 5\r\n")); // body.len(), not 999
+        assert!(text.contains("Connection: close\r\n\r\n"));
+        assert!(text.ends_with("\r\n\r\nhello"));
+    }
+
+    #[test]
+    fn serialize_http_response_drops_crlf_smuggling_header() {
+        let out = serialize_http_response(200, &[("x".into(), "a\r\nInjected: b".into())], b"");
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("Injected"));
     }
 
     #[test]

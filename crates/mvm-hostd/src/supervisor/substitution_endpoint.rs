@@ -17,6 +17,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use serde::{Deserialize, Serialize};
 
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore, default_secrets_dir};
@@ -132,12 +134,24 @@ pub fn assemble(
         Some(dir) => FileBindingStore::with_dir(dir),
         None => FileBindingStore::default_location()?,
     };
+    // Plan 129 Stage 2 — reconstruct the per-VM intermediate minter from the
+    // delivered PEMs (the key never left the host) so the terminator can
+    // terminate bound-host `https`. Absent ⇒ `http`-only (Stage 1b).
+    let tls_intermediate = match &cfg.tls_intermediate {
+        Some(ti) => Some(
+            mvm_core::crypto::egress_ca::VmIntermediate::from_pem(&ti.cert_pem, &ti.key_pem)
+                .context("reconstruct per-VM egress intermediate from EndpointConfig")?,
+        ),
+        None => None,
+    };
+
     let (service, handed) = SubstitutionService::from_plan(
         &cfg.secrets,
         &cfg.tenant_id,
         &bindings,
         secret_store,
         cfg.forward_timeout_secs,
+        tls_intermediate,
     )?;
     Ok((service, handed))
 }
