@@ -5,7 +5,6 @@
 //! headers→body logic.
 
 use std::io::Read;
-use std::net::TcpStream;
 
 use anyhow::{Context, Result, bail};
 
@@ -15,7 +14,10 @@ pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// Read one full HTTP/1.1 request off `stream`: headers up to `\r\n\r\n`,
 /// then the `Content-Length` body (if any). Bounded by [`MAX_REQUEST_BYTES`].
-pub fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
+///
+/// Generic over `Read` so it serves both the cleartext `:80` path (a raw
+/// `TcpStream`) and the `:443` path (a decrypted `rustls` stream).
+pub fn read_http_request<R: Read>(stream: &mut R) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
 

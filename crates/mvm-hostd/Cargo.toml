@@ -39,7 +39,9 @@ name = "mvm-substitution-endpoint"
 path = "src/bin/mvm-substitution-endpoint.rs"
 
 [dependencies]
-mvm-core.workspace = true
+# `egress-ca`: Plan 129 Stage 2 — the https terminator mints per-SNI leaves
+# under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
+mvm-core = { workspace = true, features = ["egress-ca"] }
 mvm-backend.workspace = true
 # plan 123 A2 — the EgressEnforcer seam this crate's SupervisorEgressEnforcer
 # implements. Acyclic HIGH->LOW: mvm-network deps only mvm-core + mvm-sdk.
@@ -77,6 +79,9 @@ thiserror = "1"
 toml.workspace = true
 url = "2"
 reqwest = { workspace = true }
+# Plan 129 Stage 2 — server-side TLS termination for bound-host https egress.
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true

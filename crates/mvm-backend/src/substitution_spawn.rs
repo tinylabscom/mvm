@@ -9,12 +9,73 @@
 //! None` (slirp has no TAP to redirect); the FC caller passes `Some(addr)` to
 //! turn on the transparent HTTP terminator that the nft TAP REDIRECT feeds.
 
+use crate::microvm::DriveFile;
 use anyhow::{Result, anyhow, bail};
+use mvm_core::crypto::egress_ca::EgressCa;
 use mvm_core::plan::SecretBinding;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+/// Plan 129 Stage 2 — the per-VM egress intermediate cert lands in the guest's
+/// `mvm-secrets` drive under this filename; the S2.3 mkGuest boot step appends
+/// it to the guest trust bundle before the entrypoint runs.
+pub const EGRESS_CERT_DRIVE_NAME: &str = "mvm-egress.crt";
+
+/// Plan 129 Stage 2 — the cert/key split the egress CA exists to enforce. The
+/// guest receives only `guest_cert` (the intermediate's PEM **cert**, so it can
+/// trust host-terminated bound-host TLS); the terminator endpoint receives the
+/// cert **and** key (`endpoint_cert_pem` / `endpoint_key_pem`) to mint per-SNI
+/// leaves. The intermediate key never enters the guest secrets drive — the same
+/// claim-13 "no key on the guest" invariant the substitution channel upholds.
+pub struct EgressTlsDelivery {
+    /// Cert-only file injected into the guest `mvm-secrets` drive.
+    pub guest_cert: DriveFile,
+    /// The intermediate cert PEM the endpoint terminates under (== guest cert).
+    pub endpoint_cert_pem: String,
+    /// The intermediate key PEM — terminator-side only, NEVER to a guest.
+    pub endpoint_key_pem: String,
+}
+
+// Manual redacted Debug: this struct carries the intermediate private key, so
+// its `Debug` must never print key bytes (xtask check-no-display-on-secret-types
+// parity with `VmIntermediate`).
+impl std::fmt::Debug for EgressTlsDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EgressTlsDelivery")
+            .field("guest_cert", &self.guest_cert.name)
+            .field("endpoint_cert_pem", &"<intermediate cert>")
+            .field("endpoint_key_pem", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Plan 129 Stage 2 (S2.2) — mint the per-VM name-constrained intermediate
+/// (loading/initialising the long-lived host egress CA under `ca_dir`) and split
+/// it: cert to the guest secrets drive, cert+key to the terminator endpoint. A
+/// pure, unit-testable helper; the boot path calls it when the admitted plan
+/// carries secrets and threads the result into `create_dev_secrets_drive` (guest)
+/// and the `EndpointConfig` (host). `bound_hosts` are the plan's allowed egress
+/// hosts — the intermediate's `nameConstraints permitted` is exactly this set.
+pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<EgressTlsDelivery> {
+    let ca = EgressCa::load_or_init_at(ca_dir)
+        .map_err(|e| anyhow!("load/init egress CA at {}: {e}", ca_dir.display()))?;
+    let inter = ca
+        .mint_vm_intermediate(bound_hosts)
+        .map_err(|e| anyhow!("mint per-VM egress intermediate: {e}"))?;
+    let cert_pem = inter.cert_pem().to_string();
+    let key_pem = inter.key_pem();
+    Ok(EgressTlsDelivery {
+        guest_cert: DriveFile {
+            name: EGRESS_CERT_DRIVE_NAME.to_string(),
+            content: cert_pem.clone(),
+            mode: 0o444,
+        },
+        endpoint_cert_pem: cert_pem,
+        endpoint_key_pem: key_pem,
+    })
+}
 
 /// Plan 129 — PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
 /// file holding the `(guest var, placeholder)` env pairs it minted (the invoke
@@ -77,6 +138,7 @@ pub fn spawn_substitution_endpoint(
     tenant: &str,
     secrets: &[SecretBinding],
     terminator_listen: Option<SocketAddr>,
+    tls_intermediate: Option<(String, String)>,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -92,6 +154,15 @@ pub fn spawn_substitution_endpoint(
         // the vsock substitution transport. `SocketAddr`'s Display ("ip:port")
         // is the wire form `serde(SocketAddr)` round-trips.
         cfg["terminator_listen"] = serde_json::Value::String(addr.to_string());
+    }
+    if let Some((cert_pem, key_pem)) = tls_intermediate {
+        // `EndpointConfig.tls_intermediate` (Stage 2): the per-VM name-constrained
+        // intermediate the `https` terminator mints per-SNI leaves under. The
+        // KEY only ever reaches this host endpoint — never the guest.
+        cfg["tls_intermediate"] = serde_json::json!({
+            "cert_pem": cert_pem,
+            "key_pem": key_pem,
+        });
     }
 
     let mut cmd = Command::new(&bin);
@@ -213,6 +284,55 @@ mod tests {
         reap_substitution_endpoint(&dir, "nonexistent-vm");
         // Idempotent: a second call on the same empty dir is still clean.
         reap_substitution_endpoint(&dir, "nonexistent-vm");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Plan 129 Stage 2 (S2.2): the cert-to-guest / key-to-endpoint split ──
+
+    // The whole point of the egress CA: the guest may trust the per-VM
+    // intermediate cert (to accept host-terminated bound-host TLS), but the
+    // intermediate KEY must never reach the guest — same claim-13 "no key on the
+    // guest" invariant the substitution channel already upholds. Assert the
+    // split holds by construction.
+    #[test]
+    fn egress_tls_delivery_gives_cert_to_guest_key_to_endpoint() {
+        let dir = std::env::temp_dir().join(format!("mvm-egress-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let d = build_egress_tls_delivery(&["api.openai.com"], &dir).unwrap();
+
+        // The guest file is a cert at the fixed drive filename, world-readable.
+        assert_eq!(d.guest_cert.name, EGRESS_CERT_DRIVE_NAME);
+        assert_eq!(d.guest_cert.mode, 0o444);
+        assert!(d.guest_cert.content.contains("BEGIN CERTIFICATE"));
+
+        // The endpoint gets BOTH halves (it serves leaves under this intermediate).
+        assert!(d.endpoint_cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(d.endpoint_key_pem.contains("PRIVATE KEY"));
+
+        // INVARIANT: no private-key material reaches the guest-delivered file.
+        assert!(
+            !d.guest_cert.content.contains("PRIVATE KEY"),
+            "intermediate key leaked into the guest cert file"
+        );
+        // The guest must trust exactly the cert the endpoint terminates under.
+        assert_eq!(d.guest_cert.content.trim(), d.endpoint_cert_pem.trim());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The key-carrying delivery struct must not expose secret bytes via Debug
+    // (xtask check-no-display-on-secret-types parity).
+    #[test]
+    fn egress_tls_delivery_debug_is_redacted() {
+        let dir = std::env::temp_dir().join(format!("mvm-egress-ca-dbg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = build_egress_tls_delivery(&["api.openai.com"], &dir).unwrap();
+        let dbg = format!("{d:?}");
+        assert!(
+            !dbg.contains("PRIVATE KEY"),
+            "key bytes leaked via Debug: {dbg}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

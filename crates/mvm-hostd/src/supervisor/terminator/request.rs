@@ -4,7 +4,25 @@ use crate::supervisor::substitution_proxy::ProxyRequest;
 use anyhow::{Context, Result, bail};
 use std::net::SocketAddr;
 
+/// Cleartext (`:80`) variant — builds an `http://` URL.
 pub fn proxy_request_from_origin_form(raw: &[u8], orig_dst: SocketAddr) -> Result<ProxyRequest> {
+    proxy_request_from_origin_form_scheme(raw, orig_dst, "http")
+}
+
+/// TLS-terminated (`:443`) variant — builds an `https://` URL so the upstream
+/// re-origination leg dials the real host over TLS.
+pub fn proxy_request_from_origin_form_https(
+    raw: &[u8],
+    orig_dst: SocketAddr,
+) -> Result<ProxyRequest> {
+    proxy_request_from_origin_form_scheme(raw, orig_dst, "https")
+}
+
+fn proxy_request_from_origin_form_scheme(
+    raw: &[u8],
+    orig_dst: SocketAddr,
+    scheme: &str,
+) -> Result<ProxyRequest> {
     let split =
         super::find_subslice(raw, b"\r\n\r\n").context("request has no header terminator")?;
     let head = std::str::from_utf8(&raw[..split]).context("request head not UTF-8")?;
@@ -48,7 +66,7 @@ pub fn proxy_request_from_origin_form(raw: &[u8], orig_dst: SocketAddr) -> Resul
     // claim-12 bind-check keys on it. Fall back to the original-dst IP (HTTP/1.0).
     let host = host.unwrap_or_else(|| orig_dst.ip().to_string());
     let host_no_port = host.split(':').next().unwrap_or(&host);
-    let url = format!("http://{host_no_port}{target}");
+    let url = format!("{scheme}://{host_no_port}{target}");
     Ok(ProxyRequest {
         method: method.to_string(),
         url,
