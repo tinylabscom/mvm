@@ -108,7 +108,10 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       up.rs "bridge broken" comment stale). Remaining: bundled-kernel compat key so
       the libkrun mkGuest warm claim fires (kernel absent pre-boot); multi-kernel
       keying; honour --name/volumes; committed bench delta (SPRINT.md)
-  [ ] WS-2 checkpoint+fork  (152 WS-B done; unblocked)
+  [~] WS-2 checkpoint+fork — fs_quick class landed: mvmctl checkpoint
+      create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
+      checkpoint.created/forked audit + fs_quick_checkpoint capability + cache GC.
+      Remaining: vm_full (memory save/restore) + checkpoint diff + pause/resume wiring
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 
