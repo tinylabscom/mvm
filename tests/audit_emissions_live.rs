@@ -2016,6 +2016,7 @@ fn build_emits_template_build_audit_entry_against_stub_outdir() {
         .env("MVM_BUILD_STUB_OUTDIR", &stub_out)
         .args([
             "build",
+            "image",
             "--flake",
             flake_dir.to_str().expect("utf-8 flake path"),
             "--profile",

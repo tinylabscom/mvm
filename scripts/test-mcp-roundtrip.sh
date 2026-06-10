@@ -68,7 +68,7 @@ echo "==> running mcp roundtrip (RUST_LOG=trace exercises stdout discipline)"
 # corrupting JSON-RPC framing shows up. The mcp stdio init should
 # install a stderr-only tracing subscriber before any frame is read,
 # so trace-level logging lands in $ERR not $OUT.
-echo "$REQUESTS" | RUST_LOG=trace "$MVMCTL_BIN" mcp stdio >"$OUT" 2>"$ERR" || true
+echo "$REQUESTS" | RUST_LOG=trace "$MVMCTL_BIN" ops mcp stdio >"$OUT" 2>"$ERR" || true
 
 # --- Assertion 1: stdout has exactly 3 lines, all valid JSON ----------
 LINE_COUNT=$(grep -c '^' "$OUT" 2>/dev/null || true)
