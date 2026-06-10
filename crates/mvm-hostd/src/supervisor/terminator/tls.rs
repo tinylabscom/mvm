@@ -20,8 +20,9 @@
 //! splice glue (Linux accept loop) lives in `substitution_proxy.rs`.
 
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use mvm_core::crypto::egress_ca::VmIntermediate;
@@ -93,6 +94,41 @@ where
     tls.write_all(&resp).context("write terminated response")?;
     tls.flush().context("flush terminated response")?;
     Ok(())
+}
+
+/// Splice an **unbound**-SNI connection straight through to `orig_dst` without
+/// decrypting — end-to-end TLS is preserved and the host gains zero added
+/// visibility. The ClientHello was only peeked, so the guest's first flight is
+/// still buffered on `guest` and flows through verbatim. No leaf is minted; the
+/// per-VM intermediate is never touched on this path.
+pub fn splice_unbound(guest: TcpStream, orig_dst: SocketAddr, timeout: Duration) -> Result<()> {
+    let upstream = TcpStream::connect_timeout(&orig_dst, timeout)
+        .with_context(|| format!("connecting unbound splice to {orig_dst}"))?;
+    splice_bidirectional(guest, upstream);
+    Ok(())
+}
+
+/// Copy bytes between two TCP streams in both directions until either closes,
+/// half-closing the peer on EOF so a blocked `read` unwinds. Lifted from the
+/// QEMU vsock relay (`qemu.rs`) and specialized to TCP↔TCP.
+fn splice_bidirectional(a: TcpStream, b: TcpStream) {
+    let (Ok(a2), Ok(b2)) = (a.try_clone(), b.try_clone()) else {
+        return;
+    };
+    let t = std::thread::spawn(move || copy_until_eof(a2, b2));
+    copy_until_eof(b, a);
+    let _ = t.join();
+}
+
+/// Copy `r`→`w` until EOF/error, then half-close `w`'s write side.
+fn copy_until_eof(mut r: TcpStream, mut w: TcpStream) {
+    let mut buf = [0u8; 16 * 1024];
+    while let Ok(n) = r.read(&mut buf) {
+        if n == 0 || w.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+    let _ = w.shutdown(Shutdown::Write);
 }
 
 /// Parse a PEM bundle into DER certs (the leaf + intermediate chain).
@@ -403,5 +439,47 @@ mod tests {
         assert_eq!(auth, "Bearer REALTOKEN");
         // And the re-origination URL is https (upstream dialled over TLS).
         assert!(seen.url.starts_with("https://api.openai.com/v1/x"));
+    }
+
+    #[test]
+    fn unbound_sni_is_spliced_without_termination() {
+        // A mock upstream that records the raw bytes it received and replies.
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let up_addr = upstream.local_addr().unwrap();
+        let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let rx = Arc::clone(&received);
+        let up = std::thread::spawn(move || {
+            let (mut conn, _) = upstream.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let n = conn.read(&mut buf).unwrap();
+            rx.lock().unwrap().extend_from_slice(&buf[..n]);
+            conn.write_all(b"SERVERHELLO-RAW").unwrap();
+            conn.shutdown(Shutdown::Write).ok();
+        });
+
+        // Terminator side: accept the guest conn and splice it straight to the
+        // upstream — no TLS config, no intermediate, no leaf minted.
+        let term = TcpListener::bind("127.0.0.1:0").unwrap();
+        let term_addr = term.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (guest, _) = term.accept().unwrap();
+            splice_unbound(guest, up_addr, Duration::from_secs(5)).unwrap();
+        });
+
+        // Guest sends raw (would-be ClientHello) bytes; they must arrive verbatim.
+        let mut client = TcpStream::connect(term_addr).unwrap();
+        let raw_hello = b"\x16\x03\x01RAW-CLIENT-HELLO-BYTES";
+        client.write_all(raw_hello).unwrap();
+        client.shutdown(Shutdown::Write).ok();
+        let mut back = Vec::new();
+        client.read_to_end(&mut back).unwrap();
+
+        server.join().unwrap();
+        up.join().unwrap();
+
+        // Bytes passed through unchanged in BOTH directions — proof the
+        // terminator never decrypted or rewrote the stream.
+        assert_eq!(received.lock().unwrap().as_slice(), raw_hello);
+        assert_eq!(back, b"SERVERHELLO-RAW");
     }
 }
