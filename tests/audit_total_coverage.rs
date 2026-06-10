@@ -116,6 +116,12 @@ const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("prune", AuditPosture::Emits("CachePrune")),
 ];
 
+// Plan 118 WS-1 1b — `mvmctl pool`.
+const POOL_SUB: &[(&str, AuditPosture)] = &[
+    ("warm", AuditPosture::Emits("PoolWarm")),
+    ("status", AuditPosture::ReadOnly),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
@@ -319,6 +325,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
+    ("pool", AuditPosture::DelegatesToSub(POOL_SUB)),
     // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
@@ -494,6 +501,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestTagRemove",
         "NetworkCreate",
         "NetworkRemove",
+        "PoolWarm",
         "RegistryReconcile",
         "SecretGet",
         "SecretPut",

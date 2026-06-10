@@ -634,6 +634,8 @@ fn run_warm(pool: &SupervisorStandbyPool, cfg: &MvmConfig, target: u32) -> Resul
             target,
         },
     )?;
+    // Plan 37 §6 — a state-changing verb emits one audit record per attempt.
+    mvm_core::audit_emit!(PoolWarm, "spawned={spawned} target={target}");
     if spawned == 0 {
         crate::ui::info(&format!("Pool already at or above target {target}."));
     } else {
