@@ -159,20 +159,6 @@ impl Platform {
         })
     }
 
-    /// Whether Docker is available on this platform.
-    ///
-    /// Runtime check — calls `docker version` to verify the daemon is running.
-    pub fn has_docker(self) -> bool {
-        static DOCKER_AVAILABLE: OnceLock<bool> = OnceLock::new();
-        *DOCKER_AVAILABLE.get_or_init(|| {
-            std::process::Command::new("docker")
-                .args(["version", "--format", "{{.Server.Version}}"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-    }
-
     /// Whether Nix is available on the host and can build Linux targets.
     ///
     /// Host-side Nix is no longer the normal mvm build boundary; the
@@ -508,18 +494,11 @@ mod tests {
     }
 
     #[test]
-    fn test_has_docker_returns_bool() {
-        // Just verify it doesn't panic; result depends on environment
-        let _ = Platform::MacOS.has_docker();
-    }
-
-    #[test]
     fn test_current_platform_valid() {
         let p = current();
         let _ = p.has_kvm();
         let _ = p.supports_native_runner();
         let _ = p.has_apple_containers();
-        let _ = p.has_docker();
     }
 
     #[test]

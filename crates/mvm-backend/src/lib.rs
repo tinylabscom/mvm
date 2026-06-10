@@ -9,7 +9,6 @@
 //!   macOS 26+ Apple Virtualization.framework.
 //! - **Cloud Hypervisor** (`cloud_hypervisor::CloudHypervisorBackend`)
 //!   — Tier 1 KVM peer of Firecracker (opt-in).
-//! - **Docker** (`docker::DockerBackend`) — Tier 3 fallback.
 //! - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //!   (Linux KVM / macOS HVF).
 //! - **microvm.nix** (`microvm_nix::MicrovmNixBackend`) — Firecracker
@@ -49,7 +48,6 @@ pub mod base;
 pub mod ch_runtime;
 pub mod cloud_hypervisor;
 pub mod compat;
-pub mod docker;
 /// Plan 129 Task 5 — per-VM transparent egress redirect (nft prerouting
 /// REDIRECT scoped to the guest TAP) steering guest :80 to the host-side
 /// substitution terminator. Linux-only mechanism; consumed by the FC path.
@@ -88,7 +86,6 @@ pub mod vz_control;
 pub use apple_container::AppleContainerBackend;
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use cloud_hypervisor::CloudHypervisorBackend;
-pub use docker::DockerBackend;
 pub use libkrun::LibkrunBackend;
 pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 pub use mock::MockBackend;

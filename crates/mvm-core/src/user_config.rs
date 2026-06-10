@@ -2,21 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Security-related operator preferences.
-///
-/// Lives under `[security]` in `~/.mvm/config.toml`. Used by Plan B (the
-/// Docker-tier acknowledgment banner) and is the seam where future
-/// posture knobs land.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SecurityConfig {
-    /// Acknowledge that the active backend is the Tier 3 Docker fallback
-    /// (no microVM isolation). When `true`, `mvmctl run` does not print
-    /// the per-run security warning banner. Equivalent to setting the
-    /// `MVM_ACK_DOCKER_TIER=1` environment variable.
-    pub ack_docker_tier: bool,
-}
-
 /// Persistent operator configuration stored at `~/.mvm/config.toml`.
 ///
 /// CLI flags always take precedence over these values. This config is
@@ -49,8 +34,6 @@ pub struct MvmConfig {
     /// Default: 30 seconds. Override via the `MVM_SERVICES_HEALTH_TIMEOUT_SECS`
     /// environment variable when ad-hoc tuning beats a config edit.
     pub services_health_timeout_secs: u64,
-    /// Security-related operator preferences (`[security]` section).
-    pub security: SecurityConfig,
 }
 
 impl MvmConfig {
@@ -79,7 +62,6 @@ impl Default for MvmConfig {
             metrics_port: None,
             catalog_url: None,
             services_health_timeout_secs: 30,
-            security: SecurityConfig::default(),
         }
     }
 }
@@ -234,8 +216,6 @@ mod tests {
         assert_eq!(cfg.default_memory_mib, 512);
         assert!(cfg.log_format.is_none());
         assert!(cfg.metrics_port.is_none());
-        // Security defaults: ack_docker_tier off — banner emits unless suppressed.
-        assert!(!cfg.security.ack_docker_tier);
         // ADR-053 §3 / plan 74 W2 default: 30 s services-health wait.
         assert_eq!(cfg.services_health_timeout_secs, 30);
     }
@@ -271,32 +251,19 @@ mod tests {
     }
 
     #[test]
-    fn test_security_section_roundtrip() {
-        let cfg = MvmConfig {
-            security: SecurityConfig {
-                ack_docker_tier: true,
-            },
-            ..MvmConfig::default()
-        };
-        let text = toml::to_string_pretty(&cfg).unwrap();
-        let parsed: MvmConfig = toml::from_str(&text).unwrap();
-        assert!(parsed.security.ack_docker_tier);
-    }
-
-    #[test]
-    fn test_legacy_config_without_security_section_still_loads() {
-        // Older config files written before the [security] section was
-        // added must continue to deserialize cleanly with default security
-        // values. Serde's `#[serde(default)]` on the struct gives us this.
-        let legacy = r#"
+    fn test_config_with_missing_optional_fields_loads_with_defaults() {
+        // A config that omits optional fields must deserialize cleanly,
+        // filling them from defaults. Serde's `#[serde(default)]` gives us
+        // this — the seam that keeps older config files loading.
+        let partial = r#"
             dev_vm_cpus = 4
             dev_vm_mem_gib = 8
             default_cpus = 2
             default_memory_mib = 512
         "#;
-        let cfg: MvmConfig = toml::from_str(legacy).unwrap();
+        let cfg: MvmConfig = toml::from_str(partial).unwrap();
         assert_eq!(cfg.dev_vm_cpus, 4);
-        assert!(!cfg.security.ack_docker_tier);
+        assert_eq!(cfg.services_health_timeout_secs, 30);
     }
 
     #[test]

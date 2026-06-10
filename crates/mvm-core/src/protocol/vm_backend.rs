@@ -679,7 +679,7 @@ pub struct VmInfo {
 /// }
 /// ```
 pub trait VmBackend: Send + Sync {
-    /// Human-readable backend name (e.g., "firecracker", "apple-container", "docker").
+    /// Human-readable backend name (e.g., "firecracker", "apple-container", "libkrun").
     fn name(&self) -> &str;
 
     /// Capabilities supported by this backend.
