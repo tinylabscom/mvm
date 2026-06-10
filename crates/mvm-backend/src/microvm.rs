@@ -329,12 +329,18 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         gateway = TAP_IP,
     );
 
+    // #746 — extract an FC-loadable ELF vmlinux if this kernel is a bzImage
+    // (no-op for an already-ELF kernel). Same as the flake path below.
+    let kernel_path =
+        mvm_build::fc_kernel::ensure_fc_loadable_kernel(std::path::Path::new(&kernel_path))
+            .with_context(|| format!("preparing FC-loadable kernel from {kernel_path}"))?;
+
     ui::info(&format!("Setting boot source: {}", state.kernel));
     api_put(
         "/boot-source",
         &format!(
             r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
-            kernel = kernel_path,
+            kernel = kernel_path.display(),
             args = kernel_boot_args,
         ),
     )?;
@@ -1870,13 +1876,25 @@ pub fn configure_flake_microvm_with_drives_dir(
         None => boot_args,
     };
 
-    ui::info(&format!("Setting boot source: {}", config.vmlinux_path));
+    // #746 — FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
+    // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
+    // which FC rejects with "Invalid Elf magic number". Extract the embedded ELF
+    // to a cached sibling once and boot from that. No-op for an already-ELF
+    // kernel (aarch64 `Image`, or a fixed image).
+    let kernel_for_boot =
+        mvm_build::fc_kernel::ensure_fc_loadable_kernel(std::path::Path::new(&config.vmlinux_path))
+            .with_context(|| {
+                format!("preparing FC-loadable kernel from {}", config.vmlinux_path)
+            })?;
+    let kernel_for_boot = kernel_for_boot.display();
+
+    ui::info(&format!("Setting boot source: {kernel_for_boot}"));
     let boot_source = match &effective_initrd {
         Some(initrd) => {
             ui::info(&format!("Using initrd: {}", initrd));
             format!(
                 r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}", "initrd_path": "{initrd}"}}"#,
-                kernel = config.vmlinux_path,
+                kernel = kernel_for_boot,
                 args = boot_args,
                 initrd = initrd,
             )
@@ -1884,7 +1902,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         None => {
             format!(
                 r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
-                kernel = config.vmlinux_path,
+                kernel = kernel_for_boot,
                 args = boot_args,
             )
         }

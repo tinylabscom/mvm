@@ -17,6 +17,8 @@ pub mod cache;
 /// D4). Kept as a lib module (not bin-inlined) so its pub API is
 /// dead-code-clean on non-Linux and its tests run cross-platform.
 pub mod egress_proxy;
+/// #746 — extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
+pub mod fc_kernel;
 pub mod firecracker;
 /// Plan 76 Phase 6 — portable signed `.mvm` artifacts. A tar.gz
 /// wrapper around kernel + rootfs + verity sidecars + cmdline,
