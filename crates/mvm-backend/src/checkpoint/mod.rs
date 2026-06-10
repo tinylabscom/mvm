@@ -117,6 +117,74 @@ pub struct CaptureFsQuickParams {
     pub quiesced: bool,
 }
 
+/// Inputs for forking a child instance from a checkpoint.
+pub struct ForkParams {
+    pub checkpoint: CheckpointId,
+    /// New checkpoint-id recording this fork's lineage.
+    pub child_id: CheckpointId,
+    pub child_vm_name: String,
+    /// Where to materialize the child's rootfs (the new VM's state dir).
+    pub dest_dir: PathBuf,
+    pub created_unix: u64,
+}
+
+/// Branch a new sandbox lineage from a checkpoint: verify the source content's
+/// integrity, CoW-clone it into `dest_dir`, and record a child checkpoint whose
+/// `parent` points back to the source. Boot of the child is the caller's job.
+pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<CheckpointMeta> {
+    let parent = store.read_meta(&params.checkpoint)?;
+    if parent.class != CheckpointClass::FsQuick {
+        anyhow::bail!(
+            "cannot fork checkpoint '{}': class vm_full is not supported yet",
+            parent.id
+        );
+    }
+
+    let content_dir = store.content_dir(&parent.id);
+    let blob = first_file_in(&content_dir)?;
+    let actual = sha256_file_hex(&blob)?;
+    if actual != parent.content_sha256 {
+        anyhow::bail!(
+            "checkpoint '{}' content failed integrity (sha256): expected {}, got {}",
+            parent.id,
+            parent.content_sha256,
+            actual
+        );
+    }
+
+    std::fs::create_dir_all(&params.dest_dir)
+        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
+    let blob_name = blob.file_name().context("content blob has no file name")?;
+    let dst = params.dest_dir.join(blob_name);
+    crate::base::cow::clone_rootfs_for_instance(&blob, &dst)
+        .context("cloning checkpoint content into child instance")?;
+
+    let child = CheckpointMeta::builder(
+        params.child_id,
+        CheckpointClass::FsQuick,
+        params.child_vm_name,
+    )
+    .parent(Some(parent.id))
+    .created_unix(params.created_unix)
+    .content_sha256(actual)
+    .supervisor_config_digest(parent.supervisor_config_digest)
+    .build();
+    store.write_meta(&child)?;
+    Ok(child)
+}
+
+fn first_file_in(dir: &Path) -> Result<PathBuf> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("reading content dir {}", dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            return Ok(entry.path());
+        }
+    }
+    anyhow::bail!("checkpoint content dir {} has no file", dir.display())
+}
+
 fn sha256_file_hex(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
@@ -251,6 +319,94 @@ mod tests {
         };
         let err = capture_fs_quick(&store, params).unwrap_err();
         assert!(err.to_string().contains("quiesced"));
+    }
+
+    fn seed_fs_quick_checkpoint(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
+        let rootfs = write_fake_rootfs(tmp);
+        capture_fs_quick(
+            store,
+            CaptureFsQuickParams {
+                id: CheckpointId::new(id),
+                vm_name: "parentvm".into(),
+                rootfs,
+                supervisor_config_digest: "d".into(),
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fork_clones_content_and_records_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let dst = tmp.path().join("childvm-state");
+        let child = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("f1"),
+                child_vm_name: "childvm".into(),
+                dest_dir: dst.clone(),
+                created_unix: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(child.parent.as_ref().unwrap(), &parent.id);
+        assert_eq!(child.vm_name, "childvm");
+        assert_eq!(
+            std::fs::read(dst.join("rootfs.ext4")).unwrap(),
+            b"fake-ext4-bytes"
+        );
+        assert_eq!(store.children_of(&parent.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fork_refuses_vm_full_in_this_pr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let m = CheckpointMeta::builder(CheckpointId::new("vf"), CheckpointClass::VmFull, "vm")
+            .content_sha256("h")
+            .supervisor_config_digest("d")
+            .created_unix(1)
+            .build();
+        store.write_meta(&m).unwrap();
+        let err = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: m.id,
+                child_id: CheckpointId::new("f"),
+                child_vm_name: "c".into(),
+                dest_dir: tmp.path().join("d"),
+                created_unix: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("vm_full"));
+    }
+
+    #[test]
+    fn fork_refuses_tampered_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let blob = store.content_dir(&parent.id).join("rootfs.ext4");
+        std::fs::write(&blob, b"tampered").unwrap();
+        let err = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("f"),
+                child_vm_name: "c".into(),
+                dest_dir: tmp.path().join("d"),
+                created_unix: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("integrity") || err.to_string().contains("sha256"));
     }
 
     #[test]
