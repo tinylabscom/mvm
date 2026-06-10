@@ -13,9 +13,10 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 
 use mvm_backend::checkpoint::{
-    CaptureFsQuickParams, CheckpointStore, ForkParams, capture_fs_quick, fork_checkpoint,
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, RestoreParams,
+    capture_fs_quick, capture_vm_full, fork_checkpoint, fork_vm_full, restore_checkpoint,
 };
-use mvm_core::checkpoint::CheckpointId;
+use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
 use mvm_core::config::vm_state_dir;
 
 use super::Cli;
@@ -28,19 +29,38 @@ pub(in crate::commands) struct CheckpointArgs {
     pub command: CheckpointCmd,
 }
 
+/// Which kind of checkpoint to capture. `fs-quick` clones the rootfs of a
+/// quiesced VM (no memory); `vm-full` captures a running VM's {rootfs, memory,
+/// machine-id} triple in one pause window.
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub(in crate::commands) enum CheckpointClassArg {
+    FsQuick,
+    VmFull,
+}
+
 #[derive(clap::Subcommand, Debug, Clone)]
 pub(in crate::commands) enum CheckpointCmd {
-    /// Freeze a quiesced VM's rootfs into an immutable fs_quick checkpoint.
+    /// Freeze a VM into a checkpoint. `--class fs-quick` (default) clones a
+    /// quiesced VM's rootfs; `--class vm-full` captures a running VM's memory.
     Create {
-        /// Name of the VM to checkpoint (must be stopped or paused).
+        /// Name of the VM to checkpoint.
         #[arg(value_parser = clap_vm_name)]
         name: String,
+        /// Checkpoint class. `fs-quick` needs the VM quiesced; `vm-full` needs
+        /// it running.
+        #[arg(long, value_enum, default_value = "fs-quick")]
+        class: CheckpointClassArg,
         /// Optional human label recorded on the checkpoint.
         #[arg(long)]
         tag: Option<String>,
         /// Output the sealed checkpoint metadata as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Resume a VM from a vm_full checkpoint (same identity).
+    Restore {
+        /// Checkpoint id to restore.
+        id: String,
     },
     /// List checkpoints under ~/.mvm/checkpoints.
     Ls {
@@ -65,7 +85,16 @@ pub(in crate::commands) enum CheckpointCmd {
 
 pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> Result<()> {
     match args.command {
-        CheckpointCmd::Create { name, tag, json } => create(&name, tag, json),
+        CheckpointCmd::Create {
+            name,
+            class,
+            tag,
+            json,
+        } => match class {
+            CheckpointClassArg::FsQuick => create(&name, tag, json),
+            CheckpointClassArg::VmFull => create_vm_full(&name, tag, json),
+        },
+        CheckpointCmd::Restore { id } => restore(&id),
         CheckpointCmd::Ls { json } => ls(json),
         CheckpointCmd::Rm { id } => rm(&id),
         CheckpointCmd::Fork { id, new_id } => fork(&id, new_id),
@@ -216,6 +245,47 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `mvmctl checkpoint create --class vm-full <vm>`: capture a RUNNING VM's
+/// {rootfs, memory, machine-id} triple in one pause window. The inverse of
+/// fs_quick — a vm_full checkpoint carries memory, so the VM must be live (the
+/// library's `VzVmFullControl` pauses/saves/resumes it).
+fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
+    if !vm_is_running(name) {
+        bail!("checkpoint --class vm-full requires a running VM; start '{name}' first");
+    }
+    let state_dir = vm_state_dir(name);
+    let store = CheckpointStore::open();
+    let now = now_unix();
+    let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
+
+    let control = mvm_backend::vz::VzVmFullControl::new(name);
+    let meta = capture_vm_full(
+        &store,
+        CaptureVmFullParams {
+            id,
+            vm_name: name.to_string(),
+            supervisor_config_digest: supervisor_config_digest(&state_dir),
+            tag,
+            created_unix: now,
+        },
+        &control,
+    )
+    .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
+
+    // Best-effort audit binding, same policy as fs_quick capture.
+    bind_checkpoint_created(name, &meta);
+
+    if json {
+        crate::json_out::emit_json(&meta)?;
+    } else {
+        ui::success(&format!(
+            "{name}: vm_full checkpoint {} created",
+            meta.id.as_str()
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {
     let plan = match super::plan_persist::read_plan(name) {
         Ok(p) => p,
@@ -244,10 +314,20 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
         .first()
         .map(|b| b.sha256.as_str())
         .unwrap_or("");
+    let class = checkpoint_class_str(meta.class);
     if let Err(e) =
-        emitter.emit_checkpoint_created(&plan, meta.id.as_str(), "fs_quick", content_sha, name)
+        emitter.emit_checkpoint_created(&plan, meta.id.as_str(), class, content_sha, name)
     {
         tracing::warn!(error = %e, "audit emit_checkpoint_created failed (non-fatal)");
+    }
+}
+
+/// Stable on-the-wire string for a checkpoint class, used as the `class` audit
+/// label so a vm_full capture isn't mislabeled fs_quick.
+fn checkpoint_class_str(class: CheckpointClass) -> &'static str {
+    match class {
+        CheckpointClass::FsQuick => "fs_quick",
+        CheckpointClass::VmFull => "vm_full",
     }
 }
 
@@ -321,15 +401,61 @@ fn rm(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// `mvmctl checkpoint restore <id>`: same-identity resume of a vm_full
+/// checkpoint. The library verifies the manifest, then materializes the saved
+/// {rootfs, memory, machine-id} back into the original VM and resumes it.
+fn restore(id: &str) -> Result<()> {
+    let checkpoint = validated_checkpoint_id(id)?;
+    let store = CheckpointStore::open();
+    let meta = store.read_meta(&checkpoint)?;
+
+    let backend = mvm_backend::vz::VzBackend;
+    restore_checkpoint(
+        &store,
+        RestoreParams {
+            checkpoint: checkpoint.clone(),
+            target_vm: meta.vm_name.clone(),
+        },
+        &backend,
+    )
+    .with_context(|| format!("restoring checkpoint {id:?}"))?;
+
+    bind_checkpoint_restored(&meta.vm_name, checkpoint.as_str());
+    ui::success(&format!(
+        "restored {} into vm '{}'",
+        checkpoint.as_str(),
+        meta.vm_name
+    ));
+    Ok(())
+}
+
 fn fork(id: &str, new_id: Option<String>) -> Result<()> {
     let checkpoint = validated_checkpoint_id(id)?;
+    let store = CheckpointStore::open();
+    // Pick the fork arm by the parent's class: vm_full carries memory and must
+    // restore through `fork_vm_full` (which auto-boots the child); fs_quick is
+    // a rootfs-only clone that the operator boots separately.
+    let parent = store.read_meta(&checkpoint)?;
+    match parent.class {
+        CheckpointClass::VmFull => fork_vm_full_arm(&store, &checkpoint, new_id),
+        CheckpointClass::FsQuick => fork_fs_quick_arm(&store, &checkpoint, new_id),
+    }
+}
+
+/// fs_quick fork: CoW-clone the rootfs into a new VM state dir; the operator
+/// boots the child with a separate `mvmctl up`.
+fn fork_fs_quick_arm(
+    store: &CheckpointStore,
+    checkpoint: &CheckpointId,
+    new_id: Option<String>,
+) -> Result<()> {
     let now = now_unix();
-    let child_vm_name = new_id.unwrap_or_else(|| format!("{id}-fork-{now}"));
+    let child_vm_name = new_id.unwrap_or_else(|| format!("{}-fork-{now}", checkpoint.as_str()));
     let dest_dir = vm_state_dir(&child_vm_name);
     let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
 
     let meta = fork_checkpoint(
-        &CheckpointStore::open(),
+        store,
         ForkParams {
             checkpoint: checkpoint.clone(),
             child_id,
@@ -343,7 +469,7 @@ fn fork(id: &str, new_id: Option<String>) -> Result<()> {
     // A fork that we can't audit (signer present but emit fails) is refused —
     // an unaudited lineage record would break the chain. A missing plan/signer
     // is best-effort, matching capture.
-    bind_checkpoint_forked(&checkpoint, &meta, &child_vm_name)?;
+    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name)?;
 
     ui::success(&format!(
         "forked {} -> checkpoint {} (vm '{}')",
@@ -353,6 +479,43 @@ fn fork(id: &str, new_id: Option<String>) -> Result<()> {
     ));
     ui::info(&format!(
         "boot the child with: mvmctl up <flake> --name {child_vm_name}"
+    ));
+    Ok(())
+}
+
+/// vm_full fork: clone the captured triple into a new identity, rewrite the
+/// supervisor config, and boot the child in restore mode (auto-boot).
+fn fork_vm_full_arm(
+    store: &CheckpointStore,
+    checkpoint: &CheckpointId,
+    new_id: Option<String>,
+) -> Result<()> {
+    let now = now_unix();
+    let child_vm_name = new_id.unwrap_or_else(|| format!("{}-fork-{now}", checkpoint.as_str()));
+    let dest_dir = vm_state_dir(&child_vm_name);
+    let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
+
+    let spawner = mvm_backend::vz::VzChildSupervisorSpawner;
+    let meta = fork_vm_full(
+        store,
+        ForkParams {
+            checkpoint: checkpoint.clone(),
+            child_id,
+            child_vm_name: child_vm_name.clone(),
+            dest_dir,
+            created_unix: now,
+        },
+        &spawner,
+    )
+    .with_context(|| format!("forking vm_full checkpoint {:?}", checkpoint.as_str()))?;
+
+    bind_checkpoint_forked(checkpoint, &meta, &child_vm_name)?;
+
+    ui::success(&format!(
+        "forked {} -> checkpoint {} (vm '{}', auto-booted)",
+        checkpoint.as_str(),
+        meta.id.as_str(),
+        child_vm_name
     ));
     Ok(())
 }
