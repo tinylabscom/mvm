@@ -211,6 +211,13 @@ opendal = { version = "0.50", features = ["services-s3"] }
 # HTTP client (for CLI upgrade)
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 
+# Plan 129 Stage 2 — the egress terminator's server-side TLS (terminate the
+# guest's https to bound hosts under the per-VM name-constrained intermediate).
+# `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
+# Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+
 # Name generation
 names = { version = "0.14", default-features = false }
 
