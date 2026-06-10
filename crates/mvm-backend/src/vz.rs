@@ -181,6 +181,8 @@ impl VmBackend for VzBackend {
             // supervisor; live adjustment goes through the control
             // socket's BALLOON verb.
             balloon: true,
+            // Vz runs on macOS with APFS, so clonefile is available.
+            fs_quick_checkpoint: cfg!(target_os = "macos"),
         }
     }
 
@@ -1448,6 +1450,12 @@ mod tests {
         // snapshots is feature-detected on macOS 14+; on a
         // contributor host below 14 it stays false.
         let _ = caps.snapshots;
+    }
+
+    #[test]
+    fn vz_advertises_fs_quick_checkpoint_on_macos() {
+        let caps = VzBackend.capabilities();
+        assert_eq!(caps.fs_quick_checkpoint, cfg!(target_os = "macos"));
     }
 
     #[test]

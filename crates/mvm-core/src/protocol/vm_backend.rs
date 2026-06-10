@@ -411,6 +411,10 @@ pub struct VmCapabilities {
     /// without rebooting the VM. cgroup-style memory limiting (Docker)
     /// is **not** a balloon and stays `false`.
     pub balloon: bool,
+    /// Can freeze a quiesced rootfs into an fs-quick checkpoint via filesystem
+    /// copy-on-write (APFS `clonefile` on macOS). Independent of `snapshots`,
+    /// which is the memory-state save/restore capability.
+    pub fs_quick_checkpoint: bool,
 }
 
 /// How thoroughly a backend can warm-start a VM from a snapshot. Distinct
