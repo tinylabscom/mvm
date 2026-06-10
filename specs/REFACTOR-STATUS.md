@@ -51,10 +51,35 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] Phase E: undeclared secret/PII egress redact-to-XXX detector
       (RedactingSubstitution mask-and-continue; PiiRedactor/SecretsScanner
       redact()) wired always-on into the gateway bridge — PR #733
-  [~] local secret-workload launch via admission flow (compile refuses managed
-      refs → deploy/plan path; the user-facing local boot gap) — in PR #745
-      (local launch + endpoint egress redaction); Task 6 e2e prereq
-  [ ] full guest-VM boot e2e (depends on the above) — runbook in plan 129
+  [x] Phase E uniform coverage: same RedactingSubstitution wired into the
+      per-VM substitution endpoint (request-level), so every backend routing
+      egress through it scrubs identically; claim-13 `secret.redacted` audit
+  [x] local secret-workload launch (mvm's domain): compile strips SecretRef
+      from the baked image + emits workload.json; `up --flake <dir>`
+      auto-discovers it → lowers plan.secrets → admits → endpoint spawn.
+      Fixed: main `up` path only threaded the signed plan to the backend under
+      MVM_GATEWAY_BRIDGE=1, so the QEMU endpoint never spawned — now QEMU
+      threads it unconditionally (libkrun/Vz stay flag-gated)
+  [x] box-validated on QEMU (dev-kvm): secret-free image (launch.env={}),
+      guest holds ONLY the placeholder (substitution-env.json), endpoint
+      spawns at boot + is reaped on `down`
+  [x] `invoke <name> --attach` dispatches RunEntrypoint into the running `up`
+      workload (reuses endpoint + placeholders); function body runs with the
+      injected proxy+placeholder env
+  [x] guest loopback made functional → PR #749: netinit must not blackhole its
+      own `lo` (EINVAL) AND /init must bring `lo` up (ENETUNREACH) — both were
+      broken, killing the forward proxy. The two together complete the loopback
+  [x] FULL live-guest e2e CLOSED on QEMU (#745+#749+#755): destination (httpbin)
+      reflects "Authorization: Bearer REALKEY-…" (REAL credential) while the guest
+      holds only mvm-secret-… — workload→loopback proxy→guest-host vsock→endpoint
+      substitute→real http forward→echo. "A raw secret never enters the microVM"
+      proven end-to-end on a live guest
+  [x] SSRF resolver port-443 bug FIXED → PR #755: forwarder resolves+SSRF-filters
+      itself, pins the safe IPs on the URL's real port (resolve_to_addrs). This
+      closed the e2e (http forwards no longer hit :443). web_fetch/MCP unaffected
+  [ ] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
+      + endpoint) — deferred follow-up
+  [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
 PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift

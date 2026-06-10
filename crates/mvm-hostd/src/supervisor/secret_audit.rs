@@ -45,6 +45,28 @@ pub async fn emit_secret_substituted(
         .await
 }
 
+/// Emit `secret.redacted { destination, categories }` — the egress redactor
+/// masked an *undeclared* secret-shaped / PII run out of an outbound request
+/// before forwarding (Plan 129 Phase E). `categories` is the comma-joined set
+/// of rule names that fired (e.g. `openai-key,email`); the matched bytes are
+/// never recorded (claim 13).
+pub async fn emit_secret_redacted(
+    recorder: &Recorder,
+    destination: &str,
+    categories: &str,
+) -> Result<(), RecorderError> {
+    recorder
+        .record_unbound(
+            EventCategory::Secret,
+            "secret.redacted",
+            [
+                ("destination".to_string(), destination.to_string()),
+                ("categories".to_string(), categories.to_string()),
+            ],
+        )
+        .await
+}
+
 /// Emit `secret.placeholder_dropped { destination }` — a placeholder smuggled
 /// onto the raw egress wire was dropped (the E1 backstop). Metadata only.
 pub async fn emit_secret_placeholder_dropped(
@@ -118,6 +140,28 @@ mod tests {
             .replace("api.openai.com", "evil.example.com");
         std::fs::write(&file, tampered).unwrap();
         assert!(verify_audit_chain(&file, &vk).is_err());
+    }
+
+    #[tokio::test]
+    async fn redacted_event_records_categories_and_destination_only() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("audit.jsonl");
+        let (recorder, vk) = recorder_at(&file);
+
+        emit_secret_redacted(&recorder, "api.openai.com", "openai-key,email")
+            .await
+            .unwrap();
+
+        let chain = std::fs::read_to_string(&file).unwrap();
+        assert!(chain.contains("secret.redacted"));
+        assert!(chain.contains("api.openai.com"));
+        assert!(chain.contains("openai-key,email"));
+        // claim 13: the masked bytes / value never appear — only category names.
+        assert!(
+            !chain.contains("sk-") && !chain.contains("XXX"),
+            "audit chain must carry no matched bytes: {chain}"
+        );
+        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
     }
 
     #[tokio::test]

@@ -608,6 +608,44 @@ fn resolve_deps_volume_binding(
     resolve_deps_volume_binding_with_cache(workload_ir_path, build_mode, None)
 }
 
+/// Resolve the Workload IR path the admission flow lowers into `plan.secrets`.
+///
+/// An explicit `--from-workload-ir` always wins. Otherwise, when `--flake`
+/// points at a local directory a `mvmctl compile` run wrote `workload.json`
+/// into, default to it. This makes a secret-declaring compiled artifact
+/// (`mvmctl up --flake <out>`) lower its managed `SecretRef`s — and so spawn
+/// the per-VM substitution endpoint at boot — without the user re-naming the
+/// IR by hand. It also closes a footgun: the secrets are lowered whenever the
+/// artifact declares them, so a forgotten flag can't silently boot a workload
+/// without the binding it needs. A remote/attr flake ref or a missing file
+/// yields `None` (a plain flake, no managed secrets). Plan 129 / ADR-067.
+fn resolve_workload_ir_path(
+    from_workload_ir: Option<&std::path::Path>,
+    flake_ref: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if let Some(p) = from_workload_ir {
+        return Some(p.to_path_buf());
+    }
+    let candidate = std::path::Path::new(flake_ref?).join("workload.json");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Whether `up` threads the signed plan + tenant (`populate_audit_substrate`)
+/// onto the backend `VmStartConfig`. Two independent consumers want it:
+///
+/// - **QEMU substitution endpoint** (Plan 129 / ADR-067): spawned when the
+///   admitted plan carries secrets — `QemuBackend::start` reads
+///   `config.plan_json` + `tenant_id` to launch the per-VM moat. QEMU has **no**
+///   gateway-bridge path, so threading the plan only enables the endpoint;
+///   always do it for QEMU.
+/// - **libkrun/Vz gateway-bridge** factory: those backends branch into the
+///   bridge supervisor on `plan_json` presence, and that gvproxy wiring isn't
+///   working end-to-end yet, so it stays opt-in behind `MVM_GATEWAY_BRIDGE=1`
+///   (`gateway_bridge_enabled`); the default keeps them on the legacy path.
+fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> bool {
+    gateway_bridge_enabled || hypervisor == "qemu"
+}
+
 fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_sdk::ir::Workload>> {
@@ -1006,7 +1044,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let seccomp_tier: mvm_core::crypto::seccomp::SeccompTier =
         args.seccomp.parse().context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
-    let lowered_plan_secrets = load_workload_ir(args.from_workload_ir.as_deref())?
+    // `--from-workload-ir`, or the `workload.json` a compiled `--flake`
+    // artifact carries (Plan 129 / ADR-067). Resolved once, used for both
+    // secret lowering and the deps-volume binding below.
+    let effective_workload_ir =
+        resolve_workload_ir_path(args.from_workload_ir.as_deref(), args.flake.as_deref());
+    let lowered_plan_secrets = load_workload_ir(effective_workload_ir.as_deref())?
         .map(|workload| lower_workload_secrets(&workload))
         .unwrap_or_default();
     let plan_secret_release = lowered_plan_secrets.secret_release;
@@ -1104,7 +1147,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         no_supervisor: args.no_supervisor,
         bundle_pin: args.bundle_pin.as_deref(),
         build_mode,
-        workload_ir_path: args.from_workload_ir.as_deref(),
+        workload_ir_path: effective_workload_ir.as_deref(),
         up_json: args.up_json,
         services_health_timeout_secs: cfg.effective_services_health_timeout_secs(),
         wait: args.wait,
@@ -1915,11 +1958,17 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
             .map(|v| v == "1")
             .unwrap_or(false);
-        if gateway_bridge_enabled && let Some(ctx) = admission_main.as_ref() {
+        if should_thread_signed_plan(gateway_bridge_enabled, effective_hypervisor)
+            && let Some(ctx) = admission_main.as_ref()
+        {
             populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
             // Plan 113 §Task 13 — stash plan.json + bundle.json for the
-            // Firecracker bridge sidecar to read at spawn time.
-            stash_plan_for_bridge(&start_config)?;
+            // Firecracker bridge sidecar to read at spawn time. Bridge-only:
+            // the QEMU substitution endpoint reads the in-memory config, so it
+            // needs no on-disk copy (and must not overwrite the persisted plan).
+            if gateway_bridge_enabled {
+                stash_plan_for_bridge(&start_config)?;
+            }
         }
 
         // Apple Container with -d: install a launchd agent instead of
@@ -3588,6 +3637,55 @@ mod resolve_deps_volume_tests {
         let binding =
             resolve_deps_volume_binding(None, mvm_build::pipeline::BuildMode::Prod).unwrap();
         assert!(binding.is_none());
+    }
+
+    #[test]
+    fn qemu_threads_signed_plan_for_substitution_endpoint() {
+        // The QEMU per-VM substitution endpoint reads config.plan_json /
+        // tenant_id to spawn when the plan carries secrets — it must be threaded
+        // even with the libkrun/Vz gateway bridge off (the default).
+        assert!(should_thread_signed_plan(false, "qemu"));
+        assert!(should_thread_signed_plan(true, "qemu"));
+    }
+
+    #[test]
+    fn libkrun_threads_signed_plan_only_under_gateway_bridge_flag() {
+        // libkrun/Vz branch into the (not-yet-working) bridge factory on
+        // plan_json presence, so the default keeps them on the legacy path.
+        assert!(!should_thread_signed_plan(false, "libkrun"));
+        assert!(!should_thread_signed_plan(false, "vz"));
+        assert!(should_thread_signed_plan(true, "libkrun"));
+    }
+
+    #[test]
+    fn explicit_from_workload_ir_wins() {
+        let p = std::path::Path::new("/some/explicit/ir.json");
+        let got = resolve_workload_ir_path(Some(p), Some("/ignored/flake/dir"));
+        assert_eq!(got.as_deref(), Some(p));
+    }
+
+    #[test]
+    fn discovers_workload_json_in_compiled_flake_dir() {
+        // A `mvmctl compile` artifact carries `workload.json`; `up --flake <dir>`
+        // must default to it so managed secrets are lowered without the flag.
+        let tmp = tempfile::tempdir().unwrap();
+        let flake = tmp.path().join("artifact");
+        std::fs::create_dir_all(&flake).unwrap();
+        let ir = flake.join("workload.json");
+        std::fs::write(&ir, "{}").unwrap();
+        let got = resolve_workload_ir_path(None, flake.to_str());
+        assert_eq!(got.as_deref(), Some(ir.as_path()));
+    }
+
+    #[test]
+    fn plain_flake_without_workload_json_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flake = tmp.path().join("plain");
+        std::fs::create_dir_all(&flake).unwrap();
+        assert!(resolve_workload_ir_path(None, flake.to_str()).is_none());
+        // A remote/attr flake ref is not a local dir → None, no panic.
+        assert!(resolve_workload_ir_path(None, Some("github:foo/bar#worker")).is_none());
+        assert!(resolve_workload_ir_path(None, None).is_none());
     }
 
     #[test]

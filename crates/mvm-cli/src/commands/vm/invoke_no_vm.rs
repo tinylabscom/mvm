@@ -176,6 +176,7 @@ mod tests {
             memory_mib: 512,
             fresh: false,
             reset: false,
+            attach: false,
             keep_alive: false,
             keep_alive_dev: false,
             session: None,

@@ -33,7 +33,8 @@ use crate::keyholder::{
     find_placeholder,
 };
 use crate::supervisor::audit_recorder::Recorder;
-use crate::supervisor::secret_audit::emit_secret_substituted;
+use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
+use crate::supervisor::secret_audit::{emit_secret_redacted, emit_secret_substituted};
 use crate::supervisor::tools::http_hardening::{
     hardened_client_builder_no_dns, resolve_ssrf_safe_ips,
 };
@@ -266,6 +267,12 @@ pub struct SubstitutionService {
     registry: Arc<SubstitutionRegistry>,
     resolver: Arc<dyn SecretResolver>,
     forwarder: Arc<dyn Forwarder>,
+    /// Egress redactor (Plan 129 Phase E). Masks *undeclared* secret-shaped /
+    /// PII content out of an outbound request before forwarding — the
+    /// request-level twin of the gateway bridge's packet redactor, sharing one
+    /// `RedactingSubstitution` definition so every backend that routes egress
+    /// through this endpoint scrubs identically. Built once (rule compilation).
+    redactor: RedactingSubstitution,
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
     recorder: Option<Recorder>,
@@ -281,6 +288,7 @@ impl SubstitutionService {
             registry,
             resolver,
             forwarder,
+            redactor: RedactingSubstitution::with_default_rules(),
             recorder: None,
         }
     }
@@ -531,6 +539,12 @@ impl SubstitutionService {
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        // Phase E: scrub undeclared secret-shaped / PII content before any
+        // substitution. Runs first so a declared placeholder (not secret-shaped,
+        // host-reserved) survives to be substituted, while an undeclared secret
+        // the guest put in the body or a non-placeholder header is masked and
+        // never reaches the wire.
+        let (req, redaction_hits) = self.redact_outbound(req);
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
@@ -543,6 +557,8 @@ impl SubstitutionService {
             Ok(r) => {
                 self.audit_substitutions(&substituted, destination.as_deref())
                     .await;
+                self.audit_redactions(&redaction_hits, destination.as_deref())
+                    .await;
                 WireResponse::Ok {
                     status: r.status,
                     headers: r.headers,
@@ -552,6 +568,55 @@ impl SubstitutionService {
             Err(e) => WireResponse::Refused {
                 message: e.to_string(),
             },
+        }
+    }
+
+    /// Mask undeclared secret-shaped / PII content out of a guest-authored
+    /// request before it leaves the host — the request-level twin of the
+    /// gateway bridge's packet redactor (one shared `RedactingSubstitution`).
+    /// A header value carrying a declared placeholder is left untouched (the
+    /// real credential is substituted into it next, and the host-reserved
+    /// placeholder is not secret-shaped); every other header value and the body
+    /// are scrubbed. Returns the rewritten request plus the categories that
+    /// fired, for the claim-13 audit. Plan 129 Phase E / ADR-067.
+    fn redact_outbound(&self, mut req: ProxyRequest) -> (ProxyRequest, RedactionHits) {
+        let mut hits = RedactionHits::default();
+        for (_, value) in req.headers.iter_mut() {
+            if find_placeholder(value).is_some() {
+                continue; // declared placeholder — substituted next, never masked.
+            }
+            if let Some((masked, h)) = self.redactor.redact_bytes(value.as_bytes()) {
+                *value = String::from_utf8_lossy(&masked).into_owned();
+                hits.merge(h);
+            }
+        }
+        if let Some((masked, h)) = self.redactor.redact_bytes(&req.body) {
+            req.body = masked;
+            hits.merge(h);
+        }
+        (req, hits)
+    }
+
+    /// Emit one `secret.redacted { destination, categories }` entry when the
+    /// egress redactor masked anything (claim 13 — category names + destination,
+    /// never the bytes). Best-effort; no-op without a recorder or a destination.
+    async fn audit_redactions(&self, hits: &RedactionHits, destination: Option<&str>) {
+        if hits.is_empty() {
+            return;
+        }
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        let mut categories: Vec<&str> = hits
+            .secrets
+            .iter()
+            .chain(hits.pii.iter())
+            .copied()
+            .collect();
+        categories.sort_unstable();
+        categories.dedup();
+        if let Err(e) = emit_secret_redacted(recorder, dest, &categories.join(",")).await {
+            tracing::warn!(error = %e, "secret.redacted audit emit failed");
         }
     }
 
@@ -1029,6 +1094,64 @@ mod server_tests {
             WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
         }
         server.abort();
+    }
+
+    /// Plan 129 Phase E / ADR-067: the endpoint scrubs an *undeclared*
+    /// secret-shaped run from the outbound body before forwarding (the same
+    /// redaction the gateway bridge applies, at the endpoint chokepoint so
+    /// every backend routing egress through it is covered), while a *declared*
+    /// placeholder is still substituted to its real credential. The destination
+    /// sees the real declared credential and a masked undeclared one — the
+    /// undeclared secret never leaves the host.
+    #[tokio::test]
+    async fn endpoint_redacts_undeclared_secret_in_body_then_forwards() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let leaked = "sk-".to_owned() + &"z".repeat(48);
+        let body = format!("{{\"leak\":\"{leaked}\"}}");
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(body.as_bytes()),
+        };
+
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+
+        let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+        // Declared secret: substituted to the real credential.
+        assert_eq!(
+            seen.headers[0],
+            ("authorization".into(), "Bearer sk-live-zzz".into())
+        );
+        // Undeclared secret in the body: masked before egress.
+        let seen_body = String::from_utf8_lossy(&seen.body);
+        assert!(
+            !seen_body.contains(&leaked),
+            "undeclared secret survived to the destination: {seen_body}"
+        );
+        assert!(
+            seen_body.contains("XXX"),
+            "body was not masked: {seen_body}"
+        );
+    }
+
+    /// A clean request is forwarded byte-for-byte — redaction never rewrites
+    /// content that doesn't match a secret/PII rule.
+    #[tokio::test]
+    async fn endpoint_forwards_clean_body_unchanged() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{\"prompt\":\"hello world\"}"),
+        };
+
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+        let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.body, b"{\"prompt\":\"hello world\"}");
     }
 
     #[test]
