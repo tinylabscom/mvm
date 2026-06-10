@@ -19,10 +19,100 @@
 //! This module's SNI peek/parse is pure + host-testable; the live terminate /
 //! splice glue (Linux accept loop) lives in `substitution_proxy.rs`.
 
+use std::io::{Read, Write};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, anyhow};
+use mvm_core::crypto::egress_ca::VmIntermediate;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+use super::read::read_http_request;
+use super::request::proxy_request_from_origin_form_https;
+use crate::keyholder::substitution::SubstitutionEndpoint;
+use crate::supervisor::substitution_proxy::{PreparedRequest, prepare_request};
+
 /// Cap on the bytes we peek looking for the SNI. A ClientHello carrying SNI is
 /// far smaller; this bounds the peek so a guest can't make us buffer unboundedly
 /// before we've even decided bound-vs-unbound.
 pub const MAX_CLIENT_HELLO_PEEK: usize = 8 * 1024;
+
+/// Build a rustls `ServerConfig` that presents a freshly-minted leaf for `sni`
+/// chained to the per-VM intermediate (`[leaf, intermediate]`), so a guest that
+/// trusts the intermediate validates the terminated connection. We already
+/// peeked the SNI, so we mint directly rather than via a `ResolvesServerCert`.
+pub fn server_config_for_sni(
+    intermediate: &VmIntermediate,
+    sni: &str,
+) -> Result<rustls::ServerConfig> {
+    let leaf = intermediate
+        .mint_leaf(sni)
+        .map_err(|e| anyhow!("mint leaf for {sni}: {e}"))?;
+
+    let mut chain = pem_certs(&leaf.cert_pem).context("parse minted leaf cert")?;
+    chain.extend(pem_certs(intermediate.cert_pem()).context("parse intermediate cert")?);
+    let key = pem_private_key(&leaf.key_pem).context("parse minted leaf key")?;
+
+    rustls::ServerConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+        .with_safe_default_protocol_versions()
+        .context("rustls protocol versions")?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .context("rustls server config from minted leaf")
+}
+
+/// Terminate the guest's TLS on `stream` under `config`, read the one decrypted
+/// HTTP/1.1 request, substitute placeholders against `endpoint` (claim-12
+/// bind-checked — refused before `forward` runs), forward via `forward`
+/// (the upstream-https leg), and write the response back encrypted.
+///
+/// `forward` is injected so the substitution + termination core stays testable
+/// with a mock upstream; production passes the reused reqwest forwarder. A
+/// substitution refusal closes the connection without forwarding — the same
+/// fail-closed invariant as the Stage 1b `:80` path.
+pub fn terminate_and_substitute<S, F>(
+    stream: S,
+    config: Arc<rustls::ServerConfig>,
+    orig_dst: SocketAddr,
+    endpoint: &SubstitutionEndpoint<'_>,
+    forward: F,
+) -> Result<()>
+where
+    S: Read + Write,
+    F: Fn(&PreparedRequest) -> Result<Vec<u8>>,
+{
+    let conn = rustls::ServerConnection::new(config).context("new rustls server connection")?;
+    let mut tls = rustls::StreamOwned::new(conn, stream);
+
+    let raw = read_http_request(&mut tls).context("read decrypted request")?;
+    let req = proxy_request_from_origin_form_https(&raw, orig_dst)?;
+    let prepared =
+        prepare_request(endpoint, req).map_err(|e| anyhow!("substitution refused: {e}"))?;
+    let resp = forward(&prepared)?;
+
+    tls.write_all(&resp).context("write terminated response")?;
+    tls.flush().context("flush terminated response")?;
+    Ok(())
+}
+
+/// Parse a PEM bundle into DER certs (the leaf + intermediate chain).
+fn pem_certs(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
+    let mut rd = std::io::Cursor::new(pem.as_bytes());
+    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut rd).collect();
+    let certs = certs.context("read PEM certs")?;
+    if certs.is_empty() {
+        return Err(anyhow!("no certificate in PEM"));
+    }
+    Ok(certs)
+}
+
+/// Parse a PEM private key (PKCS#8 — rcgen emits PKCS#8) into a rustls key.
+fn pem_private_key(pem: &str) -> Result<PrivateKeyDer<'static>> {
+    let mut rd = std::io::Cursor::new(pem.as_bytes());
+    rustls_pemfile::private_key(&mut rd)
+        .context("read PEM private key")?
+        .ok_or_else(|| anyhow!("no private key in PEM"))
+}
 
 /// Extract the SNI `host_name` from a buffered TLS ClientHello record, or `None`
 /// when the buffer isn't a ClientHello, carries no SNI, or is malformed/truncated
@@ -199,5 +289,119 @@ mod tests {
     #[test]
     fn garbage_is_none() {
         assert_eq!(parse_sni(&[0x16, 0xff, 0xff, 0xff, 0xff]), None);
+    }
+
+    // ── terminate + substitute (loopback, no VM) ──
+
+    use crate::keyholder::{LocalResolver, SubstitutionRegistry};
+    use mvm_core::crypto::egress_ca::{EgressCa, VmIntermediate};
+    use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
+    use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+    use secrecy::SecretBox;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
+    fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
+        SecretRef {
+            name: name.into(),
+            mount: SecretMount::Env { var: "K".into() },
+            auth_type: AuthType::Bearer,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        }
+    }
+
+    /// A rustls client config that trusts exactly `intermediate_cert_pem` — the
+    /// guest's posture after the S2.3 boot step installs the per-VM cert.
+    fn client_config_trusting(intermediate_cert_pem: &str) -> rustls::ClientConfig {
+        let mut roots = rustls::RootCertStore::empty();
+        for c in super::pem_certs(intermediate_cert_pem).unwrap() {
+            roots.add(c).unwrap();
+        }
+        rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    }
+
+    #[test]
+    fn bound_sni_terminates_substitutes_and_reoriginates() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+        // Reconstruct exactly as the endpoint would, from the delivered PEMs.
+        let inter = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+
+        // Substitution registry: placeholder → real token, bound to the host.
+        let sdir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(sdir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("REALTOKEN".to_string())),
+            )
+            .unwrap();
+        let store: Arc<dyn SecretStore> = Arc::new(store);
+        let resolver = LocalResolver::new("local", store);
+        let mut reg = SubstitutionRegistry::new();
+        let placeholder = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+
+        let server_cfg = Arc::new(server_config_for_sni(&inter, "api.openai.com").unwrap());
+        let captured: Arc<Mutex<Option<PreparedRequest>>> = Arc::new(Mutex::new(None));
+
+        // Terminator side: accept one connection, terminate+substitute, mock the
+        // upstream by capturing the prepared request and replying canned bytes.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cap = Arc::clone(&captured);
+        let cfg = Arc::clone(&server_cfg);
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+            let orig_dst: SocketAddr = "203.0.113.7:443".parse().unwrap();
+            terminate_and_substitute(sock, cfg, orig_dst, &endpoint, |prepared| {
+                *cap.lock().unwrap() = Some(prepared.clone());
+                Ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec())
+            })
+            .unwrap();
+        });
+
+        // Guest side: a real rustls client trusting the per-VM intermediate.
+        let client_cfg = Arc::new(client_config_trusting(inter.cert_pem()));
+        let server_name = rustls::pki_types::ServerName::try_from("api.openai.com").unwrap();
+        let mut conn = rustls::ClientConnection::new(client_cfg, server_name).unwrap();
+        let mut sock = TcpStream::connect(addr).unwrap();
+        let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+        let req = format!(
+            "GET /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer {placeholder}\r\n\r\n"
+        );
+        tls.write_all(req.as_bytes()).unwrap();
+        tls.flush().unwrap();
+        let mut resp = Vec::new();
+        let _ = tls.read_to_end(&mut resp);
+        server.join().unwrap();
+
+        // The handshake succeeded (client trusted the minted leaf) AND the
+        // response came back through the terminated tunnel.
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200 OK"),
+            "client got: {:?}",
+            String::from_utf8_lossy(&resp)
+        );
+        // The upstream (mock) saw the REAL credential — placeholder substituted.
+        let seen = captured.lock().unwrap().clone().expect("forward ran");
+        let auth = seen
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert_eq!(auth, "Bearer REALTOKEN");
+        // And the re-origination URL is https (upstream dialled over TLS).
+        assert!(seen.url.starts_with("https://api.openai.com/v1/x"));
     }
 }

@@ -146,6 +146,19 @@ impl std::fmt::Debug for VmIntermediate {
 }
 
 impl VmIntermediate {
+    /// Reconstruct an intermediate from its delivered PEMs. The transparent
+    /// `https` terminator rebuilds the minter from `EndpointConfig.tls_intermediate`
+    /// (cert+key) at admission to mint per-SNI leaves — the key never left the
+    /// host. `cert_pem` is retained verbatim so minted leaves chain to exactly
+    /// the cert the guest trusts.
+    pub fn from_pem(cert_pem: &str, key_pem: &str) -> Result<Self, EgressCaError> {
+        let key = KeyPair::from_pem(key_pem).map_err(|e| EgressCaError::Parse(e.to_string()))?;
+        Ok(Self {
+            cert_pem: cert_pem.to_string(),
+            key,
+        })
+    }
+
     /// The intermediate's PEM cert — the only piece delivered to the guest.
     pub fn cert_pem(&self) -> &str {
         &self.cert_pem
@@ -280,6 +293,22 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o400, "CA key must be owner-read-only");
+    }
+
+    #[test]
+    fn from_pem_reconstructs_a_minter_that_mints_leaves() {
+        // The terminator endpoint rebuilds the intermediate from its delivered
+        // PEMs (EndpointConfig.tls_intermediate) and must still mint leaves that
+        // chain to the same cert the guest trusts.
+        let dir = tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+
+        let rebuilt = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+        assert_eq!(rebuilt.cert_pem(), inter.cert_pem());
+        let leaf = rebuilt.mint_leaf("api.openai.com").unwrap();
+        assert!(leaf.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(leaf.key_pem.contains("PRIVATE KEY"));
     }
 
     #[test]
