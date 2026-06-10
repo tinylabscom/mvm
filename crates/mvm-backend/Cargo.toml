@@ -19,8 +19,6 @@ authors.workspace = true
 #
 # Lives here:
 #   - apple_container.rs   (macOS 26+ Apple Virtualization.framework)
-#   - cloud_hypervisor.rs  (Tier 1 KVM peer of Firecracker; opt-in)
-#   - docker.rs            (Tier 3 fallback)
 #   - libkrun.rs           (raw libkrun shim — Linux KVM / macOS HVF)
 #
 # Stays in `mvm` (W8 will move):

@@ -450,13 +450,7 @@ fn collect_balloon_support() -> BTreeMap<String, bool> {
     // list is hand-maintained because there's no general "iterate
     // every backend" helper today; adding a new backend means
     // adding it here so doctor surfaces it without lying.
-    let names = [
-        "firecracker",
-        "cloud-hypervisor",
-        "apple-container",
-        "libkrun",
-        "qemu",
-    ];
+    let names = ["firecracker", "apple-container", "libkrun", "qemu"];
     let mut out = BTreeMap::new();
     for name in names {
         let backend = AnyBackend::from_hypervisor(name);
@@ -492,14 +486,7 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 fn collect_warm_start_support() -> WarmStartReport {
     // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
     // because save/restore is a warm-start tier worth surfacing.
-    let names = [
-        "firecracker",
-        "cloud-hypervisor",
-        "apple-container",
-        "libkrun",
-        "qemu",
-        "vz",
-    ];
+    let names = ["firecracker", "apple-container", "libkrun", "qemu", "vz"];
     let mut backends = BTreeMap::new();
     for name in names {
         let b = AnyBackend::from_hypervisor(name);
@@ -2681,13 +2668,12 @@ mod tests {
     }
 
     #[test]
-    fn collect_balloon_support_advertises_fc_and_ch() {
+    fn collect_balloon_support_advertises_firecracker() {
         let support = collect_balloon_support();
         // The hand-maintained list in collect_balloon_support must
-        // include both rust-vmm backends. If a future refactor drops
-        // one, this fails loudly.
+        // include Firecracker. If a future refactor drops it, this
+        // fails loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
-        assert_eq!(support.get("cloud-hypervisor"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
         assert_eq!(support.get("apple-container"), Some(&false));
     }
