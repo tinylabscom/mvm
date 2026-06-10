@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
+use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta, ContentBlob};
 
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
 /// for tests). Layout: `<root>/<id>/meta.json` + `<root>/<id>/content/`.
@@ -99,8 +99,6 @@ impl CheckpointStore {
     }
 }
 
-use mvm_core::checkpoint::CheckpointClass;
-
 /// Inputs for an `fs_quick` capture. Grouped into a struct so the call site
 /// reads clearly and we never thread a long positional argument list.
 pub struct CaptureFsQuickParams {
@@ -128,6 +126,28 @@ pub struct ForkParams {
     pub created_unix: u64,
 }
 
+/// Verify every blob named in `meta.content` exists in the checkpoint's content
+/// dir and hashes to its recorded value. Fail-closed: any missing or mismatched
+/// blob is an error.
+pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<()> {
+    let dir = store.content_dir(&meta.id);
+    for blob in &meta.content {
+        let path = dir.join(&blob.name);
+        let actual = sha256_file_hex(&path)
+            .with_context(|| format!("hashing checkpoint blob {}", path.display()))?;
+        if actual != blob.sha256 {
+            anyhow::bail!(
+                "checkpoint '{}' blob {:?} failed integrity (sha256): expected {}, got {}",
+                meta.id,
+                blob.name,
+                blob.sha256,
+                actual
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
 /// integrity, CoW-clone it into `dest_dir`, and record a child checkpoint whose
 /// `parent` points back to the source. Boot of the child is the caller's job.
@@ -140,24 +160,18 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
         );
     }
 
-    let content_dir = store.content_dir(&parent.id);
-    let blob = only_file_in(&content_dir)?;
-    let actual = sha256_file_hex(&blob)?;
-    if actual != parent.content_sha256 {
-        anyhow::bail!(
-            "checkpoint '{}' content failed integrity (sha256): expected {}, got {}",
-            parent.id,
-            parent.content_sha256,
-            actual
-        );
-    }
+    verify_content(store, &parent)?;
 
     std::fs::create_dir_all(&params.dest_dir)
         .with_context(|| format!("creating {}", params.dest_dir.display()))?;
-    let blob_name = blob.file_name().context("content blob has no file name")?;
-    let dst = params.dest_dir.join(blob_name);
-    crate::base::cow::clone_rootfs_for_instance(&blob, &dst)
-        .context("cloning checkpoint content into child instance")?;
+    let content_dir = store.content_dir(&parent.id);
+    for blob in &parent.content {
+        crate::base::cow::clone_rootfs_for_instance(
+            &content_dir.join(&blob.name),
+            &params.dest_dir.join(&blob.name),
+        )
+        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
+    }
 
     let child = CheckpointMeta::builder(
         params.child_id,
@@ -166,33 +180,11 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     )
     .parent(Some(parent.id))
     .created_unix(params.created_unix)
-    .content_sha256(actual)
+    .content(parent.content.clone())
     .supervisor_config_digest(parent.supervisor_config_digest)
     .build();
     store.write_meta(&child)?;
     Ok(child)
-}
-
-/// Return the single regular file in a checkpoint's content dir. An fs_quick
-/// checkpoint holds exactly one blob; more than one means the content was
-/// tampered with or corrupted, so fail loud rather than guess.
-fn only_file_in(dir: &Path) -> Result<PathBuf> {
-    let mut found: Option<PathBuf> = None;
-    for entry in
-        std::fs::read_dir(dir).with_context(|| format!("reading content dir {}", dir.display()))?
-    {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            if found.is_some() {
-                anyhow::bail!(
-                    "checkpoint content dir {} has more than one file; refusing to fork an ambiguous checkpoint",
-                    dir.display()
-                );
-            }
-            found = Some(entry.path());
-        }
-    }
-    found.with_context(|| format!("checkpoint content dir {} has no file", dir.display()))
 }
 
 fn sha256_file_hex(path: &Path) -> Result<String> {
@@ -225,12 +217,16 @@ pub fn capture_fs_quick(
     crate::base::cow::clone_rootfs_for_instance(&params.rootfs, &dst)
         .context("cloning rootfs into checkpoint content")?;
 
+    let name = file_name.to_string_lossy().into_owned();
     let content_sha256 = sha256_file_hex(&dst)?;
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::FsQuick, params.vm_name)
         .tag(params.tag)
         .created_unix(params.created_unix)
-        .content_sha256(content_sha256)
+        .content(vec![ContentBlob {
+            name,
+            sha256: content_sha256,
+        }])
         .supervisor_config_digest(params.supervisor_config_digest)
         .build();
     store.write_meta(&meta)?;
@@ -240,13 +236,16 @@ pub fn capture_fs_quick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+    use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta, ContentBlob};
 
     fn meta(id: &str, tag: Option<&str>, parent: Option<&str>) -> CheckpointMeta {
         CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
             .tag(tag.map(String::from))
             .parent(parent.map(CheckpointId::new))
-            .content_sha256("h")
+            .content(vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: "h".into(),
+            }])
             .supervisor_config_digest("d")
             .created_unix(1)
             .build()
@@ -371,6 +370,8 @@ mod tests {
             std::fs::read(dst.join("rootfs.ext4")).unwrap(),
             b"fake-ext4-bytes"
         );
+        // byte-identical clone → manifest hashes are preserved
+        assert_eq!(child.content, parent.content);
         assert_eq!(store.children_of(&parent.id).unwrap().len(), 1);
     }
 
@@ -379,7 +380,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let m = CheckpointMeta::builder(CheckpointId::new("vf"), CheckpointClass::VmFull, "vm")
-            .content_sha256("h")
+            .content(vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: "h".into(),
+            }])
             .supervisor_config_digest("d")
             .created_unix(1)
             .build();
@@ -420,24 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn fork_refuses_multi_file_content() {
+    fn verify_content_passes_for_intact_blobs_and_fails_on_tamper() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
-        // plant a second file in the content dir
-        std::fs::write(store.content_dir(&parent.id).join("extra.bin"), b"x").unwrap();
-        let err = fork_checkpoint(
-            &store,
-            ForkParams {
-                checkpoint: parent.id,
-                child_id: CheckpointId::new("f"),
-                child_vm_name: "c".into(),
-                dest_dir: tmp.path().join("d"),
-                created_unix: 2,
-            },
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("more than one file"));
+        verify_content(&store, &parent).unwrap();
+        // tamper the single blob
+        let blob = store.content_dir(&parent.id).join("rootfs.ext4");
+        std::fs::write(&blob, b"tampered").unwrap();
+        assert!(verify_content(&store, &parent).is_err());
     }
 
     #[test]
@@ -457,7 +452,9 @@ mod tests {
         let meta = capture_fs_quick(&store, params).unwrap();
         let content_blob = store.content_dir(&meta.id).join("rootfs.ext4");
         assert_eq!(std::fs::read(&content_blob).unwrap(), b"fake-ext4-bytes");
-        assert_eq!(meta.content_sha256.len(), 64);
+        assert_eq!(meta.content.len(), 1);
+        assert_eq!(meta.content[0].name, "rootfs.ext4");
+        assert_eq!(meta.content[0].sha256.len(), 64);
         assert_eq!(meta.tag.as_deref(), Some("gold"));
         assert_eq!(store.read_meta(&meta.id).unwrap(), meta);
     }
