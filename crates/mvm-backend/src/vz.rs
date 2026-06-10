@@ -761,83 +761,86 @@ impl VzBackend {
             machine_id_path: machine_id_path.map(|p| p.display().to_string()),
         };
 
-        let json = cfg
-            .to_json()
-            .map_err(|e| anyhow!("serialize SupervisorConfig for restore: {e}"))?;
-
-        let supervisor_path = resolve_supervisor_path()?;
-        let pid_file = state_dir.join(PID_FILE_NAME);
-        // The VM must not already be running; refuse if a live PID
-        // file exists. Stale PID files (process already exited) are
-        // tolerated and removed.
-        if let Some(pid) = read_pid(&pid_file)
-            && pid_alive(pid)
-        {
-            bail!(
-                "VM {:?} is still running (PID {pid}); stop it with `mvmctl down {}` before restoring",
-                id.0,
-                id.0,
-            );
-        }
-        let _ = std::fs::remove_file(&pid_file);
-        let console_log = state_dir.join("console.log");
-        let _ = crate::libkrun::open_console_capture(&console_log);
-
         ui::info(&format!(
-            "Restoring Vz VM '{}' from {} via {}...",
+            "Restoring Vz VM '{}' from {}...",
             id.0,
             snapshot_path.display(),
-            supervisor_path.display(),
         ));
-
-        let mut child = Command::new(&supervisor_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| anyhow!("spawn {}: {e}", supervisor_path.display()))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
-            .write_all(json.as_bytes())
-            .map_err(|e| anyhow!("pipe SupervisorConfig to supervisor stdin: {e}"))?;
-
-        let deadline = Instant::now() + PID_FILE_TIMEOUT;
-        loop {
-            if pid_file.exists() {
-                break;
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|e| anyhow!("poll supervisor child: {e}"))?
-            {
-                bail!(
-                    "supervisor exited before writing PID file during restore (status: {status}). \
-                     Check stderr above; console log: {}",
-                    console_log.display()
-                );
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                bail!(
-                    "supervisor did not write {} within {:?} during restore; killed. Console log: {}",
-                    pid_file.display(),
-                    PID_FILE_TIMEOUT,
-                    console_log.display(),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        ui::success(&format!(
-            "Vz VM '{}' restored (pid file: {}, console log: {}).",
-            id.0,
-            pid_file.display(),
-            console_log.display()
-        ));
+        spawn_supervisor_with_config(&cfg)?;
+        ui::success(&format!("Vz VM '{}' restored.", id.0));
         Ok(VmId(id.0.clone()))
     }
+}
+
+/// Spawn `mvm-vz-supervisor` with `cfg` on stdin and block until it writes its
+/// PID file (the supervisor's "I'm up" signal). Shared by `snapshot_restore`
+/// (same-identity resume) and the vm_full fork path (new-identity restore) —
+/// both flip `startup_mode` to `Restore` and hand the supervisor a config whose
+/// shape matches the saved memory state.
+///
+/// Refuses if `cfg`'s VM is already running (a live supervisor would race the
+/// new one over the same disks); a stale PID file (process gone) is removed.
+fn spawn_supervisor_with_config(cfg: &vz::SupervisorConfig) -> Result<()> {
+    let state_dir = PathBuf::from(&cfg.vm_state_dir);
+    let pid_file = cfg.resolved_pid_file();
+    if let Some(pid) = read_pid(&pid_file)
+        && pid_alive(pid)
+    {
+        bail!(
+            "VM {:?} is still running (PID {pid}); stop it with `mvmctl down {}` first",
+            cfg.name,
+            cfg.name,
+        );
+    }
+    let _ = std::fs::remove_file(&pid_file);
+
+    let json = cfg
+        .to_json()
+        .map_err(|e| anyhow!("serialize SupervisorConfig: {e}"))?;
+    let supervisor_path = resolve_supervisor_path()?;
+    let console_log = state_dir.join("console.log");
+    let _ = crate::libkrun::open_console_capture(&console_log);
+
+    let mut child = Command::new(&supervisor_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow!("spawn {}: {e}", supervisor_path.display()))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
+        .write_all(json.as_bytes())
+        .map_err(|e| anyhow!("pipe SupervisorConfig to supervisor stdin: {e}"))?;
+
+    let deadline = Instant::now() + PID_FILE_TIMEOUT;
+    loop {
+        if pid_file.exists() {
+            break;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow!("poll supervisor child: {e}"))?
+        {
+            bail!(
+                "supervisor exited before writing PID file (status: {status}). \
+                 Check stderr above; console log: {}",
+                console_log.display()
+            );
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            bail!(
+                "supervisor did not write {} within {:?}; killed. Console log: {}",
+                pid_file.display(),
+                PID_FILE_TIMEOUT,
+                console_log.display(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 impl crate::checkpoint::VmFullRestore for VzBackend {
@@ -912,6 +915,64 @@ impl crate::checkpoint::VmFullControl for VzVmFullControl {
             .find(|d| d.id == "rootfs")
             .map(|d| PathBuf::from(&d.path))
             .ok_or_else(|| anyhow::anyhow!("supervisor config has no rootfs disk"))
+    }
+}
+
+/// Derive a fork child's `SupervisorConfig` from the parent's persisted one.
+/// Pure (no I/O, no spawn): the caller passes the already-parsed parent config
+/// and the child's cloned blob paths; this rewrites identity + restore mode.
+///
+/// - `name` → `child_vm_name` (the new identity), which also re-derives the
+///   gvproxy MAC so the forked guest doesn't collide with the parent on the
+///   network. The MAC is an explicit field on `NetworkConfig::Gvproxy`, so it
+///   must be rewritten here — setting `name` alone is not enough.
+/// - `vm_state_dir` → the child's state dir, and every disk `path` is rebased
+///   into that dir (keeping each disk's basename) so the child boots from its
+///   OWN cloned rootfs, never the parent's live image.
+/// - `startup_mode` → `Restore` against the child's cloned `memory.bin` (and
+///   inherited `machine-id` sidecar), so the supervisor resumes the captured
+///   memory state instead of cold-booting the kernel.
+pub fn build_child_supervisor_config(
+    parent_cfg: &vz::SupervisorConfig,
+    child_vm_name: &str,
+    child_state_dir: &Path,
+    memory_path: &Path,
+    machine_id_path: Option<&Path>,
+) -> Result<vz::SupervisorConfig> {
+    let mut cfg = parent_cfg.clone();
+    cfg.name = child_vm_name.to_string();
+    cfg.vm_state_dir = child_state_dir.to_string_lossy().into_owned();
+
+    for disk in &mut cfg.disks {
+        let basename = Path::new(&disk.path)
+            .file_name()
+            .ok_or_else(|| anyhow!("disk path {:?} has no file name", disk.path))?;
+        disk.path = child_state_dir
+            .join(basename)
+            .to_string_lossy()
+            .into_owned();
+    }
+
+    // Re-derive the gvproxy MAC for the new identity (it's an explicit field).
+    if let Some(vz::NetworkConfig::Gvproxy { mac, .. }) = cfg.network.as_mut() {
+        *mac = host_gvproxy::derive_mac(child_vm_name);
+    }
+
+    cfg.startup_mode = vz::StartupMode::Restore {
+        snapshot_path: memory_path.display().to_string(),
+        machine_id_path: machine_id_path.map(|p| p.display().to_string()),
+    };
+    Ok(cfg)
+}
+
+/// Spawns a forked child supervisor in `Restore` mode by handing the already-
+/// built child config to `mvm-vz-supervisor`. Implements the checkpoint seam so
+/// `fork_vm_full` stays host-testable (a mock spawner replaces this in tests).
+pub struct VzChildSupervisorSpawner;
+
+impl crate::checkpoint::ChildSupervisorSpawner for VzChildSupervisorSpawner {
+    fn spawn(&self, config: &vz::SupervisorConfig) -> Result<()> {
+        spawn_supervisor_with_config(config)
     }
 }
 
@@ -2126,5 +2187,85 @@ mod tests {
             err.to_string().contains("control.sock"),
             "error mentions socket: {err}"
         );
+    }
+
+    fn minimal_parent_config(name: &str) -> vz::SupervisorConfig {
+        vz::SupervisorConfig {
+            name: name.into(),
+            vm_state_dir: format!("/parent/state/{name}"),
+            pid_file_name: Some(PID_FILE_NAME.into()),
+            kernel: vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "console=hvc0 root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: vz::ResourceConfig {
+                cpu_count: 2,
+                memory_mib: 1024,
+            },
+            disks: vec![vz::DiskConfig {
+                id: "rootfs".into(),
+                path: "/parent/state/parentvm/rootfs.ext4".into(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: vz::VsockConfig {
+                ports: vec![],
+                socket_dir: "/parent/state/parentvm/vsock".into(),
+            },
+            console_output_path: None,
+            network: Some(vz::NetworkConfig::Gvproxy {
+                socket_path: "/parent/gv.sock".into(),
+                mac: host_gvproxy::derive_mac(name),
+                events_ingest_socket_path: None,
+            }),
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        }
+    }
+
+    #[test]
+    fn build_child_supervisor_config_rewrites_identity_disks_and_restore_mode() {
+        let parent = minimal_parent_config("parentvm");
+        let child_dir = Path::new("/child/state/childvm");
+        let mem = child_dir.join("memory.bin");
+        let mid = child_dir.join("machine-id");
+
+        let child =
+            build_child_supervisor_config(&parent, "childvm", child_dir, &mem, Some(&mid)).unwrap();
+
+        assert_eq!(child.name, "childvm");
+        assert_eq!(child.vm_state_dir, child_dir.to_string_lossy());
+        // rootfs disk now lives in the child dir, basename preserved.
+        let rootfs = child.disks.iter().find(|d| d.id == "rootfs").unwrap();
+        assert_eq!(rootfs.path, "/child/state/childvm/rootfs.ext4");
+        // MAC re-derived for the new identity (not the parent's).
+        match child.network.as_ref().unwrap() {
+            vz::NetworkConfig::Gvproxy { mac, .. } => {
+                assert_eq!(mac, &host_gvproxy::derive_mac("childvm"));
+                assert_ne!(mac, &host_gvproxy::derive_mac("parentvm"));
+            }
+        }
+        // Restore mode pointing at the child's memory + inherited machine-id.
+        match &child.startup_mode {
+            vz::StartupMode::Restore {
+                snapshot_path,
+                machine_id_path,
+            } => {
+                assert_eq!(snapshot_path, &mem.display().to_string());
+                assert_eq!(
+                    machine_id_path.as_deref(),
+                    Some(mid.display().to_string()).as_deref()
+                );
+            }
+            other => panic!("expected Restore, got {other:?}"),
+        }
     }
 }

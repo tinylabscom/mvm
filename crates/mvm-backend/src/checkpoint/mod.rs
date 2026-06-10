@@ -148,14 +148,34 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
     Ok(())
 }
 
+/// Child inherits the parent checkpoint's machine-id (boot-id / systemd
+/// machine-id continuity) rather than minting a fresh one. The forked memory
+/// state was captured WITH that identity, so restoring it demands the same id.
+const FORK_FRESH_MACHINE_ID: bool = false;
+
+/// Fork requires the parent VM stopped — a live supervisor would race the new
+/// child over the source disks while we clone them.
+const FORK_ALLOW_PARENT_RUNNING: bool = false;
+
+/// Spawns a forked child's supervisor in restore mode from its rewritten
+/// `SupervisorConfig`. Abstracted so `fork_vm_full` is testable without booting
+/// a real hypervisor; the Vz impl (`VzChildSupervisorSpawner`) lives in `vz`.
+pub trait ChildSupervisorSpawner {
+    fn spawn(&self, config: &mvm_build::vz::SupervisorConfig) -> Result<()>;
+}
+
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
 /// integrity, CoW-clone it into `dest_dir`, and record a child checkpoint whose
 /// `parent` points back to the source. Boot of the child is the caller's job.
+///
+/// fs_quick only — a vm_full checkpoint carries saved memory and must be forked
+/// through [`fork_vm_full`], which rewrites the supervisor config and restores
+/// the memory state into the new identity.
 pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<CheckpointMeta> {
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::FsQuick {
         anyhow::bail!(
-            "cannot fork checkpoint '{}': class vm_full is not supported yet",
+            "cannot fork checkpoint '{}' (class vm_full) via fork_checkpoint; use fork_vm_full",
             parent.id
         );
     }
@@ -185,6 +205,102 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     .build();
     store.write_meta(&child)?;
     Ok(child)
+}
+
+/// Branch a NEW VM identity from a vm_full checkpoint and boot it (restore-as-
+/// new, "semantic B"): verify the source triple, clone {rootfs, memory,
+/// machine-id} into the child's state dir, rewrite the parent's supervisor
+/// config for the child identity, spawn it in restore mode, and record lineage.
+///
+/// The parent VM must be stopped (see [`FORK_ALLOW_PARENT_RUNNING`]); the child
+/// inherits the parent's machine-id (see [`FORK_FRESH_MACHINE_ID`]).
+pub fn fork_vm_full(
+    store: &CheckpointStore,
+    params: ForkParams,
+    spawner: &dyn ChildSupervisorSpawner,
+) -> Result<CheckpointMeta> {
+    let parent = store.read_meta(&params.checkpoint)?;
+    if parent.class != CheckpointClass::VmFull {
+        anyhow::bail!(
+            "cannot fork_vm_full checkpoint '{}' (class fs_quick); use fork_checkpoint",
+            parent.id
+        );
+    }
+    verify_content(store, &parent)?;
+
+    if !FORK_ALLOW_PARENT_RUNNING && vm_is_running(&parent.vm_name) {
+        anyhow::bail!(
+            "cannot fork checkpoint '{}': parent VM '{}' is still running; stop it first",
+            parent.id,
+            parent.vm_name
+        );
+    }
+
+    // Clone the captured triple into the child's state dir, then boot the child
+    // from its OWN copies — never the parent's live blobs.
+    std::fs::create_dir_all(&params.dest_dir)
+        .with_context(|| format!("creating {}", params.dest_dir.display()))?;
+    let content_dir = store.content_dir(&parent.id);
+    for blob in &parent.content {
+        crate::base::cow::clone_rootfs_for_instance(
+            &content_dir.join(&blob.name),
+            &params.dest_dir.join(&blob.name),
+        )
+        .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
+    }
+
+    let parent_cfg_path =
+        mvm_core::config::vm_state_dir(&parent.vm_name).join("supervisor-config.json");
+    let parent_cfg_bytes = std::fs::read(&parent_cfg_path).with_context(|| {
+        format!(
+            "reading parent supervisor config {}",
+            parent_cfg_path.display()
+        )
+    })?;
+    let parent_cfg: mvm_build::vz::SupervisorConfig = serde_json::from_slice(&parent_cfg_bytes)
+        .with_context(|| format!("parsing {}", parent_cfg_path.display()))?;
+
+    let memory_path = params.dest_dir.join("memory.bin");
+    let machine_id_path = params.dest_dir.join("machine-id");
+    // FORK_FRESH_MACHINE_ID=false → pass the inherited machine-id sidecar so the
+    // restored guest keeps the identity its memory state was captured with.
+    let machine_id_arg = (!FORK_FRESH_MACHINE_ID).then_some(machine_id_path.as_path());
+    let child_cfg = crate::vz::build_child_supervisor_config(
+        &parent_cfg,
+        &params.child_vm_name,
+        &params.dest_dir,
+        &memory_path,
+        machine_id_arg,
+    )?;
+
+    spawner.spawn(&child_cfg)?;
+
+    let child = CheckpointMeta::builder(
+        params.child_id,
+        CheckpointClass::VmFull,
+        params.child_vm_name,
+    )
+    .parent(Some(parent.id))
+    .created_unix(params.created_unix)
+    .content(parent.content.clone())
+    .supervisor_config_digest(parent.supervisor_config_digest)
+    .build();
+    store.write_meta(&child)?;
+    Ok(child)
+}
+
+/// Liveness probe for a VM by name: a non-stale `vz.pid` whose process still
+/// exists. Mirrors the host-side pid-file convention the Vz backend writes.
+fn vm_is_running(vm_name: &str) -> bool {
+    let pid_file = mvm_core::config::vm_state_dir(vm_name).join("vz.pid");
+    let Ok(s) = std::fs::read_to_string(&pid_file) else {
+        return false;
+    };
+    let Ok(pid) = s.trim().parse::<i32>() else {
+        return false;
+    };
+    // kill(pid, 0) → 0 if the process exists, -1/ESRCH if not.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Host-side control over a running VM's memory + disk, abstracted so the
@@ -737,6 +853,170 @@ mod tests {
         );
         // Restore seam must NOT have been called on a tampered checkpoint.
         assert!(restore.seen.borrow().is_none());
+    }
+
+    struct MockSpawner {
+        seen: RefCell<Option<mvm_build::vz::SupervisorConfig>>,
+    }
+    impl ChildSupervisorSpawner for MockSpawner {
+        fn spawn(&self, config: &mvm_build::vz::SupervisorConfig) -> Result<()> {
+            *self.seen.borrow_mut() = Some(config.clone());
+            Ok(())
+        }
+    }
+
+    fn write_parent_supervisor_config(vm_name: &str) {
+        // vm_state_dir(vm_name) resolves under MVM_DATA_DIR (set by the caller).
+        let dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = mvm_build::vz::SupervisorConfig {
+            name: vm_name.into(),
+            vm_state_dir: dir.to_string_lossy().into_owned(),
+            pid_file_name: Some("vz.pid".into()),
+            kernel: mvm_build::vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "console=hvc0 root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: mvm_build::vz::ResourceConfig {
+                cpu_count: 2,
+                memory_mib: 1024,
+            },
+            disks: vec![mvm_build::vz::DiskConfig {
+                id: "rootfs".into(),
+                path: dir.join("rootfs.ext4").to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: mvm_build::vz::VsockConfig {
+                ports: vec![],
+                socket_dir: dir.join("vsock").to_string_lossy().into_owned(),
+            },
+            console_output_path: None,
+            network: Some(mvm_build::vz::NetworkConfig::Gvproxy {
+                socket_path: "/gv.sock".into(),
+                mac: mvm_build::host_gvproxy::derive_mac(vm_name),
+                events_ingest_socket_path: None,
+            }),
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: mvm_build::vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        };
+        std::fs::write(dir.join("supervisor-config.json"), cfg.to_json().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn fork_vm_full_clones_triple_rewrites_config_and_records_lineage() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        // seed_vm_full_checkpoint uses vm_name "origin"; give it a parent config.
+        let parent = seed_vm_full_checkpoint(&store, tmp.path(), "v1");
+        write_parent_supervisor_config(&parent.vm_name);
+
+        let dest = tmp.path().join("childvm-state");
+        let spawner = MockSpawner {
+            seen: RefCell::new(None),
+        };
+        let child = fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("f1"),
+                child_vm_name: "childvm".into(),
+                dest_dir: dest.clone(),
+                created_unix: 2,
+            },
+            &spawner,
+        )
+        .unwrap();
+
+        // All three blobs cloned into the child dir.
+        for name in ["rootfs.ext4", "memory.bin", "machine-id"] {
+            assert!(dest.join(name).exists(), "{name} not cloned");
+        }
+        // Lineage + class + content carried over.
+        assert_eq!(child.class, CheckpointClass::VmFull);
+        assert_eq!(child.parent.as_ref().unwrap(), &parent.id);
+        assert_eq!(child.vm_name, "childvm");
+        assert_eq!(child.content, parent.content);
+        assert_eq!(child.content.len(), 3);
+
+        // Spawner invoked with the rewritten child config.
+        let cfg = spawner.seen.borrow().clone().unwrap();
+        assert_eq!(cfg.name, "childvm");
+        assert_eq!(cfg.vm_state_dir, dest.to_string_lossy());
+        let rootfs = cfg.disks.iter().find(|d| d.id == "rootfs").unwrap();
+        assert_eq!(rootfs.path, dest.join("rootfs.ext4").to_string_lossy());
+        match &cfg.startup_mode {
+            mvm_build::vz::StartupMode::Restore {
+                snapshot_path,
+                machine_id_path,
+            } => {
+                assert_eq!(
+                    snapshot_path,
+                    &dest.join("memory.bin").display().to_string()
+                );
+                assert_eq!(
+                    machine_id_path.as_deref(),
+                    Some(dest.join("machine-id").display().to_string()).as_deref()
+                );
+            }
+            other => panic!("expected Restore, got {other:?}"),
+        }
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn fork_vm_full_refuses_fs_quick() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let spawner = MockSpawner {
+            seen: RefCell::new(None),
+        };
+        let err = fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: fsq.id,
+                child_id: CheckpointId::new("f"),
+                child_vm_name: "c".into(),
+                dest_dir: tmp.path().join("d"),
+                created_unix: 2,
+            },
+            &spawner,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("fs_quick"), "unexpected: {err}");
+        assert!(spawner.seen.borrow().is_none());
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
     }
 
     #[test]
