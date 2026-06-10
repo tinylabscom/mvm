@@ -752,6 +752,85 @@ fn resolve_deps_volume_binding_with_cache(
     Ok(Some(binding))
 }
 
+/// Plan 129 Stage 2 (S2.2) — stage the per-VM egress-TLS material for a
+/// secret-bearing plan. Mints the name-constrained intermediate, pushes its
+/// **cert** onto the guest secrets drive (`secret_files`, so the guest can trust
+/// host-terminated bound-host TLS once the S2.3 boot step installs it), and
+/// persists the cert+**key** to a host-only `egress-intermediate.json`
+/// (mode 0600) in the VM state dir for `spawn_egress_endpoint` to hand the
+/// terminator endpoint. The key never enters `secret_files` / the guest.
+///
+/// Bound hosts = the union of every plan secret's `allowed_hosts` from the host
+/// binding store — the SAME claim-12 egress allow-list, so the intermediate's
+/// `nameConstraints` can never exceed it. A plan with no secrets, or whose
+/// secrets carry no recorded binding, stages nothing (no https leg).
+fn stage_egress_tls_delivery(
+    plan_secrets: &[mvm_core::plan::SecretBinding],
+    tenant: &str,
+    vm_name: &str,
+    secret_files: &mut Vec<microvm::DriveFile>,
+) -> anyhow::Result<()> {
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore};
+
+    if plan_secrets.is_empty() {
+        return Ok(());
+    }
+    let store = FileBindingStore::default_location()?;
+    let mut bound: Vec<String> = Vec::new();
+    for s in plan_secrets {
+        if let Some(meta) = store.get(tenant, &s.name)? {
+            for h in meta.allowed_hosts {
+                if !bound.contains(&h) {
+                    bound.push(h);
+                }
+            }
+        }
+    }
+    if bound.is_empty() {
+        return Ok(());
+    }
+
+    let ca_dir = mvm_core::config::egress_ca_dir();
+    std::fs::create_dir_all(&ca_dir)
+        .with_context(|| format!("create egress CA dir {}", ca_dir.display()))?;
+    let refs: Vec<&str> = bound.iter().map(String::as_str).collect();
+    let delivery = mvm_backend::build_egress_tls_delivery(&refs, &ca_dir)?;
+
+    // Guest trusts the cert (delivered via the secrets drive; S2.3 installs it).
+    secret_files.push(delivery.guest_cert.clone());
+
+    // Host-only intermediate (cert+key) for the terminator endpoint — mode 0600
+    // private key material that must never reach the guest.
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("create VM state dir {}", state_dir.display()))?;
+    let path = state_dir.join("egress-intermediate.json");
+    let json = serde_json::to_vec(&serde_json::json!({
+        "cert_pem": delivery.endpoint_cert_pem,
+        "key_pem": delivery.endpoint_key_pem,
+    }))?;
+    write_host_only_file(&path, &json)
+        .with_context(|| format!("persist egress intermediate at {}", path.display()))?;
+    Ok(())
+}
+
+/// Atomically write `bytes` to `path` at mode 0600 (tmp + rename, so a reader
+/// never sees a half-written file). Used for host-only private key material.
+fn write_host_only_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all().ok();
+    std::fs::rename(&tmp, path)
+}
+
 /// Resolve the `source_root` for an app's lockfile path. For
 /// `Source::LocalPath { path, .. }` the source root is the directory
 /// the path resolves against — relative paths root at the IR file's
@@ -1776,6 +1855,13 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volume_cfg = rt_config.volumes.clone();
     };
 
+    // Plan 129 Stage 2 — if the plan carries secrets bound to egress hosts, mint
+    // the per-VM name-constrained egress intermediate and stage it: cert → the
+    // guest secrets drive (below), key → a host-only sidecar the terminator
+    // endpoint reads. No-op when the plan has no secrets / no egress bindings.
+    stage_egress_tls_delivery(&plan_secrets, tenant, &vm_name, &mut secret_files)
+        .context("staging per-VM egress TLS material")?;
+
     let user_cfg = mvm_core::user_config::load(None);
     let final_cpus = cpus
         .or(rt_config.cpus)
@@ -2333,6 +2419,10 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             } else {
                 w_volume_cfg = rt_cfg_watch.volumes.clone();
             }
+            // Plan 129 Stage 2 — same egress-TLS staging on the watch-mode
+            // rebuild path (cert → guest secrets drive, key → host sidecar).
+            stage_egress_tls_delivery(&plan_secrets, tenant, &vm_name_owned, &mut w_secret_files)
+                .context("staging per-VM egress TLS material (watch rebuild)")?;
             let w_port_mappings = parse_port_specs(ports).unwrap_or_default();
             if let Some(f) = ports_to_drive_file(&w_port_mappings) {
                 w_config_files.push(f);
@@ -3984,5 +4074,81 @@ mod resolve_deps_volume_tests {
             msg.contains("Source::LocalPath") || msg.contains("LocalPath"),
             "error must name the unsupported source kind: {msg}"
         );
+    }
+
+    // ── Plan 129 Stage 2 (S2.2): egress-TLS staging splits cert ↔ key ──
+
+    #[test]
+    fn stage_egress_tls_delivery_noop_without_secrets() {
+        // No secrets ⇒ no https leg, nothing staged.
+        let mut secret_files: Vec<microvm::DriveFile> = Vec::new();
+        stage_egress_tls_delivery(&[], "local", "vm-no-secrets", &mut secret_files).unwrap();
+        assert!(secret_files.is_empty());
+    }
+
+    #[test]
+    fn stage_egress_tls_delivery_splits_cert_to_guest_key_to_host() {
+        use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
+        use std::os::unix::fs::PermissionsExt;
+
+        // MVM_DATA_DIR isolates the binding store, egress CA, and VM state dir.
+        // Process-per-test under nextest already isolates env; the lock keeps
+        // plain `cargo test` (shared process) safe.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("MVM_DATA_DIR").ok();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        // Record the egress binding the helper resolves bound hosts from.
+        FileBindingStore::default_location()
+            .unwrap()
+            .put(
+                "local",
+                "OPENAI_API_KEY",
+                &SecretBindingMeta {
+                    auth_type: mvm_sdk::ir::AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            )
+            .unwrap();
+
+        let plan_secrets = vec![mvm_core::plan::SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }];
+        let mut secret_files: Vec<microvm::DriveFile> = Vec::new();
+        stage_egress_tls_delivery(&plan_secrets, "local", "vm-secret", &mut secret_files).unwrap();
+
+        // The guest got exactly the cert — never the key.
+        assert_eq!(secret_files.len(), 1);
+        let cert_file = &secret_files[0];
+        assert_eq!(cert_file.name, mvm_backend::EGRESS_CERT_DRIVE_NAME);
+        assert!(cert_file.content.contains("BEGIN CERTIFICATE"));
+        assert!(
+            !cert_file.content.contains("PRIVATE KEY"),
+            "intermediate key leaked into the guest cert file"
+        );
+
+        // The host-only intermediate sidecar holds the key at mode 0600.
+        let inter = mvm_core::config::vm_state_dir("vm-secret").join("egress-intermediate.json");
+        let meta = std::fs::metadata(&inter).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&inter).unwrap()).unwrap();
+        assert!(v["key_pem"].as_str().unwrap().contains("PRIVATE KEY"));
+        // The guest must trust exactly the cert the endpoint terminates under.
+        assert_eq!(
+            v["cert_pem"].as_str().unwrap().trim(),
+            cert_file.content.trim()
+        );
+
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("MVM_DATA_DIR", p),
+                None => std::env::remove_var("MVM_DATA_DIR"),
+            }
+        }
     }
 }

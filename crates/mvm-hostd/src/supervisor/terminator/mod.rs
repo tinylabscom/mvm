@@ -10,6 +10,7 @@ pub mod listener;
 pub mod orig_dst;
 pub mod read;
 pub mod request;
+pub mod tls;
 
 /// First index of `needle` in `haystack`, or `None`.
 pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {

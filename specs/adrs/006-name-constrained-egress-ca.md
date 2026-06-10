@@ -1,15 +1,50 @@
 ---
 title: "ADR-006: Name-Constrained CA for hypervisor-level L7 egress interception"
-status: Proposed
+status: Accepted
 date: 2026-04-30
-related: ADR-002 (microVM security posture); ADR-004 (hypervisor egress policy); plan 34 (L7 egress proxy)
+related: ADR-002 (microVM security posture); ADR-004 (hypervisor egress policy); ADR-067 (secrets-subsystem egress substitution); plan 129 (secrets subsystem, Stage 2)
 ---
 
 ## Status
 
-Proposed. Land Day 1 of plan 34's L7 sprint, before any
-`MitmdumpSupervisor` code is written. The cryptographic story this
-ADR locks down is load-bearing for everything that follows.
+**Accepted.** Implemented by plan 129 Stage 2 as the secret-egress
+`https` terminator — not the abandoned plan-34 `mitmdump` supervisor,
+but the same cryptographic design this ADR locks down: a **per-VM
+name-constrained intermediate**, not a long-lived blanket-trust host
+CA. The interceptor is mvm's own Rust terminator
+(`mvm-hostd::supervisor::terminator::tls`), driven by the substitution
+endpoint; there is no third-party MITM proxy.
+
+As implemented:
+
+- The long-lived host CA (`mvm_core::crypto::egress_ca::EgressCa`,
+  under `~/.mvm/egress-ca/`, key mode 0400) signs a **per-VM
+  intermediate** whose `nameConstraints permitted` is exactly the
+  union of the workload plan's bound egress hosts (the claim-12
+  allow-list). Only the intermediate **cert** reaches the guest; the
+  key stays host-side in the per-VM substitution endpoint and mints
+  per-SNI leaves on the fly.
+- The terminator peeks the ClientHello SNI and **terminates only bound
+  hosts** (mint leaf → decrypt → substitute the real credential →
+  re-originate upstream TLS validated against the system roots).
+  **Unbound SNI is spliced through untouched** — never decrypted, zero
+  added host visibility.
+- **Zero-added-visibility argument:** the host already sees bound-host
+  plaintext via substitution (it must, to swap the placeholder for the
+  real credential). Scoped name-constrained termination of *only* those
+  hosts adds nothing the substitution already requires, and the CA is
+  cryptographically constrained so it cannot vouch for any host outside
+  the plan's allow-list. This is **not** the rejected blanket MITM.
+- **Honest caveat (defense in depth, not the control):** Python `ssl`
+  and older Node do **not** enforce X.509 `nameConstraints`
+  client-side, so the in-guest cert constraint is a courtesy. The real
+  egress boundary remains the host-side allow-list check in
+  `prepare_request` (claim 12); the name constraint only bounds blast
+  radius if a per-VM intermediate ever leaked.
+
+The remainder of this document is the original (plan-34-era) rationale
+for *why* a per-VM name-constrained CA beats a blanket host CA — still
+the controlling argument; only the interceptor implementation changed.
 
 ## Context
 
