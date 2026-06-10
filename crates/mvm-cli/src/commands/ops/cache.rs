@@ -259,6 +259,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Untagged-checkpoint GC: tagged checkpoints are user-pinned; untagged
+            // ones follow cache retention. One corrupt meta.json makes list() fail,
+            // which logs a warning and skips the sweep — acceptable for a prune pass.
+            const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+            let ckpt_store = mvm_backend::checkpoint::CheckpointStore::open();
+            if dry_run {
+                if !ckpt_store.list().unwrap_or_default().is_empty() {
+                    ui::info("(dry-run) Would sweep expired untagged checkpoints.");
+                }
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                match sweep_untagged_checkpoints(&ckpt_store, now, CHECKPOINT_MAX_AGE_SECS) {
+                    Ok(n) => removed += n as u64,
+                    Err(e) => ui::warn(&format!("checkpoint sweep failed: {e}")),
+                }
+            }
+
             for entry in walkdir(path)? {
                 let entry_path = entry.path();
                 // Remove temp files (mvm-lima-*, .tmp)
@@ -315,6 +335,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             Ok(())
         }
     }
+}
+
+/// Remove untagged checkpoints older than `max_age_secs`. Tagged checkpoints
+/// are user-pinned and never swept. Returns the count removed.
+pub(super) fn sweep_untagged_checkpoints(
+    store: &mvm_backend::checkpoint::CheckpointStore,
+    now_unix: u64,
+    max_age_secs: u64,
+) -> anyhow::Result<usize> {
+    let mut removed = 0;
+    for m in store.list()? {
+        if m.tag.is_some() {
+            continue;
+        }
+        if now_unix.saturating_sub(m.created_unix) > max_age_secs {
+            store.remove(&m.id)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Whole-second age of a file from its mtime, or `None` if it can't be
@@ -552,6 +592,33 @@ fn walkdir(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_removes_untagged_keeps_tagged() {
+        use mvm_backend::checkpoint::CheckpointStore;
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let mk = |id: &str, tag: Option<&str>, age: u64| {
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
+                .tag(tag.map(String::from))
+                .content_sha256("h")
+                .supervisor_config_digest("d")
+                .created_unix(age)
+                .build()
+        };
+        store.write_meta(&mk("old-untagged", None, 0)).unwrap();
+        store
+            .write_meta(&mk("old-tagged", Some("gold"), 0))
+            .unwrap();
+
+        let now = 10_000_000u64;
+        let removed = super::sweep_untagged_checkpoints(&store, now, 1).unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.read_meta(&CheckpointId::new("old-tagged")).is_ok());
+        assert!(store.read_meta(&CheckpointId::new("old-untagged")).is_err());
+    }
 
     #[test]
     fn flow_byte_log_sweep_targets_audit_flow_bytes_dir() {
