@@ -65,7 +65,13 @@ use mvm_hostd::supervisor::gateway_bridge::{
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
 /// standby (1a; pool size bounds the blast radius in 1b).
-const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
+// A prelaunched **pool** standby legitimately blocks a long time waiting to be claimed —
+// it's the warm pool's whole point. Its lifetime is bounded by the pool reaper TTL
+// (`mvmctl cache prune`, ~30 min), NOT a short self-timeout; a 30s value (Plan 118 WS-1 1a)
+// made standbys self-exit before a later `up` could claim them. The per-conn read timeout
+// (set on the accepted stream) still caps a connected-but-silent peer, so DoS protection is
+// unaffected. Keep this aligned with the reaper TTL.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Cap on the attach frame — workload config is small; reject hostile prefixes.
 const MAX_ATTACH_BYTES: usize = 1 << 20; // 1 MiB
 
