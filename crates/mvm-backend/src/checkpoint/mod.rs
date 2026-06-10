@@ -118,11 +118,8 @@ pub struct CaptureFsQuickParams {
 }
 
 fn sha256_file_hex(path: &Path) -> Result<String> {
-    use sha2::Digest;
-    let bytes = std::fs::read(path).with_context(|| format!("hashing {}", path.display()))?;
-    let mut h = sha2::Sha256::new();
-    h.update(&bytes);
-    Ok(format!("{:x}", h.finalize()))
+    mvm_core::crypto::image_verify::sha256_file(path)
+        .with_context(|| format!("hashing {}", path.display()))
 }
 
 /// Freeze a quiesced VM's rootfs into an immutable fs_quick checkpoint via APFS
