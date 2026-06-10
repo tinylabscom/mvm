@@ -191,3 +191,36 @@ path (today `pause.rs::snapshot_io_for` is Firecracker-only).
 - `StartupMode::Restore` gains a rootfs path → `mvm-build/src/vz.rs`
 - CLI verbs (`create --class`, `restore`, retire `snapshot save/restore`) →
   `mvm-cli/src/commands/vm/checkpoint.rs` + `pause.rs`
+
+---
+
+## Spike decision record (Task 1)
+
+**Date:** 2026-06-10. **Outcome: semantic B (restore-as-new from a stopped parent), conservative identity.**
+
+**Decision parameters (consumed by the fork arm):**
+- `FORK_FRESH_MACHINE_ID = false` — the child inherits the parent checkpoint's
+  machine-id (the proven same-identity restore path), maximizing restore-success
+  probability until a fresh-machine-id restore is live-verified.
+- `FORK_ALLOW_PARENT_RUNNING = false` — fork requires the parent VM not running
+  (restore-as-new, one copy at a time); avoids any MAC/identity collision.
+
+**What was attempted and observed:**
+- Host is capable: macOS 26.3.1 / arm64; `snapshot_capability()` → `SaveRestore`.
+- The Rust `mvm-vz-supervisor` binary builds cleanly.
+- A live mid-run SAVE→cross-identity-restore experiment was **not reliably
+  reachable in this environment**: (1) the supervisor must be codesigned with
+  the Virtualization entitlement (not auto-done by `resolve_supervisor_path`),
+  and (2) the host's *workload* boot path exhibits the known PID-1 init-EOF
+  lifecycle exit (~5s), so a workload VM cannot be held live long enough to SAVE
+  its memory and then probe a cross-identity restore + guest networking. The Vz
+  *builder* works here, but a builder is not a SAVE-able workload.
+
+**Consequence for PR2:** the `vm_full` fork arm ships semantic **B** (safe,
+always-correct restore-as-new). The headline live fork (semantic A: two live
+copies, fresh machine-id + new MAC) is unblocked by a single follow-up — flip
+the two consts to `true` after a dedicated bringup session validates that Vz
+restores under a fresh machine-id with functional guest networking on a new MAC.
+All fork *mechanics* (clone blobs, build child config with a new name/MAC,
+spawn-in-restore-mode, lineage) are identical between A and B and are built +
+host-side-tested in PR2 regardless.
