@@ -23,13 +23,13 @@ impl std::fmt::Display for CheckpointId {
     }
 }
 
-/// The capture mechanism behind a checkpoint. Only `FsQuick` is populated in
-/// this PR; `VmFull` is reserved so the later memory-state path slots into the
-/// same model with no new surface.
+/// The capture mechanism behind a checkpoint. Only `FsQuick` is currently
+/// implemented; `VmFull` is reserved so the memory-state path can slot into the
+/// same model without a new surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointClass {
-    /// APFS copy-on-write clone of a quiesced rootfs (filesystem only).
+    /// Copy-on-write clone of a quiesced rootfs (filesystem state only).
     FsQuick,
     /// Full machine memory state via the supervisor save/restore path.
     VmFull,
@@ -73,8 +73,9 @@ impl CheckpointMeta {
     }
 }
 
-/// Builder so callers set only the fields they have; avoids a long positional
-/// constructor.
+/// Fluent builder for [`CheckpointMeta`]; obtain via [`CheckpointMeta::builder`].
+///
+/// Callers set only the fields they have; avoids a long positional constructor.
 pub struct CheckpointMetaBuilder {
     id: CheckpointId,
     class: CheckpointClass,
