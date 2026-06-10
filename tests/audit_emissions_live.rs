@@ -814,7 +814,7 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["cleanup", "--keep", "5"])
+        .args(["env", "cleanup", "--keep", "5"])
         .output()
         .expect("spawn mvmctl");
     assert!(
@@ -1364,7 +1364,7 @@ fn update_emits_update_install_audit_entry_against_mocked_github() {
     let output = sandbox
         .mvmctl()
         .env("MVM_UPDATE_API_URL", server.base_url())
-        .args(["update"])
+        .args(["env", "update"])
         .output()
         .expect("spawn mvmctl update");
     assert!(
@@ -1400,7 +1400,7 @@ fn update_check_does_not_emit_audit_entry() {
     let output = sandbox
         .mvmctl()
         .env("MVM_UPDATE_API_URL", server.base_url())
-        .args(["update", "--check"])
+        .args(["env", "update", "--check"])
         .output()
         .expect("spawn mvmctl update --check");
     assert!(
@@ -1439,7 +1439,7 @@ fn uninstall_yes_all_emits_uninstall_audit_entry_via_prefix_override() {
     let output = sandbox
         .mvmctl()
         .env("MVM_UNINSTALL_PATH_PREFIX", &prefix)
-        .args(["uninstall", "--yes", "--all"])
+        .args(["env", "uninstall", "--yes", "--all"])
         .output()
         .expect("spawn mvmctl uninstall");
     assert!(
@@ -1479,7 +1479,7 @@ fn uninstall_dry_run_does_not_emit_audit_entry() {
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["uninstall", "--yes", "--dry-run"])
+        .args(["env", "uninstall", "--yes", "--dry-run"])
         .output()
         .expect("spawn mvmctl");
     assert!(

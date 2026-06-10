@@ -162,14 +162,12 @@ impl Commands {
     /// table update will trip that test).
     pub(super) fn verb_name(&self) -> &'static str {
         match self {
-            Commands::Bootstrap(_) => "bootstrap",
+            // `env <sub>` delegates (bootstrap/cleanup/uninstall/update/sign).
+            Commands::Env(a) => a.action.verb_name(),
             Commands::Dev(_) => "dev",
-            Commands::Cleanup(_) => "cleanup",
             Commands::Logs(_) => "logs",
             Commands::Ls(_) => "ls",
-            Commands::Update(_) => "update",
             Commands::Doctor(_) => "doctor",
-            Commands::Sign(_) => "sign",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
             Commands::Storage(_) => "storage",
@@ -180,7 +178,6 @@ impl Commands {
             Commands::ShellInit(_) => "shell-init",
             // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
             Commands::Ops(a) => a.action.verb_name(),
-            Commands::Uninstall(_) => "uninstall",
             Commands::Audit(_) => "audit",
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",

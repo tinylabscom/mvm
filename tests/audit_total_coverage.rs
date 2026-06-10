@@ -88,6 +88,15 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+// Plan 178 (D5) — environment/install lifecycle grouped under `env <sub>`.
+const ENV_SUB: &[(&str, AuditPosture)] = &[
+    ("bootstrap", AuditPosture::InteractiveOrControl),
+    ("cleanup", AuditPosture::Emits("SlotPrune")),
+    ("uninstall", AuditPosture::Emits("Uninstall")),
+    ("update", AuditPosture::Emits("UpdateInstall")),
+    ("sign", AuditPosture::ReadOnly),
+];
+
 // Plan 178 — operational verbs grouped under `ops <sub>`. Postures unchanged.
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
@@ -303,15 +312,12 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
 /// `crates/mvm-cli/src/commands/mod.rs`. Adding a new command? Add
 /// an entry here — the test below fails until you do.
 const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
-    // Environment / installer surfaces.
-    ("bootstrap", AuditPosture::InteractiveOrControl),
+    // Environment / installer surfaces. Plan 178 (D5) — bootstrap/cleanup/
+    // uninstall/update/sign grouped under `env <sub>`.
+    ("env", AuditPosture::DelegatesToSub(ENV_SUB)),
     ("dev", AuditPosture::InteractiveOrControl),
-    ("cleanup", AuditPosture::Emits("SlotPrune")),
-    ("update", AuditPosture::Emits("UpdateInstall")),
     ("doctor", AuditPosture::ReadOnly),
-    ("sign", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
-    ("uninstall", AuditPosture::Emits("Uninstall")),
     ("init", AuditPosture::InteractiveOrControl),
     // VM lifecycle.
     (

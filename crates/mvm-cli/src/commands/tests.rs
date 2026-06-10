@@ -11,6 +11,7 @@ use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
 use super::catalog;
+use super::env::group as env_group;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
 use super::ops;
@@ -80,9 +81,12 @@ fn internal_subprocess_commands_are_hidden_from_help() {
 
 #[test]
 fn test_cleanup_defaults() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(cleanup::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(cleanup::Args {
             keep,
             all,
             verbose,
@@ -109,9 +113,12 @@ fn test_cleanup_defaults() {
 
 #[test]
 fn test_cleanup_keep_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--keep", "9"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--keep", "9"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, Some(9));
             assert!(!args.all);
             assert!(!args.verbose);
@@ -122,9 +129,12 @@ fn test_cleanup_keep_flag() {
 
 #[test]
 fn test_cleanup_all_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--all"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--all"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, None);
             assert!(args.all);
             assert!(!args.verbose);
@@ -135,9 +145,12 @@ fn test_cleanup_all_flag() {
 
 #[test]
 fn test_cleanup_verbose_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--verbose"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--verbose"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, None);
             assert!(!args.all);
             assert!(args.verbose);
@@ -148,9 +161,12 @@ fn test_cleanup_verbose_flag() {
 
 #[test]
 fn test_cleanup_cache_tier_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--cache"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--cache"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(args.cache);
             assert!(!args.state);
             assert!(!args.nuclear);
@@ -161,9 +177,12 @@ fn test_cleanup_cache_tier_flag() {
 
 #[test]
 fn test_cleanup_state_tier_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--state", "--yes"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--state", "--yes"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(!args.cache);
             assert!(args.state);
             assert!(!args.nuclear);
@@ -175,9 +194,12 @@ fn test_cleanup_state_tier_flag() {
 
 #[test]
 fn test_cleanup_nuclear_tier_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--nuclear", "--dry-run"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--nuclear", "--dry-run"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(!args.cache);
             assert!(!args.state);
             assert!(args.nuclear);
@@ -190,7 +212,7 @@ fn test_cleanup_nuclear_tier_flag() {
 #[test]
 fn test_cleanup_tier_flags_are_mutually_exclusive() {
     // ArgGroup("tier") forces at most one of --cache/--state/--nuclear.
-    let err = Cli::try_parse_from(["mvmctl", "cleanup", "--cache", "--state"]).unwrap_err();
+    let err = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--cache", "--state"]).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("cannot be used with") || msg.contains("conflict"),
@@ -200,9 +222,12 @@ fn test_cleanup_tier_flags_are_mutually_exclusive() {
 
 #[test]
 fn test_cleanup_force_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--cache", "--force"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--cache", "--force"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(args.cache);
             assert!(args.force);
         }
@@ -1351,39 +1376,45 @@ fn test_config_set_unknown_key_fails() {
 
 #[test]
 fn test_uninstall_parses_defaults() {
-    let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall(uninstall::Args {
-            yes: true,
-            all: false,
-            dry_run: false,
+        Commands::Env(env_group::Args {
+            action: env_group::EnvCmd::Uninstall(uninstall::Args {
+                yes: true,
+                all: false,
+                dry_run: false,
+            })
         })
     ));
 }
 
 #[test]
 fn test_uninstall_dry_run_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--dry-run", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--dry-run", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall(uninstall::Args {
-            yes: true,
-            all: false,
-            dry_run: true,
+        Commands::Env(env_group::Args {
+            action: env_group::EnvCmd::Uninstall(uninstall::Args {
+                yes: true,
+                all: false,
+                dry_run: true,
+            })
         })
     ));
 }
 
 #[test]
 fn test_uninstall_all_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--all", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--all", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall(uninstall::Args {
-            yes: true,
-            all: true,
-            dry_run: false,
+        Commands::Env(env_group::Args {
+            action: env_group::EnvCmd::Uninstall(uninstall::Args {
+                yes: true,
+                all: true,
+                dry_run: false,
+            })
         })
     ));
 }

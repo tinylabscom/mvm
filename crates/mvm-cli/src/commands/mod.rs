@@ -64,22 +64,16 @@ pub(in crate::commands) struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Up variant has many CLI fields; boxing breaks Clap derive
 pub(in crate::commands) enum Commands {
-    /// Full environment setup from scratch
-    Bootstrap(env::bootstrap::Args),
+    /// Environment / install lifecycle (bootstrap, update, sign, …)
+    Env(env::group::Args),
     /// Manage the local dev VM
     Dev(env::dev::Args),
-    /// Remove old dev-build artifacts and run Nix garbage collection
-    Cleanup(env::cleanup::Args),
     /// Show console logs from a running microVM
     Logs(vm::logs::Args),
     /// List running VMs
     Ls(vm::ps::Args),
-    /// Check for and install the latest version of mvmctl
-    Update(env::update::Args),
     /// System diagnostics and dependency checks
     Doctor(env::doctor::Args),
-    /// Re-sign mvmctl + supervisors with VZ entitlements (macOS)
-    Sign(env::sign::Args),
     /// Manage built manifest slots
     Manifest(manifest::Args),
     /// Inspect cached OCI images
@@ -101,8 +95,6 @@ pub(in crate::commands) enum Commands {
     ShellInit(env::shell_init::Args),
     /// Operational / observability commands (metrics, bench, config, mcp)
     Ops(ops::group::Args),
-    /// Remove local mvm state
-    Uninstall(env::uninstall::Args),
     /// View the local audit log (~/.mvm/log/audit.jsonl)
     Audit(ops::audit::Args),
     /// Manage named dev networks
@@ -277,14 +269,11 @@ pub fn run() -> Result<()> {
     cmd_audit::emit_cmd_invoked(cmd_recorder.as_ref(), verb);
 
     let result = match cli.command.clone() {
-        Commands::Bootstrap(a) => env::bootstrap::run(&cli, a, &cfg),
+        Commands::Env(a) => env::group::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
-        Commands::Cleanup(a) => env::cleanup::run(&cli, a, &cfg),
         Commands::Logs(a) => vm::logs::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
-        Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
-        Commands::Sign(a) => env::sign::run(&cli, a, &cfg),
         Commands::Build(a) => build::group::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Image(a) => image::run(&cli, a, &cfg),
@@ -293,7 +282,6 @@ pub fn run() -> Result<()> {
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
         Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
-        Commands::Uninstall(a) => env::uninstall::run(&cli, a, &cfg),
         Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
