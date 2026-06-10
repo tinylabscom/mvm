@@ -378,6 +378,24 @@ impl AuditEmitter {
         )
     }
 
+    /// Record that a VM was restored to the state captured in a vm_full
+    /// checkpoint. The label set carries the checkpoint id and the VM name.
+    pub fn emit_checkpoint_restored(
+        &self,
+        plan: &ExecutionPlan,
+        checkpoint_id: &str,
+        vm_name: &str,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "checkpoint.restored",
+            [
+                ("checkpoint_id".to_string(), checkpoint_id.to_string()),
+                ("vm_name".to_string(), vm_name.to_string()),
+            ],
+        )
+    }
+
     /// Record that a new sandbox was branched from a checkpoint via
     /// copy-on-write. The label set carries the parent and child
     /// checkpoint ids and the child VM name.
@@ -900,6 +918,24 @@ mod tests {
         assert!(content.contains("checkpoint.forked"));
         assert!(content.contains("ckpt-parent"));
         assert!(content.contains("ckpt-child"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn checkpoint_restored_records_id_and_vm() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-R");
+        emitter
+            .emit_checkpoint_restored(&plan, "ckpt-abc", "myvm")
+            .unwrap();
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("checkpoint.restored"));
+        assert!(content.contains("ckpt-abc"));
+        assert!(content.contains("myvm"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 }

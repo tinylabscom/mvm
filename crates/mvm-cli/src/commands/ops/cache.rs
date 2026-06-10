@@ -603,7 +603,10 @@ mod tests {
         let mk = |id: &str, tag: Option<&str>, age: u64| {
             CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
                 .tag(tag.map(String::from))
-                .content_sha256("h")
+                .content(vec![mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "h".into(),
+                }])
                 .supervisor_config_digest("d")
                 .created_unix(age)
                 .build()

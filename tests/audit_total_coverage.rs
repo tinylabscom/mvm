@@ -509,6 +509,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestTagRemove",
         "CheckpointCreated",
         "CheckpointForked",
+        "CheckpointRestored",
         "NetworkCreate",
         "NetworkRemove",
         "PoolWarm",

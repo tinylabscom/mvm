@@ -202,16 +202,21 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     if json {
         crate::json_out::emit_json(&meta)?;
     } else {
+        let sha = meta
+            .content
+            .first()
+            .map(|b| b.sha256.as_str())
+            .unwrap_or("(no blobs)");
         ui::success(&format!(
             "{name}: checkpoint {} created (sha256 {})",
             meta.id.as_str(),
-            meta.content_sha256
+            sha
         ));
     }
     Ok(())
 }
 
-fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {
+pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {
     let plan = match super::plan_persist::read_plan(name) {
         Ok(p) => p,
         Err(e) => {
@@ -234,14 +239,47 @@ fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMe
             return;
         }
     };
-    if let Err(e) = emitter.emit_checkpoint_created(
-        &plan,
-        meta.id.as_str(),
-        "fs_quick",
-        &meta.content_sha256,
-        name,
-    ) {
+    let content_sha = meta
+        .content
+        .first()
+        .map(|b| b.sha256.as_str())
+        .unwrap_or("");
+    if let Err(e) =
+        emitter.emit_checkpoint_created(&plan, meta.id.as_str(), "fs_quick", content_sha, name)
+    {
         tracing::warn!(error = %e, "audit emit_checkpoint_created failed (non-fatal)");
+    }
+}
+
+/// Best-effort: loads the persisted plan for `vm_name` and emits
+/// `checkpoint.restored` into the chain-signed audit log. Non-fatal —
+/// a restored checkpoint is already live; missing plan/signer/emitter
+/// is warned and skipped.
+pub(crate) fn bind_checkpoint_restored(vm_name: &str, checkpoint_id: &str) {
+    let plan = match super::plan_persist::read_plan(vm_name) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, vm = vm_name,
+                "no persisted plan; checkpoint.restored emitted without chain binding");
+            return;
+        }
+    };
+    let signer = match super::host_signer::load_or_init() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "host signer unavailable; chain entry skipped");
+            return;
+        }
+    };
+    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "audit emitter unavailable; chain entry skipped");
+            return;
+        }
+    };
+    if let Err(e) = emitter.emit_checkpoint_restored(&plan, checkpoint_id, vm_name) {
+        tracing::warn!(error = %e, "audit emit_checkpoint_restored failed (non-fatal)");
     }
 }
 
@@ -319,7 +357,7 @@ fn fork(id: &str, new_id: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn bind_checkpoint_forked(
+pub(crate) fn bind_checkpoint_forked(
     parent: &CheckpointId,
     child: &mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &str,
