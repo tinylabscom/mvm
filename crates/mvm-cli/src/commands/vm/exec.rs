@@ -1,4 +1,9 @@
-//! `mvmctl exec` — boot a transient microVM, run a single command, tear down.
+//! `mvmctl run` — boot a transient microVM, run a single command, tear down.
+//!
+//! Plan 178 Task 7 merged the former bare `mvmctl exec` into `run`: `run` was
+//! already a strict superset (see `RunArgs::into_exec_args`), so `exec` is
+//! gone and `run --profile dev -- <argv>` covers its dev-shell case. The
+//! `Args` struct + internal request machinery stay — `run_secure` reuses them.
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -373,15 +378,6 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
         }
     }
 
-    Ok(())
-}
-
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let req = build_exec_request(args, "`mvmctl exec`", None, false)?;
-    let exit_code = crate::exec::run(req)?;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
     Ok(())
 }
 
