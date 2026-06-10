@@ -162,6 +162,11 @@ pub enum LocalAuditKind {
     /// Emitted by `mvmctl reconcile` and the cheap convergence pass run at
     /// CLI entry for state-touching commands.
     RegistryReconcile,
+    /// `mvmctl pool warm` pre-spawned supervisor standbys for the warm pool
+    /// (Plan 118 WS-1 1b). State-changing infra verb (spawns detached
+    /// supervisors + writes `~/.mvm/pool/`); the `detail` field carries
+    /// `spawned=<n> target=<n>`.
+    PoolWarm,
     // --- Sandbox SDK foundation (fs/proc/share/pause/TTL/tags) ---
     // The verbs below are state-changing CLI surfaces added by the
     // sandbox-SDK foundation work. Each kind names a single mutation

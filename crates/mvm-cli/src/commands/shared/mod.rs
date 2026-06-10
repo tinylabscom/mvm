@@ -25,8 +25,8 @@ pub(super) use parse::{
     parse_port_specs, parse_volume_spec, vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
-    ManifestArgRef, resolve_flake_ref, resolve_manifest_arg, resolve_network_policy,
-    resolve_running_vm,
+    ManifestArgRef, resolve_effective_hypervisor, resolve_flake_ref, resolve_manifest_arg,
+    resolve_network_policy, resolve_running_vm,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};

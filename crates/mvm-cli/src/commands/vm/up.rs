@@ -829,6 +829,11 @@ pub(in crate::commands) struct Args {
     /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
     #[arg(long, default_value = "0")]
     pub metrics_port: u16,
+    /// Plan 118 WS-1 1b — keep this many prelaunched supervisor standbys warm so the next
+    /// auto-named `up` claims one instead of cold-booting. 0 (default) = feature off. Only
+    /// the libkrun backend has a standby pool today; a claim uses the gateway-bridge path.
+    #[arg(long, default_value = "0")]
+    pub warm_pool_size: u32,
     /// Reload ~/.mvm/config.toml automatically when it changes
     #[arg(long)]
     pub watch_config: bool,
@@ -1131,6 +1136,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         env_vars: &args.env,
         forward: args.forward,
         metrics_port: args.metrics_port,
+        warm_pool_size: args.warm_pool_size,
         watch_config: args.watch_config,
         watch: args.watch,
         detach: args.detach || args.up_json,
@@ -1216,6 +1222,8 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) env_vars: &'a [String],
     pub(super) forward: bool,
     pub(super) metrics_port: u16,
+    /// Plan 118 WS-1 1b — `--warm-pool-size`; 0 = off.
+    pub(super) warm_pool_size: u32,
     pub(super) watch_config: bool,
     pub(super) watch: bool,
     pub(super) detach: bool,
@@ -1282,6 +1290,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         env_vars,
         forward,
         metrics_port,
+        warm_pool_size,
         watch_config,
         watch,
         detach,
@@ -1323,22 +1332,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // matches the rest of the codebase: native KVM → Apple Container
     // (macOS 26+) → libkrun (typical macOS 13-25 contributor box with
     // the slp/krun Homebrew tap) → Docker (Tier 3 fallback).
-    let effective_hypervisor = if hypervisor == "firecracker" {
-        let plat = mvm_core::platform::current();
-        if plat.has_kvm() {
-            "firecracker" // native KVM — production Tier 1
-        } else if plat.has_apple_containers() {
-            "apple-container" // macOS 26+ Apple Silicon
-        } else if plat.has_libkrun() {
-            "libkrun" // macOS 13-25 with libkrun installed
-        } else if plat.has_docker() {
-            "docker" // universal Tier 3 fallback (banner emitted)
-        } else {
-            "firecracker" // surfaces a clear "not available" error
-        }
-    } else {
-        hypervisor
-    };
+    // Shared with `mvmctl pool` (Plan 118 WS-1 1b) so both agree on the effective backend.
+    let effective_hypervisor_owned = super::super::shared::resolve_effective_hypervisor(hypervisor);
+    let effective_hypervisor: &str = &effective_hypervisor_owned;
 
     // ADR-002 / plan 53: emit a loud, suppressible banner when the
     // active backend is not a hardware-isolated microVM. Today this
@@ -1824,7 +1820,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         });
     }
 
-    let vm_name_owned = vm_name.clone();
+    // `mut` so a warm-pool claim can rebind it to the claimed standby-id (Plan 118 WS-1 1b).
+    let mut vm_name_owned = vm_name.clone();
     let has_ports = !port_mappings.is_empty();
 
     // Stash the generated VM name so that if the Apple Container backend
@@ -1938,6 +1935,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             config_files: &config_files,
             secret_files: &secret_files,
             port_mappings: &port_mappings,
+            warm_pool_size,
         }
         .into_start_config();
         // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
@@ -2009,12 +2007,40 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
-        if let Err(e) = backend.start(&start_config) {
-            emit_failed_if(&admission_main, "backend-start", &e);
-            return Err(e);
+        // Plan 118 WS-1 1b — try a warm-pool claim first (auto-named + bridge-admitted
+        // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
+        // so rebind `vm_name_owned` for all downstream (agent wait, audit, readiness, stop).
+        let claimed: Option<String> =
+            match super::super::pool::try_warm_claim(&backend, &start_config, name.is_some()) {
+                Ok(Some(id)) => {
+                    ui::info(&format!(
+                        "Claimed a warm standby ({}) — skipping cold boot.",
+                        id.0
+                    ));
+                    Some(id.0)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    // try_warm_claim itself erroring (pool I/O, etc.) must not fail the launch.
+                    tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
+                    None
+                }
+            };
+        match claimed {
+            Some(name) => vm_name_owned = name,
+            None => {
+                if let Err(e) = backend.start(&start_config) {
+                    emit_failed_if(&admission_main, "backend-start", &e);
+                    return Err(e);
+                }
+            }
         }
         emit_launched_if(&admission_main, effective_hypervisor);
         record_vm_readiness(&vm_name_owned, InstanceReadiness::LaunchAccepted);
+        // Replenish the pool toward target after launch — best-effort, no daemon.
+        if let Err(e) = super::super::pool::replenish_after_launch(&backend, &start_config) {
+            tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
+        }
     }
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
@@ -2363,6 +2389,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 config_files: &w_config_files,
                 secret_files: &w_secret_files,
                 port_mappings: &w_port_mappings,
+                // `--wait` is a one-shot workload; no warm-pool claim on this path.
+                warm_pool_size: 0,
             }
             .into_start_config();
             // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).

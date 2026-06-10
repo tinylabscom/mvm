@@ -232,6 +232,33 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Plan 118 WS-1 1b — reap stale supervisor standbys under `~/.mvm/pool/`.
+            // The TTL guards a fresh pool (only dead-pid or expired standbys go); a
+            // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
+            // dropped, so idle entitled processes never accumulate (B-ii residual risk 3).
+            const STANDBY_POOL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            if dry_run {
+                if let Ok(pool) = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+                    && let Ok(n) = pool.list().map(|v| v.len())
+                    && n > 0
+                {
+                    ui::info(&format!(
+                        "(dry-run) Would reap stale entries among {n} standby(s)."
+                    ));
+                }
+            } else {
+                match mvm_backend::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
+                    pool.reap_stale(STANDBY_POOL_TTL, mvm_backend::standby_pool::now_unix_secs())
+                }) {
+                    Ok(reaped) if !reaped.is_empty() => {
+                        removed += reaped.len() as u64;
+                        ui::info(&format!("Reaped {} stale standby(s).", reaped.len()));
+                    }
+                    Ok(_) => {}
+                    Err(e) => ui::warn(&format!("standby pool reap failed: {e}")),
+                }
+            }
+
             for entry in walkdir(path)? {
                 let entry_path = entry.path();
                 // Remove temp files (mvm-lima-*, .tmp)
