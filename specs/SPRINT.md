@@ -2575,15 +2575,15 @@ broken" comment is STALE — `run_with_bridge` boots end-to-end today). Two real
 - [x] **Standby attach timeout 30s → 30 min.** A pool standby legitimately waits to be
   claimed; the 1a `ATTACH_TIMEOUT=30s` made standbys self-exit before a later `up` could
   claim them. Bounded now by the pool reaper TTL, not a short self-timeout.
-- [ ] **Compat key can't be the workload kernel sha for libkrun mkGuest.** A mkGuest image
-  ships no kernel; libkrun materializes the *bundled* kernel at `start_enter`, so
-  `cfg.kernel_path` is **absent** when `try_warm_claim` runs → it always fails open to cold
-  boot. A libkrun standby is workload-independent (bundled kernel + resources; rootfs at
-  attach), so the compat key must be the **bundled kernel** sha (or just (vcpus, mem) for
-  libkrun), not the workload path. This is the last blocker to the libkrun warm claim
-  firing end-to-end; the bundled-kernel identity lives in `libkrun-sys`, so it needs a
-  small cross-layer helper. Everything else (eligibility, claim, name-rebind, replenish,
-  reaper) is wired + fail-open + validated.
+- [x] **libkrun mkGuest warm claim FIRES end-to-end** (PR #758). Three coupled bugs masked
+  it: (1) **SUN_LEN** — the full 64-char binding nonce in the control-socket filename
+  overflowed the macOS unix-socket path limit, so every standby died instantly at bind;
+  fixed to a short `control.sock` under the nonce-derived `standby-<16hex>` dir. (2) The
+  compat **kernel key is uncomputable pre-boot** for mkGuest (bundled kernel materialized at
+  `start_enter`); `kernel_identity()` now returns a constant for libkrun (workload-
+  independent standby), computed identically at claim + replenish. (3) the 30-min standby
+  timeout (#757). Plus standby stderr is captured to `<pool>/<id>/standby.stderr.log`.
+  Live-validated: a second `up --warm-pool-size 1` prints "Claimed a warm standby …".
 - [ ] **`pool status` lists dead-but-unreaped standbys as "idle"** (it shows recorded
   state, not liveness). Cosmetic — `select_idle_compatible` correctly skips dead pids;
   filter the display by `pid_alive` for accuracy.
