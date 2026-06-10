@@ -161,7 +161,23 @@ PLAN 126 — Dependency reduction                 🔴 ~10%
   [ ] B1/B2/B4 prune sigstore/opendal/aws-lc
   [ ] C1/D1 unify + lock gate
 
-PLAN 153 — CLI directory split                  🔴 NOT STARTED
+PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
+  [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
+
+PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
+  [x] lock tree (D1–D6) + hide internal subprocess commands
+  [x] vm group (14 single-VM verbs)
+  [x] ops group (metrics/bench/config/mcp)
+  [x] build group (image/compile/validate/kernel; kernel.rs→build/)
+  [x] env group (bootstrap/cleanup/uninstall/update/sign)
+  [x] trust group (attest/receipt/audit folded into publisher trust)
+  [x] image.rs/catalog.rs dir split (Plan 153)
+  [x] docs: cli-commands.md + CLAUDE.md grouped forms
+  [ ] run-family merge (up/run/exec/invoke) — CONFIRMED-INTENDED, deferred
+      to Task 7 (read each impl first); tracked, do not drop
+  NOTE: audit taxonomy preserved across all groups (vm pause→cmd.pause,
+  trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
+  Deferred dir-purity: dev/doctor/init modules still live in env/.
 ```
 
 ## Security claims
