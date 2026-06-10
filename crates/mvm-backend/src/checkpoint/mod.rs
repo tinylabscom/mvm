@@ -187,6 +187,86 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     Ok(child)
 }
 
+/// Host-side control over a running VM's memory + disk, abstracted so the
+/// capture orchestration is testable without a live hypervisor.
+pub trait VmFullControl {
+    /// Pause vCPUs (idempotent if already paused).
+    fn pause(&self) -> Result<()>;
+    /// Save machine memory state to `memory_path` while paused; also writes a
+    /// `<memory_path>.machine-id` sidecar.
+    fn save_memory(&self, memory_path: &Path) -> Result<()>;
+    /// Resume vCPUs.
+    fn resume(&self) -> Result<()>;
+    /// Absolute path to the VM's live rootfs image.
+    fn rootfs_path(&self) -> Result<PathBuf>;
+}
+
+pub struct CaptureVmFullParams {
+    pub id: CheckpointId,
+    pub vm_name: String,
+    pub supervisor_config_digest: String,
+    pub tag: Option<String>,
+    pub created_unix: u64,
+}
+
+/// Capture a running VM's consistent {rootfs, memory, machine-id} triple in one
+/// pause window. The disk clone happens while paused so memory and disk match.
+pub fn capture_vm_full(
+    store: &CheckpointStore,
+    params: CaptureVmFullParams,
+    control: &dyn VmFullControl,
+) -> Result<CheckpointMeta> {
+    let content_dir = store.content_dir(&params.id);
+    std::fs::create_dir_all(&content_dir)
+        .with_context(|| format!("creating {}", content_dir.display()))?;
+
+    let memory = content_dir.join("memory.bin");
+    let rootfs_dst = content_dir.join("rootfs.ext4");
+    let machine_id = content_dir.join("machine-id");
+
+    control.pause().context("pausing VM for vm_full capture")?;
+    // From here, RESUME on every exit path so a failure never strands the guest.
+    let captured = (|| {
+        control
+            .save_memory(&memory)
+            .context("saving machine memory")?;
+        let live_rootfs = control.rootfs_path()?;
+        crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
+            .context("cloning rootfs in the pause window")?;
+        let sidecar = PathBuf::from(format!("{}.machine-id", memory.display()));
+        std::fs::rename(&sidecar, &machine_id)
+            .or_else(|_| std::fs::copy(&sidecar, &machine_id).map(|_| ()))
+            .with_context(|| format!("collecting machine-id sidecar {}", sidecar.display()))?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    let resumed = control.resume();
+    captured?;
+    resumed.context("resuming VM after vm_full capture")?;
+
+    let content = vec![
+        ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: sha256_file_hex(&rootfs_dst)?,
+        },
+        ContentBlob {
+            name: "memory.bin".into(),
+            sha256: sha256_file_hex(&memory)?,
+        },
+        ContentBlob {
+            name: "machine-id".into(),
+            sha256: sha256_file_hex(&machine_id)?,
+        },
+    ];
+    let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
+        .tag(params.tag)
+        .created_unix(params.created_unix)
+        .content(content)
+        .supervisor_config_digest(params.supervisor_config_digest)
+        .build();
+    store.write_meta(&meta)?;
+    Ok(meta)
+}
+
 fn sha256_file_hex(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
@@ -433,6 +513,65 @@ mod tests {
         let blob = store.content_dir(&parent.id).join("rootfs.ext4");
         std::fs::write(&blob, b"tampered").unwrap();
         assert!(verify_content(&store, &parent).is_err());
+    }
+
+    use std::cell::RefCell;
+
+    struct MockControl {
+        rootfs: PathBuf,
+        events: RefCell<Vec<&'static str>>,
+    }
+    impl VmFullControl for MockControl {
+        fn pause(&self) -> Result<()> {
+            self.events.borrow_mut().push("pause");
+            Ok(())
+        }
+        fn resume(&self) -> Result<()> {
+            self.events.borrow_mut().push("resume");
+            Ok(())
+        }
+        fn save_memory(&self, memory_path: &Path) -> Result<()> {
+            self.events.borrow_mut().push("save");
+            std::fs::write(memory_path, b"mem").unwrap();
+            std::fs::write(format!("{}.machine-id", memory_path.display()), b"mid").unwrap();
+            Ok(())
+        }
+        fn rootfs_path(&self) -> Result<PathBuf> {
+            Ok(self.rootfs.clone())
+        }
+    }
+
+    #[test]
+    fn capture_vm_full_orders_pause_save_clone_resume_and_builds_triple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live-rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let ctl = MockControl {
+            rootfs,
+            events: RefCell::new(vec![]),
+        };
+        let meta = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("v1"),
+                vm_name: "vm".into(),
+                supervisor_config_digest: "d".into(),
+                tag: None,
+                created_unix: 9,
+            },
+            &ctl,
+        )
+        .unwrap();
+        assert_eq!(*ctl.events.borrow(), vec!["pause", "save", "resume"]);
+        assert_eq!(meta.class, CheckpointClass::VmFull);
+        let names: Vec<_> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            names.contains(&"rootfs.ext4")
+                && names.contains(&"memory.bin")
+                && names.contains(&"machine-id")
+        );
+        verify_content(&store, &meta).unwrap();
     }
 
     #[test]
