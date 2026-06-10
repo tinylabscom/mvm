@@ -2564,3 +2564,29 @@ warm/status` + bench state-dir fix) shipped. Remaining, individually grabbable:
 - [ ] **Committed bench baseline + cold-vs-warm delta.** The state-dir fix unblocks the
   probe; a real baseline still needs a freshly-built `default-microvm` image (rides
   PR-10a's deferral).
+
+#### Plan 118 WS-1 1b auto-claim — live validation findings (2026-06-10)
+
+The `up` auto-claim wiring shipped (try_warm_claim/replenish/--warm-pool-size, fail-open).
+A live libkrun bridge boot was confirmed: `MVM_GATEWAY_BRIDGE=1 mvmctl up --flake
+examples/exit_code --hypervisor libkrun --wait` → **exit 7** (the `up.rs` "bridge gvproxy
+broken" comment is STALE — `run_with_bridge` boots end-to-end today). Two real fixes/finds:
+
+- [x] **Standby attach timeout 30s → 30 min.** A pool standby legitimately waits to be
+  claimed; the 1a `ATTACH_TIMEOUT=30s` made standbys self-exit before a later `up` could
+  claim them. Bounded now by the pool reaper TTL, not a short self-timeout.
+- [ ] **Compat key can't be the workload kernel sha for libkrun mkGuest.** A mkGuest image
+  ships no kernel; libkrun materializes the *bundled* kernel at `start_enter`, so
+  `cfg.kernel_path` is **absent** when `try_warm_claim` runs → it always fails open to cold
+  boot. A libkrun standby is workload-independent (bundled kernel + resources; rootfs at
+  attach), so the compat key must be the **bundled kernel** sha (or just (vcpus, mem) for
+  libkrun), not the workload path. This is the last blocker to the libkrun warm claim
+  firing end-to-end; the bundled-kernel identity lives in `libkrun-sys`, so it needs a
+  small cross-layer helper. Everything else (eligibility, claim, name-rebind, replenish,
+  reaper) is wired + fail-open + validated.
+- [ ] **`pool status` lists dead-but-unreaped standbys as "idle"** (it shows recorded
+  state, not liveness). Cosmetic — `select_idle_compatible` correctly skips dead pids;
+  filter the display by `pid_alive` for accuracy.
+- [ ] Independent bug: `libkrun_sys::home_mvm_keys_dir()` hardcodes `$HOME/.mvm/keys` and
+  ignores `MVM_DATA_DIR`, so `validate_audit_substrate` rejects an isolated data dir. Route
+  it through `mvm_core::config`.

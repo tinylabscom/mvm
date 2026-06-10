@@ -178,6 +178,15 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
 
 /// The base-compat key a launch needs from its `VmStartConfig` (kernel sha256 + the fixed
 /// vcpus/mem). `None` if the config carries no kernel path.
+///
+/// **Known limitation (libkrun mkGuest):** a mkGuest workload image ships no kernel — its
+/// `kernel_path` `vmlinux` is materialized by libkrun (`extract_bundled_kernel`) only at
+/// `start_enter`, so it's **absent on disk here** and `kernel_sha256_hex` errors →
+/// `try_warm_claim` fails open to cold boot. A libkrun standby is in fact
+/// workload-*independent* (it pre-loads the bundled kernel; the rootfs arrives at attach),
+/// so the right key is the **bundled** kernel sha the standby actually loads, not the
+/// workload's kernel path. Wiring that (the bundled-kernel identity lives in `libkrun-sys`)
+/// is the follow-up that makes the libkrun warm claim fire end-to-end (SPRINT.md).
 fn compat_for_launch(cfg: &VmStartConfig) -> Result<Option<StandbyCompat>> {
     let Some(kernel) = cfg.kernel_path.as_ref() else {
         return Ok(None);
