@@ -1,91 +1,58 @@
-# CLI command grouping map (Plan 178 / ADR-077) — Task 1
+# CLI command grouping map (Plan 178 / ADR-077) — LOCKED
 
-Locks the old→new mapping before any code moves. ~57 flat top-level
-variants → ~12 top-level + ~7 noun groups, internals hidden.
+Old→new mapping, settled (decisions D1–D6). ~57 flat top-level variants →
+top-level daily verbs + a small set of noun groups; internals hidden.
+**Clap group = `commands/<group>/` subdirectory, one file per subaction**
+(folds in Plan 153's directory split).
 
 ## Principles
+1. Daily-driver verbs / primary entry points stay top-level.
+2. No single-member or semantically-forced groups (no `net`, no `store`).
+3. Don't super-group commands that already own subcommands (avoids 3-level
+   nesting): `image`/`catalog`/`manifest`/`artifact` stay separate.
+4. Internal/subprocess commands hidden from `--help`.
 
-1. Daily-driver verbs and primary entry points stay top-level (short paths).
-2. No single-member groups; no awkward double-noun (`build build`,
-   `net network`) — if a group's dominant leaf shares its name, keep that
-   leaf top-level instead.
-3. Internal/subprocess commands are hidden from `--help`.
-4. The run-family (`up`/`run`/`exec`/`sandbox`/`invoke`) collapse is
-   deferred to Task 7 (read each impl first); listed top-level here unchanged.
+## Top-level
 
-## Top-level (12) — kept flat
-
+**Daily verbs / entry points:**
 `up` · `run` · `exec` · `invoke` · `ls` · `console` · `down` · `logs`
-· `build` · `dev` · `doctor` · `init`
+· `dev` · `doctor` · `init`
+(run-family `up`/`run`/`exec`/`invoke` collapse is committed-intended,
+deferred to Task 7 — see plan.)
 
-(`build` and `dev` are already group-shaped: `dev {up,down,shell,status}`;
-`build` stays the primary build verb with its args.)
+**Already-grouped domains kept top-level** (each owns subcommands):
+`image` · `catalog` · `manifest` · `artifact` · `network` · `secret`
+· `bundle` · `deps` · `storage` · `cache` · `pool` · `session` · `volume`
+· `snapshot`
 
-## Groups
+## Groups (clap group = directory)
 
-**`vm <sub>`** — act on an existing/running VM:
-`pause` `resume` `snapshot` `ttl`(was `set-ttl`) `wait` `boot-report`
-`diff` `cp` `fs` `proc` `session` `volume` `sandbox` `forward`
+**`build/`** (D1) — `build image`(was the bare `build`) · `build compile`
+· `build validate` · `build kernel`(from flat `kernel.rs`).
 
-**`image <sub>`** — image / artifact sourcing & inspection:
-`cache`(was the `image` leaf — inspect cached OCI) `catalog` `manifest`
-`artifact` `kernel`
+**`vm/`** — act on an existing/running VM: `vm pause` · `resume` · `snapshot`
+· `ttl`(was `set-ttl`) · `wait` · `boot-report` · `diff` · `cp` · `fs`
+· `proc` · `sandbox` · `forward`. (`session`/`volume`/`snapshot` already
+own subcommands → kept top-level; revisit if they read better under `vm`.)
 
-**`pkg <sub>`** — build-time helpers beyond the top-level `build`:
-`compile` `validate`
-(kept out of `build` to avoid the `build build` leaf/group clash)
+**`trust/`** — provenance (extends existing `trust add/list/remove`):
+`trust attest` · `receipt` · `audit`. (`sign` is NOT here — the only `sign`
+is `env::sign`, install/entitlement re-signing → `env sign`. `bundle`/`deps`
+already own subcommands → keep top-level; fold in only if it reads better.
+The clear single-verb wins are `attest`/`receipt`/`audit`.)
 
-**`trust <sub>`** — provenance & signing (extends existing `trust`):
-`sign` `bundle` `attest` `receipt` `audit` `deps`
+**`ops/`** — `ops metrics` · `bench` · `config` · `mcp`.
 
-**`store <sub>`** — local storage & caches:
-`storage`(dm-thin pool) `cache`(XDG cache) `pool`(warm supervisor pool)
-
-**`net <sub>`** — networking:
-`network`→ its verbs surface as `net {create,list,remove}`; **`forward`
-stays under `vm`** (it's VM-scoped), so `net` is just the dev-network verbs.
-⚠ TENSION: if `net` ends up single-purpose, keep `network` top-level instead.
-
-**`ops <sub>`** — observability / operator:
-`metrics` `bench` `config` `mcp`
-
-**`secret <sub>`** — unchanged.
+**`env/`** (D5) — `env bootstrap` · `cleanup` · `uninstall` · `update`
+· `sign` (`env::sign` — re-sign mvmctl+supervisors with VZ entitlements).
+Lift `dev`/`doctor`/`init` OUT of `env/` to their own top-level modules so
+`env/` = the `env` group 1:1.
 
 ## Hidden (`#[command(hidden)]`)
+`shell-init` · `reconcile` · `persistent-builder`
+(`__qemu-vsock-bridge` already hidden.)
 
-`shell-init` (shell-eval plumbing) · `reconcile` (registry converge,
-internal) · `boot-report` → moves under `vm` AND stays user-visible? No —
-`boot-report` is a debugging readout; keep it `vm boot-report`, visible.
-Hide: `shell-init` · `reconcile` · `persistent-builder`.
-(`__qemu-vsock-bridge` already hidden — leave.)
-
-## Open decisions for ratification
-
-- **D1 `pkg` group** for `compile`/`validate` — or keep both top-level? (They
-  avoid the `build build` clash but `pkg` is a new noun.)
-- **D2 `image cache`** rename of the bare `image` leaf — acceptable, or keep
-  `image` as a leaf-with-default-subcommand?
-- **D3 `net`** — group `{network verbs}` or keep `network` top-level (and
-  drop the `net` group)?
-- **D4 `store`** vs folding `cache`/`pool`/`storage` elsewhere.
-- **D5 run-family** — Task 7 reads `up`/`run`/`exec`/`sandbox`/`invoke` and
-  proposes the collapse; not pre-decided here.
-
-## Full per-command disposition
-
-| current | → | new path |
-|---|---|---|
-| up, run, exec, invoke, ls, console, down, logs, build, dev, doctor, init | | (top-level, unchanged) |
-| set-ttl | → | vm ttl |
-| pause, resume, snapshot, wait, boot-report, diff, cp, fs, proc, session, volume, sandbox, forward | → | vm \<same\> |
-| image | → | image cache |
-| catalog, manifest, artifact, kernel | → | image \<same\> |
-| compile, validate | → | pkg \<same\> |
-| sign, bundle, attest, receipt, audit, deps | → | trust \<same\> |
-| storage, cache, pool | → | store \<same\> |
-| network | → | net (verbs lift) |
-| metrics, bench, config, mcp | → | ops \<same\> |
-| secret | | secret (unchanged) |
-| bootstrap, cleanup, uninstall, update | → | **TBD Task 6** — env-lifecycle home (under `dev`? top-level? a `self` group?) |
-| shell-init, reconcile, persistent-builder | → | hidden |
-| __qemu-vsock-bridge | | already hidden |
+## Settled decisions
+- D1 `build` group (not `pkg`). D2 image/catalog/manifest/artifact separate.
+- D3 no `net` (keep `network`); `forward`→`vm`. D4 no `store`.
+- D5 `env` group; dev/doctor/init top-level. D6 run-family → Task 7 (intended).
