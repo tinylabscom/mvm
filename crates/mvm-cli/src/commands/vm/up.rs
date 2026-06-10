@@ -757,7 +757,7 @@ fn resolve_deps_volume_binding_with_cache(
 /// **cert** onto the guest secrets drive (`secret_files`, so the guest can trust
 /// host-terminated bound-host TLS once the S2.3 boot step installs it), and
 /// persists the cert+**key** to a host-only `egress-intermediate.json`
-/// (mode 0600) in the VM state dir for `wire_egress_substitution` to hand the
+/// (mode 0600) in the VM state dir for `spawn_egress_endpoint` to hand the
 /// terminator endpoint. The key never enters `secret_files` / the guest.
 ///
 /// Bound hosts = the union of every plan secret's `allowed_hosts` from the host

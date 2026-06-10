@@ -59,19 +59,24 @@ Implemented:
 - [x] **mkGuest `/init` Stage 2.46** — decode `mvm.egress_ca=` (same hex+sed+printf as uvols) → tmpfs `/run/mvm/egress-ca.crt` → combined bundle (`cat ca-bundle.crt egress-ca.crt`) → export `SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` (bundle) + `NODE_EXTRA_CA_CERTS` (cert). Tmpfs = writable under dm-verity; export reaches the entrypoint (setpriv preserves env). Inline ADR-006 nameConstraints caveat. **Box-validated only** (guest shell; not runnable on a macOS dev host) — proven by S2.7.
 - [x] **Commit** — `feat(guest): trust per-VM egress cert at boot via kernel cmdline (plan 129 stage 2 S2.3)`.
 
-> ### ⚠️ NEW BLOCKER for S2.7 (not S2.3) — placeholder-env-at-boot ordering
-> S2.3 delivers the **cert**. But S2.7's `curl -H "Authorization: Bearer $TOKEN"`
-> also needs `$TOKEN` = the per-run **placeholder** in the sealed entrypoint's
-> env. The placeholder is minted by the substitution endpoint at **spawn**, which
-> happens in `wire_egress_substitution` **post-boot** — after `/init` already ran.
-> So the cmdline can't carry it (chicken-and-egg), and there's no boot-time
-> placeholder-env delivery for a sealed FC entrypoint today (the SDK/invoke path
-> injects it *post-boot* at dispatch, which is why the QEMU e2e used invoke).
-> **Options for S2.7:** (a) mint placeholders **before** boot and put `$TOKEN` on
-> the cmdline too (`mvm.secret_env=<hex>`), decoded by `/init`; (b) the entrypoint
-> fetches its placeholder env from the endpoint over vsock at startup; (c) drive
-> the workload via `invoke` (post-boot) rather than as the boot entrypoint.
-> Decide before S2.7 (which is also gated on FC bringup #746).
+> ### ✅ RESOLVED (Approach A) — placeholder-env-at-boot ordering
+> S2.7's `curl -H "Authorization: Bearer $TOKEN"` needs `$TOKEN` = the per-run
+> **placeholder** in the sealed entrypoint's env, but the placeholder is minted by
+> the endpoint at spawn. **Approach A (chosen + implemented):** spawn the
+> substitution endpoint **before** `boot_args` is built, so the `(var→placeholder)`
+> pairs it mints (already written to `vm_substitution_env_path`) ride the cmdline.
+> - `run_from_build` now calls **`spawn_egress_endpoint`** (mint + bind listener)
+>   *before* `configure_flake_microvm`, guarded by an **`EndpointGuard`** (reaps on
+>   early-return); the nft REDIRECT splits into **`install_egress_redirect`** at the
+>   old post-boot site (the TAP must exist by then). `decode_plan_secrets` is the
+>   shared no-op-without-secrets gate. (`wire_egress_substitution` is gone.)
+> - `mvm_core::vm_backend::encode_secret_env_cmdline` (`mvm.secret_env=<hex(VAR=ph…)>`,
+>   placeholders only) + `secret_env_cmdline_token` reads the handshake JSON
+>   (`Vec<(String,String)>` — same type both ends) and appends to `boot_args`.
+> - mkGuest `/init` Stage 2.47 decodes + exports each `$VAR=placeholder`
+>   (redirect-from-tmpfs `while`, not a pipe). Endpoint stays the **sole minter**.
+> - Verified host build + Linux cross-build (`cargo-zigbuild`); encoder round-trip
+>   tested. Box-validated end-to-end by S2.7 (still gated on FC bringup #746).
 
 ---
 ### Original blocker note (superseded by the channel decision above)
