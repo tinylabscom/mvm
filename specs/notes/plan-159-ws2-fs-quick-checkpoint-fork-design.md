@@ -83,10 +83,13 @@ code; no live-boot dependency for any of the core logic.
   Reuses existing CoW.
 - **`fork_checkpoint`** (mvm-backend) — verify `content_sha256` → CoW-clone
   content into a new instance state dir → mint a new `VmId` → write child
-  lineage meta → (default) cold-boot the child via the existing start path;
-  `--no-start` just materializes. (No machine-id sidecar here: `fs_quick` is a
-  cold boot from a cloned rootfs with no saved machine state. The machine-id
-  identity sidecar belongs to the `vm_full` save/restore path in PR2.)
+  lineage meta. PR1 **materializes** the child and prints the `mvmctl up` hint;
+  **auto-boot-on-fork moves to the start of PR2** (pinning the start path showed
+  booting a forked child pulls in the full `up` path + plan synthesis and isn't
+  validatable on the local flaky Vz boot — which would defeat the host-side-
+  testable rationale for doing `fs_quick` first). No machine-id sidecar here:
+  `fs_quick` is a cold boot from a cloned rootfs with no saved machine state;
+  the machine-id identity sidecar belongs to the `vm_full` path in PR2.
 - **Audit** — new `LocalAuditKind::{CheckpointCreated, CheckpointForked}` +
   `AuditEmitter::emit_checkpoint_created/forked`; `tests/audit_total_coverage.rs`
   posture updated (same pattern as the `PoolWarm` kind added in Plan 118).
