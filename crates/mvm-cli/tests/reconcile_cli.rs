@@ -32,12 +32,19 @@ fn reconcile_help_lists_dry_run_and_json_flags() {
 }
 
 #[test]
-fn reconcile_appears_in_top_level_help() {
-    let out = mvmctl(&["--help"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
+fn reconcile_is_hidden_from_top_level_help_but_dispatchable() {
+    // Plan 178 Task 2 — `reconcile` is an internal registry-converge command,
+    // hidden from `--help` but still runnable (its own `--help` works).
+    let top = mvmctl(&["--help"]);
+    let top_out = String::from_utf8_lossy(&top.stdout);
     assert!(
-        stdout.contains("reconcile"),
-        "top-level help missing `reconcile`; got:\n{stdout}"
+        !top_out.contains("reconcile"),
+        "top-level help must NOT list the hidden `reconcile`; got:\n{top_out}"
+    );
+    let own = mvmctl(&["reconcile", "--help"]);
+    assert!(
+        own.status.success(),
+        "`mvmctl reconcile --help` must still work for the hidden command"
     );
 }
 

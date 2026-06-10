@@ -104,6 +104,7 @@ pub(in crate::commands) enum Commands {
     /// Stop microVMs (from mvm.toml, by name, or all)
     Down(vm::down::Args),
     /// Print shell configuration (completions + dev aliases) to stdout
+    #[command(hide = true)]
     ShellInit(env::shell_init::Args),
     /// Show runtime metrics (Prometheus text format by default)
     Metrics(ops::metrics::Args),
@@ -130,6 +131,7 @@ pub(in crate::commands) enum Commands {
     /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
     Pool(pool::Args),
     /// Converge the VM name registry with on-disk runtime state
+    #[command(hide = true)]
     Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
     Init(env::init::Args),
@@ -182,7 +184,7 @@ pub(in crate::commands) enum Commands {
     Artifact(vm::artifact::Args),
     /// Manage the persistent builder VM
     #[cfg(feature = "builder-vm")]
-    #[command(name = "persistent-builder")]
+    #[command(name = "persistent-builder", hide = true)]
     PersistentBuilder(build::persistent_builder::Args),
     /// Internal: host-side AF_VSOCK↔UNIX bridge for the QEMU workload
     /// backend (Plan 166 Phase 2). Spawned detached by

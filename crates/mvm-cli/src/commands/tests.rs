@@ -56,6 +56,28 @@ fn top_level_command_summaries_stay_short() {
 }
 
 #[test]
+fn internal_subprocess_commands_are_hidden_from_help() {
+    // Plan 178 Task 2 — subprocess/internal commands must not clutter the
+    // user-facing surface. They stay dispatchable but `hide = true`.
+    let visible: Vec<String> = cli_command()
+        .get_subcommands()
+        .filter(|cmd| !cmd.is_hide_set())
+        .map(|cmd| cmd.get_name().to_string())
+        .collect();
+    for hidden in [
+        "shell-init",
+        "reconcile",
+        "persistent-builder",
+        "__qemu-vsock-bridge",
+    ] {
+        assert!(
+            !visible.iter().any(|n| n == hidden),
+            "internal command `{hidden}` must be hidden from top-level help"
+        );
+    }
+}
+
+#[test]
 fn test_cleanup_defaults() {
     let cli = Cli::try_parse_from(["mvmctl", "cleanup"]).unwrap();
     match cli.command {
