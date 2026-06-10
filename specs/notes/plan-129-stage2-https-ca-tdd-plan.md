@@ -23,19 +23,20 @@
 
 ---
 
-## Task S2.1 — per-VM name-constrained CA module
+## Task S2.1 — per-VM name-constrained CA module ✅ DONE (commit e2ff6b02)
 
-**Files:** Create `crates/mvm-core/src/crypto/egress_ca.rs` (+ `pub mod egress_ca;` in `crypto/mod.rs`). Add `rcgen` to `crates/mvm-core/Cargo.toml`. Tests in-file.
+**Files:** Created `crates/mvm-core/src/crypto/egress_ca.rs` (+ feature-gated `pub mod egress_ca;` in `crypto/mod.rs`). Added `rcgen` (workspace + mvm-core, behind `egress-ca`). Tests in-file.
 
-- [ ] **Step 0:** Confirm the chosen `rcgen` (≥0.13) exposes name constraints (`CertificateParams.name_constraints` / `NameConstraints { permitted_subtrees, excluded_subtrees }`). Pin the version; note the API in a comment. (mvm-core's default build is runtime-free — `rcgen` pulls `ring`/`yasna`, no tokio; keep it out of the `xtask check-core-runtime-free` violation set, or gate the module behind a feature if it drags async — verify with `cargo tree -p mvm-core -e no-dev`.)
-- [ ] **Step 1: Failing tests:**
-  - `host_ca_is_self_signed_ca_true` — `EgressCa::load_or_init_at(dir)` mints/loads a long-lived host CA at `<dir>/ca.crt` + `ca.key` (key mode 0400); cert is `CA:TRUE`.
-  - `intermediate_is_name_constrained_to_bound_hosts` — `ca.mint_vm_intermediate(&["api.openai.com"])` yields a `CA:TRUE, pathlen:0` intermediate whose `nameConstraints permitted` contains exactly `api.openai.com` (DNS).
-  - `intermediate_refuses_to_sign_a_leaf_for_an_unbound_host` — minting/validating a leaf for `evil.example.com` under that intermediate fails name-constraint validation (assert via a verifier, e.g. webpki/rustls path check, not just by inspecting fields).
-  - `vm_intermediate_keypair_is_zeroized_on_drop` (if the type holds the key in memory) — reuse the redacted-`Debug`/zeroize pattern from `host_signer` (`xtask check-no-display-on-secret-types` must still pass).
-- [ ] **Step 2: Run (fail).**
-- [ ] **Step 3: Implement** `EgressCa { load_or_init_at, mint_vm_intermediate(bound_hosts) -> VmIntermediate { cert_pem, key } , mint_leaf(sni) }`. Host CA persisted under `~/.mvm/egress/` (use `mvm_core::config` helpers — never inline `$HOME/.mvm`). The per-VM intermediate is minted at admission/boot; only its **cert** ever leaves the host process.
-- [ ] **Step 4: Run (pass). Step 5: Commit** — `feat(egress-ca): name-constrained per-VM CA (plan 129 stage 2)`.
+- [x] **Step 0:** `rcgen` pinned at **0.14** (not 0.13 — 0.13.2's `Issuer` is private; 0.14 exposes `Issuer::from_ca_cert_pem`, gated behind `pem`+`x509-parser`). `ring` backend, no aws-lc-rs/cmake. Gated behind mvm-core's new **`egress-ca`** feature so the runtime-free default build pulls no rcgen — `xtask check-core-runtime-free` still clean (verified).
+- [x] **Step 1–4: Tests + impl (all green):**
+  - `host_ca_is_self_signed_ca_true` ✓ (+ deterministic reload).
+  - `ca_key_is_mode_0400` ✓.
+  - `intermediate_is_name_constrained_to_bound_hosts` ✓ (nameConstraints permitted = exactly the bound host).
+  - `intermediate_refuses_to_sign_a_leaf_for_an_unbound_host` ✓ — asserted via a **real rustls/webpki path verifier** (bad SNI rejected, bound SNI accepted), not field inspection.
+  - `EgressCa { load_or_init_at, mint_vm_intermediate, cert_pem }` + `VmIntermediate { cert_pem, key_pem, mint_leaf }` + `Leaf`. Every key-carrying type has a **redacted `Debug`** (`check-no-display-on-secret-types` clean); only certs leave the host process.
+  - **Deferred:** explicit zeroize-on-drop of the in-memory `KeyPair` — `rcgen::KeyPair` doesn't expose its key buffer for zeroization; redacted `Debug` covers the accidental-log risk. Note for hardening.
+  - `load_or_init_at(dir)` takes the dir as a param (test-friendly); the `~/.mvm/egress/` config-helper wiring lands with the caller in S2.2.
+- [x] **Step 5: Commit** — `feat(egress-ca): name-constrained per-VM CA (plan 129 stage 2)` (e2ff6b02).
 
 ## Task S2.2 — per-run cert delivery to the guest
 
