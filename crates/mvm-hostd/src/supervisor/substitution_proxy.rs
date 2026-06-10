@@ -34,7 +34,9 @@ use crate::keyholder::{
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::secret_audit::emit_secret_substituted;
-use crate::supervisor::tools::http_hardening::hardened_client_builder;
+use crate::supervisor::tools::http_hardening::{
+    hardened_client_builder_no_dns, resolve_ssrf_safe_ips,
+};
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -183,18 +185,20 @@ fn err_chain(e: &dyn std::error::Error) -> String {
     out
 }
 
-/// Production forwarder: a hardened reqwest client (TLS 1.3 min, SSRF-filtered
-/// resolver, no redirects — `hardened_client_builder`) makes the real request.
+/// Production forwarder: a hardened reqwest client (TLS 1.3 min, no redirects)
+/// makes the real request. Unlike the HTTPS-only tool clients, the egress
+/// forward target can be plain `http` (the guest's request scheme), so the
+/// client is built **per request**: we resolve the host, SSRF-filter the IPs,
+/// and pin them on the URL's *real* port via `resolve_to_addrs` — the shared
+/// `SsrfFilteringResolver` hardcodes 443 and would send an `http` forward to the
+/// HTTPS port. Plan 129 / ADR-067.
 pub struct ReqwestForwarder {
-    client: reqwest::Client,
+    timeout_secs: u64,
 }
 
 impl ReqwestForwarder {
     pub fn new(timeout_secs: u64) -> Result<Self, ForwardError> {
-        let client = hardened_client_builder(timeout_secs)
-            .build()
-            .map_err(|e| ForwardError::Failed(e.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { timeout_secs })
     }
 }
 
@@ -203,7 +207,29 @@ impl Forwarder for ReqwestForwarder {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
-        let mut rb = self.client.request(method, &req.url);
+        // Resolve + SSRF-filter the host ourselves, then pin reqwest to the safe
+        // IPs on the URL's real port (default 80 for http, 443 for https, or an
+        // explicit port). Keeps SSRF filtering without the resolver's 443 bug.
+        let url = Url::parse(&req.url)
+            .map_err(|e| ForwardError::Failed(format!("bad url {}: {e}", req.url)))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ForwardError::Failed(format!("url {} has no host", req.url)))?
+            .to_string();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ForwardError::Failed(format!("url {} has no port", req.url)))?;
+        let addrs: Vec<std::net::SocketAddr> = resolve_ssrf_safe_ips(&host)
+            .await
+            .map_err(ForwardError::Failed)?
+            .into_iter()
+            .map(|ip| std::net::SocketAddr::new(ip, port))
+            .collect();
+        let client = hardened_client_builder_no_dns(self.timeout_secs)
+            .resolve_to_addrs(&host, &addrs)
+            .build()
+            .map_err(|e| ForwardError::Failed(e.to_string()))?;
+        let mut rb = client.request(method, &req.url);
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
