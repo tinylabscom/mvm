@@ -97,6 +97,7 @@ impl VmBackend for MockBackend {
             vsock: false,
             tap_networking: false,
             balloon: false,
+            fs_quick_checkpoint: false,
         }
     }
 

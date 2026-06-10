@@ -427,6 +427,12 @@ pub fn mvm_keys_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("keys")
 }
 
+/// Immutable checkpoint store: `<mvm_data_dir>/checkpoints/`. Each checkpoint is
+/// a subdirectory `<id>/` holding `meta.json` + cloned `content/`.
+pub fn checkpoints_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("checkpoints")
+}
+
 /// Chain-signed audit logs: `<mvm_data_dir>/audit/`.
 pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("audit")
@@ -773,6 +779,16 @@ mod tests {
         assert_eq!(mode, 0o700, "expected 0700, got 0{:o}", mode);
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn checkpoints_dir_is_under_data_dir() {
+        let _g = env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", temp.path()) };
+        let dir = checkpoints_dir();
+        assert_eq!(dir, temp.path().join("checkpoints"));
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]

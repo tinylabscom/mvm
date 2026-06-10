@@ -109,7 +109,10 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
       SPRINT.md): multi-kernel keying; pool-status liveness filter;
       home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
-  [ ] WS-2 checkpoint+fork  (152 WS-B done; unblocked)
+  [~] WS-2 checkpoint+fork — fs_quick class landed (#762): mvmctl checkpoint
+      create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
+      checkpoint.created/forked audit + fs_quick_checkpoint capability + cache GC.
+      Remaining: vm_full (memory save/restore) + checkpoint diff + pause/resume wiring
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 

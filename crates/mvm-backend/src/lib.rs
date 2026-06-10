@@ -37,6 +37,7 @@ pub mod apple_container;
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
+pub mod checkpoint;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate (plan 121 A2). It lives here, not

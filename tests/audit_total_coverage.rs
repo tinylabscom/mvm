@@ -122,6 +122,13 @@ const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("status", AuditPosture::ReadOnly),
 ];
 
+const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
+    ("create", AuditPosture::Emits("CheckpointCreated")),
+    ("fork", AuditPosture::Emits("CheckpointForked")),
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::ReadOnly),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
@@ -300,6 +307,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("pause", AuditPosture::Emits("VmStop")),
     ("resume", AuditPosture::Emits("VmStart")),
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
     ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
     // Build / artifact / registry.
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
@@ -499,6 +507,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestAliasSet",
         "ManifestTagAdd",
         "ManifestTagRemove",
+        "CheckpointCreated",
+        "CheckpointForked",
         "NetworkCreate",
         "NetworkRemove",
         "PoolWarm",

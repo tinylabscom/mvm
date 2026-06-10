@@ -135,6 +135,7 @@ impl VmBackend for FirecrackerBackend {
             vsock: true,
             tap_networking: true,
             balloon: true,
+            fs_quick_checkpoint: false,
         }
     }
 

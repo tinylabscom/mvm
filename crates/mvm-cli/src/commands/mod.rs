@@ -162,6 +162,8 @@ pub(in crate::commands) enum Commands {
     Resume(vm::pause::ResumeArgs),
     /// Manage sealed instance snapshots (`ls`, `rm`).
     Snapshot(vm::pause::SnapshotArgs),
+    /// Capture, list, remove, or fork rootfs checkpoints.
+    Checkpoint(vm::checkpoint::CheckpointArgs),
     /// Manage virtio-fs volume mounts
     Volume(vm::volume::Args),
     /// Manage local secret namespaces
@@ -358,6 +360,7 @@ pub fn run() -> Result<()> {
         Commands::Pause(a) => vm::pause::run_pause(&cli, a, &cfg),
         Commands::Resume(a) => vm::pause::run_resume(&cli, a, &cfg),
         Commands::Snapshot(a) => vm::pause::run_snapshot(&cli, a, &cfg),
+        Commands::Checkpoint(a) => vm::checkpoint::run_checkpoint(&cli, a),
         Commands::Volume(a) => vm::volume::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Attest(a) => ops::attest::run(&cli, a, &cfg),

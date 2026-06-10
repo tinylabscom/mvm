@@ -89,6 +89,7 @@ impl VmBackend for QemuBackend {
             // User-mode (slirp) networking — no host TAP device.
             tap_networking: false,
             balloon: false,
+            fs_quick_checkpoint: false,
         }
     }
 

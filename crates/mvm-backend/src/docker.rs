@@ -121,6 +121,7 @@ impl VmBackend for DockerBackend {
             // kill / swap, not an in-guest driver returning pages).
             // The reclaim controller treats this as no-balloon.
             balloon: false,
+            fs_quick_checkpoint: false,
         }
     }
 
