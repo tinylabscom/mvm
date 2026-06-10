@@ -840,6 +840,59 @@ impl VzBackend {
     }
 }
 
+/// Bridges the checkpoint `VmFullControl` trait to a running Vz VM's control
+/// socket. Capture orchestration PAUSEs first, then SAVEs while paused, so
+/// memory and disk are consistent; the orchestrator calls RESUME itself after.
+pub struct VzVmFullControl {
+    vm_name: String,
+}
+
+impl VzVmFullControl {
+    pub fn new(vm_name: impl Into<String>) -> Self {
+        Self {
+            vm_name: vm_name.into(),
+        }
+    }
+
+    fn sock(&self) -> PathBuf {
+        vz_control::control_socket_path(&vm_state_dir(&self.vm_name))
+    }
+}
+
+impl crate::checkpoint::VmFullControl for VzVmFullControl {
+    fn pause(&self) -> Result<()> {
+        vz_control::send_command(&self.sock(), "PAUSE").map(|_| ())
+    }
+
+    fn resume(&self) -> Result<()> {
+        vz_control::send_command(&self.sock(), "RESUME").map(|_| ())
+    }
+
+    fn save_memory(&self, memory_path: &Path) -> Result<()> {
+        if !memory_path.is_absolute() {
+            anyhow::bail!(
+                "save_memory requires an absolute path, got {}",
+                memory_path.display()
+            );
+        }
+        vz_control::send_command(&self.sock(), &format!("SAVE {}", memory_path.display()))
+            .map(|_| ())
+    }
+
+    fn rootfs_path(&self) -> Result<PathBuf> {
+        let cfg_path = vm_state_dir(&self.vm_name).join(SUPERVISOR_CONFIG_FILE_NAME);
+        let bytes = std::fs::read(&cfg_path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg_path.display()))?;
+        let cfg: vz::SupervisorConfig = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", cfg_path.display()))?;
+        cfg.disks
+            .iter()
+            .find(|d| d.id == "rootfs")
+            .map(|d| PathBuf::from(&d.path))
+            .ok_or_else(|| anyhow::anyhow!("supervisor config has no rootfs disk"))
+    }
+}
+
 /// Write JSON to `path` mode 0600, atomically via a rename. Mirrors
 /// the pattern used by `plan_persist::write_plan` in mvm-cli.
 fn persist_supervisor_config(path: &Path, json: &str) -> Result<()> {
@@ -1962,5 +2015,94 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_VZ_SUPERVISOR_PATH");
         }
+    }
+
+    #[test]
+    fn vz_vm_full_control_resolves_rootfs_from_supervisor_config() {
+        use crate::checkpoint::VmFullControl as _;
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        // vm_state_dir("spike") = <MVM_DATA_DIR>/vms/spike
+        let state_dir = tmp.path().join("vms").join("spike");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = mvm_build::vz::SupervisorConfig {
+            name: "spike".into(),
+            vm_state_dir: state_dir.to_string_lossy().into_owned(),
+            pid_file_name: None,
+            kernel: mvm_build::vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "console=hvc0 root=/dev/vda rw init=/init".into(),
+                initrd_path: None,
+            },
+            resources: mvm_build::vz::ResourceConfig {
+                cpu_count: 1,
+                memory_mib: 512,
+            },
+            disks: vec![mvm_build::vz::DiskConfig {
+                id: "rootfs".into(),
+                path: "/abs/rootfs.ext4".into(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: mvm_build::vz::VsockConfig {
+                ports: vec![],
+                socket_dir: state_dir.to_string_lossy().into_owned(),
+            },
+            console_output_path: None,
+            network: None,
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: mvm_build::vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        };
+        let json = cfg.to_json().unwrap();
+        std::fs::write(state_dir.join(SUPERVISOR_CONFIG_FILE_NAME), json.as_bytes()).unwrap();
+
+        let ctl = VzVmFullControl::new("spike");
+        let resolved = ctl.rootfs_path().expect("resolves rootfs");
+        assert_eq!(resolved, std::path::PathBuf::from("/abs/rootfs.ext4"));
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn vz_vm_full_control_save_memory_requires_absolute_path() {
+        use crate::checkpoint::VmFullControl as _;
+        let ctl = VzVmFullControl::new("any");
+        let err = ctl
+            .save_memory(std::path::Path::new("relative/mem.bin"))
+            .expect_err("relative path rejected");
+        assert!(
+            err.to_string().contains("absolute path"),
+            "error explains requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn vz_vm_full_control_pause_surfaces_missing_socket() {
+        // No supervisor running; pause must surface the socket path.
+        use crate::checkpoint::VmFullControl as _;
+        let ctl = VzVmFullControl::new("definitely-not-running-1234567890");
+        let err = ctl.pause().expect_err("pause should error");
+        assert!(
+            err.to_string().contains("control.sock"),
+            "error mentions socket: {err}"
+        );
     }
 }
