@@ -30,6 +30,8 @@ pub struct VmStartParams<'a> {
     pub config_files: &'a [microvm::DriveFile],
     pub secret_files: &'a [microvm::DriveFile],
     pub port_mappings: &'a [config::PortMapping],
+    /// Plan 118 WS-1 1b — warm-pool target (`--warm-pool-size`); 0 = off.
+    pub warm_pool_size: u32,
 }
 
 impl VmStartParams<'_> {
@@ -47,6 +49,7 @@ impl VmStartParams<'_> {
             cpus: self.cpus,
             memory_mib: self.memory_mib,
             mem_initial_mib: self.mem_initial_mib,
+            warm_pool_size: self.warm_pool_size,
             ports: self
                 .port_mappings
                 .iter()

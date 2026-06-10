@@ -19,6 +19,7 @@ use mvm_backend::standby_pool::SupervisorStandbyPool;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
     StandbyClaim, StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend, VmId,
+    VmStartConfig,
 };
 use sha2::{Digest, Sha256};
 
@@ -173,6 +174,97 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         }
     }
     Ok(spawned)
+}
+
+/// The base-compat key a launch needs from its `VmStartConfig` (kernel sha256 + the fixed
+/// vcpus/mem). `None` if the config carries no kernel path.
+fn compat_for_launch(cfg: &VmStartConfig) -> Result<Option<StandbyCompat>> {
+    let Some(kernel) = cfg.kernel_path.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(StandbyCompat {
+        kernel_sha256: kernel_sha256_hex(Path::new(kernel))?,
+        vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
+        mem_mib: cfg.memory_mib,
+    }))
+}
+
+/// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
+/// the VM now runs under) or `None` to cold-boot. **Fail-open**: anything not default-
+/// shaped, not bridge-admitted, or any error → `None` (the caller cold-boots as normal).
+///
+/// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
+/// `--name` — a claimed VM is named by its standby-id), no extra volumes (1a's attach
+/// threads only the rootfs), the backend supports the pool, and the **admitted plan +
+/// tenant** are threaded into the config — which only the gateway-bridge path
+/// (`MVM_GATEWAY_BRIDGE=1`) does, and which a claimed standby's `run_with_bridge` requires.
+pub fn try_warm_claim(
+    backend: &AnyBackend,
+    cfg: &VmStartConfig,
+    user_named: bool,
+) -> Result<Option<VmId>> {
+    if cfg.warm_pool_size == 0
+        || user_named
+        || !cfg.volumes.is_empty()
+        || !backend.supports_standby_pool()
+    {
+        return Ok(None);
+    }
+    let (Some(plan_json), Some(tenant)) = (cfg.plan_json.clone(), cfg.tenant_id.clone()) else {
+        // No admitted plan threaded in → not the bridge path → cold-boot.
+        return Ok(None);
+    };
+    let Some(want) = compat_for_launch(cfg)? else {
+        return Ok(None);
+    };
+    let rootfs = cfg.rootfs_path.clone();
+    let bundle_json = cfg.bundle_json.clone();
+    let pool = SupervisorStandbyPool::open()?;
+    let decision = claim_or_cold(&pool, backend.as_vm_backend(), &want, |handle| {
+        // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
+        // under the standby-id, so compute it for `handle.id`.
+        let sub = mvm_backend::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
+        Ok(StandbyClaim {
+            rootfs_path: rootfs.clone(),
+            tenant_id: tenant.clone(),
+            audit_dir: sub.audit_dir.context("audit substrate missing audit_dir")?,
+            gateway_audit_socket: sub
+                .gateway_audit_socket
+                .context("audit substrate missing gateway_audit_socket")?,
+            gateway_events_socket: sub.gateway_events_socket,
+            plan_json: plan_json.clone(),
+            bundle_json: bundle_json.clone(),
+        })
+    })?;
+    Ok(match decision {
+        LaunchDecision::Claimed(id) => Some(id),
+        LaunchDecision::ColdBoot => None,
+    })
+}
+
+/// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
+/// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
+pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
+    if cfg.warm_pool_size == 0 || !backend.supports_standby_pool() {
+        return Ok(0);
+    }
+    let Some(kernel) = cfg.kernel_path.as_ref() else {
+        return Ok(0);
+    };
+    let signer = host_signer::load_or_init()?;
+    let pool = SupervisorStandbyPool::open()?;
+    warm_to_target(
+        &pool,
+        &WarmParams {
+            backend: backend.as_vm_backend(),
+            kernel: Path::new(kernel),
+            vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
+            mem_mib: cfg.memory_mib,
+            signer_id: &host_signer::host_signer_id(),
+            signing_key_path: &signer.secret_path,
+            target: cfg.warm_pool_size,
+        },
+    )
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -394,6 +486,60 @@ mod tests {
             pool.load("s1").is_err(),
             "a failed standby is removed, not left idle"
         );
+    }
+
+    // try_warm_claim eligibility gates — each must cold-boot (return None) before touching
+    // the pool. A real libkrun AnyBackend (supports the pool, no I/O at construction) so the
+    // tested gate is the deciding one.
+    fn eligible_cfg() -> VmStartConfig {
+        VmStartConfig {
+            warm_pool_size: 2,
+            kernel_path: Some("/k/vmlinux".into()),
+            rootfs_path: "/vol/rootfs.ext4".into(),
+            cpus: 2,
+            memory_mib: 1024,
+            tenant_id: Some("tenant-a".into()),
+            plan_json: Some("{}".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn try_warm_claim_cold_when_pool_size_zero() {
+        let b = AnyBackend::from_hypervisor("libkrun");
+        let mut c = eligible_cfg();
+        c.warm_pool_size = 0;
+        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+    }
+
+    #[test]
+    fn try_warm_claim_cold_when_user_named() {
+        let b = AnyBackend::from_hypervisor("libkrun");
+        assert_eq!(try_warm_claim(&b, &eligible_cfg(), true).unwrap(), None);
+    }
+
+    #[test]
+    fn try_warm_claim_cold_with_extra_volumes() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let b = AnyBackend::from_hypervisor("libkrun");
+        let mut c = eligible_cfg();
+        c.volumes = vec![VmVolume {
+            host: "/h".into(),
+            guest: "/g".into(),
+            size: String::new(),
+            read_only: false,
+            kind: VmVolumeKind::DirShare,
+            encrypted: false,
+        }];
+        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+    }
+
+    #[test]
+    fn try_warm_claim_cold_without_admitted_plan() {
+        let b = AnyBackend::from_hypervisor("libkrun");
+        let mut c = eligible_cfg();
+        c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
+        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
     }
 }
 
