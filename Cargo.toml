@@ -179,6 +179,12 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hmac = "0.12"
 rand = "0.8"
+# Plan 129 Stage 2 (ADR-006): mint the per-VM name-constrained egress CA /
+# intermediate / leaf certs for transparent https substitution. 0.13+ for the
+# `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the
+# aws-lc-rs default). Sync (no tokio) so it lives behind mvm-core's `egress-ca`
+# feature without breaking the runtime-free default build.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
 # `secrecy` wraps secret-carrying types so accidental `Debug`/`Display`
 # becomes a compile error. Plan 63 W2 — `SecretBox<T>` pass on every
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
