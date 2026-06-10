@@ -10,7 +10,9 @@
 
 ## Status (2026-06-08) — egress-substitution loop wired end-to-end (QEMU); remaining = on-box boot e2e + Python/TS surface
 
-**The full path now exists on `main` (QEMU backend):** `mvmctl up` (secret-bearing plan) → `QemuBackend::start` spawns the `mvm-substitution-endpoint` moat → it opens the encrypted host store, mints opaque placeholders, hands them back (never values) → `invoke` injects `HTTP_PROXY` + placeholders into the workload → the workload's egress hits the in-guest forward proxy → relayed over vsock → the host endpoint substitutes the real credential → real TLS. The guest only ever holds opaque placeholders. PRs #710 (transport), #711 (`RunEntrypoint.env`), #713 (drop dead in-guest ADR-049), #715 (endpoint moat), #717 (QEMU spawn), #718 (invoke env + guest forward proxy). Each leg is unit/integration-tested; the live guest→host boot e2e is the one remaining validation.
+**The full path now exists on `main` (QEMU backend):** `mvmctl up` (secret-bearing plan) → `QemuBackend::start` spawns the `mvm-substitution-endpoint` moat → it opens the encrypted host store, mints opaque placeholders, hands them back (never values) → `invoke` injects `HTTP_PROXY` + placeholders into the workload → the workload's egress hits the in-guest forward proxy → relayed over vsock → the host endpoint substitutes the real credential → real TLS. The guest only ever holds opaque placeholders. PRs #710 (transport), #711 (`RunEntrypoint.env`), #713 (drop dead in-guest ADR-049), #715 (endpoint moat), #717 (QEMU spawn), #718 (invoke env + guest forward proxy). Each leg is unit/integration-tested; the live guest→host boot e2e is the one remaining validation. SDK `secret()` authoring (`type`/`hosts`) + the ADR-049 retirement also landed (#722/#723); the **SDK authoring half is done**.
+
+**Follow-on direction — SDK-free egress (decided 2026-06-08):** the egress path above requires the workload to honor `HTTP_PROXY` / the in-guest forward proxy. Per the directive *egress is mvm's job, not the SDK's*, the next slice replaces that with a **host-side transparent terminator**: the gateway redirects guest egress (nft `nat OUTPUT REDIRECT`, scoped to passt's uid — feasibility proven on the box) to a host listener that reuses the existing substitution endpoint, so a generic `curl` (no SDK, no proxy env) gets substituted. `https` needs name-constrained TLS termination (ADR-006). Design + staged plan: `specs/notes/plan-129-egress-substitution-sdk-free-design.md` and `specs/notes/plan-129-stage1b-2-transparent-terminator-plan.md` (Stage 1b terminator core landed on branch `feat/plan-129-egress-terminator`; see that plan's "Resume state"). SDK-free authoring (`mvmctl run --secret NAME:HOST`): `specs/notes/plan-129-stage1-sdk-free-authoring-implementation.md`.
 
 ### On-box endpoint validation (2026-06-08, dev-kvm)
 
@@ -58,23 +60,89 @@ endpoint validation above**); this ties them on a real QEMU guest.
    it into `plan.secrets` (`lower_workload_secrets`). **Built:**
    `examples/python/secret-egress/` (declares a bearer secret bound to
    postman-echo.com).
-3. **Run** — through the **admission / deploy (plan) flow**, NOT `mvmctl compile`.
-   > ⚠️ **Finding (2026-06-08):** `mvmctl compile` (local boot artifacts, no
-   > admission) **refuses managed secret refs** ("Use deploy/plan flows for
-   > managed refs"). The substitution endpoint is spawned only on the *admitted*
-   > plan path, and `mvmctl up` takes `--flake`/`--manifest` (not an app+secrets
-   > directly). So the user-facing local secret-workload boot is an
-   > admission/deploy concern (the fleet path, `mvmd` — consistent with
-   > deploy/tenant lifecycle living in mvmd), not a local `compile→up`. The
-   > egress *mechanism* is complete + box-validated (endpoint over real AF_VSOCK
-   > + real store: mint / substitute / claim-12 refuse); wiring an end-to-end
-   > local secret-workload **launch** through admission is the remaining gap,
-   > tracked here.
+3. **Run** — `mvmctl compile <app> --out <dir>` then `mvmctl up --flake <dir>`.
+   > ✅ **Resolved (2026-06-09): local secret-workload launch is wired (mvm's
+   > domain).** Scope decision: admission (`admit_for_run`/`admit_plan_for_boot`),
+   > the local secret store (`~/.mvm`), and the per-VM substitution endpoint all
+   > live in mvm — admission ≠ deploy/tenant/`--prod` (those stay in mvmd). So
+   > the dev/test launch on a `/dev/kvm` box is mvm-local. `mvmctl compile` now
+   > **strips** the managed `SecretRef` from the baked image (secret-free rootfs;
+   > the guest var is a boot-injected placeholder) and emits `workload.json`;
+   > `mvmctl up --flake <dir>` auto-discovers it, lowers `plan.secrets`, admits,
+   > and the QEMU backend spawns the endpoint (#717). The earlier "mvmd-only"
+   > lean predated #717/#718 landing the endpoint spawn *in mvm*.
 4. **Assert**: the echo response shows the **real** credential (substitution
    happened host-side), `~/.mvm/vms/<vm>/substitution.pid` existed during the
    run and is gone after `stop`, and a request to an **unbound** host is refused
    (502 from the forward proxy / `WireResponse::Refused`). Confirms guest→host
    AF_VSOCK (CID 2:5253) + endpoint substitution + the forward leg.
+
+   > **Box validation (2026-06-09, dev-kvm `88.99.197.234`, QEMU):**
+   > - ✅ `compile` produces a **secret-free image** (`launch.json` env `{}`),
+   >   `workload.json` carries the `SecretRef`.
+   > - ✅ `up --flake <dir>` auto-discovers `workload.json` → admits a plan whose
+   >   `.secrets` carry the binding → **spawns `mvm-substitution-endpoint`**.
+   >   (Required a fix: the main `up` path only threaded the signed plan to the
+   >   backend under `MVM_GATEWAY_BRIDGE=1`; QEMU now threads it unconditionally.)
+   > - ✅ The **guest holds only the placeholder** —
+   >   `substitution-env.json = [["API_KEY","mvm-secret-…"]]`, the real value
+   >   never present. The "never on the microVM" guarantee, validated live.
+   > - ✅ Endpoint **lifecycle**: alive during the run, reaped on `down`.
+   > - ✅ **`invoke <name> --attach`** dispatches a `RunEntrypoint` into the
+   >   running `up` workload, reusing its endpoint + boot-minted placeholders —
+   >   the function body runs with the injected `HTTP_PROXY` + placeholder env.
+   >   (The ephemeral serverless `invoke <artifact>` path stays a follow-up:
+   >   `boot_session_vm` skips plan-64 admission + auto-selects a non-endpoint
+   >   backend.)
+   > - ✅ **Guest loopback made functional (split to PR #749):** two independent
+   >   bugs both broke the guest's own `lo` → the forward proxy on
+   >   `127.0.0.1:18080` was unreachable. (1) netinit's interface-agnostic
+   >   blackhole route for `127.0.0.0/8` (in `MANDATORY_DENY_RANGES`) — fixed by
+   >   skipping loopback in the guest install (`Report.skipped_loopback`);
+   >   on-box `skipped_loopback:["127.0.0.0/8"]`, the `EINVAL` is gone. (2) `/init`
+   >   never brought `lo` up (the kernel creates it DOWN) → `ENETUNREACH` to
+   >   `127.0.0.1` — fixed by an `ip link set lo up` early in PID-1 init. Either
+   >   alone is insufficient.
+   > - ✅ **Guest→host vsock relay (CID 2) works on real QEMU:** with the loopback
+   >   fix, the live-guest request reaches the host endpoint and a response comes
+   >   back through the full chain (no longer a connection error). The earlier
+   >   residual-risk vsock leg is proven.
+   > - ✅ **Substitution works on the live-guest path:** the endpoint resolves the
+   >   guest's placeholder and substitutes the real credential (no
+   >   `unknown placeholder`; the `mvm-secret-` placeholder is never on the wire).
+   >   Two example bugs were fixed en route: a `User-Agent` that began with the
+   >   reserved `mvm-secret-` prefix (the endpoint treated it as a 2nd placeholder
+   >   → refused), and postman-echo bot-filtering urllib's UA — example now sends
+   >   an explicit UA and targets `httpbin.org` (a clean http header-echo).
+   > - ✅ **Destination-sees-real-credential — CLOSED (with PR #755).** A real bug
+   >   blocked the forward leg: `hardened_client_builder`'s `SsrfFilteringResolver`
+   >   **hardcodes port 443**, and reqwest connects on the *resolver's* port, so an
+   >   `http` forward hit the destination's HTTPS port → `400 "plain HTTP request
+   >   was sent to HTTPS port"`. (#710 worked because it forwarded **https**.) #755
+   >   makes the forwarder resolve + SSRF-filter itself and pin reqwest to the safe
+   >   IPs on the URL's real port (`resolve_to_addrs`). With it, the full e2e
+   >   passes on the box: httpbin reflects
+   >   `"Authorization": "Bearer REALKEY-…"` (the **real** credential) while the
+   >   guest's `substitution-env.json` holds only `mvm-secret-…`. **The complete
+   >   chain — workload → loopback forward proxy → guest→host vsock → endpoint
+   >   substitute → real http forward → destination echo — is validated on a live
+   >   QEMU guest.** "A raw secret never enters the microVM" is proven end-to-end.
+
+### Deferred follow-ups (surfaced by the local-launch e2e)
+
+- [x] **SSRF resolver hardcodes port 443 → broke http egress forwards** —
+      FIXED in PR #755 (forwarder resolves + SSRF-filters itself, pins the safe
+      IPs on the URL's real port via `resolve_to_addrs`). This closed the e2e.
+- [ ] **Forward proxy + `https`/`CONNECT`** — standard clients tunnel `https`
+      through `HTTP_PROXY` via `CONNECT`, hiding headers from the proxy, so
+      substitution only works for `http`/absolute-form today. TLS-destination
+      support needs the proxy to handle `CONNECT` (or the SDK to ship an
+      absolute-form client). The example uses `http://` for this reason.
+- [ ] **Ephemeral serverless `invoke <artifact>`** — today `invoke --attach`
+      dispatches into a running `up` workload; the one-shot ephemeral form needs
+      the `boot_session_vm`/exec transient path wired through plan-64 admission +
+      endpoint spawn + QEMU selection (a cross-subsystem change to the
+      template/session-VM world).
 
 ### Original plan status (2026-06-07) — host + guest Rust foundation landed; remaining = boot + 2 design decisions
 
@@ -98,7 +166,7 @@ endpoint validation above**); this ties them on a real QEMU guest.
 3. **`#1b` endpoint spawn** — **DECISION (2026-06-08, user): a dedicated per-VM moat process holds plaintext secrets, not the per-backend supervisor bin.** Rationale: the one process that decrypts secrets should be minimal + confinable (ADR-002 process-moat), separate from the general VM supervisor. The host (mvm-local) holds the encrypted secrets in `~/.mvm`; the endpoint opens them by path. QEMU-first (the only on-box-validatable backend; it has no supervisor bin anyway).
    > - [x] **Stage 1 landed (PR #715):** `mvm-substitution-endpoint` bin + `supervisor::substitution_endpoint` lib (sibling moat to `mvm-broker`/`mvm-host-signer`). Reads `EndpointConfig` on stdin (tenant, plan secrets, transport {Vsock{port}|Uds{path}}, optional store-dir overrides) → opens `FileSecretStore`+`FileBindingStore` by path → `from_plan` → binds listener → writes ONE stdout handshake line of `(guest var, placeholder)` pairs (never values) → serves (`serve_vsock` for QEMU / `serve` UDS for FC/libkrun). Tested: config serde + `assemble` + offline e2e of the real bin over UDS (spawn → handshake → unbound-destination request → claim-12 refuse, zero egress). Box-validated (vsock arm compiles on Linux).
    > - [x] **Stage 2 landed (#717 spawn, #718 invoke-env + guest forward proxy):** `QemuBackend::start` decodes the plan's secrets (`secrets_from_signed_json`) and — when non-empty — spawns `mvm-substitution-endpoint` detached (Vsock `SUBSTITUTION_PORT=5253`), reads the handshake → `substitution-env.json`; `stop()` reaps via `substitution.pid`; fail-closed (endpoint-spawn failure rolls back qemu). `invoke` injects `HTTP_PROXY` + placeholders; the guest agent runs the forward proxy. **W1.3 port-allowlist is N/A on QEMU** — the endpoint binds AF_VSOCK via the kernel (no mvm proxy in between); libkrun/FC will need the per-port UDS declared when those backends are wired.
-   > - [ ] **Remaining: on-box boot e2e** — a secret-declaring workload making a bound-host request through `HTTP_PROXY` with a placeholder → assert the destination saw the real credential (substitution) and an unbound host is refused. Needs a small harness (secret workload + local secret + admitted plan + header-echo destination). The transport halves are each proven (#710 host `serve_vsock` over real vsock; guest `connect_host_vsock` is standard AF_VSOCK to CID 2); the e2e ties the live guest→host path together.
+   > - [x] **On-box boot e2e CLOSED (2026-06-10, QEMU) — #745/#749/#755:** a secret-declaring workload (`examples/python/secret-egress`) launched via `up --flake` through admission; the destination (httpbin) reflected the **real** `Authorization: Bearer …` while the guest held only `mvm-secret-…`; `substitution.pid` lived for the run + was reaped on stop; an unbound host was refused (claim 12). The live guest→host vsock path (CID 2:5253) + http forward are proven end-to-end. (https + Firecracker is the separate Stage 2 layer — see `specs/notes/plan-129-stage2-https-ca-tdd-plan.md`; S2.7 box e2e gated on FC agent bringup.)
 4. **Python `mvm.secret()` surface** — return the admission-minted placeholder (`sdks/python/mvm/_dsl.py`). (needs pytest)
 5. **Retire the cross-language ADR-049 API** — Rust `mvm-sdk/src/runtime_substitution.rs` (0 crate callers) + Python `sdks/python/mvm/_runtime.py` + TS `sdks/typescript/src/runtime.ts` (all `mvm-secret://`, superseded by ADR-062), so one opaque format remains (`mvm-secret-<hex>`). (cross-language; needs pytest + npm test)
 6. **F** — claim-12/13 CI gate (with Plan 128).

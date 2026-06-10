@@ -270,7 +270,7 @@ jobs:
         run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
 
       - name: Fuzz SupervisorConfig (host-side)
-        working-directory: crates/libkrun-sys
+        working-directory: crates/deps/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly
@@ -281,6 +281,18 @@ jobs:
         # contract as `fuzz_guest_request` for the guest-side
         # `GuestRequest` parser.
         run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
+
+      - name: Fuzz SupervisorAttachConfig (prelaunch attach)
+        working-directory: crates/deps/libkrun-sys
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly
+        # Plan 118 WS-1 1a — the prelaunched supervisor reads a
+        # `SupervisorAttachConfig` off a same-uid control UDS. It is the
+        # only attacker-reachable surface after spawn; any panic is a
+        # hard process death before the plan re-verify can fail closed.
+        # Same "never panic on any input" contract as fuzz_supervisor_config.
+        run: cargo fuzz run fuzz_attach_message -- -max_total_time="$DURATION"
 
       - name: Fuzz Vz SupervisorConfig (host-side)
         working-directory: crates/mvm-build

@@ -159,7 +159,44 @@ struct DoctorReport {
     /// Ordered by `BTreeMap`'s natural backend-name order so JSON
     /// output is deterministic.
     balloon_support: BTreeMap<String, bool>,
+    /// Per-backend warm-start tier + the Linux fast-resume substrate probe
+    /// (plan 123 Phase C). Surfaces the honest capability matrix — Firecracker
+    /// live-memory, Vz save/restore, libkrun disk-only — so a user can predict
+    /// which backend resumes from RAM vs. reboots from disk.
+    warm_start: WarmStartReport,
     all_ok: bool,
+}
+
+/// Per-backend warm-start capability + Linux fast-resume substrate, surfaced
+/// under `warm_start` in `mvmctl doctor --json` (plan 123 C4).
+#[derive(Debug, Serialize)]
+struct WarmStartReport {
+    /// Backend name → warm-start tier label (`SnapshotCapability::label`).
+    /// `BTreeMap` for deterministic JSON ordering, like `balloon_support`.
+    backends: BTreeMap<String, &'static str>,
+    /// The Linux-only fast-resume substrate (NBD module, HugeTLB reservation).
+    /// `null` off Linux — the substrate backs Firecracker's live-memory path,
+    /// which only runs on KVM; macOS reports per-backend tiers but N/A here.
+    substrate: Option<WarmStartSubstrate>,
+    /// Plan 118 WS-1 1b — backend name → `supports_standby_pool()`. The standby pool
+    /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;
+    /// only libkrun implements it today.
+    standby_pool: BTreeMap<String, bool>,
+    /// Live count of idle standbys recorded under `~/.mvm/pool/` (best-effort; `None` if
+    /// the pool dir can't be read).
+    standby_pool_idle: Option<usize>,
+}
+
+/// Linux fast-resume substrate probe (plan 123 C2): the kernel pieces the
+/// Firecracker UFFD/NBD/hugepages resume recipe needs.
+#[derive(Debug, Serialize)]
+struct WarmStartSubstrate {
+    /// `/sys/module/nbd` present — the NBD module is loaded (Firecracker
+    /// serves the resumed rootfs over NBD).
+    nbd_module_loaded: bool,
+    /// `/proc/sys/vm/nr_hugepages` > 0 — 2 MB hugepages reserved for the UFFD
+    /// memfile backing a live-memory resume.
+    hugetlb_reserved: bool,
 }
 
 /// Plan 93 Phase 3 — surface the last Stage 0 builder-VM bootstrap
@@ -186,6 +223,32 @@ fn stage0_status_check() -> Check {
     };
     Check {
         name: "stage 0",
+        category: "tools",
+        ok: true,
+        info,
+    }
+}
+
+/// Surface the builder VM store's on-disk presence + size (#640). Host-side we
+/// can't verify nix-store integrity (that needs booting the VM), so this is
+/// informational: present/absent + size, with the `cache repair` recovery path
+/// noted. `ok` is always true — an absent store just means a cold first build,
+/// and a present-but-degraded store isn't host-detectable without a build.
+fn builder_store_check() -> Check {
+    // The repair dry-run is a pure read: it returns (existed, bytes, path)
+    // without removing anything.
+    let info = match mvm_build::builder_vm::clear_builder_store(true) {
+        Ok(s) if s.existed => format!(
+            "present ({:.1} GiB) at {} — if `dev up` fails with a dangling-store \
+             error, run `mvmctl cache repair`",
+            s.bytes_freed as f64 / (1024.0 * 1024.0 * 1024.0),
+            s.path,
+        ),
+        Ok(s) => format!("absent ({} — first `dev up` builds it)", s.path),
+        Err(e) => format!("could not stat builder store: {e}"),
+    };
+    Check {
+        name: "builder store",
         category: "tools",
         ok: true,
         info,
@@ -276,6 +339,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(docker_check(plat));
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
+    checks.push(builder_store_check());
     checks.push(registry_drift_check());
 
     checks.push(disk_space_check(false));
@@ -311,6 +375,9 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     // ── Balloon capability per backend ────────────────────────────
     let balloon_support = collect_balloon_support();
 
+    // ── Warm-start capability per backend (plan 123 Phase C) ───────
+    let warm_start = collect_warm_start_support();
+
     // ── Workflow filter (plan 74 W5) ──────────────────────────────
     // When `--workflow <name>` is set, drop checks whose category
     // is not in the workflow's relevant set. The filter is applied
@@ -334,6 +401,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
         checks,
         security_posture,
         balloon_support,
+        warm_start,
         all_ok,
     };
 
@@ -401,6 +469,7 @@ fn render_text(report: &DoctorReport) {
     }
     render_security_posture(&report.security_posture);
     render_balloon_support(&report.balloon_support);
+    render_warm_start_support(&report.warm_start);
 }
 
 /// Enumerate every backend's `capabilities().balloon`. The doctor
@@ -448,6 +517,132 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
              `mem_initial` in mvm.toml will be ignored at boot.",
         );
     }
+}
+
+// ── Warm-start capability (plan 123 Phase C) ──────────────────────
+
+/// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
+/// probe the fast-resume substrate. Surfaced so a user knows which backend
+/// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
+/// from a disk snapshot (libkrun) before relying on a warm start.
+fn collect_warm_start_support() -> WarmStartReport {
+    // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
+    // because save/restore is a warm-start tier worth surfacing.
+    let names = [
+        "firecracker",
+        "cloud-hypervisor",
+        "apple-container",
+        "docker",
+        "libkrun",
+        "qemu",
+        "vz",
+    ];
+    let mut backends = BTreeMap::new();
+    let mut standby_pool = BTreeMap::new();
+    for name in names {
+        let b = AnyBackend::from_hypervisor(name);
+        backends.insert(b.name().to_string(), b.snapshot_capability().label());
+        standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
+    }
+    // Best-effort live idle count (Plan 118 WS-1 1b). A missing pool dir reads as 0.
+    let standby_pool_idle = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+        .and_then(|p| p.list())
+        .ok()
+        .map(|v| {
+            v.iter()
+                .filter(|h| h.state == mvm_core::vm_backend::StandbyState::Idle)
+                .count()
+        });
+    WarmStartReport {
+        backends,
+        substrate: collect_warm_start_substrate(),
+        standby_pool,
+        standby_pool_idle,
+    }
+}
+
+/// `<sys_module>/nbd` exists ⇒ the NBD kernel module is loaded. Pure so it's
+/// testable without `/sys`. Only `collect_warm_start_substrate` (Linux) and
+/// the unit tests call it; off Linux the non-test build has no caller.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn nbd_module_loaded_at(sys_module: &std::path::Path) -> bool {
+    sys_module.join("nbd").exists()
+}
+
+/// Parse `/proc/sys/vm/nr_hugepages`; > 0 ⇒ hugepages reserved. Pure so it's
+/// testable cross-platform; a non-numeric/empty read is "none reserved".
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn hugetlb_reserved_from(nr_hugepages: &str) -> bool {
+    nr_hugepages
+        .trim()
+        .parse::<u64>()
+        .map(|n| n > 0)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn collect_warm_start_substrate() -> Option<WarmStartSubstrate> {
+    let nr = std::fs::read_to_string("/proc/sys/vm/nr_hugepages").unwrap_or_default();
+    Some(WarmStartSubstrate {
+        nbd_module_loaded: nbd_module_loaded_at(std::path::Path::new("/sys/module")),
+        hugetlb_reserved: hugetlb_reserved_from(&nr),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn collect_warm_start_substrate() -> Option<WarmStartSubstrate> {
+    None
+}
+
+/// Print the warm-start matrix in `mvmctl doctor` text mode. One line per
+/// backend, then the Linux substrate (or N/A off Linux).
+fn render_warm_start_support(r: &WarmStartReport) {
+    let title = "Warm-start capability (per backend)";
+    println!("\n{}", title);
+    println!("{}", "-".repeat(title.len()));
+    for (backend, tier) in &r.backends {
+        ui::status_line(&format!("  {backend}:"), tier);
+    }
+    match &r.substrate {
+        Some(s) => {
+            ui::status_line(
+                "  substrate · NBD module",
+                if s.nbd_module_loaded {
+                    "loaded"
+                } else {
+                    "not loaded"
+                },
+            );
+            ui::status_line(
+                "  substrate · HugeTLB",
+                if s.hugetlb_reserved {
+                    "reserved"
+                } else {
+                    "none reserved"
+                },
+            );
+        }
+        None => ui::status_line("  substrate (Linux fast-resume)", "N/A (Linux-only)"),
+    }
+
+    // Plan 118 WS-1 1b — the standby pool (pre-pay spawn latency), a separate axis from
+    // the snapshot tiers above. Only libkrun implements it today.
+    let pool_title = "Standby pool (per backend)";
+    println!("\n{}", pool_title);
+    println!("{}", "-".repeat(pool_title.len()));
+    for (backend, supported) in &r.standby_pool {
+        ui::status_line(
+            &format!("  {backend}:"),
+            if *supported { "supported" } else { "—" },
+        );
+    }
+    ui::status_line(
+        "  idle standbys",
+        &match r.standby_pool_idle {
+            Some(n) => n.to_string(),
+            None => "unknown".to_string(),
+        },
+    );
 }
 
 // ── Active backend security posture (ADR-002 / plan 53) ──────
@@ -2590,6 +2785,74 @@ mod tests {
     }
 
     #[test]
+    fn collect_warm_start_support_reports_per_backend_tier() {
+        let r = collect_warm_start_support();
+        // The honest per-backend warm-start matrix (plan 123 Phase C).
+        assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
+        assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
+        assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
+        // A backend with no warm-start support must not be silently dropped.
+        assert_eq!(r.backends.get("docker"), Some(&"unsupported"));
+    }
+
+    #[test]
+    fn collect_warm_start_support_reports_standby_pool_per_backend() {
+        let r = collect_warm_start_support();
+        // Plan 118 WS-1 1b — only libkrun implements the standby pool today; the rest
+        // report honest `false` and must not be silently dropped.
+        assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
+        assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
+        assert_eq!(r.standby_pool.get("docker"), Some(&false));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn warm_start_substrate_is_none_off_linux() {
+        // The NBD/HugeTLB fast-resume substrate is Linux-only; macOS reports
+        // the per-backend tier but N/A for the substrate.
+        assert!(collect_warm_start_support().substrate.is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn warm_start_substrate_is_probed_on_linux() {
+        // On Linux the substrate is probed (values depend on the host; we only
+        // assert it's present, not loaded).
+        assert!(collect_warm_start_support().substrate.is_some());
+    }
+
+    #[test]
+    fn hugetlb_reserved_from_parses_count() {
+        assert!(!hugetlb_reserved_from("0\n"));
+        assert!(hugetlb_reserved_from("128\n"));
+        assert!(!hugetlb_reserved_from("garbage"));
+        assert!(!hugetlb_reserved_from(""));
+    }
+
+    #[test]
+    fn nbd_module_loaded_at_detects_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!nbd_module_loaded_at(tmp.path()));
+        std::fs::create_dir(tmp.path().join("nbd")).unwrap();
+        assert!(nbd_module_loaded_at(tmp.path()));
+    }
+
+    #[test]
+    fn doctor_report_serializes_warm_start() {
+        let json = serde_json::to_string(&DoctorReport {
+            workflow: None,
+            checks: vec![],
+            security_posture: collect_security_posture(),
+            balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
+            all_ok: true,
+        })
+        .unwrap();
+        assert!(json.contains("\"warm_start\""), "{json}");
+        assert!(json.contains("\"live-memory\""), "{json}");
+    }
+
+    #[test]
     fn registry_drift_summary_reports_clean_and_counts() {
         use mvm::vm::reconcile::ConvergeReport;
         let clean = ConvergeReport::default();
@@ -2615,6 +2878,7 @@ mod tests {
             }],
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
             all_ok: true,
         };
         let json = serde_json::to_string(&report).unwrap();
@@ -2637,6 +2901,7 @@ mod tests {
             checks: vec![],
             security_posture: collect_security_posture(),
             balloon_support: collect_balloon_support(),
+            warm_start: collect_warm_start_support(),
             all_ok: true,
         };
         let json = serde_json::to_string(&report).unwrap();

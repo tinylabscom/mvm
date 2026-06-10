@@ -608,6 +608,44 @@ fn resolve_deps_volume_binding(
     resolve_deps_volume_binding_with_cache(workload_ir_path, build_mode, None)
 }
 
+/// Resolve the Workload IR path the admission flow lowers into `plan.secrets`.
+///
+/// An explicit `--from-workload-ir` always wins. Otherwise, when `--flake`
+/// points at a local directory a `mvmctl compile` run wrote `workload.json`
+/// into, default to it. This makes a secret-declaring compiled artifact
+/// (`mvmctl up --flake <out>`) lower its managed `SecretRef`s — and so spawn
+/// the per-VM substitution endpoint at boot — without the user re-naming the
+/// IR by hand. It also closes a footgun: the secrets are lowered whenever the
+/// artifact declares them, so a forgotten flag can't silently boot a workload
+/// without the binding it needs. A remote/attr flake ref or a missing file
+/// yields `None` (a plain flake, no managed secrets). Plan 129 / ADR-067.
+fn resolve_workload_ir_path(
+    from_workload_ir: Option<&std::path::Path>,
+    flake_ref: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if let Some(p) = from_workload_ir {
+        return Some(p.to_path_buf());
+    }
+    let candidate = std::path::Path::new(flake_ref?).join("workload.json");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Whether `up` threads the signed plan + tenant (`populate_audit_substrate`)
+/// onto the backend `VmStartConfig`. Two independent consumers want it:
+///
+/// - **QEMU substitution endpoint** (Plan 129 / ADR-067): spawned when the
+///   admitted plan carries secrets — `QemuBackend::start` reads
+///   `config.plan_json` + `tenant_id` to launch the per-VM moat. QEMU has **no**
+///   gateway-bridge path, so threading the plan only enables the endpoint;
+///   always do it for QEMU.
+/// - **libkrun/Vz gateway-bridge** factory: those backends branch into the
+///   bridge supervisor on `plan_json` presence, and that gvproxy wiring isn't
+///   working end-to-end yet, so it stays opt-in behind `MVM_GATEWAY_BRIDGE=1`
+///   (`gateway_bridge_enabled`); the default keeps them on the legacy path.
+fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> bool {
+    gateway_bridge_enabled || hypervisor == "qemu"
+}
+
 fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_sdk::ir::Workload>> {
@@ -714,6 +752,85 @@ fn resolve_deps_volume_binding_with_cache(
     Ok(Some(binding))
 }
 
+/// Plan 129 Stage 2 (S2.2) — stage the per-VM egress-TLS material for a
+/// secret-bearing plan. Mints the name-constrained intermediate, pushes its
+/// **cert** onto the guest secrets drive (`secret_files`, so the guest can trust
+/// host-terminated bound-host TLS once the S2.3 boot step installs it), and
+/// persists the cert+**key** to a host-only `egress-intermediate.json`
+/// (mode 0600) in the VM state dir for `spawn_egress_endpoint` to hand the
+/// terminator endpoint. The key never enters `secret_files` / the guest.
+///
+/// Bound hosts = the union of every plan secret's `allowed_hosts` from the host
+/// binding store — the SAME claim-12 egress allow-list, so the intermediate's
+/// `nameConstraints` can never exceed it. A plan with no secrets, or whose
+/// secrets carry no recorded binding, stages nothing (no https leg).
+fn stage_egress_tls_delivery(
+    plan_secrets: &[mvm_core::plan::SecretBinding],
+    tenant: &str,
+    vm_name: &str,
+    secret_files: &mut Vec<microvm::DriveFile>,
+) -> anyhow::Result<()> {
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore};
+
+    if plan_secrets.is_empty() {
+        return Ok(());
+    }
+    let store = FileBindingStore::default_location()?;
+    let mut bound: Vec<String> = Vec::new();
+    for s in plan_secrets {
+        if let Some(meta) = store.get(tenant, &s.name)? {
+            for h in meta.allowed_hosts {
+                if !bound.contains(&h) {
+                    bound.push(h);
+                }
+            }
+        }
+    }
+    if bound.is_empty() {
+        return Ok(());
+    }
+
+    let ca_dir = mvm_core::config::egress_ca_dir();
+    std::fs::create_dir_all(&ca_dir)
+        .with_context(|| format!("create egress CA dir {}", ca_dir.display()))?;
+    let refs: Vec<&str> = bound.iter().map(String::as_str).collect();
+    let delivery = mvm_backend::build_egress_tls_delivery(&refs, &ca_dir)?;
+
+    // Guest trusts the cert (delivered via the secrets drive; S2.3 installs it).
+    secret_files.push(delivery.guest_cert.clone());
+
+    // Host-only intermediate (cert+key) for the terminator endpoint — mode 0600
+    // private key material that must never reach the guest.
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("create VM state dir {}", state_dir.display()))?;
+    let path = state_dir.join("egress-intermediate.json");
+    let json = serde_json::to_vec(&serde_json::json!({
+        "cert_pem": delivery.endpoint_cert_pem,
+        "key_pem": delivery.endpoint_key_pem,
+    }))?;
+    write_host_only_file(&path, &json)
+        .with_context(|| format!("persist egress intermediate at {}", path.display()))?;
+    Ok(())
+}
+
+/// Atomically write `bytes` to `path` at mode 0600 (tmp + rename, so a reader
+/// never sees a half-written file). Used for host-only private key material.
+fn write_host_only_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all().ok();
+    std::fs::rename(&tmp, path)
+}
+
 /// Resolve the `source_root` for an app's lockfile path. For
 /// `Source::LocalPath { path, .. }` the source root is the directory
 /// the path resolves against — relative paths root at the IR file's
@@ -791,6 +908,11 @@ pub(in crate::commands) struct Args {
     /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
     #[arg(long, default_value = "0")]
     pub metrics_port: u16,
+    /// Plan 118 WS-1 1b — keep this many prelaunched supervisor standbys warm so the next
+    /// auto-named `up` claims one instead of cold-booting. 0 (default) = feature off. Only
+    /// the libkrun backend has a standby pool today; a claim uses the gateway-bridge path.
+    #[arg(long, default_value = "0")]
+    pub warm_pool_size: u32,
     /// Reload ~/.mvm/config.toml automatically when it changes
     #[arg(long)]
     pub watch_config: bool,
@@ -1006,7 +1128,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let seccomp_tier: mvm_core::crypto::seccomp::SeccompTier =
         args.seccomp.parse().context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
-    let lowered_plan_secrets = load_workload_ir(args.from_workload_ir.as_deref())?
+    // `--from-workload-ir`, or the `workload.json` a compiled `--flake`
+    // artifact carries (Plan 129 / ADR-067). Resolved once, used for both
+    // secret lowering and the deps-volume binding below.
+    let effective_workload_ir =
+        resolve_workload_ir_path(args.from_workload_ir.as_deref(), args.flake.as_deref());
+    let lowered_plan_secrets = load_workload_ir(effective_workload_ir.as_deref())?
         .map(|workload| lower_workload_secrets(&workload))
         .unwrap_or_default();
     let plan_secret_release = lowered_plan_secrets.secret_release;
@@ -1088,6 +1215,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         env_vars: &args.env,
         forward: args.forward,
         metrics_port: args.metrics_port,
+        warm_pool_size: args.warm_pool_size,
         watch_config: args.watch_config,
         watch: args.watch,
         detach: args.detach || args.up_json,
@@ -1104,7 +1232,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         no_supervisor: args.no_supervisor,
         bundle_pin: args.bundle_pin.as_deref(),
         build_mode,
-        workload_ir_path: args.from_workload_ir.as_deref(),
+        workload_ir_path: effective_workload_ir.as_deref(),
         up_json: args.up_json,
         services_health_timeout_secs: cfg.effective_services_health_timeout_secs(),
         wait: args.wait,
@@ -1173,6 +1301,8 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) env_vars: &'a [String],
     pub(super) forward: bool,
     pub(super) metrics_port: u16,
+    /// Plan 118 WS-1 1b — `--warm-pool-size`; 0 = off.
+    pub(super) warm_pool_size: u32,
     pub(super) watch_config: bool,
     pub(super) watch: bool,
     pub(super) detach: bool,
@@ -1239,6 +1369,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         env_vars,
         forward,
         metrics_port,
+        warm_pool_size,
         watch_config,
         watch,
         detach,
@@ -1280,22 +1411,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // matches the rest of the codebase: native KVM → Apple Container
     // (macOS 26+) → libkrun (typical macOS 13-25 contributor box with
     // the slp/krun Homebrew tap) → Docker (Tier 3 fallback).
-    let effective_hypervisor = if hypervisor == "firecracker" {
-        let plat = mvm_core::platform::current();
-        if plat.has_kvm() {
-            "firecracker" // native KVM — production Tier 1
-        } else if plat.has_apple_containers() {
-            "apple-container" // macOS 26+ Apple Silicon
-        } else if plat.has_libkrun() {
-            "libkrun" // macOS 13-25 with libkrun installed
-        } else if plat.has_docker() {
-            "docker" // universal Tier 3 fallback (banner emitted)
-        } else {
-            "firecracker" // surfaces a clear "not available" error
-        }
-    } else {
-        hypervisor
-    };
+    // Shared with `mvmctl pool` (Plan 118 WS-1 1b) so both agree on the effective backend.
+    let effective_hypervisor_owned = super::super::shared::resolve_effective_hypervisor(hypervisor);
+    let effective_hypervisor: &str = &effective_hypervisor_owned;
 
     // ADR-002 / plan 53: emit a loud, suppressible banner when the
     // active backend is not a hardware-isolated microVM. Today this
@@ -1737,6 +1855,13 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volume_cfg = rt_config.volumes.clone();
     };
 
+    // Plan 129 Stage 2 — if the plan carries secrets bound to egress hosts, mint
+    // the per-VM name-constrained egress intermediate and stage it: cert → the
+    // guest secrets drive (below), key → a host-only sidecar the terminator
+    // endpoint reads. No-op when the plan has no secrets / no egress bindings.
+    stage_egress_tls_delivery(&plan_secrets, tenant, &vm_name, &mut secret_files)
+        .context("staging per-VM egress TLS material")?;
+
     let user_cfg = mvm_core::user_config::load(None);
     let final_cpus = cpus
         .or(rt_config.cpus)
@@ -1781,7 +1906,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         });
     }
 
-    let vm_name_owned = vm_name.clone();
+    // `mut` so a warm-pool claim can rebind it to the claimed standby-id (Plan 118 WS-1 1b).
+    let mut vm_name_owned = vm_name.clone();
     let has_ports = !port_mappings.is_empty();
 
     // Stash the generated VM name so that if the Apple Container backend
@@ -1895,6 +2021,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             config_files: &config_files,
             secret_files: &secret_files,
             port_mappings: &port_mappings,
+            warm_pool_size,
         }
         .into_start_config();
         // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
@@ -1915,11 +2042,17 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
             .map(|v| v == "1")
             .unwrap_or(false);
-        if gateway_bridge_enabled && let Some(ctx) = admission_main.as_ref() {
+        if should_thread_signed_plan(gateway_bridge_enabled, effective_hypervisor)
+            && let Some(ctx) = admission_main.as_ref()
+        {
             populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
             // Plan 113 §Task 13 — stash plan.json + bundle.json for the
-            // Firecracker bridge sidecar to read at spawn time.
-            stash_plan_for_bridge(&start_config)?;
+            // Firecracker bridge sidecar to read at spawn time. Bridge-only:
+            // the QEMU substitution endpoint reads the in-memory config, so it
+            // needs no on-disk copy (and must not overwrite the persisted plan).
+            if gateway_bridge_enabled {
+                stash_plan_for_bridge(&start_config)?;
+            }
         }
 
         // Apple Container with -d: install a launchd agent instead of
@@ -1960,12 +2093,40 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
-        if let Err(e) = backend.start(&start_config) {
-            emit_failed_if(&admission_main, "backend-start", &e);
-            return Err(e);
+        // Plan 118 WS-1 1b — try a warm-pool claim first (auto-named + bridge-admitted
+        // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
+        // so rebind `vm_name_owned` for all downstream (agent wait, audit, readiness, stop).
+        let claimed: Option<String> =
+            match super::super::pool::try_warm_claim(&backend, &start_config, name.is_some()) {
+                Ok(Some(id)) => {
+                    ui::info(&format!(
+                        "Claimed a warm standby ({}) — skipping cold boot.",
+                        id.0
+                    ));
+                    Some(id.0)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    // try_warm_claim itself erroring (pool I/O, etc.) must not fail the launch.
+                    tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
+                    None
+                }
+            };
+        match claimed {
+            Some(name) => vm_name_owned = name,
+            None => {
+                if let Err(e) = backend.start(&start_config) {
+                    emit_failed_if(&admission_main, "backend-start", &e);
+                    return Err(e);
+                }
+            }
         }
         emit_launched_if(&admission_main, effective_hypervisor);
         record_vm_readiness(&vm_name_owned, InstanceReadiness::LaunchAccepted);
+        // Replenish the pool toward target after launch — best-effort, no daemon.
+        if let Err(e) = super::super::pool::replenish_after_launch(&backend, &start_config) {
+            tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
+        }
     }
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
@@ -2258,6 +2419,10 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             } else {
                 w_volume_cfg = rt_cfg_watch.volumes.clone();
             }
+            // Plan 129 Stage 2 — same egress-TLS staging on the watch-mode
+            // rebuild path (cert → guest secrets drive, key → host sidecar).
+            stage_egress_tls_delivery(&plan_secrets, tenant, &vm_name_owned, &mut w_secret_files)
+                .context("staging per-VM egress TLS material (watch rebuild)")?;
             let w_port_mappings = parse_port_specs(ports).unwrap_or_default();
             if let Some(f) = ports_to_drive_file(&w_port_mappings) {
                 w_config_files.push(f);
@@ -2314,6 +2479,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 config_files: &w_config_files,
                 secret_files: &w_secret_files,
                 port_mappings: &w_port_mappings,
+                // `--wait` is a one-shot workload; no warm-pool claim on this path.
+                warm_pool_size: 0,
             }
             .into_start_config();
             // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
@@ -3591,6 +3758,55 @@ mod resolve_deps_volume_tests {
     }
 
     #[test]
+    fn qemu_threads_signed_plan_for_substitution_endpoint() {
+        // The QEMU per-VM substitution endpoint reads config.plan_json /
+        // tenant_id to spawn when the plan carries secrets — it must be threaded
+        // even with the libkrun/Vz gateway bridge off (the default).
+        assert!(should_thread_signed_plan(false, "qemu"));
+        assert!(should_thread_signed_plan(true, "qemu"));
+    }
+
+    #[test]
+    fn libkrun_threads_signed_plan_only_under_gateway_bridge_flag() {
+        // libkrun/Vz branch into the (not-yet-working) bridge factory on
+        // plan_json presence, so the default keeps them on the legacy path.
+        assert!(!should_thread_signed_plan(false, "libkrun"));
+        assert!(!should_thread_signed_plan(false, "vz"));
+        assert!(should_thread_signed_plan(true, "libkrun"));
+    }
+
+    #[test]
+    fn explicit_from_workload_ir_wins() {
+        let p = std::path::Path::new("/some/explicit/ir.json");
+        let got = resolve_workload_ir_path(Some(p), Some("/ignored/flake/dir"));
+        assert_eq!(got.as_deref(), Some(p));
+    }
+
+    #[test]
+    fn discovers_workload_json_in_compiled_flake_dir() {
+        // A `mvmctl compile` artifact carries `workload.json`; `up --flake <dir>`
+        // must default to it so managed secrets are lowered without the flag.
+        let tmp = tempfile::tempdir().unwrap();
+        let flake = tmp.path().join("artifact");
+        std::fs::create_dir_all(&flake).unwrap();
+        let ir = flake.join("workload.json");
+        std::fs::write(&ir, "{}").unwrap();
+        let got = resolve_workload_ir_path(None, flake.to_str());
+        assert_eq!(got.as_deref(), Some(ir.as_path()));
+    }
+
+    #[test]
+    fn plain_flake_without_workload_json_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flake = tmp.path().join("plain");
+        std::fs::create_dir_all(&flake).unwrap();
+        assert!(resolve_workload_ir_path(None, flake.to_str()).is_none());
+        // A remote/attr flake ref is not a local dir → None, no panic.
+        assert!(resolve_workload_ir_path(None, Some("github:foo/bar#worker")).is_none());
+        assert!(resolve_workload_ir_path(None, None).is_none());
+    }
+
+    #[test]
     fn workload_ir_without_dependencies_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
@@ -3858,5 +4074,81 @@ mod resolve_deps_volume_tests {
             msg.contains("Source::LocalPath") || msg.contains("LocalPath"),
             "error must name the unsupported source kind: {msg}"
         );
+    }
+
+    // ── Plan 129 Stage 2 (S2.2): egress-TLS staging splits cert ↔ key ──
+
+    #[test]
+    fn stage_egress_tls_delivery_noop_without_secrets() {
+        // No secrets ⇒ no https leg, nothing staged.
+        let mut secret_files: Vec<microvm::DriveFile> = Vec::new();
+        stage_egress_tls_delivery(&[], "local", "vm-no-secrets", &mut secret_files).unwrap();
+        assert!(secret_files.is_empty());
+    }
+
+    #[test]
+    fn stage_egress_tls_delivery_splits_cert_to_guest_key_to_host() {
+        use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
+        use std::os::unix::fs::PermissionsExt;
+
+        // MVM_DATA_DIR isolates the binding store, egress CA, and VM state dir.
+        // Process-per-test under nextest already isolates env; the lock keeps
+        // plain `cargo test` (shared process) safe.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("MVM_DATA_DIR").ok();
+        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+
+        // Record the egress binding the helper resolves bound hosts from.
+        FileBindingStore::default_location()
+            .unwrap()
+            .put(
+                "local",
+                "OPENAI_API_KEY",
+                &SecretBindingMeta {
+                    auth_type: mvm_sdk::ir::AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            )
+            .unwrap();
+
+        let plan_secrets = vec![mvm_core::plan::SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }];
+        let mut secret_files: Vec<microvm::DriveFile> = Vec::new();
+        stage_egress_tls_delivery(&plan_secrets, "local", "vm-secret", &mut secret_files).unwrap();
+
+        // The guest got exactly the cert — never the key.
+        assert_eq!(secret_files.len(), 1);
+        let cert_file = &secret_files[0];
+        assert_eq!(cert_file.name, mvm_backend::EGRESS_CERT_DRIVE_NAME);
+        assert!(cert_file.content.contains("BEGIN CERTIFICATE"));
+        assert!(
+            !cert_file.content.contains("PRIVATE KEY"),
+            "intermediate key leaked into the guest cert file"
+        );
+
+        // The host-only intermediate sidecar holds the key at mode 0600.
+        let inter = mvm_core::config::vm_state_dir("vm-secret").join("egress-intermediate.json");
+        let meta = std::fs::metadata(&inter).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&inter).unwrap()).unwrap();
+        assert!(v["key_pem"].as_str().unwrap().contains("PRIVATE KEY"));
+        // The guest must trust exactly the cert the endpoint terminates under.
+        assert_eq!(
+            v["cert_pem"].as_str().unwrap().trim(),
+            cert_file.content.trim()
+        );
+
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("MVM_DATA_DIR", p),
+                None => std::env::remove_var("MVM_DATA_DIR"),
+            }
+        }
     }
 }

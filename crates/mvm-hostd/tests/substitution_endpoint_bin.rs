@@ -83,6 +83,8 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         forward_timeout_secs: 30,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
+        terminator_listen: None,
+        tls_intermediate: None,
     };
 
     let mut child = Command::new(BIN)

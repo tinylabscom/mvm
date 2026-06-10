@@ -78,6 +78,7 @@ impl VmBackend for MicrovmNixBackend {
             // crosvm). Surfacing balloon honestly would require
             // peeking at the runner script — leave `false` for now.
             balloon: false,
+            fs_quick_checkpoint: false,
         }
     }
 

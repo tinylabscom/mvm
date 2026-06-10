@@ -646,13 +646,46 @@ impl VmConn {
             .await?
     }
 
-    /// Control verb `SAVE <path>` (macOS 14+): checkpoint the (paused) guest to
-    /// `path`, then best-effort write the `<path>.machine-id` sidecar (mode
-    /// 0600) so RESTORE preserves guest identity. The caller pauses first; an
-    /// unpaused VM makes `saveMachineStateToURL` error (surfaced as `ERR`).
+    /// Control verb `SAVE <path>` (macOS 14+): checkpoint the guest to `path`,
+    /// then best-effort write the `<path>.machine-id` sidecar (mode 0600) so
+    /// RESTORE preserves guest identity.
+    ///
+    /// `saveMachineStateToURL` requires a paused VM (an unpaused one errors with
+    /// `VZErrorDomain:3`), but the host sends `SAVE` on a running guest — so we
+    /// pause here, save, then resume: a consistent live checkpoint, the
+    /// `pause → save` order from the ADR-056 addendum. If the guest is already
+    /// paused (a caller pre-paused), we save in place and leave it paused.
     async fn save(&self, path: &str) -> Result<()> {
         // VZ refuses to overwrite an existing save file.
         let _ = std::fs::remove_file(path);
+
+        let resume_after = self.status_word().await? == "running";
+        if resume_after {
+            self.pause()
+                .await
+                .map_err(|e| anyhow!("pause before save: {e}"))?;
+        }
+        let saved = self.save_machine_state(path).await;
+        // Resume even if the save failed, so a failure never strands the guest
+        // suspended. A resume failure is logged, not fatal — the snapshot (if it
+        // succeeded) is still the deliverable.
+        if resume_after && let Err(e) = self.resume().await {
+            tracing::warn!(error = %e, "resume after save failed; guest left paused");
+        }
+        saved?;
+
+        if let Some(bytes) = &self.machine_id {
+            let sidecar = format!("{path}.machine-id");
+            if let Err(e) = write_machine_id_sidecar(&sidecar, bytes) {
+                tracing::warn!(error = %e, "SAVE machine-id sidecar write failed (RESTORE will use a fresh identifier)");
+            }
+        }
+        Ok(())
+    }
+
+    /// The raw `saveMachineStateToURL` call — the VM must already be paused (see
+    /// [`save`](Self::save), which handles the pause/resume).
+    async fn save_machine_state(&self, path: &str) -> Result<()> {
         let owned_path = path.to_string();
         let handle = Arc::clone(&self.handle);
         let (tx, rx) = oneshot::channel();
@@ -670,14 +703,7 @@ impl VmConn {
             })
             .await?;
         rx.await
-            .map_err(|_| anyhow!("save completion handler was never called"))??;
-        if let Some(bytes) = &self.machine_id {
-            let sidecar = format!("{path}.machine-id");
-            if let Err(e) = write_machine_id_sidecar(&sidecar, bytes) {
-                tracing::warn!(error = %e, "SAVE machine-id sidecar write failed (RESTORE will use a fresh identifier)");
-            }
-        }
-        Ok(())
+            .map_err(|_| anyhow!("save completion handler was never called"))?
     }
 }
 

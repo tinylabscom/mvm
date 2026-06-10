@@ -105,6 +105,7 @@ impl VmBackend for CloudHypervisorBackend {
             // Same opt-in shape as Firecracker — present only when
             // `VmStartConfig::mem_initial_mib` is `Some`.
             balloon: true,
+            fs_quick_checkpoint: false,
         }
     }
 

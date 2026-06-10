@@ -94,6 +94,42 @@ impl Drop for TapGuard {
     }
 }
 
+/// Plan 129 Stage 2 — RAII reaper for the per-VM substitution endpoint when it
+/// is spawned **before** boot (Approach A: the placeholders it mints must ride
+/// the boot cmdline). If a later boot step fails and returns before the endpoint
+/// is fully wired, `Drop` reaps it so its decrypted-secret process can't outlive
+/// a failed launch. Defused once the VM is fully up (the normal `stop_vm` path
+/// then owns teardown, same as `FirecrackerGuard`/`TapGuard`).
+#[cfg(target_os = "linux")]
+pub struct EndpointGuard {
+    vm_name: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl EndpointGuard {
+    fn new(vm_name: &str) -> Self {
+        Self {
+            vm_name: Some(vm_name.to_string()),
+        }
+    }
+    fn defuse(&mut self) {
+        self.vm_name = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EndpointGuard {
+    fn drop(&mut self) {
+        if let Some(ref name) = self.vm_name {
+            warn!(vm = %name, "EndpointGuard: reaping orphaned substitution endpoint");
+            crate::substitution_spawn::reap_substitution_endpoint(
+                &mvm_core::config::vm_state_dir(name),
+                name,
+            );
+        }
+    }
+}
+
 /// Ensure we have a Linux execution environment.
 ///
 /// Today this is always a no-op: native Linux runs Firecracker directly,
@@ -293,12 +329,18 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         gateway = TAP_IP,
     );
 
+    // #746 — extract an FC-loadable ELF vmlinux if this kernel is a bzImage
+    // (no-op for an already-ELF kernel). Same as the flake path below.
+    let kernel_path =
+        mvm_build::fc_kernel::ensure_fc_loadable_kernel(std::path::Path::new(&kernel_path))
+            .with_context(|| format!("preparing FC-loadable kernel from {kernel_path}"))?;
+
     ui::info(&format!("Setting boot source: {}", state.kernel));
     api_put(
         "/boot-source",
         &format!(
             r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
-            kernel = kernel_path,
+            kernel = kernel_path.display(),
             args = kernel_boot_args,
         ),
     )?;
@@ -686,6 +728,16 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     start_vm_firecracker(&abs_dir, &abs_socket)?;
     let mut fc_guard = FirecrackerGuard::new(&abs_dir);
 
+    // Plan 129 Stage 2 (Approach A) — spawn the substitution endpoint BEFORE
+    // configuring boot args, so the placeholders it mints land in
+    // `vm_substitution_env_path` and `configure_flake_microvm` can carry them on
+    // the cmdline (`mvm.secret_env=`) into a sealed entrypoint. The endpoint
+    // binds its listener now; the nft REDIRECT that feeds it is installed
+    // post-boot (the TAP must exist). The guard reaps the endpoint if any step
+    // below fails before the VM is fully up. No-op without egress secrets.
+    #[cfg(target_os = "linux")]
+    let mut endpoint_guard = spawn_egress_endpoint(config)?;
+
     // Configure VM via Firecracker API
     configure_flake_microvm(config, &abs_dir, &abs_socket)?;
 
@@ -726,9 +778,34 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         );
     }
 
+    // Plan 129 Task 5B — when the admitted plan carries secret bindings, stand
+    // up this VM's transparent egress moat now that the guest is healthy:
+    //   1. spawn the per-VM substitution endpoint with the terminator listener
+    //      bound on a per-slot host port (Task 4), and
+    //   2. install the nft TAP prerouting REDIRECT that steers the guest's
+    //      outbound :80 to that terminator (Task 5A).
+    // Fail closed: a secret-bearing workload must not keep running without its
+    // substitution path, so any failure rolls the VM back. Linux-only (nft +
+    // the FC path itself). The plan source is the same `plan.json` the bridge
+    // parsed; a missing/unsigned file means a legacy/non-admitted boot with no
+    // secrets — nothing to install.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = install_egress_redirect(config) {
+        // Roll back the running VM + its network. The guards were about to be
+        // defused; instead let them fire by returning before defuse — but the
+        // bridge watchdog already detached, so tear down explicitly. `stop_vm`
+        // reaps the substitution endpoint, so the (still-armed) endpoint_guard's
+        // Drop is then a harmless no-op.
+        warn!(vm = %config.slot.name, "egress redirect install failed; rolling back VM: {e}");
+        let _ = stop_vm(&config.slot.name);
+        return Err(e);
+    }
+
     // VM is fully started — defuse guards so normal stop path handles cleanup
     fc_guard.defuse();
     tap_guard.defuse();
+    #[cfg(target_os = "linux")]
+    endpoint_guard.defuse();
 
     ui::banner(&[
         &format!("MicroVM '{}' is running!", config.name),
@@ -1074,6 +1151,23 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let abs_dir = format!("{}/{}", abs_vms, name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
+
+    // Plan 129 Task 5B — tear down this VM's egress substitution moat BEFORE the
+    // not-running early return. The endpoint is a live host process holding the
+    // workload's DECRYPTED secrets and the nft REDIRECT table outlives the guest;
+    // if an FC VM crashes/OOMs on its own, a later `stop_vm` must still reap the
+    // moat — decrypted secrets must not outlive the guest, even on a crash. Both
+    // are best-effort + idempotent (no-op when the VM carried no secrets). The
+    // substitution sidecars live under `vm_state_dir(name)`, NOT the VMS_DIR
+    // `abs_dir`. Mirrors qemu.rs ordering (reap-before-not-running-return).
+    crate::substitution_spawn::reap_substitution_endpoint(
+        &mvm_core::config::vm_state_dir(name),
+        name,
+    );
+    #[cfg(target_os = "linux")]
+    if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
+        warn!(vm = %name, "remove egress redirect table: {e}");
+    }
 
     if !firecracker::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
@@ -1763,13 +1857,44 @@ pub fn configure_flake_microvm_with_drives_dir(
         format!("root=/dev/vda rw rootwait init=/init {base_args}")
     };
 
-    ui::info(&format!("Setting boot source: {}", config.vmlinux_path));
+    // Plan 129 Stage 2 — a fresh FC boot attaches no secrets drive, so the per-VM
+    // egress intermediate cert reaches the sealed guest via the kernel cmdline.
+    // `mvmctl up` staged it in `egress-intermediate.json`; `/init` decodes the
+    // `mvm.egress_ca=` token into the guest trust bundle (cert only — the key
+    // stays host-side in the terminator endpoint).
+    let boot_args = match egress_ca_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
+    // Plan 129 Stage 2 (Approach A) — the substitution endpoint spawned pre-boot
+    // minted the workload's placeholders and wrote them to
+    // `vm_substitution_env_path`. Carry them on the cmdline (`mvm.secret_env=`)
+    // so `/init` exports `$VAR=placeholder` into a sealed entrypoint (placeholders
+    // only, never values). Absent ⇒ no secrets / no endpoint.
+    let boot_args = match secret_env_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
+
+    // #746 — FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
+    // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
+    // which FC rejects with "Invalid Elf magic number". Extract the embedded ELF
+    // to a cached sibling once and boot from that. No-op for an already-ELF
+    // kernel (aarch64 `Image`, or a fixed image).
+    let kernel_for_boot =
+        mvm_build::fc_kernel::ensure_fc_loadable_kernel(std::path::Path::new(&config.vmlinux_path))
+            .with_context(|| {
+                format!("preparing FC-loadable kernel from {}", config.vmlinux_path)
+            })?;
+    let kernel_for_boot = kernel_for_boot.display();
+
+    ui::info(&format!("Setting boot source: {kernel_for_boot}"));
     let boot_source = match &effective_initrd {
         Some(initrd) => {
             ui::info(&format!("Using initrd: {}", initrd));
             format!(
                 r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}", "initrd_path": "{initrd}"}}"#,
-                kernel = config.vmlinux_path,
+                kernel = kernel_for_boot,
                 args = boot_args,
                 initrd = initrd,
             )
@@ -1777,7 +1902,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         None => {
             format!(
                 r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
-                kernel = config.vmlinux_path,
+                kernel = kernel_for_boot,
                 args = boot_args,
             )
         }
@@ -2282,6 +2407,168 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
         current_exe.as_deref(),
         &manifest_dir,
     )
+}
+
+/// Plan 129 Task 5B — stand up this VM's transparent egress substitution moat
+/// (endpoint + terminator + nft TAP REDIRECT) when the admitted plan carries
+/// secret bindings. Called after the FC guest is healthy.
+///
+/// The plan lives at `vm_state_dir(name)/plan.json` (the same file
+/// `spawn_fc_bridge` parses — `mvm_data_dir()/vms/<name>`, NOT the `abs_dir`
+/// VMS_DIR tree). The substitution pid + env sidecars also land under
+/// `vm_state_dir` so the invoke path's `vm_substitution_env_path` lookup
+/// resolves identically to the QEMU backend.
+///
+/// Fail-closed: any error propagates so the caller rolls back the VM. A
+/// missing/unsigned `plan.json` (legacy / non-admitted boot) or a plan with no
+/// secrets is a clean no-op — there's nothing to substitute.
+///
+/// The installed [`EgressRedirect`] is `persist`ed (not dropped): the VM keeps
+/// running after this returns, and `stop_vm` removes the nft table by name.
+/// Plan 129 — shared plan decode: `Some((secrets, tenant))` when the admitted
+/// plan carries egress secrets, else `None` (legacy / non-admitted / no-secret
+/// boot — nothing to wire). A missing `plan.json` or an undecodable placeholder
+/// plan is the no-op path, not an error.
+#[cfg(target_os = "linux")]
+fn decode_plan_secrets(
+    state_dir: &std::path::Path,
+) -> Result<Option<(Vec<mvm_core::plan::SecretBinding>, String)>> {
+    let plan_path = state_dir.join("plan.json");
+    let plan_json = match std::fs::read_to_string(&plan_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "read plan.json at {} for egress substitution: {e}",
+                plan_path.display()
+            ));
+        }
+    };
+    let secrets = match mvm_core::plan::secrets_from_signed_json(&plan_json) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "plan.json not a decodable signed plan; skipping egress substitution");
+            return Ok(None);
+        }
+    };
+    if secrets.is_empty() {
+        return Ok(None);
+    }
+    let tenant = mvm_core::plan::tenant_from_signed_json(&plan_json)
+        .map_err(|e| anyhow::anyhow!("extract tenant from plan.json: {e}"))?;
+    Ok(Some((secrets, tenant)))
+}
+
+/// Plan 129 Stage 2 (Approach A) — spawn the per-VM substitution endpoint
+/// **before** the guest boots, so the `(var → placeholder)` pairs it mints (and
+/// writes to `vm_substitution_env_path`) are available when `boot_args` is built
+/// and can ride the cmdline (`mvm.secret_env=`) into a sealed entrypoint. Binds
+/// the terminator listener too; the nft REDIRECT that feeds it is installed
+/// post-boot by [`install_egress_redirect`] (it needs the guest's TAP). No-op
+/// when the plan carries no egress secrets. Returns an armed [`EndpointGuard`]
+/// the caller defuses once the VM is fully up.
+#[cfg(target_os = "linux")]
+fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
+    use crate::egress_redirect::terminator_port_for;
+    use crate::substitution_spawn::spawn_substitution_endpoint;
+    use std::net::SocketAddr;
+
+    let name = &config.slot.name;
+    let state_dir = mvm_core::config::vm_state_dir(name);
+    let Some((secrets, tenant)) = decode_plan_secrets(&state_dir)? else {
+        return Ok(EndpointGuard { vm_name: None });
+    };
+
+    // Per-slot terminator port so concurrent VMs never collide host-side.
+    // 0.0.0.0: a PREROUTING REDIRECT delivers the forwarded packet to a local
+    // socket on the host, so the terminator must accept on the host's addrs.
+    let term_port = terminator_port_for(config.slot.index);
+    let listen = SocketAddr::from(([0, 0, 0, 0], term_port));
+    // `mvmctl up` staged the per-VM name-constrained intermediate (cert+key) in
+    // the sidecar. Hand the KEY to the endpoint so the `https` terminator can
+    // mint per-SNI leaves; it never reaches the guest. Absent ⇒ `http`-only.
+    let tls_intermediate = read_egress_intermediate(&state_dir)?;
+    spawn_substitution_endpoint(
+        name,
+        &state_dir,
+        &tenant,
+        &secrets,
+        Some(listen),
+        tls_intermediate,
+    )?;
+    Ok(EndpointGuard::new(name))
+}
+
+/// Plan 129 — install the per-VM nft TAP REDIRECT (`:80`/`:443` → the terminator)
+/// **after** the guest boots (the TAP exists). No-op when the plan carries no
+/// egress secrets. Persists the table so it outlives this frame; `stop_vm`
+/// removes it by name.
+#[cfg(target_os = "linux")]
+fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
+    use crate::egress_redirect::{EgressRedirect, terminator_port_for};
+
+    let name = &config.slot.name;
+    let state_dir = mvm_core::config::vm_state_dir(name);
+    if decode_plan_secrets(&state_dir)?.is_none() {
+        return Ok(());
+    }
+    let term_port = terminator_port_for(config.slot.index);
+    let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
+    redirect.persist();
+    Ok(())
+}
+
+/// Plan 129 Stage 2 — the `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
+/// or `None` when the VM has no staged intermediate (no secrets / no https leg).
+/// Reads the **cert** from the per-VM `egress-intermediate.json` sidecar (the key
+/// is never put on the cmdline / in the guest). Best-effort: a malformed/missing
+/// sidecar yields `None` rather than blocking boot — the worst case is the guest
+/// can't trust host-terminated TLS, and the claim-12 host allow-list still holds.
+fn egress_ca_cmdline_token(vm_name: &str) -> Option<String> {
+    let path = mvm_core::config::vm_state_dir(vm_name).join("egress-intermediate.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let cert = v["cert_pem"].as_str()?;
+    mvm_core::vm_backend::encode_egress_ca_cmdline(cert)
+}
+
+/// Plan 129 Stage 2 (Approach A) — the `mvm.secret_env=<hex>` cmdline token for
+/// `vm_name`, or `None` when the VM has no secrets. Reads the `(var, placeholder)`
+/// pairs the pre-boot substitution endpoint minted into `vm_substitution_env_path`
+/// (a JSON array of `[var, placeholder]`) and encodes them — **placeholders only**,
+/// never values (claim 13). Best-effort: a missing/malformed handshake yields
+/// `None` rather than blocking boot.
+fn secret_env_cmdline_token(vm_name: &str) -> Option<String> {
+    let path = mvm_core::config::vm_substitution_env_path(vm_name);
+    let bytes = std::fs::read(&path).ok()?;
+    let pairs: Vec<(String, String)> = serde_json::from_slice(&bytes).ok()?;
+    mvm_core::vm_backend::encode_secret_env_cmdline(&pairs)
+}
+
+/// Plan 129 Stage 2 — read the per-VM egress intermediate (`cert_pem` + `key_pem`)
+/// `mvmctl up` persisted at `<state_dir>/egress-intermediate.json` (host-only,
+/// mode 0600). Returns `None` when absent (no https leg) — a missing file is the
+/// Stage 1b / no-secret path, not an error. The key is host-side material only;
+/// it is handed to the terminator endpoint and never written to a guest drive.
+#[cfg(target_os = "linux")]
+fn read_egress_intermediate(state_dir: &std::path::Path) -> Result<Option<(String, String)>> {
+    let path = state_dir.join("egress-intermediate.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    let cert = v["cert_pem"].as_str();
+    let key = v["key_pem"].as_str();
+    match (cert, key) {
+        (Some(c), Some(k)) => Ok(Some((c.to_string(), k.to_string()))),
+        _ => Err(anyhow::anyhow!(
+            "{} missing cert_pem/key_pem",
+            path.display()
+        )),
+    }
 }
 
 /// Spawn the `mvm-firecracker-bridge` sibling. Creates a UNIX

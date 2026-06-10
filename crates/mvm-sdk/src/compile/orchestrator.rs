@@ -1,8 +1,15 @@
 //! `mvmforge compile` per ADR-0005 §4 and ADR-0006.
 //!
-//! Reads a validated Workload IR manifest, generates `flake.nix` and
-//! `launch.json`, and atomically publishes them to the user-specified output
-//! directory. No `nix` invocation; no network access.
+//! Reads a validated Workload IR manifest, generates `flake.nix`, `launch.json`,
+//! and `workload.json`, and atomically publishes them to the user-specified
+//! output directory. No `nix` invocation; no network access.
+//!
+//! Managed `SecretRef` env bindings (Plan 129 / ADR-067) are stripped from the
+//! baked `launch.json` — the rootfs is secret-free by construction, the guest
+//! var is injected as an opaque placeholder only at boot by the substitution
+//! endpoint — but preserved in `workload.json`, the host-side admission input
+//! `mvmctl up --from-workload-ir` lowers into `plan.secrets` to spawn that
+//! endpoint.
 
 use crate::compile::archive::{ArchiveError, archive_dir};
 use crate::compile::flake::build_flake_nix;
@@ -52,9 +59,6 @@ pub enum CompileError {
     /// the surface explicit so callers can distinguish a real
     /// "function missing" from "we couldn't even parse the source".
     FuncDescribe(FuncDescribeError),
-    ManagedSecretsNotSupported {
-        targets: Vec<String>,
-    },
     /// Plan 165 WS-B B3: a sealed/prod image must declare a workload
     /// entrypoint. The SDK only ever emits sealed images, so an app with
     /// no declared entrypoint can never be compiled into one.
@@ -93,13 +97,6 @@ impl std::fmt::Display for CompileError {
                 "function {module:?}:{function:?} is missing parameters required by args_schema: {missing:?}"
             ),
             Self::FuncDescribe(e) => write!(f, "function-presence check: {e}"),
-            Self::ManagedSecretsNotSupported { targets } => write!(
-                f,
-                "managed secret refs are not supported by `mvmctl compile` local boot artifacts yet; \
-                 found secret-backed env targets: {}. Use deploy/plan flows for managed refs, or \
-                 mount guest-visible files explicitly if you accept guest materialization.",
-                targets.join(", ")
-            ),
             Self::SealedWorkloadMissingEntrypoint { app } => write!(
                 f,
                 "sealed/prod workloads must declare an entrypoint; dev images may omit it \
@@ -168,12 +165,6 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
             .apps
             .first()
             .expect("validate() ensures at least one app");
-        let managed_secret_targets = managed_secret_targets(app);
-        if !managed_secret_targets.is_empty() {
-            return Err(CompileError::ManagedSecretsNotSupported {
-                targets: managed_secret_targets,
-            });
-        }
         let bundle_dir = staging.join("src");
         let mut source_plan = match &app.source {
             Source::LocalPath {
@@ -266,10 +257,25 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
             source_plan = rehash(&bundle_dir).map_err(CompileError::Source)?;
         }
 
-        let flake = build_flake_nix(workload).map_err(CompileError::Render)?;
-        let launch = build_launch_json(workload, &source_plan).map_err(CompileError::Render)?;
+        // Plan 129 / ADR-067: a managed `SecretRef` env binding must never be
+        // baked into the image. The guest receives the var only at boot, as an
+        // opaque placeholder minted by the per-VM substitution endpoint; the
+        // ref itself rides the admission plan (host-side `workload.json`), not
+        // the rootfs. Strip every `SecretRef` env entry before rendering the
+        // baked artifact so no env-baking path (launch.json → exec wrapper,
+        // flake) can ever observe it. The image is secret-free by construction.
+        let baked = strip_secret_env(workload);
+        let flake = build_flake_nix(&baked).map_err(CompileError::Render)?;
+        let launch = build_launch_json(&baked, &source_plan).map_err(CompileError::Render)?;
         write_lf(&staging.join("flake.nix"), &flake)?;
         write_lf(&staging.join("launch.json"), &launch)?;
+        // The canonical (unstripped) IR — `mvmctl up --from-workload-ir`'s
+        // admission input. Carries the managed `SecretRef`s the baked artifact
+        // dropped, so the substitution endpoint is spawned at boot. Host-side
+        // only: the flake builds the rootfs from `./src` + `launch.json`, never
+        // this file, so it cannot reach the guest. Plan 129 / ADR-067.
+        let workload_json = serde_json::to_string(workload).map_err(CompileError::Render)?;
+        write_lf(&staging.join("workload.json"), &workload_json)?;
         // Per ADR-0010 §3 (Option A): the rendered flake references
         // `mvm.lib.<system>.mk<Lang>FunctionService` directly. The
         // factories live in mvm; mvmforge does not bundle local
@@ -301,34 +307,29 @@ fn check_declared_entrypoints(workload: &Workload) -> Result<(), CompileError> {
     Ok(())
 }
 
-fn managed_secret_targets(app: &crate::ir::App) -> Vec<String> {
-    let mut targets = Vec::new();
-    collect_secret_targets(&app.env, &mut targets);
-    for ep in &app.entrypoints {
-        match ep {
-            Entrypoint::Command { env, .. } | Entrypoint::Function { env, .. } => {
-                collect_secret_targets(env, &mut targets);
+/// Return a clone of `workload` with every managed `SecretRef` env entry
+/// removed — from each app's `env` and from each entrypoint's `env`. Plan 129 /
+/// ADR-067: the baked image must be secret-free; the secret var is delivered
+/// only at boot as an opaque placeholder by the substitution endpoint, and the
+/// `SecretRef` binding travels the host-side admission plan, never the rootfs.
+/// `Literal` env entries are untouched.
+fn strip_secret_env(workload: &Workload) -> Workload {
+    let mut baked = workload.clone();
+    for app in &mut baked.apps {
+        retain_non_secret_env(&mut app.env);
+        for ep in &mut app.entrypoints {
+            match ep {
+                Entrypoint::Command { env, .. } | Entrypoint::Function { env, .. } => {
+                    retain_non_secret_env(env);
+                }
             }
         }
     }
-    targets.sort();
-    targets.dedup();
-    targets
+    baked
 }
 
-fn collect_secret_targets(
-    env: &std::collections::BTreeMap<String, EnvValue>,
-    out: &mut Vec<String>,
-) {
-    for value in env.values() {
-        let EnvValue::SecretRef { reference } = value else {
-            continue;
-        };
-        match &reference.mount {
-            crate::ir::SecretMount::Env { var } => out.push(var.clone()),
-            crate::ir::SecretMount::File { path } => out.push(path.clone()),
-        }
-    }
+fn retain_non_secret_env(env: &mut std::collections::BTreeMap<String, EnvValue>) {
+    env.retain(|_, value| !matches!(value, EnvValue::SecretRef { .. }));
 }
 
 /// ADR-0015 Phase 2: confirm every Entrypoint::Function resolves to
@@ -557,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_writes_three_top_level_entries_atomically() {
+    fn compile_writes_top_level_entries_atomically() {
         let tmp = TempDir::new().unwrap();
         let manifest_dir = tmp.path().join("manifest");
         make_src(&manifest_dir);
@@ -566,9 +567,10 @@ mod tests {
         assert!(out.is_dir());
         assert!(out.join("flake.nix").is_file());
         assert!(out.join("launch.json").is_file());
+        assert!(out.join("workload.json").is_file());
         assert!(out.join("src").is_dir());
         let entries: Vec<_> = fs::read_dir(&out).unwrap().collect();
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
     }
 
     #[test]
@@ -636,8 +638,66 @@ mod tests {
         w
     }
 
+    /// A workload with a managed secret ref compiles into a secret-free
+    /// image: the `SecretRef` env entry is stripped from the baked
+    /// `launch.json` (the guest var is injected as an opaque placeholder
+    /// only at boot, by the substitution endpoint — never baked). The
+    /// real value is never in compile's reach; this asserts the *binding*
+    /// can't leak into the image either. Plan 129 / ADR-067.
     #[test]
-    fn compile_refuses_managed_secret_refs_for_local_boot_artifacts() {
+    fn compile_strips_secret_refs_from_baked_launch_json() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_dir = tmp.path().join("manifest");
+        make_src(&manifest_dir);
+        let out = tmp.path().join("artifact");
+        let mut workload = sample();
+        workload.apps[0].env.insert(
+            "API_KEY".into(),
+            EnvValue::SecretRef {
+                reference: SecretRef {
+                    name: "api-key".into(),
+                    mount: SecretMount::Env {
+                        var: "API_KEY".into(),
+                    },
+                    auth_type: crate::ir::AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            },
+        );
+        // A plain env var alongside the secret must survive untouched.
+        workload.apps[0].env.insert(
+            "LOG_LEVEL".into(),
+            EnvValue::Literal {
+                value: "info".into(),
+            },
+        );
+
+        compile(&workload, &out, &manifest_dir).expect("secret-declaring app compiles");
+
+        let launch: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("launch.json")).unwrap()).unwrap();
+        let env = launch.get("env").and_then(|e| e.as_object()).unwrap();
+        assert!(
+            !env.contains_key("API_KEY"),
+            "secret-bound env var must be stripped from the baked image; launch.env = {env:?}"
+        );
+        assert_eq!(
+            env.get("LOG_LEVEL")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str()),
+            Some("info"),
+            "non-secret env vars must survive the strip"
+        );
+    }
+
+    /// Compile emits the canonical (unstripped) Workload IR as
+    /// `workload.json` alongside the build artifacts. This is the host-side
+    /// admission input `mvmctl up --from-workload-ir` lowers into
+    /// `plan.secrets` — it carries the managed `SecretRef`s (which were
+    /// stripped from the baked `launch.json`) so the substitution endpoint can
+    /// be spawned at boot. Plan 129 / ADR-067.
+    #[test]
+    fn compile_emits_workload_json_carrying_secret_refs_for_admission() {
         let tmp = TempDir::new().unwrap();
         let manifest_dir = tmp.path().join("manifest");
         make_src(&manifest_dir);
@@ -657,13 +717,54 @@ mod tests {
             },
         );
 
-        let err = compile(&workload, &out, &manifest_dir).unwrap_err();
-        match err {
-            CompileError::ManagedSecretsNotSupported { targets } => {
-                assert_eq!(targets, vec!["API_KEY".to_string()]);
-            }
-            other => panic!("expected ManagedSecretsNotSupported, got {other:?}"),
+        compile(&workload, &out, &manifest_dir).unwrap();
+
+        let ir: Workload =
+            serde_json::from_slice(&fs::read(out.join("workload.json")).unwrap()).unwrap();
+        // The admission input round-trips the original workload, secrets intact.
+        assert_eq!(ir, workload);
+        assert!(matches!(
+            ir.apps[0].env.get("API_KEY"),
+            Some(EnvValue::SecretRef { .. })
+        ));
+    }
+
+    /// A `SecretRef` carried on an *entrypoint* env (not just the app env)
+    /// must also be stripped from the baked `launch.json` — the exec-wrapper
+    /// path (`exec.rs::build_guest_wrapper`) exports entrypoint env into the
+    /// guest, so a surviving ref there would defeat the invariant.
+    #[test]
+    fn compile_strips_secret_refs_from_entrypoint_env() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_dir = tmp.path().join("manifest");
+        make_src(&manifest_dir);
+        let out = tmp.path().join("artifact");
+        let mut workload = sample();
+        if let Entrypoint::Command { env, .. } = &mut workload.apps[0].entrypoints[0] {
+            env.insert(
+                "API_KEY".into(),
+                EnvValue::SecretRef {
+                    reference: SecretRef {
+                        name: "api-key".into(),
+                        mount: SecretMount::Env {
+                            var: "API_KEY".into(),
+                        },
+                        auth_type: crate::ir::AuthType::Bearer,
+                        allowed_hosts: vec!["api.openai.com".into()],
+                    },
+                },
+            );
         }
+
+        compile(&workload, &out, &manifest_dir).expect("secret-declaring app compiles");
+
+        let launch = String::from_utf8(fs::read(out.join("launch.json")).unwrap()).unwrap();
+        assert!(
+            !launch.contains("API_KEY")
+                && !launch.contains("secret_ref")
+                && !launch.contains("\"ref\""),
+            "no secret-bound env var or SecretRef may appear anywhere in the baked launch.json: {launch}"
+        );
     }
 
     #[test]

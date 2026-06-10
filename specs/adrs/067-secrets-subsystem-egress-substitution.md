@@ -18,7 +18,24 @@ Constraints that shaped the decision:
 
 A secret is a reference. The host substitutes the real value into outbound traffic at the egress boundary; the guest holds only a placeholder. Four parts.
 
-### 1. Mechanism — SDK-cooperative substitution + a policy/detection proxy
+### 1. Mechanism — proxy-native transparent substitution (SDK optional)
+
+> **Update (plan 129 Stage 2 — proxy-native is the primary path).** The
+> original framing below made SDK-cooperative routing primary and the non-SDK
+> path a "coverage boundary." That is now inverted. The **transparent host-side
+> terminator** is the primary mechanism: an nft `nat` REDIRECT steers the
+> guest's outbound `:80`/`:443` to a per-VM terminator that recovers the
+> original destination (`SO_ORIGINAL_DST`), substitutes on bound hosts, and —
+> for `https` — terminates TLS under a **per-VM name-constrained intermediate**
+> the guest trusts (ADR-006), splicing unbound hosts through untouched. A
+> generic `curl https://<bound-host> -H "Authorization: Bearer $PLACEHOLDER"`
+> with **no SDK** now gets the real credential substituted host-side. The SDK
+> forward-proxy (`HTTP_PROXY` + placeholder env) remains supported as an
+> alternative, but is no longer required. The claim-12 allow-list and claim-13
+> "no value to the guest / metadata-only audit" invariants are identical on both
+> paths. The §"Coverage caveat" below is superseded for **bound** hosts (they
+> substitute SDK-or-not); an unbound destination still gets the placeholder
+> dropped, which remains the correct failure.
 
 The workload's HTTP client routes a secret-bearing request to a **host substitution endpoint** (configured by the SDK / proxy env), carrying a placeholder token where the secret goes. That hop is host-local (vsock / UDS), so its plaintext is fine — the host is in the TCB and the channel has no third-party observer. The host endpoint:
 
@@ -67,7 +84,7 @@ Honest framing for the docs and tests: *software default = encrypted at rest, de
 
 ## Alternatives considered
 
-- **TLS MITM of all guest egress** (the adjacent-SDK approach). Rejected: the host terminates every TLS session and sees all plaintext, the guest's end-to-end TLS is broken, and it requires the guest to trust a host-injected CA. Maximum host visibility for a platform whose pitch is minimal blast radius.
+- **TLS MITM of *all* guest egress** (the adjacent-SDK approach). Rejected: the host terminates every TLS session and sees all plaintext, the guest's end-to-end TLS is broken, and it requires the guest to trust a long-lived blanket-trust host CA. Maximum host visibility for a platform whose pitch is minimal blast radius. **Note (plan 129 Stage 2):** the scoped terminator we *did* build is not this — it terminates **only bound hosts** (the host already sees their plaintext via substitution → zero added visibility), splices everything else untouched, and trusts a **per-VM name-constrained** intermediate that cannot vouch for any host outside the plan's allow-list (ADR-006), not a blanket CA.
 - **Pure SDK-cooperative with no proxy detection.** Rejected: no backstop for a placeholder leaking via a non-cooperative side channel. The default-deny proxy + leak-scan is cheap and closes it.
 - **Hardware-sealed required.** Rejected: unacceptable DX; hardware is a transparent upgrade, not a gate.
 - **Resolve into the guest for signing** (ADR-049). Rejected and superseded: it brings the credential into guest RAM, which is the thing we are eliminating. Signing moves to the host keyholder.

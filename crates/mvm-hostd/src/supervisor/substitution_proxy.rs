@@ -33,8 +33,11 @@ use crate::keyholder::{
     find_placeholder,
 };
 use crate::supervisor::audit_recorder::Recorder;
-use crate::supervisor::secret_audit::emit_secret_substituted;
-use crate::supervisor::tools::http_hardening::hardened_client_builder;
+use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
+use crate::supervisor::secret_audit::{emit_secret_redacted, emit_secret_substituted};
+use crate::supervisor::tools::http_hardening::{
+    hardened_client_builder_no_dns, resolve_ssrf_safe_ips,
+};
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -105,11 +108,27 @@ pub fn prepare_request(
 }
 
 /// The destination host (no port) from an absolute URL.
-fn destination_host(url: &str) -> Result<String, ProxyError> {
+pub(crate) fn destination_host(url: &str) -> Result<String, ProxyError> {
     Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
         .ok_or_else(|| ProxyError::BadUrl(url.to_string()))
+}
+
+/// Capture per-secret audit metadata (name + auth-type) for every header that
+/// carries a known placeholder — BEFORE substitution consumes the request.
+/// `resolve_meta` touches no secret value, so this is claim-13 safe. Shared by
+/// the UDS/vsock `process` path and the terminator path so their two audit
+/// emissions can't drift.
+pub(crate) fn collect_substituted_meta(
+    endpoint: &SubstitutionEndpoint<'_>,
+    headers: &[(String, String)],
+) -> Vec<(String, AuthType)> {
+    headers
+        .iter()
+        .filter_map(|(_, v)| find_placeholder(v))
+        .filter_map(|ph| endpoint.resolve_meta(ph))
+        .collect()
 }
 
 // ============================================================================
@@ -167,18 +186,20 @@ fn err_chain(e: &dyn std::error::Error) -> String {
     out
 }
 
-/// Production forwarder: a hardened reqwest client (TLS 1.3 min, SSRF-filtered
-/// resolver, no redirects — `hardened_client_builder`) makes the real request.
+/// Production forwarder: a hardened reqwest client (TLS 1.3 min, no redirects)
+/// makes the real request. Unlike the HTTPS-only tool clients, the egress
+/// forward target can be plain `http` (the guest's request scheme), so the
+/// client is built **per request**: we resolve the host, SSRF-filter the IPs,
+/// and pin them on the URL's *real* port via `resolve_to_addrs` — the shared
+/// `SsrfFilteringResolver` hardcodes 443 and would send an `http` forward to the
+/// HTTPS port. Plan 129 / ADR-067.
 pub struct ReqwestForwarder {
-    client: reqwest::Client,
+    timeout_secs: u64,
 }
 
 impl ReqwestForwarder {
     pub fn new(timeout_secs: u64) -> Result<Self, ForwardError> {
-        let client = hardened_client_builder(timeout_secs)
-            .build()
-            .map_err(|e| ForwardError::Failed(e.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { timeout_secs })
     }
 }
 
@@ -187,7 +208,29 @@ impl Forwarder for ReqwestForwarder {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
-        let mut rb = self.client.request(method, &req.url);
+        // Resolve + SSRF-filter the host ourselves, then pin reqwest to the safe
+        // IPs on the URL's real port (default 80 for http, 443 for https, or an
+        // explicit port). Keeps SSRF filtering without the resolver's 443 bug.
+        let url = Url::parse(&req.url)
+            .map_err(|e| ForwardError::Failed(format!("bad url {}: {e}", req.url)))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ForwardError::Failed(format!("url {} has no host", req.url)))?
+            .to_string();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ForwardError::Failed(format!("url {} has no port", req.url)))?;
+        let addrs: Vec<std::net::SocketAddr> = resolve_ssrf_safe_ips(&host)
+            .await
+            .map_err(ForwardError::Failed)?
+            .into_iter()
+            .map(|ip| std::net::SocketAddr::new(ip, port))
+            .collect();
+        let client = hardened_client_builder_no_dns(self.timeout_secs)
+            .resolve_to_addrs(&host, &addrs)
+            .build()
+            .map_err(|e| ForwardError::Failed(e.to_string()))?;
+        let mut rb = client.request(method, &req.url);
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
@@ -224,9 +267,19 @@ pub struct SubstitutionService {
     registry: Arc<SubstitutionRegistry>,
     resolver: Arc<dyn SecretResolver>,
     forwarder: Arc<dyn Forwarder>,
+    /// Egress redactor (Plan 129 Phase E). Masks *undeclared* secret-shaped /
+    /// PII content out of an outbound request before forwarding — the
+    /// request-level twin of the gateway bridge's packet redactor, sharing one
+    /// `RedactingSubstitution` definition so every backend that routes egress
+    /// through this endpoint scrubs identically. Built once (rule compilation).
+    redactor: RedactingSubstitution,
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
     recorder: Option<Recorder>,
+    /// Plan 129 Stage 2 — the per-VM name-constrained intermediate the `https`
+    /// terminator mints per-SNI leaves under. `None` ⇒ no TLS leg (Stage 1b
+    /// `http`-only). Set from `EndpointConfig.tls_intermediate` at assemble.
+    tls_intermediate: Option<Arc<mvm_core::crypto::egress_ca::VmIntermediate>>,
 }
 
 impl SubstitutionService {
@@ -239,7 +292,9 @@ impl SubstitutionService {
             registry,
             resolver,
             forwarder,
+            redactor: RedactingSubstitution::with_default_rules(),
             recorder: None,
+            tls_intermediate: None,
         }
     }
 
@@ -247,6 +302,16 @@ impl SubstitutionService {
     /// `secret.substituted` entry (metadata only — claim 13).
     pub fn with_recorder(mut self, recorder: Recorder) -> Self {
         self.recorder = Some(recorder);
+        self
+    }
+
+    /// Plan 129 Stage 2 — attach the per-VM egress intermediate so the
+    /// terminator can terminate bound-host `https`. Absent ⇒ `http`-only.
+    pub fn with_tls_intermediate(
+        mut self,
+        intermediate: mvm_core::crypto::egress_ca::VmIntermediate,
+    ) -> Self {
+        self.tls_intermediate = Some(Arc::new(intermediate));
         self
     }
 
@@ -262,12 +327,16 @@ impl SubstitutionService {
         bindings: &dyn BindingStore,
         secret_store: Arc<dyn SecretStore>,
         forward_timeout_secs: u64,
+        tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
     ) -> Result<(Arc<Self>, HandedPlaceholders), FromPlanError> {
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
         let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
-        let service = Arc::new(Self::new(Arc::new(registry), resolver, forwarder));
-        Ok((service, handed))
+        let mut service = Self::new(Arc::new(registry), resolver, forwarder);
+        if let Some(intermediate) = tls_intermediate {
+            service = service.with_tls_intermediate(intermediate);
+        }
+        Ok((Arc::new(service), handed))
     }
 
     /// Accept loop: one routed request per connection, framed JSON, a task per
@@ -322,6 +391,208 @@ impl SubstitutionService {
         }
     }
 
+    /// Accept loop for the transparent egress **terminator** (Plan 129 stage
+    /// 1b): the host nft `nat` chain REDIRECTs a guest's outbound TCP here, we
+    /// recover the original destination via `SO_ORIGINAL_DST`, substitute any
+    /// secret placeholder in the request (claim-12 bind-checked), and splice
+    /// the request to the real destination — returning its response verbatim.
+    ///
+    /// Linux-only: `SO_ORIGINAL_DST` is an `SOL_IP` getsockopt. The substitution
+    /// core ([`terminator::handler::handle_request`]) and the splice
+    /// ([`terminator::listener::forward_http_raw`]) are sync + blocking, so each
+    /// connection's syscalls (orig-dst, request read, forward, write-back) run
+    /// on `spawn_blocking` threads, off the reactor. A failure on one connection
+    /// is logged and the socket dropped — never fatal to the loop.
+    ///
+    /// `timeout` is the configured per-connection I/O deadline (the endpoint's
+    /// `forward_timeout_secs`), applied to BOTH the untrusted guest-facing socket
+    /// (read+write) and the upstream forward leg. Without it a guest that sends a
+    /// partial header or stops reading mid-write-back would park a blocking-pool
+    /// thread forever — a bounded pool means a hostile guest could exhaust it.
+    #[cfg(target_os = "linux")]
+    pub async fn serve_terminator(
+        self: Arc<Self>,
+        listener: tokio::net::TcpListener,
+        timeout: std::time::Duration,
+    ) {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let me = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = me.handle_terminator_connection(stream, timeout).await {
+                            tracing::warn!(error = %e, "terminator connection failed");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "terminator accept failed; stopping");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Handle one redirected guest connection: recover orig-dst, read the
+    /// request, substitute + forward, write the response back. claim-12
+    /// fail-closed is enforced inside `handle_request` (it refuses an unbound
+    /// destination / unknown placeholder before the forward runs); on refusal
+    /// we log and close WITHOUT forwarding.
+    #[cfg(target_os = "linux")]
+    async fn handle_terminator_connection(
+        &self,
+        stream: tokio::net::TcpStream,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        use crate::keyholder::SubstitutionEndpoint;
+        use crate::supervisor::terminator;
+        use std::io::Write;
+
+        // The orig-dst getsockopt + bounded request read are blocking syscalls.
+        // The redirected socket is UNTRUSTED: set read+write deadlines so a guest
+        // that never completes its header (`\r\n\r\n`) or stalls mid-write-back
+        // can't park this blocking-pool thread forever (bounded pool ⇒ DoS).
+        let std_stream = stream.into_std()?;
+        std_stream.set_nonblocking(false)?;
+        std_stream.set_read_timeout(Some(timeout))?;
+        std_stream.set_write_timeout(Some(timeout))?;
+
+        // Recover the original destination first (cheap getsockopt) so we can
+        // branch http(:80, Stage 1b) vs https(:443, Stage 2) before reading.
+        let (std_stream, orig_dst) = tokio::task::spawn_blocking(move || {
+            let orig_dst = terminator::orig_dst::original_dst(&std_stream)?;
+            anyhow::Ok((std_stream, orig_dst))
+        })
+        .await??;
+
+        if orig_dst.port() == 443 {
+            return self
+                .handle_https_terminator(std_stream, orig_dst, timeout)
+                .await;
+        }
+
+        // ── Stage 1b: cleartext :80 ──
+        let mut std_stream = std_stream;
+        let (mut std_stream, raw) = tokio::task::spawn_blocking(move || {
+            let raw = terminator::read::read_http_request(&mut std_stream)?;
+            anyhow::Ok((std_stream, raw))
+        })
+        .await??;
+
+        // Capture audit metadata before substitution consumes the request —
+        // same as the UDS/vsock `process` path (shared helper so they can't
+        // drift). resolve_meta touches no value, so this is claim-13 safe.
+        let req = terminator::request::proxy_request_from_origin_form(&raw, orig_dst)?;
+        let endpoint = SubstitutionEndpoint::new(&self.registry, self.resolver.as_ref());
+        let destination = destination_host(&req.url).ok();
+        let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        drop(req);
+
+        // Substitution + the raw forward leg are sync; run them off the reactor.
+        // Clone the Arcs the closure needs (it must be 'static — can't borrow
+        // &self across spawn_blocking); the endpoint is rebuilt inside.
+        let registry = Arc::clone(&self.registry);
+        let resolver = Arc::clone(&self.resolver);
+        let forwarded = tokio::task::spawn_blocking(move || {
+            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            terminator::handler::handle_request(&raw, orig_dst, &endpoint, |prepared, dst| {
+                terminator::listener::forward_http_raw(prepared, dst, timeout)
+            })
+        })
+        .await?;
+
+        let resp = match forwarded {
+            Ok(resp) => resp,
+            Err(e) => {
+                // claim-12 fail-closed: refusal closes the socket, no forward.
+                tracing::warn!(error = %e, "terminator refused or forward failed; closing");
+                return Ok(());
+            }
+        };
+
+        self.audit_substitutions(&substituted, destination.as_deref())
+            .await;
+
+        tokio::task::spawn_blocking(move || {
+            std_stream.write_all(&resp)?;
+            std_stream.flush()
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// Stage 2 (`:443`): peek the ClientHello SNI, then **terminate** TLS for a
+    /// bound host (mint a leaf under the per-VM intermediate, decrypt, substitute,
+    /// re-originate over the hardened reqwest forwarder) or **splice** an unbound
+    /// host straight through without decrypting. Fail-closed: a bound host whose
+    /// substitution refuses closes the socket without forwarding (claim 12).
+    #[cfg(target_os = "linux")]
+    async fn handle_https_terminator(
+        &self,
+        std_stream: std::net::TcpStream,
+        orig_dst: std::net::SocketAddr,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        use crate::keyholder::SubstitutionEndpoint;
+        use crate::supervisor::terminator::tls;
+
+        // Peek the SNI without consuming the stream (blocking).
+        let (std_stream, sni) = tokio::task::spawn_blocking(move || {
+            let sni = tls::peek_sni(&std_stream)?;
+            anyhow::Ok((std_stream, sni))
+        })
+        .await??;
+
+        // Terminate ONLY a host bound by some workload secret, and only when we
+        // hold the per-VM intermediate. Everything else is spliced end-to-end —
+        // never decrypted (zero added host visibility over substitution's needs).
+        let bound_sni = sni.filter(|s| self.registry.host_is_bound(s));
+        let (intermediate, sni) = match (self.tls_intermediate.clone(), bound_sni) {
+            (Some(intermediate), Some(sni)) => (intermediate, sni),
+            _ => {
+                return tokio::task::spawn_blocking(move || {
+                    tls::splice_unbound(std_stream, orig_dst, timeout)
+                })
+                .await?;
+            }
+        };
+
+        let config = Arc::new(tls::server_config_for_sni(&intermediate, &sni)?);
+        let registry = Arc::clone(&self.registry);
+        let resolver = Arc::clone(&self.resolver);
+        let forwarder = Arc::clone(&self.forwarder);
+        let handle = tokio::runtime::Handle::current();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            tls::terminate_and_substitute(std_stream, config, orig_dst, &endpoint, |prepared| {
+                // The upstream leg reuses the hardened reqwest forwarder (TLS +
+                // system roots + SSRF filter); block_on is safe on a blocking
+                // thread. reqwest decoded the body, so we re-frame the response.
+                let resp = handle
+                    .block_on(forwarder.forward(prepared.clone()))
+                    .map_err(|e| anyhow::anyhow!("upstream forward: {e}"))?;
+                Ok(tls::serialize_http_response(
+                    resp.status,
+                    &resp.headers,
+                    &resp.body,
+                ))
+            })
+        })
+        .await?;
+
+        match outcome {
+            Ok(o) => {
+                self.audit_substitutions(&o.substituted, o.destination.as_deref())
+                    .await;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "https terminator refused or failed; closing");
+                Ok(())
+            }
+        }
+    }
+
     async fn handle_connection(&self, mut stream: UnixStream) -> Result<(), FrameError> {
         let wire: WireRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
         let resp = self.process(wire).await;
@@ -372,15 +643,15 @@ impl SubstitutionService {
         let registry: &SubstitutionRegistry = &self.registry;
         let endpoint = SubstitutionEndpoint::new(registry, self.resolver.as_ref());
         // Capture audit metadata (name + auth-type per substituted secret, and
-        // the destination) before `prepare_request` consumes `req`. resolve_meta
-        // touches no value, so this is claim-13 safe.
+        // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
-        let substituted: Vec<(String, AuthType)> = req
-            .headers
-            .iter()
-            .filter_map(|(_, v)| find_placeholder(v))
-            .filter_map(|ph| endpoint.resolve_meta(ph))
-            .collect();
+        let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        // Phase E: scrub undeclared secret-shaped / PII content before any
+        // substitution. Runs first so a declared placeholder (not secret-shaped,
+        // host-reserved) survives to be substituted, while an undeclared secret
+        // the guest put in the body or a non-placeholder header is masked and
+        // never reaches the wire.
+        let (req, redaction_hits) = self.redact_outbound(req);
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
@@ -393,6 +664,8 @@ impl SubstitutionService {
             Ok(r) => {
                 self.audit_substitutions(&substituted, destination.as_deref())
                     .await;
+                self.audit_redactions(&redaction_hits, destination.as_deref())
+                    .await;
                 WireResponse::Ok {
                     status: r.status,
                     headers: r.headers,
@@ -402,6 +675,55 @@ impl SubstitutionService {
             Err(e) => WireResponse::Refused {
                 message: e.to_string(),
             },
+        }
+    }
+
+    /// Mask undeclared secret-shaped / PII content out of a guest-authored
+    /// request before it leaves the host — the request-level twin of the
+    /// gateway bridge's packet redactor (one shared `RedactingSubstitution`).
+    /// A header value carrying a declared placeholder is left untouched (the
+    /// real credential is substituted into it next, and the host-reserved
+    /// placeholder is not secret-shaped); every other header value and the body
+    /// are scrubbed. Returns the rewritten request plus the categories that
+    /// fired, for the claim-13 audit. Plan 129 Phase E / ADR-067.
+    fn redact_outbound(&self, mut req: ProxyRequest) -> (ProxyRequest, RedactionHits) {
+        let mut hits = RedactionHits::default();
+        for (_, value) in req.headers.iter_mut() {
+            if find_placeholder(value).is_some() {
+                continue; // declared placeholder — substituted next, never masked.
+            }
+            if let Some((masked, h)) = self.redactor.redact_bytes(value.as_bytes()) {
+                *value = String::from_utf8_lossy(&masked).into_owned();
+                hits.merge(h);
+            }
+        }
+        if let Some((masked, h)) = self.redactor.redact_bytes(&req.body) {
+            req.body = masked;
+            hits.merge(h);
+        }
+        (req, hits)
+    }
+
+    /// Emit one `secret.redacted { destination, categories }` entry when the
+    /// egress redactor masked anything (claim 13 — category names + destination,
+    /// never the bytes). Best-effort; no-op without a recorder or a destination.
+    async fn audit_redactions(&self, hits: &RedactionHits, destination: Option<&str>) {
+        if hits.is_empty() {
+            return;
+        }
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        let mut categories: Vec<&str> = hits
+            .secrets
+            .iter()
+            .chain(hits.pii.iter())
+            .copied()
+            .collect();
+        categories.sort_unstable();
+        categories.dedup();
+        if let Err(e) = emit_secret_redacted(recorder, dest, &categories.join(",")).await {
+            tracing::warn!(error = %e, "secret.redacted audit emit failed");
         }
     }
 
@@ -881,6 +1203,64 @@ mod server_tests {
         server.abort();
     }
 
+    /// Plan 129 Phase E / ADR-067: the endpoint scrubs an *undeclared*
+    /// secret-shaped run from the outbound body before forwarding (the same
+    /// redaction the gateway bridge applies, at the endpoint chokepoint so
+    /// every backend routing egress through it is covered), while a *declared*
+    /// placeholder is still substituted to its real credential. The destination
+    /// sees the real declared credential and a masked undeclared one — the
+    /// undeclared secret never leaves the host.
+    #[tokio::test]
+    async fn endpoint_redacts_undeclared_secret_in_body_then_forwards() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let leaked = "sk-".to_owned() + &"z".repeat(48);
+        let body = format!("{{\"leak\":\"{leaked}\"}}");
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(body.as_bytes()),
+        };
+
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+
+        let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+        // Declared secret: substituted to the real credential.
+        assert_eq!(
+            seen.headers[0],
+            ("authorization".into(), "Bearer sk-live-zzz".into())
+        );
+        // Undeclared secret in the body: masked before egress.
+        let seen_body = String::from_utf8_lossy(&seen.body);
+        assert!(
+            !seen_body.contains(&leaked),
+            "undeclared secret survived to the destination: {seen_body}"
+        );
+        assert!(
+            seen_body.contains("XXX"),
+            "body was not masked: {seen_body}"
+        );
+    }
+
+    /// A clean request is forwarded byte-for-byte — redaction never rewrites
+    /// content that doesn't match a secret/PII rule.
+    #[tokio::test]
+    async fn endpoint_forwards_clean_body_unchanged() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["api.openai.com"]);
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{\"prompt\":\"hello world\"}"),
+        };
+
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+        let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.body, b"{\"prompt\":\"hello world\"}");
+    }
+
     #[test]
     fn from_plan_builds_a_service_and_handed_placeholders() {
         use crate::keyholder::{FileBindingStore, SecretBindingMeta};
@@ -916,7 +1296,8 @@ mod server_tests {
             },
         }];
         let (_service, handed) =
-            SubstitutionService::from_plan(&plan, "local", &bindings, secret_store, 30).unwrap();
+            SubstitutionService::from_plan(&plan, "local", &bindings, secret_store, 30, None)
+                .unwrap();
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
         assert!(handed[0].1.as_str().starts_with("mvm-secret-"));

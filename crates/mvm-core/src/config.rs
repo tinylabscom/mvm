@@ -339,6 +339,20 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// `<mvm_data_dir>/pool/` — the supervisor standby pool root (Plan 118 WS-1 1b).
+/// Each idle standby gets a `pool/<id>/` subdir holding its control UDS +
+/// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_DATA_DIR`
+/// surfaces as an error rather than silently writing entitled processes' state to
+/// `/tmp`.
+pub fn mvm_pool_dir() -> std::io::Result<std::path::PathBuf> {
+    Ok(mvm_data_dir_strict()?.join("pool"))
+}
+
+/// `<mvm_data_dir>/pool/<id>/` for a single standby.
+pub fn pool_standby_dir(id: &str) -> std::io::Result<std::path::PathBuf> {
+    Ok(mvm_pool_dir()?.join(id))
+}
+
 /// Filename of libkrun's per-port vsock listener socket: `vsock-<port>.sock`.
 /// The single source of truth for the name. Callers that already hold the
 /// per-VM dir (e.g. a `VsockTransport` constructed from an explicit dir)
@@ -413,6 +427,12 @@ pub fn mvm_keys_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("keys")
 }
 
+/// Immutable checkpoint store: `<mvm_data_dir>/checkpoints/`. Each checkpoint is
+/// a subdirectory `<id>/` holding `meta.json` + cloned `content/`.
+pub fn checkpoints_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("checkpoints")
+}
+
 /// Chain-signed audit logs: `<mvm_data_dir>/audit/`.
 pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("audit")
@@ -426,6 +446,14 @@ pub fn mvm_overlays_dir() -> std::path::PathBuf {
 /// Secret-material staging: `<mvm_data_dir>/secrets/`.
 pub fn mvm_secrets_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("secrets")
+}
+
+/// Plan 129 Stage 2 — the long-lived host egress CA's home:
+/// `<mvm_data_dir>/egress-ca/` (holds `ca.crt` + `ca.key`, key mode 0400).
+/// The per-VM name-constrained intermediates the transparent `https`
+/// terminator uses are minted under this CA; see `crypto::egress_ca`.
+pub fn egress_ca_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_data_dir()).join("egress-ca")
 }
 
 /// Check if running in production mode (MVM_PRODUCTION=1).
@@ -627,6 +655,21 @@ mod tests {
     }
 
     #[test]
+    fn pool_dirs_live_under_mvm_data_dir() {
+        let _g = env_lock();
+        unsafe { std::env::set_var("MVM_DATA_DIR", "/custom/data") };
+        assert_eq!(
+            mvm_pool_dir().unwrap(),
+            std::path::PathBuf::from("/custom/data/pool")
+        );
+        assert_eq!(
+            pool_standby_dir("standby-abc").unwrap(),
+            std::path::PathBuf::from("/custom/data/pool/standby-abc")
+        );
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
     fn test_mvm_data_dir_strict_errs_without_home_or_override() {
         // The security contract: secrets/bundles/trust-store callers must
         // never get a silent /tmp fallback. With neither MVM_DATA_DIR nor
@@ -736,6 +779,16 @@ mod tests {
         assert_eq!(mode, 0o700, "expected 0700, got 0{:o}", mode);
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn checkpoints_dir_is_under_data_dir() {
+        let _g = env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", temp.path()) };
+        let dir = checkpoints_dir();
+        assert_eq!(dir, temp.path().join("checkpoints"));
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]

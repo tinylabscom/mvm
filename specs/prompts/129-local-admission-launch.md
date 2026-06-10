@@ -1,5 +1,21 @@
 # Plan 129 — local secret-workload launch via the admission flow (boot-e2e gate)
 
+> ✅ **SATISFIED / CLOSED (2026-06-10).** This gate is met on `main`. Kept for
+> historical context — do **not** re-run it as a fresh gate.
+> - **Route wired** — #745: `mvmctl compile` strips the `SecretRef` from the baked
+>   image + emits `workload.json`; `up --flake <dir>` auto-discovers it → lowers
+>   `plan.secrets` → admits → the QEMU backend spawns the `mvm-substitution-endpoint`.
+> - **Boot e2e box-validated on QEMU** — #745/#749/#755: the destination (httpbin)
+>   reflected the **real** `Authorization: Bearer …` while the guest held only
+>   `mvm-secret-…`; `substitution.pid` lived for the run and was reaped on stop;
+>   an unbound host was refused (claim 12).
+> - **Phase E** (undeclared secret/PII egress redactor) — #733, wired always-on.
+> - **Deferred (unchanged):** SigV4 forward-path signing (user decision).
+> - **Follow-on layer (separate):** https + Firecracker via the name-constrained
+>   CA — Plan 129 **Stage 2** (#761 code, #763 FC kernel fix), tracked in
+>   `specs/notes/plan-129-stage2-https-ca-tdd-plan.md`; its live https-on-FC box
+>   e2e (S2.7) is gated on FC guest-agent bringup, not on this prompt.
+
 > Session kickoff prompt. Paste as the opening message of the next session.
 
 ## Context
@@ -15,7 +31,13 @@ Merged: #710/#711/#713/#715/#717/#718 (the loop — transport, `RunEntrypoint.en
 endpoint moat, QEMU spawn, invoke env + guest forward proxy), #722/#723 (Python +
 TS `mvm.secret(type=, hosts=)` egress surface; the old in-guest substitution
 models retired across Rust/Python/TS), #724 (`examples/python/secret-egress/` +
-the finding below).
+the finding below), **#733 (Phase E — undeclared-secret/PII egress redact-to-`XXX`
+wired always-on into the gateway bridge; the second tier of the invariant).**
+
+**Both tiers of the no-secret invariant are now landed** (substitution +
+redaction). What remains is purely the **user-facing local launch glue** — there
+is no code path for a user to boot a secret-declaring workload locally. That is
+the whole of this session's work.
 
 ## Security invariant — the whole point (verify, do not assume)
 
@@ -33,47 +55,26 @@ distinct mechanisms, and they are not interchangeable:
   guarantee).** If a secret is redacted on the way out, it *was already on the
   guest*. This only catches secrets that landed by some other path (baked into
   the image, hardcoded, fetched). It does **not** give "never on the microVM" —
-  substitution does.
+  substitution does. **Shipped in #733** as `RedactingSubstitution` (a
+  `SubstitutionStage`), wired always-on into the gateway-bridge `ObserverWiring`:
+  it runs `SecretsScanner.redact()` + `PiiRedactor.redact()` over each egress
+  payload, masks any undeclared secret-shaped / PII match to `XXX` in place
+  (mask-and-continue, not a whole-request drop), and `tracing::warn!`s the
+  destination + fired-rule categories (never the value).
 
-**Current state of the egress scan (`mvm_hostd::supervisor::network::stages::build_egress_scan`):**
-wires `MandatoryDenyEgressScan` + `PlaceholderLeakScan` + L4/DNS policy only.
-`PlaceholderLeakScan` drops egress carrying a *placeholder* — NOT arbitrary
-secret-shaped content. `SecretsScanner` (secret-shaped regex, `DEFAULT_RULES`)
-and `PiiRedactor` **exist** but are **not wired into `build_egress_scan`** (only
-into the separate L7 inspector chain). So an **undeclared** real secret could be
-on the guest *and* leak today.
+**Both mechanisms are now live and verified.** The egress scan
+(`build_egress_scan`) keeps `MandatoryDenyEgressScan` + `PlaceholderLeakScan` +
+L4/DNS for the fail-closed *placeholder-leak* drop, and the separate always-on
+`RedactingSubstitution` stage handles the mask-and-continue case for *undeclared
+secret-shaped* content. So: declared secret → never on the guest (substitution);
+undeclared secret that somehow landed → never leaves (`XXX`). **No invariant work
+remains in this session** — the only open item is the user-facing local launch
+glue below.
 
-**Required to fully hold the invariant (Plan 129 Phase E — currently deferred):**
-1. Confirm substitution gives no-secret-on-guest for declared secrets, **SDK and
-   non-SDK (plan-declared)** — on the box (the example workload + a non-SDK plan
-   with `.secrets`). Verify the guest's env/fs hold only the placeholder, never
-   the value.
-2. **Wire a redacting secret/PII ScanStage into `build_egress_scan`** (the live
-   gateway-bridge ScanStage path the workload VMs use). **Behavior decided
-   (2026-06-08): an undeclared-but-detected secret is REDACTED IN-PLACE — the
-   matched bytes are replaced with a mask (e.g. `XXX`) and the request CONTINUES
-   without the secret.** This is a `Verdict::Modify` (rebuild-the-packet) path,
-   NOT a whole-request drop (`PlaceholderLeakScan` drops on a leaked placeholder;
-   this masks). Reuse the existing pieces: `SecretsScanner` (`DEFAULT_RULES`,
-   secret-shaped regex) + `PiiRedactor` (already does mask-replacement) for
-   detection/masking, and the `SubstitutionStage` `Verdict::Modify` /
-   packet-rebuild pattern for the in-place edit. Audit each redaction (claim-13
-   style: category + destination, never the value).
-   - Rationale: a workload that needs a credential should **declare** it (→
-     substitution → the real value is injected and never on the guest). An
-     undeclared secret that shows up on egress is scrubbed to `XXX` rather than
-     blocking the whole request — the request proceeds credential-less (likely a
-     downstream 401, the correct signal to declare it), and the secret never
-     leaves. Box-validate: an undeclared secret-shaped / PII payload on egress
-     comes out masked (`XXX`), the rest of the request intact, and the redaction
-     is audited.
-   - (Keep `PlaceholderLeakScan`'s drop for leaked *placeholders* — a placeholder
-     escaping raw is a host/transport bug, fail-closed; a real secret-shaped blob
-     is a workload mistake, mask-and-continue.)
-
-> Decide whether Phase E is in this session's scope or its own follow-up, but the
-> invariant is not fully satisfied until #2 ships. Substitution (#1) is the
-> guarantee; the detector (#2) is the net for everything else.
+> Verify-don't-assume: before touching launch glue, confirm on the box that a
+> declared secret reaches the guest only as a placeholder (env/fs hold
+> `mvm-secret-<hex>`, never the value) for **both** an SDK workload and a non-SDK
+> plan-declared `.secrets`. That confirmation is the boot-e2e gate below.
 
 ## The gap (from on-box validation, 2026-06-08)
 

@@ -61,6 +61,11 @@ sigstore = { version = "0.13", default-features = false, features = ["bundle", "
 # Plan 124 D1 — only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
 schemars = { version = "0.8", optional = true }
+# Plan 129 Stage 2 (ADR-006) — the per-VM name-constrained egress CA lives in
+# `crypto::egress_ca`, gated behind `egress-ca` so the foundation crate's default
+# closure doesn't pull `rcgen`/`ring`/`yasna` for non-egress consumers. Sync, no
+# tokio (runtime-free invariant unaffected).
+rcgen = { workspace = true, optional = true }
 
 # `default` is empty: the default `mvm-core` build is runtime-free
 # (plan 126 B5 PR-2). The hostd IPC transport pulls tokio only behind
@@ -70,6 +75,14 @@ schemars = { version = "0.8", optional = true }
 # -e no-dev` carries no `tokio` so this can't silently regress.
 [features]
 default = []
+# Plan 129 Stage 2 (ADR-006): the per-VM name-constrained egress CA
+# (`crypto::egress_ca`). Pulls `rcgen` (sync — ring/yasna, no tokio), so the
+# runtime-free default build is unaffected. Enabled by mvm-backend (cert
+# delivery) and mvm-hostd (the TLS terminator).
+egress-ca = ["dep:rcgen"]
+# Expose `plan::signing::test_support` (shared `ExecutionPlan` fixtures) to
+# other crates' test builds without shipping the fixtures in a release build.
+test-support = []
 # The hostd IPC async transport in `protocol` (mvmd ↔ mvm-hostd control
 # channel: read/write_frame + send/recv request/response). The only
 # async surface in mvm-core besides `manifest-verify`; gated so the
@@ -113,6 +126,11 @@ rand.workspace = true
 # macros regardless of which non-dev features pull tokio. Dev-only, so
 # the `-e no-dev` runtime-free gate (plan 126 B5) ignores it.
 tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
+# Plan 129 Stage 2: the egress-CA tests parse minted certs (x509-parser) and
+# assert nameConstraints enforcement through a real path verifier (rustls/webpki,
+# ring backend). Dev-only — the egress-ca module itself only needs rcgen.
+x509-parser = "0.16"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [lints]
 workspace = true

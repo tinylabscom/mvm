@@ -2533,3 +2533,60 @@ Tracked as GitHub issues so they're individually grabbable:
 - [x] Docs parity maintenance — added a lifecycle-matrix SDK guide separating current CLI support, current Python/TypeScript SDK support, and runtime parity targets.
 - [x] Docs parity maintenance — added a control-surfaces architecture page covering CLI, SDKs, MCP stdio, console, guest RPC, and not-claimed local management surfaces.
 - [x] Docs parity maintenance — added a platform-support reference page covering Linux, macOS, Windows future work, Docker fallback, host/backend status, and guest target strings.
+
+### Plan 118 WS-1 1b — supervisor warm pool: deferred follow-ups
+
+1a (#748) + 1b-i (#751, mechanism) + 1b-ii (reaper + doctor column + `mvmctl pool
+warm/status` + bench state-dir fix) shipped. Remaining, individually grabbable:
+
+- [ ] **`up`/`run` auto-claim wiring.** `claim_or_cold` is closure-ready (it builds the
+  `StandbyClaim` per the selected standby so the name-keyed audit substrate
+  `gateway-<vm>.sock` resolves for the standby-id). The wiring is held back on two
+  coupled items: (a) a claimed VM runs under its **standby-id** (its vsock socket dir is
+  baked at spawn), so `up.rs` must rebind the ~40 downstream `vm_name` references for a
+  warm launch — risky surgery in the core command; (b) a claim forces the supervisor's
+  **`run_with_bridge`** path (the attach carries tenant+plan+audit), which `up.rs:~1906`
+  documents as not-working-by-default on libkrun ("gvproxy vfkit socket empty") — though
+  that comment predates Plan 123 Phase A (#727/#647) wiring egress policy *live* on the
+  libkrun bridge, so it may be stale. **First step: confirm a libkrun bridge-path boot
+  works end-to-end** (run the `#[ignore]`'d `valid_attach_boots_and_agent_reachable`), then
+  do the name-rebind. Until then `up` always cold-boots; `mvmctl pool warm` pre-spawns
+  standbys but nothing auto-claims them.
+- [ ] **`--warm-pool-size` flag on `up`** (threads to `VmStartConfig.warm_pool_size` +
+  replenish-on-use) — lands with the auto-claim, since replenish without claim only
+  accumulates unclaimed standbys.
+- [ ] **Multi-kernel pool keying.** v1 is default-kernel + default-resources only
+  (`StandbyCompat` = kernel sha256 + vcpus + mem; non-matching launches cold-boot).
+  Generalize to per-(kernel,shape) targets + eviction once a second shape is common.
+- [ ] **Honour an explicit `--name` / extra `--volume`s for warm launches.** v1 only
+  claims for auto-named, volume-less launches (1a's attach threads only the rootfs; a
+  claimed VM is named by standby-id).
+- [ ] **Committed bench baseline + cold-vs-warm delta.** The state-dir fix unblocks the
+  probe; a real baseline still needs a freshly-built `default-microvm` image (rides
+  PR-10a's deferral).
+
+#### Plan 118 WS-1 1b auto-claim — live validation findings (2026-06-10)
+
+The `up` auto-claim wiring shipped (try_warm_claim/replenish/--warm-pool-size, fail-open).
+A live libkrun bridge boot was confirmed: `MVM_GATEWAY_BRIDGE=1 mvmctl up --flake
+examples/exit_code --hypervisor libkrun --wait` → **exit 7** (the `up.rs` "bridge gvproxy
+broken" comment is STALE — `run_with_bridge` boots end-to-end today). Two real fixes/finds:
+
+- [x] **Standby attach timeout 30s → 30 min.** A pool standby legitimately waits to be
+  claimed; the 1a `ATTACH_TIMEOUT=30s` made standbys self-exit before a later `up` could
+  claim them. Bounded now by the pool reaper TTL, not a short self-timeout.
+- [x] **libkrun mkGuest warm claim FIRES end-to-end** (PR #758). Three coupled bugs masked
+  it: (1) **SUN_LEN** — the full 64-char binding nonce in the control-socket filename
+  overflowed the macOS unix-socket path limit, so every standby died instantly at bind;
+  fixed to a short `control.sock` under the nonce-derived `standby-<16hex>` dir. (2) The
+  compat **kernel key is uncomputable pre-boot** for mkGuest (bundled kernel materialized at
+  `start_enter`); `kernel_identity()` now returns a constant for libkrun (workload-
+  independent standby), computed identically at claim + replenish. (3) the 30-min standby
+  timeout (#757). Plus standby stderr is captured to `<pool>/<id>/standby.stderr.log`.
+  Live-validated: a second `up --warm-pool-size 1` prints "Claimed a warm standby …".
+- [ ] **`pool status` lists dead-but-unreaped standbys as "idle"** (it shows recorded
+  state, not liveness). Cosmetic — `select_idle_compatible` correctly skips dead pids;
+  filter the display by `pid_alive` for accuracy.
+- [ ] Independent bug: `libkrun_sys::home_mvm_keys_dir()` hardcodes `$HOME/.mvm/keys` and
+  ignores `MVM_DATA_DIR`, so `validate_audit_substrate` rejects an isolated data dir. Route
+  it through `mvm_core::config`.

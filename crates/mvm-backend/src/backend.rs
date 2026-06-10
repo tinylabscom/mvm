@@ -135,6 +135,7 @@ impl VmBackend for FirecrackerBackend {
             vsock: true,
             tap_networking: true,
             balloon: true,
+            fs_quick_checkpoint: false,
         }
     }
 
@@ -568,6 +569,47 @@ impl AnyBackend {
 
     pub fn snapshot_capability(&self) -> SnapshotCapability {
         self.inner().snapshot_capability()
+    }
+
+    /// Borrow the wrapped backend as `&dyn VmBackend` — for callers (the warm-pool
+    /// orchestration helpers) that are generic over `VmBackend` rather than the enum.
+    pub fn as_vm_backend(&self) -> &dyn VmBackend {
+        self.inner()
+    }
+
+    /// Plan 118 WS-1 1b — does this backend support a prelaunched-supervisor standby
+    /// pool? See [`VmBackend::supports_standby_pool`]. Only libkrun does today.
+    pub fn supports_standby_pool(&self) -> bool {
+        self.inner().supports_standby_pool()
+    }
+
+    /// Spawn a prelaunched standby. See [`VmBackend::spawn_standby`].
+    pub fn spawn_standby(
+        &self,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
+    {
+        self.inner().spawn_standby(spec)
+    }
+
+    /// Claim an idle standby. See [`VmBackend::claim_standby`].
+    pub fn claim_standby(
+        &self,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+        claim: &mvm_core::vm_backend::StandbyClaim,
+    ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        self.inner().claim_standby(handle, claim)
+    }
+
+    /// Warm-start a VM at (at least) the requested snapshot tier. See
+    /// [`VmBackend::warm_start`] — fails closed with a typed error on an
+    /// over-request rather than degrading to a cold boot (plan 123 C4).
+    pub fn warm_start(
+        &self,
+        config: &VmStartConfig,
+        requested: SnapshotCapability,
+    ) -> std::result::Result<VmId, mvm_core::vm_backend::WarmStartError> {
+        self.inner().warm_start(config, requested)
     }
 
     /// Start a VM using the backend-agnostic config.
@@ -1065,6 +1107,37 @@ mod tests {
             AnyBackend::from_hypervisor("qemu").snapshot_capability(),
             SnapshotCapability::DiskOnly
         );
+    }
+
+    #[test]
+    fn libkrun_warm_start_refuses_live_memory_with_recovery_hint() {
+        // A live-memory warm-start asked of libkrun's disk-only tier must
+        // fail closed (no cold-boot fallback) and name a recovery action —
+        // plan 123 C4 / ADR-053. The Unsupported branch returns before any
+        // boot, so this needs no VM/KVM.
+        use mvm_core::vm_backend::WarmStartError;
+        let cfg = VmStartConfig {
+            name: "warm-gate-test".into(),
+            rootfs_path: "/nonexistent/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        match AnyBackend::from_hypervisor("libkrun")
+            .warm_start(&cfg, SnapshotCapability::LiveMemory)
+        {
+            Err(WarmStartError::Unsupported {
+                requested,
+                available,
+                hint,
+            }) => {
+                assert_eq!(requested, SnapshotCapability::LiveMemory);
+                assert_eq!(available, SnapshotCapability::DiskOnly);
+                assert!(
+                    hint.contains("Firecracker") || hint.contains("Vz"),
+                    "{hint}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
     }
 
     #[test]

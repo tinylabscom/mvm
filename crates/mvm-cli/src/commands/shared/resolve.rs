@@ -182,3 +182,27 @@ pub fn resolve_network_policy(
 // user-global config / mvmd tenant config. Function deleted; the
 // `resolve_network_policy` form (always returns Some) is the only
 // remaining helper.
+
+/// Resolve the requested hypervisor to the effective one for this host. `firecracker`
+/// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
+/// → apple-container, macOS 13-25 + libkrun → libkrun, else docker. Any explicit value is
+/// returned as-is. Single source of truth, shared by `mvmctl up` and `mvmctl pool`
+/// (Plan 118 WS-1 1b) so they agree on which backend a launch uses.
+pub fn resolve_effective_hypervisor(requested: &str) -> String {
+    if requested != "firecracker" {
+        return requested.to_string();
+    }
+    let plat = mvm_core::platform::current();
+    if plat.has_kvm() {
+        "firecracker"
+    } else if plat.has_apple_containers() {
+        "apple-container"
+    } else if plat.has_libkrun() {
+        "libkrun"
+    } else if plat.has_docker() {
+        "docker"
+    } else {
+        "firecracker"
+    }
+    .to_string()
+}

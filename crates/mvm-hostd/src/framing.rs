@@ -100,6 +100,12 @@ where
     serde_json::from_slice(&body).map_err(FrameError::Decode)
 }
 
+// NB: the *sync* length-prefixed framing the libkrun supervisor control channel uses
+// (Plan 118 WS-1 1a/1b) lives in `libkrun_sys::framing` — colocated with the
+// `Supervisor*Config` wire types it frames, and reachable by the `mvm-backend` writer
+// (`claim_standby`) which cannot depend on `mvm-hostd` (cycle). This module keeps the
+// async tokio variants its own same-uid channels use.
+
 #[cfg(test)]
 mod tests {
     use super::*;

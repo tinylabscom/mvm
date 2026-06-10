@@ -8,6 +8,10 @@ mod image;
 mod kernel;
 mod manifest;
 mod ops;
+/// Plan 118 WS-1 1b — supervisor warm-pool: the `mvmctl pool warm/status` command + the
+/// launch glue (`try_warm_claim`/`replenish_after_launch`) the `up` path calls to claim a
+/// warm standby (auto-named, bridge-admitted launches) and top the pool back up.
+mod pool;
 mod qemu_bridge;
 mod shared;
 mod storage;
@@ -123,6 +127,8 @@ pub(in crate::commands) enum Commands {
     Console(vm::console::Args),
     /// Manage the XDG cache directory (~/.cache/mvm)
     Cache(ops::cache::Args),
+    /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
+    Pool(pool::Args),
     /// Converge the VM name registry with on-disk runtime state
     Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
@@ -156,6 +162,8 @@ pub(in crate::commands) enum Commands {
     Resume(vm::pause::ResumeArgs),
     /// Manage sealed instance snapshots (`ls`, `rm`).
     Snapshot(vm::pause::SnapshotArgs),
+    /// Capture, list, remove, or fork rootfs checkpoints.
+    Checkpoint(vm::checkpoint::CheckpointArgs),
     /// Manage virtio-fs volume mounts
     Volume(vm::volume::Args),
     /// Manage local secret namespaces
@@ -335,6 +343,7 @@ pub fn run() -> Result<()> {
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
         Commands::Cache(a) => ops::cache::run(&cli, a, &cfg),
+        Commands::Pool(a) => pool::run(&cli, a, &cfg),
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
@@ -351,6 +360,7 @@ pub fn run() -> Result<()> {
         Commands::Pause(a) => vm::pause::run_pause(&cli, a, &cfg),
         Commands::Resume(a) => vm::pause::run_resume(&cli, a, &cfg),
         Commands::Snapshot(a) => vm::pause::run_snapshot(&cli, a, &cfg),
+        Commands::Checkpoint(a) => vm::checkpoint::run_checkpoint(&cli, a),
         Commands::Volume(a) => vm::volume::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
         Commands::Attest(a) => ops::attest::run(&cli, a, &cfg),
