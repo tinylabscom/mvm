@@ -355,10 +355,9 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `checkpoint.created` — fires after `capture_fs_quick` seals
-    /// the checkpoint directory. `class` is the checkpoint strategy
-    /// (e.g. `"fs_quick"`); `content_sha256` is the hex digest of the
-    /// sealed directory tree so the audit chain pins the content.
+    /// Record that a VM's filesystem state was frozen into an fs_quick
+    /// checkpoint. The label set carries the checkpoint id, class, the
+    /// SHA-256 of the cloned rootfs blob, and the owning VM.
     pub fn emit_checkpoint_created(
         &self,
         plan: &ExecutionPlan,
@@ -379,11 +378,9 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `checkpoint.forked` — fires after `fork_checkpoint` has
-    /// hard-linked the parent checkpoint tree and registered the child
-    /// VM. The parent/child id pair forms the lineage record; an
-    /// operator can reconstruct a fork tree by scanning the chain for
-    /// these entries.
+    /// Record that a new sandbox was branched from a checkpoint via
+    /// copy-on-write. The label set carries the parent and child
+    /// checkpoint ids and the child VM name.
     pub fn emit_checkpoint_forked(
         &self,
         plan: &ExecutionPlan,
