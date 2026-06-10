@@ -621,10 +621,20 @@ impl VmBackend for LibkrunBackend {
 
         let bin =
             resolve_supervisor_path().map_err(|e| StandbyError::SpawnFailed(e.to_string()))?;
+        // Capture the standby supervisor's stderr next to its control socket so a standby
+        // that dies before it's claimed leaves a diagnosable trail (it's detached, so there
+        // is no parent to inherit into).
+        let stderr = spec
+            .control_socket
+            .parent()
+            .map(|d| d.join("standby.stderr.log"))
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(Stdio::from)
+            .unwrap_or_else(Stdio::null);
         let mut child = Command::new(bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .map_err(|e| StandbyError::SpawnFailed(format!("spawn supervisor: {e}")))?;
         child

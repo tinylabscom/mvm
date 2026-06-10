@@ -42,30 +42,61 @@ pub fn fresh_binding_nonce() -> String {
     hex_lower(&buf)
 }
 
-/// Build a `StandbySpec` for a standby that pre-loads `kernel` with the given resources.
-/// The control UDS lives under `pool_root/<id>/control-<nonce>.sock` (nonce in the path —
-/// defense in depth); the VM's runtime state dir is the normal `vms_root/<id>/` so
-/// stop/status/console resolve it like any cold-booted VM.
-pub fn build_standby_spec(
-    pool_root: &Path,
-    vms_root: &Path,
-    kernel: &Path,
-    vcpus: u8,
-    mem_mib: u32,
-    signer_id: &str,
-    signing_key_path: &Path,
-) -> Result<StandbySpec> {
+/// The compat-key kernel identity, computed identically at claim **and** replenish time.
+/// For **libkrun** a workload microVM always boots the bundled libkrunfw kernel (mkGuest
+/// images ship none; the builder VM uses a custom kernel but never the warm pool), so the
+/// identity is a constant — crucially the same whether the workload's `kernel_path` is
+/// absent (claim, pre-boot) or present (replenish, after libkrun materialized the bundled
+/// kernel). That's what makes the libkrun warm claim *fire* instead of fail-open to cold
+/// because the absent path can't be hashed. Other backends boot a real on-disk kernel → sha.
+const LIBKRUN_BUNDLED_KERNEL_ID: &str = "libkrun-bundled-kernel";
+
+pub fn kernel_identity(backend: &dyn VmBackend, kernel_path: Option<&str>) -> Result<String> {
+    if backend.name() == "libkrun" {
+        return Ok(LIBKRUN_BUNDLED_KERNEL_ID.to_string());
+    }
+    let kernel = kernel_path.context("launch config has no kernel path for the compat key")?;
+    kernel_sha256_hex(Path::new(kernel))
+}
+
+/// Inputs to [`build_standby_spec`] (grouped to avoid a long positional signature).
+pub struct StandbySpecParams<'a> {
+    /// `~/.mvm/pool/` root — holds the control UDS.
+    pub pool_root: &'a Path,
+    /// `~/.mvm/vms/` root — the standby's runtime state dir lives at `vms_root/<id>/`.
+    pub vms_root: &'a Path,
+    /// Kernel image the standby pre-loads (the path; for libkrun mkGuest the bundled kernel
+    /// is materialized here at boot).
+    pub kernel: &'a Path,
+    /// Compat-key identity (see [`kernel_identity`]) — not necessarily a hash of `kernel`
+    /// (for libkrun it's the bundled-kernel constant).
+    pub kernel_sha256: &'a str,
+    pub vcpus: u8,
+    pub mem_mib: u32,
+    pub signer_id: &'a str,
+    pub signing_key_path: &'a Path,
+}
+
+/// Build a `StandbySpec` from [`StandbySpecParams`]. The control UDS lives under
+/// `pool_root/<id>/control-<nonce>.sock` (nonce in the path — defense in depth); the VM's
+/// runtime state dir is the normal `vms_root/<id>/` so stop/status/console resolve it like
+/// any cold-booted VM.
+pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
     let nonce = fresh_binding_nonce();
+    // `standby-<16 hex>` — nonce-derived (defense-in-depth obfuscation within the 0700
+    // dir). The socket filename is kept SHORT and fixed: a Unix domain socket path must fit
+    // `SUN_LEN` (~104 bytes on macOS), so the full 64-char nonce can't live in the path —
+    // the binding security is the *echoed full nonce verified in the attach*, not the path.
     let id = format!("standby-{}", &nonce[..16]);
     Ok(StandbySpec {
-        kernel_path: kernel.to_string_lossy().into_owned(),
-        kernel_sha256: kernel_sha256_hex(kernel)?,
-        vcpus,
-        mem_mib,
-        signing_key_path: signing_key_path.to_path_buf(),
-        signer_id: signer_id.to_string(),
-        control_socket: pool_root.join(&id).join(format!("control-{nonce}.sock")),
-        vm_state_dir: vms_root.join(&id).to_string_lossy().into_owned(),
+        kernel_path: p.kernel.to_string_lossy().into_owned(),
+        kernel_sha256: p.kernel_sha256.to_string(),
+        vcpus: p.vcpus,
+        mem_mib: p.mem_mib,
+        signing_key_path: p.signing_key_path.to_path_buf(),
+        signer_id: p.signer_id.to_string(),
+        control_socket: p.pool_root.join(&id).join("control.sock"),
+        vm_state_dir: p.vms_root.join(&id).to_string_lossy().into_owned(),
         binding_nonce: nonce,
         id,
     })
@@ -146,8 +177,11 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     if p.target == 0 || !p.backend.supports_standby_pool() {
         return Ok(0);
     }
+    // The compat identity computed identically here and at claim time (a constant for
+    // libkrun's bundled kernel) so a warmed standby is actually claimable.
+    let kernel_sha256 = kernel_identity(p.backend, p.kernel.to_str())?;
     let want = StandbyCompat {
-        kernel_sha256: kernel_sha256_hex(p.kernel)?,
+        kernel_sha256: kernel_sha256.clone(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
     };
@@ -156,15 +190,16 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let vms_root = mvm_core::config::mvm_data_dir_strict()?.join("vms");
     let mut spawned = 0;
     for _ in have..p.target {
-        let spec = build_standby_spec(
-            &pool_root,
-            &vms_root,
-            p.kernel,
-            p.vcpus,
-            p.mem_mib,
-            p.signer_id,
-            p.signing_key_path,
-        )?;
+        let spec = build_standby_spec(&StandbySpecParams {
+            pool_root: &pool_root,
+            vms_root: &vms_root,
+            kernel: p.kernel,
+            kernel_sha256: &kernel_sha256,
+            vcpus: p.vcpus,
+            mem_mib: p.mem_mib,
+            signer_id: p.signer_id,
+            signing_key_path: p.signing_key_path,
+        })?;
         match p.backend.spawn_standby(&spec) {
             Ok(handle) => {
                 pool.record(&handle)?;
@@ -176,26 +211,16 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     Ok(spawned)
 }
 
-/// The base-compat key a launch needs from its `VmStartConfig` (kernel sha256 + the fixed
-/// vcpus/mem). `None` if the config carries no kernel path.
-///
-/// **Known limitation (libkrun mkGuest):** a mkGuest workload image ships no kernel — its
-/// `kernel_path` `vmlinux` is materialized by libkrun (`extract_bundled_kernel`) only at
-/// `start_enter`, so it's **absent on disk here** and `kernel_sha256_hex` errors →
-/// `try_warm_claim` fails open to cold boot. A libkrun standby is in fact
-/// workload-*independent* (it pre-loads the bundled kernel; the rootfs arrives at attach),
-/// so the right key is the **bundled** kernel sha the standby actually loads, not the
-/// workload's kernel path. Wiring that (the bundled-kernel identity lives in `libkrun-sys`)
-/// is the follow-up that makes the libkrun warm claim fire end-to-end (SPRINT.md).
-fn compat_for_launch(cfg: &VmStartConfig) -> Result<Option<StandbyCompat>> {
-    let Some(kernel) = cfg.kernel_path.as_ref() else {
-        return Ok(None);
-    };
-    Ok(Some(StandbyCompat {
-        kernel_sha256: kernel_sha256_hex(Path::new(kernel))?,
+/// The base-compat key a launch needs (kernel identity + the fixed vcpus/mem). The kernel
+/// component is [`kernel_identity`] — for libkrun the bundled-kernel constant, so it's
+/// computable here pre-boot even though the mkGuest workload kernel isn't on disk yet (the
+/// claim/replenish asymmetry that previously forced fail-open-to-cold).
+fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<StandbyCompat> {
+    Ok(StandbyCompat {
+        kernel_sha256: kernel_identity(backend, cfg.kernel_path.as_deref())?,
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
-    }))
+    })
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
@@ -223,9 +248,7 @@ pub fn try_warm_claim(
         // No admitted plan threaded in → not the bridge path → cold-boot.
         return Ok(None);
     };
-    let Some(want) = compat_for_launch(cfg)? else {
-        return Ok(None);
-    };
+    let want = compat_for_launch(backend.as_vm_backend(), cfg)?;
     let rootfs = cfg.rootfs_path.clone();
     let bundle_json = cfg.bundle_json.clone();
     let pool = SupervisorStandbyPool::open()?;
@@ -322,28 +345,38 @@ mod tests {
     }
 
     #[test]
-    fn standby_spec_puts_nonce_in_socket_path_and_state_under_vms() {
+    fn standby_spec_socket_is_short_and_nonce_derived_state_under_vms() {
         let tmp = tempfile::tempdir().unwrap();
         let kp = tmp.path().join("vmlinux");
         std::fs::write(&kp, b"k").unwrap();
         let pool_root = tmp.path().join("pool");
         let vms_root = tmp.path().join("vms");
-        let spec = build_standby_spec(
-            &pool_root,
-            &vms_root,
-            &kp,
-            2,
-            1024,
-            "host:test",
-            &tmp.path().join("key"),
-        )
+        let spec = build_standby_spec(&StandbySpecParams {
+            pool_root: &pool_root,
+            vms_root: &vms_root,
+            kernel: &kp,
+            kernel_sha256: &kernel_sha256_hex(&kp).unwrap(),
+            vcpus: 2,
+            mem_mib: 1024,
+            signer_id: "host:test",
+            signing_key_path: &tmp.path().join("key"),
+        })
         .unwrap();
+        // The socket lives under the nonce-derived `standby-<16hex>` dir; the filename is
+        // short + fixed so the path fits SUN_LEN (the full 64-char nonce would overflow it).
+        assert!(spec.id.starts_with("standby-"));
+        assert!(spec.binding_nonce.starts_with(&spec.id["standby-".len()..]));
+        assert!(spec.control_socket.starts_with(pool_root.join(&spec.id)));
+        assert_eq!(spec.control_socket.file_name().unwrap(), "control.sock");
+        // Keep the realistic ~/.mvm path well under the macOS SUN_LEN (~104 bytes).
         assert!(
-            spec.control_socket
-                .to_string_lossy()
-                .contains(&spec.binding_nonce)
+            std::path::Path::new("/Users/someuser/.mvm/pool")
+                .join(&spec.id)
+                .join("control.sock")
+                .as_os_str()
+                .len()
+                < 104
         );
-        assert!(spec.control_socket.starts_with(&pool_root));
         assert!(
             spec.vm_state_dir
                 .starts_with(vms_root.to_string_lossy().as_ref())
@@ -351,6 +384,35 @@ mod tests {
         assert_eq!(spec.kernel_sha256.len(), 64);
         assert_eq!(spec.vcpus, 2);
         assert_eq!(spec.mem_mib, 1024);
+    }
+
+    #[test]
+    fn kernel_identity_is_constant_for_libkrun_and_sha_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kp = tmp.path().join("vmlinux");
+        std::fs::write(&kp, b"real-kernel").unwrap();
+        let kps = kp.to_string_lossy();
+
+        // libkrun: the bundled-kernel constant, computable even when the workload kernel is
+        // absent (the mkGuest claim/replenish symmetry fix).
+        let libkrun = AnyBackend::from_hypervisor("libkrun");
+        assert_eq!(
+            kernel_identity(libkrun.as_vm_backend(), None).unwrap(),
+            LIBKRUN_BUNDLED_KERNEL_ID
+        );
+        assert_eq!(
+            kernel_identity(libkrun.as_vm_backend(), Some("/nonexistent/vmlinux")).unwrap(),
+            LIBKRUN_BUNDLED_KERNEL_ID
+        );
+
+        // firecracker: the real on-disk kernel's sha.
+        let fc = AnyBackend::from_hypervisor("firecracker");
+        assert_eq!(
+            kernel_identity(fc.as_vm_backend(), Some(&kps)).unwrap(),
+            sha256_hex_of(b"real-kernel")
+        );
+        // …and it errors if a real-kernel backend has no path.
+        assert!(kernel_identity(fc.as_vm_backend(), None).is_err());
     }
 
     // A minimal VmBackend stub that opts into the standby pool and records calls, so the
