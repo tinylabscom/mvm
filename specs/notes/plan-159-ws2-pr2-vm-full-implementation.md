@@ -591,3 +591,16 @@ git commit -m "feat(cli): checkpoint --class vm_full + restore; retire snapshot 
 - Tasks 2-9 are host-side unit-testable via the `VmFullControl`/restore/spawn seams; the **live Vz round-trip is Task 1's spike** + one optional manual validation.
 - Keep the CLI thin: all capture/restore/fork logic stays in `mvm-backend::checkpoint`; the CLI resolves args, builds the Vz seam impls, and binds audit.
 - No process-artifact references in code comments. Reuse `clone_rootfs_for_instance`, `sha256_file`, `vz_control`, `snapshot_restore`, `derive_mac` — do not reimplement.
+
+---
+
+## Deferred follow-ups (tracked; not PR2 scope)
+
+- [ ] **Hoist `AuditEmitter` (+ `host_signer`, `plan_persist`) into a library crate** so the
+      checkpoint audit binding (`bind_checkpoint_created/restored/forked`) is reachable by
+      `mvmd`, not just the `mvm-cli` binary. Agreed as the **next** change after PR2 (option b
+      from the PR2 scope decision). The checkpoint *operations* are already library API in
+      `mvm-backend`; this closes the remaining gap so mvmd-driven checkpoints/forks emit
+      identical chain-signed `checkpoint.*` events. Likely lands the emitter in `mvm-hostd`
+      (which already owns the supervisor-side audit + `verify_audit_chain`) or a small
+      `mvm-core::audit` seam, with `mvm-cli` consuming it.
