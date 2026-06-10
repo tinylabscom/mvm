@@ -31,7 +31,7 @@
 //! - `logs` tails `<vm_state_dir>/console.log` (capture-only console
 //!   per Plan 97 Security §9).
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
     StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -837,6 +837,28 @@ impl VzBackend {
             console_log.display()
         ));
         Ok(VmId(id.0.clone()))
+    }
+}
+
+impl crate::checkpoint::VmFullRestore for VzBackend {
+    /// Materialize the checkpoint's rootfs into place (must happen before
+    /// `restoreMachineState` — the saved memory expects the exact disk it was
+    /// captured with), then boot the supervisor in Restore mode.
+    fn restore(
+        &self,
+        target_vm: &str,
+        rootfs_src: &std::path::Path,
+        memory: &std::path::Path,
+        machine_id: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        use crate::checkpoint::VmFullControl as _;
+        let target_rootfs = VzVmFullControl::new(target_vm)
+            .rootfs_path()
+            .context("resolving target VM rootfs path for restore")?;
+        crate::base::cow::clone_rootfs_for_instance(rootfs_src, &target_rootfs)
+            .context("materializing checkpoint rootfs before restore")?;
+        self.snapshot_restore(&VmId(target_vm.to_string()), memory, Some(machine_id))
+            .map(|_| ())
     }
 }
 

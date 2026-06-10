@@ -267,6 +267,53 @@ pub fn capture_vm_full(
     Ok(meta)
 }
 
+/// Restores a vm_full checkpoint's saved state into a target VM, abstracted so
+/// the orchestration is testable without a live hypervisor.
+pub trait VmFullRestore {
+    /// Materialize `rootfs_src` onto the target VM's rootfs, then restore the
+    /// machine `memory` + `machine_id`, and resume. The target must already be
+    /// stopped — callers must ensure no live supervisor is racing the rootfs.
+    fn restore(
+        &self,
+        target_vm: &str,
+        rootfs_src: &Path,
+        memory: &Path,
+        machine_id: &Path,
+    ) -> Result<()>;
+}
+
+pub struct RestoreParams {
+    pub checkpoint: CheckpointId,
+    /// Name of the VM to restore into (must match the supervisor-config shape).
+    pub target_vm: String,
+}
+
+/// Resume a VM from a vm_full checkpoint (same identity). Verifies the manifest,
+/// then hands the three blob paths to the restore seam. Refusing fs_quick here is
+/// deliberate: fs_quick has no memory state, so `fork_checkpoint` is the right verb.
+pub fn restore_checkpoint(
+    store: &CheckpointStore,
+    params: RestoreParams,
+    restore: &dyn VmFullRestore,
+) -> Result<()> {
+    let meta = store.read_meta(&params.checkpoint)?;
+    if meta.class != CheckpointClass::VmFull {
+        anyhow::bail!(
+            "checkpoint '{}' is class fs_quick; restore applies to vm_full checkpoints \
+             (fork an fs_quick checkpoint instead)",
+            meta.id
+        );
+    }
+    verify_content(store, &meta)?;
+    let dir = store.content_dir(&meta.id);
+    restore.restore(
+        &params.target_vm,
+        &dir.join("rootfs.ext4"),
+        &dir.join("memory.bin"),
+        &dir.join("machine-id"),
+    )
+}
+
 fn sha256_file_hex(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
@@ -572,6 +619,124 @@ mod tests {
                 && names.contains(&"machine-id")
         );
         verify_content(&store, &meta).unwrap();
+    }
+
+    struct MockRestore {
+        seen: RefCell<Option<(String, PathBuf, PathBuf, PathBuf)>>,
+    }
+    impl VmFullRestore for MockRestore {
+        fn restore(
+            &self,
+            target_vm: &str,
+            rootfs_src: &Path,
+            memory: &Path,
+            machine_id: &Path,
+        ) -> Result<()> {
+            *self.seen.borrow_mut() = Some((
+                target_vm.to_string(),
+                rootfs_src.to_path_buf(),
+                memory.to_path_buf(),
+                machine_id.to_path_buf(),
+            ));
+            Ok(())
+        }
+    }
+
+    fn seed_vm_full_checkpoint(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
+        let rootfs = tmp.join("live.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let ctl = MockControl {
+            rootfs,
+            events: RefCell::new(vec![]),
+        };
+        capture_vm_full(
+            store,
+            CaptureVmFullParams {
+                id: CheckpointId::new(id),
+                vm_name: "origin".into(),
+                supervisor_config_digest: "d".into(),
+                tag: None,
+                created_unix: 1,
+            },
+            &ctl,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn restore_checkpoint_verifies_then_hands_blobs_to_restore_seam() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v1");
+        let restore = MockRestore {
+            seen: RefCell::new(None),
+        };
+        restore_checkpoint(
+            &store,
+            RestoreParams {
+                checkpoint: ckpt.id.clone(),
+                target_vm: "origin".into(),
+            },
+            &restore,
+        )
+        .unwrap();
+        let (vm, r, m, mid) = restore.seen.borrow().clone().unwrap();
+        let cdir = store.content_dir(&ckpt.id);
+        assert_eq!(vm, "origin");
+        assert_eq!(r, cdir.join("rootfs.ext4"));
+        assert_eq!(m, cdir.join("memory.bin"));
+        assert_eq!(mid, cdir.join("machine-id"));
+    }
+
+    #[test]
+    fn restore_checkpoint_refuses_fs_quick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let restore = MockRestore {
+            seen: RefCell::new(None),
+        };
+        let err = restore_checkpoint(
+            &store,
+            RestoreParams {
+                checkpoint: fsq.id,
+                target_vm: "origin".into(),
+            },
+            &restore,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("vm_full") || err.to_string().contains("fs_quick"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_checkpoint_refuses_tampered_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "v2");
+        // Tamper a blob after capture.
+        let blob = store.content_dir(&ckpt.id).join("memory.bin");
+        std::fs::write(&blob, b"tampered").unwrap();
+        let restore = MockRestore {
+            seen: RefCell::new(None),
+        };
+        let err = restore_checkpoint(
+            &store,
+            RestoreParams {
+                checkpoint: ckpt.id,
+                target_vm: "origin".into(),
+            },
+            &restore,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("integrity") || err.to_string().contains("sha256"),
+            "unexpected error: {err}"
+        );
+        // Restore seam must NOT have been called on a tampered checkpoint.
+        assert!(restore.seen.borrow().is_none());
     }
 
     #[test]
