@@ -4,6 +4,7 @@
 pub mod arch;
 pub mod build_env;
 pub mod catalog;
+pub mod checkpoint;
 pub mod config;
 pub mod dev_network;
 pub mod exit_capture;
