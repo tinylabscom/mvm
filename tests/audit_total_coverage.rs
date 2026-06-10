@@ -122,8 +122,6 @@ const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("status", AuditPosture::ReadOnly),
 ];
 
-// Wired into AUDIT_POSTURE once Task 8 registers the checkpoint command.
-#[allow(dead_code)]
 const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("CheckpointCreated")),
     ("fork", AuditPosture::Emits("CheckpointForked")),
@@ -309,6 +307,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("pause", AuditPosture::Emits("VmStop")),
     ("resume", AuditPosture::Emits("VmStart")),
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
     ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
     // Build / artifact / registry.
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),

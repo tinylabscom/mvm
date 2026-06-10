@@ -359,9 +359,6 @@ impl AuditEmitter {
     /// the checkpoint directory. `class` is the checkpoint strategy
     /// (e.g. `"fs_quick"`); `content_sha256` is the hex digest of the
     /// sealed directory tree so the audit chain pins the content.
-    // Called by the checkpoint command group (Task 8); the command
-    // doesn't exist yet so this is temporarily unreferenced.
-    #[allow(dead_code)]
     pub fn emit_checkpoint_created(
         &self,
         plan: &ExecutionPlan,
@@ -387,9 +384,6 @@ impl AuditEmitter {
     /// VM. The parent/child id pair forms the lineage record; an
     /// operator can reconstruct a fork tree by scanning the chain for
     /// these entries.
-    // Called by the checkpoint command group (Task 8); the command
-    // doesn't exist yet so this is temporarily unreferenced.
-    #[allow(dead_code)]
     pub fn emit_checkpoint_forked(
         &self,
         plan: &ExecutionPlan,

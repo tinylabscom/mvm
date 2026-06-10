@@ -209,6 +209,7 @@ impl Commands {
             Commands::Pause(_) => "pause",
             Commands::Resume(_) => "resume",
             Commands::Snapshot(_) => "snapshot",
+            Commands::Checkpoint(_) => "checkpoint",
             Commands::Volume(_) => "volume",
             Commands::Secret(_) => "secret",
             Commands::Attest(_) => "attest",
