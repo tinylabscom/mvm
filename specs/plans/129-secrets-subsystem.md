@@ -114,30 +114,25 @@ endpoint validation above**); this ties them on a real QEMU guest.
    >   reserved `mvm-secret-` prefix (the endpoint treated it as a 2nd placeholder
    >   → refused), and postman-echo bot-filtering urllib's UA — example now sends
    >   an explicit UA and targets `httpbin.org` (a clean http header-echo).
-   > - 🔴 **Destination-sees-real-credential still blocked — new bug found:** the
-   >   endpoint's forward leg uses `hardened_client_builder`'s
-   >   `SsrfFilteringResolver`, which **hardcodes port 443** in its DNS lookup
-   >   (`tools/http_hardening.rs`). reqwest uses the resolver's port, so an
-   >   **`http://`** forward connects to **:443 and sends plain HTTP** → the
-   >   destination returns `400 "plain HTTP request was sent to HTTPS port"`. The
-   >   forward-proxy live-guest path is http-only (https CONNECT-tunnels, above),
-   >   so it *always* hits this. (#710 worked because it forwarded **https** →
-   >   443 is correct there.) This is a real bug in **shared** http-hardening
-   >   tooling (web_fetch / MCP tools also use it) — the fix must make SSRF
-   >   filtering **port-aware** (or move it to a connect-layer check) without
-   >   breaking https callers. Tracked below.
+   > - ✅ **Destination-sees-real-credential — CLOSED (with PR #755).** A real bug
+   >   blocked the forward leg: `hardened_client_builder`'s `SsrfFilteringResolver`
+   >   **hardcodes port 443**, and reqwest connects on the *resolver's* port, so an
+   >   `http` forward hit the destination's HTTPS port → `400 "plain HTTP request
+   >   was sent to HTTPS port"`. (#710 worked because it forwarded **https**.) #755
+   >   makes the forwarder resolve + SSRF-filter itself and pin reqwest to the safe
+   >   IPs on the URL's real port (`resolve_to_addrs`). With it, the full e2e
+   >   passes on the box: httpbin reflects
+   >   `"Authorization": "Bearer REALKEY-…"` (the **real** credential) while the
+   >   guest's `substitution-env.json` holds only `mvm-secret-…`. **The complete
+   >   chain — workload → loopback forward proxy → guest→host vsock → endpoint
+   >   substitute → real http forward → destination echo — is validated on a live
+   >   QEMU guest.** "A raw secret never enters the microVM" is proven end-to-end.
 
 ### Deferred follow-ups (surfaced by the local-launch e2e)
 
-- [ ] **SSRF resolver hardcodes port 443 → breaks http egress forwards** (the
-      current blocker for destination-sees-real-credential). `SsrfFilteringResolver`
-      in `tools/http_hardening.rs` resolves with port 443; reqwest uses the
-      resolver's port, so an `http://` forward hits :443 with plain HTTP. Make
-      SSRF filtering port-aware (honor the URL's port) or move it to a
-      connect-layer check; don't break the https callers (web_fetch, MCP tools).
-      Then the live-guest forward-proxy e2e (destination-sees-real-credential +
-      claim-12 + redact-to-`XXX`) should close — everything *before* the forward
-      leg is on-box validated (loopback, vsock relay, substitution).
+- [x] **SSRF resolver hardcodes port 443 → broke http egress forwards** —
+      FIXED in PR #755 (forwarder resolves + SSRF-filters itself, pins the safe
+      IPs on the URL's real port via `resolve_to_addrs`). This closed the e2e.
 - [ ] **Forward proxy + `https`/`CONNECT`** — standard clients tunnel `https`
       through `HTTP_PROXY` via `CONNECT`, hiding headers from the proxy, so
       substitution only works for `http`/absolute-form today. TLS-destination
