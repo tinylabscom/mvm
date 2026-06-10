@@ -216,6 +216,29 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
     Some(format!("mvm.egress_ca={hex}"))
 }
 
+/// Plan 129 Stage 2 — encode the per-run secret **placeholder** env as a single
+/// `mvm.secret_env=<hex>` kernel-cmdline token: a newline-joined
+/// `VAR=placeholder` blob, hex-encoded so it survives `/proc/cmdline` as one
+/// space-free token. `/init` decodes it and `export`s each `VAR=placeholder`
+/// into the sealed entrypoint's environment, so an SDK-free workload reads its
+/// opaque placeholder from `$VAR` and the host substitutes the real credential
+/// at egress. **Never a value** — only the `mvm-secret-…` placeholder (claim 13).
+/// `None` for no secrets. The cmdline is the only per-VM channel a *fresh* FC
+/// boot has to a sealed guest (no secrets drive attached), and the placeholder
+/// must be minted **before** boot so it can ride here.
+pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let blob = pairs
+        .iter()
+        .map(|(var, ph)| format!("{var}={ph}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hex: String = blob.bytes().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.secret_env={hex}"))
+}
+
 /// A file to inject into the guest (config or secret).
 #[derive(Debug, Clone)]
 pub struct VmFile {
@@ -1059,6 +1082,33 @@ mod tests {
     #[test]
     fn encode_egress_ca_cmdline_empty_is_none() {
         assert!(encode_egress_ca_cmdline("").is_none());
+    }
+
+    #[test]
+    fn encode_secret_env_cmdline_empty_is_none() {
+        assert!(encode_secret_env_cmdline(&[]).is_none());
+    }
+
+    #[test]
+    fn encode_secret_env_cmdline_round_trips_pairs_as_single_token() {
+        let pairs = vec![
+            ("API_KEY".to_string(), "mvm-secret-abc123".to_string()),
+            ("DB_TOKEN".to_string(), "mvm-secret-def456".to_string()),
+        ];
+        let got = encode_secret_env_cmdline(&pairs).unwrap();
+        assert!(got.starts_with("mvm.secret_env="));
+        // Single cmdline token — no spaces/newlines survive.
+        assert!(!got.contains(' ') && !got.contains('\n'));
+        // The hex decodes back to the newline-joined `VAR=placeholder` blob.
+        let hex = got.strip_prefix("mvm.secret_env=").unwrap();
+        let decoded: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "API_KEY=mvm-secret-abc123\nDB_TOKEN=mvm-secret-def456"
+        );
     }
 
     #[test]
