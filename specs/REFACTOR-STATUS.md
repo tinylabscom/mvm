@@ -137,6 +137,13 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
     [ ] remaining: IR/SDK developer-declared authoring (the only open variant; mvmd
         can author via bundle), terminator-path redaction, live PII spans.
         See plan §"Deferred follow-ups".
+  [x] Phase F: egress no-secret-to-guest leak-gate (claim-12/13 backstop) —
+      canary tests (handed_placeholders_never_contain_the_secret_value /
+      substitution_endpoint_refuses_unbound_destination /
+      audit_chain_carries_no_secret_value) in crates/mvm-hostd/tests/
+      egress_secret_leak_gate.rs + claim doc claim-egress-no-secret-to-guest.md +
+      catalog.md row 16 witnesses (Preview), gated on every PR (Test lane +
+      check-claim-catalog)
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
@@ -296,5 +303,6 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
 
 ## Security claims
 
-15/15 shipped, none regressed (`specs/claims/catalog.md`, gated by
-`xtask check-claim-catalog`).
+15/15 shipped, none regressed, + 1 `Preview` (claim 16, egress-substitution
+leak-gate — witnesses machine-checked, ADR-002 promotion pending) (`specs/claims/catalog.md`,
+gated by `xtask check-claim-catalog`).
