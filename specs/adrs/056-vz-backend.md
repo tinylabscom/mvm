@@ -3,7 +3,14 @@
 **Status:** accepted 2026-05-22, implements Plan 97. Vz is an opt-in
 macOS backend (`MVM_BACKEND=vz` / `--backend vz`); `auto_select`
 remains unchanged so libkrun is still the macOS default and
-Firecracker the Linux deploy default.
+Firecracker the Linux deploy default. **Amended 2026-06-10 by
+[ADR-076](076-backend-matrix-consolidation.md):** Vz becomes the
+**macOS-26 auto-default** and **absorbs `AppleContainerBackend`** — the
+in-process `providers/apple_container` AVF path is deleted, leaving one
+honestly-named `vz` AVF backend on the per-VM supervisor model. The
+"opt-in only / libkrun stays the macOS default" stance above holds for
+macOS 13–25; macOS-26 now auto-selects `vz`. The per-claim table and the
+console/entitlement invariants below are unchanged.
 
 ## Context
 
