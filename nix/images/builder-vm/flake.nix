@@ -157,18 +157,17 @@
       # CycloneDX-1.5 empty stub when the tool isn't on PATH and logs
       # a warning.
       #
-      # The egress side is closed: the builder VM runs
-      # `mvm-egress-proxy`, embedded in mvmctl at its own build time
-      # and baked into the rootfs via `hostBinExtraFiles` (read from
-      # `MVM_HOST_BIN_DIR` under `--impure`) at the install path
-      # declared in `nix/lib/mvm-host-binaries.nix`.
-      # `mvm-host-vm-init::install::run_install` spawns it
-      # before the installer + injects `HTTPS_PROXY` /
-      # `HTTP_PROXY` on `uv` / `pnpm`'s env. The proxy refuses
-      # anything outside the four allowed hostnames:
-      # `pypi.org`, `files.pythonhosted.org`,
+      # Egress posture is per-arm. The flake-build arm (`nix build`)
+      # runs with open egress so nix can fetch substitutes and pinned
+      # flake inputs directly. The install arm (`uv` / `pnpm`) locks
+      # egress at its entry via iptables OUTPUT default-deny + proxy-uid
+      # ACCEPT, so untrusted dependency code can only reach the network
+      # through `mvm-egress-proxy` (embedded in mvmctl and baked into
+      # the rootfs via `hostBinExtraFiles`). The proxy refuses anything
+      # outside `pypi.org`, `files.pythonhosted.org`,
       # `registry.npmjs.org`, `objects.githubusercontent.com`.
-      # Complementary iptables drop-rule defense-in-depth runs too.
+      # The persistent dispatch loop resets the chain per job kind so
+      # jobs cannot leak posture from one dispatch to the next.
       builderPackages = pkgs: with pkgs; [
         bashInteractive
         coreutils
