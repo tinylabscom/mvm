@@ -107,14 +107,24 @@ No files created. Edits land across the workspace; the heaviest files
 ## Tasks
 
 ### T1 — Build the worklist and the detection regex
-- [ ] Settle the canonical match set: `\b[Pp]lan \d+`, `\bADR[- ]\d+`,
-      `\bW\d+\.[A-Z0-9]`, `\b[Ss]print \d+`, `\bPR #?\d+`, and bare
-      `#\d{2,}` inside a comment. Record it in this plan so the future
-      lint (T5) and the sweep use one source of truth.
-- [ ] Generate the file list (`rg -l … crates/ src/ xtask/ nix/`),
-      excluding `specs/`, `public/`, and the two carved-out lint files.
-- [ ] Spot-confirm the count baseline (~2,531) so completion is
-      measurable.
+- [x] Canonical match set (single source of truth for the sweep + the T5
+      lint), applied to comment text only:
+      - `\b[Pp]lan [0-9]+`
+      - `\bADR[- ][0-9]+`
+      - `\bW[0-9]+\.[A-Z0-9]`  (workstream tags, e.g. `W4.3`)
+      - `\b[Ss]print [0-9]+`
+      - `\bPR #?[0-9]+`
+      - bare `#[0-9]{2,}` inside a comment (PR shorthand)
+- [x] Worklist scope: `crates/ src/ xtask/ nix/ build.rs`, globs
+      `*.rs *.nix *.sh *.toml`; exclude `specs/`, `public/`, and the two
+      self-referential lint files (`xtask/src/check_adr_coverage.rs`,
+      `xtask/src/check_doc_claims.rs`).
+- [x] Baseline (2026-06-11, `origin/main` @ 6ee62ee7): **~3,097
+      reference-lines across 494 files** (the earlier ~2,531 was low) —
+      `Plan N` ~2,370, `ADR-NN` ~903, `Wn.X` ~376, `Sprint N` ~29,
+      `PR #` ~12 (lines overlap, so per-token counts sum high). This is a
+      line-hit upper bound; the comment-only count is somewhat lower once
+      string/identifier hits are excluded. T4's grep must reach zero.
 
 ### T2 — Pilot batch (the 7 heaviest files)
 - [ ] Apply the transform rules by hand to the heaviest files above;
