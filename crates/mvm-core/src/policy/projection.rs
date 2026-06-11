@@ -34,8 +34,10 @@ pub enum Proto {
     Udp,
 }
 
-impl Proto {
-    pub fn parse(s: &str) -> Result<Self, ProjectionError> {
+impl std::str::FromStr for Proto {
+    type Err = ProjectionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "tcp" => Ok(Self::Tcp),
             "udp" => Ok(Self::Udp),
@@ -43,6 +45,13 @@ impl Proto {
                 proto: other.to_string(),
             }),
         }
+    }
+}
+
+impl Proto {
+    /// Named alias for [`FromStr`] used by the lowering code.
+    pub fn parse(s: &str) -> Result<Self, ProjectionError> {
+        s.parse()
     }
 }
 
@@ -60,6 +69,7 @@ pub struct CanonicalRule {
 impl CanonicalRule {
     /// Pure membership decision: does this rule admit the probe?
     pub fn permits(&self, proto: &Proto, ip: IpAddr, port: u16) -> bool {
+        debug_assert!(self.port_lo <= self.port_hi, "inverted port range");
         self.proto == *proto
             && self.net.contains(&ip)
             && self.port_lo <= port
@@ -79,7 +89,6 @@ pub enum ProjectionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -142,5 +151,40 @@ mod tests {
             Proto::parse("icmp"),
             Err(ProjectionError::UnknownProto { .. })
         ));
+    }
+
+    #[test]
+    fn canonical_rule_port_range_is_inclusive_at_both_ends() {
+        let rule = CanonicalRule {
+            proto: Proto::Tcp,
+            net: net("10.0.0.0/24"),
+            port_lo: 80,
+            port_hi: 443,
+        };
+        assert!(rule.permits(&Proto::Tcp, ip("10.0.0.7"), 80));
+        assert!(rule.permits(&Proto::Tcp, ip("10.0.0.7"), 443));
+        assert!(!rule.permits(&Proto::Tcp, ip("10.0.0.7"), 79));
+        assert!(!rule.permits(&Proto::Tcp, ip("10.0.0.7"), 444));
+    }
+
+    #[test]
+    fn canonical_rule_port_zero_only_rule_is_not_a_wildcard() {
+        // (0, 0) is normalized to (0, 65535) by the lowering before
+        // a rule is built; a literal (0, 0) rule permits only port 0.
+        let rule = CanonicalRule {
+            proto: Proto::Tcp,
+            net: net("10.0.0.0/24"),
+            port_lo: 0,
+            port_hi: 0,
+        };
+        assert!(rule.permits(&Proto::Tcp, ip("10.0.0.7"), 0));
+        assert!(!rule.permits(&Proto::Tcp, ip("10.0.0.7"), 1));
+    }
+
+    #[test]
+    fn proto_fromstr_roundtrip() {
+        assert_eq!("tcp".parse::<Proto>().unwrap(), Proto::Tcp);
+        assert_eq!("udp".parse::<Proto>().unwrap(), Proto::Udp);
+        assert!("TCP".parse::<Proto>().is_err());
     }
 }
