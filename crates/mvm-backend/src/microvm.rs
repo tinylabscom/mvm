@@ -156,6 +156,19 @@ pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
     Ok(format!("{}/{}", abs_vms, name))
 }
 
+/// Firecracker binds the vsock UDS at `<dir>/v.sock`, but the host-side
+/// transport resolves it via `vsock_uds_path` = `<dir>/runtime/v.sock`
+/// (the convention the template/slot launch and the mock agent share).
+/// Expose the socket under `runtime/` so `wait_for_guest_agent` finds it.
+/// Best-effort; a dangling symlink until InstanceStart binds the socket.
+fn expose_vsock_runtime_symlink(dir: &str) {
+    if let Err(e) = run_in_vm(&format!(
+        "mkdir -p {dir}/runtime && ln -sf ../v.sock {dir}/runtime/v.sock"
+    )) {
+        warn!("failed to expose vsock UDS under runtime/: {e}");
+    }
+}
+
 /// Resolve the path to the per-VM serial console log file.
 ///
 /// The host-side netinit-audit emitter
@@ -374,20 +387,7 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         ),
     )?;
 
-    // The host-side vsock transport resolves the UDS via `vsock_uds_path`
-    // = `<instance_dir>/runtime/v.sock` (the convention the template/slot
-    // launch and the mock agent also use), but Firecracker binds the UDS
-    // one level up at `<instance_dir>/v.sock`. Expose it under `runtime/`
-    // too — a dangling symlink now, live once InstanceStart binds the
-    // socket. Without this, `wait_for_guest_agent` probes one directory
-    // too deep and every Firecracker boot reports "guest agent not
-    // reachable" even though the agent is up.
-    if let Err(e) = run_in_vm(&format!(
-        "mkdir -p {dir}/runtime && ln -sf ../v.sock {dir}/runtime/v.sock",
-        dir = abs_dir,
-    )) {
-        warn!("failed to expose vsock UDS under runtime/: {e}");
-    }
+    expose_vsock_runtime_symlink(abs_dir);
 
     Ok(())
 }
@@ -2072,6 +2072,7 @@ pub fn configure_flake_microvm_with_drives_dir(
             dir = drives_dir,
         ),
     )?;
+    expose_vsock_runtime_symlink(drives_dir);
 
     // Virtio-balloon. Only attached when the workload opted in via
     // `mem_initial`. The device boots pre-inflated to `memory -
