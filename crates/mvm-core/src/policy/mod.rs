@@ -15,6 +15,7 @@ pub mod security;
 // resolver + bundle types via the facade.
 pub mod bundle;
 pub mod policies;
+pub mod projection;
 pub mod redaction;
 pub mod resolver;
 pub mod signing;
