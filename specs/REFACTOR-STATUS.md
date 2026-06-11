@@ -23,7 +23,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 170** — Host lifecycle convergence · ✅ mvm-side (density → mvmd)
 - [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
-- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; live FC https e2e gated on agent bringup
+- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; SigV4/HMAC forward-path signing landed (bind-checked, key-never-leaves); live FC https e2e gated on agent bringup
 - [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
@@ -148,7 +148,19 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
       catalog.md row 16 witnesses (Preview), gated on every PR (Test lane +
       check-claim-catalog)
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
-  [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
+  [x] forward-path signing integration (SigV4 + HMAC)  — prepare_request branches
+      on the resolved auth_type, routes SigV4/HMAC through the bind-checked
+      endpoint.sign (claim 12, key-never-leaves) and assembles the
+      Authorization (AWS4-HMAC-SHA256) / x-mvm-signature header. Credential
+      model: the secret value IS the secret-access-key (in the encrypted store,
+      the signing key); access_key_id/region/service are non-secret operator
+      metadata on the binding (mvmctl secret set --type sigv4
+      --aws-access-key-id/--region/--service) reconstructed onto the SecretRef
+      at admission. Security tests: sigv4_request_gets_a_valid_authorization_header,
+      sigv4_forward_path_matches_the_aws_get_vanilla_signature,
+      sigv4_unbound_destination_is_refused_before_signing,
+      sigv4_without_params_is_refused, hmac_request_gets_a_signature_header +
+      hmac_unbound_destination_is_refused_before_signing.
 
 PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
   [x] WS-A exit channel (vsock + PID-1 helper) — PR #698 (merged)
