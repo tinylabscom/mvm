@@ -32,6 +32,7 @@ pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
 pub mod checkpoint;
+pub mod codesign;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate. It lives here, not in `mvm`,
