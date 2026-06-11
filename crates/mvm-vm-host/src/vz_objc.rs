@@ -10,20 +10,18 @@
 //! shipped (`Supervisor.swift`), ported rather than swapped for a main-thread
 //! `CFRunLoop`. The non-`Send` objc2 handles live behind that queue; a small
 //! [`SerialQueue::dispatch`] bridges each queue hop to an `async` await so the
-//! process main thread stays free for the control socket + vsock proxy (later
-//! slices). All `unsafe` is contained in this module.
+//! process main thread stays free for the control socket + vsock proxy. All
+//! `unsafe` is contained in this module.
 //!
-//! **Scope so far.** Cold boot + clean lifecycle/exit propagation; config
-//! translation (cpu/memory/kernel/disks/virtio-fs/vsock-device/console/entropy/
-//! balloon/platform); the vsock host-side proxy (per-port UNIX listeners spliced
-//! to the guest); and the direct gvproxy virtio-net attachment. Deliberately
-//! fail-closed (not silently dropped) on the one surface still on the Swift
-//! supervisor behind the parity gate: **flow-audited** networking (the
-//! `events_ingest` path — porting it as an in-process `payload_tap` is a later
-//! slice, and direct-attaching it would bypass the claim-10 egress audit). Also
-//! wired: the control socket (STATUS/PAUSE/RESUME/BALLOON/SAVE), `Restore`
-//! startup mode, and the machine-id sidecar. Still to come: the in-process
-//! payload_tap, the workload-exit channel, and the parity matrix.
+//! **Scope.** This is the production VZ path — the Swift supervisor is deleted.
+//! Cold boot + clean lifecycle/exit propagation; config translation
+//! (cpu/memory/kernel/disks/virtio-fs/vsock-device/console/entropy/balloon/
+//! platform) with a host resource-cap check; the vsock host-side proxy (per-port
+//! UNIX listeners spliced to the guest); the gvproxy virtio-net attachment and
+//! the in-process flow-audit `payload_tap` (claim 10); the control socket
+//! (STATUS/PAUSE/RESUME/BALLOON/SAVE) and `Restore` startup mode with the
+//! machine-id sidecar; and the workload-exit channel. Deferred (separate plans):
+//! WS-D nested-virt `/dev/kvm`; WS-C rootfs-provider/SLIRP notes.
 
 use std::cell::Cell;
 use std::io;
@@ -256,7 +254,9 @@ struct ConnectionHandle {
     _connection: Retained<VZVirtioSocketConnection>,
 }
 
-// SAFETY: only retained to defer deallocation; never touched concurrently.
+// SAFETY: held only to keep the connection retained; no objc method is called on
+// it after construction. The sole cross-thread access is the `objc_release` on
+// drop, which is atomic-refcount and thread-safe.
 unsafe impl Send for ConnectionHandle {}
 unsafe impl Sync for ConnectionHandle {}
 
@@ -441,9 +441,10 @@ struct ExitListenerHandle {
     _delegate: Retained<VsockListenerDelegate>,
 }
 
-// SAFETY: created on the queue and only held to defer deallocation.
+// SAFETY: held only to keep the listener + delegate retained; no objc method is
+// called on them after creation (on the queue). The sole cross-thread access is
+// the `objc_release` on drop, which is atomic-refcount and thread-safe.
 unsafe impl Send for ExitListenerHandle {}
-// SAFETY: shared access is funnelled through the queue.
 unsafe impl Sync for ExitListenerHandle {}
 
 /// Capture one finished workload's exit code: read the guest's 4-byte LE i32,
@@ -488,17 +489,21 @@ async fn run_exit_listener(
 // VM handle + supervisor
 // ---------------------------------------------------------------------------
 
-/// Holds the VM and its delegate together. Both are non-`Send`; access is only
-/// ever made from inside [`SerialQueue::dispatch`], which is what makes the
-/// `unsafe impl Send`/`Sync` sound.
+/// Holds the VM and its delegate together. Both are non-`Send`; the `Arc` is
+/// moved/cloned across the tokio runtime, but the objects are only ever
+/// *operated on* from inside [`SerialQueue::dispatch`] closures — which is what
+/// makes the `unsafe impl Send`/`Sync` sound.
 struct VmHandle {
     vm: Retained<VZVirtualMachine>,
     _delegate: Retained<VmDelegate>,
 }
 
-// SAFETY: every field touch happens on the VM's serial dispatch queue.
+// SAFETY: VZ method calls on these objects only ever run inside
+// `SerialQueue::dispatch` closures, i.e. on the queue VZ binds the VM to. The
+// only access off that queue is the implicit `objc_release` when the last `Arc`
+// drops on a tokio thread — atomic-refcount and queue-agnostic (`VZVirtualMachine`
+// dealloc has no documented queue affinity). No VZ method is dispatched off-queue.
 unsafe impl Send for VmHandle {}
-// SAFETY: shared access is funnelled through the same serial queue.
 unsafe impl Sync for VmHandle {}
 
 /// What the create closure produces on the VM's queue: the VM handle, the
@@ -1033,6 +1038,11 @@ impl VzSupervisor {
     /// Re-read the framework's authoritative state and publish it. Called after
     /// `start()` so the watcher sees `Running` (or an already-terminal state if
     /// the guest exited instantly) without guessing.
+    ///
+    /// Only promotes out of `Pending`: if the delegate already pushed a terminal
+    /// state, leave it. The state re-read carries no error message
+    /// (`collapse_state(Error)` is empty), so overwriting a delegate-reported
+    /// `Errored(msg)` here would silently drop the diagnostic.
     async fn push_current_state(&self) {
         let handle = Arc::clone(&self.handle);
         let tx = self.state_tx.clone();
@@ -1040,7 +1050,15 @@ impl VzSupervisor {
             .queue
             .dispatch(move || {
                 // SAFETY: `state` is a queue-bound property; we are on the queue.
-                let _ = tx.send(collapse_state(unsafe { handle.vm.state() }));
+                let observed = collapse_state(unsafe { handle.vm.state() });
+                tx.send_if_modified(|current| {
+                    if matches!(current, RunState::Pending) {
+                        *current = observed;
+                        true
+                    } else {
+                        false
+                    }
+                });
             })
             .await;
     }
@@ -1204,13 +1222,40 @@ type BuiltConfig = (
     Option<PendingBridge>,
 );
 
+/// Plan 97 Security §8 / ADR-056 "Resource-cap parity" — refuse an over- or
+/// under-allocated request with a legible error rather than VZ's opaque
+/// `validateWithError`. Defense in depth: host admission already gates resources
+/// against the signed plan (claim 8), but an entitled hypervisor-driving process
+/// fails closed on its own too. The caps are host-determined (the live machine),
+/// not constants.
+fn validate_requested_resources(cpu_count: u32, memory_mib: u64) -> Result<()> {
+    // SAFETY: class-method accessors with no preconditions.
+    let max_cpu = unsafe { VZVirtualMachineConfiguration::maximumAllowedCPUCount() };
+    let min_mem = unsafe { VZVirtualMachineConfiguration::minimumAllowedMemorySize() };
+    let max_mem = unsafe { VZVirtualMachineConfiguration::maximumAllowedMemorySize() };
+    let cpu = cpu_count as usize;
+    if cpu < 1 || cpu > max_cpu {
+        bail!("requested cpu_count={cpu_count} is outside the host range 1..={max_cpu}");
+    }
+    let mem = mib_to_bytes(memory_mib);
+    if mem < min_mem || mem > max_mem {
+        bail!(
+            "requested memory_mib={memory_mib} ({mem} bytes) is outside the host range {}..={} MiB",
+            min_mem / (1024 * 1024),
+            max_mem / (1024 * 1024)
+        );
+    }
+    Ok(())
+}
+
 fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
+    validate_requested_resources(config.resources.cpu_count, config.resources.memory_mib)?;
     // Set when the flow-audited gvproxy bridge is wired (audit substrate present):
     // the supervisor's half of the guest-NIC socketpair, handed to the bridge.
     let mut pending_bridge: Option<PendingBridge> = None;
     // SAFETY: new() returns a default-initialized configuration.
     let vz_config = unsafe { VZVirtualMachineConfiguration::new() };
-    // SAFETY: plain setters with validated scalar values.
+    // SAFETY: plain setters; values were range-checked above.
     unsafe {
         vz_config.setCPUCount(config.resources.cpu_count as usize);
         vz_config.setMemorySize(mib_to_bytes(config.resources.memory_mib));
@@ -1325,7 +1370,7 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     }
 
     // virtio-vsock device. CID 3 is the Vz default for the first guest; the
-    // host dials per-port unix sockets via the (later-slice) vsock proxy.
+    // host dials per-port unix sockets via the vsock proxy.
     // SAFETY: new() returns a default vsock device configuration.
     let vsock = unsafe { VZVirtioSocketDeviceConfiguration::new() };
     let vsock_array = NSArray::from_retained_slice(&[Retained::into_super(vsock)]);
@@ -1420,8 +1465,9 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
         .map_err(|e| anyhow!("VZ configuration invalid: {}", ns_error_to_string(&e)))?;
 
     // Save/restore is a separate, weaker guarantee than validity (VZ boots
-    // configs it can't snapshot). Surface it as a warning now; SAVE/RESTORE
-    // land in a later slice (Plan 152 WS-E).
+    // configs it can't snapshot). A `Boot` that never snapshots is fine, so this
+    // is a warning, not a gate — SAVE / `Restore` startup surface the real error
+    // if they're used against an unsupported config.
     if let Err(e) = unsafe { vz_config.validateSaveRestoreSupportWithError() } {
         tracing::warn!(
             error = %ns_error_to_string(&e),

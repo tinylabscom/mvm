@@ -1,16 +1,18 @@
 # Plan 152 — Rust-native `Virtualization.framework` supervisor + guest `/init` lifecycle parity
 
-> **Status (2026-06-07):** In progress, staged per workstream.
-> **WS-A** (guest `/init` exit-code + poweroff parity) implemented on
-> `feat/plan-152-wsa-init-exit` — a separate session owns it.
-> **WS-B threading-model decision RESOLVED** (this update): private serial
-> `DispatchQueue` + delegate, tokio current-thread I/O — see the WS-B
-> checkbox below and the ADR-056 addendum. The WS-B Rust-supervisor build
-> follows from it. **Both gates satisfied** — Plan 120 green
-> (`core_demo_e2e` COMPLETE 2026-06-03); Plan 134 (architecture-aware
-> artifact model, slice 1) merged to main (via `feat/artifact-model-impl`,
-> tip `a57f2548`). Boot path is on main, so the `/init` diff is no longer
-> measured against a moving target.
+> **Status (2026-06-10): WS-A + WS-B COMPLETE and on `main`.**
+> - **WS-A** (guest `/init` exit-code + poweroff parity) — merged.
+> - **WS-B** (Rust-native objc2 VZ supervisor) — threading decision merged
+>   (#697 + ADR-056 addendum); supervisor built across slices and **finalized
+>   in #736 (Swift crate deleted)**; the SAVE pause-before-save regression
+>   fixed in #740; a supervisor correctness gate lives at
+>   `crates/mvm-build/tests/vz_supervisor_parity.rs`. Post-finalize hardening
+>   (resource-cap check, self-sign lock, error-clobber, SAFETY comments,
+>   doc-truth) lands in `feat/plan-152-vz-supervisor-hardening`.
+> - **WS-E** (validateSaveRestoreSupport gate, MAC pinning) folded into WS-B —
+>   the gvproxy file-handle path pins the MAC; `validateSaveRestoreSupport` is
+>   a warn (Boot doesn't snapshot). **WS-C** (notes only) and **WS-D**
+>   (nested-virt `/dev/kvm`) remain deferred / future-spike.
 >
 > **Numbering caveat:** picked 152 as next-after-highest from local
 > `specs/plans/`. Reconcile against open PRs before merge — the
@@ -244,11 +246,11 @@ Bring `mkGuest`'s `/init` in line with the reference contract so a
 finished workload **writes its exit code and powers off**, instead of
 the current reboot that strands the agent (Plan 120 root cause).
 
-- [ ] Diff the current `mkGuest` `/init` (in `crates/mvm-guest` +
+- [x] Diff the current `mkGuest` `/init` (in `crates/mvm-guest` +
       the Nix `/init` it bakes) against the reference sequence: run
       command → capture `$?` → write to a host-visible control file →
       `sync` → `poweroff -f`.
-- [ ] Define the host-visible exit channel for our backends. We do not
+- [x] Define the host-visible exit channel for our backends. We do not
       have a writable virtio-fs control share on every backend; pick
       between (a) a dedicated control vsock port the supervisor reads,
       or (b) a small control share, and document why. Prefer vsock —
@@ -257,14 +259,14 @@ the current reboot that strands the agent (Plan 120 root cause).
       (JSON `{command,timeout}` in → `{stdout,stderr,exit_code}` out,
       connect with retry/backoff) — a concrete model for the vsock option,
       complementary to the `/init` writes-`.exit`-then-`poweroff -f` contract.
-- [ ] Implement `poweroff -f` (not reboot) as the workload PID-1
+- [x] Implement `poweroff -f` (not reboot) as the workload PID-1
       terminal action, with the exit code emitted on the chosen
       channel first.
-- [ ] Surface the captured exit code through `VzBackend` /
+- [x] Surface the captured exit code through `VzBackend` /
       `LibkrunBackend` lifecycle and into the audit chain
       (`plan.launched` → a `plan.exited` with the code, or extend the
       existing terminal event).
-- [ ] Regression: a function-workload example that exits non-zero must
+- [x] Regression: a function-workload example that exits non-zero must
       propagate that code to `mvmctl`. Extend `examples/agent_ping`
       or add an `examples/exit_code` fixture.
 
@@ -289,20 +291,20 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       VZ serial queue only for VZ API calls via `QueueBound<Send>` (one
       `unsafe impl Send`, deref'd only inside dispatched closures). Rationale
       in `specs/adrs/056-vz-backend.md` §"Addendum … threading model".
-- [ ] New `[[bin]]` `mvm-vz-supervisor` in `mvm-vm-host`, sibling to
+- [x] New `[[bin]]` `mvm-vz-supervisor` in `mvm-vm-host`, sibling to
       `mvm-libkrun-supervisor` / `mvm-vz-drainer`, cfg-gated macOS. Reads
       the same `SupervisorConfig` JSON on stdin.
-- [ ] Reuse, don't reimplement: `mvm_build::vz::SupervisorConfig`
+- [x] Reuse, don't reimplement: `mvm_build::vz::SupervisorConfig`
       (schema already mirrored), `mvm_core::framing`,
       `mvm_hostd::supervisor::audit_file::FileAuditSigner`, and the
       gateway audit bridge (`mvm_hostd::supervisor::gateway_bridge` —
       thread it inline; the out-of-process `mvm-vz-drainer` becomes
       optional/removable).
-- [ ] Build the `VZVirtualMachineConfiguration` in Rust: `VZLinuxBootLoader`,
+- [x] Build the `VZVirtualMachineConfiguration` in Rust: `VZLinuxBootLoader`,
       virtio block/fs/net (gvproxy file-handle attachment), vsock device,
       console, cpu/memory, balloon, entropy. Call `validateWithError()`
       **then** `validateSaveRestoreSupportWithError()`; pin the NAT MAC.
-- [ ] **Vz `payload_tap` (absorbs Plan 141's Vz arm).** Attach the guest
+- [x] **Vz `payload_tap` (absorbs Plan 141's Vz arm).** Attach the guest
       net device to a socketpair Rust owns; run the gateway bridge + Plan
       141 observer pipeline (`on_packet`/`Verdict`/etherparse) **in-process**
       against it — no SCM_RIGHTS, no Swift, no NDJSON ingest. Advertise
@@ -310,38 +312,38 @@ Replace `crates/mvm-vz-supervisor/` (Swift) with a Rust binary using
       Vz; delete the `mvm-vz-drainer` + `BridgeEndpoints::VzIngest` NDJSON
       path (Plan 141 Q10). Reuses 141's backend-agnostic
       `Observer`/`gateway_bridge` core unchanged (ADR-064 §8).
-- [ ] Lifecycle (per the resolved threading decision): a private serial
+- [x] Lifecycle (per the resolved threading decision): a private serial
       `dispatch2` queue passed to `VZVirtualMachine`, a `declare_class!`
       `VZVirtualMachineDelegate` writing the write-once terminal slot,
       `QueueBound<Send>` for the non-`Send` `Retained` handles, and
       `block2::RcBlock` completion handlers. Main thread blocks on the
       terminal signal; SIGTERM/SIGINT → `requestStop`.
-- [ ] Reimplement `VsockProxy.swift` in Rust: per-port UDS listeners at
+- [x] Reimplement `VsockProxy.swift` in Rust: per-port UDS listeners at
       `<socketDir>/vsock-<port>.sock` (mode 0700) ↔
       `VZVirtioSocketDevice.connect(toPort:)`, fd→`dup`→`AsyncFd`. Mine
       `apple_container::start_vsock_proxy_listener()` for the port
       allowlist + framing.
-- [ ] Reimplement the control socket (`control.sock`, mode 0700,
+- [x] Reimplement the control socket (`control.sock`, mode 0700,
       newline-framed PAUSE/RESUME/STATUS/BALLOON/SAVE/RESTORE) — the
       client half already lives in `crates/mvm-backend/src/vz_control.rs`;
       extract a shared `vz::control` codec.
-- [ ] Snapshot: `saveMachineStateToURL` / `restoreMachineStateFromURL`
+- [x] Snapshot: `saveMachineStateToURL` / `restoreMachineStateFromURL`
       (macOS 14+) with the `<snapshot>.machine-id` sidecar, matching the
       Swift behaviour exactly. Call order (confirmed against prior art):
       save = `pauseWithCompletionHandler` →
       `saveMachineStateToURL_completionHandler`; restore =
       `restoreMachineStateFromURL_completionHandler` →
       `resumeWithCompletionHandler` (~0.5s restore observed).
-- [ ] Codesign: extend `mvm_backend::providers::apple_container::
+- [x] Codesign: extend `mvm_backend::providers::apple_container::
       ensure_signed()` to sign the new binary with
       `com.apple.security.virtualization`.
-- [ ] Update `vz.rs` `resolve_supervisor_path()` to find the
+- [x] Update `vz.rs` `resolve_supervisor_path()` to find the
       `mvm-vm-host` build output; **delete** the Swift-build-output search
       branch and the SwiftPM dependency once parity tests pass.
-- [ ] Parity gate: a test matrix asserting the Rust supervisor matches
+- [x] Parity gate: a test matrix asserting the Rust supervisor matches
       the Swift one on boot, vsock round-trip, every control verb, and
       save/restore — **before** removing `crates/mvm-vz-supervisor/`.
-- [ ] Remove the Swift crate, `tools/build.sh`, `Package.swift`,
+- [x] Remove the Swift crate, `tools/build.sh`, `Package.swift`,
       `Entitlements.plist`, and the `MvmContainerBridge/bridge.swift`
       stub; drop `MVM_VZ_SUPERVISOR_PATH` Swift-discovery from
       docs/memory. Fold the entitled-TCB rationale into an ADR-056
