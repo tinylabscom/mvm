@@ -1,15 +1,14 @@
 //! mvm-host-vm-init — PID 1 for the libkrun builder VM.
 //!
-//! Plan 72 W3 (`specs/plans/72-builder-vm-via-libkrun.md`). Tiny
-//! static-linked init that mounts the essentials, brings up the
+//! Tiny static-linked init that mounts the essentials, brings up the
 //! persistent `/nix` store (formatting on first boot), tries to
 //! bring the network up, executes `/job/cmd.sh`, writes
 //! `/job/result`, and powers off.
 //!
 //! ## Why this binary, not a shell script
 //!
-//! Per Plan 72 §W3, the choice between shell and Rust was
-//! explicitly debated. Rust won because:
+//! The choice between shell and Rust was explicitly debated. Rust
+//! won because:
 //!
 //! - One binary to audit; no `/bin/sh` -> `/usr/bin/sh` -> busybox
 //!   hop where each link is a separate Nix store path.
@@ -36,8 +35,7 @@
 //!      disk before the first build.
 //!   4. Best-effort `udhcpc -i eth0 -n -q` — failure is
 //!      non-fatal (offline builds against the seed store still
-//!      work; Plan 72 W4's `LibkrunBuilderVm::with_offline()`
-//!      formalizes this).
+//!      work; `LibkrunBuilderVm::with_offline()` formalizes this).
 //!   5. Read `/job/cmd.sh`. Exit code 2 + "no cmd.sh" in
 //!      `/job/result` if missing.
 //!   6. Spawn `/bin/sh -eu /job/cmd.sh`. Capture exit + stderr
@@ -73,20 +71,19 @@ use std::process::ExitCode;
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/boot_timings.rs"]
 mod boot_timings;
-/// Plan 89 W3 part 2 — hand-rolled parser for the
-/// `HostVmRequest` wire shape the persistent builder VM's
-/// dispatch loop reads off vsock. Cross-platform; the W3 part 3
-/// Linux dispatch loop calls into it after reading the framed
-/// body. Tested against the host's serde-derived encoding so
-/// schema drift on either side is loud.
+/// Hand-rolled parser for the `HostVmRequest` wire shape the
+/// persistent builder VM's dispatch loop reads off vsock.
+/// Cross-platform; the Linux dispatch loop calls into it after
+/// reading the framed body. Tested against the host's
+/// serde-derived encoding so schema drift on either side is loud.
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/builder_request.rs"]
 mod builder_request;
-/// Plan 89 W2 part 3 — hand-rolled `HostVmResponse::Result`
-/// JSON. Cross-platform (testable on macOS) so the wire shape can
-/// be validated against `mvm_build::builder_protocol`'s typed
-/// serde via a dev-dep test, without dragging serde_json into the
-/// production builder-init binary.
+/// Hand-rolled `HostVmResponse::Result` JSON. Cross-platform
+/// (testable on macOS) so the wire shape can be validated against
+/// `mvm_build::builder_protocol`'s typed serde via a dev-dep test,
+/// without dragging serde_json into the production builder-init
+/// binary.
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/dispatch_response.rs"]
 mod dispatch_response;
@@ -102,17 +99,17 @@ mod network;
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/proxy.rs"]
 mod proxy;
-/// Plan 107 A2.2 / A2.3 — spawn a workload microVM inside the host
-/// VM via a `WorkloadVmm` backend (Firecracker today). Cross-platform
-/// trait + state-dir/lifecycle logic (tested on macOS); the
-/// signal-based stop/status helpers are Linux-only.
+/// Spawn a workload microVM inside the host VM via a `WorkloadVmm`
+/// backend (Firecracker today). Cross-platform trait +
+/// state-dir/lifecycle logic (tested on macOS); the signal-based
+/// stop/status helpers are Linux-only.
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/workload.rs"]
 mod workload;
-/// Plan 107 A3 — in-host-VM vsock forwarder (the nesting hop). The
-/// cross-platform CONNECT+splice core is unit-tested on every host;
-/// the AF_VSOCK listener wiring (A3.b) is Linux-only. `unix`-gated
-/// because it uses `UnixStream` (the crate is inert on Windows).
+/// In-host-VM vsock forwarder (the nesting hop). The cross-platform
+/// CONNECT+splice core is unit-tested on every host; the AF_VSOCK
+/// listener wiring is Linux-only. `unix`-gated because it uses
+/// `UnixStream` (the crate is inert on Windows).
 #[cfg(unix)]
 #[allow(dead_code)]
 #[path = "mvm-host-vm-init/workload_proxy.rs"]
@@ -179,7 +176,7 @@ fn hex_decode_utf8(s: &str) -> Option<String> {
 }
 
 /// True when the kernel cmdline carries the `mvm.backend=qemu` marker —
-/// the dev-tier QEMU builder (Plan 166 / ADR-072). The host (`qemu_builder`)
+/// the dev-tier QEMU builder. The host (`qemu_builder`)
 /// adds this token; libkrun/Vz/Firecracker boots don't. Used to skip the
 /// egress lockdown on the dev-tier builder, where it has no security claim
 /// and would only break networked flake builds. Pure over the cmdline
@@ -312,13 +309,13 @@ pub(crate) fn setup_dev_fd_symlinks(dev_root: &std::path::Path) -> Result<(), St
 }
 
 // ============================================================================
-// Guest-agent fork (Plan 124 B1 / ADR-066 §6 — the universal-agent invariant)
+// Guest-agent fork (the universal-agent invariant)
 // ============================================================================
 //
 // The builder/dev VM bakes `mvm-guest-agent` (mkGuest, via the
 // `entrypoint.shell = "/bin/sh"` → dev-shell build) but PID 1 here never
 // forked it, so vsock port 5252 stayed unbound on builder/dev VMs — only
-// workload VMs ran the agent. B1 makes this init fork the agent under
+// workload VMs ran the agent. This init forks the agent under
 // setpriv exactly as the workload `/init` does (nix/lib/mk-guest.nix), so
 // the *same* agent runs in every VM type. The argv construction + binary
 // resolution are pure (cross-platform-testable); the spawn itself is in
@@ -332,12 +329,12 @@ use std::process::Command;
 /// The uid the guest agent is dropped to via setpriv. The agent is a
 /// long-lived RPC service, not a build step, so it gets its own uid —
 /// distinct from build commands' `BUILDER_UID` (902). Mirrors the
-/// workload `/init` fork in `nix/lib/mk-guest.nix` (ADR-002 W4.5).
+/// workload `/init` fork in `nix/lib/mk-guest.nix`.
 #[cfg(any(target_os = "linux", test))]
 const AGENT_UID: u32 = 990;
 
 /// Candidate paths for the baked `mvm-guest-agent`, in preference order.
-/// The verity runtime overlay (ADR-051), when attached, bind-mounts the
+/// The verity runtime overlay, when attached, bind-mounts the
 /// agent at `/mvm/runtime/agent`; prefer it over the rootfs-baked copy.
 /// Same order the workload `/init` probes.
 #[cfg(any(target_os = "linux", test))]
@@ -362,7 +359,7 @@ fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
 /// uid. Mirrors the workload `/init` invocation in `nix/lib/mk-guest.nix`:
 /// `setpriv --reuid --regid --clear-groups --no-new-privs -- <agent>`. No
 /// `--bounding-set=-all` — unlike a build step the agent keeps the default
-/// bounding set (the reference + ADR-002 W4.5 do not strip it here).
+/// bounding set (we do not strip it here).
 #[cfg(any(target_os = "linux", test))]
 fn agent_spawn_command(agent_bin: &Path) -> Command {
     let mut c = Command::new("setpriv");
@@ -379,7 +376,7 @@ fn agent_spawn_command(agent_bin: &Path) -> Command {
 mod tests {
     use super::*;
 
-    // ── Plan 124 B1: guest-agent fork (universal-agent invariant) ──
+    // ── guest-agent fork (universal-agent invariant) ──
 
     #[test]
     fn agent_spawn_command_mirrors_workload_init_setpriv() {
@@ -401,7 +398,7 @@ mod tests {
 
     #[test]
     fn resolve_agent_binary_prefers_runtime_overlay() {
-        // Both present → the verity overlay path wins (ADR-051).
+        // Both present → the verity overlay path wins.
         let got = resolve_agent_binary(|_| true);
         assert_eq!(got, Some(PathBuf::from("/mvm/runtime/agent")));
     }
@@ -653,8 +650,7 @@ mod linux {
     use crate::boot_timings::BootTimings;
 
     /// Persistent Nix-store device — virtio-blk attached as
-    /// `/dev/vdb` by `LibkrunBuilderVm` (Plan 72 W4 will wire
-    /// the `extra_disks` entry).
+    /// `/dev/vdb` by `LibkrunBuilderVm` via its `extra_disks` entry.
     const NIX_STORE_DEV: &str = "/dev/vdb";
 
     /// Where we mount the persistent store before bind-mounting
@@ -664,7 +660,7 @@ mod linux {
     const NIX_STORE_MOUNT: &str = "/nix-store";
     const NIX_OVERLAY_UPPER: &str = "/nix-store/upper";
     const NIX_OVERLAY_WORK: &str = "/nix-store/work";
-    /// Plan 95 followup — was `/nix-merged` (rootfs root). The rootfs
+    /// Was `/nix-merged` (rootfs root). The rootfs
     /// boots `ro`, so `mkdir /nix-merged` failed with EROFS and the
     /// overlay-mount fell back to seed-copy. `/run` is mounted tmpfs
     /// by `mount_pseudofs` (mvmctl-init Stage 1), so `mkdir` there
@@ -695,7 +691,7 @@ mod linux {
 
     /// Per-job command staging dir (`/job/cmd.sh`, `/job/env`,
     /// `/job/result`). Mounted via virtio-fs from the host
-    /// (`LibkrunBuilderVm` declares the `job` tag — see Plan 72 W4).
+    /// (`LibkrunBuilderVm` declares the `job` tag).
     const JOB_DIR: &str = "/job";
 
     /// Workspace bind from the host — the in-repo flake the user
@@ -709,7 +705,7 @@ mod linux {
     /// out after the VM powers off.
     const OUT_DIR: &str = "/out";
 
-    /// Pre-cross-compiled host-vm binaries (ADR-065). `cmd.sh` exports
+    /// Pre-cross-compiled host-vm binaries. `cmd.sh` exports
     /// `MVM_HOST_BIN_DIR=/mvm-bins` so the builder-vm flake installs
     /// them from here instead of building them with the guest's nix —
     /// the flake eval reads `/mvm-bins/<bin>`, so this must be mounted
@@ -733,20 +729,20 @@ mod linux {
     /// (`krun_set_console_output`).
     const STDERR_TAIL_LINES: usize = 20;
 
-    /// Filename for the structured install spec (Plan 73 Followup
-    /// B.2). When `/job/install_spec.json` is present the init
+    /// Filename for the structured install spec. When
+    /// `/job/install_spec.json` is present the init
     /// binary routes through the app-deps install pipeline instead
     /// of dispatching `/job/cmd.sh`. The two modes are mutually
     /// exclusive — install jobs don't carry a cmd.sh, flake jobs
     /// don't carry an install_spec.json.
     const INSTALL_SPEC_FILENAME: &str = "install_spec.json";
 
-    /// Plan 124 B1 — fork `mvm-guest-agent` under setpriv to the agent
-    /// uid, mirroring the workload `/init` (`nix/lib/mk-guest.nix`). Best
+    /// Fork `mvm-guest-agent` under setpriv to the agent uid,
+    /// mirroring the workload `/init` (`nix/lib/mk-guest.nix`). Best
     /// effort: a missing binary or spawn error logs and returns so PID 1
     /// proceeds to the builder dispatch loop. The agent supervises vsock
     /// RPC on port 5252; without it the host can boot the builder VM but
-    /// can't reach the agent — exactly the pre-B1 state this fixes.
+    /// can't reach the agent.
     fn fork_guest_agent() {
         use std::os::unix::process::CommandExt;
 
@@ -799,8 +795,8 @@ mod linux {
         // The Linux kernel doesn't pass a PATH to PID 1, so without
         // this every `Command::new("iptables")` /
         // `Command::new("modprobe")` style spawn relies on the
-        // child to find its binary — which fails on a stock rootfs
-        // (Plan 86 / ADR-054). Set a canonical PATH that covers the
+        // child to find its binary — which fails on a stock rootfs.
+        // Set a canonical PATH that covers the
         // mvm builder VM rootfs layout (busybox at `/bin/*` + extra
         // packages at `/sbin/*` + `/usr/local/bin/*`) before any
         // spawn site runs. Absolute-path call sites like
@@ -819,7 +815,7 @@ mod linux {
             );
         }
 
-        // Plan 76 Phase 5: anchor the boot-timings clock as close
+        // Anchor the boot-timings clock as close
         // to init entry as we can. The few ms of `eprintln!` +
         // module dispatch above this point are constant across
         // boots and uninteresting.
@@ -843,7 +839,7 @@ mod linux {
             t.pseudofs_ready_ms = Some(BootTimings::ms_since(anchor))
         });
 
-        // Plan 76 Phase 5: three independent setup tracks fan out
+        // Three independent setup tracks fan out
         // after pseudofs. They share no state with each other
         // until join.
         //
@@ -901,28 +897,27 @@ mod linux {
         let _ = track_b.join();
         let _ = track_c.join();
 
-        // In-guest egress lockdown — Plan 73 Followup B.2.y /
-        // ADR-047 defense-in-depth. Installs iptables OUTPUT
-        // default-deny + proxy-uid-only ACCEPT so a build step
-        // that ignores HTTP_PROXY env vars cannot bypass
+        // In-guest egress lockdown — defense-in-depth. Installs
+        // iptables OUTPUT default-deny + proxy-uid-only ACCEPT so a
+        // build step that ignores HTTP_PROXY env vars cannot bypass
         // `mvm-egress-proxy`. FATAL on failure — without these
         // rules the builder VM's egress allowlist is unenforced
-        // and ADR-002's Claim 9 transitive trust onto the
+        // and the egress claim's transitive trust onto the
         // builder VM has no defense layer. (Note: this is
         // installed even when `setup_network()` failed, because
         // the rules don't depend on a working IP address —
         // offline builds still need the policy in place in case
         // a substituter URL is reached via cache rather than
         // network.)
-        // Plan 166 / ADR-072: the QEMU builder is a dev-tier substrate
-        // with NO security claims (outside ADR-002). The egress lockdown
-        // is a Claim 9/10 defense for the prod (libkrun / Firecracker)
-        // builder; on the dev-tier QEMU builder it would only break
-        // networked flake builds — nix can't reach substituters or fetch
-        // flake-input sources under `OUTPUT` DROP, because a flake
-        // `cmd.sh` runs with no proxy (the proxy path is install-pipeline
-        // only). Skip it for `mvm.backend=qemu` so slirp gives nix open
-        // egress; every prod backend stays locked.
+        // The QEMU builder is a dev-tier substrate with NO security
+        // claims. The egress lockdown is an egress-enforcement defense
+        // for the prod (libkrun / Firecracker) builder; on the dev-tier
+        // QEMU builder it would only break networked flake builds — nix
+        // can't reach substituters or fetch flake-input sources under
+        // `OUTPUT` DROP, because a flake `cmd.sh` runs with no proxy (the
+        // proxy path is install-pipeline only). Skip it for
+        // `mvm.backend=qemu` so slirp gives nix open egress; every prod
+        // backend stays locked.
         let qemu_dev_tier = crate::dev_tier_builder_from_cmdline(
             &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
         );
@@ -935,12 +930,12 @@ mod linux {
             &crate::network::SystemIptables,
             crate::network::PROXY_UID,
         ) {
-            // Plan 86: in the Stage 0 / ur-seed bootstrap context the
+            // In the Stage 0 bootstrap context the
             // libkrunfw-bundled kernel ships without netfilter — both
             // `iptables-nft` and `iptables-legacy` bail with "table
             // does not exist" or "protocol not supported" at the first
             // rule install. The egress lockdown is defense-in-depth
-            // for the Plan 73 deps-install pipeline (untrusted code
+            // for the deps-install pipeline (untrusted code
             // running in the steady-state builder VM). Stage 0 only
             // runs flake builds — `nix build` against a pinned
             // `path:/work#…` reference — where Nix's own fixed-output
@@ -964,8 +959,8 @@ mod linux {
             }
         }
 
-        // Plan 124 B1 / ADR-066 §6 — fork the guest agent under setpriv so
-        // the builder/dev VM runs the *same* agent every workload VM does
+        // Fork the guest agent under setpriv so the builder/dev VM runs
+        // the *same* agent every workload VM does
         // (vsock 5252). After the egress lockdown so the agent comes up
         // behind the same egress floor; non-fatal so a missing agent or
         // spawn failure never wedges PID 1 — the builder protocol is the
@@ -973,9 +968,9 @@ mod linux {
         // which also never blocks on the agent).
         fork_guest_agent();
 
-        // Plan 89 W3 part 3 dispatch: if the host staged a
+        // Dispatch: if the host staged a
         // `dispatch.sock.marker` in /job, this VM is persistent
-        // (host-side `LibkrunPersistentHostVm`, W3 part 4).
+        // (host-side `LibkrunPersistentHostVm`).
         // Enter the dispatch loop instead of single-shot. Marker
         // absent (the default) preserves the existing cmd.sh /
         // install_spec flows exactly.
@@ -987,8 +982,7 @@ mod linux {
             });
             // Snapshot the cold-boot timings — the dispatch loop's
             // first response carries this; subsequent responses
-            // see None (per Plan 89's HostVmResponse::Result
-            // semantics).
+            // see None (per the HostVmResponse::Result semantics).
             let cold_boot_timings = match timings.lock() {
                 Ok(t) => Some(t.clone()),
                 Err(_) => {
@@ -1006,7 +1000,7 @@ mod linux {
             return power_off();
         }
 
-        // Plan 73 Followup B.2 dispatch: install jobs hand the init
+        // Install dispatch: install jobs hand the init
         // binary a structured spec rather than a shell script. We
         // probe for the spec first; if absent, fall through to the
         // existing cmd.sh flake-build flow.
@@ -1047,14 +1041,13 @@ mod linux {
             t.job_end_ms = Some(BootTimings::ms_since(anchor))
         });
         write_result(code, &tail);
-        // Plan 89 W2 part 3: best-effort vsock send of the
+        // Best-effort vsock send of the
         // `HostVmResponse::Result` frame the host's
         // `mvm_build::builder_protocol::read_host_vm_response_from_socket`
         // is waiting for. Runs BEFORE write_boot_timings so the
         // timings snapshot we send mirrors what hits the filesystem.
         // Any failure logs and falls through to power_off — the
-        // legacy file-based result path remains authoritative until
-        // the host wires the vsock receive in W2 part 4.
+        // legacy file-based result path remains authoritative.
         let timings_snapshot = match timings.lock() {
             Ok(t) => t.clone(),
             Err(_) => {
@@ -1086,7 +1079,7 @@ mod linux {
         power_off()
     }
 
-    /// Plan 89 W2 part 3 — listen on `AF_VSOCK` port
+    /// Listen on `AF_VSOCK` port
     /// [`BUILDER_DISPATCH_PORT`] and write a single framed
     /// `HostVmResponse::Result` to the first connection that
     /// arrives within `ACCEPT_TIMEOUT_SECS` seconds. Best-effort:
@@ -1102,19 +1095,19 @@ mod linux {
     ///
     /// AF_VSOCK constants are inlined rather than going through
     /// `nix` because the size-budget comment in this crate's
-    /// Cargo.toml (Plan 72 §W3 — ≤ 1.5 MiB) discourages new dep
+    /// Cargo.toml (≤ 1.5 MiB) discourages new dep
     /// features. The pattern mirrors
     /// `crates/mvm-guest/src/bin/mvm-builder-agent.rs` exactly.
     // -----------------------------------------------------------
-    // Plan 89 W2 / W3 — AF_VSOCK helpers
+    // AF_VSOCK helpers
     // -----------------------------------------------------------
     //
-    // Shared between W2 part 3's single-shot send and W3 part 3's
+    // Shared between the single-shot send and the
     // dispatch loop. Inlined FFI rather than `nix` because the
-    // Plan 72 §W3 size budget discourages new dep features; the
+    // 1.5 MiB size budget discourages new dep features; the
     // pattern mirrors `mvm-guest/src/bin/mvm-builder-agent.rs`.
 
-    /// Plan 89 W2 part 2 — must match
+    /// Must match
     /// `mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`. Hardcoded
     /// for size-budget reasons; the
     /// `vsock_send_tests::builder_dispatch_port_literal_is_21471`
@@ -1126,7 +1119,7 @@ mod linux {
     const SO_RCVTIMEO: i32 = 20;
     const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 
-    /// W3 part 3 cap on a single inbound `HostVmRequest` body.
+    /// Cap on a single inbound `HostVmRequest` body.
     /// Matches `mvm_guest::vsock::MAX_FRAME_SIZE` (256 KiB) — the
     /// host's `read_frame` enforces the same bound on its side, so
     /// a body above this size couldn't have been written by a
@@ -1162,7 +1155,7 @@ mod linux {
     /// breadcrumb). `accept_timeout_secs = Some(n)` applies
     /// `SO_RCVTIMEO` so subsequent `accept()` calls bound the wait at
     /// `n`s; `None` means accept blocks until a peer connects. Used
-    /// for both the dispatch port (21471) and the Plan 107 A3
+    /// for both the dispatch port (21471) and the
     /// workload-forward port (21472).
     fn open_vsock_listener_fd(port: u32, accept_timeout_secs: Option<i64>) -> Option<i32> {
         let listen_fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
@@ -1233,7 +1226,7 @@ mod linux {
         unsafe { std::fs::File::from_raw_fd(conn_fd) }
     }
 
-    /// Plan 107 A3 — the workload-vsock forwarder listener. Binds the
+    /// The workload-vsock forwarder listener. Binds the
     /// AF_VSOCK [`crate::workload_proxy::WORKLOAD_FORWARD_PORT`] and
     /// loops accepting outer-host connections, handing each to
     /// [`crate::workload_proxy::handle_forward_conn`] on its own
@@ -1256,7 +1249,7 @@ mod linux {
             "mvm-host-vm-init: forward listener ready on AF_VSOCK port {}",
             crate::workload_proxy::WORKLOAD_FORWARD_PORT
         );
-        // Plan 107 A3.4 — bound concurrent forwarded streams.
+        // Bound concurrent forwarded streams.
         let limiter = crate::workload_proxy::ConnectionLimiter::new(
             crate::workload_proxy::MAX_CONCURRENT_FORWARDS,
         );
@@ -1354,20 +1347,20 @@ mod linux {
     }
 
     // -----------------------------------------------------------
-    // Plan 89 W3 part 3 — persistent-VM dispatch loop
+    // persistent-VM dispatch loop
     // -----------------------------------------------------------
 
-    /// Plan 89 W3 part 3 — dispatch loop entry point. Called from
+    /// Dispatch loop entry point. Called from
     /// `run` when `/job/dispatch.sock.marker` is present (the host
     /// stages the marker when spawning a long-lived
-    /// `LibkrunPersistentHostVm`, W3 part 4). Opens a long-lived
+    /// `LibkrunPersistentHostVm`). Opens a long-lived
     /// AF_VSOCK listener on [`BUILDER_DISPATCH_PORT`], reads one
     /// `HostVmRequest` per accepted connection, dispatches the
     /// inner job, writes back a `HostVmResponse::Result`, and
     /// repeats until a `Shutdown` request triggers a clean exit.
     ///
     /// `cold_boot_timings` carries the BootTimings snapshot taken
-    /// at dispatch-loop entry. Per Plan 89 spec, only the
+    /// at dispatch-loop entry. Only the
     /// supervisor's *first* dispatch in a persistent VM session
     /// gets a populated `boot_timings` field on the wire; subsequent
     /// dispatches see `None`. The first dispatch in this loop
@@ -1380,7 +1373,7 @@ mod linux {
         // blocks waiting for the supervisor's next submit. The
         // outer `mvmctl dev down` signals shutdown via a
         // `HostVmRequest::Shutdown` frame on a fresh connection.
-        // Plan 107 A3 — bring up the workload-vsock forwarder before
+        // Bring up the workload-vsock forwarder before
         // the dispatch loop. It runs for the VM's lifetime on its own
         // AF_VSOCK port, bridging the outer host to each workload's
         // Firecracker v.sock. Failure here is non-fatal: builds still
@@ -1444,7 +1437,7 @@ mod linux {
                     drop(conn);
                     break;
                 }
-                // Plan 107 A2.2 — spawn / stop / query a Firecracker
+                // Spawn / stop / query a Firecracker
                 // workload microVM inside the host VM. All three reply
                 // with a typed frame (incl. the fail-closed
                 // `WorkloadFailed` on error) so the host never has to
@@ -1529,7 +1522,7 @@ mod linux {
         0
     }
 
-    /// Plan 89 W3 part 10 — base dir for per-job scratch
+    /// Base dir for per-job scratch
     /// (`/tmp/<job_id>/`). Lives under the rootfs's existing
     /// tmpfs `/tmp`, which is wiped on every cold boot anyway —
     /// per-job scratch only matters for the persistent VM where
@@ -1543,15 +1536,15 @@ mod linux {
         format!("{base}/{job_id}")
     }
 
-    /// Plan 89 W3 part 10 — RAII wrapper that creates
+    /// RAII wrapper that creates
     /// `/tmp/<job_id>/` on construction and best-effort removes
     /// it on Drop. Defers to `job_scratch_path` so tests can
     /// substitute the base dir.
     ///
     /// Cleanup is "best effort" because the leftover scratch dir
     /// is not security-load-bearing on its own — the persistent
-    /// VM also wipes `/tmp` on cold restart (it's tmpfs), and the
-    /// follow-up parts add `unshare --mount` so the bind-mounts
+    /// VM also wipes `/tmp` on cold restart (it's tmpfs), and
+    /// `unshare --mount` makes the bind-mounts
     /// inside the scratch dir tear down with the mount namespace.
     /// If `remove_dir_all` fails (e.g. orphan child still holds a
     /// file open), log the error and continue — the next dispatch
@@ -1564,9 +1557,9 @@ mod linux {
         /// Create the per-job scratch dir under `base` (typically
         /// [`JOB_SCRATCH_BASE`]) with mode 0700. If `owner_uid` /
         /// `owner_gid` are provided, `chown` the dir to them so a
-        /// downstream uid-drop (Plan 89 W3 part 13) can still
+        /// downstream uid-drop can still
         /// write into it. The dispatch loop passes `Some((902,
-        /// 902))` after part 13; tests pass `None` to keep their
+        /// 902))`; tests pass `None` to keep their
         /// own uid as the owner.
         fn create(base: &str, job_id: &str, chown_to: Option<(u32, u32)>) -> std::io::Result<Self> {
             use std::os::unix::fs::PermissionsExt;
@@ -1617,7 +1610,7 @@ mod linux {
     /// `conn` is the same vsock connection the request arrived on;
     /// streaming chunks and the terminal Result frame share it so
     /// the host correlates everything by conn identity, not by job
-    /// id alone (Plan 89 W3 part 9).
+    /// id alone.
     fn execute_dispatched_job(
         conn: &mut std::fs::File,
         job_id: String,
@@ -1625,7 +1618,7 @@ mod linux {
         job_dir_relpath: &str,
         cold_boot_timings: Option<BootTimings>,
     ) -> String {
-        // Plan 89 W3 part 12 — flush + re-install the egress
+        // Flush + re-install the egress
         // lockdown before every dispatch. A previous build that
         // mutated iptables (whether via a CAP_NET_ADMIN leak or
         // because we haven't shipped the cap drop yet) loses its
@@ -1653,7 +1646,7 @@ mod linux {
                 if !Path::new(&cmd_path).exists() {
                     (2, format!("missing {cmd_path}"), 0)
                 } else {
-                    // Plan 89 W3 part 10 — per-job scratch dir
+                    // Per-job scratch dir
                     // at `/tmp/<job_id>/`. Pointed at by TMPDIR so
                     // every tool that honors it (mkstemp, nix
                     // evaluator, Python tempfile) writes there
@@ -1666,8 +1659,8 @@ mod linux {
                     // the stderr tail — the build is still
                     // useful, just without per-job tempfile
                     // isolation.
-                    // Chown to the builder uid (Plan 89 W3 part
-                    // 13) so the dispatched cmd.sh — which runs
+                    // Chown to the builder uid so the dispatched
+                    // cmd.sh — which runs
                     // under `setpriv --reuid=BUILDER_UID
                     // --regid=BUILDER_GID` via
                     // `Isolation::Unshared` — can write into the
@@ -1720,7 +1713,7 @@ mod linux {
                 }
             }
             crate::builder_request::BuilderJob::Install { spec_path } => {
-                // Plan 89 W3 part 8: route Install dispatches
+                // Route Install dispatches
                 // through the existing single-shot pipeline with
                 // per-dispatch paths. The host (PersistentBuilderVm)
                 // stages `<session.job_dir>/<job_id>/install_spec.json`
@@ -1767,7 +1760,7 @@ mod linux {
 
     #[cfg(test)]
     mod vsock_send_tests {
-        // Plan 89 W2 part 3 — the in-binary BUILDER_DISPATCH_PORT
+        // The in-binary BUILDER_DISPATCH_PORT
         // const above must stay in sync with
         // mvm_guest::builder_agent::BUILDER_DISPATCH_PORT (the
         // canonical definition the host side uses). We can't `use`
@@ -1834,7 +1827,7 @@ mod linux {
         run_install_job_at(spec_path, JOB_DIR, OUT_DIR);
     }
 
-    /// Plan 89 W3 part 8 — install dispatch with explicit
+    /// Install dispatch with explicit
     /// `job_dir` and `out_dir`. Single-shot uses the legacy
     /// `JOB_DIR` / `OUT_DIR` constants; persistent dispatch
     /// passes the per-dispatch `/job/<job_id>` paths so concurrent
@@ -1842,8 +1835,7 @@ mod linux {
     /// serialized so the clobber risk is theoretical, but the
     /// per-dispatch layout removes the question entirely and
     /// matches the persistent flake path's
-    /// `<session.job_dir>/<job_id>/out/` convention from W3
-    /// part 6/7).
+    /// `<session.job_dir>/<job_id>/out/` convention).
     fn run_install_job_at(spec_path: &str, job_dir: &str, out_dir: &str) {
         use crate::install::{
             InstallContext, InstallError, RESULT_FILENAME, SystemCommandRunner, run_install,
@@ -1881,7 +1873,7 @@ mod linux {
         }
 
         let runner = SystemCommandRunner;
-        // Plan 73 Followup B.2.x: the production proxy lifecycle
+        // The production proxy lifecycle
         // spawns `mvm-egress-proxy` from PATH. The builder VM
         // flake installs the binary at `/sbin/mvm-egress-proxy`
         // (alongside `/sbin/mvm-host-vm-init`), which is on the
@@ -1916,8 +1908,8 @@ mod linux {
         };
 
         // Write the typed report into out_dir — the host reads it
-        // from `<out_dir>/result.json` post-power-off. Plan 73
-        // Followup B.2's contract: result.json lives next to the
+        // from `<out_dir>/result.json` post-power-off.
+        // result.json lives next to the
         // four sealed-volume artifacts so a single virtio-fs
         // share carries everything the host needs. Hand-rolled
         // JSON via InstallReport::to_json so we don't pull
@@ -1934,7 +1926,7 @@ mod linux {
     /// [`crate::install::InstallReport::to_json`] so the host's
     /// parser doesn't need a separate code path. Single-shot uses
     /// `OUT_DIR`; persistent dispatch passes the per-dispatch
-    /// `/job/<job_id>/out` (Plan 89 W3 part 8).
+    /// `/job/<job_id>/out`.
     fn write_install_failure_at(out_dir: &str, exit_code: i32, reason: &str) {
         use crate::install::{
             CONTENT_SUBDIR, CVE_FILENAME, FETCH_LOG_FILENAME, RESULT_FILENAME, SBOM_FILENAME,
@@ -1961,11 +1953,7 @@ mod linux {
         }
     }
 
-    /// Plan 76 Phase 5: the first phase, on the critical path for
-    /// every other init step. /proc, /sys, /dev, /tmp must be
-    /// available before module loading, device probing, or virtio-fs
-    /// mounting; nothing else fans out concurrently with this.
-    /// Plan 86 — detect the "kernel ships without netfilter / iptables
+    /// Detect the "kernel ships without netfilter / iptables
     /// tables" error pattern. Matches both the iptables-nft Protocol
     /// not supported and the iptables-legacy "Table does not exist /
     /// do you need to insmod?" surfaces. A future netlink-based check
@@ -1993,7 +1981,7 @@ mod linux {
         // "Read-only file system" at the first `iptables -A` call.
         // mkGuest's /init does the equivalent for the dev image's
         // boot path; we replicate it here for the mvm-host-vm-init
-        // path (Plan 86).
+        // path.
         mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
         // `/dev/shm` (tmpfs) is required by libfaketime's `sem_open`:
         // `make-ext4-fs.nix` runs `mkfs.ext4` under faketime for
@@ -2008,7 +1996,7 @@ mod linux {
         // requires devpts to be mounted at `/dev/pts`. Without it
         // nix bails with `error: opening pseudoterminal master:
         // No such file or directory`. The dev image flake's
-        // mkGuest /init mounts this; we replicate for Plan 86.
+        // mkGuest /init mounts this; we replicate it here.
         let _ = std::fs::create_dir_all("/dev/pts");
         mount_fs_idempotent("devpts", "/dev/pts", "devpts")?;
         // `/dev/fd → /proc/self/fd` is what bash process substitution
@@ -2026,7 +2014,7 @@ mod linux {
         Ok(())
     }
 
-    /// Plan 76 Phase 5: serial chain that gates job execution.
+    /// Serial chain that gates job execution.
     /// /dev/vdb format (first boot only) → mount → overlay-mount
     /// rootfs `/nix` with persistent upper/work dirs → bind-mount
     /// over /nix. Each step depends on the previous, so this stays
@@ -2043,7 +2031,7 @@ mod linux {
             t.nix_device_ready_ms = Some(BootTimings::ms_since(anchor))
         });
 
-        // Plan 92: the slim custom kernel under
+        // The slim custom kernel under
         // `nix/images/builder-vm/kernel/` builds overlay, vsock,
         // fuse, virtiofs, and the iptables tables as `=y`. No
         // modprobe needed before `mount -t overlay` or `socket(AF_VSOCK)`
@@ -2065,7 +2053,7 @@ mod linux {
             t.nix_mounted_ms = Some(BootTimings::ms_since(anchor))
         });
 
-        // PR #420 follow-up: load `/nix-path-registration` (the
+        // Load `/nix-path-registration` (the
         // standard `make-ext4-fs.nix` manifest) into the persistent
         // `/nix/var/nix/db` so the in-VM `nix build` knows the
         // seeded closure is already valid. Without this, nix-daemon
@@ -2083,7 +2071,7 @@ mod linux {
         Ok(())
     }
 
-    /// Plan 76 Phase 5: independent track that runs concurrently
+    /// Independent track that runs concurrently
     /// with `setup_nix_store`. Loads the `fuse` + `virtiofs`
     /// kernel modules (themselves fanned out across two threads),
     /// then mounts the three virtio-fs shares.
@@ -2091,13 +2079,13 @@ mod linux {
         // Load FUSE + virtio-fs kernel modules before mounting the
         // host-exported shares. Stock nixpkgs kernel ships these as
         // `=m` (loadable modules); without modprobe, `mount -t
-        // virtiofs` bails with ENODEV. `mkGuest` (PR #215) stages
+        // virtiofs` bails with ENODEV. `mkGuest` stages
         // `/lib/modules/<kver>/` into the rootfs precisely so we can
         // load them at boot. Failure is non-fatal — the subsequent
         // mount attempts will fail visibly if a module is genuinely
         // missing rather than just not-yet-loaded.
         //
-        // Plan 76 Phase 5: the two modprobes fan out across a pair
+        // The two modprobes fan out across a pair
         // of threads. modprobe is mostly I/O-bound (open + read the
         // module file, run the insmod ioctl); running them
         // concurrently halves the wall-clock cost on slower disks.
@@ -2109,8 +2097,8 @@ mod linux {
             t.modules_ready_ms = Some(BootTimings::ms_since(anchor))
         });
 
-        // virtio-fs shares declared by `LibkrunBuilderVm` (Plan 72
-        // W4). Each entry is `(tag, target)` — the kernel routes
+        // virtio-fs shares declared by `LibkrunBuilderVm`.
+        // Each entry is `(tag, target)` — the kernel routes
         // `mount -t virtiofs <tag> <target>` to the daemon libkrun
         // spawned for that share. Mounting is best-effort per
         // share: if the host omitted one (e.g. an offline build
@@ -2195,12 +2183,12 @@ mod linux {
     }
 
     fn setup_network() -> Result<(), String> {
-        // Plan 87 W4: seed /run/resolv.conf from the fallback before
+        // Seed /run/resolv.conf from the fallback before
         // udhcpc runs. /etc/resolv.conf is a symlink into /run, so
         // libc resolvers have a usable nameserver list from boot 1
         // even if DHCP fails (TSI mode, or passt mid-handoff).
         // Failure here is non-fatal — the symlink might not exist
-        // on a guest built before Plan 87, in which case udhcpc's
+        // on an older guest, in which case udhcpc's
         // own write to /etc/resolv.conf (if -s is set) is the
         // only path.
         let fallback = std::path::Path::new("/etc/resolv.conf.fallback");
@@ -2233,8 +2221,8 @@ mod linux {
             );
         }
 
-        // Plan 87 W4: when /etc/udhcpc/default.script exists (passt
-        // path / ur-seed-built rootfs), use it so the DHCP lease
+        // When /etc/udhcpc/default.script exists (passt
+        // path), use it so the DHCP lease
         // writes /run/resolv.conf with the leased DNS. Older rootfs
         // builds without the script keep the legacy `-i eth0 -n -q`
         // shape — udhcpc still sets the IP but resolv.conf stays at
@@ -2242,11 +2230,10 @@ mod linux {
         //
         // `/bin/udhcpc` — udhcpc is a busybox applet, and mkGuest
         // installs busybox applet symlinks under `/bin/<applet>`,
-        // not `/sbin/`. (Plan 96 / PR #420 follow-up: prior
-        // `/sbin/udhcpc` hardcoding ENOENTed at every boot, which
-        // `setup_network` swallowed as non-fatal — leaving the
-        // builder VM with no DHCP-assigned IP and the inner nix
-        // build unable to reach `cache.nixos.org`.)
+        // not `/sbin/`. (Prior `/sbin/udhcpc` hardcoding ENOENTed at
+        // every boot, which `setup_network` swallowed as non-fatal —
+        // leaving the builder VM with no DHCP-assigned IP and the
+        // inner nix build unable to reach `cache.nixos.org`.)
         let script = "/etc/udhcpc/default.script";
         let mut cmd = Command::new("/bin/udhcpc");
         cmd.args(["-i", "eth0", "-n", "-q"]);
@@ -2354,14 +2341,14 @@ mod linux {
         // unshare wrapping (the VM tear-down already kills any
         // orphan process and reclaims every IPC key + mount). The
         // whole stderr tail still lands in `/job/result` and the
-        // host's file-based fallback parses it. Plan 89 W3 part 9
-        // added the streaming variant for the persistent dispatch
+        // host's file-based fallback parses it. The streaming variant
+        // serves the persistent dispatch
         // loop; this single-shot wrapper passes a no-op so the
         // two code paths share their `Command`/`wait` logic.
         run_job_streaming(cmd_sh, None, Isolation::Inherit, |_line| {})
     }
 
-    /// Plan 89 W3 part 11 — how the build subprocess relates to
+    /// How the build subprocess relates to
     /// the dispatch loop's process / mount / IPC namespaces.
     ///
     /// - [`Isolation::Inherit`]: subprocess runs in the dispatch
@@ -2372,8 +2359,8 @@ mod linux {
     /// - [`Isolation::Unshared`]: subprocess runs in fresh mount
     ///   + pid + ipc namespaces via `unshare --mount --pid --ipc
     ///   --fork`, then drops to the unprivileged builder uid via
-    ///   `setpriv --reuid --regid --clear-groups` (Plan 89 W3
-    ///   part 13). The pid namespace turns orphan-cleanup into a
+    ///   `setpriv --reuid --regid --clear-groups`. The pid
+    ///   namespace turns orphan-cleanup into a
     ///   single namespace-exit; the mount namespace lets future
     ///   parts bind-mount `/dev/shm` etc. per-job without bleeding
     ///   state into the shared rootfs; the IPC namespace prevents
@@ -2383,18 +2370,18 @@ mod linux {
     ///   privileges the dispatch loop has as PID 1.
     ///
     /// Network namespace is intentionally *not* unshared — the
-    /// per-VM iptables baseline (Plan 73 Followup B.2.y) already
+    /// per-VM iptables baseline already
     /// gates egress through the proxy, and the build needs the
-    /// proxy reachable. W3 part 12 re-applies that baseline per
-    /// dispatch, which closes the F7 finding without breaking
-    /// proxy access.
+    /// proxy reachable. That baseline is re-applied per
+    /// dispatch, so a build can't leave the chain in a state we no
+    /// longer trust without breaking proxy access.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Isolation {
         Inherit,
         Unshared,
     }
 
-    /// Plan 89 W3 part 13 — unprivileged uid the dispatched build
+    /// Unprivileged uid the dispatched build
     /// runs as inside the persistent VM. Picked above the
     /// `mvm-agent` (1900) / `mvm-worker` (1000) / `mvm-egress-
     /// proxy` (1801) uids the rest of the rootfs reserves so the
@@ -2409,7 +2396,7 @@ mod linux {
     const BUILDER_UID: u32 = 902;
     const BUILDER_GID: u32 = 902;
 
-    /// Plan 89 W3 part 13 — assemble the `Command` for one
+    /// Assemble the `Command` for one
     /// dispatched job per the requested isolation. Split out from
     /// [`run_job_streaming`] so the argv shape is testable
     /// without spawning (the spawn integration test in
@@ -2466,7 +2453,7 @@ mod linux {
         }
     }
 
-    /// Plan 89 W3 part 9 — same as [`run_job`] but invokes
+    /// Same as [`run_job`] but invokes
     /// `on_line` for each stderr line as it arrives. Used by the
     /// persistent dispatch loop to frame each line as a
     /// `HostVmResponse::StderrChunk` and write it to the active
@@ -2490,7 +2477,7 @@ mod linux {
         use std::collections::VecDeque;
         use std::io::{BufRead, BufReader};
         use std::process::Stdio;
-        // Plan 89 W3 part 11/13 — switch between bare `/bin/sh
+        // Switch between bare `/bin/sh
         // -eu <cmd>` and the unshare+setpriv wrapped form via
         // [`build_isolated_command`]. unshare + setpriv both
         // live in `util-linux`, which is in the builder VM's
@@ -2498,7 +2485,7 @@ mod linux {
         // PATH (`/sbin:/usr/sbin:/bin:/usr/bin`) finds them.
         let mut cmd = build_isolated_command(cmd_sh, isolation);
         cmd.stdout(Stdio::inherit()).stderr(Stdio::piped());
-        // Plan 89 W3 part 10 — point the dispatched build's
+        // Point the dispatched build's
         // tmpfile machinery at the per-job scratch dir so leftover
         // tempfiles can't outlive the dispatch. Tools that honor
         // TMPDIR (mkstemp, Python's `tempfile`, Nix's evaluator,
@@ -3021,7 +3008,7 @@ mod linux {
             assert!(err.contains(&over), "err includes the offending name");
         }
 
-        /// Plan 89 W3 part 9 — `run_job_streaming` calls the
+        /// `run_job_streaming` calls the
         /// per-line callback once per stderr line, in order, and
         /// returns the same `(exit_code, tail)` shape as the
         /// single-shot `run_job` for the success case.
@@ -3051,7 +3038,7 @@ mod linux {
             assert_eq!(tail, "one\ntwo\nthree");
         }
 
-        /// Plan 89 W3 part 9 — non-zero exit still surfaces all
+        /// Non-zero exit still surfaces all
         /// streamed lines and a tail bounded by `STDERR_TAIL_LINES`.
         #[test]
         fn run_job_streaming_caps_tail_to_stderr_tail_lines() {
@@ -3086,7 +3073,7 @@ mod linux {
             assert_eq!(*tail_lines.last().unwrap(), &format!("line{total}"));
         }
 
-        /// Plan 89 W3 part 9 — single-shot `run_job` keeps its
+        /// Single-shot `run_job` keeps its
         /// pre-streaming semantics: returns the tail without any
         /// per-line side effect (the streaming variant's callback
         /// is `|_| {}`).
@@ -3100,7 +3087,7 @@ mod linux {
             assert_eq!(tail, "hi");
         }
 
-        /// Plan 89 W3 part 10 — `JobScratch::create` builds
+        /// `JobScratch::create` builds
         /// `<base>/<job_id>` with mode 0700 and `Drop` wipes it.
         /// We parameterize on a tempdir base so the test doesn't
         /// touch the host's real `/tmp`.
@@ -3125,7 +3112,7 @@ mod linux {
             assert!(!expected.exists(), "Drop removed scratch dir");
         }
 
-        /// Plan 89 W3 part 10 — Drop still removes the dir even
+        /// Drop still removes the dir even
         /// if it has files inside (the build leaves tempfiles
         /// behind). Catches the `remove_dir_all` vs `remove_dir`
         /// difference.
@@ -3144,7 +3131,7 @@ mod linux {
             assert!(!expected.exists(), "Drop wiped nested contents");
         }
 
-        /// Plan 89 W3 part 10 — `run_job_streaming` honors the
+        /// `run_job_streaming` honors the
         /// TMPDIR override. cmd.sh echoes the var so we can
         /// assert the build subprocess saw it.
         #[test]
@@ -3165,7 +3152,7 @@ mod linux {
             assert_eq!(tail, "tmpdir=/scratch/abc");
         }
 
-        /// Plan 89 W3 part 10 — when `tmpdir` is `None` the
+        /// When `tmpdir` is `None` the
         /// subprocess inherits whatever TMPDIR the dispatch loop
         /// already had (typically unset inside PID 1). We assert
         /// the env var is *not* explicitly forced to a value the
@@ -3204,7 +3191,7 @@ mod linux {
             assert_eq!(tail, "tmpdir=/inherited-from-parent");
         }
 
-        /// Plan 89 W3 part 11 — `Isolation::Unshared` mode wraps
+        /// `Isolation::Unshared` mode wraps
         /// the build subprocess in `unshare --mount --pid --ipc
         /// --fork`. The cmd.sh reads `/proc/self/status` and
         /// looks for `NSpid:` — under a fresh pid namespace, the
@@ -3247,8 +3234,8 @@ mod linux {
                 &cmd_path,
                 // Print one line per fact so the assertions can
                 // match exact substrings rather than parse a
-                // pipe-separated record. Plan 89 W3 part 13
-                // added the uid check.
+                // pipe-separated record. The uid check guards the
+                // setpriv drop below.
                 "awk '/^NSpid:/ {print \"inner_pid=\" $NF; next} \
                        /^Uid:/ {print \"uid=\" $2; next}' \
                        /proc/self/status >&2\nexit 0\n",
@@ -3268,7 +3255,7 @@ mod linux {
                 tail.contains("inner_pid=1") || tail.contains("inner_pid=2"),
                 "unshare did not produce a fresh pid namespace; tail={tail}"
             );
-            // Plan 89 W3 part 13 — the setpriv layer drops the
+            // The setpriv layer drops the
             // build to BUILDER_UID. The probe succeeded only if
             // the runner has CAP_SETUID (which comes with
             // CAP_SYS_ADMIN), so setpriv must succeed too.
@@ -3278,7 +3265,7 @@ mod linux {
             );
         }
 
-        /// Plan 89 W3 part 13 — pure argv-shape test for the
+        /// Pure argv-shape test for the
         /// wiring around `build_isolated_command`. Runs on every
         /// host (no spawn, no caps required) so an accidental
         /// reorder of unshare/setpriv flags trips here even when
@@ -3315,7 +3302,7 @@ mod linux {
             assert_eq!(&args[10..], &["/bin/sh", "-eu", "/job/cmd.sh"]);
         }
 
-        /// Plan 89 W3 part 13 — `JobScratch::create` accepts a
+        /// `JobScratch::create` accepts a
         /// `chown_to` arg; passing the current uid/gid is a
         /// no-op chown that any user can perform, so we can pin
         /// the wiring without needing root in CI. The actual

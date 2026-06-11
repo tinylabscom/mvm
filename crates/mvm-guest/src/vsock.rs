@@ -19,11 +19,11 @@ pub const GUEST_CID: u32 = 3;
 ///
 /// **Why 5252 (and why not <1024).** Linux gates `bind(2)` on AF_VSOCK
 /// ports ≤ 1023 behind `CAP_NET_BIND_SERVICE` — the same way it gates
-/// AF_INET. The agent runs as uid 901 with `--bounding-set=-all`
-/// (ADR-002 §W4.5), so it has no caps to spend on a privileged port.
+/// AF_INET. The agent runs as uid 901 with `--bounding-set=-all`,
+/// so it has no caps to spend on a privileged port.
 /// Any port < 1024 would force us to either grant the agent
-/// `CAP_NET_BIND_SERVICE` (weakening W4.5 to work around port choice)
-/// or bind in init and pass the fd in (extra surface for no
+/// `CAP_NET_BIND_SERVICE` (weakening the no-caps posture to work around
+/// port choice) or bind in init and pass the fd in (extra surface for no
 /// architectural benefit). Port 52 was picked when the agent ran as
 /// root and the codebase incorrectly assumed vsock binds were
 /// unprivileged on Linux — see the corrected comment in
@@ -32,7 +32,7 @@ pub const GUEST_CID: u32 = 3;
 /// 5252 sits clearly above 1023 and below the port-forward range
 /// (`PORT_FORWARD_BASE` = 10_000) and the console-data range
 /// (`CONSOLE_PORT_BASE` = 20_000), so the host-side proxy allowlist
-/// (ADR-002 §W1.3) keeps its disjoint-union shape. The "52" tail is a
+/// keeps its disjoint-union shape. The "52" tail is a
 /// callback to the historical port for grep-ability.
 ///
 /// **Single source of truth.** `mvm-apple-container` and
@@ -44,14 +44,14 @@ pub const GUEST_AGENT_PORT: u32 = 5252;
 /// Control vsock port the guest's `/init` connects to (host side) to
 /// report a one-shot workload's exit code before `poweroff -f`. The host
 /// supervisor binds the listener (`add_vsock_port2(listen=false)`). Wire
-/// format: a single 4-byte little-endian `i32`. Plan 152 WS-A.
+/// format: a single 4-byte little-endian `i32`.
 pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 
-/// vsock port the host substitution endpoint (Plan 129 / ADR-067 §1) is exposed
+/// vsock port the host substitution endpoint is exposed
 /// on. The in-guest forward proxy connects here; the host bin maps it to the
 /// UDS where `SubstitutionService` listens. Distinct from the removed 5300/5301
-/// secrets channel (ADR-062). NOTE: exposing this port end-to-end needs the
-/// host-side proxy port-allowlist (W1.3) to admit it — part of the bin glue.
+/// secrets channel. NOTE: exposing this port end-to-end needs the
+/// host-side proxy port-allowlist to admit it — part of the bin glue.
 pub const SUBSTITUTION_PORT: u32 = 5253;
 
 /// Base vsock port for TCP port forwarding.
@@ -84,8 +84,8 @@ const CONNECT_RETRIES: u32 = 3;
 /// Delay between CONNECT handshake retries.
 const CONNECT_RETRY_DELAY_MS: u64 = 500;
 
-/// Base delay for the adaptive readiness-poll backoff (Plan 93 Phase 2
-/// Lever 2). The first poll after a failed attempt waits this long.
+/// Base delay for the adaptive readiness-poll backoff. The first poll
+/// after a failed attempt waits this long.
 const ADAPTIVE_BACKOFF_BASE_MS: u64 = 20;
 
 /// Cap for the adaptive readiness-poll backoff — the historical fixed
@@ -93,8 +93,8 @@ const ADAPTIVE_BACKOFF_BASE_MS: u64 = 20;
 /// this ceiling so a slow guest still polls at the old steady cadence.
 const ADAPTIVE_BACKOFF_CAP_MS: u64 = 500;
 
-/// Adaptive backoff delay for the `mvmctl up` readiness poll
-/// (Plan 93 Phase 2 Lever 2). `attempt` is 0-based: attempt 0 waits the
+/// Adaptive backoff delay for the `mvmctl up` readiness poll.
+/// `attempt` is 0-based: attempt 0 waits the
 /// base, each subsequent attempt doubles, capped at
 /// [`ADAPTIVE_BACKOFF_CAP_MS`]. This replaces a fixed 500 ms sleep that
 /// cost up to ~480 ms of dead time after a fast-binding guest was
@@ -115,8 +115,8 @@ pub fn adaptive_backoff(attempt: u32) -> Duration {
 
 /// Request sent from host to guest vsock agent.
 ///
-/// `#[serde(deny_unknown_fields)]` is load-bearing: ADR-002 §W4.1
-/// requires the guest agent to refuse frames whose JSON contains
+/// `#[serde(deny_unknown_fields)]` is load-bearing: the guest agent
+/// must refuse frames whose JSON contains
 /// fields the deserializer doesn't recognise, on the principle that
 /// silent acceptance of unknown fields is a deserialization-bug
 /// gadget waiting to happen. Today every variant is a struct or
@@ -126,8 +126,7 @@ pub fn adaptive_backoff(attempt: u32) -> Duration {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestRequest {
     /// Negotiate guest-agent protocol compatibility and capabilities
-    /// before dispatching capability-dependent requests. ADR-053 /
-    /// plan 74 W1.
+    /// before dispatching capability-dependent requests.
     ProtocolHello {
         host_protocol_version: u32,
         min_supported_version: u32,
@@ -160,7 +159,7 @@ pub enum GuestRequest {
         timeout_secs: Option<u64>,
     },
     /// Run the image's baked entrypoint program with the given stdin
-    /// piped in and stdout/stderr captured. ADR-007 / plan 41 W1.
+    /// piped in and stdout/stderr captured.
     ///
     /// This is the production-safe call surface. The agent reads the
     /// entrypoint path from `/etc/mvm/entrypoint` at boot, validates
@@ -175,7 +174,7 @@ pub enum GuestRequest {
     /// `Stderr` chunk + a terminal event (buffered up to caps); v2
     /// may chunk progressively without changing the wire shape.
     ///
-    /// Caps and timeouts are enforced agent-side (W2). The wire
+    /// Caps and timeouts are enforced agent-side. The wire
     /// frame size is bounded by `MAX_FRAME_SIZE`.
     RunEntrypoint {
         /// Bytes piped to the wrapper's stdin.
@@ -185,7 +184,7 @@ pub enum GuestRequest {
         /// `EntrypointEvent::Error { kind: Timeout }`.
         timeout_secs: u64,
         /// Env vars injected into the workload after `env_clear()`
-        /// (Plan 129: `HTTP_PROXY` + secret placeholder vars). Empty for
+        /// (`HTTP_PROXY` + secret placeholder vars). Empty for
         /// a plain call; omitted on the wire defaults to empty.
         #[serde(default)]
         env: Vec<(String, String)>,
@@ -212,13 +211,13 @@ pub enum GuestRequest {
     },
     /// Query whether the agent's boot-time entrypoint validation
     /// succeeded. Used by `mvmctl doctor` to confirm a running guest
-    /// can actually serve `RunEntrypoint`. ADR-007 / plan 41 W5.
+    /// can actually serve `RunEntrypoint`.
     /// Prod-safe — reveals no secrets, takes no inputs.
     EntrypointStatus,
 
     /// Query structured readiness across every guest subsystem
     /// (control plane, entrypoint, warm pool, integrations, probes,
-    /// volumes) plus per-phase boot timings. Plan 76 Phase 2.
+    /// volumes) plus per-phase boot timings.
     ///
     /// Prod-safe — the response carries no secrets and reveals only
     /// state the host already chose to provision (via image config /
@@ -233,10 +232,10 @@ pub enum GuestRequest {
     ReadinessStatus,
 
     // ========================================================================
-    // Filesystem RPC (W1 / A1 of the filesystem-volumes plan).
+    // Filesystem RPC.
     //
     // Production-safe (unlike `Exec`): every verb is constrained by
-    // the agent's uid 901 + W2 read-only bind mounts + the
+    // the agent's uid 901 + read-only bind mounts + the
     // `mvm-security::policy::path` deny-list. Extending the
     // `prod-agent-runentry-contract` CI lane to assert handler
     // symbols PRESENT in prod builds is part of the per-verb landing.
@@ -314,7 +313,7 @@ pub enum GuestRequest {
     },
 
     // ========================================================================
-    // Process control RPC (W1 / A2 of the filesystem-volumes plan).
+    // Process control RPC.
     //
     // **Dev-only.** These verbs are the closest analog to the
     // established sandbox-runtime
@@ -329,7 +328,7 @@ pub enum GuestRequest {
     // `crate::process_rpc`, gated behind the `dev-shell` feature —
     // which means the function symbols are absent from prod builds.
     // The combined `prod-agent-runentry-contract` CI gate asserts
-    // this symbol contract per ADR-002 §W4.3 + ADR-007 §W5.
+    // this symbol contract.
     //
     // Distinct from `Exec` (single-shot, blocking) and from
     // `RunEntrypoint` (production-safe baked program). Process
@@ -342,7 +341,7 @@ pub enum GuestRequest {
     /// caller can never address a process it didn't start.
     ///
     /// Children spawned this way inherit the agent's bounding-set
-    /// (`--bounding-set=-all --no-new-privs` per ADR-002 §W4.5);
+    /// (`--bounding-set=-all --no-new-privs`);
     /// the handler additionally `process_group(0)`s and sets
     /// `RLIMIT_CORE=0` to avoid coredump exfil. argv is validated
     /// against an allowlist before exec.
@@ -397,7 +396,7 @@ pub enum GuestRequest {
     ProcKill { pid_token: String },
 
     // ========================================================================
-    // virtio-fs share mount control (W1 / D of the filesystem-volumes plan).
+    // virtio-fs share mount control.
     //
     // The host launches a `virtiofsd` process exposing a host
     // directory under a virtio-fs `tag`; the agent then runs the
@@ -410,9 +409,9 @@ pub enum GuestRequest {
     /// Mount a virtio-fs volume inside the guest. The host has
     /// already attached the device and the agent only needs to
     /// run the in-guest mount(2) call. `volume_name` is the
-    /// virtio-fs tag string the device was created with — named
-    /// per plan 45 to align with the `Volume` wire type.
-    /// (Replaces the former `MountShare` per plan 45 §D5.)
+    /// virtio-fs tag string the device was created with — named to
+    /// align with the `Volume` wire type.
+    /// (Replaces the former `MountShare`.)
     MountVolume {
         volume_name: String,
         guest_path: String,
@@ -421,7 +420,7 @@ pub enum GuestRequest {
     /// Unmount a previously-mounted volume. `force = false`
     /// returns `EBUSY` when the kernel reports active fds; the
     /// caller passes `force = true` to demand a lazy detach.
-    /// (Replaces the former `UnmountShare` per plan 45 §D5.)
+    /// (Replaces the former `UnmountShare`.)
     UnmountVolume { guest_path: String, force: bool },
 
     /// Update the warm-process pool's idle-recycle timeout. Workers
@@ -453,7 +452,7 @@ pub enum GuestRequest {
     ///
     /// **v1 is stateless** — each call spawns a fresh interpreter
     /// process, so `from foo import bar` in call 1 isn't visible in
-    /// call 2. A future v2 (Plan-0010 §run-code Choice A) routes
+    /// call 2. A future v2 routes
     /// through the warm-process pool's wrapper for stateful eval
     /// across calls; the wire shape stays identical, the dispatch
     /// flips inside the agent.
@@ -467,10 +466,9 @@ impl GuestRequest {
     /// Stable kebab-case verb name for this request — the value
     /// host-side audit emitters write into the
     /// `LocalAuditKind::NetworkPolicyAllow` detail format under
-    /// `verb=<name>`. Plan 51 W6 / Plan 37 §6 invariant: every
-    /// vsock RPC from host to guest emits one audit record so a
-    /// forensic pass can reconstruct what the host asked the
-    /// guest to do.
+    /// `verb=<name>`. Invariant: every vsock RPC from host to guest
+    /// emits one audit record so a forensic pass can reconstruct
+    /// what the host asked the guest to do.
     ///
     /// The strings are wire-stable — a rename here is also a
     /// detail-format wire-format change. Pinned by
@@ -524,7 +522,7 @@ fn default_true() -> bool {
 }
 
 // ============================================================================
-// Readiness model (plan 76 Phase 2)
+// Readiness model
 // ============================================================================
 
 /// State of a single guest subsystem during boot.
@@ -565,11 +563,11 @@ pub enum ComponentState {
 /// Per-phase monotonic boot timings in milliseconds since the agent
 /// process started.
 ///
-/// Plan 76 Phase 4 fills in the full per-phase set. Phase 2 wires
 /// `agent_started_ms`, `vsock_bound_ms`, `first_accept_ms`, and
-/// `entrypoint_ready_ms` so callers can already display the cold-path
-/// timing breakdown. Fields populated by Phase 4 (`warm_pool_ready_ms`,
-/// `integrations_ready_ms`, `probes_ready_ms`) stay `None` for now.
+/// `entrypoint_ready_ms` are wired so callers can already display the
+/// cold-path timing breakdown. The remaining fields
+/// (`warm_pool_ready_ms`, `integrations_ready_ms`, `probes_ready_ms`)
+/// are reserved and stay `None` for now.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -580,7 +578,7 @@ pub struct BootTimingReport {
     pub agent_started_ms: Option<u64>,
     /// Milliseconds from agent start to a successful `bind+listen`
     /// pair on the control port. Same anchor as `agent_started_ms`
-    /// today; reserved for diverging if a future Phase 4 refactor
+    /// today; reserved for diverging if a future refactor
     /// splits "process started" from "socket created".
     pub vsock_bound_ms: Option<u64>,
     /// Milliseconds from agent start to the first accepted host
@@ -589,18 +587,18 @@ pub struct BootTimingReport {
     /// Milliseconds from agent start to `entrypoint = Ready` (or
     /// `Failed`). `None` while still `Starting`.
     pub entrypoint_ready_ms: Option<u64>,
-    /// Filled in by Phase 4. `None` for now.
+    /// Reserved; not yet populated, so `None` for now.
     pub warm_pool_ready_ms: Option<u64>,
-    /// Filled in by Phase 4. `None` for now.
+    /// Reserved; not yet populated, so `None` for now.
     pub integrations_ready_ms: Option<u64>,
-    /// Filled in by Phase 4. `None` for now.
+    /// Reserved; not yet populated, so `None` for now.
     pub probes_ready_ms: Option<u64>,
 }
 
 /// Snapshot of agent readiness at the moment of a `ReadinessStatus`
 /// call.
 ///
-/// Plan 76 Phase 2 §"Early control-plane readiness". Used by host
+/// Used by host
 /// callers (`mvmctl wait`, `mvmctl up --timings`, `mvmctl doctor`)
 /// to distinguish:
 ///
@@ -646,16 +644,16 @@ pub struct ReadinessReport {
 }
 
 // ============================================================================
-// Profile classifier (plan 76 Phase 1)
+// Profile classifier
 // ============================================================================
 
 /// Coarse profile-eligibility class for each `GuestRequest` variant.
 ///
 /// Wire types are compiled into every agent build; this classifier
 /// is the dispatcher-side gate that rejects out-of-profile verbs
-/// *before* the per-variant handler runs. See ADR-002 §W4.3 for the
-/// complementary compile-time symbol-absence story (`do_exec`,
-/// `do_run_code`, process RPC handlers gated by `dev-shell`).
+/// *before* the per-variant handler runs. Complemented by the
+/// compile-time symbol-absence story (`do_exec`, `do_run_code`,
+/// process RPC handlers gated by `dev-shell`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestClass {
     /// Allowed under `SealedProd` and `Dev` profiles. Includes the
@@ -748,8 +746,7 @@ impl GuestRequest {
             // DevOnly: shell exec, process RPC, filesystem RPC,
             // console, port forwarding, code eval, filesystem diff.
             // Filesystem reads look benign but can leak secrets and
-            // mounted-volume contents (plan 76 "Read-only filesystem
-            // access can leak secrets"), so the entire filesystem
+            // mounted-volume contents, so the entire filesystem
             // RPC surface is DevOnly in v1.
             GuestRequest::Exec { .. }
             | GuestRequest::FsDiff
@@ -803,7 +800,7 @@ impl GuestRequest {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestResponse {
-    /// Guest-agent protocol negotiation succeeded. ADR-053 / plan 74 W1.
+    /// Guest-agent protocol negotiation succeeded.
     ProtocolHelloAck {
         agent_protocol_version: u32,
         min_supported_version: u32,
@@ -834,7 +831,7 @@ pub enum GuestResponse {
     /// Error from guest agent.
     Error { message: String },
     /// The dispatcher refused this verb because the active
-    /// `AgentProfile` does not allow it (plan 76 Phase 1). Distinct
+    /// `AgentProfile` does not allow it. Distinct
     /// from `Error { message }` so SDK callers can branch on
     /// capability without parsing message text — analogous to
     /// `ProcErrorKind::UnsupportedInProduction` for process RPC,
@@ -861,7 +858,6 @@ pub enum GuestResponse {
         probes: Vec<crate::probes::ProbeResult>,
     },
     /// One event in the response stream of a `RunEntrypoint` call.
-    /// ADR-007 / plan 41 W1.
     ///
     /// The agent emits a sequence of these in response to a single
     /// `RunEntrypoint` request, terminated by an `EntrypointEvent`
@@ -869,7 +865,7 @@ pub enum GuestResponse {
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
     /// One event in the streaming response of an `Exec` call (dev-shell
-    /// only). Terminated by `ExecEvent::Exit`. Plan 159 WS-5 E.
+    /// only). Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
     /// Post-restore acknowledgement.
     PostRestoreAck {
@@ -886,7 +882,7 @@ pub enum GuestResponse {
     ConsoleExited { session_id: u32, exit_code: i32 },
     /// Console resize acknowledged.
     ConsoleResized { session_id: u32 },
-    /// Result of an `EntrypointStatus` query. ADR-007 / plan 41 W5.
+    /// Result of an `EntrypointStatus` query.
     ///
     /// `ok = true` means the agent successfully validated
     /// `/etc/mvm/entrypoint` at boot and will serve `RunEntrypoint`.
@@ -899,17 +895,17 @@ pub enum GuestResponse {
         detail: Option<String>,
     },
 
-    /// Result of a `ReadinessStatus` query. Plan 76 Phase 2.
+    /// Result of a `ReadinessStatus` query.
     /// Snapshot of every component plus per-phase timings.
     ReadinessStatusReport(ReadinessReport),
 
     /// Result of a filesystem RPC call. The single top-level variant
     /// keeps `GuestResponse` from sprawling — the `FsResult` sub-enum
-    /// carries the per-verb shapes. W1 / A1.
+    /// carries the per-verb shapes.
     FsResult(FsResult),
 
     /// Result of a non-streaming process-control verb (`ProcStart`,
-    /// `ProcList`, `ProcSignal`, `ProcSendInput`, `ProcKill`). W1 / A2.
+    /// `ProcList`, `ProcSignal`, `ProcSendInput`, `ProcKill`).
     ProcResult(ProcResult),
 
     /// One event in the streaming response of a `ProcWait` call.
@@ -921,7 +917,7 @@ pub enum GuestResponse {
 
     /// Result of a `MountVolume` / `UnmountVolume` call. Single-frame
     /// surface; closed sub-enum carries the per-verb shape.
-    /// (Renamed from `ShareResult` per plan 45 §D5.)
+    /// (Renamed from `ShareResult`.)
     VolumeMountResult(VolumeMountResult),
 
     /// Acknowledgement for `UpdateIdleTimeout`. `applied_secs` is the
@@ -949,7 +945,7 @@ pub enum GuestCapability {
     Console,
     VolumeMount,
     UpdateIdleTimeout,
-    /// Plan 76 Phase 2 — `ReadinessStatus` returns
+    /// `ReadinessStatus` returns
     /// `GuestResponse::ReadinessStatusReport(ReadinessReport)`.
     /// `mvmctl wait` / `mvmctl boot-report` require this capability.
     Readiness,
@@ -1044,7 +1040,7 @@ pub fn protocol_hello_response(
 }
 
 /// Result of a virtio-fs volume mount operation.
-/// (Renamed from `ShareResult` per plan 45 §D5.)
+/// (Renamed from `ShareResult`.)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1064,7 +1060,7 @@ pub enum VolumeMountResult {
 
 /// Class of error returned in `VolumeMountResult::Error`. Closed enum
 /// so the host can branch on `kind` without parsing message text.
-/// (Renamed from `ShareErrorKind` per plan 45 §D5.)
+/// (Renamed from `ShareErrorKind`.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1173,8 +1169,8 @@ pub enum ProcErrorKind {
     /// Per-VM concurrent-process cap or per-call byte cap
     /// exceeded.
     CapExceeded,
-    /// Returned by prod builds whose handler module was stripped
-    /// per ADR-002 §W4.3. Lets SDK callers branch on capability.
+    /// Returned by prod builds whose handler module was stripped.
+    /// Lets SDK callers branch on capability.
     UnsupportedInProduction,
     /// Other / unclassified.
     Other,
@@ -1204,7 +1200,7 @@ pub enum ProcWaitEvent {
         kind: ProcErrorKind,
         message: String,
     },
-    /// A streaming resource is throttled (ADR-053 §5 / plan 74 W4).
+    /// A streaming resource is throttled.
     /// **Non-terminal.** The agent emits this on the rising edge of
     /// a backpressure condition — typically the host-side stdout/
     /// stderr buffer crossing its high-water mark. The wait loop
@@ -1213,7 +1209,7 @@ pub enum ProcWaitEvent {
     ///
     /// `detail` is a bounded, redacted human-readable hint
     /// (operator-facing). It **never** carries argv, env, stdin,
-    /// stdout, stderr, or filesystem paths — see ADR-053's payload
+    /// stdout, stderr, or filesystem paths — that's the payload
     /// invariant.
     Backpressure {
         reason: mvm_core::domain::instance::BackpressureReason,
@@ -1368,7 +1364,6 @@ pub enum FsChangeKind {
 }
 
 /// One event in the streaming response of a `RunEntrypoint` call.
-/// ADR-007 / plan 41 W1.
 ///
 /// `Stdout` / `Stderr` carry bytes from the wrapper's respective
 /// streams. `Exit` and `Error` are terminal — they end the response
@@ -1387,9 +1382,7 @@ pub enum EntrypointEvent {
     Stdout { chunk: Vec<u8> },
     /// Bytes from the wrapper's stderr.
     Stderr { chunk: Vec<u8> },
-    /// One control-channel record from the wrapper's fd-3 (Plan-0010
-    /// §B4 / phase 4 of the upstream-mvm coordination work in
-    /// `specs/upstream-mvm-prompt.md`).
+    /// One control-channel record from the wrapper's fd-3.
     ///
     /// fd-3 is a separate stream the wrapper writes structured
     /// records to — error envelopes, captured logs when capture is
@@ -1411,10 +1404,10 @@ pub enum EntrypointEvent {
     /// beyond the framing. The host (`mvmctl invoke` and downstream
     /// SDKs) decides what to do with each record kind.
     ///
-    /// **Wiring status (phase 4a):** the variant ships ahead of any
+    /// **Wiring status:** the variant ships ahead of any
     /// emitter. Agents at this version do not yet open fd-3 in the
-    /// child or emit `Control` events; phase 4b lands fd-3 wiring in
-    /// the cold path (`execute()`), phase 4c in the warm-process
+    /// child or emit `Control` events; later work lands fd-3 wiring in
+    /// the cold path (`execute()`), then the warm-process
     /// pool, and the wrapper templates flip from stderr-envelope to
     /// fd-3-envelope at the same time. Hosts that see a `Control`
     /// event must already know how to consume it, so this variant is
@@ -1453,7 +1446,6 @@ impl EntrypointEvent {
 /// One event in the response stream of an `Exec` call (dev-shell only).
 /// The agent emits a sequence of these for a single `Exec` request,
 /// terminated by `Exit`. The host reads frames in a loop until terminal.
-/// Plan 159 WS-5 E.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1467,7 +1459,7 @@ pub enum ExecEvent {
     /// `timeout_secs` elapsed; the agent killed the command's process
     /// group. Terminal. Mirrors `ProcWaitEvent::TimedOut`. The host maps
     /// this to exit code 124 (GNU `timeout(1)` convention) for user
-    /// commands. Plan 173.
+    /// commands.
     TimedOut,
 }
 
@@ -1479,7 +1471,6 @@ impl ExecEvent {
 }
 
 /// Kind of agent-side error reported via `EntrypointEvent::Error`.
-/// ADR-007 / plan 41 W1.
 ///
 /// The variants are deliberately coarse — the host correlates by
 /// `kind` and surfaces the human-readable `message` to the operator.
@@ -1500,7 +1491,7 @@ pub enum RunEntrypointError {
     Busy,
     /// The wrapper process died unexpectedly (signal, OOM, etc.).
     WrapperCrashed,
-    /// Entrypoint validation has not yet completed. Plan 76 Phase 2:
+    /// Entrypoint validation has not yet completed:
     /// the agent binds vsock early and validates entrypoint in the
     /// background, so a host that races `RunEntrypoint` ahead of
     /// `ReadinessStatus { entrypoint: Ready }` gets this back rather
@@ -1549,7 +1540,7 @@ pub enum HostBoundRequest {
         pool_id: String,
         instance_id: String,
     },
-    /// Query host wall-clock time. Plan 37 Addendum B11.
+    /// Query host wall-clock time.
     ///
     /// The guest agent calls this at boot (and after snapshot
     /// restore / wake) to set its own clock against host-trusted
@@ -1574,7 +1565,7 @@ pub enum HostBoundResponse {
         status: String,
         guest_ip: Option<String>,
     },
-    /// Host wall-clock time. Plan 37 Addendum B11. Reported as
+    /// Host wall-clock time. Reported as
     /// (unix_seconds, unix_nanos) so the response is
     /// representation-stable across host clock crates and
     /// language runtimes — the guest reconstructs the
@@ -2125,7 +2116,7 @@ pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<Guest
 ///
 /// This helper is intentionally stream-level so it works with both the
 /// Firecracker UDS multiplexer path and Apple Container's direct vsock
-/// stream. Hard cutover (ADR-053 / plan 74 W1): every fresh session
+/// stream. Hard cutover: every fresh session
 /// must call this before issuing any operational request, including a
 /// bare `Ping` reachability probe. Pre-hello guest agents receive
 /// `ProtocolMismatch` and the connection is closed; this helper
@@ -2190,7 +2181,7 @@ pub fn require_capabilities(
 }
 
 /// Send a `RunEntrypoint` request and consume the streaming
-/// `EntrypointEvent` response. ADR-007 / plan 41 W3.
+/// `EntrypointEvent` response.
 ///
 /// `on_event` is invoked for each non-terminal event (`Stdout` /
 /// `Stderr` chunk) as it arrives — callers can stream output to their
@@ -2238,7 +2229,7 @@ where
 /// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
 /// `Exit` or `TimedOut`. Exec carries no `GuestCapability` — the agent
 /// gates it at compile time via the `dev-shell` feature — so this does
-/// a plain protocol hello (no capability requirement). Plan 159 WS-5 E.
+/// a plain protocol hello (no capability requirement).
 pub fn send_exec_streaming<F>(
     stream: &mut UnixStream,
     command: &str,
@@ -2262,7 +2253,7 @@ where
 /// Read an `ExecEvent` response stream from `stream`: invoke `on_event`
 /// for each non-terminal chunk, return the terminal `Exit`. The caller
 /// must have already done the protocol hello and written the request
-/// frame (`Exec` or `RunCode` — both stream `ExecEvent`). Plan 159 WS-5 E.
+/// frame (`Exec` or `RunCode` — both stream `ExecEvent`).
 pub fn read_exec_stream<F>(stream: &mut UnixStream, mut on_event: F) -> Result<ExecEvent>
 where
     F: FnMut(&ExecEvent),
@@ -2468,11 +2459,11 @@ pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
 
 /// Query filesystem diff on an already-connected stream. Backend-agnostic
 /// entry point for `mvmctl diff` — the stream comes from
-/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM
-/// (Plan 169). `FsDiff` is part of the filesystem RPC surface, so this drives
-/// the plan 74 W1 hello prelude requiring `FilesystemRpc` exactly like
+/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM.
+/// `FsDiff` is part of the filesystem RPC surface, so this drives
+/// the hello prelude requiring `FilesystemRpc` exactly like
 /// [`send_fs_request_on`] — the dir-based wrappers used to skip the hello,
-/// which a hard-cutover agent (ADR-053) would reject.
+/// which a hard-cutover agent would reject.
 pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
     require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
     let resp = send_request(stream, &GuestRequest::FsDiff)?;
@@ -2498,8 +2489,8 @@ pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcRe
 /// Dispatch a non-streaming process-control verb on an already-connected
 /// stream and return the `ProcResult`. The backend-agnostic entry point:
 /// the host CLI obtains the stream from `mvm::vsock_transport::for_vm(name)`
-/// so `mvmctl proc` works regardless of which VMM launched the VM
-/// (Plan 169). `send_proc_request` is the dir-based wrapper over this.
+/// so `mvmctl proc` works regardless of which VMM launched the VM.
+/// `send_proc_request` is the dir-based wrapper over this.
 pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<ProcResult> {
     debug_assert!(matches!(
         req,
@@ -2536,8 +2527,8 @@ pub fn send_proc_wait<F: FnMut(&ProcWaitEvent)>(
 
 /// Stream `ProcWait` events on an already-connected stream. Backend-agnostic
 /// entry point for `mvmctl proc wait` — the stream comes from
-/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM
-/// (Plan 169). Mirrors the host shape of [`send_run_entrypoint`].
+/// `mvm::vsock_transport::for_vm(name)` so the verb works against any VMM.
+/// Mirrors the host shape of [`send_run_entrypoint`].
 pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
     stream: &mut UnixStream,
     pid_token: &str,
@@ -2591,7 +2582,7 @@ pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult
 /// stream from `mvm::vsock_transport::for_vm(name)` (which resolves the
 /// right socket per backend — Firecracker's `v.sock`, or the per-port UNIX
 /// socket libkrun/QEMU expose), so `fs`/`cp` work regardless of which VMM
-/// launched the VM (Plan 169). `send_fs_request` is the dir-based wrapper
+/// launched the VM. `send_fs_request` is the dir-based wrapper
 /// over this for callers that still pass an instance dir (mvmd, mock).
 pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<FsResult> {
     require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
@@ -2608,7 +2599,7 @@ pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<
 /// Used by the Apple Container backend where the vsock connection is
 /// established via `VZVirtioSocketDevice` rather than a UDS path.
 ///
-/// Performs the ADR-053 / plan 74 W1 hello prelude internally so
+/// Performs the hello prelude internally so
 /// callers don't have to. `StartPortForward` is not a capability-gated
 /// operation, so an empty capability list is requested — the hello
 /// alone satisfies the agent's "no operational request before hello"
@@ -3244,7 +3235,7 @@ mod tests {
         assert!(err.to_string().contains("guest image is stale"));
     }
 
-    /// W4.1 + A1 regression: every new FS variant rejects unknown
+    /// Regression: every new FS variant rejects unknown
     /// fields. Repeats the smuggling discipline from
     /// `test_guest_request_rejects_unknown_field_inside_variant` for
     /// each verb so a reviewer adding an FS field without the
@@ -3297,7 +3288,7 @@ mod tests {
         }
     }
 
-    /// W4.1 + A2 regression: every new Proc variant rejects unknown
+    /// Regression: every new Proc variant rejects unknown
     /// fields. Mirrors `test_fs_request_variants_reject_unknown_fields`
     /// for the dev-only process surface.
     #[test]
@@ -3370,7 +3361,7 @@ mod tests {
             }
             .is_terminal()
         );
-        // ADR-053 §5 / plan 74 W4: `Backpressure` is non-terminal.
+        // `Backpressure` is non-terminal.
         // The wait loop continues after the agent emits it.
         assert!(
             !ProcWaitEvent::Backpressure {
@@ -3382,7 +3373,7 @@ mod tests {
         );
     }
 
-    /// ADR-053 §5 / plan 74 W4: the `Backpressure` variant
+    /// The `Backpressure` variant
     /// roundtrips through serde with its full nested shape and
     /// `BackpressureReason` snake-case discriminant intact, and
     /// rejects unknown fields like every other host↔guest type.
@@ -3412,7 +3403,7 @@ mod tests {
         );
     }
 
-    /// W4.1 + D regression: every new Volume variant rejects unknown
+    /// Regression: every new Volume variant rejects unknown
     /// fields. Mirrors the FS / Proc deny-unknown-fields tests for
     /// the virtio-fs volume surface.
     #[test]
@@ -3547,11 +3538,11 @@ mod tests {
         }
     }
 
-    /// W4.1 regression: unknown fields in a `GuestRequest` JSON frame must be
+    /// Regression: unknown fields in a `GuestRequest` JSON frame must be
     /// rejected outright. Without `deny_unknown_fields`, an attacker could
     /// smuggle extra keys past serde to (a) trip up downstream consumers that
     /// re-parse the same blob, (b) probe for upcoming variants, or (c) create
-    /// drift between versions of the agent and host. ADR-002 §W4.1.
+    /// drift between versions of the agent and host.
     #[test]
     fn test_guest_request_rejects_unknown_field_inside_variant() {
         let json = r#"{"SleepPrep":{"drain_timeout_secs":30,"smuggled":1}}"#;
@@ -3602,7 +3593,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // ADR-007 / plan 41 W1 — RunEntrypoint wire protocol
+    // RunEntrypoint wire protocol
     // -------------------------------------------------------------------
 
     #[test]
@@ -3665,7 +3656,7 @@ mod tests {
     #[test]
     fn test_run_entrypoint_request_rejects_unknown_field() {
         // Unknown fields inside the request must not slip past the
-        // deserializer (ADR-002 §W4.1).
+        // deserializer.
         let json = r#"{"RunEntrypoint":{"stdin":[1,2,3],"timeout_secs":10,"smuggled":"x"}}"#;
         let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
         assert!(
@@ -3700,7 +3691,7 @@ mod tests {
     fn test_entrypoint_event_control_roundtrip() {
         // Control events are non-terminal — the host streams them
         // through alongside Stdout/Stderr until a terminal Exit/Error
-        // arrives. Phase 4a wire-shape lock-in.
+        // arrives. Wire-shape lock-in.
         let evt = EntrypointEvent::Control {
             header_json: r#"{"kind":"envelope","envelope_kind":"ValueError","error_id":"abc","message":"negative input"}"#.into(),
             payload: b"".to_vec(),
@@ -3884,7 +3875,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // ADR-007 / plan 41 W5 — EntrypointStatus query
+    // EntrypointStatus query
     // -------------------------------------------------------------------
 
     #[test]
@@ -3991,8 +3982,8 @@ mod tests {
     fn test_constants() {
         assert_eq!(GUEST_CID, 3);
         // Must stay > 1023 — vsock binds <= 1023 require
-        // CAP_NET_BIND_SERVICE, which the agent (uid 901) doesn't have
-        // (ADR-002 §W4.5). See the doc comment on GUEST_AGENT_PORT.
+        // CAP_NET_BIND_SERVICE, which the agent (uid 901) doesn't have.
+        // See the doc comment on GUEST_AGENT_PORT.
         const _: () = assert!(GUEST_AGENT_PORT > 1023);
         assert_eq!(GUEST_AGENT_PORT, 5252);
         assert_eq!(DEFAULT_TIMEOUT_SECS, 10);
@@ -4495,7 +4486,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // ADR-007 / plan 41 W3 — send_run_entrypoint streaming consumer
+    // send_run_entrypoint streaming consumer
     // -------------------------------------------------------------------
 
     fn write_event_frame(stream: &mut UnixStream, event: &EntrypointEvent) {
@@ -4732,7 +4723,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Plan 76 Phase 1 — profile classifier
+    // profile classifier
     // ========================================================================
 
     /// Every `GuestRequest` variant must classify as either `ProdSafe`
@@ -5028,7 +5019,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Plan 76 Phase 2 — readiness model
+    // readiness model
     // ========================================================================
 
     #[test]
@@ -5099,7 +5090,7 @@ mod tests {
 
     #[test]
     fn test_readiness_report_rejects_unknown_fields() {
-        // ADR-002 §W4.1: every host↔guest type must deny unknown
+        // Every host↔guest type must deny unknown
         // fields. Verify the outer report shape; ComponentState +
         // BootTimingReport carry their own `deny_unknown_fields`.
         let json = r#"{
@@ -5130,7 +5121,7 @@ mod tests {
 
     #[test]
     fn test_run_entrypoint_error_not_ready_roundtrip() {
-        // Plan 76 Phase 2: the typed variant returned when a host
+        // The typed variant returned when a host
         // races `RunEntrypoint` ahead of `entrypoint=Ready`.
         let err = RunEntrypointError::NotReady;
         let json = serde_json::to_string(&err).unwrap();
@@ -5141,7 +5132,7 @@ mod tests {
 
     #[test]
     fn test_boot_timing_report_default_is_all_none() {
-        // The skeleton ships with all-`None` so Phase 4 can fill
+        // The skeleton ships with all-`None` so later work can fill
         // the remaining fields without breaking the wire shape.
         let t = BootTimingReport::default();
         assert!(t.agent_started_ms.is_none());
@@ -5201,7 +5192,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Plan 74 W2 / Plan 51 W6 — `GuestRequest::kind_name` for vsock RPC audit
+    // `GuestRequest::kind_name` for vsock RPC audit
     // ========================================================================
 
     /// Every `GuestRequest` variant must produce a kebab-case
@@ -5377,7 +5368,7 @@ mod tests {
         );
     }
 
-    // Plan 159 WS-5 E — send_exec_streaming host reader
+    // send_exec_streaming host reader
     // -------------------------------------------------------------------
 
     fn answer_exec_protocol_hello(stream: &mut UnixStream) {
