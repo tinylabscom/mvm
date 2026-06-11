@@ -106,7 +106,7 @@ fn bundle_pin_from_archive(
     anyhow::bail!("archive has no manifest.sig entry")
 }
 
-struct AdmitPlanForBootParams<'a> {
+pub(super) struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
     pub vm_name: &'a str,
     pub backend_name: &'a str,
@@ -236,7 +236,9 @@ impl std::fmt::Debug for AdmissionContext {
 /// the rest of the supervisor surface uses). Once `mvm-hostd` lifts
 /// the supervisor in-process, the proper `mvm_core::crypto::image_verify`
 /// signed-manifest path can replace this.
-fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<Option<AdmissionContext>> {
+pub(super) fn admit_plan_for_boot(
+    p: AdmitPlanForBootParams<'_>,
+) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
         return Ok(None);
     }
@@ -646,7 +648,7 @@ fn should_thread_signed_plan(gateway_bridge_enabled: bool, hypervisor: &str) -> 
     gateway_bridge_enabled || hypervisor == "qemu"
 }
 
-fn load_workload_ir(
+pub(super) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_sdk::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {

@@ -928,8 +928,9 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     ui::info(&format!(
         "session start: booting {mode} session for template '{template_id}'"
     ));
-    let vm = crate::exec::boot_session_vm(&template_id, "session", args.cpus, args.memory_mib)
-        .context("Booting session VM")?;
+    let vm =
+        crate::exec::boot_session_vm(&template_id, "session", args.cpus, args.memory_mib, None)
+            .context("Booting session VM")?;
 
     if !crate::exec::wait_for_agent(&vm.vm_name, 30) {
         // Roll back the boot — the agent never came up, so the VM is

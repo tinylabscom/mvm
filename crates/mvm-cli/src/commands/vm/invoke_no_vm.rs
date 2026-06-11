@@ -174,6 +174,7 @@ mod tests {
             timeout: 30,
             cpus: 2,
             memory_mib: 512,
+            from_workload_ir: None,
             fresh: false,
             reset: false,
             attach: false,

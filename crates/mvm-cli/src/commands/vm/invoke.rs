@@ -64,6 +64,14 @@ pub(in crate::commands) struct Args {
     #[arg(long, default_value = "512")]
     pub memory_mib: u32,
 
+    /// Plan 129 — path to the workload's IR (`workload.json`) declaring its
+    /// `.secrets`. When set, the ephemeral VM is booted through plan admission
+    /// so the host spawns the substitution endpoint and the workload's egress
+    /// gets the real credential — while the guest only ever holds the opaque
+    /// `mvm-secret-<hex>` placeholder. Omit for a plain (no-secret) invoke.
+    #[arg(long)]
+    pub from_workload_ir: Option<std::path::PathBuf>,
+
     /// Boot a fresh transient VM, run the call, tear down (the v1
     /// default — wired explicitly so future versions can flip the
     /// default to warm-session reuse without breaking scripts).
@@ -244,8 +252,67 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     ui::info(&format!(
         "invoke: booting {lifecycle_label} for template '{template_id}'"
     ));
-    let vm = crate::exec::boot_session_vm(&template_id, "invoke", args.cpus, args.memory_mib)
-        .context("Booting VM for invoke")?;
+    // Plan 129 — if the workload declares secrets (its IR was passed via
+    // `--from-workload-ir`), admit the lowered plan so the ephemeral VM spawns
+    // the substitution endpoint. The closure runs admission inside
+    // `boot_session_vm` (the rootfs + vm_name it needs are generated there). No
+    // IR / no secrets ⇒ `None`, the unchanged plain-invoke path.
+    let admit_closure: Option<Box<crate::exec::SessionAdmit>> =
+        super::up::load_workload_ir(args.from_workload_ir.as_deref())?
+            .map(|w| super::managed_secrets::lower_workload_secrets(&w))
+            .filter(|lowered| !lowered.secrets.is_empty())
+            .map(|lowered| {
+                let secrets = lowered.secrets;
+                let secret_release = lowered.secret_release;
+                let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+                    .name()
+                    .to_string();
+                let cpus = args.cpus;
+                let mem = args.memory_mib as u64;
+                Box::new(
+                    move |rootfs: &std::path::Path,
+                          vm_name: &str|
+                          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+                        let ledger = super::plan_admission::InMemoryNonceLedger::default();
+                        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+                            tenant: "local",
+                            vm_name,
+                            backend_name: &backend_name,
+                            rootfs_path: rootfs,
+                            cpus,
+                            mem_mib: mem,
+                            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                            secret_release,
+                            secrets: secrets.clone(),
+                            no_supervisor: false,
+                            ledger: &ledger,
+                            keys_dir: None,
+                            audit_dir: None,
+                            policy_dir: None,
+                            bundle_pin: None,
+                            deps_volume: None,
+                            shares: vec![],
+                        })?;
+                        let Some(c) = ctx else { return Ok(None) };
+                        let plan_json = serde_json::to_string(&c.admitted.signed)
+                            .context("serializing admitted plan for the session VM")?;
+                        Ok(Some(crate::exec::SessionAuditSubstrate {
+                            tenant_id: c.admitted.plan.tenant.0.clone(),
+                            plan_json,
+                            bundle_json: None,
+                        }))
+                    },
+                ) as Box<crate::exec::SessionAdmit>
+            });
+
+    let vm = crate::exec::boot_session_vm(
+        &template_id,
+        "invoke",
+        args.cpus,
+        args.memory_mib,
+        admit_closure.as_deref(),
+    )
+    .context("Booting VM for invoke")?;
 
     // Phase 3 + 5c: register a session record so `mvmctl session ls`
     // sees the call (whether transient or warm). With `--keep-alive`
@@ -574,6 +641,27 @@ mod tests {
                 "--attach must conflict with {flag}"
             );
         }
+    }
+
+    #[test]
+    fn from_workload_ir_flag_parses() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            args: Args,
+        }
+        // Plan 129 — the IR path that routes an ephemeral invoke through
+        // admission so the substitution endpoint spawns.
+        let w =
+            Wrap::try_parse_from(["x", "tmpl", "--from-workload-ir", "/w/workload.json"]).unwrap();
+        assert_eq!(
+            w.args.from_workload_ir.as_deref(),
+            Some(std::path::Path::new("/w/workload.json"))
+        );
+        // Absent ⇒ None (the plain no-secret invoke path).
+        let plain = Wrap::try_parse_from(["x", "tmpl"]).unwrap();
+        assert!(plain.args.from_workload_ir.is_none());
     }
 
     #[test]
