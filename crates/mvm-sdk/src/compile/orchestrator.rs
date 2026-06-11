@@ -1,10 +1,10 @@
-//! `mvmforge compile` per ADR-0005 §4 and ADR-0006.
+//! `mvmforge compile`.
 //!
 //! Reads a validated Workload IR manifest, generates `flake.nix`, `launch.json`,
 //! and `workload.json`, and atomically publishes them to the user-specified
 //! output directory. No `nix` invocation; no network access.
 //!
-//! Managed `SecretRef` env bindings (Plan 129 / ADR-067) are stripped from the
+//! Managed `SecretRef` env bindings are stripped from the
 //! baked `launch.json` — the rootfs is secret-free by construction, the guest
 //! var is injected as an opaque placeholder only at boot by the substitution
 //! endpoint — but preserved in `workload.json`, the host-side admission input
@@ -38,14 +38,14 @@ pub enum CompileError {
     Source(SourceError),
     Reachability(ReachabilityError),
     Archive(ArchiveError),
-    /// ADR-0015 Phase 2: an Entrypoint::Function declared a
+    /// An Entrypoint::Function declared a
     /// (module, function) that didn't resolve to a top-level
     /// function in the bundled source.
     FunctionNotFound {
         module: String,
         function: String,
     },
-    /// ADR-0015 Phase 2.5: the function exists but its parameter
+    /// The function exists but its parameter
     /// names don't accommodate every name listed in
     /// `args_schema.required`. Functions taking `**kwargs` (Python)
     /// or rest params (JS/TS) bypass this check.
@@ -54,12 +54,12 @@ pub enum CompileError {
         function: String,
         missing: Vec<String>,
     },
-    /// ADR-0015 Phase 2: tree-sitter setup or I/O failure while
+    /// tree-sitter setup or I/O failure while
     /// attempting the function-presence check. Internal-ish; keeps
     /// the surface explicit so callers can distinguish a real
     /// "function missing" from "we couldn't even parse the source".
     FuncDescribe(FuncDescribeError),
-    /// Plan 165 WS-B B3: a sealed/prod image must declare a workload
+    /// A sealed/prod image must declare a workload
     /// entrypoint. The SDK only ever emits sealed images, so an app with
     /// no declared entrypoint can never be compiled into one.
     SealedWorkloadMissingEntrypoint {
@@ -109,7 +109,7 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 /// Returns true when `out` should be written as a single deterministic
-/// `.tar.gz` (per ADR-0012) rather than as a directory of individual
+/// `.tar.gz` rather than as a directory of individual
 /// files. Triggered by the `.tar.gz` suffix on the output path. The
 /// directory mode remains supported for in-tree consumers like
 /// `just real-mvm-check`, which calls `nix flake check` against a
@@ -139,11 +139,11 @@ pub fn compile_archive(
 
 /// Compile a validated workload into an artifact directory at `out`.
 ///
-/// Honors `app.source = LocalPath { path, include, exclude }` per ADR-0008 by
+/// Honors `app.source = LocalPath { path, include, exclude }` by
 /// copying the source tree into `<staging>/src/` before publishing. `path` in
 /// the IR is interpreted relative to `manifest_dir`, or absolute.
 pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(), CompileError> {
-    // Plan 165 WS-B B3: fail closed before any staging/IO. Every SDK
+    // Fail closed before any staging/IO. Every SDK
     // artifact is sealed by construction, so an app with no declared
     // entrypoint is a misconfiguration, not a request for an interactive
     // dev shell (that path is the Nix-flake `entrypoint.shell`, never
@@ -183,7 +183,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
             }
         };
 
-        // Plan-0007 §Phase 2 + §Phase 3: for function-entrypoint
+        // For function-entrypoint
         // workloads, prune language source files unreachable from the
         // declared entry module (plus any declared `extra_imports`).
         // Non-source files (configs, data, lockfiles, etc.) are left
@@ -197,7 +197,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
         // either uses a language we don't support yet (Rust, etc.)
         // or has the entry-module path wrong, in which case the
         // wrapper would fail at runtime anyway.
-        // Multi-function apps (ADR-0014 Phase 2): each function
+        // Multi-function apps: each function
         // entrypoint contributes its own root. Walk reachability from
         // every (module, extra_imports) pair and union the results
         // before pruning. Single-entrypoint workloads (the common
@@ -234,7 +234,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
                 .map_err(CompileError::Reachability)?;
                 reachable.extend(walked);
             }
-            // ADR-0015 Phase 2: confirm each entrypoint's
+            // Confirm each entrypoint's
             // (module, function) resolves to a top-level function
             // in the bundled source. Catches typos at compile
             // time rather than the wrapper failing at runtime.
@@ -257,7 +257,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
             source_plan = rehash(&bundle_dir).map_err(CompileError::Source)?;
         }
 
-        // Plan 129 / ADR-067: a managed `SecretRef` env binding must never be
+        // A managed `SecretRef` env binding must never be
         // baked into the image. The guest receives the var only at boot, as an
         // opaque placeholder minted by the per-VM substitution endpoint; the
         // ref itself rides the admission plan (host-side `workload.json`), not
@@ -273,10 +273,10 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
         // admission input. Carries the managed `SecretRef`s the baked artifact
         // dropped, so the substitution endpoint is spawned at boot. Host-side
         // only: the flake builds the rootfs from `./src` + `launch.json`, never
-        // this file, so it cannot reach the guest. Plan 129 / ADR-067.
+        // this file, so it cannot reach the guest.
         let workload_json = serde_json::to_string(workload).map_err(CompileError::Render)?;
         write_lf(&staging.join("workload.json"), &workload_json)?;
-        // Per ADR-0010 §3 (Option A): the rendered flake references
+        // The rendered flake references
         // `mvm.lib.<system>.mk<Lang>FunctionService` directly. The
         // factories live in mvm; mvmforge does not bundle local
         // copies into the user-visible artifact.
@@ -292,10 +292,10 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
     }
 }
 
-/// Plan 165 WS-B B3: refuse to compile any app that lacks a declared
-/// workload entrypoint. Reuses the B1 predicate so the "is there a
-/// command?" signal has a single definition. Multi-app workloads fail
-/// closed on the first offender (named in the error).
+/// Refuse to compile any app that lacks a declared
+/// workload entrypoint. Reuses the `has_declared_entrypoint` predicate so the
+/// "is there a command?" signal has a single definition. Multi-app workloads
+/// fail closed on the first offender (named in the error).
 fn check_declared_entrypoints(workload: &Workload) -> Result<(), CompileError> {
     for app in &workload.apps {
         if !app.has_declared_entrypoint() {
@@ -308,8 +308,8 @@ fn check_declared_entrypoints(workload: &Workload) -> Result<(), CompileError> {
 }
 
 /// Return a clone of `workload` with every managed `SecretRef` env entry
-/// removed — from each app's `env` and from each entrypoint's `env`. Plan 129 /
-/// ADR-067: the baked image must be secret-free; the secret var is delivered
+/// removed — from each app's `env` and from each entrypoint's `env`.
+/// The baked image must be secret-free; the secret var is delivered
 /// only at boot as an opaque placeholder by the substitution endpoint, and the
 /// `SecretRef` binding travels the host-side admission plan, never the rootfs.
 /// `Literal` env entries are untouched.
@@ -332,12 +332,12 @@ fn retain_non_secret_env(env: &mut std::collections::BTreeMap<String, EnvValue>)
     env.retain(|_, value| !matches!(value, EnvValue::SecretRef { .. }));
 }
 
-/// ADR-0015 Phase 2: confirm every Entrypoint::Function resolves to
+/// Confirm every Entrypoint::Function resolves to
 /// a top-level function in the bundled source. Runs after reachability
 /// (so we've already validated the module file exists) but before
 /// pruning (so we still see all source files we might dispatch into).
 ///
-/// Also runs the Phase 2.5 schema-arity check: when an entrypoint
+/// Also runs the schema-arity check: when an entrypoint
 /// declares `args_schema` with a `required: [...]` list, every name
 /// in that list must correspond to a declared parameter on the
 /// function (or the function must accept `**kwargs`/rest, in which
@@ -505,7 +505,7 @@ fn promote(staging: &Path, out: &Path) -> Result<(), CompileError> {
 }
 
 fn write_lf(path: &Path, contents: &str) -> Result<(), CompileError> {
-    // ADR-0006 invariant: generated files use LF line endings on every host.
+    // Invariant: generated files use LF line endings on every host.
     fs::write(path, contents.replace("\r\n", "\n").as_bytes()).map_err(CompileError::Write)
 }
 
@@ -643,7 +643,7 @@ mod tests {
     /// `launch.json` (the guest var is injected as an opaque placeholder
     /// only at boot, by the substitution endpoint — never baked). The
     /// real value is never in compile's reach; this asserts the *binding*
-    /// can't leak into the image either. Plan 129 / ADR-067.
+    /// can't leak into the image either.
     #[test]
     fn compile_strips_secret_refs_from_baked_launch_json() {
         let tmp = TempDir::new().unwrap();
@@ -695,7 +695,7 @@ mod tests {
     /// admission input `mvmctl up --from-workload-ir` lowers into
     /// `plan.secrets` — it carries the managed `SecretRef`s (which were
     /// stripped from the baked `launch.json`) so the substitution endpoint can
-    /// be spawned at boot. Plan 129 / ADR-067.
+    /// be spawned at boot.
     #[test]
     fn compile_emits_workload_json_carrying_secret_refs_for_admission() {
         let tmp = TempDir::new().unwrap();
@@ -769,8 +769,7 @@ mod tests {
 
     #[test]
     fn function_workload_compile_does_not_bundle_factories() {
-        // Per ADR-0010 §3 (Option A, amended 2026-05-06): factories
-        // live in mvm. The compiled artifact contains zero
+        // Factories live in mvm. The compiled artifact contains zero
         // mvmforge-internal nix files; the rendered flake references
         // upstream `mvm.lib.<system>.mk<Lang>FunctionService` directly.
         let tmp = TempDir::new().unwrap();
@@ -814,7 +813,7 @@ mod tests {
         assert_eq!(parsed["source"]["tree_hash"].as_str().unwrap().len(), 64);
     }
 
-    // ---------- ADR-0015 Phase 2: function-presence check ----------------
+    // ---------- function-presence check ----------------
 
     /// Bundles `adder.py` with `def add(a, b)` so reachability + function
     /// presence both have something concrete to operate on.
@@ -866,7 +865,7 @@ mod tests {
         }
     }
 
-    // ---------- ADR-0015 Phase 2.5: schema-arity check -------------------
+    // ---------- schema-arity check -------------------
 
     /// Build an `adder_workload("add")` and inject an `args_schema` whose
     /// `required: [...]` list we control.
@@ -928,7 +927,7 @@ mod tests {
         }
     }
 
-    // ---------- Plan 165 WS-B B3: no-entrypoint policy --------------------
+    // ---------- no-entrypoint policy --------------------
 
     #[test]
     fn compile_refuses_sealed_workload_with_no_declared_entrypoint() {
@@ -978,8 +977,8 @@ mod tests {
 
     #[test]
     fn compile_accepts_idle_sleep_infinity_command() {
-        // An idle image declares a real command, so the B3 guard must not
-        // fire. We assert specifically on the ABSENCE of the B3 error —
+        // An idle image declares a real command, so the no-entrypoint guard
+        // must not fire. We assert specifically on the ABSENCE of that error —
         // a bare `sleep infinity` source tree compiles cleanly here.
         let tmp = TempDir::new().unwrap();
         let manifest_dir = tmp.path().join("manifest");

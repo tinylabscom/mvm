@@ -4,10 +4,9 @@ use mvm_core::vm_backend::{
     VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
-// W8: every backend variant + the FC support modules live in this
-// crate now. `microvm`, `image` are siblings under
-// `crate::`; the substrate (`config`, `shell`, `runtime_meta`) lives
-// in `mvm-base`.
+// Every backend variant + the FC support modules live in this crate.
+// `microvm`, `image` are siblings under `crate::`; the substrate
+// (`config`, `shell`, `runtime_meta`) lives in `mvm-base`.
 use crate::apple_container::AppleContainerBackend;
 use crate::base::config::{PortMapping, VMS_DIR};
 use crate::base::shell::run_in_vm_stdout;
@@ -137,17 +136,18 @@ impl VmBackend for FirecrackerBackend {
 
     fn snapshot_capability(&self) -> SnapshotCapability {
         // Firecracker is the live-memory fast-resume backend (UFFD / NBD /
-        // hugepages) — plan 123 C2.
+        // hugepages).
         SnapshotCapability::LiveMemory
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        // Task 2.2 / ADR-072 — fail closed when KVM is absent rather than
-        // letting the Firecracker boot fault deep in the API handshake.
-        // Firecracker is the production runtime and *requires* `/dev/kvm`;
-        // a no-KVM host should use `--hypervisor qemu` for local dev/test
-        // (Tier-3 TCG), never a silent Firecracker fallback. On macOS the
-        // runtime path nests through libkrun/Vz, so this probe is Linux-only.
+        // Fail closed when KVM is absent rather than letting the
+        // Firecracker boot fault deep in the API handshake. Firecracker
+        // is the production runtime and *requires* `/dev/kvm`; a no-KVM
+        // host should use `--hypervisor qemu` for local dev/test
+        // (Tier-3 TCG), never a silent Firecracker fallback. On macOS
+        // the runtime path nests through libkrun/Vz, so this probe is
+        // Linux-only.
         #[cfg(target_os = "linux")]
         if !crate::qemu::kvm_available() {
             anyhow::bail!(
@@ -158,16 +158,16 @@ impl VmBackend for FirecrackerBackend {
             );
         }
         let fc_config = FirecrackerConfig::from_start_config(config)?;
-        // Thread the W6.2.1 sidecar into per-VM runtime metadata so
+        // Thread the sidecar into per-VM runtime metadata so
         // `mvmctl console` can enforce the accessible/sealed gate.
         // Best-effort: a malformed sidecar surfaces an error here
         // (build pipeline bug); a missing sidecar defaults to
         // accessible=true.
         let rootfs = std::path::Path::new(&config.rootfs_path);
-        // Plan 74 W2 / ADR-051 admission gate — refuse pre-W1.4b
-        // rootfs that lack the `/mvm/runtime` mount point. Runs
-        // before `microvm::run_from_build` so a refusal exits
-        // clean — no FC API socket, no VM dir half-populated.
+        // Admission gate — refuse older rootfs that lack the
+        // `/mvm/runtime` mount point. Runs before
+        // `microvm::run_from_build` so a refusal exits clean — no FC
+        // API socket, no VM dir half-populated.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
         crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
@@ -267,9 +267,9 @@ impl VmBackend for FirecrackerBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Tier 1: full ADR-002. All seven CI-enforced claims hold.
-        // Hardware isolation via KVM; verified boot via dm-verity (W3,
-        // shipped 2026-04-30).
+        // Tier 1: full security posture. All seven CI-enforced claims
+        // hold. Hardware isolation via KVM; verified boot via
+        // dm-verity.
         BackendSecurityProfile {
             claims: [ClaimStatus::Holds; 7],
             layer_coverage: LayerCoverage::all_layers(),
@@ -282,7 +282,7 @@ impl VmBackend for FirecrackerBackend {
     }
 }
 
-/// Isolation tier of a `VmBackend`. Plan 76 Phase 7.
+/// Isolation tier of a `VmBackend`.
 ///
 /// Captures the host/guest boundary strength so the CLI can refuse
 /// to silently downgrade from a hardened production tier to a
@@ -292,18 +292,16 @@ impl VmBackend for FirecrackerBackend {
 /// **Tier 1** — Firecracker (with jailer + seccomp) and Cloud
 /// Hypervisor (rust-vmm peer at the same maturity). The hardened
 /// production posture: KVM-only, minimal device surface, audited
-/// codebase, ADR-002 §W1–§W5 claims hold against this tier.
+/// codebase, the full security claim set holds against this tier.
 ///
 /// **Tier 2** — libkrun. Fast, well-engineered, but its host/guest
 /// boundary is **not equivalent to Firecracker + jailer + seccomp**.
 /// Best for local dev on macOS Apple Silicon (HVF) and builder VMs.
-/// Plan 76 §"libkrun isolation is not Firecracker isolation": prod
-/// selection must require explicit operator acknowledgement.
+/// Prod selection must require explicit operator acknowledgement.
 ///
 /// **Tier 3** — Mock, test-only.
 /// Apple Container sits at Tier 3 today as well: while VZ provides
-/// real virtualization, the security claims have not been audited
-/// against ADR-002.
+/// real virtualization, the security claims have not been audited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendTier {
     Tier1,
@@ -330,19 +328,19 @@ impl BackendTier {
 pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
     AppleContainer(AppleContainerBackend),
-    /// libkrun (plan 53 §"Plan E") — Linux KVM / macOS Apple Silicon HVF.
+    /// libkrun — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
-    /// Vz (Apple Virtualization.framework) — Plan 97 / ADR-056. Direct
-    /// host-level Vz integration on macOS 13+; collapses the nested
+    /// Vz (Apple Virtualization.framework). Direct host-level Vz
+    /// integration on macOS 13+; collapses the nested
     /// macOS → libkrun → Firecracker workload-microVM path. Opt-in via
     /// `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun
-    /// as the macOS default per Plan 97 §"Phase D".
+    /// as the macOS default.
     Vz(VzBackend),
-    /// QEMU workload runtime (Plan 166 Phase 2 / ADR-072) — Linux dev/test
-    /// substrate (KVM where present, TCG fallback). Opt-in via
-    /// `--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
-    /// it (Firecracker stays the production runtime). Dev tier only,
-    /// outside ADR-002 claims.
+    /// QEMU workload runtime — Linux dev/test substrate (KVM where
+    /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
+    /// `MVM_BACKEND=qemu`; `auto_select` never picks it (Firecracker
+    /// stays the production runtime). Dev tier only, outside the
+    /// security claims.
     Qemu(QemuBackend),
     /// In-memory mock — test-only. Records `start`/`stop`/`pause`/
     /// `resume` calls against a `Mutex<HashMap>` and never touches
@@ -380,8 +378,8 @@ impl AnyBackend {
             "apple-container" => Self::AppleContainer(AppleContainerBackend),
             "libkrun" | "krun" => Self::Libkrun(LibkrunBackend),
             "vz" | "virtualization" => Self::Vz(VzBackend),
-            // Plan 166 Phase 2 — `"qemu"` is the Linux dev/test backend
-            // (KVM where present, TCG fallback).
+            // `"qemu"` is the Linux dev/test backend (KVM where
+            // present, TCG fallback).
             "qemu" => Self::Qemu(QemuBackend),
             // Test-only in-memory backend. See `crate::mock`. Routing
             // here from a production caller is a misconfiguration, but
@@ -475,10 +473,9 @@ impl AnyBackend {
         vms
     }
 
-    /// Plan 76 Phase 7 — isolation tier of this backend. Used by
-    /// `mvmctl up` to refuse silent Tier 2 downgrades on
-    /// production-like launches, and by `mvmctl doctor` to surface
-    /// what's actually running on the host.
+    /// Isolation tier of this backend. Used by `mvmctl up` to refuse
+    /// silent Tier 2 downgrades on production-like launches, and by
+    /// `mvmctl doctor` to surface what's actually running on the host.
     ///
     /// Classification mirrors each backend's existing
     /// `BackendSecurityProfile.tier` (`crates/mvm-backend/src/*.rs::security_profile`),
@@ -494,14 +491,13 @@ impl AnyBackend {
 
             // Tier 2: fast local. libkrun's host/guest boundary
             // is well-engineered but not equivalent to
-            // Firecracker + jailer + seccomp; plan 76 §"libkrun
-            // isolation is not Firecracker isolation". Apple
-            // Container (Virtualization.framework) sits here per its
-            // existing `BackendSecurityProfile.tier` string.
+            // Firecracker + jailer + seccomp. Apple Container
+            // (Virtualization.framework) sits here per its existing
+            // `BackendSecurityProfile.tier` string.
             // QEMU: best-case Tier 2 (KVM-accelerated). The TCG (no-KVM)
             // mode is a runtime Tier-3 degradation surfaced by the QEMU
             // backend's `start` banner + doctor, not by this compile-time
-            // classification (Plan 166 / ADR-072).
+            // classification.
             Self::Libkrun(_) | Self::AppleContainer(_) | Self::Vz(_) | Self::Qemu(_) => {
                 BackendTier::Tier2
             }
@@ -541,7 +537,7 @@ impl AnyBackend {
         self.inner()
     }
 
-    /// Plan 118 WS-1 1b — does this backend support a prelaunched-supervisor standby
+    /// Does this backend support a prelaunched-supervisor standby
     /// pool? See [`VmBackend::supports_standby_pool`]. Only libkrun does today.
     pub fn supports_standby_pool(&self) -> bool {
         self.inner().supports_standby_pool()
@@ -567,7 +563,7 @@ impl AnyBackend {
 
     /// Warm-start a VM at (at least) the requested snapshot tier. See
     /// [`VmBackend::warm_start`] — fails closed with a typed error on an
-    /// over-request rather than degrading to a cold boot (plan 123 C4).
+    /// over-request rather than degrading to a cold boot.
     pub fn warm_start(
         &self,
         config: &VmStartConfig,
@@ -610,9 +606,9 @@ impl AnyBackend {
     }
 
     /// Block until a VM exits and return its captured exit status.
-    /// Plan 152 WS-A Task 3.1. Delegates to the inner backend; only
-    /// libkrun (and mock) implement a real wait surface — other backends
-    /// return a clear bail via the default VmBackend impl.
+    /// Delegates to the inner backend; only libkrun (and mock)
+    /// implement a real wait surface — other backends return a clear
+    /// bail via the default VmBackend impl.
     pub fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
         self.inner().wait(id)
     }
@@ -712,8 +708,8 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_hypervisor_vz() {
-        // Plan 97 Phase B — `--backend vz` and the longer
-        // `--backend virtualization` both route to the new Vz backend.
+        // `--backend vz` and the longer `--backend virtualization`
+        // both route to the new Vz backend.
         // `auto_select()` itself stays unchanged on macOS (libkrun
         // remains the default per the user's "don't replace libkrun"
         // instruction).
@@ -760,7 +756,7 @@ mod tests {
     #[test]
     fn test_any_backend_from_build_output_with_runner() {
         // A non-KVM dev/test runner output routes to the QEMU backend
-        // (microvm.nix folded into QEMU — ADR-076).
+        // (microvm.nix folded into QEMU).
         let backend = AnyBackend::from_build_output(true);
         assert_eq!(backend.name(), "qemu");
     }
@@ -773,8 +769,8 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_hypervisor_qemu() {
-        // Plan 166 Phase 2 — `"qemu"` routes to the real QEMU workload
-        // backend, not the retired microvm.nix alias.
+        // `"qemu"` routes to the real QEMU workload backend, not the
+        // retired microvm.nix alias.
         let backend = AnyBackend::from_hypervisor("qemu");
         assert_eq!(backend.name(), "qemu");
         assert!(matches!(backend, AnyBackend::Qemu(_)));
@@ -976,9 +972,9 @@ mod tests {
     #[test]
     fn libkrun_warm_start_refuses_live_memory_with_recovery_hint() {
         // A live-memory warm-start asked of libkrun's disk-only tier must
-        // fail closed (no cold-boot fallback) and name a recovery action —
-        // plan 123 C4 / ADR-053. The Unsupported branch returns before any
-        // boot, so this needs no VM/KVM.
+        // fail closed (no cold-boot fallback) and name a recovery action.
+        // The Unsupported branch returns before any boot, so this needs
+        // no VM/KVM.
         use mvm_core::vm_backend::WarmStartError;
         let cfg = VmStartConfig {
             name: "warm-gate-test".into(),
@@ -1040,7 +1036,7 @@ mod tests {
         );
     }
 
-    // Plan 76 Phase 7 — BackendTier coverage.
+    // BackendTier coverage.
 
     #[test]
     fn tier_classification_locks_each_backend_variant() {
@@ -1062,9 +1058,8 @@ mod tests {
         // The `BackendSecurityProfile.tier` field (consulted by
         // `mvmctl doctor --json::security_posture.tier`) is the
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
-        // is the Plan 76 Phase 7 closed-enum view of the same fact.
-        // Bumping one without the other is a regression — keep them
-        // wired.
+        // is the closed-enum view of the same fact. Bumping one without
+        // the other is a regression — keep them wired.
         let names = ["firecracker", "libkrun", "apple-container", "qemu", "mock"];
         for name in names {
             let b = AnyBackend::from_hypervisor(name);

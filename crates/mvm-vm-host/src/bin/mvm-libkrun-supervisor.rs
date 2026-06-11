@@ -1,7 +1,7 @@
-//! Plan 57 W4 / Plan 102 W6.A.5 — one-libkrun-guest-per-process supervisor.
+//! One-libkrun-guest-per-process supervisor.
 //!
 //! Reads a [`SupervisorConfig`] JSON document on stdin, ad-hoc
-//! codesigns itself for `Hypervisor.framework` (macOS W2 gate),
+//! codesigns itself for `Hypervisor.framework` (macOS gate),
 //! creates the per-VM state directory, writes its own PID, then
 //! either:
 //!
@@ -14,7 +14,7 @@
 //!    <gateway_audit_socket>` subscribers see the live NDJSON feed.
 //!    This is the claim-10 substrate path.
 //! 2. **Legacy path** (`cfg.tenant_id` is `None`) — falls back to
-//!    the pre-W6.A.5 [`run_supervisor`] which boots libkrun without
+//!    [`run_supervisor`] which boots libkrun without
 //!    interposing a bridge. Used by Stage 0 builder VMs and any
 //!    other dev-mode call site that doesn't synthesize an
 //!    `ExecutionPlan`.
@@ -25,15 +25,15 @@
 //! ## Why one process per VM
 //!
 //! `krun_start_enter` calls `exit()` on the calling process when
-//! the guest exits cleanly. An in-process registry (plan 57 W4
-//! Option A) would tear down every other libkrun guest the parent
+//! the guest exits cleanly. An in-process registry would tear down
+//! every other libkrun guest the parent
 //! `mvmctl` is supervising. One process per VM scopes the `exit()`
 //! to a single supervisor; the parent `mvmctl` returns immediately
 //! after spawning and survives a guest's shutdown.
 //!
 //! ## Why this is its own crate
 //!
-//! Plan 102 W6.A.5 — the bin's bridge-factory branch depends on
+//! The bin's bridge-factory branch depends on
 //! `mvm-supervisor` (gateway audit substrate). Adding
 //! `mvm-supervisor` to `mvm-libkrun`'s deps would close the cycle
 //! `mvm-supervisor → mvm-backend → mvm-libkrun`. Splitting the bin
@@ -64,10 +64,10 @@ use mvm_hostd::supervisor::gateway_bridge::{
 };
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
-/// standby (1a; pool size bounds the blast radius in 1b).
+/// standby; pool size bounds the blast radius.
 // A prelaunched **pool** standby legitimately blocks a long time waiting to be claimed —
 // it's the warm pool's whole point. Its lifetime is bounded by the pool reaper TTL
-// (`mvmctl cache prune`, ~30 min), NOT a short self-timeout; a 30s value (Plan 118 WS-1 1a)
+// (`mvmctl cache prune`, ~30 min), NOT a short self-timeout; a 30s value
 // made standbys self-exit before a later `up` could claim them. The per-conn read timeout
 // (set on the accepted stream) still caps a connected-but-silent peer, so DoS protection is
 // unaffected. Keep this aligned with the reaper TTL.
@@ -75,7 +75,7 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Cap on the attach frame — workload config is small; reject hostile prefixes.
 const MAX_ATTACH_BYTES: usize = 1 << 20; // 1 MiB
 
-/// Stdin dispatch (Plan 118 WS-1 1a). The prelaunched producer wraps the base
+/// Stdin dispatch. The prelaunched producer wraps the base
 /// config under a unique `prelaunch_base` key; legacy callers emit a bare
 /// `SupervisorConfig` (no wrapper) and are byte-for-byte unchanged. Probed
 /// wrapper-first: a legacy config has no such key, so it falls through to the
@@ -96,13 +96,13 @@ struct PrelaunchEnvelope {
 
 fn main() -> ExitCode {
     // macOS Hypervisor.framework rejects any process without
-    // `com.apple.security.hypervisor`. Plan 57 W2's ad-hoc signer
+    // `com.apple.security.hypervisor`. The ad-hoc signer
     // self-signs + re-spawns the binary on first run; subsequent
     // invocations are silent (`MVM_SIGNED=1`). Without this,
     // `krun_start_enter` fails at VM creation with rc -22.
     mvm_backend::providers::apple_container::ensure_signed();
 
-    // Plan 88 W5 diagnostic: opt-in libkrun internal logger. Set
+    // Diagnostic: opt-in libkrun internal logger. Set
     // `MVM_KRUN_LOG={off,error,warn,info,debug,trace}` to surface
     // device-attach traces and virtio MMIO events that don't appear
     // via `krun_set_log_level` alone. Tried `krun_init_log` first
@@ -138,7 +138,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Prelaunch (warm-pool standby, Plan 118 WS-1 1a) vs legacy/cold (bare
+    // Prelaunch (warm-pool standby) vs legacy/cold (bare
     // SupervisorConfig). The prelaunch producer wraps the base under a unique
     // `prelaunch_base` key; legacy callers emit a bare config and route below
     // unchanged.
@@ -160,7 +160,7 @@ fn main() -> ExitCode {
 /// listener and route to the bridge/legacy boot path. Extracted so both
 /// entrypoints run identical post-config logic.
 fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
-    // Plan 152 WS-A: bind the workload-exit control listener and capture
+    // Bind the workload-exit control listener and capture
     // the guest's exit code on a background thread. Must bind BEFORE the
     // run dispatch (libkrun's listen=false proxy needs a live socket
     // before start_enter). Best-effort: a bind failure must not block
@@ -187,7 +187,7 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
         }
     }
 
-    // Plan 102 W6.A.5 — route to the bridge path when the producer
+    // Route to the bridge path when the producer
     // populated the audit substrate, otherwise fall back to the
     // legacy direct-libkrun path (Stage 0 builder VMs, smoke tests,
     // etc. that haven't synthesized an ExecutionPlan).
@@ -208,7 +208,7 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
     }
 }
 
-/// Prelaunched-standby flow (Plan 118 WS-1 1a). `ensure_signed()` + the libkrun
+/// Prelaunched-standby flow. `ensure_signed()` + the libkrun
 /// dylib are already warm (done in `main`). Bind the control UDS, accept ONE
 /// connection (per-conn timeout), read the attach frame, re-verify+merge, then
 /// hand the whole config to the existing bridge path. One-shot: any failure or
@@ -272,7 +272,7 @@ fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
 }
 
 /// Bind the control UDS at `path` with mode 0700, inside a 0700 parent dir.
-/// Mirrors the W1.2 vsock-proxy posture: same-uid only.
+/// Mirrors the vsock-proxy posture: same-uid only.
 fn bind_control_socket(path: &std::path::Path) -> std::io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -363,8 +363,8 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
     // signed (plan_admission.rs serializes `admitted.signed`), not a bare
     // ExecutionPlan. Decode the envelope and read the inner plan from its
     // payload. The host already verified the signature + G4 window/nonce at
-    // admit time and spawns this supervisor over a private channel, so under
-    // ADR-002 (host is trusted) we extract rather than re-verify here.
+    // admit time and spawns this supervisor over a private channel, so since
+    // the host is trusted we extract rather than re-verify here.
     // Defense-in-depth re-verify via `mvm_core::plan::verify_plan` with the host
     // signer pubkey is a follow-up.
     let signed: SignedExecutionPlan =
@@ -393,8 +393,8 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
     let signing_key = SigningKey::from_bytes(&key_array);
 
     // FileAuditSigner is what mvm-supervisor's chain emitter wraps.
-    // The cross-process flock (Plan 102 W6.A commit 2) serializes
-    // writes from concurrent VM supervisors for the same tenant.
+    // The cross-process flock serializes writes from concurrent VM
+    // supervisors for the same tenant.
     let signer = FileAuditSigner::open(signing_key, &audit_dir)
         .with_context(|| format!("open FileAuditSigner at {}", audit_dir.display()))?;
     let signer: Arc<dyn AuditSigner> = Arc::new(signer);
@@ -409,17 +409,17 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
         "starting bridge-mode libkrun supervisor"
     );
 
-    // Plan 113 §Task 4 — observer chain from admitted plan + host
+    // Observer chain from admitted plan + host
     // allowlist. `resolve_observer_chain_from_plan` returns an empty
     // Vec for the `local-default` plan ref WITHOUT consulting the
     // allowlist; only non-default refs trigger the
     // `~/.mvm/observers/allowlist.toml` load. This preserves the
-    // Stage 0 / dev-mode path (and the Plan 112 phase3c dispatch
+    // Stage 0 / dev-mode path (and the dispatch
     // smoke, which uses a placeholder plan that fails decode before
     // reaching this code).
     //
     // Leaf capabilities are fixed per backend: libkrun reports
-    // `payload_tap: true`. The Vz drainer (Plan 113 §Task 10) will
+    // `payload_tap: true`. The Vz drainer will
     // set `payload_tap: false` from its own bin.
     let leaf_caps = mvm_hostd::supervisor::network::ProviderCapabilities {
         flow_events: true,
@@ -450,7 +450,7 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
         bundle: bundle.map(Arc::new),
         audit_socket,
         signer,
-        // Plan 123 A2/A4 — the flow-open gate. This `AllowAll` is only the
+        // The flow-open gate. This `AllowAll` is only the
         // *no-bundle fallback*: when the admitted plan carries a resolvable
         // policy bundle, `run_bridge_inner` derives a per-tenant
         // `PlanFlowPolicy` (deny-by-default, the libkrun analogue of the
@@ -459,10 +459,10 @@ fn run_with_bridge(cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
         // dev-mode carry no bundle, so they keep `AllowAll` (still gated by the
         // always-on mandatory-deny + placeholder-leak packet scans).
         policy: Arc::new(AllowAll),
-        // Plan 113 / ADR-064 — observers resolved above from the
+        // Observers resolved above from the
         // admitted plan's `network_policy` ref through the host
         // allowlist. Empty for `local-default` plans (preserves
-        // pre-Plan-113 behavior); non-empty for tenant policies that
+        // prior behavior); non-empty for tenant policies that
         // reference an allowlisted observer by name.
         observers,
     };

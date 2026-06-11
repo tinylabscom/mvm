@@ -28,7 +28,7 @@ const ROTATE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
 /// Categories of local mvmctl operations that are audit-logged.
 ///
-/// Plan 37 §6 invariant: "no unaudited control-plane mutation". Every
+/// Invariant: no unaudited control-plane mutation. Every
 /// state-changing CLI verb emits one of these. Pure read-only verbs
 /// (status / list / inspect / completions / shell-init) are not
 /// audited; everything that mutates host state, registry state, the
@@ -45,7 +45,7 @@ pub enum LocalAuditKind {
     VolumeLock,
     UpdateInstall,
     Uninstall,
-    // --- DX features (Phase 2) ---
+    // --- DX features ---
     NetworkCreate,
     NetworkRemove,
     ImageFetch,
@@ -55,7 +55,7 @@ pub enum LocalAuditKind {
     ConfigChange,
     ConsoleSessionStart,
     ConsoleSessionEnd,
-    // --- MCP server (plan 32 / Proposal A) ---
+    // --- MCP server ---
     /// `tools/call run` invocation — every LLM-driven code execution
     /// against a microVM is auditable.
     McpToolsCallRun,
@@ -63,21 +63,20 @@ pub enum LocalAuditKind {
     /// not a non-zero guest exit code).
     McpToolsCallRunError,
     /// MCP session opened — first call with a previously-unseen
-    /// `session=ID` parameter (plan 32 / Proposal A.2).
+    /// `session=ID` parameter.
     McpSessionStarted,
     /// MCP session closed by the client (`close: true`) or reaped
     /// by the server (idle / max-lifetime / shutdown drain).
     McpSessionClosed,
-    // --- Plan 37 future verbs (B21) -----------------------------
+    // --- Reserved future verbs ----------------------------------
     // These kinds are reserved here so the wire format is stable
     // before the corresponding CLI verbs ship. Each will be emitted
-    // by its own command in a subsequent PR. Reserving them now
-    // lets the parallel agents working on Wave 2.6 (egress proxy)
-    // and Wave 3 (supervisor commands) land their verbs without
+    // by its own command later. Reserving them now lets the egress
+    // proxy and supervisor command work land their verbs without
     // re-bumping the audit schema.
     /// `mvmctl plan submit <signed-plan>` — admission of a signed
     /// `ExecutionPlan`. Distinct from the supervisor's per-state
-    /// `plan.admitted` event (B19): this is the local CLI verb that
+    /// `plan.admitted` event: this is the local CLI verb that
     /// hands the plan to the supervisor.
     PlanSubmit,
     /// Policy bundle install or replacement. Public policy rollout
@@ -91,28 +90,27 @@ pub enum LocalAuditKind {
     /// the supervisor will admit.
     HostTrustSet,
     /// `mvmctl supervisor restart` — restart the trusted host-side
-    /// supervisor process (plan 37 §7B Zone B).
+    /// supervisor process.
     SupervisorRestart,
     /// `mvmctl quarantine <workload>` — freeze a running workload.
     /// Distinct from `kill`: quarantined workloads can be resumed
     /// for forensics; killed workloads cannot.
     Quarantine,
     /// `mvmctl kill <workload>` — terminal teardown of a running
-    /// workload. Plan 37 Addendum B6.
+    /// workload.
     Kill,
     /// `mvmctl artifact fetch <plan_id>` — retrieve captured
-    /// artifacts from the supervisor's artifact store. Plan 37 §21.
+    /// artifacts from the supervisor's artifact store.
     ArtifactFetch,
     /// `mvmctl wake <workload>` / `mvmctl sleep <workload>` —
     /// supervisor-driven snapshot suspend/resume.
     WorkloadWake,
     WorkloadSleep,
-    // --- Egress L7 (plan 34 / ADR-006) ---
+    // --- Egress L7 ---
     /// Host CA for hypervisor-level L7 egress interception was
-    /// rotated. ADR-006 §"Decisions" 7 — rotation is explicit, not
-    /// implicit; every rotation lands in the audit log with old +
-    /// new fingerprints + the list of VMs whose per-VM leaves were
-    /// re-signed. Plan 34 §"Files (summary)".
+    /// rotated. Rotation is explicit, not implicit; every rotation
+    /// lands in the audit log with old + new fingerprints + the list
+    /// of VMs whose per-VM leaves were re-signed.
     EgressCaRotated,
     // --- Lifecycle integrity events ---
     /// `mvmctl build` failed before producing a slot/revision. Paired
@@ -122,18 +120,18 @@ pub enum LocalAuditKind {
     /// Snapshot integrity verification failed at resume time. Covers
     /// HMAC tag mismatch (tampered bytes or rotated host key), version
     /// mismatch under strict mode, and lower-level I/O / encoding
-    /// failures from `crate::crypto::snapshot_hmac::verify`. ADR-007 /
-    /// plan 41 W4 — refusing to resume a tampered snapshot is a
-    /// security signal and must be auditable.
+    /// failures from `crate::crypto::snapshot_hmac::verify`. Refusing
+    /// to resume a tampered snapshot is a security signal and must be
+    /// auditable.
     SnapshotIntegrityFailed,
     /// Pre-flight verification of a downloaded dev image manifest
     /// failed: cosign signature invalid, manifest version pin off,
     /// `not_after` past, or the published version is on the signed
-    /// revocation list. Plan 36 / ADR 005 — every refusal is an
-    /// auditable event so an operator can correlate "image rejected
+    /// revocation list. Every refusal is an auditable event so an
+    /// operator can correlate "image rejected
     /// at 14:03" with their CDN logs.
     ImageVerifyFailed,
-    // --- Registry / cache mutations (Plan 37 §6 invariant fillers) ---
+    // --- Registry / cache mutations (no-unaudited-mutation fillers) ---
     /// `mvmctl cache prune` removed temporary files / empty subdirs
     /// from `~/.cache/mvm`. Pure read-only `cache info` is not
     /// audited; the prune verb is, because it deletes host bytes.
@@ -155,15 +153,15 @@ pub enum LocalAuditKind {
     /// `mvmctl cache prune --orphan-builds`. The detail field carries
     /// the count and (for small sweeps) the truncated slot hashes.
     SlotPrune,
-    /// Reconcile-on-entry convergence healed registry/runtime drift
-    /// (Plan 170 WS-A / ADR-074): a dead-process record was torn down, a
-    /// stale record dropped, or an orphan state dir reaped. One entry per
+    /// Reconcile-on-entry convergence healed registry/runtime drift:
+    /// a dead-process record was torn down, a stale record dropped, or
+    /// an orphan state dir reaped. One entry per
     /// healed item; the `detail` field carries `action=<classification>`.
     /// Emitted by `mvmctl reconcile` and the cheap convergence pass run at
     /// CLI entry for state-touching commands.
     RegistryReconcile,
-    /// `mvmctl pool warm` pre-spawned supervisor standbys for the warm pool
-    /// (Plan 118 WS-1 1b). State-changing infra verb (spawns detached
+    /// `mvmctl pool warm` pre-spawned supervisor standbys for the warm pool.
+    /// State-changing infra verb (spawns detached
     /// supervisors + writes `~/.mvm/pool/`); the `detail` field carries
     /// `spawned=<n> target=<n>`.
     PoolWarm,
@@ -208,21 +206,21 @@ pub enum LocalAuditKind {
     /// VM. The reaper picks up the new deadline on its next tick.
     VmTtlSet,
     /// `mvmctl vm volume add` / `volume remove` — mounts or unmounts
-    /// a virtio-fs volume into a running guest. (Plan 45 — rename of
-    /// the prior `VmShareAdd` / `VmShareRemove` per Path C; no compat
-    /// shim, no behavioural change.)
+    /// a virtio-fs volume into a running guest. (Renamed from the
+    /// prior `VmShareAdd` / `VmShareRemove`; no compat shim, no
+    /// behavioural change.)
     VmVolumeAdd,
     VmVolumeRemove,
-    // --- Plan 46: metering API ---
+    // --- metering API ---
     /// One per-minute metering bucket sealed and chained into the
-    /// audit log. Plan 46 — auditing-grade resource attribution. The
+    /// audit log. Auditing-grade resource attribution. The
     /// `detail` field carries a JSON-encoded `MeteringBucket`
     /// (`mvm_core::metering::MeteringBucket`) so a forensic pass can
     /// reconstruct per-tenant resource consumption end-to-end without
     /// trusting the per-tenant JSONL rollup file (which the audit
     /// chain authenticates by sealing each bucket here).
     MeteringEpoch,
-    // --- Sprint 52 W2: bundle trust store mutations ---
+    // --- bundle trust store mutations ---
     //
     // `~/.mvm/trusted-publishers/<key_id>.pub` is the host-trust-
     // boundary state for bundle admission (claim 9). Every add /
@@ -250,7 +248,7 @@ pub enum LocalAuditKind {
     /// so a non-KVM host can `docker load` it. Detail:
     /// `template=<slot>,revision=<rev>,bytes=<size>`.
     ImageExportOci,
-    // --- Plan 47: dm-thin storage pool ops ---
+    // --- dm-thin storage pool ops ---
     /// `mvmctl storage gc` removed one or more orphaned thin volumes
     /// from the pool. Detail carries the removed volume names (or a
     /// truncated count for large sweeps).
@@ -263,7 +261,7 @@ pub enum LocalAuditKind {
     /// carries used + capacity bytes. Operators correlate with their
     /// disk-pressure alerts.
     StoragePoolFull,
-    // --- Phase 5 session lifecycle (post-fd-3-fix audit posture) ---
+    // --- session lifecycle ---
     //
     // Dev sessions hold a long-lived microVM with PTY / shell-exec
     // surface available behind the session id. The session id IS the
@@ -297,7 +295,7 @@ pub enum LocalAuditKind {
     /// inside another session verb) tore down an idle session.
     /// Detail: `session=<id>,idle_timeout_secs=<n>`.
     SessionReap,
-    // --- Plan 73 Followup C: deps-volume audit verbs ---
+    // --- deps-volume audit verbs ---
     /// `mvmctl deps audit` re-ran the CVE scan against a cached deps
     /// volume and resealed it. Detail carries the prior + new volume
     /// hashes plus the count of high/critical CVE findings surfaced.
@@ -305,13 +303,13 @@ pub enum LocalAuditKind {
     /// records, one per volume).
     DepsAudit,
 
-    // --- Plan 77 W3: Stage 0 builder VM bootstrap lifecycle ---
+    // --- Stage 0 builder VM bootstrap lifecycle ---
     //
     // Three events bracket the per-host Stage 0 lifecycle so a
     // contributor can answer "did `dev up` actually run Stage 0 last
-    // night, and how did it land?" after the fact. The rescued plan
-    // doc sketched a separate `~/.mvm/audit/stage0.jsonl` file; we
-    // emit into the shared local audit log instead because (a) every
+    // night, and how did it land?" after the fact. We emit into the
+    // shared local audit log (rather than a separate
+    // `~/.mvm/audit/stage0.jsonl`) because (a) every
     // other contributor-side event already lands there, (b) the
     // schema/macro/rotation already exists, and (c) operators filter
     // by `kind` not by file. The `kind` strings (`stage0_boot`,
@@ -347,13 +345,12 @@ pub enum LocalAuditKind {
     /// started.
     Stage0Failed,
 
-    // --- Plan 74 W2: programmable network policy enforcement events ---
+    // --- programmable network policy enforcement events ---
     //
     // Five new kinds wired into the L3 iptables / L4 substrate / DNS
-    // pin paths. State-only slice: variants ship here so emission
-    // sites land in their own focused PRs without re-bumping the
-    // audit schema each time. Wire format is stable (snake_case
-    // strings) per the enum's `rename_all` attribute.
+    // pin paths. Variants ship ahead of their emission sites without
+    // re-bumping the audit schema each time. Wire format is stable
+    // (snake_case strings) per the enum's `rename_all` attribute.
     //
     // Detail-format conventions across the five (so a future
     // dashboard parses uniformly):
@@ -363,8 +360,7 @@ pub enum LocalAuditKind {
     //   - additional key=value pairs comma-separated, no spaces.
     //
     /// L4 allow decision: a flow matched a policy rule and was
-    /// permitted. Plan 74 W2 §"Emit audit entries for every
-    /// allow/deny". Fired from `L4Policy::evaluate` and from the
+    /// permitted. Fired from `L4Policy::evaluate` and from the
     /// iptables FORWARD accept path (when wired). Detail format:
     ///   `proto=<tcp|udp>,dst=<ip:port>,rule=<host:port-or-cidr>`
     NetworkPolicyAllow,
@@ -380,12 +376,12 @@ pub enum LocalAuditKind {
     /// fired regardless of the user's allow-list. Surfaced as a
     /// distinct kind because IMDS-style exfil attempts deserve a
     /// dedicated alert channel separate from noisier policy
-    /// denials. Plan 74 W2 §item 4. Detail format:
+    /// denials. Detail format:
     ///   `proto=<tcp|udp>,dst=<ip:port>,category=<cloud-metadata|link-local|cgnat|loopback>`
     NetworkMandatoryDeny,
     /// Supervisor admission resolved a destination host to one or
     /// more IPs and pinned them for the lifetime of the workload.
-    /// Plan 74 W2 item 1. Fires once per `(workload, destination)`
+    /// Fires once per `(workload, destination)`
     /// pair at admission, before the guest boots. Detail format:
     ///   `dest=<host>,ips=<ip[,ip...]>,ttl_s=<n>`
     DnsPinSet,
@@ -396,16 +392,16 @@ pub enum LocalAuditKind {
     ///   `dest=<host>,pinned_ips=<ip[,ip...]>,observed_ip=<ip>`
     DnsPinReject,
 
-    // --- Plan 101 W7: gateway-flow audit kinds (claim 10 leg 2) ---
+    // --- gateway-flow audit kinds (claim 10 leg 2) ---
     //
     // Four new kinds emitted by the gvproxy (macOS) / passt (Linux)
-    // control-socket wrapper. State-only slice: variants ship here so
-    // emission sites land in their own focused PRs without re-bumping
-    // the audit schema each time. Wire format is stable (snake_case
-    // strings) per the enum's `rename_all` attribute.
+    // control-socket wrapper. Variants ship ahead of their emission
+    // sites without re-bumping the audit schema each time. Wire
+    // format is stable (snake_case strings) per the enum's
+    // `rename_all` attribute.
     //
-    // Detail-format conventions (populated by Plan 101 W6 — emission
-    // PR; documented here so the names match the intended payload):
+    // Detail-format conventions (documented here so the names match
+    // the intended payload the emission path populates):
     //   - `flow_id=<u64-hex>` is the join key across all four kinds
     //     for a single flow's lifecycle.
     //   - per-direction byte counters are `bytes_in` / `bytes_out` on
@@ -428,9 +424,9 @@ pub enum LocalAuditKind {
     ///   `flow_id=<hex>,bytes_in=<n>,bytes_out=<n>,duration_ms=<n>`
     FlowClosed,
     /// Periodic aggregated byte counters for a long-lived flow.
-    /// Per-byte audit is too noisy; emission policy lives in Plan
-    /// 101 W8 (default: emit every 30s for flows still open beyond
-    /// the window). Counters are deltas since the previous
+    /// Per-byte audit is too noisy; the emission policy defaults to
+    /// every 30s for flows still open beyond the window. Counters
+    /// are deltas since the previous
     /// `FlowBytes` / `FlowOpened` entry on the same `flow_id`.
     /// Detail format:
     ///   `flow_id=<hex>,bytes_in_delta=<n>,bytes_out_delta=<n>,window_s=<n>`
@@ -444,14 +440,14 @@ pub enum LocalAuditKind {
     ///   `flow_id=<hex>,decision=<allow|deny>,rule=<rule-id>`
     FlowPolicyDecision,
 
-    // --- Plan 93 Phase 3: vendored-blob supply-chain fetch ---
+    // --- vendored-blob supply-chain fetch ---
     //
     // Emitted once per vendored bootstrap blob each time it is fetched
     // or revalidated from cache, so every hash trust decision in the
     // no-prebuilt-download supply chain is auditable. Today the only such
-    // blob is the Plan 160 nix-tarball Stage 0 seed (SHA-256-pinned; the
-    // hash is the binding integrity check — ADR-071); the kind is
-    // forward-compatible with any future pinned asset. Lands in the shared
+    // blob is the nix-tarball Stage 0 seed (SHA-256-pinned; the hash
+    // is the binding integrity check); the kind is forward-compatible
+    // with any future pinned asset. Lands in the shared
     // local audit log (not the chain-signed stream), matching the Stage 0
     // siblings above. Wire string is stable (`vendor_blob_fetched`) — log
     // shippers / `mvmctl audit` filter on it.
@@ -713,7 +709,7 @@ pub fn emit_to(path: &Path, kind: LocalAuditKind, vm_name: Option<&str>, detail:
 
 /// Return the most recent Stage 0 lifecycle event (`Stage0Boot`,
 /// `Stage0CachePromoted`, or `Stage0Failed`) in the default local
-/// audit log, or `None` if Stage 0 has never run. Plan 93 Phase 3 —
+/// audit log, or `None` if Stage 0 has never run.
 /// `mvmctl doctor` uses this to answer "when did Stage 0 last run and
 /// how did it land?" without grep-ing the log.
 pub fn read_last_stage0_event() -> Option<LocalAuditEvent> {
@@ -775,7 +771,7 @@ pub enum AuditAction {
     SnapshotDeleted,
     TransitionDeferred,
     MinRuntimeOverridden,
-    // -- Vsock security (Phase 8) --
+    // -- Vsock security --
     VsockSessionStarted,
     VsockSessionEnded,
     VsockFrameReceived,
@@ -944,10 +940,10 @@ mod tests {
 
     #[test]
     fn b21_reserved_audit_kinds_serde_roundtrip() {
-        // B21 reserves audit kinds for plan-37 future verbs so the
-        // wire format stays stable before each CLI verb ships. This
-        // test is the contract — older builds must accept any of
-        // these snake_case variants without rejecting them.
+        // These reserved audit kinds keep the wire format stable
+        // before each CLI verb ships. This test is the contract —
+        // older builds must accept any of these snake_case variants
+        // without rejecting them.
         let kinds = vec![
             LocalAuditKind::PlanSubmit,
             LocalAuditKind::PolicyApply,
@@ -992,12 +988,12 @@ mod tests {
     }
 
     // =====================================================================
-    // Plan 74 W2 — network policy audit kinds (state-only slice)
+    // network policy audit kinds
     // =====================================================================
 
     /// Same shape as `b21_reserved_audit_kinds_serde_roundtrip`:
-    /// every new W2 variant must serde-roundtrip cleanly so emission
-    /// PRs can land independently without re-bumping the audit
+    /// every new network-policy variant must serde-roundtrip cleanly
+    /// so emission can land independently without re-bumping the audit
     /// schema each time.
     #[test]
     fn w2_network_audit_kinds_serde_roundtrip() {
@@ -1016,8 +1012,8 @@ mod tests {
         }
     }
 
-    /// Wire-format pin for the W2 variants. Pinned so a future
-    /// rename surfaces as a failing test and forces a conscious
+    /// Wire-format pin for the network-policy variants. Pinned so a
+    /// future rename surfaces as a failing test and forces a conscious
     /// decision about old-log readability.
     #[test]
     fn w2_network_audit_kinds_use_snake_case_on_the_wire() {
@@ -1047,9 +1043,9 @@ mod tests {
     /// the doc comment explaining why they're separate.
     #[test]
     fn registry_reconcile_kind_serializes_snake_case() {
-        // Plan 170 WS-A — the convergence audit kind must serde-roundtrip
-        // (snake_case per the enum attr) so emission + chain verification
-        // stay stable.
+        // The convergence audit kind must serde-roundtrip (snake_case
+        // per the enum attr) so emission + chain verification stay
+        // stable.
         let json = serde_json::to_string(&LocalAuditKind::RegistryReconcile).unwrap();
         assert_eq!(json, "\"registry_reconcile\"");
         let parsed: LocalAuditKind = serde_json::from_str(&json).unwrap();
@@ -1098,12 +1094,12 @@ mod tests {
     }
 
     // =====================================================================
-    // Plan 101 W7 — gateway-flow audit kinds (state-only slice)
+    // gateway-flow audit kinds
     // =====================================================================
 
-    /// Mirrors the W2 / B21 roundtrip pattern: every reserved W7
-    /// variant must serde-roundtrip cleanly so the W6 emission PRs
-    /// land independently without re-bumping the audit schema.
+    /// Mirrors the network-policy roundtrip pattern: every reserved
+    /// gateway-flow variant must serde-roundtrip cleanly so emission
+    /// lands independently without re-bumping the audit schema.
     #[test]
     fn w7_flow_audit_kinds_serde_roundtrip() {
         let kinds = vec![
@@ -1120,8 +1116,8 @@ mod tests {
         }
     }
 
-    /// Wire-format pin for the four W7 variants. A future rename
-    /// surfaces here as a failing test and forces a conscious
+    /// Wire-format pin for the four gateway-flow variants. A future
+    /// rename surfaces here as a failing test and forces a conscious
     /// decision about old-log readability.
     #[test]
     fn w7_flow_audit_kinds_use_snake_case_on_the_wire() {
@@ -1141,7 +1137,7 @@ mod tests {
         }
     }
 
-    /// `FlowPolicyDecision` is distinct from the W2 admission-time
+    /// `FlowPolicyDecision` is distinct from the admission-time
     /// `NetworkPolicyAllow` / `NetworkPolicyDeny` kinds. A future
     /// maintainer who tries to collapse them fails this test and
     /// reads the doc comment explaining why they are separate
@@ -1169,7 +1165,7 @@ mod tests {
         assert_ne!(flow, deny);
     }
 
-    /// Each new W7 variant must compose with the standard
+    /// Each new gateway-flow variant must compose with the standard
     /// `LocalAuditEvent` constructor. Catches a future regression
     /// where a variant accidentally drops `Clone` or stops being
     /// usable with the existing event shape.
@@ -1235,7 +1231,7 @@ mod tests {
             LocalAuditKind::McpToolsCallRunError,
             LocalAuditKind::McpSessionStarted,
             LocalAuditKind::McpSessionClosed,
-            // B21 reserved future verbs.
+            // Reserved future verbs.
             LocalAuditKind::PlanSubmit,
             LocalAuditKind::PolicyApply,
             LocalAuditKind::PolicyRollback,
@@ -1246,7 +1242,7 @@ mod tests {
             LocalAuditKind::ArtifactFetch,
             LocalAuditKind::WorkloadWake,
             LocalAuditKind::WorkloadSleep,
-            // Plan 34 / ADR-006 egress L7.
+            // Egress L7.
             LocalAuditKind::EgressCaRotated,
             // Lifecycle integrity gap-fillers.
             LocalAuditKind::TemplateBuildError,
@@ -1256,7 +1252,7 @@ mod tests {
             LocalAuditKind::CachePrune,
             LocalAuditKind::SlotRemove,
             LocalAuditKind::SlotPrune,
-            // Phase 5 session lifecycle.
+            // Session lifecycle.
             LocalAuditKind::SessionStart,
             LocalAuditKind::SessionAttach,
             LocalAuditKind::SessionExec,
@@ -1264,24 +1260,24 @@ mod tests {
             LocalAuditKind::SessionConsoleOpen,
             LocalAuditKind::SessionKill,
             LocalAuditKind::SessionReap,
-            // Sprint 52 W2 trust-store mutations.
+            // Trust-store mutations.
             LocalAuditKind::TrustAdd,
             LocalAuditKind::TrustRemove,
-            // Sprint 52 W2 bundle registry mutations.
+            // Bundle registry mutations.
             LocalAuditKind::BundleInstall,
             LocalAuditKind::BundleGc,
             // OCI export follow-on.
             LocalAuditKind::ImageExportOci,
-            // Plan 77 W3 Stage 0 bootstrap lifecycle.
+            // Stage 0 bootstrap lifecycle.
             LocalAuditKind::Stage0Boot,
             LocalAuditKind::Stage0CachePromoted,
             LocalAuditKind::Stage0Failed,
-            // Plan 101 W7 gateway-flow audit (claim 10 leg 2).
+            // Gateway-flow audit (claim 10 leg 2).
             LocalAuditKind::FlowOpened,
             LocalAuditKind::FlowClosed,
             LocalAuditKind::FlowBytes,
             LocalAuditKind::FlowPolicyDecision,
-            // Plan 93 Phase 3 vendored-blob supply-chain fetch.
+            // Vendored-blob supply-chain fetch.
             LocalAuditKind::VendorBlobFetched,
         ];
         for kind in kinds {
@@ -1292,9 +1288,10 @@ mod tests {
 
     #[test]
     fn lifecycle_gap_kinds_use_snake_case_on_the_wire() {
-        // Pin the casing for the new gap-fillers exactly like the B21
-        // and egress kinds — the audit log is a stable parsed format
-        // for downstream tools (`mvmctl audit`, log shippers).
+        // Pin the casing for the new gap-fillers exactly like the
+        // reserved and egress kinds — the audit log is a stable
+        // parsed format for downstream tools (`mvmctl audit`, log
+        // shippers).
         let kinds_and_strings = [
             (LocalAuditKind::TemplateBuildError, "template_build_error"),
             (
@@ -1312,23 +1309,23 @@ mod tests {
             (LocalAuditKind::SessionConsoleOpen, "session_console_open"),
             (LocalAuditKind::SessionKill, "session_kill"),
             (LocalAuditKind::SessionReap, "session_reap"),
-            // Sprint 52 W2 trust-store mutations.
+            // Trust-store mutations.
             (LocalAuditKind::TrustAdd, "trust_add"),
             (LocalAuditKind::TrustRemove, "trust_remove"),
-            // Sprint 52 W2 bundle registry mutations.
+            // Bundle registry mutations.
             (LocalAuditKind::BundleInstall, "bundle_install"),
             (LocalAuditKind::BundleGc, "bundle_gc"),
             // OCI export follow-on.
             (LocalAuditKind::ImageExportOci, "image_export_oci"),
-            // Plan 77 W3 Stage 0 bootstrap lifecycle. Wire strings are
+            // Stage 0 bootstrap lifecycle. Wire strings are
             // load-bearing: downstream log shippers / dashboards filter
             // on `kind == "stage0_boot"` etc., so the snake-case
             // mapping needs a pinned regression test.
             (LocalAuditKind::Stage0Boot, "stage0_boot"),
             (LocalAuditKind::Stage0CachePromoted, "stage0_cache_promoted"),
             (LocalAuditKind::Stage0Failed, "stage0_failed"),
-            // Plan 93 Phase 3 vendored-blob supply-chain fetch. Wire
-            // string is load-bearing: `mvmctl audit` + log shippers
+            // Vendored-blob supply-chain fetch. Wire string is
+            // load-bearing: `mvmctl audit` + log shippers
             // filter on `kind == "vendor_blob_fetched"`.
             (LocalAuditKind::VendorBlobFetched, "vendor_blob_fetched"),
         ];

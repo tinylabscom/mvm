@@ -38,32 +38,29 @@ pub struct VmStartConfig {
     pub initrd_path: Option<String>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
     /// Present when the flake was built with `verifiedBoot = true`
-    /// (the production default per ADR-002 §W3). Must be paired with
-    /// `roothash`. Backends without verity support may ignore both.
+    /// (the production default). Must be paired with `roothash`.
+    /// Backends without verity support may ignore both.
     pub verity_path: Option<String>,
     /// 64-char lowercase-hex root hash from `rootfs.roothash`. Baked
-    /// into the kernel cmdline as `dm-mod.create=`. ADR-002 §W3.2.
+    /// into the kernel cmdline as `dm-mod.create=`.
     pub roothash: Option<String>,
-    /// Plan 74 W1.4b — absolute path to the mvm runtime overlay
-    /// ext4 (ADR-051). When all three of
+    /// Absolute path to the mvm runtime overlay ext4. When all three of
     /// `runtime_overlay_path`, `runtime_overlay_verity_path`,
     /// and `runtime_overlay_roothash` are `Some`, the backend
     /// attaches the overlay as a second virtio-blk drive at
     /// `/dev/vdc` and threads `mvm.runtime_roothash=<hex>` into
-    /// the kernel cmdline so `mvm-verity-init` (the W1.4b.3b.2
-    /// PID 1) sets up the second dm-verity target and
-    /// bind-mounts it at `/sysroot/mvm/runtime`. All three
-    /// `None` ⇒ legacy boot path (rootfs verity only).
+    /// the kernel cmdline so `mvm-verity-init` (PID 1) sets up the
+    /// second dm-verity target and bind-mounts it at
+    /// `/sysroot/mvm/runtime`. All three `None` ⇒ legacy boot path
+    /// (rootfs verity only).
     pub runtime_overlay_path: Option<String>,
-    /// Plan 74 W1.4b — absolute path to the mvm runtime overlay
-    /// verity sidecar (ADR-051). Paired with
-    /// `runtime_overlay_path` + `runtime_overlay_roothash`; the
+    /// Absolute path to the mvm runtime overlay verity sidecar. Paired
+    /// with `runtime_overlay_path` + `runtime_overlay_roothash`; the
     /// backend attaches it as the fourth virtio-blk drive at
     /// `/dev/vdd`.
     pub runtime_overlay_verity_path: Option<String>,
-    /// Plan 74 W1.4b — 64-char lowercase-hex root hash for the
-    /// runtime overlay (ADR-051). Baked into the kernel cmdline
-    /// as `mvm.runtime_roothash=<hex>`.
+    /// 64-char lowercase-hex root hash for the runtime overlay. Baked
+    /// into the kernel cmdline as `mvm.runtime_roothash=<hex>`.
     pub runtime_overlay_roothash: Option<String>,
     /// Nix store revision hash.
     pub revision_hash: String,
@@ -98,30 +95,29 @@ pub struct VmStartConfig {
     pub secret_files: Vec<VmFile>,
     /// Directory containing microvm.nix runner scripts (microvm.nix backend only).
     pub runner_dir: Option<String>,
-    /// Plan 102 Phase 3c — tenant identifier from the admitted
-    /// `ExecutionPlan` (`AdmittedPlan.plan.tenant.0`). When `Some`,
-    /// the libkrun/Vz backends activate the gateway audit substrate
-    /// (bridge factory + chain-signed audit emit per ADR-058).
-    /// `None` keeps the legacy `run_supervisor` path for callers
+    /// Tenant identifier from the admitted `ExecutionPlan`
+    /// (`AdmittedPlan.plan.tenant.0`). When `Some`, the libkrun/Vz
+    /// backends activate the gateway audit substrate (bridge factory +
+    /// chain-signed audit emit). `None` keeps the legacy
+    /// `run_supervisor` path for callers
     /// without admission (`mvmctl dev` Stage 0 builder, session VMs,
     /// template restore).
     pub tenant_id: Option<String>,
-    /// Plan 102 Phase 3c — JSON-encoded `SignedExecutionPlan`
-    /// envelope. Carried as a `String` so `mvm-core` does not depend
-    /// on `mvm-plan` (avoids the `mvm-plan → mvm-libkrun → mvm-core`
-    /// cycle). **The supervisor re-verifies the signature** before
-    /// trusting any decoded field (ADR-041 §"Verification at
-    /// admission"); the host is in the TCB per ADR-002 but the
-    /// supervisor still runs Ed25519 verification. **Do not log
-    /// this value** — the envelope may carry secret bindings, env
-    /// vars, or policy refs that resolve to credentials.
+    /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
+    /// `String` so `mvm-core` does not depend on `mvm-plan` (avoids the
+    /// `mvm-plan → mvm-libkrun → mvm-core` cycle). **The supervisor
+    /// re-verifies the signature** before trusting any decoded field;
+    /// the host is in the TCB but the supervisor still runs Ed25519
+    /// verification. **Do not log this value** — the envelope may carry
+    /// secret bindings, env vars, or policy refs that resolve to
+    /// credentials.
     pub plan_json: Option<String>,
-    /// Plan 102 Phase 3c — JSON-encoded `PlanArtifact` (bundle pin)
+    /// JSON-encoded `PlanArtifact` (bundle pin)
     /// when `admitted.plan.bundle.is_some()`. `None` when the plan
     /// has no `.mvmpkg` pin (the common case). Same "do not log"
     /// rule as `plan_json`.
     pub bundle_json: Option<String>,
-    /// Plan 118 WS-1 1b — target warm-pool size. `0` (default) = feature off: no
+    /// Target warm-pool size. `0` (default) = feature off: no
     /// standbys, no idle RAM, no control UDS, no behaviour change. A future
     /// Firecracker standby reads the same field (it's why this lives on the
     /// backend-agnostic config, not a libkrun-specific knob).
@@ -166,9 +162,9 @@ pub struct VmVolume {
     /// Directory share (virtio-fs) vs disk image (virtio-blk). Backends
     /// attach the right device per kind rather than inferring from `size`.
     pub kind: VmVolumeKind,
-    /// `:enc` — route a `Disk` volume through in-guest encryption
-    /// (Plan 101). Fails closed at launch until that lands; never
-    /// silently plaintext. Always false for a `DirShare`.
+    /// `:enc` — route a `Disk` volume through in-guest encryption.
+    /// Fails closed at launch until that lands; never silently
+    /// plaintext. Always false for a `DirShare`.
     pub encrypted: bool,
 }
 
@@ -202,8 +198,8 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
     Some(format!("mvm.uvols={}", entries.join(";")))
 }
 
-/// Plan 129 Stage 2 — encode the per-VM egress intermediate **cert** (PEM) as a
-/// single `mvm.egress_ca=<hex>` kernel-cmdline token, mirroring `mvm.uvols`.
+/// Encode the per-VM egress intermediate **cert** (PEM) as a single
+/// `mvm.egress_ca=<hex>` kernel-cmdline token, mirroring `mvm.uvols`.
 /// `/init` decodes it, writes the cert to tmpfs (`/run/mvm/egress-ca.crt`), and
 /// points the guest's TLS trust at a combined bundle so a workload trusts
 /// host-terminated bound-host TLS. The fresh FC boot attaches no secrets drive,
@@ -221,7 +217,7 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
     Some(format!("mvm.egress_ca={hex}"))
 }
 
-/// Plan 129 Stage 2 — encode the per-run secret **placeholder** env as a single
+/// Encode the per-run secret **placeholder** env as a single
 /// `mvm.secret_env=<hex>` kernel-cmdline token: a newline-joined
 /// `VAR=placeholder` blob, hex-encoded so it survives `/proc/cmdline` as one
 /// space-free token. `/init` decodes it and `export`s each `VAR=placeholder`
@@ -461,9 +457,9 @@ pub struct VmCapabilities {
 
 /// How thoroughly a backend can warm-start a VM from a snapshot. Distinct
 /// from `VmCapabilities::snapshots` (a coarse "can checkpoint" bool): this is
-/// the honest per-backend warm-start *tier* (plan 123 Phase C). No path
-/// silently degrades — a request beyond the reported tier returns a typed
-/// error (ADR-053) once the snapshot RPC is wired (C2/C3).
+/// the honest per-backend warm-start *tier*. No path silently degrades —
+/// a request beyond the reported tier returns a typed error once the
+/// snapshot RPC is wired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SnapshotCapability {
     /// Full live-memory snapshot + fast resume (Firecracker: UFFD/NBD/hugepages).
@@ -502,14 +498,14 @@ impl SnapshotCapability {
 
     /// Whether a backend at this tier can honor a request for `requested`.
     /// Used to fail closed on an over-request (e.g. live-memory asked of
-    /// libkrun's disk-only) rather than silently degrade — plan 123 C4.
+    /// libkrun's disk-only) rather than silently degrade.
     pub const fn satisfies(self, requested: SnapshotCapability) -> bool {
         self.rank() >= requested.rank()
     }
 }
 
 /// Why a warm-start request could not be honored. Typed so the caller gets a
-/// recovery action instead of a silent degrade (ADR-053, plan 123 C4).
+/// recovery action instead of a silent degrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WarmStartError {
     /// The backend's snapshot tier can't satisfy the requested tier. Carries
@@ -544,10 +540,10 @@ impl fmt::Display for WarmStartError {
 impl std::error::Error for WarmStartError {}
 
 // ---------------------------------------------------------------------------
-// Supervisor standby pool — Plan 118 WS-1 1b
+// Supervisor standby pool
 // ---------------------------------------------------------------------------
 
-/// How a prelaunched standby is to be set up (Plan 118 WS-1 1b). Backend-agnostic:
+/// How a prelaunched standby is to be set up. Backend-agnostic:
 /// the caller (the launch path) fills this in; the backend's [`VmBackend::spawn_standby`]
 /// translates it to its own wire config (libkrun → `SupervisorBaseConfig`).
 #[derive(Debug, Clone)]
@@ -680,12 +676,10 @@ pub struct BalloonState {
 }
 
 // ---------------------------------------------------------------------------
-// BackendSecurityProfile — per-backend ADR-002 claim coverage
+// BackendSecurityProfile — per-backend security-claim coverage
 // ---------------------------------------------------------------------------
 
-/// Status of a single ADR-002 security claim for a backend.
-///
-/// See ADR-002 §"The seven CI-enforced claims" for the claim definitions.
+/// Status of a single security claim for a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimStatus {
     /// The claim holds for this backend; the CI gate enforces it.
@@ -698,7 +692,7 @@ pub enum ClaimStatus {
     DoesNotHold,
 }
 
-/// Coverage of the five Matryoshka trust layers (ADR-002 §"Trust layers").
+/// Coverage of the five Matryoshka trust layers.
 ///
 /// `true` means the layer is enforced by hardware/software isolation under
 /// this backend; `false` means the layer collapses into the host kernel
@@ -738,7 +732,7 @@ impl LayerCoverage {
     }
 }
 
-/// Per-backend declaration of ADR-002 security-claim coverage.
+/// Per-backend declaration of security-claim coverage.
 ///
 /// `mvmctl doctor` and `mvmctl run` consume this to render the active
 /// backend's security posture. The seven claims are stored at indices
@@ -853,7 +847,7 @@ pub trait VmBackend: Send + Sync {
     /// (Vz, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
     /// `Unsupported` so a backend opts in explicitly; consumers check this
     /// before requesting a snapshot rather than discovering a silent
-    /// degrade (plan 123 C1 / ADR-053).
+    /// degrade.
     fn snapshot_capability(&self) -> SnapshotCapability {
         SnapshotCapability::Unsupported
     }
@@ -863,11 +857,11 @@ pub trait VmBackend: Send + Sync {
     /// Fails closed: if [`snapshot_capability`](Self::snapshot_capability)
     /// cannot satisfy `requested` (e.g. live-memory asked of libkrun's
     /// disk-only), returns [`WarmStartError::Unsupported`] carrying a
-    /// recovery hint (ADR-053) — never a silent cold boot. When the tier
+    /// recovery hint — never a silent cold boot. When the tier
     /// admits the request but the backend wires no warm-start path, the
     /// default returns [`WarmStartError::Failed`] rather than fabricating a
-    /// VM; backends that implement warm-start (libkrun disk-only — plan 123
-    /// C4; Firecracker live-memory — C2; Vz save/restore — C3) override this.
+    /// VM; backends that implement warm-start (libkrun disk-only,
+    /// Firecracker live-memory, Vz save/restore) override this.
     fn warm_start(
         &self,
         _config: &VmStartConfig,
@@ -891,8 +885,8 @@ pub trait VmBackend: Send + Sync {
         )))
     }
 
-    /// Does this backend support a prelaunched-supervisor standby pool (Plan 118
-    /// WS-1 1b)? Opt-in, default `false` — orthogonal to [`snapshot_capability`]
+    /// Does this backend support a prelaunched-supervisor standby pool?
+    /// Opt-in, default `false` — orthogonal to [`snapshot_capability`]
     /// (snapshot = restore a booted VM; standby = pre-pay spawn/setup latency).
     ///
     /// [`snapshot_capability`]: Self::snapshot_capability
@@ -994,9 +988,8 @@ pub trait VmBackend: Send + Sync {
 
     /// Pause the vCPUs of a running VM, leaving the VMM alive.
     ///
-    /// Used by the orchestrator's sleep/wake path (mvmd Track I in the
-    /// `what-do-we-need-deep-dolphin` plan): pause → snapshot → resume,
-    /// or pause → stop for a clean shutdown.
+    /// Used by the orchestrator's sleep/wake path: pause → snapshot →
+    /// resume, or pause → stop for a clean shutdown.
     ///
     /// Backends without pause/resume support — see
     /// [`VmCapabilities::pause_resume`] — return `Err`. Implementors
@@ -1075,7 +1068,7 @@ pub trait VmBackend: Send + Sync {
         )
     }
 
-    /// Return the ADR-002 security profile for this backend.
+    /// Return the security profile for this backend.
     ///
     /// Each backend declares which of the seven CI-enforced claims hold,
     /// which Matryoshka layers it covers, and a tier label. `mvmctl doctor`
@@ -1324,7 +1317,7 @@ mod tests {
             hint: "use `mvmctl up` for a cold boot".to_string(),
         };
         let msg = err.to_string();
-        // Display names both tiers and surfaces the recovery action (ADR-053).
+        // Display names both tiers and surfaces the recovery action.
         assert!(msg.contains("live-memory"), "{msg}");
         assert!(msg.contains("disk-only"), "{msg}");
         assert!(msg.contains("mvmctl up"), "{msg}");
@@ -1533,7 +1526,7 @@ mod tests {
         assert!(config.volumes.is_empty());
         assert!(config.config_files.is_empty());
         assert!(config.secret_files.is_empty());
-        // Plan 102 Phase 3c — audit substrate fields default to None
+        // Audit substrate fields default to None
         // so legacy callers (no AdmittedPlan in scope) get the legacy
         // supervisor path.
         assert!(config.tenant_id.is_none());

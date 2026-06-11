@@ -1,14 +1,14 @@
-//! Plan 97 Phase C / Plan 98 — builder-runtime backend selection.
+//! Builder-runtime backend selection.
 //!
 //! Picks between [`libkrun_builder::LibkrunBuilderVm`] and
 //! [`vz_builder::VzBuilderVm`]. Returns `Box<dyn BuilderVm>` so
 //! callers do not need to switch on the concrete type — both drivers
 //! implement [`builder_vm::BuilderVm`] with byte-identical artifact
-//! contracts (`finalize_flake_job` / `finalize_install_job` from PRs
-//! #436/#437 produce the same [`builder_vm::BuilderArtifacts`] shape
-//! regardless of which hypervisor booted the guest).
+//! contracts (`finalize_flake_job` / `finalize_install_job` produce the
+//! same [`builder_vm::BuilderArtifacts`] shape regardless of which
+//! hypervisor booted the guest).
 //!
-//! ## Selection priority (Plan 98)
+//! ## Selection priority
 //!
 //! 1. **CLI flag** (`--builder <libkrun|vz>`, plumbed in by callers as
 //!    a typed `Option<BuilderBackendChoice>`) — highest priority.
@@ -38,15 +38,13 @@ use mvm_core::platform::{Platform, current};
 /// `mvmctl doctor` can reference it without re-deriving the string.
 pub const MVM_BUILDER_BACKEND_ENV: &str = "MVM_BUILDER_BACKEND";
 
-/// Plan 100 W1 env-var name: `MVM_LINUX_BUILDER_VM=1` opts the host
-/// into the symmetric-builder-VM rollout on Linux. The dispatch flip
-/// itself (replace direct-Firecracker workload execution with a
-/// nested libkrun-builder-VM → Firecracker chain) is Plan 100 W6.
+/// `MVM_LINUX_BUILDER_VM=1` opts the host into the symmetric-builder-VM
+/// rollout on Linux: replace direct-Firecracker workload execution with a
+/// nested libkrun-builder-VM → Firecracker chain.
 ///
-/// Plan 105 W1 (this slice) wires the env constant + readiness
-/// predicate + doctor probe so operators can validate their host
-/// ahead of W6, and so the W6 dispatch wiring has a single
-/// canonical signal to consume.
+/// The env constant + readiness predicate + doctor probe let operators
+/// validate their host ahead of the dispatch flip, and give that flip a
+/// single canonical signal to consume.
 ///
 /// Surfaced as a constant so `mvmctl doctor` can reference it
 /// without re-deriving the string.
@@ -63,8 +61,8 @@ pub enum BuilderBackendChoice {
     Libkrun,
     /// Vz-backed builder VM. Opt-in via `MVM_BUILDER_BACKEND=vz`.
     Vz,
-    /// QEMU-backed builder VM (Linux dev/builder substrate, Plan 166 /
-    /// ADR-072). Opt-in via `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
+    /// QEMU-backed builder VM (Linux dev/builder substrate). Opt-in via
+    /// `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
     /// auto-detect never picks it (the default-flip is evidence-gated).
     Qemu,
 }
@@ -148,7 +146,7 @@ pub fn resolve_choice_with_override(flag: Option<BuilderBackendChoice>) -> Build
 
 /// Resolve the choice with no CLI flag — env var + auto-detect only.
 /// Existing callers that don't yet plumb the `--builder` flag use
-/// this; Phase 1 will migrate them to `resolve_choice_with_override`.
+/// this; they migrate to `resolve_choice_with_override` once wired.
 pub fn resolve_choice() -> BuilderBackendChoice {
     resolve_choice_with_override(None)
 }
@@ -176,14 +174,14 @@ pub fn resolve_builder_backend_with_override(
     }
 }
 
-/// Builder driver for the **Stage 0** bootstrap (ADR-068 + Plan 166).
+/// Builder driver for the Stage 0 bootstrap.
 ///
-/// Stage 0 is implemented for **libkrun** and **QEMU**; Vz and Firecracker
+/// Stage 0 is implemented for libkrun and QEMU; Vz and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
 /// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
 /// everything else — including the Vz auto-detect default on macOS-26+ — falls
-/// back to **libkrun**, preserving the long-standing "Stage 0 is libkrun even
-/// on Vz-default hosts" invariant (CLAUDE.md) rather than hitting the Vz gap.
+/// back to libkrun, preserving the long-standing "Stage 0 is libkrun even
+/// on Vz-default hosts" invariant rather than hitting the Vz gap.
 /// `verbose` streams the libkrun console; the QEMU path always logs to
 /// `console.log`.
 pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
@@ -194,7 +192,7 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Plan 105 W1 — `MVM_LINUX_BUILDER_VM` readiness gate
+// `MVM_LINUX_BUILDER_VM` readiness gate
 // ──────────────────────────────────────────────────────────────────
 
 /// Pure predicate over an `MVM_LINUX_BUILDER_VM` env-var value.
@@ -218,8 +216,8 @@ pub fn linux_builder_vm_requested_for(raw: Option<&str>) -> bool {
 }
 
 /// Live runtime check: is `MVM_LINUX_BUILDER_VM` set to a truthy
-/// value? Plan 100 W6 will consume this to decide whether the
-/// workload path nests through a libkrun builder VM.
+/// value? Consumed to decide whether the workload path nests through a
+/// libkrun builder VM.
 pub fn linux_builder_vm_requested() -> bool {
     let raw = std::env::var(MVM_LINUX_BUILDER_VM_ENV).ok();
     linux_builder_vm_requested_for(raw.as_deref())
@@ -263,7 +261,7 @@ pub fn linux_builder_vm_readiness_for(
 }
 
 /// Live readiness check using the runtime platform + sysfs probe.
-/// `mvmctl doctor` and the future Plan 100 W6 dispatch both call
+/// `mvmctl doctor` and the future workload-nesting dispatch both call
 /// this to surface clean errors before mid-build.
 pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
     let plat = current();
@@ -460,7 +458,7 @@ mod tests {
         });
     }
 
-    // ── Plan 105 W1 — MVM_LINUX_BUILDER_VM env predicate ──────────
+    // ── MVM_LINUX_BUILDER_VM env predicate ──────────
 
     #[test]
     fn linux_builder_vm_requested_truthy_values() {
@@ -498,7 +496,7 @@ mod tests {
         assert!(!linux_builder_vm_requested_for(None));
     }
 
-    // ── Plan 105 W1 — readiness predicate ────────────────────────
+    // ── readiness predicate ────────────────────────
 
     #[test]
     fn linux_builder_vm_readiness_ok_when_linux_native_with_nested_kvm() {
@@ -531,9 +529,9 @@ mod tests {
 
     #[test]
     fn linux_builder_vm_readiness_refuses_on_wsl2() {
-        // WSL2 with nested KVM still refuses — Plan 100 W1 targets
-        // LinuxNative only; WSL2 nested-KVM-builder is a future
-        // backend project, not the W1 surface.
+        // WSL2 with nested KVM still refuses — the readiness gate
+        // targets LinuxNative only; WSL2 nested-KVM-builder is a future
+        // backend project, out of scope here.
         let err = linux_builder_vm_readiness_for(Platform::Wsl2, true)
             .expect_err("WSL2 not Plan 100 W1 surface");
         assert!(format!("{err}").contains("Linux-only"));

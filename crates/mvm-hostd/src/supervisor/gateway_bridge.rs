@@ -1,5 +1,5 @@
-//! Per-VM gateway audit bridge ([Plan 102 W6.A] / [ADR-058] claim
-//! 10 leg 2).
+//! Per-VM gateway audit bridge — claim 10 leg 2 (no bytes leave the
+//! trust boundary unaudited).
 //!
 //! Sits in-process between the guest virtio-net fd and the host
 //! gateway (passt / gvproxy). Three variants cover the backends
@@ -16,8 +16,8 @@
 //!   datagrams both ways. SOCK_DGRAM preserves packet boundaries.
 //! - [`BridgeEndpoints::VzIngest`] — legacy Vz NDJSON `FlowEvent` ingest
 //!   path from the (now-removed) Swift supervisor. Superseded by the
-//!   Rust supervisor's in-process `VzGvproxy` splice (Plan 152 WS-B
-//!   slice 8); retained pending a dead-code sweep follow-up.
+//!   Rust supervisor's in-process `VzGvproxy` splice; retained pending a
+//!   dead-code sweep follow-up.
 //!
 //! All three feed one `mpsc::Sender<FlowEvent>` into a per-VM
 //! `signer_task` that is the **sole** caller of
@@ -32,11 +32,10 @@
 //! the signed chain is the source of truth.
 //!
 //! Mediation seam: the bridge consults [`FlowPolicy::evaluate`]
-//! before emitting `FlowOpened`. W6.A ships [`AllowAll`] as the
-//! default; Plan 74's enforcer and future SNI / L7-URL inspectors
-//! plug in without re-architecting (the
-//! [`FlowDecisionCtx`] carries optional `sni_hostname` / `url_path`
-//! fields for them to fill).
+//! before emitting `FlowOpened`. [`AllowAll`] is the default; the
+//! per-tenant enforcer and future SNI / L7-URL inspectors plug in
+//! without re-architecting (the [`FlowDecisionCtx`] carries optional
+//! `sni_hostname` / `url_path` fields for them to fill).
 //!
 //! Concurrency model: each VM gets a dedicated `std::thread`
 //! hosting a current-thread tokio runtime + `LocalSet`. Three
@@ -44,9 +43,6 @@
 //! [`crate::supervisor::gateway_audit::GatewayAuditSink`] accept loop. Bridge
 //! thread panic → `std::process::exit(1)` (fail-closed; the
 //! gateway audit substrate is claim-10 load-bearing).
-//!
-//! [Plan 102 W6.A]: ../../../specs/plans/103-w6a-implementation-tracker.md
-//! [ADR-058]: ../../../specs/adrs/058-claim-10-bytes-leaving-trust-boundary.md
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -59,14 +55,14 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::supervisor::audit::{AuditEntry, AuditSigner, FlowCloseReason, FlowDirection};
 use crate::supervisor::gateway_audit::GatewayAuditSink;
-// Plan 141 / ADR-064 — packet-observer pipeline wiring.
+// Packet-observer pipeline wiring.
 use crate::supervisor::network::Observer;
 use crate::supervisor::network::PacketCtx;
 use crate::supervisor::network::latency::ObserverLatency;
 use crate::supervisor::network::packet::{self, FlowKey};
 use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
-// plan 123 A3.2/A3.3: egress stages wired into the live pipeline, carried on
-// ObserverWiring (default no-op) so plan 129 sets them without touching the
+// Egress stages wired into the live pipeline, carried on ObserverWiring
+// (default no-op) so the secrets subsystem sets them without touching the
 // call sites.
 use crate::supervisor::network::stages::{
     RedactingSubstitution, ScanStage, SubstitutionStage, build_egress_scan,
@@ -79,29 +75,29 @@ use std::collections::HashSet;
 // ============================================================================
 
 /// Mediation hook the bridge consults before emitting `FlowOpened`.
-/// W6.A ships [`AllowAll`] as the default; Plan 74's enforcer and
-/// future SNI / L7-URL inspectors plug in here without re-architecting.
+/// [`AllowAll`] is the default; the per-tenant enforcer and future
+/// SNI / L7-URL inspectors plug in here without re-architecting.
 pub trait FlowPolicy: Send + Sync + 'static {
     fn evaluate(&self, ctx: &FlowDecisionCtx) -> FlowAction;
 }
 
-/// Inputs the bridge presents to [`FlowPolicy::evaluate`]. W6.A
-/// fills only `direction`; future SNI inspector / L7 MITM fill the
+/// Inputs the bridge presents to [`FlowPolicy::evaluate`]. Today only
+/// `direction` is filled; future SNI inspector / L7 MITM fill the
 /// optional `sni_hostname` / `url_path` fields. Keeping the seam
 /// forward-compat is the whole point of this struct — adding fields
 /// later doesn't break callers that match-on `Allow`/`Drop`.
 #[derive(Debug, Clone)]
 pub struct FlowDecisionCtx {
     pub direction: FlowDirection,
-    /// L3 destination IP. `None` in W6.A (no parser yet).
+    /// L3 destination IP. `None` today (no parser yet).
     pub dest_ip: Option<std::net::IpAddr>,
-    /// L4 destination port. `None` in W6.A.
+    /// L4 destination port. `None` today.
     pub dest_port: Option<u16>,
-    /// SNI hostname extracted from TLS ClientHello. `None` in
-    /// W6.A; populated by the SNI inspector when it lands.
+    /// SNI hostname extracted from TLS ClientHello. `None` until the
+    /// SNI inspector lands.
     pub sni_hostname: Option<String>,
-    /// Full URL path (HTTPS via TLS MITM). `None` in W6.A;
-    /// populated by `L7EgressProxy` Phase 2.
+    /// Full URL path (HTTPS via TLS MITM). `None` until the L7 egress
+    /// proxy populates it.
     pub url_path: Option<String>,
 }
 
@@ -112,13 +108,13 @@ pub enum FlowAction {
     /// splicing.
     Allow,
     /// Drop the flow. Bridge emits `FlowClosed { PolicyDropped }`
-    /// and tears down the bridge for that flow. W6.A's `AllowAll`
-    /// never returns this; Plan 74 enforcer will.
+    /// and tears down the bridge for that flow. `AllowAll` never
+    /// returns this; the per-tenant enforcer does.
     Drop { reason: DropReason },
 }
 
-/// Why a flow was dropped. Free-form string so Plan 74 / SNI / L7
-/// can populate without coordinating enum extensions; the bridge
+/// Why a flow was dropped. Free-form string so the enforcer / SNI / L7
+/// layers can populate without coordinating enum extensions; the bridge
 /// echoes this into the chain entry's `reason` label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropReason(pub String);
@@ -129,9 +125,9 @@ impl DropReason {
     }
 }
 
-/// Default `FlowPolicy` that lets everything through. The W6.A
-/// substrate uses this; Plan 74 enforcement replaces it later via
-/// the `BridgeConfig.policy` slot.
+/// Default `FlowPolicy` that lets everything through. The unenforced
+/// substrate uses this; per-tenant enforcement replaces it via the
+/// `BridgeConfig.policy` slot.
 pub struct AllowAll;
 
 impl FlowPolicy for AllowAll {
@@ -141,7 +137,7 @@ impl FlowPolicy for AllowAll {
 }
 
 /// Per-tenant flow-open gate derived from the admitted plan's resolved
-/// [`mvm_core::policy::EffectivePolicy`] (plan 123 A2/A4 — claim 10).
+/// [`mvm_core::policy::EffectivePolicy`] (claim 10).
 /// Deny-by-default: an egress flow opens only when the tenant policy
 /// admits *some* egress — an explicit L4 allow rule, an egress
 /// allow-list entry, or the `open` egress kill-switch. A deny-all
@@ -162,7 +158,7 @@ impl FlowPolicy for AllowAll {
 ///
 /// Ingress always opens — an ingress frame is a reply to a guest-
 /// initiated (already-gated) egress flow, and deny-by-default is an
-/// *egress* control (ADR-002 claim 10), matching the egress-only scans.
+/// *egress* control (claim 10), matching the egress-only scans.
 pub struct PlanFlowPolicy {
     egress_permitted: bool,
 }
@@ -227,7 +223,7 @@ pub enum BridgeEndpoints {
     /// Swift; Swift writes NDJSON `FlowEvent`s over this unix
     /// stream to the Rust ingest task.
     VzIngest { events_socket_path: PathBuf },
-    /// Rust-native Vz supervisor + gvproxy (Plan 152 WS-B slice 8). The
+    /// Rust-native Vz supervisor + gvproxy. The
     /// supervisor owns a SOCK_DGRAM socketpair — one half is the guest NIC
     /// (`VZFileHandleNetworkDeviceAttachment`), the other (`supervisor_fd`,
     /// already connected) faces the bridge. The bridge shuffles datagrams
@@ -249,18 +245,15 @@ pub struct BridgeConfig {
     pub audit_socket: PathBuf,
     pub signer: Arc<dyn AuditSigner>,
     pub policy: Arc<dyn FlowPolicy>,
-    /// Plan 113 / ADR-064 — host-allowlisted observers that fan-out
-    /// each FlowEvent before chain signing. Empty `Vec` = no observers
-    /// (only the always-on chain signer fires). The signer task wraps
-    /// each observer call in `catch_unwind`; a panicking observer
-    /// surfaces a `tracing::warn` and does not break sibling observers
-    /// or the chain-signing path.
+    /// Host-allowlisted observers that fan-out each FlowEvent before
+    /// chain signing. Empty `Vec` = no observers (only the always-on
+    /// chain signer fires). The signer task wraps each observer call in
+    /// `catch_unwind`; a panicking observer surfaces a `tracing::warn`
+    /// and does not break sibling observers or the chain-signing path.
     ///
-    /// Task 3 ships the fan-out mechanism with an empty vec at every
-    /// existing producer site (pre-Plan-113 behavior preserved
-    /// byte-for-byte). Task 4 wires `Pipeline::from_admitted` into
-    /// `mvm-libkrun-supervisor::main::run_with_bridge` to populate the
-    /// list from the plan's resolved tenant policy bundle.
+    /// `Pipeline::from_admitted` populates the list from the plan's
+    /// resolved tenant policy bundle; callers without a bundle pass an
+    /// empty vec (no observers fire).
     pub observers: Vec<Arc<dyn crate::supervisor::network::Observer>>,
 }
 
@@ -268,8 +261,8 @@ pub struct BridgeConfig {
 // Internal FlowEvent (bridge → signer mpsc)
 // ============================================================================
 
-/// Event the bridge tasks push into the signer mpsc. Plan 113 / ADR-064
-/// lifted visibility from `pub(crate)` to `pub` so external observer
+/// Event the bridge tasks push into the signer mpsc. Visibility is
+/// `pub` (not `pub(crate)`) so external observer
 /// impls hosted in this same crate can be reached through
 /// `BridgeConfig.observers` (a `pub` field whose element type is
 /// `Arc<dyn Observer>`, which receives `&FlowEvent` in `on_flow_event`).
@@ -288,8 +281,8 @@ pub enum FlowEventKind {
     Closed {
         reason: FlowCloseReason,
     },
-    /// Plan 141 / ADR-064 — a host-allowlisted observer's `on_packet`
-    /// forced a fail-closed flow kill. `reason` ∈ {`drop`,
+    /// A host-allowlisted observer's `on_packet` forced a fail-closed
+    /// flow kill. `reason` ∈ {`drop`,
     /// `modify_over_mtu`, `modify_unserializable`}.
     ObserverFault {
         observer: String,
@@ -303,17 +296,17 @@ pub enum FlowEventKind {
 /// **Audit completeness > per-VM throughput.**
 pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
-/// Frame-size ceiling for `Verdict::Modify` rebuilds (Plan 141). A
-/// rebuilt frame larger than this cannot traverse the unixgram /
-/// length-prefixed datagram path, so the flow is killed (fail-closed,
-/// Q8). Set to the practical datagram max rather than the 1500 link MTU
+/// Frame-size ceiling for `Verdict::Modify` rebuilds. A rebuilt frame
+/// larger than this cannot traverse the unixgram / length-prefixed
+/// datagram path, so the flow is killed (fail-closed). Set to the
+/// practical datagram max rather than the 1500 link MTU
 /// so a legitimately large (e.g. TSO) original frame isn't spuriously
 /// killed when an observer shrinks or keeps its payload size.
 pub const BRIDGE_MTU: usize = 65_535;
 
-/// Per-VM packet-observer wiring threaded into the bridge variants
-/// (Plan 141 / ADR-064). Bundled into one struct so the variant fns stay
-/// under the `too_many_arguments` lint. `observers` mirrors the set
+/// Per-VM packet-observer wiring threaded into the bridge variants.
+/// Bundled into one struct so the variant fns stay under the
+/// `too_many_arguments` lint. `observers` mirrors the set
 /// `signer_task` fans flow-events to; the same observer may implement both
 /// `on_flow_event` and `on_packet`. `killed_flows` is shared across both
 /// directions so a kill on one is honoured everywhere.
@@ -322,7 +315,7 @@ pub struct ObserverWiring {
     pub latency: Arc<ObserverLatency>,
     pub killed_flows: Arc<tokio::sync::Mutex<HashSet<FlowKey>>>,
     pub mtu: usize,
-    /// Plan 129 egress stages (A3.3). Default no-op; Plan 129 sets these so its
+    /// Egress stages. Default no-op; the secrets subsystem sets these so its
     /// substitution/leak-scan run on the live egress path without a code edit.
     pub substitution: Arc<dyn SubstitutionStage>,
     pub scan: Arc<dyn ScanStage>,
@@ -377,7 +370,7 @@ impl From<&FlowEvent> for FlowEventWire {
 // ============================================================================
 
 /// Drains the per-VM event channel, fans each `FlowEvent` out to the
-/// host-allowlisted observers (Plan 113 / ADR-064), then converts it
+/// host-allowlisted observers, then converts it
 /// to a chained `AuditEntry` and signs it. Sole caller of
 /// `signer.sign_and_emit` per VM.
 ///
@@ -403,7 +396,7 @@ pub(crate) async fn signer_task(
             let _ = broadcast_tx.send(json);
         }
 
-        // Plan 113 / ADR-064 — observer fan-out under `catch_unwind`.
+        // Observer fan-out under `catch_unwind`.
         // Runs BEFORE chain signing so observers see every event the
         // chain will record (the always-on chain-signing path below
         // is structural and cannot be displaced by tenant policy).
@@ -520,9 +513,9 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
-        // Signer task — sole writer of sign_and_emit per VM. Plan 113
-        // / ADR-064: observers fan out BEFORE chain signing inside the
-        // task body; the chain-signing call is structural.
+        // Signer task — sole writer of sign_and_emit per VM. Observers
+        // fan out BEFORE chain signing inside the task body; the
+        // chain-signing call is structural.
         let signer_handle = tokio::task::spawn_local(signer_task(
             event_rx,
             cfg.plan.clone(),
@@ -535,8 +528,8 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
         // Subscriber-sink accept loop.
         let sink_handle = tokio::task::spawn_local(sink.run());
 
-        // Plan 123 Slice 3 — resolve the tenant's egress policy from the
-        // admitted policy bundle, if one reached the bridge, so the per-tenant
+        // Resolve the tenant's egress policy from the admitted policy
+        // bundle, if one reached the bridge, so the per-tenant
         // filters compose under mandatory-deny. No bundle (the common case
         // today: bundle_json carries a PlanArtifact pin, not resolved content)
         // → mandatory-deny only, the prior live default. A bundle whose L4
@@ -566,7 +559,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                         .map(|(host, _port)| host.clone())
                         .collect()
                 };
-                // Plan 123 A2/A4 — the per-tenant deny-by-default flow-open gate,
+                // The per-tenant deny-by-default flow-open gate,
                 // derived from the SAME resolved policy as the packet scan above
                 // (so the coarse gate never drops a flow the scan would admit).
                 // This replaces the supervisor bin's `AllowAll` when a bundle
@@ -583,7 +576,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             // mandatory-deny + placeholder-leak scans still gate every packet.
             None => (None, Vec::new(), cfg.policy.clone()),
         };
-        // Plan 141 — packet-observer wiring shared across both directions.
+        // Packet-observer wiring shared across both directions.
         let wiring = ObserverWiring {
             observers: cfg.observers.clone(),
             latency: Arc::new(ObserverLatency::new(
@@ -592,7 +585,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             )),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
-            // Plan 129 Phase E — always-on egress redactor: mask any UNDECLARED
+            // Always-on egress redactor: mask any UNDECLARED
             // secret-shaped / PII run in the guest's outbound bytes to `XXX`
             // (mask-and-continue). Declared secrets never reach the guest (they
             // substitute host-side via the endpoint); this is the backstop for
@@ -757,13 +750,13 @@ where
 
 /// Frame-aware bidirectional bridge between two passt/qemu stream sockets.
 /// Reads one length-prefixed ethernet frame at a time, runs the
-/// packet-observer pipeline (Plan 141), and re-emits the (possibly
-/// rebuilt) frame with a corrected length prefix. Emits `FlowOpened` on
+/// packet-observer pipeline, and re-emits the (possibly rebuilt) frame
+/// with a corrected length prefix. Emits `FlowOpened` on
 /// the first frame per direction (after `FlowPolicy::evaluate` returns
 /// `Allow`) and `FlowClosed { Eof }` on a clean EOF; `BridgeError` on I/O
 /// error.
 ///
-/// Direction semantics (the pre-Plan-141 opaque-copy code had the labels
+/// Direction semantics (the earlier opaque-copy code had the labels
 /// reversed, which didn't matter for a byte pump but does for observers):
 /// `a` faces passt/internet, `b` faces libkrun/guest. **Egress** = guest →
 /// internet (read `b`, write `a`); **ingress** = internet → guest (read
@@ -1004,7 +997,7 @@ async fn bridge_copy_bidirectional(
 // libkrun + gvproxy bridge (SOCK_DGRAM shuffle)
 // ============================================================================
 
-/// Plan 141 — true if `raw` parses to a flow already in `killed`. Cheap:
+/// True if `raw` parses to a flow already in `killed`. Cheap:
 /// only parses when at least one flow has been killed. The async-mutex
 /// guard is held across the synchronous parse (no await in between).
 async fn flow_is_killed(killed: &tokio::sync::Mutex<HashSet<FlowKey>>, raw: &[u8]) -> bool {
@@ -1085,7 +1078,7 @@ async fn run_libkrun_gvproxy_bridge(
     let inbound = Arc::new(inbound);
     let outbound = Arc::new(outbound);
 
-    // Plan 141 — per-direction clones of the packet-observer wiring.
+    // Per-direction clones of the packet-observer wiring.
     let mtu = wiring.mtu;
     let policy_a = policy.clone();
     let event_a = event_tx.clone();
@@ -1145,7 +1138,7 @@ async fn run_libkrun_gvproxy_bridge(
                 }
             }
 
-            // Plan 141 — packet-observer pipeline. Short-circuit packets on
+            // Packet-observer pipeline. Short-circuit packets on
             // an already-killed flow, then fan out; `Forward` relays the
             // (possibly rebuilt) frame, `Kill` records the flow + emits a
             // fault and drops (fail-closed).
@@ -1251,7 +1244,7 @@ async fn run_libkrun_gvproxy_bridge(
                 }
             }
 
-            // Plan 141 — packet-observer pipeline (ingress direction).
+            // Packet-observer pipeline (ingress direction).
             let raw = &buf[..n];
             if flow_is_killed(&killed_flows_b, raw).await {
                 continue;
@@ -1321,7 +1314,7 @@ fn gvproxy_outbound_bind_path(supervisor_listen_path: &std::path::Path) -> PathB
 }
 
 // ============================================================================
-// Rust-native Vz + gvproxy bridge (SOCK_DGRAM shuffle, Plan 152 WS-B slice 8)
+// Rust-native Vz + gvproxy bridge (SOCK_DGRAM shuffle)
 // ============================================================================
 
 /// In-process gvproxy splice for the Rust Vz supervisor. Runs the same
@@ -1744,8 +1737,8 @@ async fn handle_vz_ingest(
                     kind: FlowEventKind::Closed { reason },
                 }
             }
-            // Plan 141 — the Vz NDJSON ingest path (Plan 152 territory) does
-            // not produce observer faults; Rust owns the packet pipeline on
+            // The legacy Vz NDJSON ingest path does not produce observer
+            // faults; Rust owns the packet pipeline on
             // the in-scope backends. Accept the variant for exhaustiveness
             // and forward it verbatim if a future Swift sender emits it.
             FlowEventWire::FlowObserverFault {
@@ -1830,7 +1823,7 @@ mod tests {
     #[test]
     fn flow_decision_ctx_has_optional_sni_url_slots() {
         // Forward-compat: future SNI inspector + L7 MITM populate
-        // these. W6.A's bridge passes None; the policy seam stays
+        // these. The bridge passes None today; the policy seam stays
         // stable.
         let c = ctx();
         assert!(c.sni_hostname.is_none());
@@ -1840,7 +1833,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // PlanFlowPolicy — per-tenant deny-by-default flow gate (plan 123 A2/A4)
+    // PlanFlowPolicy — per-tenant deny-by-default flow gate
     // -----------------------------------------------------------------
 
     fn eff_with_l4(specs: Vec<L4RuleSpec>) -> mvm_core::policy::EffectivePolicy {
@@ -2232,11 +2225,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // signer_task fan-out (Plan 113 / ADR-064 §Task 3)
+    // signer_task fan-out
     // -----------------------------------------------------------------
 
-    /// Plan 113 §Task 3 — proves the structural ordering invariant:
-    /// observers run BEFORE chain signing under `catch_unwind`. A
+    /// Proves the structural ordering invariant: observers run BEFORE
+    /// chain signing under `catch_unwind`. A
     /// panicking observer is logged + isolated; sibling observers
     /// continue to receive events and the chain-signing call still
     /// fires. Verifies AuditEmit is non-displaceable by tenant policy.
@@ -2385,7 +2378,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Plan 141 — gvproxy packet-observer pipeline wiring
+    // gvproxy packet-observer pipeline wiring
     // -----------------------------------------------------------------
 
     use crate::supervisor::network::latency::ObserverLatency;
@@ -2461,8 +2454,8 @@ mod tests {
 
     #[test]
     fn observer_wiring_defaults_to_noop_stages() {
-        // A3.3: the bridge wiring carries the egress stages; the default is
-        // no-op, so Plan 129 opts in by setting them — never the reverse.
+        // The bridge wiring carries the egress stages; the default is
+        // no-op, so the secrets subsystem opts in by setting them — never the reverse.
         let w = wiring_with(vec![]);
         assert_eq!(w.substitution.name(), "noop-substitution");
         assert_eq!(w.scan.name(), "noop-scan");
@@ -2575,14 +2568,14 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────────────────────
-    // Plan 123 Slice 3 — per-tenant L4 egress enforcement exercised
+    // Per-tenant L4 egress enforcement exercised
     // through the LIVE libkrun gvproxy bridge (real Unix datagram
     // sockets, no VM). Drives the production scan (`build_egress_scan`)
     // over `run_libkrun_gvproxy_bridge`: a denied flow is withheld from
     // gvproxy, an allowed flow is forwarded.
     // ───────────────────────────────────────────────────────────────
 
-    /// A bridge `ObserverWiring` whose egress scan is the real Slice 3 scan for
+    /// A bridge `ObserverWiring` whose egress scan is the real production scan for
     /// `l4` + `dns_allow` (mandatory-deny + L4 + DNS sink-hole), no observers.
     fn wiring_with_egress_scan(l4: Option<L4Policy>, dns_allow: Vec<String>) -> ObserverWiring {
         ObserverWiring {
@@ -2816,7 +2809,7 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────────────────────
-    // Plan 123 A2/A4 — per-tenant FlowPolicy enforce exercised through the
+    // Per-tenant FlowPolicy enforce exercised through the
     // LIVE libkrun gvproxy bridge (real Unix datagram sockets, no VM). Unlike
     // the L4/DNS scan tests above, these drive the *flow-open* gate
     // (`PlanFlowPolicy`) with a NoopScan wiring, isolating the coarse
@@ -2927,7 +2920,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Plan 141 follow-up — live DHCP handshake through a REAL gateway
+    // Live DHCP handshake through a REAL gateway
     // (gvproxy / rvproxy). Opt-in (MVM_GATEWAY_DHCP_E2E=1); skips when
     // unset or when the gateway binary is absent. Validates the macOS
     // gvproxy datagram arm end-to-end against a real userspace gateway:

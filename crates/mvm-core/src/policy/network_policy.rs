@@ -53,11 +53,11 @@ pub enum NetworkPreset {
     Registries,
     /// Developer preset: registries + GitHub + OpenAI + Anthropic APIs.
     Dev,
-    /// LLM-agent preset (plan 32 / Proposal D / ADR-004): the LLM
-    /// inference APIs an agent typically calls (Anthropic, OpenAI),
-    /// plus GitHub for source operations. Minimum surface for
-    /// `nix/images/examples/llm-agent/`'s `claude-code-vm`. Strictly
-    /// smaller than `dev` — does NOT include package registries,
+    /// LLM-agent preset: the LLM inference APIs an agent typically
+    /// calls (Anthropic, OpenAI), plus GitHub for source operations.
+    /// Minimum surface for `nix/images/examples/llm-agent/`'s
+    /// `claude-code-vm`. Strictly smaller than `dev` — does NOT include
+    /// package registries,
     /// because an agent VM is meant to run trusted closures, not
     /// re-resolve npm/PyPI on the fly.
     Agent,
@@ -120,11 +120,10 @@ impl fmt::Display for NetworkPreset {
     }
 }
 
-/// Egress enforcement layer (plan 32 / Proposal D / ADR-004).
+/// Egress enforcement layer.
 ///
-/// The three-layer model lives in ADR-004; this enum lets callers
-/// pick which layers apply. v1 (D shipped) wires only L3; v2
-/// (plan 34, deferred) adds the L7 SNI/Host proxy + DNS pinning.
+/// This enum lets callers pick which layers apply. v1 wires only L3;
+/// v2 (deferred) adds the L7 SNI/Host proxy + DNS pinning.
 ///
 /// `Open` is the implicit mode for any `NetworkPolicy` that resolves
 /// to an unrestricted preset. `L3Only` and `L3PlusL7` apply when
@@ -142,10 +141,9 @@ pub enum EgressMode {
     L3Only,
     /// L3 + L7 stack: iptables allowlist plus an HTTPS proxy on the
     /// host that enforces SNI for HTTPS (CONNECT) and Host header
-    /// for HTTP. Plan 34 / ADR-004 §"L7" covers the runtime impl;
-    /// today this variant returns "egress proxy not implemented" at
-    /// `tap_create` time so callers see a clear error rather than a
-    /// silent downgrade.
+    /// for HTTP. The runtime impl isn't wired yet — today this variant
+    /// returns "egress proxy not implemented" at `tap_create` time so
+    /// callers see a clear error rather than a silent downgrade.
     L3PlusL7,
 }
 
@@ -182,15 +180,13 @@ impl fmt::Display for EgressMode {
 
 /// Network policy for a microVM, controlling outbound traffic.
 ///
-/// The optional `egress_mode` enrichment is plan 34's per-policy
-/// override. When present, it pins the L3/L7 enforcement tier for the
-/// policy at apply-time; when `None`, callers fall back to the
-/// host-wide default (today: `EgressMode::Open`, equivalent to the
-/// pre-plan-34 behaviour). The field is deliberately co-located on
+/// The optional `egress_mode` enrichment is a per-policy override. When
+/// present, it pins the L3/L7 enforcement tier for the policy at
+/// apply-time; when `None`, callers fall back to the host-wide default
+/// (today: `EgressMode::Open`). The field is deliberately co-located on
 /// each variant rather than as a sibling field so a `Preset` and a
-/// hand-rolled `AllowList` can both attach a mode without forcing
-/// every consumer to re-thread a separate parameter — see plan 34
-/// §"Per-template default_network_policy interaction".
+/// hand-rolled `AllowList` can both attach a mode without forcing every
+/// consumer to re-thread a separate parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum NetworkPolicy {
@@ -231,8 +227,8 @@ impl NetworkPolicy {
     }
 
     /// Construct a preset policy with an explicit `egress_mode`. Used
-    /// by plan 34 callers that want to bake an L7 tier into a
-    /// template's `default_network_policy`.
+    /// by callers that want to bake an L7 tier into a template's
+    /// `default_network_policy`.
     pub fn preset_with_mode(preset: NetworkPreset, mode: EgressMode) -> Self {
         Self::Preset {
             preset,
@@ -362,12 +358,11 @@ impl NetworkPolicy {
 impl Default for NetworkPolicy {
     /// Deny-all is the safe default.
     ///
-    /// Pre-Sprint 52, `Default` returned `unrestricted()`. The old
-    /// posture contradicted the rest of the ADR-002 security model
-    /// (claims 1–9 confine the guest at every other layer; an
-    /// unrestricted egress default undermined the claim that
-    /// untrusted code can't reach arbitrary network destinations).
-    /// Sprint 52 flipped the default to `deny_all` so the safe
+    /// An earlier `Default` returned `unrestricted()`. That posture
+    /// contradicted the rest of the security model (the guest is
+    /// confined at every other layer; an unrestricted egress default
+    /// undermined the claim that untrusted code can't reach arbitrary
+    /// network destinations). The default is now `deny_all` so the safe
     /// posture is the one workloads get without opting in.
     ///
     /// Migration shape: `mvmctl up` callers who relied on the old
@@ -402,7 +397,7 @@ fn dev_extra_rules() -> Vec<HostPort> {
     ]
 }
 
-/// LLM-agent preset rules (plan 32 / Proposal D / ADR-004).
+/// LLM-agent preset rules.
 ///
 /// Strictly smaller than `dev` — agent VMs are meant to run trusted
 /// closures (claude-code, opencode, …) against an inference endpoint
@@ -418,12 +413,12 @@ fn agent_rules() -> Vec<HostPort> {
 }
 
 // ============================================================================
-// Plan 74 W2 — Mandatory deny ranges (item #4)
+// Mandatory deny ranges
 // ============================================================================
 
 /// CIDR ranges that mvm always denies as egress destinations,
-/// regardless of any user-supplied allow-list. Plan 74 W2 §"Block
-/// metadata endpoints and local control-plane ranges by default".
+/// regardless of any user-supplied allow-list — blocks metadata
+/// endpoints and local control-plane ranges by default.
 ///
 /// Categories represented:
 ///
@@ -458,11 +453,9 @@ fn agent_rules() -> Vec<HostPort> {
 ///   public internet; out of scope for egress policy.
 /// - IPv6 ULA (`fc00::/7`) — analogous to RFC1918 above.
 ///
-/// Future enforcers (iptables/nft on Linux, the L4Policy
-/// evaluator, the L7 egress proxy) should consult this list
-/// *before* the user's allow-list. The plan 74 W2 follow-up
-/// slice wires this into the iptables FORWARD setup; this PR
-/// ships the data model only.
+/// Every enforcer (iptables/nft on Linux, the L4Policy evaluator, the
+/// L7 egress proxy) should consult this list *before* the user's
+/// allow-list.
 pub const MANDATORY_DENY_RANGES: &[&str] = &[
     // Cloud metadata first — the most consequential entry. A
     // future operator who edits this list should think twice
@@ -705,7 +698,7 @@ mod tests {
 
     #[test]
     fn preset_agent_excludes_package_registries() {
-        // Plan 32 / Proposal D: agent preset is strictly smaller than dev.
+        // Agent preset is strictly smaller than dev.
         // No npm, no PyPI, no crates.io — agents are meant to run
         // pre-resolved closures, not pull packages at runtime.
         let rules = NetworkPreset::Agent.rules();
@@ -771,7 +764,7 @@ mod tests {
 
     #[test]
     fn policy_default_is_deny_all() {
-        // ADR-002 claim 10: the safe default is deny-all. Workloads
+        // claim 10: the safe default is deny-all. Workloads
         // that need network access opt in explicitly via
         // `--network-preset` or a template's
         // `default_network_policy`. The escape hatch is
@@ -888,7 +881,7 @@ mod tests {
         assert!(script.contains("iptables -D FORWARD"));
     }
 
-    // --- Plan 34 / ADR-006 egress_mode enrichment ---
+    // --- egress_mode enrichment ---
 
     #[test]
     fn egress_mode_default_is_none_on_constructors() {
@@ -934,7 +927,7 @@ mod tests {
     #[test]
     fn egress_mode_serde_omits_field_when_none() {
         // skip_serializing_if must elide the field for back-compat
-        // with consumers that don't know about plan 34 yet.
+        // with consumers that don't know about egress_mode yet.
         let policy = NetworkPolicy::preset(NetworkPreset::Dev);
         let json = serde_json::to_string(&policy).unwrap();
         assert!(
@@ -945,8 +938,8 @@ mod tests {
 
     #[test]
     fn pre_plan_34_serialised_form_still_parses() {
-        // A NetworkPolicy serialised before plan 34 has no
-        // `egress_mode` field. `#[serde(default)]` must accept it.
+        // A NetworkPolicy serialised before `egress_mode` existed has
+        // no such field. `#[serde(default)]` must accept it.
         let preset_json = r#"{"type":"preset","preset":"dev"}"#;
         let parsed: NetworkPolicy = serde_json::from_str(preset_json).unwrap();
         assert_eq!(parsed, NetworkPolicy::preset(NetworkPreset::Dev));
@@ -962,7 +955,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Plan 74 W2 — Mandatory deny ranges (item #4)
+    // Mandatory deny ranges
     // =====================================================================
 
     /// Every entry in [`MANDATORY_DENY_RANGES`] must parse cleanly.
@@ -1105,7 +1098,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Plan 74 W2 — iptables wiring for mandatory deny ranges
+    // iptables wiring for mandatory deny ranges
     // =====================================================================
 
     /// The most consequential assertion: the rendered script
@@ -1226,7 +1219,7 @@ mod tests {
         // `while … do :; done` form drains all matches so a
         // leaked duplicate (from a prior crashed apply) doesn't
         // strand a deny rule. Matches the pattern used by the
-        // pre-W2 cleanup script in `mvm-backend::network`.
+        // cleanup script in `mvm-backend::network`.
         for line in cleanup.lines().filter(|l| l.contains("iptables -D")) {
             assert!(
                 line.starts_with("while sudo "),

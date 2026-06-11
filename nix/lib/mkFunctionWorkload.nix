@@ -1,5 +1,5 @@
 # mkFunctionWorkload — turn a function-call workload's IR JSON into a
-# microVM rootfs in one call. Plan 71.
+# microVM rootfs in one call.
 #
 # Reads the canonical workload IR JSON, validates that it describes a
 # single-app, single-primary-function workload backed by a
@@ -18,16 +18,16 @@
 # unsupported attributes by hand. Each rejected shape names the
 # explicit path forward in its error message.
 #
-# Boot-time staging note (W5.2 backlog):
+# Boot-time staging note:
 #   `mkGuest`'s `entrypoint.services` form is currently unwired — it
-#   falls through to a recovery shell. Until W5.2 ports the per-
-#   service supervisor, this helper composes the factory's per-call
+#   falls through to a recovery shell. Until the per-service
+#   supervisor lands, this helper composes the factory's per-call
 #   wrapper-runner symlinks via `extraFiles`, but stages the user's
 #   `appPkg → working_dir` symlink + idles the VM using
 #   `entrypoint.command = [ <boot-script> ]`. The wrapper drops privs
 #   per-call internally (see `nix/wrappers/{python,node}/oneshot.*`),
-#   so it's safe to keep the boot script at uid 0 here. Once `W5.2`
-#   wires services properly, the boot-script + `uids.entrypoint = 0`
+#   so it's safe to keep the boot script at uid 0 here. Once services
+#   are wired properly, the boot-script + `uids.entrypoint = 0`
 #   workaround in this file goes away and the factory's own `service`
 #   block takes over.
 {
@@ -106,10 +106,10 @@ let
 
   workingDir = primary.working_dir or "/app";
 
-  # SDK port Phase 10b. `launch.json` carries pre-merged hooks (addons
-  # before app); the JSON sidecar is loaded via `irFile` here so the
-  # field flows in unchanged. Default to four empty phases so legacy
-  # IR documents without `hooks` keep evaluating.
+  # `launch.json` carries pre-merged hooks (addons before app); the
+  # JSON sidecar is loaded via `irFile` here so the field flows in
+  # unchanged. Default to four empty phases so legacy IR documents
+  # without `hooks` keep evaluating.
   hooks = ir.hooks or {
     before_build = [ ];
     before_start = [ ];
@@ -142,10 +142,10 @@ mkGuest {
   };
   bootCommand = factory.bootCommand;
   # uid 0: the boot script symlinks into `/` which is root-only. The
-  # per-call wrapper drops privs internally via setpriv (W2.3) so
-  # this is the same posture the sealed function-workload path
-  # already uses; W5.2 + W2.1 will replace this with a per-service
-  # uid once services are wired in mkGuest.
+  # per-call wrapper drops privs internally via setpriv, so this is
+  # the same posture the sealed function-workload path already uses;
+  # a per-service uid replaces this once services are wired in
+  # mkGuest.
   uids = {
     entrypoint = 0;
   };

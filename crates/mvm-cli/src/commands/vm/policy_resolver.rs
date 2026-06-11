@@ -1,4 +1,4 @@
-//! Plan 64 W5 + Phase 3 Slice A — `PolicyRef → concrete component slot` resolver.
+//! `PolicyRef → concrete component slot` resolver.
 //!
 //! `mvm-plan::ExecutionPlan` carries four policy refs that name (but
 //! do not contain) the policy bundle a workload runs under:
@@ -16,7 +16,7 @@
 //! `ArtifactCollector`) to make admission decisions; this resolver
 //! is the function that turns a plan's refs into those objects.
 //!
-//! ## What lives where, post-Slice-A
+//! ## What lives where
 //!
 //! Live consumers shipped after parsing a `<tenant>:<workload>`
 //! bundle:
@@ -25,7 +25,7 @@
 //!   `mvm_hostd::supervisor::l7_proxy`. The chain wraps a
 //!   `DestinationPolicy::new(bundle.egress.allow_list)`; CONNECT
 //!   targets that miss the allow-list return 403 + audit. Plain-HTTP
-//!   is gated on `bundle.egress.allow_plain_http` per ADR-002.
+//!   is gated on `bundle.egress.allow_plain_http`.
 //! - `tool_policy` → `PolicyToolGate::from_policy(&bundle.tool)`
 //!   from `mvm_hostd::supervisor::policy_tool_gate`. RPC calls to tool
 //!   names absent from `bundle.tool.allowed` get
@@ -44,21 +44,21 @@
 //!
 //! ## No live consumer yet
 //!
-//! The W3 callsite (`up.rs::admit_plan_for_boot`) ships
+//! The current callsite (`up.rs::admit_plan_for_boot`) ships
 //! `admit + backend.start()` rather than `Supervisor::launch`. The
 //! `BackendLauncher` adapter that would consume `ResolvedSlots` via
 //! `Supervisor::with_egress` / `with_tool_gate` / etc. lives in the
-//! mvm-hostd lift (ADR-041 "negative / honest deferrals"). This
+//! mvm-hostd lift. This
 //! module exists as substrate so the lift is a one-line change.
-//! Slice A's L7EgressProxy + PolicyToolGate constructors are ready
+//! The L7EgressProxy + PolicyToolGate constructors are ready
 //! and tested; the consumer just hasn't been built yet.
 //!
 //! ## Dead-code allow
 //!
 //! Every public item below is currently unused outside this module's
 //! tests because `up.rs::admit_plan_for_boot` ships
-//! `admit + backend.start()` rather than `Supervisor::launch` (W3
-//! deferral). The `#![allow(dead_code)]` mirrors
+//! `admit + backend.start()` rather than `Supervisor::launch`. The
+//! `#![allow(dead_code)]` mirrors
 //! `AdmittedPlan.signed`'s justification — keeping the surface
 //! published stabilises the contract for the eventual mvm-hostd
 //! consumer.
@@ -92,9 +92,8 @@ pub const LOCAL_DEFAULT: &str = "local-default";
 /// Each field is a `Box<dyn Trait>` so the resolver can return
 /// either a Noop (when the plan's refs are `"local-default"`) or
 /// a live impl (when a `<tenant>:<workload>` bundle parses) without
-/// leaking the concrete type to callers. Slice A (2026-05-11)
-/// flipped `egress` and `tool_gate` from Noop to live for parsed
-/// bundles; Slice B (2026-05-11) adds the `network` slot for L4
+/// leaking the concrete type to callers. `egress` and `tool_gate`
+/// are live for parsed bundles; the `network` slot does L4
 /// flow gating; `keystore` and `artifacts` stay Noop until the
 /// supervisor lift in mvm-hostd.
 pub struct ResolvedSlots {
@@ -153,7 +152,7 @@ pub enum ResolveError {
     /// translate into a live `LiveL4Gate` — unparseable CIDR,
     /// unknown protocol, or inverted port range. The detail carries
     /// the underlying `L4SpecError` so the operator knows which row
-    /// (by zero-based index) to fix. Plan 60 Phase 3 Slice B.
+    /// (by zero-based index) to fix.
     L4SpecInvalid {
         value: String,
         path: PathBuf,
@@ -166,8 +165,7 @@ pub enum ResolveError {
     /// lenient (silently skips unknown names) because in-process
     /// callers own their config; the resolver enforces fail-loud at
     /// admission so a typo can't silently leave an inspector
-    /// enforced when the operator intended to disable it. Plan 60
-    /// Phase 3 Slice B follow-on.
+    /// enforced when the operator intended to disable it.
     EgressPolicyInvalid {
         value: String,
         path: PathBuf,
@@ -179,7 +177,7 @@ pub enum ResolveError {
     /// or an unknown category in `pii.categories`. Fail-loud at
     /// admission so an operator who intended to scan all 4 default
     /// categories but typo'd one doesn't silently get only 3
-    /// scanned. Plan 60 Phase 3 Slice B follow-on.
+    /// scanned.
     PiiPolicyInvalid {
         value: String,
         path: PathBuf,
@@ -191,10 +189,9 @@ pub enum ResolveError {
     /// `htpps://...`). Fail-loud at admission so an operator who
     /// thought they were configuring TLS audit replication doesn't
     /// silently boot with the entry dropped. The eventual audit-
-    /// stream replicator (Plan 60 Phase 4 follow-on after the
-    /// mvm-hostd lift) is the live consumer; this validation
-    /// catches typos *before* the resolver hands an unusable URL
-    /// list downstream.
+    /// stream replicator (after the mvm-hostd lift) is the live
+    /// consumer; this validation catches typos *before* the resolver
+    /// hands an unusable URL list downstream.
     AuditPolicyInvalid {
         value: String,
         path: PathBuf,
@@ -365,7 +362,7 @@ fn classify_plan_refs<'a>(
 ///   parses cleanly → **live `L7EgressProxy` + `PolicyToolGate`**
 ///   constructed from the bundle's `egress` + `tool` sections.
 ///   Keystore + ArtifactCollector remain Noop until the
-///   supervisor lift in mvm-hostd. Plan 60 Phase 3 Slice A.
+///   supervisor lift in mvm-hostd.
 /// - Anything else → typed error pointing the operator at what to
 ///   fix (missing file, parse error, mismatched refs, typo).
 pub fn resolve_supervisor_components(plan: &ExecutionPlan) -> Result<ResolvedSlots, ResolveError> {
@@ -402,8 +399,8 @@ pub fn resolve_supervisor_components_with_dir(
 }
 
 /// Load the tenant `PolicyBundle` a plan resolves to, for delivery to the
-/// supervisor's L4 gate + observers via `VmStartConfig.bundle_json` (plan 123
-/// Slice 3 (b)). `None` for a local-default plan — no per-tenant policy, so the
+/// supervisor's L4 gate + observers via `VmStartConfig.bundle_json`.
+/// `None` for a local-default plan — no per-tenant policy, so the
 /// bridge enforces mandatory-deny only. Errors identically to
 /// [`resolve_supervisor_components`] on a missing or malformed bundle, so
 /// admission fails closed before boot.
@@ -444,9 +441,9 @@ fn noop_slots() -> ResolvedSlots {
     }
 }
 
-/// Slice A — turn a parsed `PolicyBundle` into live supervisor
+/// Turn a parsed `PolicyBundle` into live supervisor
 /// component slots. Egress + tool-gate ship as real `L7EgressProxy`
-/// plus `PolicyToolGate`. Slice B adds the `network` slot constructed
+/// plus `PolicyToolGate`. The `network` slot is constructed
 /// from `bundle.network.l4` rows via `LiveL4Gate::from_specs`.
 /// Keystore + artifacts stay Noop until the mvm-hostd supervisor lift.
 ///
@@ -477,7 +474,7 @@ fn slots_from_bundle(
     // (silently skips unknown names) so in-process supervisor
     // callers can extend the disabled list ahead of inspector
     // additions; the resolver path is the trust boundary where
-    // typos must surface loudly. Plan 60 Phase 3 Slice B follow-on.
+    // typos must surface loudly.
     validate_egress_policy_inspector_names(&bundle.egress).map_err(
         |e: EgressPolicyValidationError| ResolveError::EgressPolicyInvalid {
             value: ref_value.to_string(),
@@ -488,8 +485,8 @@ fn slots_from_bundle(
 
     // Same fail-loud posture for `[audit].stream_destinations` —
     // shape-check each URL's scheme prefix against
-    // `KNOWN_AUDIT_STREAM_SCHEMES`. The eventual replicator (Plan 60
-    // Phase 4 follow-on after the mvm-hostd lift) is the live
+    // `KNOWN_AUDIT_STREAM_SCHEMES`. The eventual replicator (after
+    // the mvm-hostd lift) is the live
     // consumer; this admission gate catches typos like
     // `htpps://audit...` so the operator sees them at boot rather
     // than after a forensic dig through the audit chain.
@@ -503,7 +500,7 @@ fn slots_from_bundle(
 
     // L7 inspector chain: delegate to the supervisor's canonical
     // builder so the order + `disabled_inspectors` semantics stay in
-    // one place. Today's chain (Plan 37 §15 order) is:
+    // one place. Today's chain is:
     //   destination_policy → ssrf_guard → secrets_scanner →
     //   injection_guard → pii_redactor
     // The `with_pii` variant honors the bundle's `[pii]` section
@@ -738,7 +735,7 @@ mod tests {
     }
 
     /// Set all four PolicyRef fields on a plan to the same value.
-    /// Phase-6 schema requires the four refs agree; tests that
+    /// The schema requires the four refs agree; tests that
     /// violate that on purpose set only one field.
     fn set_all_refs(plan: &mut ExecutionPlan, value: &str) {
         plan.network_policy = PolicyRef(value.to_string());
@@ -749,7 +746,7 @@ mod tests {
 
     #[test]
     fn policy_resolver_rejects_tenant_ref_when_bundle_missing() {
-        // Phase-6 substrate: a "<tenant>:<workload>" ref makes
+        // A "<tenant>:<workload>" ref makes
         // resolve_supervisor_components attempt to load the bundle
         // file. When the file isn't there we surface BundleNotFound
         // with a clear path so operators know exactly where to put it.
@@ -871,9 +868,9 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 3 Slice A — live L7EgressProxy + PolicyToolGate
+    // live L7EgressProxy + PolicyToolGate
     //
-    // After Slice A, a parsed `<tenant>:<workload>` bundle returns
+    // A parsed `<tenant>:<workload>` bundle returns
     // actual `L7EgressProxy` + `PolicyToolGate` impls instead of
     // Noops. These tests use the `_with_dir` seam so they can
     // inject a tempdir without mutating $HOME.
@@ -1220,9 +1217,9 @@ retention_days = {retention_days}
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 3 Slice B — live L4Gate from [[network.l4]] rows
+    // live L4Gate from [[network.l4]] rows
     //
-    // After Slice B, a parsed `<tenant>:<workload>` bundle yields a
+    // A parsed `<tenant>:<workload>` bundle yields a
     // live `LiveL4Gate` in `slots.network` constructed from the
     // bundle's `[[network.l4]]` rows. Empty rows = default-deny;
     // non-empty rows allow the listed flows.
@@ -1456,7 +1453,7 @@ disabled_inspectors = [{list}]
 
     #[test]
     fn resolve_policy_bundle_loads_for_a_tenant_workload_plan() {
-        // Slice 3 (b): a tenant:workload plan resolves to the on-disk
+        // A tenant:workload plan resolves to the on-disk
         // PolicyBundle the supervisor's L4 gate + observers consume.
         let tmp = tempfile::tempdir().unwrap();
         write_bundle(
@@ -1517,7 +1514,7 @@ disabled_inspectors = [{list}]
     fn slice_b_inspector_chain_honors_disabled_inspectors() {
         // A bundle that disables `ssrf_guard` and `secrets_scanner`
         // must produce a 3-inspector chain. Naming is by
-        // `Inspector::name()` strings (Plan 37 §15).
+        // `Inspector::name()` strings.
         let tmp = tempfile::tempdir().unwrap();
         write_bundle(
             tmp.path(),
@@ -1541,7 +1538,7 @@ disabled_inspectors = [{list}]
         // The underlying `build_inspector_chain` API is intentionally
         // lenient: an unknown name in `disabled_inspectors` is
         // silently skipped (chain still carries all 5 inspectors).
-        // The fail-loud tightening lives one layer up — the W5
+        // The fail-loud tightening lives one layer up — the
         // resolver path calls `validate_egress_policy_inspector_names`
         // before `build_inspector_chain` (see the next test). This
         // separation lets in-process supervisor callers extend their
@@ -1567,7 +1564,7 @@ disabled_inspectors = [{list}]
 
     #[test]
     fn slice_b_resolver_refuses_bundle_with_unknown_disabled_inspector() {
-        // Tightening: the W5 resolver path runs
+        // Tightening: the resolver path runs
         // `validate_egress_policy_inspector_names` before
         // `build_inspector_chain`, so a typo in `disabled_inspectors`
         // fails admission with `ResolveError::EgressPolicyInvalid`
@@ -1636,9 +1633,9 @@ disabled_inspectors = [{list}]
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 3 — `[pii]` policy wiring
+    // `[pii]` policy wiring
     //
-    // `slots_from_bundle` now calls `build_inspector_chain_with_pii`
+    // `slots_from_bundle` calls `build_inspector_chain_with_pii`
     // so a tenant bundle's `[pii]` section (mode + categories) drives
     // runtime behaviour. The resolver path enforces fail-loud on
     // unknown mode strings or category names — typos at admission
@@ -1813,8 +1810,7 @@ bundle_version = 1
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 4 follow-on — `[audit].stream_destinations`
-    // shape validation
+    // `[audit].stream_destinations` shape validation
     //
     // The resolver runs `validate_audit_policy_stream_destinations`
     // before constructing slots so a typo on an audit-stream URL

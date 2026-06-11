@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
-# Builder-VM-only Linux tools (plan 121 D4) — cross-compiled to
+# Builder-VM-only Linux tools — cross-compiled to
 # aarch64-unknown-linux-musl by crates/mvm-cli/build.rs and embedded.
 # Linux-gated in source (stub main() elsewhere) so non-Linux workspace
 # builds stay green. Bin names are load-bearing: build.rs +
@@ -21,7 +21,7 @@ path = "src/bin/mvm-host-vm-init.rs"
 name = "mvm-egress-proxy"
 path = "src/bin/mvm-egress-proxy.rs"
 
-# Plan 160 — PID 1 of the nix-tarball Stage 0 seed. Cross-compiled to
+# PID 1 of the nix-tarball Stage 0 seed. Cross-compiled to
 # static aarch64-musl + embedded by mvm-cli/build.rs (via SEED_BINARIES),
 # same treatment as mvm-host-vm-init. Host-side only — never installed in a
 # VM, absent from the nix attrset + the host-binaries sync gate.
@@ -30,16 +30,16 @@ name = "stage0-init"
 path = "src/bin/stage0-init.rs"
 
 [dependencies]
-# Plan 74 W1.3 — OCI layer unpack to a staging rootfs. `tar` and
+# OCI layer unpack to a staging rootfs. `tar` and
 # `flate2` are workspace deps already (used by `mvm-sdk`'s addon
 # tarball pipeline at the same pinned versions). `oci_to_rootfs`
 # in this crate stays plain-tar-on-Read; gzip and zstd decoding
-# happen at the caller's boundary (W1.5 CLI orchestrator) so the
+# happen at the caller's boundary (the CLI orchestrator) so the
 # unpacker can be exercised against in-memory fixtures without
 # pulling a decompressor in for each test.
 flate2.workspace = true
 tar.workspace = true
-# Plan 160 — in-process xz decode of the Nix-tarball Stage 0 seed
+# In-process xz decode of the Nix-tarball Stage 0 seed
 # (`stage0::extract_nix_store_tarball`), replacing a shell-out to host
 # `tar -xJf`. Pure Rust (no liblzma C dep) so host-side seed
 # materialization stays self-contained on every contributor host.
@@ -47,12 +47,12 @@ lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-guest.workspace = true
-# plan 123 A/L3 — `LibkrunNetworkProvider` impls the `NetworkProvider`
+# `LibkrunNetworkProvider` impls the `NetworkProvider`
 # seam. mvm-network deps only mvm-core + mvm-sdk, so this edge is acyclic.
 # Optional + folded into `builder-vm`: the provider is gated with
 # `libkrun_builder`, so a default build pulls neither.
 mvm-network = { workspace = true, optional = true }
-# Plan 73 Followup B.1 — `install_app_deps` reuses
+# `install_app_deps` reuses
 # `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
 # for cache-hit verification. The orchestrator owns the cache
 # probe + miss-path placeholder; the audit primitives stay in
@@ -64,12 +64,11 @@ chrono.workspace = true
 fs2.workspace = true
 hex.workspace = true
 reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
-# Plan 72 W1: optional libkrun FFI dep for the in-tree builder VM
+# Optional libkrun FFI dep for the in-tree builder VM
 # launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
-# `builder-vm`; default-off until Plan 72 W5
-# cutover flips polarity.
+# `builder-vm`; default-off until the cutover flips polarity.
 libkrun-sys = { workspace = true, optional = true }
-# Plan 97 Phase C — `VzBuilderBackend` builds a `vz::SupervisorConfig`
+# `VzBuilderBackend` builds a `vz::SupervisorConfig`
 # JSON document and pipes it to the Swift `mvm-vz-supervisor`. The
 # crate is pure types (no C linkage, no platform-specific deps) so
 # it costs nothing on non-macOS hosts; the runtime spawn bails when
@@ -77,13 +76,13 @@ libkrun-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# Plan 76 Phase 6 — `.mvm` packed artifacts carry an Ed25519
+# `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller
 # hands us a signing key) signatures inside this crate so the
 # format library is self-contained; the CLI passes the host
 # signer's key bytes in.
 ed25519-dalek.workspace = true
-# Plan 74 W1.4b.4 — `download_runtime_overlay` stages files into a
+# `download_runtime_overlay` stages files into a
 # temp dir before atomic install into the cache. Promoted from a
 # dev-dep so lib code (not just tests) can reach it.
 tempfile.workspace = true
@@ -91,12 +90,12 @@ thiserror = "1"
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
-# Plan 89 W2 — `builder_protocol::{HostVmRequest,HostVmResponse}`
+# `builder_protocol::{HostVmRequest,HostVmResponse}`
 # carry a `JobId(Uuid)` to disambiguate concurrent dispatches over
 # the persistent VM channel. Existing mvm-core / mvm-cli call sites
 # already pull in the same version.
 uuid.workspace = true
-# Plan 89 W3 part 7 — `persistent_builder::supervisor_alive`
+# `persistent_builder::supervisor_alive`
 # pokes the recorded supervisor PID with `kill(pid, 0)` before
 # routing a build through the supervisor. Unix-only; gated with
 # `#[cfg(unix)]` at the call site.
@@ -104,13 +103,13 @@ libc.workspace = true
 which = "6"
 
 # Linux mount/reboot/signal/ioctl syscalls for the mvm-host-vm-init bin
-# (the builder VM's PID 1) — folded in with mvm-host-vm-init (plan 121
-# D4). Linux-only so non-Linux workspace builds don't drag in the dep.
+# (the builder VM's PID 1) — folded in with mvm-host-vm-init.
+# Linux-only so non-Linux workspace builds don't drag in the dep.
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["mount", "reboot", "signal", "ioctl"] }
 
 [dev-dependencies]
-# Plan 76 Phase 6 — `packed_artifact::tests` generate Ed25519
+# `packed_artifact::tests` generate Ed25519
 # keypairs for round-trip tests. ed25519-dalek's
 # `SigningKey::generate` takes any `CryptoRng + RngCore`; the
 # concrete `OsRng` lives in `rand`.
@@ -118,15 +117,15 @@ rand = "0.8"
 
 [features]
 default = []
-# Folded in with the mvm-egress-proxy bin (plan 121 D4). Off by default;
+# Folded in with the mvm-egress-proxy bin. Off by default;
 # tests/dev enable it so the `mvm-egress-proxy` bin honors a
 # `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no
-# features) ship the four ADR-047 hostnames hard-coded — no env override.
+# features) ship the four allowed hostnames hard-coded — no env override.
 # The bin's `#[cfg(feature = "dev-shell")]` blocks only compile on Linux
 # (inside `mod linux`), so this missing feature was a Linux-only error
 # invisible on a macOS dev host.
 dev-shell = []
-# Plan 72 W1: libkrun-direct builder VM launcher. Pulls the
+# libkrun-direct builder VM launcher. Pulls the
 # `mvm-libkrun` FFI crate which itself gates the underlying
 # `libkrun-sys` bindings.
 contributor-bootstrap = []

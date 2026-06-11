@@ -11,16 +11,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// Field-name pattern for secret-shaped declarations. Plan-0009 / ADR-0009.
+/// Field-name pattern for secret-shaped declarations.
 /// Curated list lives in `data/secret_field_tokens.txt`; see that file
 /// for the two tiers (auth credentials, financial/government
 /// identifiers) and the rationale for what is and isn't included.
 static SECRET_FIELD_TOKENS: LazyLock<Vec<&'static str>> =
     LazyLock::new(|| parse_lines(include_str!("../../data/secret_field_tokens.txt")));
 
-/// Languages mvm currently has Nix factory dispatch for. Per
-/// ADR-0010 §4, the IR field is an open string but the host
-/// validator rejects values not in this list with
+/// Languages mvm currently has Nix factory dispatch for. The IR
+/// field is an open string but the host validator rejects values
+/// not in this list with
 /// `E_UNSUPPORTED_LANGUAGE`. Curated list lives in
 /// `data/supported_languages.txt`; adding a language is append-here,
 /// plus a per-language Nix factory in `nix/factories/`, dispatch
@@ -29,7 +29,7 @@ pub static SUPPORTED_LANGUAGES: LazyLock<Vec<&'static str>> =
     LazyLock::new(|| parse_lines(include_str!("../../data/supported_languages.txt")));
 
 /// Recognize wildcard / "any" host strings in an egress allowlist.
-/// Plan-0004 §5: callers must enumerate concrete hosts.
+/// Callers must enumerate concrete hosts.
 fn is_wildcard_host(host: &str) -> bool {
     matches!(
         host.trim(),
@@ -279,7 +279,7 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                         .to_string(),
                 });
             }
-            // Reject wildcard hosts in granular egress allowlist (plan-0004 §5).
+            // Reject wildcard hosts in granular egress allowlist.
             // The allowlist must enumerate concrete host:port pairs; CIDRs and
             // sentinel "any" hosts get rejected with E_NETWORK_WILDCARD.
             if let Some(egress) = &network.egress {
@@ -315,7 +315,7 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                 }
             }
         }
-        // ADR-0009 / plan-0008: function workloads must declare their
+        // Function workloads must declare their
         // dependency posture explicitly — either point at a hash-pinned
         // lockfile or declare `no_deps()` for stdlib-only workloads.
         // The actual lockfile-content check (hash-pinning) runs in the
@@ -356,7 +356,7 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
     }
 }
 
-/// Validate the warm-process concurrency config against ADR-0011 §Decision.
+/// Validate the warm-process concurrency config.
 ///
 /// Cross-field rules:
 /// - `pool_size ∈ [1, 64]` (mvm substrate sanity cap)
@@ -441,13 +441,13 @@ fn validate_concurrency(
     }
 }
 
-/// Validate the consumer-side `addons[]` field on an `App` (ADR-0018).
+/// Validate the consumer-side `addons[]` field on an `App`.
 ///
 /// IR-side rules — checks that don't require fetching the addon's manifest:
 /// - `name` and `alias` (if present) match the workload-id pattern.
 /// - `(name, alias)` pairs are unique within the list.
 /// - `tier == InVm` is rejected with `E_ADDON_TIER_NOT_IMPLEMENTED`
-///   (`specs/plans/0012-in-vm-addon-tier.md`).
+///   (the in-VM addon tier is not yet implemented).
 /// - `sha256` is 64 hex chars (basic format check; cryptographic
 ///   verification happens in `addon::resolve_and_validate`).
 /// - `AddonRef::Registry { url, version }` has non-empty fields.
@@ -646,7 +646,7 @@ fn validate_source(source: &Source, base: &str, errors: &mut Vec<ValidationError
 
 fn validate_env(env: &BTreeMap<String, EnvValue>, base: &str, errors: &mut Vec<ValidationError>) {
     for (key, value) in env {
-        // Plan 129 A2 — a SecretRef is admitted once it declares a destination
+        // A SecretRef is admitted once it declares a destination
         // binding. claim 12: a secret with no allowed_hosts could be substituted
         // toward any host the egress endpoint reaches, so refuse the unbound one.
         // `auth_type` is a typed enum (always valid); `name` is required by the

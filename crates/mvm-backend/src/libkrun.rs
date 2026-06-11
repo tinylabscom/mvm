@@ -1,9 +1,9 @@
 //! libkrun backend for mvm.
 //!
-//! Plan 53 §"Plan E" / Sprint 48: Tier 2 microVM backend that runs on
+//! Tier 2 microVM backend that runs on
 //! Linux KVM and macOS Apple Silicon. The lifecycle
-//! delegates to a per-VM `mvm-libkrun-supervisor` subprocess (plan 57
-//! W4) rather than calling libkrun in-process: `krun_start_enter` calls
+//! delegates to a per-VM `mvm-libkrun-supervisor` subprocess
+//! rather than calling libkrun in-process: `krun_start_enter` calls
 //! `exit()` on the host process when the guest powers off, so any
 //! in-process registry would tear down sibling guests. One process per
 //! VM scopes the `exit()` to that supervisor and lets the parent
@@ -68,7 +68,7 @@ const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// means `mvmctl stop` returns in 2 s instead of 5 s.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Upper bound for `wait()` (Plan 152 WS-A `up --wait`): how long to wait
+/// Upper bound for `wait()` (the `up --wait` path): how long to wait
 /// for the guest's one-shot workload to finish and report its exit code via
 /// `<vm_state_dir>/workload.exit`. A workload that exceeds this (or crashes
 /// without reporting) fails closed to `VmExitStatus::UNKNOWN`.
@@ -78,7 +78,7 @@ const WORKLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
 /// input. The sole interactive path into a guest is the dev-shell-gated
-/// agent vsock console (Plan 165 WS-C / claim 15), absent from sealed
+/// agent vsock console (claim 15), absent from sealed
 /// prod agents. Centralized so the write-only invariant lives in one place.
 pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
@@ -89,12 +89,12 @@ pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<st
 }
 
 /// Default kernel cmdline for libkrun-launched guests.
-/// `console=hvc0` matches libkrun's virtio-console wiring (plan 57 W3
-/// finding); `root=/dev/vda rw init=/init` matches Apple Container's
+/// `console=hvc0` matches libkrun's virtio-console wiring;
+/// `root=/dev/vda rw init=/init` matches Apple Container's
 /// boot for the same Nix-built rootfs layout.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
-/// Plan 112 Phase 3c — build the supervisor config for one VM, lifting
+/// Build the supervisor config for one VM, lifting
 /// the audit-substrate resolution into the shared `audit_substrate`
 /// module so libkrun and Vz share one source of truth (and the future
 /// `NetworkProvider` trait extraction is mechanical).
@@ -123,10 +123,10 @@ fn krun_context_base(
         .with_cmdline(cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
-        // Plan 152 WS-A: workload exit-code capture (listen=false → host binds).
+        // Workload exit-code capture (listen=false → host binds).
         .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
     krun.rootfs_path = None;
-    // Plan 87/88 / ADR-058 / Plan 123 L3-B — select the gateway through the same
+    // Select the gateway through the same
     // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
     // claim-10 no-bypass bridge). Workload-independent, so it belongs in the base.
     let scratch = state_dir.to_string_lossy().into_owned();
@@ -263,7 +263,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         };
     }
 
-    // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
+    // Resolve the audit substrate (paths + tenant
     // validation). When the producer threaded an AdmittedPlan in
     // (`tenant_id` Some), the AuditSubstrate carries the five resolved
     // paths; otherwise it's all-None and the supervisor takes the
@@ -301,10 +301,10 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         signing_key_path: substrate.signing_key_path,
         plan,
         bundle,
-        // Plan 113 §Task 14 / ADR-064 §Decision 6 — only `HardFail` is
+        // Only `HardFail` is
         // implemented today. Defaulting here keeps the producer site
-        // explicit while a future plan can change the default or
-        // introduce policy-driven selection.
+        // explicit while a future change can introduce policy-driven
+        // selection.
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
     })
 }
@@ -337,7 +337,7 @@ impl VmBackend for LibkrunBackend {
 
     fn snapshot_capability(&self) -> SnapshotCapability {
         // libkrun has no memory snapshot — warm-start is a fast reboot from
-        // the overlay/rootfs disk snapshot (plan 123 C4). A live-memory
+        // the overlay/rootfs disk snapshot. A live-memory
         // request is refused with a typed error, not silently degraded.
         SnapshotCapability::DiskOnly
     }
@@ -350,7 +350,7 @@ impl VmBackend for LibkrunBackend {
             );
         }
 
-        // Plan 112 Phase 3c — early kernel-path check. `build_supervisor_config`
+        // Early kernel-path check. `build_supervisor_config`
         // re-checks too, but this keeps the existing test contract
         // (`libkrun_start_errors_when_kernel_path_missing`) firing before
         // `admit_overlay_aware`'s sidecar check would mask it.
@@ -363,15 +363,14 @@ impl VmBackend for LibkrunBackend {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create per-VM state dir {}: {e}", state_dir.display()))?;
 
-        // W6.2.1: thread the build-time sidecar into per-VM runtime
+        // Thread the build-time sidecar into per-VM runtime
         // metadata so `mvmctl console` enforces the accessible/sealed
         // gate on libkrun-launched VMs the same way as on the
         // libkrun/Firecracker paths.
         let rootfs = Path::new(&config.rootfs_path);
-        // Plan 74 W2 / ADR-051 admission gate — refuse pre-W1.4b
-        // rootfs that lack the `/mvm/runtime` mount point. Fires
-        // before the supervisor spawn so a refusal leaves no PID
-        // file or krun handle behind.
+        // Admission gate — refuse a rootfs that lacks the
+        // `/mvm/runtime` mount point. Fires before the supervisor
+        // spawn so a refusal leaves no PID file or krun handle behind.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
         crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
@@ -563,7 +562,7 @@ impl VmBackend for LibkrunBackend {
     ) -> std::result::Result<VmId, WarmStartError> {
         // libkrun has no memory snapshot; a live-memory (or save/restore)
         // request fails closed with a recovery action rather than silently
-        // cold-booting (plan 123 C4 / ADR-053).
+        // cold-booting.
         let available = SnapshotCapability::DiskOnly;
         if !available.satisfies(requested) {
             return Err(WarmStartError::Unsupported {
@@ -695,7 +694,7 @@ impl VmBackend for LibkrunBackend {
     fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
         // Poll for the captured exit code to appear. The guest writes
         // `workload.exit` (and the supervisor persists it) BEFORE the guest
-        // powers off — the Plan 152 WS-A ack handshake guarantees the
+        // powers off — the ack handshake guarantees the
         // ordering — so its presence is the reliable "workload finished"
         // signal. We deliberately do NOT poll supervisor PID liveness: on a
         // busy host the dead supervisor's PID can be reused by another
@@ -740,8 +739,8 @@ impl VmBackend for LibkrunBackend {
             };
             let alive = read_pid(&pid_path).is_some_and(pid_alive);
             // The supervisor doesn't surface cpus/memory/ports back to
-            // the parent today; W4.3 (the integration-test PR) reads
-            // these out of the live VM via a status RPC over vsock.
+            // the parent today; a future status RPC over vsock will read
+            // these out of the live VM.
             // Until then, `list` reports the name + running state and
             // leaves the discoverable-from-runtime fields empty.
             vms.push(VmInfo {
@@ -802,8 +801,8 @@ impl VmBackend for LibkrunBackend {
         // Tier 2: hardware isolation via KVM (Linux) or Hypervisor.framework
         // (macOS). Comparable VMM TCB to Firecracker — libkrun is rust-vmm
         // based, ~80K LOC, no Firecracker-excluded features (so it passes
-        // the plan 53 §"fork test"). Claim 3 (verified boot) is partial
-        // because the W3 dm-verity pipeline currently targets Firecracker;
+        // the "fork test"). Claim 3 (verified boot) is partial
+        // because the dm-verity pipeline currently targets Firecracker;
         // libkrun support is a follow-up.
         BackendSecurityProfile {
             claims: [
@@ -888,7 +887,7 @@ fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
 
 /// Read the workload exit status written by the supervisor into
 /// `<state_dir>/workload.exit`. Returns UNKNOWN when the file is absent
-/// (guest was killed / backend doesn't support capture). Plan 152 WS-A.
+/// (guest was killed / backend doesn't support capture).
 fn read_exit_status_from(state_dir: &std::path::Path) -> mvm_core::vm_backend::VmExitStatus {
     match mvm_core::exit_capture::read_captured(state_dir) {
         Some(code) => mvm_core::vm_backend::VmExitStatus {
@@ -968,7 +967,7 @@ mod tests {
 
     #[test]
     fn prod_console_attachment_has_no_input() {
-        // claim 15 / Plan 165 WS-C: the backend captures the guest console
+        // claim 15: the backend captures the guest console
         // to a WRITE-ONLY sink — there is no host fd from which the guest
         // could read console input. The only interactive path is the
         // dev-shell-gated agent vsock console, which a sealed prod agent
@@ -1013,7 +1012,7 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_maps_substrate_into_supervisor_config() {
-        // Plan 112 Phase 3c — when the producer threaded an admitted plan,
+        // When the producer threaded an admitted plan,
         // build_supervisor_config maps the resolved AuditSubstrate fields
         // into SupervisorConfig + parses plan_json/bundle_json as JSON.
         let config = VmStartConfig {
@@ -1095,7 +1094,7 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_no_tenant_keeps_substrate_none() {
-        // Plan 112 Phase 3c — no admission ⇒ all five substrate fields
+        // No admission ⇒ all five substrate fields
         // None ⇒ supervisor takes the legacy `run_supervisor` path.
         let config = VmStartConfig {
             name: "dev-vm".into(),
@@ -1118,7 +1117,7 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_refuses_unsafe_tenant() {
-        // Plan 112 Phase 3c — defense-in-depth: tenant_id passes through
+        // Defense-in-depth: tenant_id passes through
         // the DNS-label allowlist in audit_substrate; build_supervisor_config
         // propagates the error.
         let config = VmStartConfig {
@@ -1239,7 +1238,7 @@ mod tests {
         });
     }
 
-    // Plan 152 WS-A — read_exit_status_from / wait() tests.
+    // read_exit_status_from / wait() tests.
 
     #[test]
     fn wait_reads_workload_exit_file() {
@@ -1268,7 +1267,7 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_registers_control_port() {
-        // Plan 152 WS-A: the workload exit-code control port must appear in
+        // The workload exit-code control port must appear in
         // host_listen_ports (not vsock_ports) so the supervisor owns the
         // listener socket and the guest connects as a client.
         let config = VmStartConfig {
