@@ -210,6 +210,13 @@ PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-famil
   NOTE: audit taxonomy preserved across all groups (vm pause→cmd.pause,
   trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
   Deferred dir-purity: dev/doctor/init modules still live in env/.
+
+PLAN 180 — Strip spec refs from code comments    🔴 NOT STARTED
+  [ ] worklist + canonical detection regex
+  [ ] pilot batch (7 heaviest files)
+  [ ] fan-out sweep (~2,531 comment hits)
+  [ ] verify just ci green, comment-only diff
+  [ ] check-no-spec-refs-in-comments lint gate
 ```
 
 ## Security claims
