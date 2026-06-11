@@ -13,7 +13,7 @@ For stateful agent and service workspaces, see [Persistent workspaces](/guides/p
 | Files inside a running VM | VM runtime disk | Lost when the VM is destroyed unless captured or copied out. |
 | Host-mounted files | Mount or copy workflow | Host exposure depends on mount mode and path selection. |
 | Managed local volume | `mvmctl volume` | Encrypted at rest when locked. |
-| Machine state | pause/resume or snapshot save/restore | May contain memory, files, processes, and credentials present in the guest. |
+| Machine state | pause/resume or checkpoint create/restore | May contain memory, files, processes, and credentials present in the guest. |
 
 ## Pause and resume
 

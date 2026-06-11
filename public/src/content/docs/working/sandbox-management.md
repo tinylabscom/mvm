@@ -42,11 +42,11 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 ```
 
-For backend-specific machine-state files:
+For Vz memory checkpoints (vm-full class):
 
 ```sh
-mvmctl snapshot save agent-sandbox --path /tmp/agent-sandbox.vzsnap --hypervisor vz
-mvmctl snapshot restore agent-sandbox --path /tmp/agent-sandbox.vzsnap --hypervisor vz
+mvmctl checkpoint create agent-sandbox --class vm-full
+mvmctl checkpoint restore agent-sandbox --name <checkpoint-name>
 ```
 
 Snapshots can contain memory, files, and runtime credentials. Apply retention and deletion policy.

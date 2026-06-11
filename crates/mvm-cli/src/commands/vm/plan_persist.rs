@@ -1,8 +1,8 @@
-//! Plan 97 Phase E follow-up — persist the admitted `ExecutionPlan`
-//! into the per-VM state dir at boot so out-of-process lifecycle
-//! verbs (`snapshot save`, future `pause`/`resume` rewires) can
-//! rehydrate the plan and bind audit-chain entries to the same
-//! `plan_id` the launch admitted under.
+//! Persist the admitted `ExecutionPlan` into the per-VM state dir at
+//! boot so out-of-process lifecycle verbs (`checkpoint create`,
+//! `checkpoint restore`, `pause`/`resume`) can rehydrate the plan and
+//! bind audit-chain entries to the same `plan_id` the launch admitted
+//! under.
 //!
 //! On-disk layout: `~/.mvm/vms/<vm_name>/plan.json`, mode 0600.
 //! Same directory the backend's `<backend>.pid` lives in, so the

@@ -316,7 +316,7 @@ Before creating a snapshot, the host sends a `sleep-prep` request. The agent:
 3. Drops page cache
 4. Responds with "ready"
 
-On wake (snapshot restore), the host sends a `wake` request and the agent runs restore commands for each integration.
+On wake (checkpoint or snapshot restore), the host sends a `wake` request and the agent runs restore commands for each integration.
 
 ## Filesystem Diff
 

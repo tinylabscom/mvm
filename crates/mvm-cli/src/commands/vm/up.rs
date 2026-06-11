@@ -535,7 +535,7 @@ fn emit_policy_audit_invalid(
 /// VM that already booted.
 ///
 /// Also persists the admitted plan into the VM state dir so
-/// out-of-process lifecycle verbs (e.g. `mvmctl snapshot save`) can
+/// out-of-process lifecycle verbs (e.g. `mvmctl checkpoint create`) can
 /// rehydrate it and bind their audit events to the same plan_id.
 /// Plan persistence failure is non-fatal — the launch already
 /// succeeded; the cost is that lifecycle audit will be unbound on
