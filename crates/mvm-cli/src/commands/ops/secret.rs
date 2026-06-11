@@ -43,7 +43,7 @@ use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_core::plan::TenantId;
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
-use mvm_sdk::ir::AuthType;
+use mvm_sdk::ir::{AuthType, Sigv4Params};
 use secrecy::SecretBox;
 
 use mvm_core::user_config::MvmConfig;
@@ -108,6 +108,19 @@ pub(in crate::commands) enum SecretAction {
         /// How the credential authenticates outbound requests.
         #[arg(long = "type", value_enum)]
         auth_type: AuthTypeArg,
+        /// AWS access-key id (e.g. `AKIA…`). Required with `--type sigv4`,
+        /// rejected otherwise. Public (it pairs with the secret-access-key
+        /// value, which is the stored secret) — not the signing key.
+        #[arg(long = "aws-access-key-id")]
+        aws_access_key_id: Option<String>,
+        /// AWS credential-scope region (e.g. `us-east-1`). Required with
+        /// `--type sigv4`, rejected otherwise.
+        #[arg(long)]
+        region: Option<String>,
+        /// AWS credential-scope service (e.g. `s3`, `execute-api`). Required
+        /// with `--type sigv4`, rejected otherwise.
+        #[arg(long)]
+        service: Option<String>,
         /// Inline value. Pass `-` to read from stdin (preferred when
         /// scripting; avoids shell-history exposure).
         #[arg(long, conflicts_with = "value_file")]
@@ -180,6 +193,9 @@ pub(in crate::commands) fn run_with_stores(
             tenant,
             hosts,
             auth_type,
+            aws_access_key_id,
+            region,
+            service,
             value,
             value_file,
         } => cmd_set(
@@ -191,6 +207,9 @@ pub(in crate::commands) fn run_with_stores(
                 name,
                 hosts,
                 auth_type: auth_type.into(),
+                aws_access_key_id,
+                region,
+                service,
                 value,
                 value_file,
             },
@@ -231,6 +250,9 @@ struct SetArgs {
     name: String,
     hosts: Vec<String>,
     auth_type: AuthType,
+    aws_access_key_id: Option<String>,
+    region: Option<String>,
+    service: Option<String>,
     value: Option<String>,
     value_file: Option<PathBuf>,
 }
@@ -246,10 +268,17 @@ fn cmd_set(
         name,
         hosts,
         auth_type,
+        aws_access_key_id,
+        region,
+        service,
         value,
         value_file,
     } = set;
     let result = (|| -> Result<()> {
+        // Validate the SigV4 scope params against the auth-type BEFORE touching
+        // the store: `--type sigv4` requires all three; any of them is rejected
+        // for a non-sigv4 type (they'd be silently dropped otherwise).
+        let sigv4 = resolve_sigv4_params(auth_type, aws_access_key_id, region, service)?;
         let raw = resolve_value(value, value_file, &name)?;
         let secret = SecretBox::new(Box::new(raw));
         store.put(&tenant, &name, &secret)?;
@@ -261,7 +290,7 @@ fn cmd_set(
             &SecretBindingMeta {
                 auth_type,
                 allowed_hosts: hosts,
-                sigv4: None,
+                sigv4,
             },
         )
     })();
@@ -269,6 +298,45 @@ fn cmd_set(
     result?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
     Ok(())
+}
+
+/// Validate + assemble the SigV4 scope params against the auth-type. Pure so it
+/// is unit-testable without a store. `Sigv4` demands all three (`access_key_id`,
+/// `region`, `service`); any other auth-type rejects all three (a passed param
+/// would otherwise be silently ignored, masking an operator mistake). The secret
+/// value (the secret-access-key) is resolved separately and never lands here.
+fn resolve_sigv4_params(
+    auth_type: AuthType,
+    access_key_id: Option<String>,
+    region: Option<String>,
+    service: Option<String>,
+) -> Result<Option<Sigv4Params>> {
+    match auth_type {
+        AuthType::Sigv4 => {
+            let access_key_id = access_key_id
+                .filter(|s| !s.is_empty())
+                .context("--type sigv4 requires --aws-access-key-id")?;
+            let region = region
+                .filter(|s| !s.is_empty())
+                .context("--type sigv4 requires --region")?;
+            let service = service
+                .filter(|s| !s.is_empty())
+                .context("--type sigv4 requires --service")?;
+            Ok(Some(Sigv4Params {
+                access_key_id,
+                region,
+                service,
+            }))
+        }
+        AuthType::Hmac | AuthType::Bearer | AuthType::Basic => {
+            if access_key_id.is_some() || region.is_some() || service.is_some() {
+                anyhow::bail!(
+                    "--aws-access-key-id/--region/--service are only valid with --type sigv4"
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn cmd_get(store: &dyn SecretStore, audit: &AuditLog, tenant: String, name: String) -> Result<()> {
@@ -307,11 +375,23 @@ fn cmd_ls(
 /// which is never an input.
 fn ls_line(name: &str, binding: Option<&SecretBindingMeta>) -> String {
     match binding {
-        Some(b) => format!(
-            "{name}\ttype={}\thosts={}",
-            auth_type_label(b.auth_type),
-            b.allowed_hosts.join(",")
-        ),
+        Some(b) => {
+            let mut line = format!(
+                "{name}\ttype={}\thosts={}",
+                auth_type_label(b.auth_type),
+                b.allowed_hosts.join(",")
+            );
+            // SigV4 scope is non-secret operator metadata. access_key_id is
+            // identifying but public (it pairs with the secret-access-key, which
+            // is never shown); region/service name the credential scope.
+            if let Some(s) = &b.sigv4 {
+                line.push_str(&format!(
+                    "\taccess_key_id={}\tregion={}\tservice={}",
+                    s.access_key_id, s.region, s.service
+                ));
+            }
+            line
+        }
         None => name.to_string(),
     }
 }
@@ -756,6 +836,39 @@ mod tests {
                 name: name.into(),
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 auth_type,
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                value: Some(value.into()),
+                value_file: None,
+            },
+        )
+    }
+
+    /// Like [`set`] but for a SigV4 secret: passes the scope params through.
+    fn set_sigv4(
+        store: &dyn SecretStore,
+        bindings: &dyn BindingStore,
+        audit: &AuditLog,
+        name: &str,
+        hosts: &[&str],
+        access_key_id: &str,
+        region: &str,
+        service: &str,
+        value: &str,
+    ) -> Result<()> {
+        cmd_set(
+            store,
+            bindings,
+            audit,
+            SetArgs {
+                tenant: "local".into(),
+                name: name.into(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                auth_type: AuthType::Sigv4,
+                aws_access_key_id: Some(access_key_id.into()),
+                region: Some(region.into()),
+                service: Some(service.into()),
                 value: Some(value.into()),
                 value_file: None,
             },
@@ -793,6 +906,108 @@ mod tests {
             !sidecar.contains("sk-live-zzz"),
             "binding sidecar must not contain the secret value: {sidecar}"
         );
+    }
+
+    #[test]
+    fn cmd_set_sigv4_stores_params_in_binding_not_value_in_sidecar() {
+        let tmp_store = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(tmp_store.path());
+        let (bind_dir, bindings) = temp_bindings();
+        let (_audit_dir, audit) = temp_audit();
+
+        set_sigv4(
+            &store,
+            &bindings,
+            &audit,
+            "aws",
+            &["s3.us-east-1.amazonaws.com"],
+            "AKIAIOSFODNN7EXAMPLE",
+            "us-east-1",
+            "s3",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", // the secret-access-key
+        )
+        .unwrap();
+
+        // The value (secret-access-key) landed in the value store.
+        assert_eq!(store.list("local").unwrap(), vec!["aws"]);
+        // The binding carries the non-secret scope params.
+        let b = bindings.get("local", "aws").unwrap().unwrap();
+        assert_eq!(b.auth_type, AuthType::Sigv4);
+        let params = b.sigv4.expect("sigv4 params stored");
+        assert_eq!(params.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(params.region, "us-east-1");
+        assert_eq!(params.service, "s3");
+        // The secret-access-key (the signing key) never lands in the sidecar.
+        let sidecar =
+            std::fs::read_to_string(bind_dir.path().join("local").join("aws.json")).unwrap();
+        assert!(
+            !sidecar.contains("wJalrXUtnFEMI"),
+            "binding sidecar must not carry the secret-access-key: {sidecar}"
+        );
+    }
+
+    #[test]
+    fn resolve_sigv4_params_requires_all_three_for_sigv4() {
+        // Missing any of the three is an error.
+        assert!(
+            resolve_sigv4_params(AuthType::Sigv4, Some("AKIA".into()), Some("r".into()), None)
+                .is_err()
+        );
+        assert!(
+            resolve_sigv4_params(AuthType::Sigv4, Some("AKIA".into()), None, Some("s".into()))
+                .is_err()
+        );
+        assert!(
+            resolve_sigv4_params(AuthType::Sigv4, None, Some("r".into()), Some("s".into()))
+                .is_err()
+        );
+        // All three present → params.
+        let p = resolve_sigv4_params(
+            AuthType::Sigv4,
+            Some("AKIA".into()),
+            Some("us-east-1".into()),
+            Some("s3".into()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(p.access_key_id, "AKIA");
+        assert_eq!(p.region, "us-east-1");
+        assert_eq!(p.service, "s3");
+    }
+
+    #[test]
+    fn resolve_sigv4_params_rejects_params_for_non_sigv4_types() {
+        // Passing a sigv4 param to a bearer secret is an operator error, not
+        // a silent no-op.
+        for t in [AuthType::Bearer, AuthType::Basic, AuthType::Hmac] {
+            assert!(
+                resolve_sigv4_params(t, Some("AKIA".into()), None, None).is_err(),
+                "{t:?} must reject --aws-access-key-id"
+            );
+            // No params → None, fine.
+            assert_eq!(resolve_sigv4_params(t, None, None, None).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn ls_line_shows_sigv4_scope_for_a_sigv4_secret() {
+        let b = SecretBindingMeta {
+            auth_type: AuthType::Sigv4,
+            allowed_hosts: vec!["s3.us-east-1.amazonaws.com".into()],
+            sigv4: Some(Sigv4Params {
+                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                region: "us-east-1".into(),
+                service: "s3".into(),
+            }),
+        };
+        let line = ls_line("aws", Some(&b));
+        assert!(line.contains("type=sigv4"), "got: {line}");
+        assert!(
+            line.contains("access_key_id=AKIAIOSFODNN7EXAMPLE"),
+            "got: {line}"
+        );
+        assert!(line.contains("region=us-east-1"), "got: {line}");
+        assert!(line.contains("service=s3"), "got: {line}");
     }
 
     #[test]
