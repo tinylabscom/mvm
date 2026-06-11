@@ -87,6 +87,7 @@ pub fn build_sigv4_input(
         date_stamp,
         region: region.to_string(),
         service: service.to_string(),
+        signed_headers,
     })
 }
 
@@ -167,6 +168,26 @@ mod tests {
     }
 
     #[test]
+    fn signed_headers_is_returned_sorted_and_lowercased() {
+        // The forward path needs SignedHeaders for the Authorization header;
+        // it's the sorted, lowercased, `;`-joined set of header names.
+        let input = build_sigv4_input(
+            "POST",
+            "https://h/p",
+            &[
+                ("X-Amz-Date".into(), "20150830T123600Z".into()),
+                ("Host".into(), "h".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            b"{}",
+            "us-east-1",
+            "s3",
+        )
+        .unwrap();
+        assert_eq!(input.signed_headers, "content-type;host;x-amz-date");
+    }
+
+    #[test]
     fn get_vanilla_signs_to_the_published_signature_end_to_end() {
         // From raw request → canonical → string-to-sign → signature, against
         // the published get-vanilla signature (closes the loop with the signer).
@@ -189,6 +210,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["example.amazonaws.com".into()],
+            sigv4: None,
         };
         let sig = Signer::new(&resolver as &dyn SecretResolver)
             .sign_sigv4(&secret, &get_vanilla())

@@ -651,6 +651,9 @@ fn helper_to_env_value(v: Value, path: &Path, line: usize) -> Result<EnvValue, P
                     },
                     auth_type,
                     allowed_hosts,
+                    // SigV4 scope params are operator-set in the local binding,
+                    // not authored in source — the keyholder reconstructs them.
+                    sigv4: None,
                 },
             })
         }

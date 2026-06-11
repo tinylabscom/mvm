@@ -70,6 +70,7 @@ fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
         },
         auth_type: AuthType::Bearer,
         allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        sigv4: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
             &SecretBindingMeta {
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec!["api.openai.com".into()],
+                sigv4: None,
             },
         )
         .unwrap();
