@@ -155,11 +155,40 @@ impl RedactingSubstitution {
     ) -> Option<(Vec<u8>, RedactionHits)> {
         use crate::supervisor::entropy_scanner::EntropyScanner;
         use crate::supervisor::name_scanner::NameScanner;
-        use mvm_core::policy::{EntropyMode, NameMode};
+        use crate::supervisor::pii_redactor::PiiRedactor;
+        use mvm_core::policy::{EntropyMode, NameMode, SecretAction};
 
-        let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
-        let (after_pii, pii) = self.pii.redact(&after_secrets);
-        let mut buf = after_pii;
+        // Curated secrets: default Block masks (today's behavior); a per-destination
+        // Audit downgrade observes a trusted sink without masking.
+        let (mut buf, secrets) = match action.secrets {
+            SecretAction::Block | SecretAction::Redact => self.secrets.redact(payload, REDACTION_MASK),
+            SecretAction::Audit => (payload.to_vec(), self.secrets.scan(payload)),
+        };
+
+        // Structured PII: a default (empty) action runs the always-on ruleset;
+        // an explicit per-destination policy overrides — `disabled` skips it, a
+        // category list restricts it. A malformed policy fails safe to always-on.
+        let pii_is_default = action.pii.mode.is_none() && action.pii.categories.is_empty();
+        let pii = if pii_is_default {
+            let (out, p) = self.pii.redact(&buf);
+            buf = out;
+            p
+        } else {
+            match PiiRedactor::from_policy(&action.pii) {
+                Ok(None) => Vec::new(),
+                Ok(Some(r)) => {
+                    let (out, p) = r.redact(&buf);
+                    buf = out;
+                    p
+                }
+                Err(_) => {
+                    let (out, p) = self.pii.redact(&buf);
+                    buf = out;
+                    p
+                }
+            }
+        };
+
         let mut hits = RedactionHits {
             secrets,
             pii,
@@ -655,6 +684,64 @@ mod tests {
         let (out, hits) = r.redact_bytes_for(body, &on).expect("entropy hit");
         assert_eq!(hits.entropy, 1);
         assert!(!String::from_utf8_lossy(&out).contains("Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9"));
+    }
+
+    #[test]
+    fn default_action_still_masks_email_and_curated_secrets() {
+        // Regression guard: a default (no-profile) action preserves today's
+        // always-on behavior — structured PII + curated secrets are masked.
+        use mvm_core::policy::RedactionAction;
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"contact alice@example.com key AKIAIOSFODNN7EXAMPLE end";
+        let (out, hits) = r
+            .redact_bytes_for(body, &RedactionAction::default())
+            .expect("default masks pii+secrets");
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("alice@example.com"), "email not masked: {s}");
+        assert!(!s.contains("AKIAIOSFODNN7EXAMPLE"), "secret not masked: {s}");
+        assert!(hits.pii.contains(&"email"));
+        assert!(!hits.secrets.is_empty());
+    }
+
+    #[test]
+    fn pii_disabled_for_destination_leaves_email() {
+        // A trusted sink can disable PII masking; the email survives while a
+        // default destination would mask it.
+        use mvm_core::policy::{PiiPolicy, RedactionAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"contact alice@example.com end";
+        let action = RedactionAction {
+            pii: PiiPolicy {
+                mode: Some("disabled".into()),
+                categories: vec![],
+            },
+            ..Default::default()
+        };
+        // Nothing else opts in, so the whole pass is a no-op → None.
+        assert!(
+            r.redact_bytes_for(body, &action).is_none(),
+            "pii=disabled should leave the email and mask nothing"
+        );
+    }
+
+    #[test]
+    fn secrets_audit_counts_without_masking() {
+        // A per-destination secrets=audit downgrade observes but does not mask.
+        use mvm_core::policy::{RedactionAction, SecretAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"key AKIAIOSFODNN7EXAMPLE end";
+        let action = RedactionAction {
+            secrets: SecretAction::Audit,
+            ..Default::default()
+        };
+        let (out, hits) = r
+            .redact_bytes_for(body, &action)
+            .expect("audit still reports the hit");
+        assert!(
+            String::from_utf8_lossy(&out).contains("AKIAIOSFODNN7EXAMPLE"),
+            "audit mode must not mask the secret"
+        );
+        assert!(!hits.secrets.is_empty(), "audit mode must still count the hit");
     }
 
     #[test]
