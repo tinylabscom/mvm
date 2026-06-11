@@ -14,7 +14,7 @@ fn mvmctl(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn sign_help_lists_json_flag() {
-    let out = mvmctl(&["sign", "--help"]);
+    let out = mvmctl(&["env", "sign", "--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -30,7 +30,7 @@ fn sign_help_lists_json_flag() {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn sign_is_noop_off_macos() {
-    let out = mvmctl(&["sign"]);
+    let out = mvmctl(&["env", "sign"]);
     assert!(
         out.status.success(),
         "sign should be a successful no-op off macOS"

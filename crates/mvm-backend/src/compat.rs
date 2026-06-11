@@ -16,14 +16,6 @@
 //!   (capabilities() is host-probed; compat reports the nominal capability).
 //! - **AppleContainer**: `crates/mvm-backend/src/apple_container.rs`; macOS
 //!   26+ Apple Silicon only; vmnet networking; no snapshots or jailer.
-//! - **CloudHypervisor**: `crates/mvm-backend/src/cloud_hypervisor.rs`;
-//!   Linux/KVM + macOS/HVF, both arches; ELF / uncompressed Image kernel;
-//!   snapshot-capable; TAP wiring incomplete (recorded as Tap intentionally —
-//!   CH supports TAP, the impl note says it's a follow-up, so `networking`
-//!   reflects what CH *can* do rather than what the start path does today).
-//! - **Docker**: `crates/mvm-backend/src/docker.rs`; OCI image / tar.gz;
-//!   no kernel (container runtime, not a VMM); ext4 rootfs or OCI layer set;
-//!   no snapshots/jailer; networking via Docker's own NAT/bridge.
 //! - **Qemu**: no implementation yet; capabilities are conventional QEMU
 //!   defaults for the mvm workload shape (ELF/Image per arch, ext4 rootfs,
 //!   TAP networking, snapshots, no jailer). Flagged with `// assumption`.
@@ -44,8 +36,6 @@ pub enum MicrovmBackend {
     Libkrun,
     Vz,
     AppleContainer,
-    CloudHypervisor,
-    Docker,
     Qemu,
     Vfkit,
 }
@@ -204,51 +194,6 @@ static APPLE_CONTAINER: BackendCompat = BackendCompat {
     networking: NetworkingModel::UserModeVirtio, // vmnet; closest model is UserModeVirtio
 };
 
-// CloudHypervisor: source — crates/mvm-backend/src/cloud_hypervisor.rs.
-// Linux/KVM + macOS/HVF; both x86_64 and aarch64.
-// DEFAULT_CMDLINE uses console=ttyS0 reboot=k panic=1 (matches FC shape).
-// CH boots ELF vmlinux on x86_64; uncompressed arm64 Image on aarch64
-// (CH API doc: `--kernel` accepts vmlinux ELF or arm64 Image; bzImage /
-// compressed variants are not supported by CH's direct-boot path today).
-// Snapshots supported (capabilities() reports true).
-// Jailer: CH does not use Firecracker's jailer; it has its own seccomp
-// profile but the mvm jailer path is FC-specific (ADR-002 §W1.1 targets FC).
-// TAP: CH supports it; mvm start path defers TAP wiring (cloud_hypervisor.rs
-// module docs), but the compat model reflects what CH *can* do.
-static CLOUD_HYPERVISOR: BackendCompat = BackendCompat {
-    backend: MicrovmBackend::CloudHypervisor,
-    guest_arches: &[X86_64, Aarch64],
-    kernel_formats: &[
-        (X86_64, &[K::Elf]),    // vmlinux ELF; CH doesn't support bzImage
-        (Aarch64, &[K::Image]), // uncompressed arm64 Image
-    ],
-    rootfs_formats: &[R::Ext4],
-    required_boot_args: &["console=ttyS0", "reboot=k", "panic=1"],
-    supports_snapshots: true,
-    supports_jailer: false, // CH has its own seccomp; mvm jailer path targets FC only
-    networking: NetworkingModel::Tap, // CH supports TAP; mvm start path wires it as follow-up
-};
-
-// Docker: source — crates/mvm-backend/src/docker.rs.
-// Both arches (Docker is arch-agnostic; OCI image layer set handles the diff).
-// No kernel (container runtime, not a VMM) — kernel_formats left empty.
-// OCI images are loaded from image.tar.gz (streamLayeredImage); raw ext4
-// import is a fallback on Linux. No jailer; no snapshots.
-// Networking via Docker's own NAT/bridge (no TAP managed by mvm).
-static DOCKER: BackendCompat = BackendCompat {
-    backend: MicrovmBackend::Docker,
-    guest_arches: &[X86_64, Aarch64],
-    // Docker is a container runtime, not a VMM; there is no kernel to boot.
-    // The model records no accepted kernel formats — the ArtifactValidator
-    // skips the kernel-format check for Docker accordingly.
-    kernel_formats: &[],
-    rootfs_formats: &[R::Ext4, R::Raw], // ext4 import or OCI layer (Raw = OCI tarball)
-    required_boot_args: &[],
-    supports_snapshots: false,
-    supports_jailer: false,
-    networking: NetworkingModel::None, // Docker manages its own networking; mvm doesn't wire it
-};
-
 // Qemu: no implementation yet. Capabilities are conventional QEMU defaults
 // for the mvm workload shape. All fields are marked // assumption below.
 // x86_64: ELF vmlinux or bzImage (Raw accepted as generic blob);  // assumption
@@ -292,8 +237,6 @@ pub fn compat(b: MicrovmBackend) -> &'static BackendCompat {
         MicrovmBackend::Libkrun => &LIBKRUN,
         MicrovmBackend::Vz => &VZ,
         MicrovmBackend::AppleContainer => &APPLE_CONTAINER,
-        MicrovmBackend::CloudHypervisor => &CLOUD_HYPERVISOR,
-        MicrovmBackend::Docker => &DOCKER,
         MicrovmBackend::Qemu => &QEMU,
         MicrovmBackend::Vfkit => &VFKIT,
     }
@@ -329,8 +272,6 @@ mod tests {
             MicrovmBackend::Libkrun,
             MicrovmBackend::Vz,
             MicrovmBackend::AppleContainer,
-            MicrovmBackend::CloudHypervisor,
-            MicrovmBackend::Docker,
             MicrovmBackend::Qemu,
             MicrovmBackend::Vfkit,
         ] {
@@ -366,34 +307,12 @@ mod tests {
     }
 
     #[test]
-    fn cloud_hypervisor_supports_both_arches() {
-        let c = compat(MicrovmBackend::CloudHypervisor);
-        assert!(c.guest_arches.contains(&X86_64));
-        assert!(c.guest_arches.contains(&Aarch64));
-        // CH boots ELF on x86_64 and Image on aarch64 (no bzImage/compressed).
-        assert!(kernel_format_ok(c, X86_64, KernelFormat::Elf));
-        assert!(!kernel_format_ok(c, X86_64, KernelFormat::Image));
-        assert!(kernel_format_ok(c, Aarch64, KernelFormat::Image));
-        assert!(!kernel_format_ok(c, Aarch64, KernelFormat::Elf));
-    }
-
-    #[test]
-    fn docker_has_no_kernel_formats() {
-        let c = compat(MicrovmBackend::Docker);
-        assert!(c.kernel_formats.is_empty());
-        assert!(!kernel_format_ok(c, X86_64, KernelFormat::Elf));
-        assert!(!kernel_format_ok(c, Aarch64, KernelFormat::Image));
-    }
-
-    #[test]
     fn firecracker_supports_jailer_others_do_not() {
         assert!(compat(MicrovmBackend::Firecracker).supports_jailer);
         for b in [
             MicrovmBackend::Libkrun,
             MicrovmBackend::Vz,
             MicrovmBackend::AppleContainer,
-            MicrovmBackend::CloudHypervisor,
-            MicrovmBackend::Docker,
             MicrovmBackend::Qemu,
             MicrovmBackend::Vfkit,
         ] {
@@ -404,9 +323,9 @@ mod tests {
     #[test]
     fn serde_roundtrips() {
         // Spot-check that the enums round-trip through JSON as snake_case.
-        let b = MicrovmBackend::CloudHypervisor;
+        let b = MicrovmBackend::Vz;
         let j = serde_json::to_string(&b).unwrap();
-        assert_eq!(j, "\"cloud_hypervisor\"");
+        assert_eq!(j, "\"vz\"");
         assert_eq!(serde_json::from_str::<MicrovmBackend>(&j).unwrap(), b);
 
         let r = RootfsFormat::InitramfsCpioGz;

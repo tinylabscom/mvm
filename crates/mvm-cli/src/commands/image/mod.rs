@@ -16,11 +16,15 @@ use mvm_oci::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ui;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::shared::human_bytes;
+
+mod inspect;
+mod ls;
+mod pull;
+mod rm;
 
 const INDEX_FILE: &str = "index.json";
 
@@ -130,7 +134,7 @@ struct CachedOciLayer {
 }
 
 impl CachedOciImage {
-    fn provenance(
+    pub(super) fn provenance(
         &self,
         source: &str,
         supplied_reference: &str,
@@ -188,7 +192,7 @@ impl OciProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OciTrustDecision {
+pub(super) struct OciTrustDecision {
     trust_policy: String,
     verification_status: String,
 }
@@ -361,7 +365,7 @@ fn registry_env_key(registry: &str) -> Result<String> {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-struct ImageListRow {
+pub(super) struct ImageListRow {
     reference: String,
     registry: String,
     repository: String,
@@ -373,7 +377,7 @@ struct ImageListRow {
 }
 
 #[derive(Debug, Serialize)]
-struct InspectOutput {
+pub(super) struct InspectOutput {
     image: CachedOciImage,
     size_bytes: u64,
     manifest: Option<Value>,
@@ -382,76 +386,19 @@ struct InspectOutput {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct RemoveOutcome {
-    reference: String,
-    removed_files: usize,
-    freed_bytes: u64,
+pub(super) struct RemoveOutcome {
+    pub(super) reference: String,
+    pub(super) removed_files: usize,
+    pub(super) freed_bytes: u64,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let cache_root = oci_cache_root();
     match args.action {
-        ImageAction::Pull { reference, prod } => {
-            let (image, trust, auth_source) = pull_image_with_trust(&cache_root, &reference, prod)?;
-            let provenance = image.provenance("image_pull", &reference, &trust);
-            mvm_core::audit_emit!(
-                ImageFetch,
-                "source=image_pull reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
-                image.reference,
-                image.resolved_digest,
-                prod,
-                provenance.layer_digests.len(),
-                provenance.trust_policy,
-                provenance.verification_status,
-                auth_source
-            );
-            ui::success(&format!(
-                "Pulled {} -> {}",
-                image.reference, image.resolved_digest
-            ));
-            if let Some(rootfs_path) = image.rootfs_path {
-                ui::info(&format!(
-                    "Rootfs: {}",
-                    cache_root.join(rootfs_path).display()
-                ));
-            }
-            Ok(())
-        }
-        ImageAction::Ls { registry, json } => {
-            let rows = list_rows(&cache_root, registry.as_deref())?;
-            if json {
-                crate::json_out::emit_json(&rows)?;
-            } else {
-                render_list(&rows);
-            }
-            Ok(())
-        }
-        ImageAction::Inspect { reference, json } => {
-            let output = inspect_image(&cache_root, &reference)?;
-            if json {
-                crate::json_out::emit_json(&output)?;
-            } else {
-                render_inspect(&output);
-            }
-            Ok(())
-        }
-        ImageAction::Rm { reference } => {
-            let outcome = remove_image(&cache_root, &reference)?;
-            ui::success(&format!(
-                "Removed cached image {} ({} file(s), freed {}).",
-                outcome.reference,
-                outcome.removed_files,
-                human_bytes(outcome.freed_bytes)
-            ));
-            mvm_core::audit_emit!(
-                CachePrune,
-                "source=image_rm reference={} removed={} freed_bytes={}",
-                outcome.reference,
-                outcome.removed_files,
-                outcome.freed_bytes
-            );
-            Ok(())
-        }
+        ImageAction::Pull { reference, prod } => pull::run(&cache_root, reference, prod),
+        ImageAction::Ls { registry, json } => ls::run(&cache_root, registry.as_deref(), json),
+        ImageAction::Inspect { reference, json } => inspect::run(&cache_root, &reference, json),
+        ImageAction::Rm { reference } => rm::run(&cache_root, &reference),
     }
 }
 
@@ -509,7 +456,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     })
 }
 
-fn pull_image_with_trust(
+pub(super) fn pull_image_with_trust(
     cache_root: &Path,
     reference: &str,
     prod: bool,
@@ -872,7 +819,7 @@ fn is_gzip_layer(media_type: &str) -> bool {
         || media_type.contains("tar.gzip")
 }
 
-fn list_rows(cache_root: &Path, registry: Option<&str>) -> Result<Vec<ImageListRow>> {
+pub(super) fn list_rows(cache_root: &Path, registry: Option<&str>) -> Result<Vec<ImageListRow>> {
     let index = load_index(cache_root)?;
     let rows = index
         .images
@@ -892,7 +839,7 @@ fn list_rows(cache_root: &Path, registry: Option<&str>) -> Result<Vec<ImageListR
     Ok(rows)
 }
 
-fn inspect_image(cache_root: &Path, reference: &str) -> Result<InspectOutput> {
+pub(super) fn inspect_image(cache_root: &Path, reference: &str) -> Result<InspectOutput> {
     let index = load_index(cache_root)?;
     let image = find_image(&index, reference)
         .with_context(|| format!("cached OCI image not found for '{reference}'"))?
@@ -916,7 +863,7 @@ fn inspect_image(cache_root: &Path, reference: &str) -> Result<InspectOutput> {
     })
 }
 
-fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveOutcome> {
+pub(super) fn remove_image(cache_root: &Path, reference: &str) -> Result<RemoveOutcome> {
     let mut index = load_index(cache_root)?;
     let Some(position) = index
         .images
@@ -1186,7 +1133,7 @@ fn safe_cache_path(cache_root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(cache_root.join(rel))
 }
 
-fn render_list(rows: &[ImageListRow]) {
+pub(super) fn render_list(rows: &[ImageListRow]) {
     if rows.is_empty() {
         println!("No cached OCI images.");
         return;
@@ -1206,7 +1153,7 @@ fn render_list(rows: &[ImageListRow]) {
     }
 }
 
-fn render_inspect(output: &InspectOutput) {
+pub(super) fn render_inspect(output: &InspectOutput) {
     let image = &output.image;
     println!("Reference: {}", image.reference);
     println!("Registry: {}", image.registry);

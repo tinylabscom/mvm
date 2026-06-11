@@ -88,11 +88,58 @@ const STORAGE_SUB: &[(&str, AuditPosture)] = &[
 
 const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("SandboxGc"))];
 
+// Plan 178 (D5) — environment/install lifecycle grouped under `env <sub>`.
+const ENV_SUB: &[(&str, AuditPosture)] = &[
+    ("bootstrap", AuditPosture::InteractiveOrControl),
+    ("cleanup", AuditPosture::Emits("SlotPrune")),
+    ("uninstall", AuditPosture::Emits("Uninstall")),
+    ("update", AuditPosture::Emits("UpdateInstall")),
+    ("sign", AuditPosture::ReadOnly),
+];
+
+// Plan 178 — operational verbs grouped under `ops <sub>`. Postures unchanged.
+const OPS_SUB: &[(&str, AuditPosture)] = &[
+    ("metrics", AuditPosture::ReadOnly),
+    ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
+    ("config", AuditPosture::Emits("ConfigChange")),
+    ("mcp", AuditPosture::InteractiveOrControl),
+];
+
+// Plan 178 — the single-VM operational verbs grouped under `vm <sub>`. The
+// audit postures are unchanged from when these were top-level (the CLI path
+// moved, the audit taxonomy did not).
+const VM_SUB: &[(&str, AuditPosture)] = &[
+    ("pause", AuditPosture::Emits("VmStop")),
+    ("resume", AuditPosture::Emits("VmStart")),
+    ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
+    ("cp", AuditPosture::Emits("VmFileCopy")),
+    ("fs", AuditPosture::Emits("VmFsMutate")),
+    ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
+    ("diff", AuditPosture::ReadOnly),
+    ("wait", AuditPosture::ReadOnly),
+    ("boot-report", AuditPosture::ReadOnly),
+    ("set-ttl", AuditPosture::Emits("VmTtlSet")),
+    ("forward", AuditPosture::ReadOnly),
+    ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
+    ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
+    ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
+];
+
 // `kernel build` compiles/downloads a microVM kernel into the local
 // cache. Like `compile`, it produces build outputs but doesn't touch the
 // security audit chain — the Stage-0 supply-chain events the compile arm
 // may trigger are emitted by the shared bootstrap, same as `dev`.
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
+
+// Plan 178 (D1) — build-time verbs grouped under `build <sub>`. `build image`
+// is the former top-level `build`. Postures unchanged.
+const BUILD_SUB: &[(&str, AuditPosture)] = &[
+    ("image", AuditPosture::Emits("TemplateBuild")),
+    ("compile", AuditPosture::ReadOnly),
+    ("validate", AuditPosture::ReadOnly),
+    ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
+];
 
 // Plan 93 Phase 2 Lever 0 — `mvmctl bench microvm-launch`. The live
 // probe boots a throwaway guest through the signed-plan admission path
@@ -128,6 +175,7 @@ const POOL_SUB: &[(&str, AuditPosture)] = &[
 
 const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("CheckpointCreated")),
+    ("restore", AuditPosture::Emits("CheckpointRestored")),
     ("fork", AuditPosture::Emits("CheckpointForked")),
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::ReadOnly),
@@ -186,20 +234,12 @@ const PROC_SUB: &[(&str, AuditPosture)] = &[
     ("wait", AuditPosture::ReadOnly),
 ];
 
+// `snapshot` now covers only the Firecracker instance-snapshot inventory verbs
+// (`ls` / `rm`). The Vz machine-state save/restore verbs were retired in favor
+// of `checkpoint --class vm-full` / `checkpoint restore`.
 const SNAPSHOT_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("SnapshotDelete")),
-    // Plan 97 Phase E — `mvmctl snapshot save <vm> --path <p>` drives
-    // `VzBackend::snapshot_save`, hashes the resulting blob, and emits
-    // a chain-signed `vm.snapshot_saved` entry bound to the VM's
-    // persisted plan (see `AuditEmitter::emit_vm_snapshot_saved`).
-    ("save", AuditPosture::Emits("vm.snapshot_saved")),
-    // Plan 97 Phase E follow-up — `restore` currently bails before
-    // the supervisor call ("not yet implemented" — the Vz restore
-    // path needs a separate startup mode that boots from a saved
-    // state blob). Posture reflects the planned `vm.snapshot_restored`
-    // emit once the supervisor RESTORE mode lands.
-    ("restore", AuditPosture::Emits("vm.snapshot_restored")),
 ];
 
 // Plan 76 Phase 6 — `mvmctl artifact pack/verify`. Both are
@@ -258,6 +298,10 @@ const TRUST_SUB: &[(&str, AuditPosture)] = &[
     ("add", AuditPosture::Emits("TrustAdd")),
     ("list", AuditPosture::ReadOnly),
     ("remove", AuditPosture::Emits("TrustRemove")),
+    // Plan 178 — provenance verbs folded into `trust <sub>`.
+    ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
+    ("receipt", AuditPosture::ReadOnly),
+    ("audit", AuditPosture::ReadOnly),
 ];
 
 // Plan 73 Followup C — sealed deps-volume cache. `deps inspect` is
@@ -277,15 +321,12 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
 /// `crates/mvm-cli/src/commands/mod.rs`. Adding a new command? Add
 /// an entry here — the test below fails until you do.
 const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
-    // Environment / installer surfaces.
-    ("bootstrap", AuditPosture::InteractiveOrControl),
+    // Environment / installer surfaces. Plan 178 (D5) — bootstrap/cleanup/
+    // uninstall/update/sign grouped under `env <sub>`.
+    ("env", AuditPosture::DelegatesToSub(ENV_SUB)),
     ("dev", AuditPosture::InteractiveOrControl),
-    ("cleanup", AuditPosture::Emits("SlotPrune")),
-    ("update", AuditPosture::Emits("UpdateInstall")),
     ("doctor", AuditPosture::ReadOnly),
-    ("sign", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
-    ("uninstall", AuditPosture::Emits("Uninstall")),
     ("init", AuditPosture::InteractiveOrControl),
     // VM lifecycle.
     (
@@ -294,66 +335,39 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ),
     ("down", AuditPosture::Emits("VmStop")),
     ("logs", AuditPosture::ReadOnly),
-    ("forward", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
-    ("diff", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
     ("run", AuditPosture::InteractiveOrControl),
-    ("receipt", AuditPosture::ReadOnly),
-    ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
-    ("cp", AuditPosture::Emits("VmFileCopy")),
-    ("exec", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
-    ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
-    ("set-ttl", AuditPosture::Emits("VmTtlSet")),
-    ("fs", AuditPosture::Emits("VmFsMutate")),
-    ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
-    ("pause", AuditPosture::Emits("VmStop")),
-    ("resume", AuditPosture::Emits("VmStart")),
-    ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
-    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
-    ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
-    // Build / artifact / registry.
-    ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
+    // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
+    ("vm", AuditPosture::DelegatesToSub(VM_SUB)),
+    // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
+    // kernel grouped under `build <sub>`.
+    ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
-    ("build", AuditPosture::Emits("TemplateBuild")),
     ("persistent-builder", AuditPosture::InteractiveOrControl),
     // Plan 166 Phase 2 — hidden internal helper: a long-running host-side
     // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
     // plumbing spawned by `mvm_backend::qemu`; never emits audit events.
     ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
-    // SDK port Phase 2c — renders a `Workload` IR to a flake +
-    // sidecars at the user-supplied --out path. Doesn't touch the
-    // audit chain. ReadOnly w.r.t. host state.
-    ("compile", AuditPosture::ReadOnly),
-    ("validate", AuditPosture::ReadOnly),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
     // Operational surfaces.
-    ("metrics", AuditPosture::ReadOnly),
-    ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
-    ("config", AuditPosture::Emits("ConfigChange")),
-    ("audit", AuditPosture::ReadOnly),
+    // Plan 178 — metrics/bench/config/mcp grouped under `ops <sub>`.
+    ("ops", AuditPosture::DelegatesToSub(OPS_SUB)),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
     ("pool", AuditPosture::DelegatesToSub(POOL_SUB)),
     // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
-    ("mcp", AuditPosture::InteractiveOrControl),
     ("secret", AuditPosture::DelegatesToSub(SECRET_SUB)),
-    ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
-    // Plan 76 Phase 2 / Phase 4 — host-side readiness UX. Both
-    // verbs are pure vsock reads (`ReadinessStatus`) and never
-    // mutate host or guest state.
-    ("wait", AuditPosture::ReadOnly),
-    ("boot-report", AuditPosture::ReadOnly),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
 ];
@@ -513,6 +527,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestTagRemove",
         "CheckpointCreated",
         "CheckpointForked",
+        "CheckpointRestored",
         "NetworkCreate",
         "NetworkRemove",
         "PoolWarm",
@@ -552,14 +567,6 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
-        // Plan 97 Phase E — vm-lifecycle chain events for the Vz
-        // backend's snapshot verbs. `vm.snapshot_saved` is emitted
-        // today by `AuditEmitter::emit_vm_snapshot_saved`;
-        // `vm.snapshot_restored` is the planned token for the
-        // forthcoming RESTORE supervisor mode (the verb currently
-        // bails before emit).
-        "vm.snapshot_saved",
-        "vm.snapshot_restored",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();

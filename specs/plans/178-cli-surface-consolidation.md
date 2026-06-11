@@ -86,13 +86,23 @@ Hidden (subprocess/internal): `persistent-builder` `boot-report`
 - [ ] **Implement.** `Trust` group gains `sign bundle attest receipt audit`; new `Net` group ← `network forward`; new `Ops` group ← `metrics bench config mcp`. Re-parent only; security-claim leaves (`audit`, `bundle`, `attest`) keep identical behavior.
 - [ ] **Green + commit.** nextest + cli test + clippy; `git commit -m "refactor(cli): group trust/net/ops verbs"`
 
-## Task 6: Dev-environment grouping
+## Task 6: `env` group (D5 — settled)
 **Files:** `crates/mvm-cli/src/commands/env/`; `mod.rs`.
-- [ ] **Failing test.** Assert `dev`, `doctor`, `init`, `run`, `exec`, `ls`, `console`, `down` remain top-level; `bootstrap cleanup uninstall update` move under `dev` (or stay top-level if `dev` is already a busy group — decide from Task 1 audit). FAIL on the chosen change.
-- [ ] **Implement** the chosen dev grouping; keep `dev up/down/shell/status` intact.
-- [ ] **Green + commit.** nextest + cli test + clippy; `git commit -m "refactor(cli): consolidate dev-environment verbs"`
+- [ ] **Failing test.** Assert `env bootstrap`, `env cleanup`, `env uninstall`, `env update`, `env sign` parse; the old flat names are gone; `dev`, `doctor`, `init` remain top-level. FAIL.
+- [ ] **Implement** the `env` group = `bootstrap`/`cleanup`/`uninstall`/`update`/`sign` (modules already in `env/`). **Move `dev`, `doctor`, `init` out of `env/`** into their own top-level modules so `env/` maps 1:1 to the `env` group (directory = group, Plan 153). Keep `dev up/down/shell/status` intact. `shell-init` is hidden (Task 2).
+- [ ] **Green + commit.** nextest + cli test + clippy; `git commit -m "refactor(cli): env group + lift dev/doctor/init top-level"`
 
 ## Task 7: Run-family rationalization (READ FIRST — do not guess)
+
+> **Intent (confirmed by the owner): the run-family WILL be merged.** This
+> is committed future work, not an open question — `up`/`run`/`exec`/
+> `invoke` collapse into a coherent few. The only thing deferred is the
+> *exact* collapse, which must be derived by reading each implementation
+> (their admission/transient/function-invoke semantics differ and a wrong
+> merge breaks a claim path). If this task does not land in the initial
+> Plan 178 pass, it MUST remain tracked in "Deferred follow-ups" below —
+> do not drop it.
+
 **Files:** `crates/mvm-cli/src/commands/vm/{up,exec,invoke,sandbox}.rs`.
 - [ ] **Read every implementation before changing anything.** `up.rs` (signed `ExecutionPlan` workload boot — claim-8 path), `exec.rs` (transient-VM runner + `Exec`/`Run`/`Receipt` args — `reference_exec_rs_transient_runner`), `invoke.rs` (`send_run_entrypoint` function-service `--input` — `feedback_input_flag_and_mode_aliases`), `sandbox.rs`. Write a one-paragraph semantics summary for each into this task before editing.
 - [ ] **Decide the collapse** from the summaries (candidate: `run` = boot+run a workload [absorbs `up`/`sandbox` where they overlap], `exec` = run-in-existing-guest, `invoke` = call a function entrypoint). Record the decision; do NOT merge anything whose audit/admission behavior differs without preserving it.
@@ -109,6 +119,33 @@ Hidden (subprocess/internal): `persistent-builder` `boot-report`
 - [ ] Tick the Plan 178 boxes in `specs/REFACTOR-STATUS.md`; bump "Last updated".
 
 ---
+
+## Deferred follow-ups
+- [ ] **Run-family merge** (`up`/`run`/`exec`/`invoke` → a coherent few).
+      CONFIRMED-INTENDED by the owner (see Task 7 banner) — collapse the
+      runners; preserve claim-8 admission, the transient-VM path, `--input`,
+      and `--dev`/`--prod` aliases. Land in this plan's pass if scope allows;
+      otherwise this checkbox keeps it tracked. Do NOT drop it.
+- [ ] `network` → `net` rename (cosmetic brevity; D3 left it as `network`).
+
+## Plan 153 (CLI directory split) — subsumed here
+
+Per the owner, the grouping IS the directory layout: **clap group = its own
+`commands/<group>/` subdirectory, one file per subaction** (Plan 153's goal).
+This plan folds in Plan 153's outstanding split — flat `image.rs` → `image/`
+and `catalog.rs` → `catalog/` (its only two remaining flat files) — as part
+of forming the groups. Mark Plan 153 done (or descoped into 178) in
+REFACTOR-STATUS when this lands.
+
+## Settled tree (decisions D1–D6)
+- D1: `build` group (= `build/`) — `build image`/`compile`/`validate`/`kernel`.
+- D2: `image`/`catalog`/`manifest`/`artifact` stay separate top-level groups
+  (each already owns subcommands; no super-group → no 3-level nesting).
+- D3: no `net`; keep `network` top-level; `forward` → `vm forward`.
+- D4: no `store`; `storage`/`cache`/`pool` stay separate top-level.
+- D5: `env` group (= `env/`) for `bootstrap`/`cleanup`/`uninstall`/`update`/
+  `sign`; lift `dev`/`doctor`/`init` to their own top-level modules.
+- D6: run-family merge deferred to Task 7 / follow-ups (intended, not optional).
 
 ## Self-review / success criteria
 - [ ] ~56 flat verbs → ~8 top-level + ~8 groups; internals hidden.

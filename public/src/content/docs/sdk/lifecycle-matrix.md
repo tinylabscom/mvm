@@ -48,7 +48,7 @@ keep a workflow documented as planned.
 | Live SDK experiment | `mvmctl run --mode live ./script.py` or `.ts` | Exercises current live transport and cleanup helpers. |
 | Deployable workload declaration | Static declaration workflow | Avoids importing user modules during compile. |
 | Persistent service | `mvmctl build`, `mvmctl up`, `mvmctl logs`, `mvmctl down` | CLI has the broadest lifecycle coverage today. |
-| Cold recovery test | `mvmctl pause/resume` or `mvmctl snapshot save/restore` | Backend-specific state handling is visible. |
+| Cold recovery test | `mvmctl pause/resume` or `mvmctl checkpoint create/restore` | Backend-specific state handling is visible. |
 
 ## SDK parity rules
 

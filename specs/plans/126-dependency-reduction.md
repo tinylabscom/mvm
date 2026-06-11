@@ -41,8 +41,17 @@ It backs cosign verification for claim 14 (OCI provenance). Options: move the ve
 
 Pre-decided with 123: one lean S3 client for the repo.
 
-- [ ] **Step 1:** Replace `opendal` (`crates/mvm/Cargo.toml`, optional, template-registry-s3) with `object_store` (the same crate 123's S3 `MountProvider` uses, TLS pinned to `ring`). Failing test — the template-registry-s3 round-trips against `object_store`'s in-memory backend.
-- [ ] **Step 2:** Drop `opendal` from the workspace; re-measure (expect ~70 gone, minus `object_store`'s own small closure). Commit.
+- [x] **DONE** — `crates/mvm/src/vm/template/registry.rs`'s `TemplateRegistry`
+  (template-registry-s3) now uses `object_store::aws::AmazonS3` instead of
+  `opendal::BlockingOperator`; it owns a current-thread runtime to drive the
+  async `get`/`put` from the sync API (mirrors `mvm_storage::s3::S3MountProvider`,
+  the same `object_store` 0.11 the 123 S3 `MountProvider` uses). `opendal`
+  removed from `crates/mvm/Cargo.toml` + the root workspace.
+- [x] **Re-measured:** `cargo tree -i opendal` empty; `opendal` gone from
+  `Cargo.lock`; full lockfile **689 → 678 (−11)** (opendal + reqsign + unique
+  closure removed; object_store was already in-tree via mvm-storage, so its side
+  is free). Default build + `cargo build --workspace` + `nextest -p mvm` green;
+  `check-forbidden-deps` clean.
 
 ### Task B3: `pgp` (168 crates) — SUPERSEDED by plan 160
 

@@ -48,7 +48,7 @@ binaries are already embedded.
 
 ## Builder backend selection (Plan 98)
 
-The builder VM (the Linux guest that runs `nix build` inside `mvmctl build` / `mvmctl up` / `mvmctl dev`) picks between two host VMMs:
+The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image` / `mvmctl up` / `mvmctl dev`) picks between two host VMMs:
 
 - **libkrun** — third-party in-process VMM via the Homebrew trio above. Default on Linux + macOS 13-25. Works everywhere mvm runs.
 - **Vz** — Apple Virtualization.framework. Default on macOS 26+ Apple Silicon (mirrors the Apple Container runtime tier). macOS-only.
@@ -119,7 +119,7 @@ BuildEnvironment : ShellEnvironment (extends)
   record_revision()
 ```
 
-- **Dev mode** (`mvmctl build`, `mvmctl template build`): uses `dev_build()` with `&dyn ShellEnvironment`
+- **Dev mode** (`mvmctl build image`, `mvmctl template build`): uses `dev_build()` with `&dyn ShellEnvironment`
 - **Fleet mode** (in mvmd): uses `pool_build()` with `&dyn BuildEnvironment`
 
 The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `BuildEnvironment` impl lives in mvmd-runtime.
@@ -233,7 +233,7 @@ the source gap analysis is at
    `plan.admitted` / `plan.launched` / `plan.failed` chain-signed
    entries to `~/.mvm/audit/<tenant>.jsonl`; tampering breaks
    `mvm_supervisor::verify_audit_chain` (surfaced via
-   `mvmctl audit verify`, which exits nonzero on detected drift).
+   `mvmctl trust audit verify`, which exits nonzero on detected drift).
    Workspace `cargo test` exercises rejection paths on every PR
    (plan 64 W1–W4 — `synthesize_plan`, `host_signer::load_or_init_at`,
    `admit_for_run`, `AuditEmitter`; `xtask check-no-display-on-secret-types`
@@ -269,7 +269,7 @@ the source gap analysis is at
    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
    a VM spawn. The `app-deps-audit` job in `.github/workflows/ci.yml`
-   (Followup D) gates every PR: it exercises `mvmctl compile` on
+   (Followup D) gates every PR: it exercises `mvmctl build compile` on
    `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
    fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
    asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -322,7 +322,7 @@ the source gap analysis is at
     `AuditEmitter::emit_oci_provenance`
     (`crates/mvm-cli/src/commands/vm/audit_chain.rs`) carrying those
     labels; `mvm_supervisor::verify_audit_chain` continues to detect
-    drift, surfaced via `mvmctl audit verify`. `--prod` refuses
+    drift, surfaced via `mvmctl trust audit verify`. `--prod` refuses
     mutable references before any network fetch
     (`crates/mvm-cli/src/commands/image.rs::
     prod_pull_requires_digest_pin_before_network` and
@@ -432,8 +432,8 @@ cargo run -- dev down    # stop the builder VM
 cargo run -- dev shell   # open shell in running builder VM
 cargo run -- dev status  # show dev environment status
 
-# Build from Nix flake
-cargo run -- build --flake . --profile minimal --role worker
+# Build from Nix flake (Plan 178: build-time verbs live under `build`)
+cargo run -- build image --flake . --profile minimal --role worker
 cargo run -- run --flake . --profile minimal --cpus 2 --memory 1024
 
 # Templates

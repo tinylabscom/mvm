@@ -27,8 +27,9 @@ zeroize.workspace = true
 # S3 MountProvider — OFF by default (B4 step 4). The lean object_store, not
 # aws-sdk-s3 (which drags in aws-config/aws-smithy + the aws-lc-rs C crypto
 # closure the dep budget rejects). Only the `s3` feature pulls it, so the
-# default tree stays clean. The opendal -> object_store consolidation is
-# plan 126's job; this is the first object_store consumer.
+# default tree stays clean. The opendal -> object_store consolidation (plan 126
+# B2) is DONE — `mvm`'s template registry now uses object_store too, and opendal
+# is gone from the workspace.
 object_store = { version = "0.11", optional = true, default-features = false, features = [
     "aws",
 ] }

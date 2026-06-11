@@ -10,6 +10,7 @@ pub(super) mod down;
 pub(super) mod exec;
 pub(super) mod forward;
 pub(super) mod fs;
+pub(super) mod group;
 pub(super) mod host_signer;
 pub(super) mod invoke;
 pub(super) mod invoke_no_vm;

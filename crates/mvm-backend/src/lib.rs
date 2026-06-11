@@ -7,13 +7,8 @@
 //!   dispatch enum + `FirecrackerConfig` — the production Tier 1 path.
 //! - **Apple Container** (`apple_container::AppleContainerBackend`) —
 //!   macOS 26+ Apple Virtualization.framework.
-//! - **Cloud Hypervisor** (`cloud_hypervisor::CloudHypervisorBackend`)
-//!   — Tier 1 KVM peer of Firecracker (opt-in).
-//! - **Docker** (`docker::DockerBackend`) — Tier 3 fallback.
 //! - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //!   (Linux KVM / macOS HVF).
-//! - **microvm.nix** (`microvm_nix::MicrovmNixBackend`) — Firecracker
-//!   via the upstream microvm.nix runner.
 //!
 //! Plus the FC support modules: `firecracker` (installer helpers),
 //! `microvm` (lifecycle), `image` (Mvmfile.toml), `network` (TAP/
@@ -47,10 +42,7 @@ pub mod checkpoint;
 // paths so the mvmd `mvmctl::runtime::{shell,ui,shell_mock}` contract
 // surface keeps resolving.
 pub mod base;
-pub mod ch_runtime;
-pub mod cloud_hypervisor;
 pub mod compat;
-pub mod docker;
 /// Plan 129 Task 5 — per-VM transparent egress redirect (nft prerouting
 /// REDIRECT scoped to the guest TAP) steering guest :80 to the host-side
 /// substitution terminator. Linux-only mechanism; consumed by the FC path.
@@ -60,7 +52,6 @@ pub mod handle_registry;
 pub mod image;
 pub mod libkrun;
 pub mod microvm;
-pub mod microvm_nix;
 pub mod mock;
 pub mod mock_guest_agent;
 pub mod netinit_audit;
@@ -91,10 +82,7 @@ pub mod vz_control;
 
 pub use apple_container::AppleContainerBackend;
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
-pub use cloud_hypervisor::CloudHypervisorBackend;
-pub use docker::DockerBackend;
 pub use libkrun::LibkrunBackend;
-pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;

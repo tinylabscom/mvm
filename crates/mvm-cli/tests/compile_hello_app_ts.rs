@@ -20,7 +20,13 @@ fn compile_hello_app_ts_lowers_and_strips_framework() {
     #[allow(deprecated)]
     let st = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
-        .args(["compile", app, "--out", out.path().to_str().unwrap()])
+        .args([
+            "build",
+            "compile",
+            app,
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
         .status()
         .expect("spawn mvmctl compile");
 
@@ -68,7 +74,13 @@ fn compile_hello_app_ts_with_deps_bakes_node_modules_at_build_time() {
     #[allow(deprecated)]
     let st = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
-        .args(["compile", app, "--out", out.path().to_str().unwrap()])
+        .args([
+            "build",
+            "compile",
+            app,
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
         .status()
         .expect("spawn mvmctl compile");
     assert!(st.success(), "mvmctl compile <app.ts with deps> failed");

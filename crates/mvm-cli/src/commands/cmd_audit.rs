@@ -138,6 +138,13 @@ impl Commands {
     /// of caches, build/compile, config, …) skip it. `reconcile` itself
     /// is excluded — it *is* the convergence pass, run with its own opts.
     pub(super) fn touches_vm_state(&self) -> bool {
+        // `vm <sub>` only converges for the running-VM lifecycle ops
+        // (pause/resume/snapshot); registry-record/guest-RPC subs (set-ttl,
+        // cp, fs, …) opt out so convergence doesn't sweep a registered VM
+        // whose process isn't live before the op reads its record.
+        if let Commands::Vm(a) = self {
+            return a.action.touches_vm_state();
+        }
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
@@ -146,9 +153,6 @@ impl Commands {
                 | Commands::Run(_)
                 | Commands::Console(_)
                 | Commands::Dev(_)
-                | Commands::Pause(_)
-                | Commands::Resume(_)
-                | Commands::Snapshot(_)
                 // `ls` is the local "status" surface — converging first
                 // means stale dead records never show up in the listing.
                 | Commands::Ls(_)
@@ -163,31 +167,22 @@ impl Commands {
     /// table update will trip that test).
     pub(super) fn verb_name(&self) -> &'static str {
         match self {
-            Commands::Bootstrap(_) => "bootstrap",
+            // `env <sub>` delegates (bootstrap/cleanup/uninstall/update/sign).
+            Commands::Env(a) => a.action.verb_name(),
             Commands::Dev(_) => "dev",
-            Commands::Cleanup(_) => "cleanup",
             Commands::Logs(_) => "logs",
-            Commands::Forward(_) => "forward",
             Commands::Ls(_) => "ls",
-            Commands::Update(_) => "update",
             Commands::Doctor(_) => "doctor",
-            Commands::Sign(_) => "sign",
-            Commands::Kernel(_) => "kernel",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
             Commands::Storage(_) => "storage",
-            Commands::Build(_) => "build",
-            Commands::Compile(_) => "compile",
+            // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
+            Commands::Build(a) => a.action.verb_name(),
             Commands::Up(_) => "up",
             Commands::Down(_) => "down",
             Commands::ShellInit(_) => "shell-init",
-            Commands::Metrics(_) => "metrics",
-            Commands::Bench(_) => "bench",
-            Commands::Config(_) => "config",
-            Commands::Uninstall(_) => "uninstall",
-            Commands::Audit(_) => "audit",
-            Commands::Validate(_) => "validate",
-            Commands::Diff(_) => "diff",
+            // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
+            Commands::Ops(a) => a.action.verb_name(),
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",
             Commands::Console(_) => "console",
@@ -196,28 +191,17 @@ impl Commands {
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
-            Commands::Receipt(_) => "receipt",
-            Commands::Sandbox(_) => "sandbox",
-            Commands::Cp(_) => "cp",
-            Commands::Exec(_) => "exec",
             Commands::Invoke(_) => "invoke",
-            Commands::Session(_) => "session",
-            Commands::Mcp(_) => "mcp",
-            Commands::SetTtl(_) => "set-ttl",
-            Commands::Fs(_) => "fs",
-            Commands::Proc(_) => "proc",
-            Commands::Pause(_) => "pause",
-            Commands::Resume(_) => "resume",
-            Commands::Snapshot(_) => "snapshot",
-            Commands::Checkpoint(_) => "checkpoint",
-            Commands::Volume(_) => "volume",
+            // `vm <sub>` delegates to the per-op verb so the audit taxonomy
+            // (cmd.pause.*, cmd.cp.*, cmd.checkpoint.*, …) is unchanged by
+            // the grouping.
+            Commands::Vm(a) => a.action.verb_name(),
             Commands::Secret(_) => "secret",
-            Commands::Attest(_) => "attest",
             Commands::Bundle(_) => "bundle",
-            Commands::Trust(_) => "trust",
+            // `trust <sub>` delegates: attest/receipt/audit keep their own
+            // verbs, publisher add/list/remove keep `trust`.
+            Commands::Trust(a) => a.action.verb_name(),
             Commands::Deps(_) => "deps",
-            Commands::Wait(_) => "wait",
-            Commands::BootReport(_) => "boot-report",
             Commands::Artifact(_) => "artifact",
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",

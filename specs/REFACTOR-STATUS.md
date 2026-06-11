@@ -117,10 +117,12 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
       SPRINT.md): multi-kernel keying; pool-status liveness filter;
       home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
-  [~] WS-2 checkpoint+fork — fs_quick class landed (#762): mvmctl checkpoint
+  [~] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (PR2): mvmctl checkpoint
       create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
-      checkpoint.created/forked audit + fs_quick_checkpoint capability + cache GC.
-      Remaining: vm_full (memory save/restore) + checkpoint diff + pause/resume wiring
+      checkpoint.created/forked/restored audit + fs_quick+vm_full capability +
+      vm_full memory save/restore (saveMachineStateToURL) + vm_full fork arm +
+      restore_checkpoint + retire snapshot save/restore. cache GC.
+      Remaining: checkpoint diff + pause/resume wiring (PR3)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 
@@ -167,34 +169,51 @@ PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-ga
   [ ] T4 FirecrackerBackend::warm_start override + mvmctl verb + agent_ping e2e
   (Vz=152 WS-C; libkrun disk-only done #741; reflink clone = 123 C4 follow-up)
 
-PLAN 126 — Dependency reduction                 🔴 ~10%
+PLAN 126 — Dependency reduction                 🟡 ~25%
   [x] A1 re-baseline
   [x] B5 drop tokio from mvm-core (PR-1)
-  [ ] B1/B2/B4 prune sigstore/opendal/aws-lc
-  [ ] C1/D1 unify + lock gate
+  [x] B2 opendal → object_store (mvm template registry); opendal GONE,
+      lockfile 689→678 (−11)
+  [ ] B1 sigstore — already off default; needs cross-repo mvmd decision (relocate cosign-verify)
+  [ ] B3 pgp (168) — SUPERSEDED by plan 160 (drop Alpine seed); security decision
+  [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
+  [ ] C1/D1 unify reqwest majors + lock gate
 
-PLAN 153 — CLI directory split                  🔴 NOT STARTED
+PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
+  [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 176 — Strip spec refs from code comments    🔴 NOT STARTED
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
+  [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
+  [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
+  [x] Phase 1 fold microvm_nix → qemu
+  [x] Phase 1 prune dead CI lane + Justfile setup recipe
+  [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
+      4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
+  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
+      onto supervisor vz + shared console transport + drop apple-container
+
+PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
+  [x] lock tree (D1–D6) + hide internal subprocess commands
+  [x] vm group (14 single-VM verbs)
+  [x] ops group (metrics/bench/config/mcp)
+  [x] build group (image/compile/validate/kernel; kernel.rs→build/)
+  [x] env group (bootstrap/cleanup/uninstall/update/sign)
+  [x] trust group (attest/receipt/audit folded into publisher trust)
+  [x] image.rs/catalog.rs dir split (Plan 153)
+  [x] docs: cli-commands.md + CLAUDE.md grouped forms
+  [x] run-family merge (Task 7): exec→run (run was a strict superset via
+      RunArgs::into_exec_args); `up` + `invoke` kept distinct (admission /
+      no-shell entrypoint). `run --profile dev` covers exec.
+  NOTE: audit taxonomy preserved across all groups (vm pause→cmd.pause,
+  trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
+  Deferred dir-purity: dev/doctor/init modules still live in env/.
+
+PLAN 180 — Strip spec refs from code comments    🔴 NOT STARTED
   [ ] worklist + canonical detection regex
   [ ] pilot batch (7 heaviest files)
   [ ] fan-out sweep (~2,531 comment hits)
   [ ] verify just ci green, comment-only diff
   [ ] check-no-spec-refs-in-comments lint gate
-
-PLAN 177 — Backend consolidation (8→4)           🔴 NOT STARTED  (ADR-076)
-  [ ] Phase 1 delete docker
-  [ ] Phase 1 delete cloud_hypervisor
-  [ ] Phase 1 fold microvm_nix → qemu
-  [ ] Phase 1 prune dead CI lanes
-  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
-      onto supervisor vz + shared console transport + drop apple-container
-
-PLAN 178 — CLI surface consolidation (~56→~8+8)   🔴 NOT STARTED  (ADR-077)
-  [ ] lock grouping map + hide internals
-  [ ] vm/image/build/storage/trust/net/ops groups
-  [ ] dev-env grouping
-  [ ] run-family rationalization (read-first)
 ```
 
 ## Security claims

@@ -9,13 +9,16 @@ use clap::Parser;
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::build::build;
 use super::build::compile;
+use super::build::group as build_group;
 use super::catalog;
+use super::env::group as env_group;
 use super::env::{cleanup, dev, init, uninstall};
 use super::image;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
+use super::trust;
 use super::vm::{
-    checkpoint, console, cp, down, exec, forward, pause, sandbox, session, up, volume,
+    checkpoint, console, cp, down, exec, forward, group, pause, sandbox, session, up, volume,
 };
 
 use audit::AuditAction;
@@ -58,10 +61,35 @@ fn top_level_command_summaries_stay_short() {
 }
 
 #[test]
+fn internal_subprocess_commands_are_hidden_from_help() {
+    // Plan 178 Task 2 — subprocess/internal commands must not clutter the
+    // user-facing surface. They stay dispatchable but `hide = true`.
+    let visible: Vec<String> = cli_command()
+        .get_subcommands()
+        .filter(|cmd| !cmd.is_hide_set())
+        .map(|cmd| cmd.get_name().to_string())
+        .collect();
+    for hidden in [
+        "shell-init",
+        "reconcile",
+        "persistent-builder",
+        "__qemu-vsock-bridge",
+    ] {
+        assert!(
+            !visible.iter().any(|n| n == hidden),
+            "internal command `{hidden}` must be hidden from top-level help"
+        );
+    }
+}
+
+#[test]
 fn test_cleanup_defaults() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(cleanup::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(cleanup::Args {
             keep,
             all,
             verbose,
@@ -88,9 +116,12 @@ fn test_cleanup_defaults() {
 
 #[test]
 fn test_cleanup_keep_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--keep", "9"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--keep", "9"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, Some(9));
             assert!(!args.all);
             assert!(!args.verbose);
@@ -101,9 +132,12 @@ fn test_cleanup_keep_flag() {
 
 #[test]
 fn test_cleanup_all_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--all"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--all"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, None);
             assert!(args.all);
             assert!(!args.verbose);
@@ -114,9 +148,12 @@ fn test_cleanup_all_flag() {
 
 #[test]
 fn test_cleanup_verbose_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--verbose"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--verbose"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, None);
             assert!(!args.all);
             assert!(args.verbose);
@@ -127,9 +164,12 @@ fn test_cleanup_verbose_flag() {
 
 #[test]
 fn test_cleanup_cache_tier_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--cache"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--cache"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(args.cache);
             assert!(!args.state);
             assert!(!args.nuclear);
@@ -140,9 +180,12 @@ fn test_cleanup_cache_tier_flag() {
 
 #[test]
 fn test_cleanup_state_tier_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--state", "--yes"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--state", "--yes"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(!args.cache);
             assert!(args.state);
             assert!(!args.nuclear);
@@ -154,9 +197,12 @@ fn test_cleanup_state_tier_flag() {
 
 #[test]
 fn test_cleanup_nuclear_tier_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--nuclear", "--dry-run"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--nuclear", "--dry-run"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(!args.cache);
             assert!(!args.state);
             assert!(args.nuclear);
@@ -169,7 +215,7 @@ fn test_cleanup_nuclear_tier_flag() {
 #[test]
 fn test_cleanup_tier_flags_are_mutually_exclusive() {
     // ArgGroup("tier") forces at most one of --cache/--state/--nuclear.
-    let err = Cli::try_parse_from(["mvmctl", "cleanup", "--cache", "--state"]).unwrap_err();
+    let err = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--cache", "--state"]).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("cannot be used with") || msg.contains("conflict"),
@@ -179,9 +225,12 @@ fn test_cleanup_tier_flags_are_mutually_exclusive() {
 
 #[test]
 fn test_cleanup_force_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "cleanup", "--cache", "--force"]).unwrap();
-    match cli.command {
-        Commands::Cleanup(args) => {
+    let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--cache", "--force"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
             assert!(args.cache);
             assert!(args.force);
         }
@@ -191,9 +240,12 @@ fn test_cleanup_force_flag() {
 
 #[test]
 fn volume_create_parses_default_root() {
-    let cli = Cli::try_parse_from(["mvmctl", "volume", "create", "work"]).unwrap();
-    match cli.command {
-        Commands::Volume(volume::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "volume", "create", "work"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Volume(volume::Args {
             command:
                 volume::VolumeCmd::Create {
                     volume,
@@ -211,9 +263,13 @@ fn volume_create_parses_default_root() {
 
 #[test]
 fn volume_create_host_backed_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "volume", "create", "work", "--host-backed"]).unwrap();
-    match cli.command {
-        Commands::Volume(volume::Args {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "vm", "volume", "create", "work", "--host-backed"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Volume(volume::Args {
             command:
                 volume::VolumeCmd::Create {
                     volume,
@@ -231,9 +287,12 @@ fn volume_create_host_backed_parses() {
 
 #[test]
 fn volume_unlock_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "volume", "unlock", "work"]).unwrap();
-    match cli.command {
-        Commands::Volume(volume::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "volume", "unlock", "work"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Volume(volume::Args {
             command: volume::VolumeCmd::Unlock { volume },
         }) => assert_eq!(volume, "work"),
         _ => panic!("Expected volume unlock command"),
@@ -242,9 +301,12 @@ fn volume_unlock_parses() {
 
 #[test]
 fn volume_lock_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "volume", "lock", "work"]).unwrap();
-    match cli.command {
-        Commands::Volume(volume::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "volume", "lock", "work"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Volume(volume::Args {
             command: volume::VolumeCmd::Lock { volume },
         }) => assert_eq!(volume, "work"),
         _ => panic!("Expected volume lock command"),
@@ -253,9 +315,12 @@ fn volume_lock_parses() {
 
 #[test]
 fn volume_catalog_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "volume", "catalog", "--json"]).unwrap();
-    match cli.command {
-        Commands::Volume(volume::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "volume", "catalog", "--json"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Volume(volume::Args {
             command: volume::VolumeCmd::Catalog { json },
         }) => assert!(json),
         _ => panic!("Expected volume catalog command"),
@@ -266,6 +331,7 @@ fn volume_catalog_json_parses() {
 fn volume_mount_managed_omits_host() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "vm",
         "volume",
         "mount",
         "vm-1",
@@ -275,8 +341,11 @@ fn volume_mount_managed_omits_host() {
         "/mnt/work",
     ])
     .unwrap();
-    match cli.command {
-        Commands::Volume(volume::Args {
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Volume(volume::Args {
             command:
                 volume::VolumeCmd::Mount {
                     name,
@@ -302,10 +371,21 @@ fn volume_mount_managed_omits_host() {
 
 #[test]
 fn test_build_flake_with_profile() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "build", "--flake", ".", "--profile", "gateway"]).unwrap();
-    match cli.command {
-        Commands::Build(build::Args { flake, profile, .. }) => {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "build",
+        "image",
+        "--flake",
+        ".",
+        "--profile",
+        "gateway",
+    ])
+    .unwrap();
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Image(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert_eq!(profile.as_deref(), Some("gateway"));
         }
@@ -315,9 +395,12 @@ fn test_build_flake_with_profile() {
 
 #[test]
 fn test_build_flake_defaults_to_no_profile() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "--flake", "."]).unwrap();
-    match cli.command {
-        Commands::Build(build::Args { flake, profile, .. }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "--flake", "."]).unwrap();
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Image(build::Args { flake, profile, .. }) => {
             assert_eq!(flake.as_deref(), Some("."));
             assert!(profile.is_none(), "profile should be None when omitted");
         }
@@ -327,9 +410,12 @@ fn test_build_flake_defaults_to_no_profile() {
 
 #[test]
 fn test_build_mvmfile_mode_still_works() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "myimage"]).unwrap();
-    match cli.command {
-        Commands::Build(build::Args { path, flake, .. }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "image", "myimage"]).unwrap();
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Image(build::Args { path, flake, .. }) => {
             assert_eq!(path, "myimage");
             assert!(flake.is_none(), "Mvmfile mode should have no --flake");
         }
@@ -932,9 +1018,12 @@ fn test_read_dir_to_drive_files_nonexistent_dir() {
 
 #[test]
 fn test_forward_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000"]).unwrap();
-    match cli.command {
-        Commands::Forward(forward::Args { name, port, ports }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "forward", "swift", "3000"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             // Positional ports land in `ports`, flag ports in `port`.
             assert!(port.is_empty());
@@ -946,9 +1035,12 @@ fn test_forward_parses() {
 
 #[test]
 fn test_forward_with_port_mapping() {
-    let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "8080:3000"]).unwrap();
-    match cli.command {
-        Commands::Forward(forward::Args { name, port, ports }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "forward", "swift", "8080:3000"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert!(port.is_empty());
             assert_eq!(ports, vec!["8080:3000"]);
@@ -959,9 +1051,12 @@ fn test_forward_with_port_mapping() {
 
 #[test]
 fn test_forward_with_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "-p", "3000"]).unwrap();
-    match cli.command {
-        Commands::Forward(forward::Args { name, port, ports }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "forward", "swift", "-p", "3000"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert_eq!(port, vec!["3000"]);
             assert!(ports.is_empty());
@@ -972,10 +1067,15 @@ fn test_forward_with_flag() {
 
 #[test]
 fn test_forward_multiple_ports() {
-    let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "-p", "3000", "-p", "8080:443"])
-        .unwrap();
-    match cli.command {
-        Commands::Forward(forward::Args { name, port, ports }) => {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "vm", "forward", "swift", "-p", "3000", "-p", "8080:443",
+    ])
+    .unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert_eq!(port, vec!["3000", "8080:443"]);
             assert!(ports.is_empty());
@@ -986,9 +1086,13 @@ fn test_forward_multiple_ports() {
 
 #[test]
 fn test_forward_multiple_positional() {
-    let cli = Cli::try_parse_from(["mvmctl", "forward", "swift", "3000", "8080:443"]).unwrap();
-    match cli.command {
-        Commands::Forward(forward::Args { name, port, ports }) => {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "vm", "forward", "swift", "3000", "8080:443"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert!(port.is_empty());
             assert_eq!(ports, vec!["3000", "8080:443"]);
@@ -1001,9 +1105,12 @@ fn test_forward_multiple_positional() {
 fn test_forward_no_ports_parses() {
     // forward with no ports should parse successfully — the runtime path
     // falls back to persisted ports from run-info.json
-    let cli = Cli::try_parse_from(["mvmctl", "forward", "swift"]).unwrap();
-    match cli.command {
-        Commands::Forward(forward::Args { name, port, ports }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "forward", "swift"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
             assert_eq!(name, "swift");
             assert!(port.is_empty());
             assert!(ports.is_empty());
@@ -1152,33 +1259,40 @@ fn test_image_rm_parses() {
 
 #[test]
 fn test_metrics_command_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "metrics"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Metrics(metrics::Args {
-            json: false,
-            instance: None,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Metrics(metrics::Args {
+                json: false,
+                instance: None,
+            })
         })
     ));
 }
 
 #[test]
 fn test_metrics_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "metrics", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Metrics(metrics::Args {
-            json: true,
-            instance: None,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Metrics(metrics::Args {
+                json: true,
+                instance: None,
+            })
         })
     ));
 }
 
 #[test]
 fn test_metrics_instance_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "metrics", "--instance", "i-abc"]).unwrap();
-    match cli.command {
-        Commands::Metrics(metrics::Args { instance, .. }) => {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics", "--instance", "i-abc"]).unwrap();
+    let Commands::Ops(opsg) = cli.command else {
+        panic!("expected ops group")
+    };
+    match opsg.action {
+        ops::group::OpsCmd::Metrics(metrics::Args { instance, .. }) => {
             assert_eq!(instance.as_deref(), Some("i-abc"));
         }
         _ => panic!("expected Metrics command"),
@@ -1206,20 +1320,25 @@ fn test_prometheus_exposition_has_expected_metrics() {
 
 #[test]
 fn test_config_show_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "config", "show"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "config", "show"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Config(config::Args {
-            action: ConfigAction::Show
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Config(config::Args {
+                action: ConfigAction::Show
+            })
         })
     ));
 }
 
 #[test]
 fn test_config_set_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "config", "set", "dev_vm_cpus", "4"]).unwrap();
-    match cli.command {
-        Commands::Config(config::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "config", "set", "dev_vm_cpus", "4"]).unwrap();
+    let Commands::Ops(opsg) = cli.command else {
+        panic!("expected ops group")
+    };
+    match opsg.action {
+        ops::group::OpsCmd::Config(config::Args {
             action: ConfigAction::Set { key, value },
         }) => {
             assert_eq!(key, "dev_vm_cpus");
@@ -1260,39 +1379,45 @@ fn test_config_set_unknown_key_fails() {
 
 #[test]
 fn test_uninstall_parses_defaults() {
-    let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall(uninstall::Args {
-            yes: true,
-            all: false,
-            dry_run: false,
+        Commands::Env(env_group::Args {
+            action: env_group::EnvCmd::Uninstall(uninstall::Args {
+                yes: true,
+                all: false,
+                dry_run: false,
+            })
         })
     ));
 }
 
 #[test]
 fn test_uninstall_dry_run_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--dry-run", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--dry-run", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall(uninstall::Args {
-            yes: true,
-            all: false,
-            dry_run: true,
+        Commands::Env(env_group::Args {
+            action: env_group::EnvCmd::Uninstall(uninstall::Args {
+                yes: true,
+                all: false,
+                dry_run: true,
+            })
         })
     ));
 }
 
 #[test]
 fn test_uninstall_all_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "uninstall", "--all", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--all", "--yes"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Uninstall(uninstall::Args {
-            yes: true,
-            all: true,
-            dry_run: false,
+        Commands::Env(env_group::Args {
+            action: env_group::EnvCmd::Uninstall(uninstall::Args {
+                yes: true,
+                all: true,
+                dry_run: false,
+            })
         })
     ));
 }
@@ -1301,24 +1426,30 @@ fn test_uninstall_all_flag_parses() {
 
 #[test]
 fn test_audit_show_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc", "--json"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["mvmctl", "trust", "audit", "show", "plan-abc", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Audit(audit::Args {
-            action: AuditAction::Show {
-                ref plan_id,
-                json: true,
-                ..
-            }
+        Commands::Trust(trust::Args {
+            action: trust::TrustAction::Audit(audit::Args {
+                action: AuditAction::Show {
+                    ref plan_id,
+                    json: true,
+                    ..
+                }
+            })
         }) if plan_id == "plan-abc"
     ));
 }
 
 #[test]
 fn test_audit_tail_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "tail"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "tail"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action:
                 AuditAction::Tail {
                     lines,
@@ -1338,10 +1469,15 @@ fn test_audit_tail_parses() {
 
 #[test]
 fn test_audit_tail_follow_parses() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "audit", "tail", "--follow", "--lines", "50"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "tail", "--follow", "--lines", "50",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action:
                 AuditAction::Tail {
                     lines,
@@ -1359,9 +1495,12 @@ fn test_audit_tail_follow_parses() {
 
 #[test]
 fn test_audit_tail_chain_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "tail", "--chain"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "tail", "--chain"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action: AuditAction::Tail { chain, tenant, .. },
         }) => {
             assert!(chain);
@@ -1373,9 +1512,12 @@ fn test_audit_tail_chain_flag_parses() {
 
 #[test]
 fn test_audit_verify_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "verify"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "verify"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action: AuditAction::Verify { tenant },
         }) => assert_eq!(tenant, "local"),
         _ => panic!("Expected Audit::Verify"),
@@ -1384,9 +1526,13 @@ fn test_audit_verify_parses() {
 
 #[test]
 fn test_audit_verify_with_tenant() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "verify", "--tenant", "acme"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "trust", "audit", "verify", "--tenant", "acme"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action: AuditAction::Verify { tenant },
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
@@ -1395,9 +1541,12 @@ fn test_audit_verify_with_tenant() {
 
 #[test]
 fn test_audit_show_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "audit", "show", "plan-abc"]).unwrap();
-    match cli.command {
-        Commands::Audit(audit::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "show", "plan-abc"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
             action:
                 AuditAction::Show {
                     plan_id,
@@ -1678,11 +1827,13 @@ fn test_network_remove_help() {
 
 #[test]
 fn test_snapshot_ls_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "snapshot", "ls", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "snapshot", "ls", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Snapshot(pause::SnapshotArgs {
-            command: pause::SnapshotCmd::Ls { json: true }
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Snapshot(pause::SnapshotArgs {
+                command: pause::SnapshotCmd::Ls { json: true }
+            })
         })
     ));
 }
@@ -1691,12 +1842,22 @@ fn test_snapshot_ls_json_parses() {
 
 #[test]
 fn test_checkpoint_create_parses() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "checkpoint", "create", "myvm", "--tag", "gold"]).unwrap();
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "create",
+        "myvm",
+        "--tag",
+        "gold",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Checkpoint(checkpoint::CheckpointArgs {
-            command: checkpoint::CheckpointCmd::Create { .. }
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create { .. }
+            })
         })
     ));
 }
@@ -1706,6 +1867,7 @@ fn test_checkpoint_fork_parses() {
     assert!(
         Cli::try_parse_from([
             "mvmctl",
+            "vm",
             "checkpoint",
             "fork",
             "ckpt-abc",
@@ -1721,6 +1883,7 @@ fn test_checkpoint_fork_rejects_traversal_new_id() {
     // --new-id must not allow a path component that escapes the VM state dir.
     let r = Cli::try_parse_from([
         "mvmctl",
+        "vm",
         "checkpoint",
         "fork",
         "ckpt-abc",
@@ -1732,13 +1895,71 @@ fn test_checkpoint_fork_rejects_traversal_new_id() {
 
 #[test]
 fn test_checkpoint_ls_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "checkpoint", "ls", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "ls", "--json"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Checkpoint(checkpoint::CheckpointArgs {
-            command: checkpoint::CheckpointCmd::Ls { json: true }
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Ls { json: true }
+            })
         })
     ));
+}
+
+#[test]
+fn test_checkpoint_create_vm_full_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "create",
+        "myvm",
+        "--class",
+        "vm-full",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create {
+                    class: checkpoint::CheckpointClassArg::VmFull,
+                    ..
+                }
+            })
+        })
+    ));
+}
+
+#[test]
+fn test_checkpoint_restore_parses() {
+    assert!(Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "restore", "ckpt-abc"]).is_ok());
+}
+
+#[test]
+fn test_checkpoint_create_defaults_fs_quick() {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "create", "myvm"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create {
+                    class: checkpoint::CheckpointClassArg::FsQuick,
+                    ..
+                }
+            })
+        })
+    ));
+}
+
+#[test]
+fn test_snapshot_save_is_gone() {
+    assert!(Cli::try_parse_from(["mvmctl", "snapshot", "save", "vm", "--path", "/x"]).is_err());
+}
+
+#[test]
+fn test_snapshot_restore_is_gone() {
+    assert!(Cli::try_parse_from(["mvmctl", "snapshot", "restore", "vm", "--path", "/x"]).is_err());
 }
 
 // --- Catalog CLI tests (plan 40 replaced `mvmctl image *`) ---
@@ -1876,13 +2097,13 @@ fn up_rejects_removed_secret_flag() {
     );
 }
 
-// --- Exec CLI tests ---
+// --- Run (transient runner; absorbed the former exec) CLI tests ---
 
 #[test]
-fn exec_default_manifest_argv_only() {
-    let cli = Cli::try_parse_from(["mvmctl", "exec", "--", "uname", "-a"]).expect("parse");
+fn run_transient_default_manifest_argv_only() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--", "uname", "-a"]).expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             manifest,
             cpus,
             memory,
@@ -1891,6 +2112,7 @@ fn exec_default_manifest_argv_only() {
             timeout,
             launch_plan,
             argv,
+            ..
         }) => {
             assert!(manifest.is_none(), "manifest should default to None");
             assert_eq!(cpus, 2);
@@ -1904,19 +2126,19 @@ fn exec_default_manifest_argv_only() {
             assert!(launch_plan.is_none(), "launch_plan should default to None");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_timeout_parses_to_some() {
-    let cli = Cli::try_parse_from(["mvmctl", "exec", "--timeout", "5", "--", "sleep", "10"])
+fn run_transient_timeout_parses_to_some() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--timeout", "5", "--", "sleep", "10"])
         .expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args { timeout, .. }) => {
+        Commands::Run(exec::RunArgs { timeout, .. }) => {
             assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
@@ -2131,10 +2353,13 @@ fn run_dry_run_json_flags_parse() {
 
 #[test]
 fn receipt_verify_parses() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "receipt", "verify", "/tmp/receipt.json"]).expect("parse");
-    match cli.command {
-        Commands::Receipt(exec::ReceiptArgs {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "receipt", "verify", "/tmp/receipt.json"])
+        .expect("parse");
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Receipt(exec::ReceiptArgs {
             action: exec::ReceiptAction::Verify { path, pubkey: None },
         }) => {
             assert_eq!(path, std::path::Path::new("/tmp/receipt.json"));
@@ -2147,6 +2372,7 @@ fn receipt_verify_parses() {
 fn receipt_verify_pubkey_flag_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "trust",
         "receipt",
         "verify",
         "/tmp/receipt.json",
@@ -2154,8 +2380,11 @@ fn receipt_verify_pubkey_flag_parses() {
         "/tmp/host-signer.pub",
     ])
     .expect("parse");
-    match cli.command {
-        Commands::Receipt(exec::ReceiptArgs {
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Receipt(exec::ReceiptArgs {
             action: exec::ReceiptAction::Verify { path, pubkey },
         }) => {
             assert_eq!(path, std::path::Path::new("/tmp/receipt.json"));
@@ -2170,9 +2399,12 @@ fn receipt_verify_pubkey_flag_parses() {
 
 #[test]
 fn sandbox_gc_defaults_to_dry_run() {
-    let cli = Cli::try_parse_from(["mvmctl", "sandbox", "gc"]).expect("parse");
-    match cli.command {
-        Commands::Sandbox(sandbox::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "sandbox", "gc"]).expect("parse");
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Sandbox(sandbox::Args {
             action:
                 sandbox::SandboxAction::Gc(sandbox::GcArgs {
                     dry_run,
@@ -2193,9 +2425,12 @@ fn sandbox_gc_defaults_to_dry_run() {
 
 #[test]
 fn sandbox_gc_apply_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "sandbox", "gc", "--apply"]).expect("parse");
-    match cli.command {
-        Commands::Sandbox(sandbox::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "sandbox", "gc", "--apply"]).expect("parse");
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Sandbox(sandbox::Args {
             action:
                 sandbox::SandboxAction::Gc(sandbox::GcArgs {
                     dry_run,
@@ -2213,9 +2448,12 @@ fn sandbox_gc_apply_parses() {
 
 #[test]
 fn sandbox_gc_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "sandbox", "gc", "--json"]).expect("parse");
-    match cli.command {
-        Commands::Sandbox(sandbox::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "sandbox", "gc", "--json"]).expect("parse");
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Sandbox(sandbox::Args {
             action: sandbox::SandboxAction::Gc(sandbox::GcArgs { json, .. }),
         }) => {
             assert!(json);
@@ -2226,7 +2464,7 @@ fn sandbox_gc_json_parses() {
 
 #[test]
 fn sandbox_gc_rejects_apply_and_dry_run_together() {
-    let result = Cli::try_parse_from(["mvmctl", "sandbox", "gc", "--apply", "--dry-run"]);
+    let result = Cli::try_parse_from(["mvmctl", "vm", "sandbox", "gc", "--apply", "--dry-run"]);
     assert!(result.is_err());
 }
 
@@ -2234,6 +2472,7 @@ fn sandbox_gc_rejects_apply_and_dry_run_together() {
 fn cp_host_to_guest_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "vm",
         "cp",
         "--force",
         "--create-parents",
@@ -2243,8 +2482,11 @@ fn cp_host_to_guest_parses() {
         "vm1:/tmp/host.txt",
     ])
     .expect("parse");
-    match cli.command {
-        Commands::Cp(cp::Args {
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Cp(cp::Args {
             source,
             destination,
             force,
@@ -2265,10 +2507,20 @@ fn cp_host_to_guest_parses() {
 
 #[test]
 fn cp_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "cp", "--json", "./host.txt", "vm1:/tmp/host.txt"])
-        .expect("parse");
-    match cli.command {
-        Commands::Cp(cp::Args { json, .. }) => {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "cp",
+        "--json",
+        "./host.txt",
+        "vm1:/tmp/host.txt",
+    ])
+    .expect("parse");
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Cp(cp::Args { json, .. }) => {
             assert!(json);
         }
         _ => panic!("Expected Cp command"),
@@ -2277,10 +2529,13 @@ fn cp_json_flag_parses() {
 
 #[test]
 fn cp_guest_to_host_defaults_parse() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "cp", "vm1:/tmp/out.txt", "./out.txt"]).expect("parse");
-    match cli.command {
-        Commands::Cp(cp::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "cp", "vm1:/tmp/out.txt", "./out.txt"])
+        .expect("parse");
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Cp(cp::Args {
             source,
             destination,
             force,
@@ -2300,25 +2555,25 @@ fn cp_guest_to_host_defaults_parse() {
 }
 
 #[test]
-fn exec_with_launch_plan_no_argv() {
+fn run_transient_with_launch_plan_no_argv() {
     let cli =
-        Cli::try_parse_from(["mvmctl", "exec", "--launch-plan", "./plan.json"]).expect("parse");
+        Cli::try_parse_from(["mvmctl", "run", "--launch-plan", "./plan.json"]).expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             launch_plan, argv, ..
         }) => {
             assert_eq!(launch_plan.as_deref(), Some("./plan.json"));
             assert!(argv.is_empty());
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_launch_plan_conflicts_with_argv() {
+fn run_transient_launch_plan_conflicts_with_argv() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "exec",
+        "run",
         "--launch-plan",
         "./plan.json",
         "--",
@@ -2332,10 +2587,10 @@ fn exec_launch_plan_conflicts_with_argv() {
 }
 
 #[test]
-fn exec_with_manifest_and_resources() {
+fn run_transient_with_manifest_and_resources() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "exec",
+        "run",
         "--manifest",
         "my-tpl",
         "--cpus",
@@ -2347,7 +2602,7 @@ fn exec_with_manifest_and_resources() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             manifest,
             cpus,
             memory,
@@ -2359,15 +2614,15 @@ fn exec_with_manifest_and_resources() {
             assert_eq!(memory, "1G");
             assert_eq!(argv, vec!["/bin/true".to_string()]);
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_with_add_dir_and_env() {
+fn run_transient_with_add_dir_and_env() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "exec",
+        "run",
         "--add-dir",
         "/tmp:/work",
         "--add-dir",
@@ -2382,7 +2637,7 @@ fn exec_with_add_dir_and_env() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             add_dir, env, argv, ..
         }) => {
             assert_eq!(
@@ -2392,14 +2647,14 @@ fn exec_with_add_dir_and_env() {
             assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
             assert_eq!(argv, vec!["ls".to_string(), "/work".to_string()]);
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_requires_argv() {
+fn run_transient_requires_argv() {
     // Without trailing argv, Clap should reject because `argv` is required.
-    let cli = Cli::try_parse_from(["mvmctl", "exec"]);
+    let cli = Cli::try_parse_from(["mvmctl", "run"]);
     assert!(cli.is_err());
 }
 
@@ -2786,6 +3041,7 @@ fn test_up_no_supervisor_flag_parses() {
 fn test_compile_from_recording_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "build",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -2793,8 +3049,11 @@ fn test_compile_from_recording_parses() {
         "/tmp/out",
     ])
     .expect("parse");
-    match cli.command {
-        Commands::Compile(compile::Args {
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Compile(compile::Args {
             from_recording,
             from_ir,
             entry,
@@ -2820,6 +3079,7 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
     // accept both.
     let err = Cli::try_parse_from([
         "mvmctl",
+        "build",
         "compile",
         "--from-recording",
         "/tmp/rec.json",
@@ -2836,10 +3096,13 @@ fn test_compile_from_recording_conflicts_with_from_ir() {
 
 #[test]
 fn test_compile_default_no_from_flags_leaves_them_none() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "compile", "--from-ir", "/tmp/ir.json"]).expect("parse");
-    match cli.command {
-        Commands::Compile(compile::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "compile", "--from-ir", "/tmp/ir.json"])
+        .expect("parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group")
+    };
+    match bg.action {
+        build_group::BuildCmd::Compile(compile::Args {
             from_ir,
             from_recording,
             ..
@@ -2906,9 +3169,13 @@ fn builder_flag_unset_by_default() {
 
 #[test]
 fn test_session_start_ephemeral_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "session", "start", "tmpl", "--ephemeral"]).unwrap();
-    match cli.command {
-        Commands::Session(session::Args {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "vm", "session", "start", "tmpl", "--ephemeral"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Session(session::Args {
             command: session::Cmd::Start(a),
         }) => assert!(a.ephemeral),
         _ => panic!("expected session start"),
@@ -2919,9 +3186,12 @@ fn test_session_start_ephemeral_parses() {
 
 #[test]
 fn test_session_attach_continue_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "session", "attach", "--continue"]).unwrap();
-    match cli.command {
-        Commands::Session(session::Args {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "session", "attach", "--continue"]).unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Session(session::Args {
             command: session::Cmd::Attach(a),
         }) => {
             assert!(a.continue_latest);
@@ -2961,10 +3231,20 @@ fn test_up_wait_conflicts_with_up_json() {
 
 #[test]
 fn test_session_attach_resume_parses() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "session", "attach", "-r", "aaaaaaaaaaaaaaaa"]).unwrap();
-    match cli.command {
-        Commands::Session(session::Args {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "session",
+        "attach",
+        "-r",
+        "aaaaaaaaaaaaaaaa",
+    ])
+    .unwrap();
+    let Commands::Vm(vmg) = cli.command else {
+        panic!("expected vm group")
+    };
+    match vmg.action {
+        group::VmCmd::Session(session::Args {
             command: session::Cmd::Attach(a),
         }) => {
             assert_eq!(a.resume.as_deref(), Some("aaaaaaaaaaaaaaaa"));
@@ -2988,7 +3268,7 @@ fn state_touching_commands_trigger_entry_convergence() {
     assert!(touches(&["mvmctl", "up"]));
     assert!(touches(&["mvmctl", "down"]));
     assert!(touches(&["mvmctl", "console", "myvm"]));
-    assert!(touches(&["mvmctl", "pause", "myvm"]));
+    assert!(touches(&["mvmctl", "vm", "pause", "myvm"]));
     assert!(touches(&["mvmctl", "ls"]));
     assert!(touches(&["mvmctl", "dev", "status"]));
 }
@@ -2997,7 +3277,7 @@ fn state_touching_commands_trigger_entry_convergence() {
 fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     assert!(!touches(&["mvmctl", "doctor"]));
     assert!(!touches(&["mvmctl", "catalog", "list"]));
-    assert!(!touches(&["mvmctl", "audit", "tail"]));
+    assert!(!touches(&["mvmctl", "trust", "audit", "tail"]));
     assert!(!touches(&["mvmctl", "cache", "info"]));
     // `reconcile` is the convergence verb itself — must not double-run on entry.
     assert!(!touches(&["mvmctl", "reconcile"]));
