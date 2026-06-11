@@ -1910,6 +1910,7 @@ fn test_checkpoint_ls_json_parses() {
 fn test_checkpoint_create_vm_full_parses() {
     let cli = Cli::try_parse_from([
         "mvmctl",
+        "vm",
         "checkpoint",
         "create",
         "myvm",
@@ -1919,30 +1920,34 @@ fn test_checkpoint_create_vm_full_parses() {
     .unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Checkpoint(checkpoint::CheckpointArgs {
-            command: checkpoint::CheckpointCmd::Create {
-                class: checkpoint::CheckpointClassArg::VmFull,
-                ..
-            }
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create {
+                    class: checkpoint::CheckpointClassArg::VmFull,
+                    ..
+                }
+            })
         })
     ));
 }
 
 #[test]
 fn test_checkpoint_restore_parses() {
-    assert!(Cli::try_parse_from(["mvmctl", "checkpoint", "restore", "ckpt-abc"]).is_ok());
+    assert!(Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "restore", "ckpt-abc"]).is_ok());
 }
 
 #[test]
 fn test_checkpoint_create_defaults_fs_quick() {
-    let cli = Cli::try_parse_from(["mvmctl", "checkpoint", "create", "myvm"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "create", "myvm"]).unwrap();
     assert!(matches!(
         cli.command,
-        Commands::Checkpoint(checkpoint::CheckpointArgs {
-            command: checkpoint::CheckpointCmd::Create {
-                class: checkpoint::CheckpointClassArg::FsQuick,
-                ..
-            }
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create {
+                    class: checkpoint::CheckpointClassArg::FsQuick,
+                    ..
+                }
+            })
         })
     ));
 }
