@@ -226,6 +226,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         fs_policy,
         secrets: input.secrets.clone(),
         egress_policy,
+        redaction: Default::default(),
         tool_policy,
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),

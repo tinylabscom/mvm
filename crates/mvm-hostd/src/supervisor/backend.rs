@@ -251,6 +251,7 @@ mod tests {
             fs_policy: mvm_core::plan::FsPolicyRef("default".to_string()),
             secrets: vec![],
             egress_policy: mvm_core::plan::PolicyRef("agent-l7".to_string()),
+            redaction: Default::default(),
             tool_policy: mvm_core::plan::PolicyRef("read-only".to_string()),
             artifact_policy: mvm_core::plan::ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],

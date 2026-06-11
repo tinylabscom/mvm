@@ -83,7 +83,7 @@ impl EmergencyDeny {
 ///
 /// The supervisor consumes this; `mvmctl plan inspect <plan>` can
 /// also print it for operator review.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectivePolicy {
     pub network: NetworkPolicy,
@@ -161,6 +161,7 @@ mod tests {
                 allow_plain_http: false,
                 body_cap_bytes: 0,
                 disabled_inspectors: vec![],
+                redaction: crate::policy::RedactionPolicy::default(),
             },
             pii: PiiPolicy {
                 mode: Some("detect".to_string()),
