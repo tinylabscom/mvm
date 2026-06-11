@@ -24,6 +24,8 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 use thiserror::Error;
 
+use crate::policy::network_policy::is_mandatory_deny;
+
 /// L4 protocol of a canonical rule. The string forms `"tcp"` /
 /// `"udp"` are the `L4RuleSpec.proto` wire values; anything else
 /// refuses at projection time (loud failure at admission, not a
@@ -74,6 +76,30 @@ impl CanonicalRule {
             && self.net.contains(&ip)
             && self.port_lo <= port
             && port <= self.port_hi
+    }
+}
+
+/// The canonical projection of a resolved policy's egress grants.
+/// `Unrestricted` is the `egress.mode = "open"` kill-switch made
+/// explicit; mandatory-deny still applies to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalEgress {
+    Unrestricted,
+    Rules(Vec<CanonicalRule>),
+}
+
+impl CanonicalEgress {
+    /// The single decision function both enforcement layers must
+    /// agree with. Mandatory-deny is checked first and is
+    /// unconditional — no grant shape can override it.
+    pub fn permits(&self, proto: &Proto, ip: IpAddr, port: u16) -> bool {
+        if is_mandatory_deny(ip) {
+            return false;
+        }
+        match self {
+            Self::Unrestricted => true,
+            Self::Rules(rules) => rules.iter().any(|r| r.permits(proto, ip, port)),
+        }
     }
 }
 
@@ -186,5 +212,59 @@ mod tests {
         assert_eq!("tcp".parse::<Proto>().unwrap(), Proto::Tcp);
         assert_eq!("udp".parse::<Proto>().unwrap(), Proto::Udp);
         assert!("TCP".parse::<Proto>().is_err());
+    }
+
+    #[test]
+    fn canonical_egress_rules_permit_only_matching_probe() {
+        let eg = CanonicalEgress::Rules(vec![CanonicalRule {
+            proto: Proto::Tcp,
+            net: net("93.184.216.0/24"),
+            port_lo: 443,
+            port_hi: 443,
+        }]);
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.217.34"), 443));
+    }
+
+    #[test]
+    fn canonical_egress_empty_rules_is_deny_all() {
+        let eg = CanonicalEgress::Rules(vec![]);
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+    }
+
+    #[test]
+    fn canonical_egress_unrestricted_permits_ordinary_destinations() {
+        let eg = CanonicalEgress::Unrestricted;
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 53));
+    }
+
+    #[test]
+    fn mandatory_deny_wins_even_under_unrestricted() {
+        // The `open` kill-switch never reaches metadata/loopback —
+        // mirrors the gateway-bridge invariant that even an open
+        // policy keeps every packet gated by mandatory-deny.
+        let eg = CanonicalEgress::Unrestricted;
+        for denied in ["169.254.169.254", "127.0.0.1", "100.64.0.1", "::1"] {
+            assert!(
+                !eg.permits(&Proto::Tcp, ip(denied), 443),
+                "{denied} must be denied under unrestricted"
+            );
+        }
+    }
+
+    #[test]
+    fn mandatory_deny_wins_even_when_a_rule_matches() {
+        // A rule that (somehow) covers a denied address still
+        // denies at decision time — belt to the projection-time
+        // refusal's suspenders.
+        let eg = CanonicalEgress::Rules(vec![CanonicalRule {
+            proto: Proto::Tcp,
+            net: net("0.0.0.0/0"),
+            port_lo: 0,
+            port_hi: 65535,
+        }]);
+        assert!(!eg.permits(&Proto::Tcp, ip("169.254.169.254"), 80));
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
     }
 }
