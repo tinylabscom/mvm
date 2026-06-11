@@ -41,7 +41,7 @@ requires editing both the marker and the visible cell.
 | `network-policy`      | Deny-by-default egress with DNS pinning, SNI/Host enforcement, metadata endpoint protection, and audit.                  | **Planned** |
 | `secret-non-leakage`  | Workloads receive opaque secret tokens; real secret values are substituted only by trusted host-side policy.             | **Planned** |
 | `sdk-lifecycle`       | Python/TypeScript/Rust SDKs create, run, inspect, snapshot, and stop sandboxes with cleanup bound to the parent process. | **Planned** |
-| `cold-start`          | Latency numbers produced by a reproducible harness, split by fresh boot, guest-agent-ready, snapshot restore, warm pool. | **Planned** |
+| `cold-start`          | Latency numbers produced by a reproducible harness, split by fresh boot, guest-agent-ready, checkpoint restore, warm pool. | **Planned** |
 | `filesystem-backends` | Local, encrypted, object-store, and in-memory filesystem substrates share one contract; mountable vs API-only is stated. | **Planned** |
 
 ## What each status means in practice
@@ -141,7 +141,7 @@ Tracking work:
 
 `runtime_boot_bench` covers Apple Container serial and parallel
 boots today, but mvm has no published end-to-end latency number
-covering Firecracker, libkrun, snapshot restore, and warm-pool
+covering Firecracker, libkrun, checkpoint restore, and warm-pool
 claim under a single methodology.
 ADR-048 §"Non-goals" explicitly forbids claiming
 <!-- allow(doc-claim:cold-start): explicit non-goal callout -->

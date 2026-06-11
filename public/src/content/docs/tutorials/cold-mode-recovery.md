@@ -15,14 +15,14 @@ cargo run -- resume agent-sandbox
 
 Firecracker pause/resume writes sealed instance state and verifies it before resume. This is the local `mvm` primitive.
 
-## Vz machine-state save/restore
+## Vz memory checkpoints
 
 ```sh
-cargo run -- snapshot save agent-sandbox --path /tmp/agent-sandbox.vzsnap --hypervisor vz
-cargo run -- snapshot restore agent-sandbox --path /tmp/agent-sandbox.vzsnap --hypervisor vz
+cargo run -- checkpoint create agent-sandbox --class vm-full
+cargo run -- checkpoint restore agent-sandbox --name <checkpoint-name>
 ```
 
-Vz snapshots are opaque machine-state files. `mvm` records the saved file hash in the audit chain when the launch plan and host signer are available, and restore records whether the file matched the prior chain entry.
+Vz checkpoints capture full machine state. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
 
 ## Security checklist
 

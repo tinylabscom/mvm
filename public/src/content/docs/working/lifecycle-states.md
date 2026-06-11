@@ -17,7 +17,7 @@ cleanup is still required.
 | Starting | The backend is creating the VM, attaching drives, and waiting for readiness. | `mvmctl wait` or `mvmctl boot-report` | Admission failures should be reported without leaking secrets. |
 | Running | Guest compute is active and can execute commands, expose ports, write files, and emit logs. | `mvmctl exec`, `mvmctl logs`, `mvmctl fs`, `mvmctl down`, or snapshot commands | Treat command output, files, logs, ports, and receipts as boundary-crossing data. |
 | Paused | Guest execution is suspended and can be resumed by the backend path that created the pause. | `mvmctl resume` | Paused memory can contain tokens, browser sessions, plaintext files, and process state. |
-| Cold | Compute is released while recoverable state is retained through a backend snapshot or machine-state file. | `mvmctl resume` or `mvmctl snapshot restore` | Cold state is persistence, not a security boundary. Protect it like sensitive data. |
+| Cold | Compute is released while recoverable state is retained through a backend snapshot or checkpoint. | `mvmctl resume` or `mvmctl checkpoint restore` | Cold state is persistence, not a security boundary. Protect it like sensitive data. |
 | Restoring | The backend is loading saved state and re-establishing runtime control. | Wait for readiness, then verify workload health | Restore can fail because of backend, host, image, or policy drift. |
 | Stopped | Guest compute is no longer running, while build artifacts, logs, receipts, volumes, or snapshots may remain. | `mvmctl up`, `mvmctl sandbox gc`, or `mvmctl cleanup` | Stop is not erase. Review retained state before reusing or sharing the host. |
 | Cleaned | Local registry entries and selected generated state have been removed by cleanup commands. | Rebuild from source if needed | Strong erasure depends on filesystem, volume, snapshot, and cache behavior. |
@@ -30,8 +30,8 @@ cleanup is still required.
 | Image to running sandbox | `mvmctl up` or `mvmctl run` |
 | Wait for readiness | `mvmctl wait`, `mvmctl boot-report` |
 | Run work | `mvmctl exec`, `mvmctl fs`, `mvmctl logs`, port-forwarding commands |
-| Running to paused or cold | `mvmctl pause`, `mvmctl snapshot save` |
-| Paused or cold to running | `mvmctl resume`, `mvmctl snapshot restore` |
+| Running to paused or cold | `mvmctl pause`, `mvmctl checkpoint create` |
+| Paused or cold to running | `mvmctl resume`, `mvmctl checkpoint restore` |
 | Running to stopped | `mvmctl down` |
 | Remove retained local state | `mvmctl sandbox gc`, `mvmctl cleanup`, snapshot and volume cleanup commands |
 
