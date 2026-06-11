@@ -145,31 +145,6 @@ impl VsockTransport for VzTransport {
     }
 }
 
-/// Connects through Apple's `Virtualization.framework` vsock device.
-///
-/// `mvm_backend::providers::apple_container::vsock_connect` consults the framework's
-/// in-process VM registry and either returns a direct
-/// `VZVirtioSocketDevice` stream (mac host) or routes through the
-/// per-VM proxy socket (cross-process / development).
-pub struct AppleContainerTransport {
-    vm_name: String,
-}
-
-impl AppleContainerTransport {
-    pub fn new(vm_name: impl Into<String>) -> Self {
-        Self {
-            vm_name: vm_name.into(),
-        }
-    }
-}
-
-impl VsockTransport for AppleContainerTransport {
-    fn connect(&self, port: u32) -> Result<UnixStream> {
-        mvm_backend::providers::apple_container::vsock_connect(&self.vm_name, port)
-            .map_err(|e| anyhow::anyhow!("Apple Container vsock connect failed: {e}"))
-    }
-}
-
 /// Connects through the daemon-managed mode-0700 proxy Unix socket.
 ///
 /// Used for cross-process access in dev — the `mvmctl dev` daemon
@@ -255,25 +230,16 @@ impl VsockTransport for NestingHopTransport {
 
 /// Pick a transport for a VM by name.
 ///
-/// Probes Apple Container first by attempting a real connect to the
-/// agent control port — that's the cheapest probe that doesn't
-/// require the caller to know the backend ahead of time. Then tries
-/// libkrun's per-port Unix socket, then Firecracker by resolving the
-/// running VM's instance directory.
+/// Probes libkrun's per-port Unix socket first, then the vz supervisor's
+/// per-port socket, then Firecracker by resolving the running VM's
+/// instance directory — the cheapest probe that doesn't require the
+/// caller to know the backend ahead of time.
 ///
 /// Note: the probe consumes one stream and immediately drops it;
 /// callers get a *fresh* stream from the returned transport's
 /// `connect()`. This matches the legacy ladder it replaces, which
 /// already did one throwaway probe before the real call.
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
-    if mvm_backend::providers::apple_container::vsock_connect(
-        vm_name,
-        mvm_guest::vsock::GUEST_AGENT_PORT,
-    )
-    .is_ok()
-    {
-        return Ok(Box::new(AppleContainerTransport::new(vm_name)));
-    }
     let libkrun = LibkrunTransport::for_vm(vm_name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(libkrun));
