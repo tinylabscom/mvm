@@ -7,7 +7,6 @@ use mvm_core::vm_backend::{
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `mvm-base`.
-use crate::apple_container::AppleContainerBackend;
 use crate::base::config::{PortMapping, VMS_DIR};
 use crate::base::shell::run_in_vm_stdout;
 use crate::image::RuntimeVolume;
@@ -327,14 +326,12 @@ impl BackendTier {
 /// backend is active. Each variant delegates to its inner implementation.
 pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
-    AppleContainer(AppleContainerBackend),
     /// libkrun — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
-    /// Vz (Apple Virtualization.framework). Direct host-level Vz
-    /// integration on macOS 13+; collapses the nested
-    /// macOS → libkrun → Firecracker workload-microVM path. Opt-in via
-    /// `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun
-    /// as the macOS default.
+    /// Vz — the one Apple Virtualization.framework backend (per-VM Rust
+    /// objc2 supervisor: snapshot/restore, pause/resume, flow-audited
+    /// networking). The macOS-26 auto-default; opt-in elsewhere via
+    /// `--hypervisor vz` / `MVM_BACKEND=vz`.
     Vz(VzBackend),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
@@ -371,11 +368,10 @@ impl AnyBackend {
     /// Select backend by hypervisor name.
     ///
     /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
-    /// `"apple-container"` (macOS 26+), `"libkrun"` (Linux KVM / macOS
-    /// HVF). Unknown names fall back to Firecracker.
+    /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
+    /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
         match name {
-            "apple-container" => Self::AppleContainer(AppleContainerBackend),
             "libkrun" | "krun" => Self::Libkrun(LibkrunBackend),
             "vz" | "virtualization" => Self::Vz(VzBackend),
             // `"qemu"` is the Linux dev/test backend (KVM where
@@ -397,7 +393,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. Apple Container (macOS 26+)
+    /// 2. Vz — Apple Virtualization.framework (macOS 13+)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -414,9 +410,9 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ → Apple Virtualization.framework.
+        // 2. macOS 26+ → Apple Virtualization.framework via the vz supervisor.
         if plat.has_apple_containers() {
-            return Self::AppleContainer(AppleContainerBackend);
+            return Self::Vz(VzBackend);
         }
 
         // 3. libkrun installed → use the raw libkrun shim.
@@ -466,7 +462,7 @@ impl AnyBackend {
             Self::Qemu(QemuBackend),
             Self::Libkrun(LibkrunBackend),
             Self::Firecracker(FirecrackerBackend),
-            Self::AppleContainer(AppleContainerBackend),
+            Self::Vz(VzBackend),
         ] {
             if let Ok(found) = backend.list() {
                 vms.extend(found);
@@ -500,9 +496,7 @@ impl AnyBackend {
             // mode is a runtime Tier-3 degradation surfaced by the QEMU
             // backend's `start` banner + doctor, not by this compile-time
             // classification.
-            Self::Libkrun(_) | Self::AppleContainer(_) | Self::Vz(_) | Self::Qemu(_) => {
-                BackendTier::Tier2
-            }
+            Self::Libkrun(_) | Self::Vz(_) | Self::Qemu(_) => BackendTier::Tier2,
 
             // Tier 3: test-only. Mock is in-memory.
             Self::Mock(_) => BackendTier::Tier3,
@@ -513,7 +507,6 @@ impl AnyBackend {
     fn inner(&self) -> &dyn VmBackend {
         match self {
             Self::Firecracker(b) => b,
-            Self::AppleContainer(b) => b,
             Self::Libkrun(b) => b,
             Self::Vz(b) => b,
             Self::Qemu(b) => b,

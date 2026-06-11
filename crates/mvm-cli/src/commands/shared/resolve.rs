@@ -195,7 +195,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     if plat.has_kvm() {
         "firecracker"
     } else if plat.has_apple_containers() {
-        "apple-container"
+        "vz"
     } else if plat.has_libkrun() {
         "libkrun"
     } else {
