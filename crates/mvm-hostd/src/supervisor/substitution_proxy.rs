@@ -133,6 +133,71 @@ pub(crate) fn collect_substituted_meta(
         .collect()
 }
 
+/// Mask undeclared secret/PII content in `req` per the destination `action`,
+/// leaving declared placeholders intact (they're substituted next). Returns the
+/// categories that fired. Shared by the vsock/UDS `process` path and both
+/// terminator cores so they scrub identically — one definition, no drift.
+///
+/// A header value carrying a declared placeholder is left untouched (the real
+/// credential is substituted into it next, and the host-reserved placeholder is
+/// not secret-shaped); every other header value and the body are scrubbed.
+pub(crate) fn redact_request(
+    req: &mut ProxyRequest,
+    redactor: &RedactingSubstitution,
+    action: &mvm_core::policy::RedactionAction,
+) -> RedactionHits {
+    let mut hits = RedactionHits::default();
+    for (_, value) in req.headers.iter_mut() {
+        if find_placeholder(value).is_some() {
+            continue; // declared placeholder — substituted next, never masked.
+        }
+        if let Some((masked, h)) = redactor.redact_bytes_for(value.as_bytes(), action) {
+            *value = String::from_utf8_lossy(&masked).into_owned();
+            hits.merge(h);
+        }
+    }
+    if let Some((masked, h)) = redactor.redact_bytes_for(&req.body, action) {
+        req.body = masked;
+        hits.merge(h);
+    }
+    hits
+}
+
+/// True when `action` opts the destination into redaction (entropy or names on)
+/// — the trigger for the cleartext-scan fail-closed gate. Curated secrets always
+/// run, but a body we can't scan in cleartext (compressed / over-cap) is only a
+/// *bypass* worth refusing once a destination has opted into the deeper scan.
+pub(crate) fn redaction_active(action: &mvm_core::policy::RedactionAction) -> bool {
+    !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
+        || !matches!(action.names, mvm_core::policy::NameMode::Off)
+}
+
+/// The fail-closed scan-gate the cleartext cores run before substitute/forward:
+/// when the destination opted into redaction, a `content-encoding` (compressed)
+/// or over-cap body can't be scanned in the clear, so it's refused rather than
+/// forwarded unscanned. Returns the reason marker when the request must be
+/// refused, else `None`. `compressed` wins when both hold (the harder bypass).
+pub(crate) fn fail_closed_reason(
+    headers: &[(String, String)],
+    body_len: usize,
+    action: &mvm_core::policy::RedactionAction,
+) -> Option<&'static str> {
+    if !redaction_active(action) {
+        return None;
+    }
+    let compressed = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"));
+    let oversize = body_len as u64 > mvm_core::policy::DEFAULT_BODY_CAP_BYTES;
+    if compressed {
+        Some("fail_closed_compressed")
+    } else if oversize {
+        Some("fail_closed_oversize")
+    } else {
+        None
+    }
+}
+
 // ============================================================================
 // Transport — the host-local listener + the real-TLS forward leg (D-T2)
 // ============================================================================
@@ -520,31 +585,69 @@ impl SubstitutionService {
         let endpoint = SubstitutionEndpoint::new(&self.registry, self.resolver.as_ref());
         let destination = destination_host(&req.url).ok();
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        // Whether the request smuggled a host placeholder at all — decides if a
+        // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
+        let carried_placeholder = req
+            .headers
+            .iter()
+            .any(|(_, v)| find_placeholder(v).is_some());
         drop(req);
 
-        // Substitution + the raw forward leg are sync; run them off the reactor.
-        // Clone the Arcs the closure needs (it must be 'static — can't borrow
-        // &self across spawn_blocking); the endpoint is rebuilt inside.
+        // Resolve the per-destination redaction action; clone so the closure owns
+        // it across spawn_blocking.
+        let action = destination
+            .as_deref()
+            .map(|d| {
+                crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
+            })
+            .unwrap_or_default();
+
+        // Substitution + redaction + the raw forward leg are sync; run them off
+        // the reactor. Clone the Arcs the closure needs (it must be 'static —
+        // can't borrow &self across spawn_blocking); the endpoint + redactor are
+        // rebuilt inside.
         let registry = Arc::clone(&self.registry);
         let resolver = Arc::clone(&self.resolver);
         let forwarded = tokio::task::spawn_blocking(move || {
             let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
-            terminator::handler::handle_request(&raw, orig_dst, &endpoint, |prepared, dst| {
-                terminator::listener::forward_http_raw(prepared, dst, timeout)
-            })
+            // The redactor is the shared curated ruleset (same as the service's),
+            // rebuilt here so the closure stays 'static without cloning rule state.
+            let redactor = RedactingSubstitution::with_default_rules();
+            terminator::handler::handle_request(
+                &raw,
+                orig_dst,
+                &endpoint,
+                &redactor,
+                &action,
+                |prepared, dst| terminator::listener::forward_http_raw(prepared, dst, timeout),
+            )
         })
         .await?;
 
-        let resp = match forwarded {
-            Ok(resp) => resp,
+        let (resp, redaction_hits) = match forwarded {
+            Ok(ok) => ok,
             Err(e) => {
-                // claim-12 fail-closed: refusal closes the socket, no forward.
+                // Every error path is fail-closed: the socket closes WITHOUT
+                // forwarding. Audit per cause so a claim-12 drop / fail-closed
+                // refusal is observable; a parse / forward failure isn't
+                // secret-relevant.
+                match &e {
+                    terminator::error::TerminatorError::Refused(_) if carried_placeholder => {
+                        self.audit_placeholder_dropped(destination.as_deref()).await;
+                    }
+                    terminator::error::TerminatorError::FailClosed(reason) => {
+                        self.audit_fail_closed(destination.as_deref(), reason).await;
+                    }
+                    _ => {}
+                }
                 tracing::warn!(error = %e, "terminator refused or forward failed; closing");
                 return Ok(());
             }
         };
 
         self.audit_substitutions(&substituted, destination.as_deref())
+            .await;
+        self.audit_redactions(&redaction_hits, destination.as_deref())
             .await;
 
         tokio::task::spawn_blocking(move || {
@@ -568,7 +671,7 @@ impl SubstitutionService {
         timeout: std::time::Duration,
     ) -> anyhow::Result<()> {
         use crate::keyholder::SubstitutionEndpoint;
-        use crate::supervisor::terminator::tls;
+        use crate::supervisor::terminator::{self, tls};
 
         // Peek the SNI without consuming the stream (blocking).
         let (std_stream, sni) = tokio::task::spawn_blocking(move || {
@@ -591,26 +694,46 @@ impl SubstitutionService {
             }
         };
 
+        // The SNI is the bound destination; resolve its redaction action here so
+        // the terminated (cleartext) request is scrubbed identically to the `:80`
+        // and vsock paths. The spliced/unbound arm above never reaches this —
+        // it's ciphertext, nothing to scan, redaction correctly does not apply.
+        let dest = sni.clone();
+        let action =
+            crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, &dest).clone();
+
         let config = Arc::new(tls::server_config_for_sni(&intermediate, &sni)?);
         let registry = Arc::clone(&self.registry);
         let resolver = Arc::clone(&self.resolver);
         let forwarder = Arc::clone(&self.forwarder);
         let handle = tokio::runtime::Handle::current();
-        let outcome = tokio::task::spawn_blocking(move || {
+        let (outcome, carried_placeholder) = tokio::task::spawn_blocking(move || {
             let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
-            tls::terminate_and_substitute(std_stream, config, orig_dst, &endpoint, |prepared| {
-                // The upstream leg reuses the hardened reqwest forwarder (TLS +
-                // system roots + SSRF filter); block_on is safe on a blocking
-                // thread. reqwest decoded the body, so we re-frame the response.
-                let resp = handle
-                    .block_on(forwarder.forward(prepared.clone()))
-                    .map_err(|e| anyhow::anyhow!("upstream forward: {e}"))?;
-                Ok(tls::serialize_http_response(
-                    resp.status,
-                    &resp.headers,
-                    &resp.body,
-                ))
-            })
+            let redactor = RedactingSubstitution::with_default_rules();
+            let mut carried = false;
+            let outcome = tls::terminate_and_substitute(
+                std_stream,
+                config,
+                orig_dst,
+                &endpoint,
+                &redactor,
+                &action,
+                &mut carried,
+                |prepared| {
+                    // The upstream leg reuses the hardened reqwest forwarder (TLS
+                    // + system roots + SSRF filter); block_on is safe on a
+                    // blocking thread. reqwest decoded the body, so we re-frame.
+                    let resp = handle
+                        .block_on(forwarder.forward(prepared.clone()))
+                        .map_err(|e| anyhow::anyhow!("upstream forward: {e}"))?;
+                    Ok(tls::serialize_http_response(
+                        resp.status,
+                        &resp.headers,
+                        &resp.body,
+                    ))
+                },
+            );
+            (outcome, carried)
         })
         .await?;
 
@@ -618,9 +741,22 @@ impl SubstitutionService {
             Ok(o) => {
                 self.audit_substitutions(&o.substituted, o.destination.as_deref())
                     .await;
+                self.audit_redactions(&o.redaction_hits, o.destination.as_deref())
+                    .await;
                 Ok(())
             }
             Err(e) => {
+                // Every error path is fail-closed (the socket closes WITHOUT
+                // forwarding); audit per cause exactly like the `:80` path.
+                match &e {
+                    terminator::error::TerminatorError::Refused(_) if carried_placeholder => {
+                        self.audit_placeholder_dropped(Some(&dest)).await;
+                    }
+                    terminator::error::TerminatorError::FailClosed(reason) => {
+                        self.audit_fail_closed(Some(&dest), reason).await;
+                    }
+                    _ => {}
+                }
                 tracing::warn!(error = %e, "https terminator refused or failed; closing");
                 Ok(())
             }
@@ -688,32 +824,17 @@ impl SubstitutionService {
                 crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
             })
             .unwrap_or_default();
-        let redaction_active = !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
-            || !matches!(action.names, mvm_core::policy::NameMode::Off);
-        if redaction_active {
-            // Fail closed: a body we can't scan in cleartext is a silent bypass.
-            // A compressed body, or one over the scan cap, is refused before any
-            // forward leg runs.
-            let compressed = req
-                .headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"));
-            let oversize = req.body.len() as u64 > mvm_core::policy::DEFAULT_BODY_CAP_BYTES;
-            if compressed || oversize {
-                // Distinct reasons so the audit names which condition fired;
-                // compressed wins when both hold (it's the harder bypass).
-                let reason = if compressed {
-                    "fail_closed_compressed"
-                } else {
-                    "fail_closed_oversize"
-                };
-                self.audit_fail_closed(destination.as_deref(), reason).await;
-                return WireResponse::Refused {
-                    message: "egress redaction enabled for destination but body is \
-                              compressed or over the scan cap; refusing (fail-closed)"
-                        .into(),
-                };
-            }
+        // Fail closed: a body we can't scan in cleartext is a silent bypass. A
+        // compressed body, or one over the scan cap, to a redaction-opted-in
+        // destination is refused before any forward leg runs. Shared with the
+        // cleartext terminator cores so the gate can't drift.
+        if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), &action) {
+            self.audit_fail_closed(destination.as_deref(), reason).await;
+            return WireResponse::Refused {
+                message: "egress redaction enabled for destination but body is \
+                          compressed or over the scan cap; refusing (fail-closed)"
+                    .into(),
+            };
         }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
@@ -769,23 +890,11 @@ impl SubstitutionService {
     /// fired, for the claim-13 audit.
     fn redact_outbound(
         &self,
-        mut req: ProxyRequest,
+        req: ProxyRequest,
         action: &mvm_core::policy::RedactionAction,
     ) -> (ProxyRequest, RedactionHits) {
-        let mut hits = RedactionHits::default();
-        for (_, value) in req.headers.iter_mut() {
-            if find_placeholder(value).is_some() {
-                continue; // declared placeholder — substituted next, never masked.
-            }
-            if let Some((masked, h)) = self.redactor.redact_bytes_for(value.as_bytes(), action) {
-                *value = String::from_utf8_lossy(&masked).into_owned();
-                hits.merge(h);
-            }
-        }
-        if let Some((masked, h)) = self.redactor.redact_bytes_for(&req.body, action) {
-            req.body = masked;
-            hits.merge(h);
-        }
+        let mut req = req;
+        let hits = redact_request(&mut req, &self.redactor, action);
         (req, hits)
     }
 

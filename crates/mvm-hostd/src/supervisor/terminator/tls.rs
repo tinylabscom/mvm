@@ -34,9 +34,12 @@ use super::error::TerminatorError;
 use super::read::read_http_request;
 use super::request::proxy_request_from_origin_form_https;
 use crate::keyholder::substitution::SubstitutionEndpoint;
+use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
 use crate::supervisor::substitution_proxy::{
-    PreparedRequest, collect_substituted_meta, destination_host, prepare_request,
+    PreparedRequest, collect_substituted_meta, destination_host, fail_closed_reason,
+    prepare_request, redact_request,
 };
+use mvm_core::policy::RedactionAction;
 
 /// What a terminated connection substituted — handed back so the caller emits
 /// the same `secret.substituted` audit (metadata only, claim 13) the `:80` path
@@ -44,6 +47,10 @@ use crate::supervisor::substitution_proxy::{
 pub struct TerminateOutcome {
     pub substituted: Vec<(String, AuthType)>,
     pub destination: Option<String>,
+    /// Redaction categories that fired masking undeclared secret/PII content out
+    /// of the decrypted request — handed back so the caller emits the same
+    /// `secret.redacted` audit (names only, claim 13) the cleartext path does.
+    pub redaction_hits: RedactionHits,
 }
 
 /// Peek (without consuming) the ClientHello SNI from a blocking std `TcpStream`.
@@ -105,11 +112,20 @@ pub fn server_config_for_sni(
 /// with a mock upstream; production passes the reused reqwest forwarder. A
 /// substitution refusal closes the connection without forwarding — the same
 /// fail-closed invariant as the `:80` path.
+///
+/// `carried_placeholder` is set from the DECRYPTED headers (the caller can't see
+/// them — the request was peeked as ciphertext) so that on a [`TerminatorError::
+/// Refused`] the caller can tell a claim-12 placeholder-drop (audit it) from a
+/// plain bad request, mirroring the `:80` core exactly.
+#[allow(clippy::too_many_arguments)]
 pub fn terminate_and_substitute<S, F>(
     stream: S,
     config: Arc<rustls::ServerConfig>,
     orig_dst: SocketAddr,
     endpoint: &SubstitutionEndpoint<'_>,
+    redactor: &RedactingSubstitution,
+    action: &RedactionAction,
+    carried_placeholder: &mut bool,
     forward: F,
 ) -> Result<TerminateOutcome, TerminatorError>
 where
@@ -122,12 +138,29 @@ where
 
     let raw = read_http_request(&mut tls)
         .map_err(|e| TerminatorError::Parse(format!("read decrypted request: {e}")))?;
-    let req = proxy_request_from_origin_form_https(&raw, orig_dst)
+    let mut req = proxy_request_from_origin_form_https(&raw, orig_dst)
         .map_err(|e| TerminatorError::Parse(e.to_string()))?;
     // Capture audit metadata before substitution consumes the request (claim-13
     // safe — resolve_meta touches no value), mirroring the `:80` path exactly.
     let substituted = collect_substituted_meta(endpoint, &req.headers);
     let destination = destination_host(&req.url).ok();
+    *carried_placeholder = req
+        .headers
+        .iter()
+        .any(|(_, v)| crate::keyholder::find_placeholder(v).is_some());
+
+    // Fail closed BEFORE masking/substitution: this is the TLS-TERMINATED
+    // (bound-host) sub-path where the host holds cleartext, so an unscannable
+    // body (compressed / over-cap) to a redaction-opted-in destination is a
+    // silent bypass — refuse it rather than re-originate it unscanned. (The
+    // spliced/unbound `:443` arm never reaches here: it's ciphertext, nothing to
+    // scan, and redaction correctly does not apply.)
+    if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), action) {
+        return Err(TerminatorError::FailClosed(reason));
+    }
+    // Mask undeclared secret/PII before substitution (declared placeholders, not
+    // secret-shaped, survive to be substituted).
+    let redaction_hits = redact_request(&mut req, redactor, action);
 
     let prepared =
         prepare_request(endpoint, req).map_err(|e| TerminatorError::Refused(e.to_string()))?;
@@ -140,6 +173,7 @@ where
     Ok(TerminateOutcome {
         substituted,
         destination,
+        redaction_hits,
     })
 }
 
@@ -495,11 +529,24 @@ mod tests {
             let (sock, _) = listener.accept().unwrap();
             let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
             let orig_dst: SocketAddr = "203.0.113.7:443".parse().unwrap();
-            terminate_and_substitute(sock, cfg, orig_dst, &endpoint, |prepared| {
-                *cap.lock().unwrap() = Some(prepared.clone());
-                Ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec())
-            })
+            let redactor = RedactingSubstitution::with_default_rules();
+            let action = RedactionAction::default();
+            let mut carried = false;
+            terminate_and_substitute(
+                sock,
+                cfg,
+                orig_dst,
+                &endpoint,
+                &redactor,
+                &action,
+                &mut carried,
+                |prepared| {
+                    *cap.lock().unwrap() = Some(prepared.clone());
+                    Ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec())
+                },
+            )
             .unwrap();
+            assert!(carried, "request carried a declared placeholder");
         });
 
         // Guest side: a real rustls client trusting the per-VM intermediate.

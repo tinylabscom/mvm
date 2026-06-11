@@ -10,30 +10,50 @@ use std::net::SocketAddr;
 use super::error::TerminatorError;
 use super::request::proxy_request_from_origin_form;
 use crate::keyholder::substitution::SubstitutionEndpoint;
-use crate::supervisor::substitution_proxy::{PreparedRequest, prepare_request};
+use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
+use crate::supervisor::substitution_proxy::{
+    PreparedRequest, fail_closed_reason, prepare_request, redact_request,
+};
+use mvm_core::policy::RedactionAction;
 
-/// Parse `raw` (origin-form HTTP), substitute placeholders against `endpoint`
-/// (refuses an unbound destination / unknown placeholder BEFORE forwarding —
-/// claim 12), then call `forward` with the prepared request and `orig_dst`.
-/// Returns the raw response bytes from `forward`.
+/// Parse `raw` (origin-form HTTP), mask undeclared secret/PII content against
+/// the destination `action` (the same redaction the vsock `process` path runs),
+/// substitute declared placeholders against `endpoint` (refuses an unbound
+/// destination / unknown placeholder BEFORE forwarding — claim 12), then call
+/// `forward` with the prepared request and `orig_dst`. Returns the raw response
+/// bytes plus the redaction categories that fired (for the caller's audit).
 ///
 /// The result is typed ([`TerminatorError`]) so the caller can tell a claim-12
-/// refusal (`Refused`) from a parse or forward failure and audit accordingly.
-/// Every error path means the socket closes without forwarding.
+/// refusal (`Refused`) from a fail-closed gate (`FailClosed`), a parse, or a
+/// forward failure and audit accordingly. **Every error path closes the socket
+/// without forwarding un-substituted / un-redacted bytes** — fail-closed.
 pub fn handle_request<F>(
     raw: &[u8],
     orig_dst: SocketAddr,
     endpoint: &SubstitutionEndpoint<'_>,
+    redactor: &RedactingSubstitution,
+    action: &RedactionAction,
     forward: F,
-) -> Result<Vec<u8>, TerminatorError>
+) -> Result<(Vec<u8>, RedactionHits), TerminatorError>
 where
     F: Fn(&PreparedRequest, SocketAddr) -> Result<Vec<u8>>,
 {
-    let req = proxy_request_from_origin_form(raw, orig_dst)
+    let mut req = proxy_request_from_origin_form(raw, orig_dst)
         .map_err(|e| TerminatorError::Parse(e.to_string()))?;
+    // Fail closed BEFORE masking/substitution: a body we can't scan in cleartext
+    // (compressed / over-cap) to a redaction-opted-in destination is a silent
+    // bypass, so refuse it rather than forward it unscanned.
+    if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), action) {
+        return Err(TerminatorError::FailClosed(reason));
+    }
+    // Mask undeclared secret/PII first so a declared placeholder (host-reserved,
+    // not secret-shaped) survives to be substituted, while undeclared secrets in
+    // any other header or the body are masked and never reach the wire.
+    let hits = redact_request(&mut req, redactor, action);
     let prepared =
         prepare_request(endpoint, req).map_err(|e| TerminatorError::Refused(e.to_string()))?;
-    forward(&prepared, orig_dst).map_err(|e| TerminatorError::Forward(e.to_string()))
+    let resp = forward(&prepared, orig_dst).map_err(|e| TerminatorError::Forward(e.to_string()))?;
+    Ok((resp, hits))
 }
 
 #[cfg(test)]
@@ -54,6 +74,12 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
+    }
+
+    /// The default redactor (curated rules) most tests pass — declared
+    /// placeholders survive, undeclared secret/PII content is masked.
+    fn default_redactor() -> RedactingSubstitution {
+        RedactingSubstitution::with_default_rules()
     }
 
     /// Build a `(registry, resolver, _dir)` with one bearer secret `name`=`value`
@@ -95,10 +121,19 @@ mod tests {
 
         let orig_dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
 
-        let resp = handle_request(raw.as_bytes(), orig_dst, &endpoint, |prepared, _dst| {
-            *cap.lock().unwrap() = Some(prepared.clone());
-            Ok(canned.to_vec())
-        })
+        let redactor = default_redactor();
+        let action = RedactionAction::default();
+        let (resp, _hits) = handle_request(
+            raw.as_bytes(),
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |prepared, _dst| {
+                *cap.lock().unwrap() = Some(prepared.clone());
+                Ok(canned.to_vec())
+            },
+        )
         .unwrap();
 
         // (1) placeholder was substituted to the real token.
@@ -131,10 +166,19 @@ mod tests {
         let forward_called = Arc::new(Mutex::new(false));
         let fc = Arc::clone(&forward_called);
 
-        let result = handle_request(raw, orig_dst, &endpoint, |_prepared, _dst| {
-            *fc.lock().unwrap() = true;
-            Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
-        });
+        let redactor = default_redactor();
+        let action = RedactionAction::default();
+        let result = handle_request(
+            raw,
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |_prepared, _dst| {
+                *fc.lock().unwrap() = true;
+                Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
+            },
+        );
 
         assert!(
             matches!(result, Err(TerminatorError::Refused(_))),
@@ -160,10 +204,19 @@ mod tests {
         let forward_called = Arc::new(Mutex::new(false));
         let fc = Arc::clone(&forward_called);
 
-        let result = handle_request(raw.as_bytes(), orig_dst, &endpoint, |_prepared, _dst| {
-            *fc.lock().unwrap() = true;
-            Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
-        });
+        let redactor = default_redactor();
+        let action = RedactionAction::default();
+        let result = handle_request(
+            raw.as_bytes(),
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |_prepared, _dst| {
+                *fc.lock().unwrap() = true;
+                Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
+            },
+        );
 
         assert!(
             matches!(result, Err(TerminatorError::Refused(_))),
