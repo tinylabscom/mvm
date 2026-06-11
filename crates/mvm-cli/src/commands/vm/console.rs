@@ -7,8 +7,7 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
 use mvm::vsock_transport::{
-    AppleContainerTransport, FirecrackerTransport, LibkrunTransport, VsockProxyTransport,
-    VsockTransport, VzTransport,
+    FirecrackerTransport, LibkrunTransport, VsockProxyTransport, VsockTransport, VzTransport,
 };
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
@@ -19,25 +18,17 @@ use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
 
 /// Pick the right vsock transport for `name`. Priority:
-/// 1. In-process Apple Container (zero-copy `VZVirtioSocketDevice` stream).
-/// 2. Dev-mode mode-0700 proxy socket (cross-process daemon dispatch).
-/// 3. libkrun per-port Unix socket.
-/// 4. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`).
-/// 5. Firecracker UDS multiplexer (fleet/production path).
+/// 1. Dev-mode mode-0700 proxy socket (cross-process daemon dispatch).
+/// 2. libkrun per-port Unix socket.
+/// 3. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`) —
+///    the macOS AVF path.
+/// 4. Firecracker UDS multiplexer (fleet/production path).
 ///
-/// The Apple Container probe consumes one stream and drops it; the
-/// returned `Arc<dyn VsockTransport>` is then used for every real
-/// connection (control + data + resize). Cloning the Arc lets the
-/// SIGWINCH handler thread reuse the same dispatch.
+/// Each probe consumes one stream and drops it; the returned
+/// `Arc<dyn VsockTransport>` is then used for every real connection
+/// (control + data + resize). Cloning the Arc lets the SIGWINCH handler
+/// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
-    if mvm_backend::providers::apple_container::vsock_connect(
-        name,
-        mvm_guest::vsock::GUEST_AGENT_PORT,
-    )
-    .is_ok()
-    {
-        return Ok(Arc::new(AppleContainerTransport::new(name)));
-    }
     let proxy = dev_vsock_proxy_path();
     if std::path::Path::new(&proxy).exists() {
         return Ok(Arc::new(VsockProxyTransport::new(proxy)));
