@@ -75,6 +75,77 @@ impl ConfinementSpec {
             allowed_syscalls,
         }
     }
+
+    /// Canonical spec for `mvm-substitution-endpoint` — the per-VM process
+    /// that holds the workload's decrypted secrets AND parses untrusted guest
+    /// bytes over vsock/UDS. Confining it bounds the blast radius of a parser
+    /// compromise: a hijacked endpoint can read only its own tenant's stores
+    /// and the TLS/DNS files its forward leg needs, and can invoke only the
+    /// network-service syscall set.
+    ///
+    /// `readable_paths` covers the secret + binding stores (resolved by the
+    /// caller exactly as `assemble` does — config override or `~/.mvm`
+    /// default) plus the TLS root + DNS resolver files the reqwest
+    /// (`rustls-native-certs`) forward leg reads PER REQUEST during `serve`,
+    /// so they must stay readable AFTER confinement. The endpoint as assembled
+    /// attaches no audit recorder, so `read_write_paths` is empty.
+    ///
+    /// The syscall allowlist comes from the same canonical
+    /// `seccomp::BRIDGE_SYSCALLS` table the bridge uses — extended with the
+    /// extra syscalls the tokio multi-thread runtime + rustls TLS forward leg
+    /// touch (see the table's comments). On non-Linux targets the list is
+    /// empty (the stub `confine_self` errors; the bin hard-exits before
+    /// reaching it). `existing_paths` filters to paths that exist on this host
+    /// — `/etc/pki`, `/etc/resolv.conf`, etc. are distro-dependent, and a
+    /// missing readable path makes the Landlock `open` step fail closed.
+    pub fn substitution_endpoint(secret_store_dir: PathBuf, binding_store_dir: PathBuf) -> Self {
+        #[cfg(target_os = "linux")]
+        let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::BRIDGE_SYSCALLS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        #[cfg(not(target_os = "linux"))]
+        let allowed_syscalls: Vec<&'static str> = Vec::new();
+
+        // The forward leg uses reqwest's rustls-tls backend, which loads the
+        // host's native root store (rustls-native-certs reads /etc/ssl/certs +
+        // /etc/pki/tls). DNS goes through getaddrinfo (resolv.conf / hosts /
+        // nsswitch). These are read per request during serve, so they must be
+        // inside the Landlock ruleset.
+        let tls_dns_paths: Vec<PathBuf> = [
+            "/etc/ssl",
+            "/etc/pki",
+            "/etc/resolv.conf",
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let mut readable_paths = vec![secret_store_dir, binding_store_dir];
+        readable_paths.extend(tls_dns_paths);
+
+        Self {
+            // Filter to extant paths: /etc/pki / /etc/resolv.conf are distro-
+            // dependent, and Landlock's `open` on a missing path fails closed
+            // (PathNotFound), which would abort an otherwise-healthy endpoint.
+            readable_paths: existing_paths(readable_paths),
+            read_write_paths: Vec::new(),
+            allowed_syscalls,
+        }
+    }
+}
+
+/// Drop paths that don't exist on this host. Landlock installs a rule by
+/// `open`ing each path; a missing one returns `PathNotFound` and (per the
+/// hard-exit contract) would abort the process. The store dirs are created by
+/// the supervisor before spawn and the TLS/DNS files are present on any host
+/// that can actually make an egress call, but `/etc/pki` / `/etc/resolv.conf`
+/// vary by distro — filtering keeps the spec portable without weakening it
+/// (a path that isn't there grants no access anyway).
+fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.into_iter().filter(|p| p.exists()).collect()
 }
 
 /// Apply Landlock filesystem confinement then seccomp-BPF syscall
@@ -174,5 +245,73 @@ mod tests {
         assert!(!spec.allowed_syscalls.contains(&"ptrace"));
         assert!(!spec.allowed_syscalls.contains(&"setgid"));
         assert!(!spec.allowed_syscalls.contains(&"capset"));
+    }
+
+    #[test]
+    fn substitution_endpoint_spec_grants_read_on_stores() {
+        // Use real existing dirs so they survive the `existing_paths` filter;
+        // the binary's own crate manifest dir is guaranteed present.
+        let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bindings = store.clone();
+        let spec = ConfinementSpec::substitution_endpoint(store.clone(), bindings.clone());
+        assert!(
+            spec.readable_paths.iter().any(|p| p == &store),
+            "secret store dir must be readable"
+        );
+        assert!(
+            spec.readable_paths.iter().any(|p| p == &bindings),
+            "binding store dir must be readable"
+        );
+    }
+
+    #[test]
+    fn substitution_endpoint_spec_has_no_write_paths() {
+        // The endpoint as assembled attaches no audit recorder, so it needs no
+        // writable directory. If a recorder is ever wired into `assemble`, the
+        // audit dir must be added to `read_write_paths` (and this test updated).
+        let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let spec = ConfinementSpec::substitution_endpoint(store.clone(), store);
+        assert!(spec.read_write_paths.is_empty());
+    }
+
+    #[test]
+    fn substitution_endpoint_spec_drops_nonexistent_paths() {
+        // A bogus store dir is filtered out — Landlock's `open` on a missing
+        // path fails closed, which would abort an otherwise-healthy endpoint.
+        let missing = PathBuf::from("/definitely/not/a/real/store/dir/xyzzy");
+        let spec = ConfinementSpec::substitution_endpoint(missing.clone(), missing.clone());
+        assert!(
+            !spec.readable_paths.iter().any(|p| p == &missing),
+            "nonexistent store dir must be filtered out"
+        );
+    }
+
+    /// On Linux the endpoint allowlist is the bridge table plus the tokio +
+    /// TLS-forward additions. Assert the additions are present (the egress
+    /// path needs them) and the dangerous names still absent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn substitution_endpoint_allowlist_covers_tls_and_runtime() {
+        let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let spec = ConfinementSpec::substitution_endpoint(store.clone(), store);
+        // Thread creation for tokio workers / blocking pool.
+        assert!(spec.allowed_syscalls.contains(&"clone"));
+        // Socket-option negotiation (incl. SO_ORIGINAL_DST on the terminator).
+        assert!(spec.allowed_syscalls.contains(&"getsockopt"));
+        assert!(spec.allowed_syscalls.contains(&"setsockopt"));
+        // Cert-store dir read for rustls-native-certs.
+        assert!(spec.allowed_syscalls.contains(&"getdents64"));
+        // Still no privilege-escalation syscalls.
+        assert!(!spec.allowed_syscalls.contains(&"execve"));
+        assert!(!spec.allowed_syscalls.contains(&"ptrace"));
+        assert!(!spec.allowed_syscalls.contains(&"setuid"));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn substitution_endpoint_allowlist_empty_off_linux() {
+        let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let spec = ConfinementSpec::substitution_endpoint(store.clone(), store);
+        assert!(spec.allowed_syscalls.is_empty());
     }
 }
