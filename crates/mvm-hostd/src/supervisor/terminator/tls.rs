@@ -654,4 +654,234 @@ mod tests {
         assert_eq!(received.lock().unwrap().as_slice(), raw_hello);
         assert_eq!(back, b"SERVERHELLO-RAW");
     }
+
+    // ── adversarial: every refusal cause fails closed (forward never runs) ──
+
+    /// What a single TLS-terminated round-trip observed: the core's typed result,
+    /// whether the forward closure ran, and the request it (would have) sent.
+    struct Driven {
+        result: Result<(), String>,
+        forwarded: bool,
+        captured: Option<PreparedRequest>,
+    }
+
+    /// Drive one bound-host TLS round-trip through `terminate_and_substitute`.
+    /// The registry binds one bearer secret `openai`=`REALTOKEN` to
+    /// `bound_hosts`; `request` is templated with `{ph}` = the minted placeholder
+    /// then sent over a real rustls client that trusts the per-VM intermediate;
+    /// `action` selects the redaction posture. Returns what the terminator core
+    /// did — proving forward-not-called on any refusal. `dst_host` is the bound
+    /// SNI the terminator mints a leaf for (always termination-eligible).
+    fn drive_terminate(
+        bound_hosts: &[&str],
+        dst_host: &str,
+        action: RedactionAction,
+        request_template: &str,
+    ) -> Driven {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let inter = ca.mint_vm_intermediate(&[dst_host]).unwrap();
+        let inter = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+
+        let sdir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(sdir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("REALTOKEN".to_string())),
+            )
+            .unwrap();
+        let store: Arc<dyn SecretStore> = Arc::new(store);
+        let resolver = LocalResolver::new("local", store);
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg
+            .mint(bearer_ref("openai", bound_hosts))
+            .as_str()
+            .to_string();
+        let request = request_template.replace("{ph}", &ph);
+
+        let server_cfg = Arc::new(server_config_for_sni(&inter, dst_host).unwrap());
+        let captured: Arc<Mutex<Option<PreparedRequest>>> = Arc::new(Mutex::new(None));
+        let forwarded = Arc::new(Mutex::new(false));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cap = Arc::clone(&captured);
+        let fwd = Arc::clone(&forwarded);
+        let cfg = Arc::clone(&server_cfg);
+        let server = std::thread::spawn(move || -> Result<(), String> {
+            let (sock, _) = listener.accept().unwrap();
+            let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+            let orig_dst: SocketAddr = "203.0.113.7:443".parse().unwrap();
+            let redactor = RedactingSubstitution::with_default_rules();
+            let mut carried = false;
+            terminate_and_substitute(
+                sock,
+                cfg,
+                orig_dst,
+                &endpoint,
+                &redactor,
+                &action,
+                &mut carried,
+                |prepared| {
+                    *fwd.lock().unwrap() = true;
+                    *cap.lock().unwrap() = Some(prepared.clone());
+                    Ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi".to_vec())
+                },
+            )
+            .map(|_| ())
+            // Stringify so the variant marker survives the thread boundary; the
+            // Display format begins with the variant's literal prefix.
+            .map_err(|e| e.to_string())
+        });
+
+        // Guest: real rustls client trusting the per-VM intermediate. The
+        // handshake may fail to complete on the server's early refusal — that's
+        // fine, the assertion we care about is server-side (forward not called).
+        let client_cfg = Arc::new(client_config_trusting(inter.cert_pem()));
+        let server_name = rustls::pki_types::ServerName::try_from(dst_host.to_string()).unwrap();
+        let mut conn = rustls::ClientConnection::new(client_cfg, server_name).unwrap();
+        if let Ok(mut sock) = TcpStream::connect(addr) {
+            let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+            let _ = tls.write_all(request.as_bytes());
+            let _ = tls.flush();
+            let mut resp = Vec::new();
+            let _ = tls.read_to_end(&mut resp);
+        }
+        let result = server.join().unwrap();
+        Driven {
+            result,
+            forwarded: *forwarded.lock().unwrap(),
+            captured: captured.lock().unwrap().clone(),
+        }
+    }
+
+    #[test]
+    fn tls_unknown_placeholder_fails_closed_before_forwarding() {
+        // A made-up placeholder the registry never minted.
+        let req = "GET /v1/x HTTP/1.1\r\nhost: api.openai.com\r\n\
+                   authorization: Bearer mvm-secret-deadbeefdeadbeefdeadbeef\r\n\r\n";
+        let d = drive_terminate(
+            &["api.openai.com"],
+            "api.openai.com",
+            RedactionAction::default(),
+            req,
+        );
+        assert!(
+            d.result
+                .as_ref()
+                .is_err_and(|e| e.starts_with("substitution refused")),
+            "expected Refused, got {:?}",
+            d.result
+        );
+        assert!(
+            !d.forwarded,
+            "forward must not run on an unknown placeholder"
+        );
+    }
+
+    #[test]
+    fn tls_unbound_destination_fails_closed_before_forwarding() {
+        // A real (minted) placeholder bound to `other.example.com`, but the
+        // decrypted Host header dials `api.openai.com` (the bound SNI). The core
+        // re-checks the binding against the request URL and refuses — claim 12.
+        let req = "GET /v1/x HTTP/1.1\r\nhost: api.openai.com\r\n\
+                   authorization: Bearer {ph}\r\n\r\n";
+        let d = drive_terminate(
+            &["other.example.com"],
+            "api.openai.com",
+            RedactionAction::default(),
+            req,
+        );
+        assert!(
+            d.result
+                .as_ref()
+                .is_err_and(|e| e.starts_with("substitution refused")),
+            "expected Refused for unbound destination, got {:?}",
+            d.result
+        );
+        assert!(
+            !d.forwarded,
+            "forward must not run when the destination is unbound"
+        );
+    }
+
+    #[test]
+    fn tls_malformed_request_fails_closed_before_forwarding() {
+        // Absolute-form target — not the origin-form transparent path.
+        let req = "GET http://x/ HTTP/1.1\r\nhost: api.openai.com\r\n\r\n";
+        let d = drive_terminate(
+            &["api.openai.com"],
+            "api.openai.com",
+            RedactionAction::default(),
+            req,
+        );
+        assert!(
+            d.result
+                .as_ref()
+                .is_err_and(|e| e.starts_with("request parse failed")),
+            "expected Parse, got {:?}",
+            d.result
+        );
+        assert!(!d.forwarded, "forward must not run on a parse failure");
+    }
+
+    #[test]
+    fn tls_compressed_body_to_redaction_destination_fails_closed() {
+        use mvm_core::policy::EntropyMode;
+        let action = RedactionAction {
+            entropy: EntropyMode::Redact {
+                min_bits_per_char: 4.0,
+                min_run_len: 20,
+            },
+            ..Default::default()
+        };
+        let req = "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\n\
+                   content-encoding: gzip\r\ncontent-length: 5\r\n\r\nBYTES";
+        let d = drive_terminate(&["api.openai.com"], "api.openai.com", action, req);
+        assert!(
+            d.result
+                .as_ref()
+                .is_err_and(|e| e.starts_with("fail-closed")),
+            "expected FailClosed, got {:?}",
+            d.result
+        );
+        assert!(
+            !d.forwarded,
+            "forward must not run on a fail-closed refusal"
+        );
+    }
+
+    #[test]
+    fn tls_undeclared_secret_in_body_is_masked_before_forwarding() {
+        // A terminated request with no declared placeholder, but an UNDECLARED
+        // secret-shaped token in the body. The host must mask it before the
+        // upstream (forward) ever sees the raw bytes — the proof that the
+        // terminated `:443` path scrubs the cleartext body like the `:80` path.
+        let leaked = "sk-".to_owned() + &"z".repeat(48);
+        let body = format!("{{\"leak\":\"{leaked}\"}}");
+        let req = format!(
+            "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let d = drive_terminate(
+            &["api.openai.com"],
+            "api.openai.com",
+            RedactionAction::default(),
+            &req,
+        );
+        assert!(
+            d.result.is_ok(),
+            "clean-header request should forward: {:?}",
+            d.result
+        );
+        assert!(d.forwarded, "forward should have run");
+        let seen = d.captured.expect("forward ran");
+        let seen_body = String::from_utf8_lossy(&seen.body);
+        assert!(
+            !seen_body.contains(&leaked),
+            "undeclared secret reached the forward closure: {seen_body}"
+        );
+    }
 }

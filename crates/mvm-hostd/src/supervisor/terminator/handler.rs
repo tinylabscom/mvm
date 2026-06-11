@@ -82,6 +82,19 @@ mod tests {
         RedactingSubstitution::with_default_rules()
     }
 
+    /// An action opted into entropy redaction — arms the cleartext-scan
+    /// fail-closed gate (a compressed / over-cap body must be refused).
+    fn redaction_opted_in_action() -> RedactionAction {
+        use mvm_core::policy::EntropyMode;
+        RedactionAction {
+            entropy: EntropyMode::Redact {
+                min_bits_per_char: 4.0,
+                min_run_len: 20,
+            },
+            ..Default::default()
+        }
+    }
+
     /// Build a `(registry, resolver, _dir)` with one bearer secret `name`=`value`
     /// bound to `hosts`, and a minted placeholder ready to embed in requests.
     /// Returns `(registry, resolver, placeholder_string, _tempdir)`.
@@ -225,6 +238,180 @@ mod tests {
         assert!(
             !*forward_called.lock().unwrap(),
             "forward must not be called when substitution is refused"
+        );
+    }
+
+    #[test]
+    fn malformed_request_errors_before_forwarding() {
+        let (reg, resolver, _ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        // Not a parseable HTTP request line.
+        let raw = b"this is not http\r\n\r\n";
+        let orig_dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
+
+        let forward_called = Arc::new(Mutex::new(false));
+        let fc = Arc::clone(&forward_called);
+        let redactor = default_redactor();
+        let action = RedactionAction::default();
+        let result = handle_request(
+            raw,
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |_prepared, _dst| {
+                *fc.lock().unwrap() = true;
+                Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
+            },
+        );
+
+        assert!(
+            matches!(result, Err(TerminatorError::Parse(_))),
+            "expected Parse for malformed request, got {result:?}"
+        );
+        assert!(
+            !*forward_called.lock().unwrap(),
+            "forward must not run on a parse failure"
+        );
+    }
+
+    #[test]
+    fn compressed_body_to_redaction_destination_fails_closed_before_forwarding() {
+        let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        // A compressed body the host can't scan in cleartext, to a destination
+        // opted into redaction → must fail closed (a silent bypass otherwise).
+        // The gate triggers on the content-encoding header, not the body bytes,
+        // so a placeholder ASCII body is enough to prove the refusal.
+        let raw = format!(
+            "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\ncontent-encoding: gzip\r\n\
+             authorization: Bearer {ph}\r\ncontent-length: 5\r\n\r\nBYTES"
+        );
+        let orig_dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
+
+        let forward_called = Arc::new(Mutex::new(false));
+        let fc = Arc::clone(&forward_called);
+        let redactor = default_redactor();
+        let action = redaction_opted_in_action();
+        let result = handle_request(
+            raw.as_bytes(),
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |_prepared, _dst| {
+                *fc.lock().unwrap() = true;
+                Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
+            },
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(TerminatorError::FailClosed("fail_closed_compressed"))
+            ),
+            "expected FailClosed(compressed), got {result:?}"
+        );
+        assert!(
+            !*forward_called.lock().unwrap(),
+            "forward must not run on a fail-closed refusal"
+        );
+    }
+
+    #[test]
+    fn over_cap_body_to_redaction_destination_fails_closed_before_forwarding() {
+        let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        // A body one byte over the scan cap, to a redaction-opted-in destination
+        // → can't be scanned within bounds, so refuse rather than forward.
+        let over = mvm_core::policy::DEFAULT_BODY_CAP_BYTES as usize + 1;
+        let mut raw = format!(
+            "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer {ph}\r\n\
+             content-length: {over}\r\n\r\n"
+        )
+        .into_bytes();
+        raw.extend(std::iter::repeat_n(b'a', over));
+        let orig_dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
+
+        let forward_called = Arc::new(Mutex::new(false));
+        let fc = Arc::clone(&forward_called);
+        let redactor = default_redactor();
+        let action = redaction_opted_in_action();
+        let result = handle_request(
+            &raw,
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |_prepared, _dst| {
+                *fc.lock().unwrap() = true;
+                Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
+            },
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(TerminatorError::FailClosed("fail_closed_oversize"))
+            ),
+            "expected FailClosed(oversize), got {result:?}"
+        );
+        assert!(
+            !*forward_called.lock().unwrap(),
+            "forward must not run on a fail-closed refusal"
+        );
+    }
+
+    #[test]
+    fn undeclared_secret_in_body_is_masked_before_the_forward_sees_it() {
+        let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        // A declared placeholder in the header (substituted) plus an UNDECLARED
+        // secret-shaped token in the body (must be masked before egress).
+        let leaked = "sk-".to_owned() + &"z".repeat(48);
+        let body = format!("{{\"leak\":\"{leaked}\"}}");
+        let raw = format!(
+            "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer {ph}\r\n\
+             content-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let orig_dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
+
+        let captured: Arc<Mutex<Option<PreparedRequest>>> = Arc::new(Mutex::new(None));
+        let cap = Arc::clone(&captured);
+        let redactor = default_redactor();
+        let action = RedactionAction::default();
+        let (_resp, hits) = handle_request(
+            raw.as_bytes(),
+            orig_dst,
+            &endpoint,
+            &redactor,
+            &action,
+            |prepared, _dst| {
+                *cap.lock().unwrap() = Some(prepared.clone());
+                Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
+            },
+        )
+        .unwrap();
+
+        let seen = captured.lock().unwrap().clone().expect("forward ran");
+        // Declared secret: substituted to the real token.
+        let auth = seen
+            .headers
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert_eq!(auth, "Bearer REALTOKEN");
+        // Undeclared secret: masked — the forward never sees the raw bytes.
+        let seen_body = String::from_utf8_lossy(&seen.body);
+        assert!(
+            !seen_body.contains(&leaked),
+            "undeclared secret reached the forward closure: {seen_body}"
+        );
+        assert!(
+            !hits.is_empty(),
+            "a redaction hit should have been recorded"
         );
     }
 }
