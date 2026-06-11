@@ -374,6 +374,21 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         ),
     )?;
 
+    // The host-side vsock transport resolves the UDS via `vsock_uds_path`
+    // = `<instance_dir>/runtime/v.sock` (the convention the template/slot
+    // launch and the mock agent also use), but Firecracker binds the UDS
+    // one level up at `<instance_dir>/v.sock`. Expose it under `runtime/`
+    // too — a dangling symlink now, live once InstanceStart binds the
+    // socket. Without this, `wait_for_guest_agent` probes one directory
+    // too deep and every Firecracker boot reports "guest agent not
+    // reachable" even though the agent is up.
+    if let Err(e) = run_in_vm(&format!(
+        "mkdir -p {dir}/runtime && ln -sf ../v.sock {dir}/runtime/v.sock",
+        dir = abs_dir,
+    )) {
+        warn!("failed to expose vsock UDS under runtime/: {e}");
+    }
+
     Ok(())
 }
 
