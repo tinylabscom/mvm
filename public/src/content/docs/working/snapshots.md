@@ -1,19 +1,19 @@
 ---
 title: Snapshots and cold mode
-description: Pause a microVM into sealed state, save backend snapshots, and restore later with explicit integrity checks.
+description: Pause a microVM into sealed state, create checkpoints, and restore later with explicit integrity checks.
 ---
 
-Cold mode means a workload is not currently consuming a running guest, but it has recoverable state. In `mvm`, that state is represented by backend-specific snapshot artifacts.
+Cold mode means a workload is not currently consuming a running guest, but it has recoverable state. In `mvm`, that state is represented by backend-specific snapshot and checkpoint artifacts.
 
-## Current snapshot paths
+## Current snapshot and checkpoint paths
 
 | Path | Backend | Commands | Status |
 | --- | --- | --- | --- |
 | Sealed instance snapshot | Firecracker | `mvmctl pause`, `mvmctl resume`, `mvmctl snapshot ls`, `mvmctl snapshot rm` | Shipped for the Firecracker snapshot path. |
-| Machine-state file | Vz | `mvmctl snapshot save`, `mvmctl snapshot restore` | Shipped for Vz snapshot save/restore on supported macOS versions. |
+| Memory checkpoint (vm-full) | Vz | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore`, `mvmctl checkpoint ls`, `mvmctl checkpoint rm` | Shipped on supported macOS versions. |
 | Pool instance sleep | Firecracker pool lifecycle | internal pool lifecycle APIs | Implemented in pool lifecycle; public docs should stay tied to the CLI surface. |
 
-Other backends may support stop/start without machine-state recovery. Do not assume snapshot support unless the active backend reports it.
+Other backends may support stop/start without machine-state recovery. Do not assume snapshot or checkpoint support unless the active backend reports it.
 
 ## Firecracker pause and resume
 
@@ -40,18 +40,31 @@ mvmctl snapshot ls
 mvmctl snapshot rm agent-sandbox
 ```
 
-## Vz save and restore
+## Vz memory checkpoints
 
-On supported macOS hosts, Vz snapshots are file-based:
+On supported macOS hosts, Vz memory checkpoints capture full guest state:
 
 ```sh
-mvmctl snapshot save agent-sandbox --path /tmp/agent-sandbox.vzsnap --hypervisor vz
-mvmctl snapshot restore agent-sandbox --path /tmp/agent-sandbox.vzsnap --hypervisor vz
+mvmctl checkpoint create agent-sandbox --class vm-full
+mvmctl checkpoint restore agent-sandbox --name <checkpoint-name>
 ```
 
-The save path writes an opaque Vz machine-state file and records its SHA-256 in the audit chain when the persisted launch plan and host signer are available. Restore re-hashes the file and records whether the current bytes match the prior chain entry.
+`checkpoint create` pauses the VM, saves machine state and memory to the checkpoint directory, and records the content hash in the audit chain. `checkpoint restore` re-hashes the checkpoint content and records whether it matches the prior chain entry before restoring.
 
-The restore proceeds even when the snapshot is not in the local chain or the hash differs, because operators may transfer snapshots between hosts. The audit entry labels that result so the operator can review it.
+The restore proceeds even when the checkpoint hash is not in the local chain or has drifted, because operators may transfer checkpoints between hosts. The audit entry labels that result so the operator can review it.
+
+List and remove checkpoints:
+
+```sh
+mvmctl checkpoint ls
+mvmctl checkpoint rm agent-sandbox --name <checkpoint-name>
+```
+
+Fork a checkpoint to a new identity (new VM name, same state):
+
+```sh
+mvmctl checkpoint fork agent-sandbox --name <checkpoint-name> --into new-sandbox
+```
 
 ## Security implications
 

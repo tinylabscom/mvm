@@ -1,5 +1,21 @@
 # Plan 129 — local secret-workload launch via the admission flow (boot-e2e gate)
 
+> ✅ **SATISFIED / CLOSED (2026-06-10).** This gate is met on `main`. Kept for
+> historical context — do **not** re-run it as a fresh gate.
+> - **Route wired** — #745: `mvmctl compile` strips the `SecretRef` from the baked
+>   image + emits `workload.json`; `up --flake <dir>` auto-discovers it → lowers
+>   `plan.secrets` → admits → the QEMU backend spawns the `mvm-substitution-endpoint`.
+> - **Boot e2e box-validated on QEMU** — #745/#749/#755: the destination (httpbin)
+>   reflected the **real** `Authorization: Bearer …` while the guest held only
+>   `mvm-secret-…`; `substitution.pid` lived for the run and was reaped on stop;
+>   an unbound host was refused (claim 12).
+> - **Phase E** (undeclared secret/PII egress redactor) — #733, wired always-on.
+> - **Deferred (unchanged):** SigV4 forward-path signing (user decision).
+> - **Follow-on layer (separate):** https + Firecracker via the name-constrained
+>   CA — Plan 129 **Stage 2** (#761 code, #763 FC kernel fix), tracked in
+>   `specs/notes/plan-129-stage2-https-ca-tdd-plan.md`; its live https-on-FC box
+>   e2e (S2.7) is gated on FC guest-agent bringup, not on this prompt.
+
 > Session kickoff prompt. Paste as the opening message of the next session.
 
 ## Context

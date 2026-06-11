@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + undeclared redaction (box-validated); SDK-free terminator core (#735) + FC wiring (#744) landed; live FC e2e deferred to a bringup/debug session
+PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (box-validated on QEMU); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC kernel blocker fixed (#763); live FC https e2e gated only on agent bringup
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -41,10 +41,18 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] FC wiring: EgressRedirect (nft TAP redirect) + wire_egress_substitution + stop_vm reap — Task 5 — PR #744 (merged)
       (mechanism corrected: FC=TAP+nft NAT, not passt/skuid; passt path deferred to libkrun)
   [ ] live SDK-free FC box e2e — Task 6 — DEFERRED to a bringup/debug session
-      (prompt: specs/prompts/129-fc-bringup-debug.md). Gated on: published default
-      x86_64 kernel is bzImage not ELF vmlinux (#746); FC guest-agent reachability;
-      the local secret-launch glue below
-  [ ] Stage 2: name-constrained CA + https termination     — ADR-006; TDD plan: specs/notes/plan-129-stage2-https-ca-tdd-plan.md
+      (prompt: specs/prompts/129-fc-bringup-debug.md). Kernel blocker (published
+      x86_64 bzImage→ELF vmlinux, #746) FIXED — PR #763 (mvm_build::fc_kernel
+      auto-extracts at boot); local secret-launch glue DONE (#745). Remaining
+      gate: FC guest-agent reachability (live-debug on the dev-kvm box)
+  [x] Stage 2 S2.1–S2.6: name-constrained per-VM CA (crypto::egress_ca) + host
+      cert/key split + kernel-cmdline cert + placeholder-env delivery (mvm.egress_ca /
+      mvm.secret_env) + SNI-gated TLS terminator (terminate bound / splice unbound,
+      reqwest re-origination) + :443 nft redirect + ADR-006 Accepted / ADR-067
+      proxy-native-primary — PR #761; TDD plan: specs/notes/plan-129-stage2-https-ca-tdd-plan.md
+  [ ] Stage 2 S2.7: live SDK-free https FC box e2e — gated on the FC bringup above
+      (agent reachability) + a placeholder-env-at-boot path (resolved by Approach A
+      in #761; box-validation pending)
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)
@@ -109,10 +117,12 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
       SPRINT.md): multi-kernel keying; pool-status liveness filter;
       home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
-  [~] WS-2 checkpoint+fork — fs_quick class landed (#762): mvmctl checkpoint
+  [~] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (PR2): mvmctl checkpoint
       create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
-      checkpoint.created/forked audit + fs_quick_checkpoint capability + cache GC.
-      Remaining: vm_full (memory save/restore) + checkpoint diff + pause/resume wiring
+      checkpoint.created/forked/restored audit + fs_quick+vm_full capability +
+      vm_full memory save/restore (saveMachineStateToURL) + vm_full fork arm +
+      restore_checkpoint + retire snapshot save/restore. cache GC.
+      Remaining: checkpoint diff + pause/resume wiring (PR3)
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 
@@ -159,14 +169,28 @@ PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-ga
   [ ] T4 FirecrackerBackend::warm_start override + mvmctl verb + agent_ping e2e
   (Vz=152 WS-C; libkrun disk-only done #741; reflink clone = 123 C4 follow-up)
 
-PLAN 126 — Dependency reduction                 🔴 ~10%
+PLAN 126 — Dependency reduction                 🟡 ~25%
   [x] A1 re-baseline
   [x] B5 drop tokio from mvm-core (PR-1)
-  [ ] B1/B2/B4 prune sigstore/opendal/aws-lc
-  [ ] C1/D1 unify + lock gate
+  [x] B2 opendal → object_store (mvm template registry); opendal GONE,
+      lockfile 689→678 (−11)
+  [ ] B1 sigstore — already off default; needs cross-repo mvmd decision (relocate cosign-verify)
+  [ ] B3 pgp (168) — SUPERSEDED by plan 160 (drop Alpine seed); security decision
+  [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
+  [ ] C1/D1 unify reqwest majors + lock gate
 
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
+
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
+  [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
+  [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
+  [x] Phase 1 fold microvm_nix → qemu
+  [x] Phase 1 prune dead CI lane + Justfile setup recipe
+  [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
+      4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
+  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
+      onto supervisor vz + shared console transport + drop apple-container
 
 PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands

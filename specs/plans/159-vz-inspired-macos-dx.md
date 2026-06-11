@@ -185,17 +185,21 @@ Clone the reference's **tiered, fail-closed checkpoint model** and bring
 snapshots to the `apple_container` runtime tier (currently
 `snapshots=false`).
 
-- [~] Two classes, fail-closed (no silent degradation): `fs_quick`
+- [x] Two classes, fail-closed (no silent degradation): `fs_quick`
       (default) backed by our existing **APFS CoW** rootfs clone (fast,
       filesystem-only) — **landed PR1**; `vm_full` backed by
       `saveMachineStateToURL` / `restoreMachineStateFromURL` (memory state,
-      macOS 14+) — **PR2**. Reject `vm_full` with a hard error when the
-      backend can't honor it.
-- [x] First-class **fork**: branch a new sandbox lineage from a
-      checkpoint (`fork <ckpt> [--new-id]`), reusing the per-instance CoW
-      clone we already do.
+      macOS 14+) — **landed PR2**. Rejects `vm_full` with a hard error when
+      the backend can't honor it. `snapshot save`/`snapshot restore` retired.
+- [x] `restore_checkpoint` — same-identity resume from `vm_full` state;
+      re-hashes blobs, records `checkpoint.restored` audit entry.
+- [x] `vm_full` **fork arm** — new-identity restore (rewrite config,
+      fresh audit lineage, `checkpoint.forked` entry). First-class **fork**:
+      branch a new sandbox lineage from a checkpoint (`fork <ckpt> [--new-id]`),
+      reusing the per-instance CoW clone we already do.
 - [ ] `checkpoint diff <a> <b>` — versioned diff between two checkpoints
       (the reference's `diff` verb), for inspecting what a fork changed.
+      **(PR3)**
 - [x] `--tag` to pin a checkpoint against GC; untagged ones follow cache
       retention (`cache prune` already exists — extend it).
 - [x] Flip `apple_container` `capabilities()` to advertise the supported

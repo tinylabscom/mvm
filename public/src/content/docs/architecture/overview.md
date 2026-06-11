@@ -35,4 +35,4 @@ The runtime should be understandable from evidence:
 - the audit chain records runtime decisions;
 - credentials are references and grants;
 - network access is explicitly mediated;
-- snapshot restore carries backend-specific integrity evidence.
+- checkpoint and snapshot restore carry backend-specific integrity evidence.

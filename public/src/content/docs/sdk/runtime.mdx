@@ -126,7 +126,7 @@ The same core operations should exist across Python, TypeScript, and Rust:
 The runtime SDK should expose cold mode as a first-class lifecycle state, not as an implementation detail. `mvm` already has backend-specific snapshot primitives:
 
 - Firecracker `mvmctl pause` / `mvmctl resume` writes and verifies sealed instance snapshots.
-- Vz `mvmctl snapshot save` / `mvmctl snapshot restore` stores machine-state files and records hashes in the audit chain.
+- Vz `mvmctl checkpoint create --class vm-full` / `mvmctl checkpoint restore` captures memory state and records content hashes in the audit chain.
 - Pool instances have Sleeping/Running restore paths for base and delta snapshots.
 
 The SDK contract should hide backend mechanics but not hide security semantics. A cold sandbox still has sensitive state on disk. Restore should surface whether the snapshot matched the recorded audit hash or seal, and retention policy must be explicit.

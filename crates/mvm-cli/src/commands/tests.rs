@@ -1906,6 +1906,62 @@ fn test_checkpoint_ls_json_parses() {
     ));
 }
 
+#[test]
+fn test_checkpoint_create_vm_full_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "create",
+        "myvm",
+        "--class",
+        "vm-full",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create {
+                    class: checkpoint::CheckpointClassArg::VmFull,
+                    ..
+                }
+            })
+        })
+    ));
+}
+
+#[test]
+fn test_checkpoint_restore_parses() {
+    assert!(Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "restore", "ckpt-abc"]).is_ok());
+}
+
+#[test]
+fn test_checkpoint_create_defaults_fs_quick() {
+    let cli = Cli::try_parse_from(["mvmctl", "vm", "checkpoint", "create", "myvm"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Create {
+                    class: checkpoint::CheckpointClassArg::FsQuick,
+                    ..
+                }
+            })
+        })
+    ));
+}
+
+#[test]
+fn test_snapshot_save_is_gone() {
+    assert!(Cli::try_parse_from(["mvmctl", "snapshot", "save", "vm", "--path", "/x"]).is_err());
+}
+
+#[test]
+fn test_snapshot_restore_is_gone() {
+    assert!(Cli::try_parse_from(["mvmctl", "snapshot", "restore", "vm", "--path", "/x"]).is_err());
+}
+
 // --- Catalog CLI tests (plan 40 replaced `mvmctl image *`) ---
 
 #[test]
