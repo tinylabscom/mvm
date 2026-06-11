@@ -175,17 +175,6 @@ fn hex_decode_utf8(s: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// True when the kernel cmdline carries the `mvm.backend=qemu` marker —
-/// the dev-tier QEMU builder. The host (`qemu_builder`)
-/// adds this token; libkrun/Vz/Firecracker boots don't. Used to skip the
-/// egress lockdown on the dev-tier builder, where it has no security claim
-/// and would only break networked flake builds. Pure over the cmdline
-/// string so it's unit-testable without `/proc`.
-#[cfg(any(target_os = "linux", test))]
-fn dev_tier_builder_from_cmdline(cmdline: &str) -> bool {
-    cmdline.split_whitespace().any(|t| t == "mvm.backend=qemu")
-}
-
 /// Parse the `mvm.uvols=` token out of a kernel cmdline. Format:
 /// `mvm.uvols=<tag>:<hex(path)>:<ro|rw>:<fs|blk>;...`. Best-effort:
 /// malformed entries are skipped rather than failing (a bad mount must
@@ -527,26 +516,6 @@ mod tests {
     #[test]
     fn parse_user_volumes_cmdline_absent_is_empty() {
         assert!(parse_user_volumes_cmdline("console=hvc0 root=/dev/vda rw").is_empty());
-    }
-
-    #[test]
-    fn dev_tier_marker_detected_for_qemu_backend() {
-        assert!(dev_tier_builder_from_cmdline(
-            "console=ttyS0 root=/dev/vda ro init=/sbin/mvm-host-vm-init mvm.backend=qemu net.ifnames=0"
-        ));
-    }
-
-    #[test]
-    fn dev_tier_marker_absent_for_prod_backends() {
-        // libkrun/Vz/Firecracker boots carry no `mvm.backend=qemu` — the
-        // egress lockdown stays mandatory there.
-        assert!(!dev_tier_builder_from_cmdline(
-            "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init"
-        ));
-        // Substring-but-not-token must not match (no `mvm.backend=qemufoo`).
-        assert!(!dev_tier_builder_from_cmdline(
-            "console=hvc0 mvm.backend=qemubuilder"
-        ));
     }
 
     #[test]
@@ -897,75 +866,11 @@ mod linux {
         let _ = track_b.join();
         let _ = track_c.join();
 
-        // In-guest egress lockdown — defense-in-depth. Installs
-        // iptables OUTPUT default-deny + proxy-uid-only ACCEPT so a
-        // build step that ignores HTTP_PROXY env vars cannot bypass
-        // `mvm-egress-proxy`. FATAL on failure — without these
-        // rules the builder VM's egress allowlist is unenforced
-        // and the egress claim's transitive trust onto the
-        // builder VM has no defense layer. (Note: this is
-        // installed even when `setup_network()` failed, because
-        // the rules don't depend on a working IP address —
-        // offline builds still need the policy in place in case
-        // a substituter URL is reached via cache rather than
-        // network.)
-        // The QEMU builder is a dev-tier substrate with NO security
-        // claims. The egress lockdown is an egress-enforcement defense
-        // for the prod (libkrun / Firecracker) builder; on the dev-tier
-        // QEMU builder it would only break networked flake builds — nix
-        // can't reach substituters or fetch flake-input sources under
-        // `OUTPUT` DROP, because a flake `cmd.sh` runs with no proxy (the
-        // proxy path is install-pipeline only). Skip it for
-        // `mvm.backend=qemu` so slirp gives nix open egress; every prod
-        // backend stays locked.
-        let qemu_dev_tier = crate::dev_tier_builder_from_cmdline(
-            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
-        );
-        if qemu_dev_tier {
-            eprintln!(
-                "mvm-host-vm-init: egress lockdown SKIPPED — dev-tier QEMU builder \
-                 (mvm.backend=qemu); ADR-072: no security claims, dev only"
-            );
-        } else if let Err(e) = crate::network::install_egress_lockdown(
-            &crate::network::SystemIptables,
-            crate::network::PROXY_UID,
-        ) {
-            // In the Stage 0 bootstrap context the
-            // libkrunfw-bundled kernel ships without netfilter — both
-            // `iptables-nft` and `iptables-legacy` bail with "table
-            // does not exist" or "protocol not supported" at the first
-            // rule install. The egress lockdown is defense-in-depth
-            // for the deps-install pipeline (untrusted code
-            // running in the steady-state builder VM). Stage 0 only
-            // runs flake builds — `nix build` against a pinned
-            // `path:/work#…` reference — where Nix's own fixed-output
-            // derivation hashes carry the integrity guarantee. We
-            // log + continue rather than fail closed.
-            //
-            // The steady-state builder VM image (built by Stage 0 via
-            // the in-repo TSI-patched kernel under
-            // `nix/images/builder-vm/kernel/`) carries netfilter, so
-            // this fallback only triggers in Stage 0 — the audit
-            // signal still distinguishes the two contexts.
-            if egress_error_indicates_no_netfilter(&e) {
-                eprintln!(
-                    "mvm-host-vm-init: egress lockdown SKIPPED (kernel lacks netfilter — \
-                     Stage 0 / libkrunfw-bundled-kernel context): {e}"
-                );
-            } else {
-                eprintln!("mvm-host-vm-init: egress lockdown FAILED (fatal): {e}");
-                write_result(2, &format!("egress lockdown failed: {e}"));
-                return power_off();
-            }
-        }
-
         // Fork the guest agent under setpriv so the builder/dev VM runs
-        // the *same* agent every workload VM does
-        // (vsock 5252). After the egress lockdown so the agent comes up
-        // behind the same egress floor; non-fatal so a missing agent or
-        // spawn failure never wedges PID 1 — the builder protocol is the
-        // primary job, the agent is additive (mirrors the workload /init,
-        // which also never blocks on the agent).
+        // the *same* agent every workload VM does (vsock 5252). Non-fatal
+        // so a missing agent or spawn failure never wedges PID 1 — the
+        // builder protocol is the primary job, the agent is additive
+        // (mirrors the workload /init, which also never blocks on the agent).
         fork_guest_agent();
 
         // Dispatch: if the host staged a
@@ -1600,6 +1505,25 @@ mod linux {
         }
     }
 
+    /// Set the iptables OUTPUT posture for the given job kind before
+    /// dispatch. Install jobs lock egress (flush + uid-only ACCEPT)
+    /// so untrusted dep code can't reach the network directly; flake
+    /// jobs open egress so nix can fetch substitutes without a proxy.
+    /// Separated from `execute_dispatched_job` so the mapping is
+    /// directly testable — the match is the policy, and an inversion
+    /// would be silent without a unit test pinning the sequences.
+    fn apply_job_posture(
+        job: &crate::builder_request::BuilderJob,
+        ip: &dyn crate::network::IptablesRunner,
+    ) -> Result<(), String> {
+        match job {
+            crate::builder_request::BuilderJob::Install { .. } => {
+                crate::network::reapply_egress_lockdown(ip, crate::network::PROXY_UID)
+            }
+            crate::builder_request::BuilderJob::Flake { .. } => crate::network::open_egress(ip),
+        }
+    }
+
     /// Run one dispatched job: locate cmd.sh under
     /// `/job/<job_dir_relpath>/cmd.sh`, exec it, stream every
     /// stderr line back to `conn` as a `HostVmResponse::StderrChunk`
@@ -1618,22 +1542,17 @@ mod linux {
         job_dir_relpath: &str,
         cold_boot_timings: Option<BootTimings>,
     ) -> String {
-        // Flush + re-install the egress
-        // lockdown before every dispatch. A previous build that
-        // mutated iptables (whether via a CAP_NET_ADMIN leak or
-        // because we haven't shipped the cap drop yet) loses its
-        // changes here. Fail closed: if iptables is broken we
-        // refuse the dispatch — that's safer than running a
-        // build against a chain whose state we no longer trust.
-        if let Err(e) = crate::network::reapply_egress_lockdown(
-            &crate::network::SystemIptables,
-            crate::network::PROXY_UID,
-        ) {
-            eprintln!("mvm-host-vm-init: dispatch loop: iptables baseline re-apply failed: {e}");
+        // Set per-job egress posture before dispatch. The install arm
+        // also locks at its own entry for defense in depth, but this
+        // outer reset ensures a prior flake job's open chain never
+        // leaks into a following install and vice versa.
+        let posture_result = apply_job_posture(&job, &crate::network::SystemIptables);
+        if let Err(e) = posture_result {
+            eprintln!("mvm-host-vm-init: dispatch loop: egress posture failed: {e}");
             let response = crate::dispatch_response::DispatchResponse {
                 job_id,
                 exit_code: 126,
-                stderr_tail: format!("iptables baseline re-apply failed: {e}"),
+                stderr_tail: format!("egress posture failed: {e}"),
                 boot_timings: cold_boot_timings,
                 build_ms: 0,
             };
@@ -1886,6 +1805,7 @@ mod linux {
             runner: &runner,
             extra_path: None,
             proxy: &mut proxy,
+            iptables: &crate::network::SystemIptables,
         };
         let report = match run_install(ctx) {
             Ok(r) => r,
@@ -1903,6 +1823,11 @@ mod linux {
             Err(InstallError::Io(why)) => {
                 eprintln!("mvm-host-vm-init: install pipeline IO: {why}");
                 write_install_failure_at(out_dir, 2, &format!("install pipeline IO: {why}"));
+                return;
+            }
+            Err(InstallError::EgressLockdown(e)) => {
+                eprintln!("mvm-host-vm-init: egress lockdown failed (fatal): {e}");
+                write_install_failure_at(out_dir, 2, &format!("egress lockdown failed: {e}"));
                 return;
             }
         };
@@ -1953,18 +1878,6 @@ mod linux {
         }
     }
 
-    /// Detect the "kernel ships without netfilter / iptables
-    /// tables" error pattern. Matches both the iptables-nft Protocol
-    /// not supported and the iptables-legacy "Table does not exist /
-    /// do you need to insmod?" surfaces. A future netlink-based check
-    /// would be more robust, but this regex-of-substrings catches the
-    /// only two error shapes the libkrunfw-bundled kernel produces.
-    fn egress_error_indicates_no_netfilter(err: &str) -> bool {
-        err.contains("Table does not exist")
-            || err.contains("Failed to initialize nft")
-            || err.contains("Protocol not supported")
-    }
-
     fn mount_pseudofs() -> Result<(), String> {
         // Standard init filesystems. libkrun's kernel mounts
         // devtmpfs (and sometimes /proc /sys) before handing off to
@@ -1976,12 +1889,10 @@ mod linux {
         mount_fs_idempotent("devtmpfs", "/dev", "devtmpfs")?;
         mount_fs_idempotent("tmpfs", "/tmp", "tmpfs")?;
         // `/run` must be a tmpfs so iptables-legacy can write
-        // `/run/xtables.lock`. The rootfs is mounted ro, so a missing
-        // `/run` tmpfs makes `install_egress_lockdown` bail with
+        // `/run/xtables.lock`. The rootfs is mounted ro, so without this
+        // `install_egress_lockdown` (called from the install arm) bails with
         // "Read-only file system" at the first `iptables -A` call.
-        // mkGuest's /init does the equivalent for the dev image's
-        // boot path; we replicate it here for the mvm-host-vm-init
-        // path.
+        // mkGuest's /init does the equivalent for the dev image's boot path.
         mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
         // `/dev/shm` (tmpfs) is required by libfaketime's `sem_open`:
         // `make-ext4-fs.nix` runs `mkfs.ext4` under faketime for
@@ -3367,6 +3278,114 @@ mod linux {
             std::fs::create_dir(&store).expect("create store");
             std::fs::create_dir(store.join("abc123-some-pkg")).expect("create closure path");
             assert!(!nix_store_needs_seed(base.path()));
+        }
+
+        // --- apply_job_posture tests ---
+
+        struct RecordingIp {
+            calls: std::cell::RefCell<Vec<Vec<String>>>,
+            fail_at: Option<usize>,
+        }
+
+        impl RecordingIp {
+            fn new() -> Self {
+                Self {
+                    calls: std::cell::RefCell::new(Vec::new()),
+                    fail_at: None,
+                }
+            }
+            fn fail_at(idx: usize) -> Self {
+                Self {
+                    calls: std::cell::RefCell::new(Vec::new()),
+                    fail_at: Some(idx),
+                }
+            }
+        }
+
+        impl crate::network::IptablesRunner for RecordingIp {
+            fn run(&self, args: &[&str]) -> Result<(), String> {
+                let mut calls = self.calls.borrow_mut();
+                let idx = calls.len();
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                if Some(idx) == self.fail_at {
+                    Err(format!("forced failure at {idx}"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn install_job() -> crate::builder_request::BuilderJob {
+            crate::builder_request::BuilderJob::Install {
+                spec_path: "/job/spec.json".to_string(),
+            }
+        }
+
+        fn flake_job() -> crate::builder_request::BuilderJob {
+            crate::builder_request::BuilderJob::Flake {
+                flake_ref: "path:/work".to_string(),
+                attr_path: "packages.aarch64-linux.default".to_string(),
+            }
+        }
+
+        #[test]
+        fn apply_job_posture_install_emits_flush_then_three_lockdown_rules() {
+            let ip = RecordingIp::new();
+            apply_job_posture(&install_job(), &ip).expect("happy path");
+            let calls = ip.calls.borrow();
+            // flush + 3 rules = 4 invocations
+            assert_eq!(calls.len(), 4);
+            assert_eq!(calls[0], vec!["-F".to_string(), "OUTPUT".to_string()]);
+            assert_eq!(
+                calls[1],
+                vec![
+                    "-A".to_string(),
+                    "OUTPUT".to_string(),
+                    "-o".to_string(),
+                    "lo".to_string(),
+                    "-j".to_string(),
+                    "ACCEPT".to_string(),
+                ]
+            );
+            assert!(calls[2].iter().any(|a| a == "--uid-owner"));
+            assert!(
+                calls[2]
+                    .iter()
+                    .any(|a| a == &crate::network::PROXY_UID.to_string())
+            );
+            assert!(calls[2].iter().any(|a| a == "ACCEPT"));
+            assert_eq!(
+                calls[3],
+                vec!["-P".to_string(), "OUTPUT".to_string(), "DROP".to_string()]
+            );
+        }
+
+        #[test]
+        fn apply_job_posture_flake_emits_flush_then_accept_policy() {
+            let ip = RecordingIp::new();
+            apply_job_posture(&flake_job(), &ip).expect("happy path");
+            let calls = ip.calls.borrow();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0], vec!["-F".to_string(), "OUTPUT".to_string()]);
+            assert_eq!(
+                calls[1],
+                vec!["-P".to_string(), "OUTPUT".to_string(), "ACCEPT".to_string()]
+            );
+        }
+
+        #[test]
+        fn apply_job_posture_install_propagates_error() {
+            // Fail at invocation 0 (the flush) — error surfaces immediately.
+            let ip = RecordingIp::fail_at(0);
+            let result = apply_job_posture(&install_job(), &ip);
+            assert!(result.is_err(), "posture error must propagate");
+        }
+
+        #[test]
+        fn apply_job_posture_flake_propagates_error() {
+            let ip = RecordingIp::fail_at(0);
+            let result = apply_job_posture(&flake_job(), &ip);
+            assert!(result.is_err(), "posture error must propagate");
         }
     }
 }

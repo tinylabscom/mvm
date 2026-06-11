@@ -92,7 +92,7 @@ Per-arm posture keeps the lockdown exactly where the threat is.
   tier token only if nothing else consumes `mvm.backend=qemu`; verify with rg first)
 - Modify: `nix/images/builder-vm/flake.nix` (egress comment block ~:160)
 
-- [ ] **A1: add `open_egress` to `network.rs` with tests.** New function beside
+- [x] **A1: add `open_egress` to `network.rs` with tests.** New function beside
   `install_egress_lockdown`:
 
   ```rust
@@ -108,14 +108,14 @@ Per-arm posture keeps the lockdown exactly where the threat is.
 
   Tests (same `RecordingRunner` pattern as the existing module tests): exact
   invocation sequence; first-call failure propagates.
-- [ ] **A2: remove the boot-time lockdown.** Delete the
+- [x] **A2: remove the boot-time lockdown.** Delete the
   `qemu_dev_tier`/`install_egress_lockdown` block from `run()`
   (`mvm-host-vm-init.rs` ~:900-960) including the
   `egress_error_indicates_no_netfilter` Stage-0 fallback branch it guards (keep the
   helper only if the install-arm path still needs it — it does not: the steady-state
   builder kernel carries netfilter, and the install arm must fail closed). Delete
   `dev_tier_builder_from_cmdline` (:185) and its tests; it has no remaining callers.
-- [ ] **A3: lock at install-arm entry.** At the top of `run_install`
+- [x] **A3: lock at install-arm entry.** At the top of `run_install`
   (`install.rs:305`), before the egress proxy spawn and any dep tooling runs:
 
   ```rust
@@ -129,17 +129,17 @@ Per-arm posture keeps the lockdown exactly where the threat is.
   Add the `EgressLockdown(String)` variant to `InstallError` (fail-closed: a builder
   whose kernel can't enforce the lockdown refuses install jobs). Unit-test via the
   existing `run_install_with_fakes` seam (inject a failing runner → install refuses).
-- [ ] **A4: per-job posture in the persistent dispatch loop.** At the ~:1628
+- [x] **A4: per-job posture in the persistent dispatch loop.** At the ~:1628
   `reapply_egress_lockdown` site, set posture by job kind instead of
   unconditionally re-locking: install dispatch → `reapply_egress_lockdown`,
   flake-build dispatch → `open_egress`. Failure stays a hard refusal of the
   dispatched job either way.
-- [ ] **A5: drop the QEMU boot-skip remnants + fix comments.** Remove the
+- [x] **A5: drop the QEMU boot-skip remnants + fix comments.** Remove the
   `mvm.builder-tier` skip prose from the builder flake's egress comment block and
   describe the per-arm posture instead. In `qemu_builder.rs:142` keep
   `mvm.backend=qemu` only if `rg "mvm.backend"` shows another consumer (stage0's
   backend detection does consume it — verify before touching).
-- [ ] **A6: gates.** `cargo fmt --all -- --check`,
+- [x] **A6: gates.** `cargo fmt --all -- --check`,
   `cargo clippy --workspace -- -D warnings`,
   `cargo nextest run -p mvm-build`, then commit
   `fix(builder-vm): scope egress lockdown to the install arm`.
