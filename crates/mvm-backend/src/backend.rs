@@ -436,7 +436,7 @@ impl AnyBackend {
     /// state-dir marker file, so `down` / `status` dispatch to the VMM that
     /// actually launched it rather than a platform default. The pid-file
     /// backends each drop a distinct marker under `vm_state_dir(name)`:
-    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`.
+    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`, Vz `vz.pid`.
     ///
     /// Returns `None` when no marker is present — the VM isn't one of the
     /// pid-file backends (e.g. Apple Container, which tracks state
@@ -450,6 +450,8 @@ impl AnyBackend {
             Some(Self::Libkrun(LibkrunBackend))
         } else if dir.join("fc.pid").is_file() {
             Some(Self::Firecracker(FirecrackerBackend))
+        } else if dir.join("vz.pid").is_file() {
+            Some(Self::Vz(VzBackend))
         } else {
             None
         }
@@ -889,6 +891,34 @@ mod tests {
     }
 
     #[test]
+    fn for_started_vm_resolves_vz_by_marker() {
+        let temp = std::path::PathBuf::from(format!(
+            "/tmp/mvmac-fsv-vz-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let vms = temp.join(".mvm/vms");
+        std::fs::create_dir_all(vms.join("vzvm")).expect("mkdir vm dir");
+        std::fs::write(vms.join("vzvm").join("vz.pid"), "12345").expect("write marker");
+        let saved = std::env::var("HOME").ok();
+        // SAFETY: for_started_vm (HOME consumer) is the only env reader in
+        // this test; restored below.
+        unsafe { std::env::set_var("HOME", &temp) };
+        let result = AnyBackend::for_started_vm("vzvm");
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        assert!(matches!(result, Some(AnyBackend::Vz(_))), "vz.pid → Vz");
+    }
+
+    #[test]
     fn test_auto_select_returns_valid_backend() {
         let backend = AnyBackend::auto_select();
         let name = backend.name();
@@ -1037,6 +1067,11 @@ mod tests {
         assert!(
             fc.capabilities().pause_resume,
             "firecracker: capability flag must say pause_resume=true (matches the real impl)"
+        );
+        let vz = AnyBackend::from_hypervisor("vz");
+        assert!(
+            vz.capabilities().pause_resume,
+            "vz: capability flag must say pause_resume=true (matches the real impl)"
         );
     }
 
