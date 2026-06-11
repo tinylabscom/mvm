@@ -1068,6 +1068,11 @@ mod tests {
             fc.capabilities().pause_resume,
             "firecracker: capability flag must say pause_resume=true (matches the real impl)"
         );
+        let vz = AnyBackend::from_hypervisor("vz");
+        assert!(
+            vz.capabilities().pause_resume,
+            "vz: capability flag must say pause_resume=true (matches the real impl)"
+        );
     }
 
     // Plan 76 Phase 7 — BackendTier coverage.
