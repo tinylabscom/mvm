@@ -25,7 +25,7 @@ use ipnet::IpNet;
 use thiserror::Error;
 
 use crate::policy::dns_pin::DnsPinRegistry;
-use crate::policy::network_policy::is_mandatory_deny;
+use crate::policy::network_policy::{is_mandatory_deny, mandatory_deny_ranges};
 use crate::policy::resolver::EffectivePolicy;
 
 /// L4 protocol of a canonical rule. The string forms `"tcp"` /
@@ -123,6 +123,29 @@ pub enum ProjectionError {
     ExpiredPin { host: String, expires_at: String },
     #[error("DNS pin for {host:?} has an empty IP set")]
     EmptyPin { host: String },
+    #[error("grant for {dest:?} overlaps mandatory-deny range {range}")]
+    MandatoryDenyOverlap { dest: String, range: IpNet },
+}
+
+/// True when two CIDRs share any address. For valid CIDRs, two
+/// nets overlap iff one contains the other's network address.
+fn nets_overlap(a: &IpNet, b: &IpNet) -> bool {
+    a.contains(&b.network()) || b.contains(&a.network())
+}
+
+/// Refuse any grant net that intersects a mandatory-deny range.
+/// Projection-time belt; `CanonicalEgress::permits` keeps the
+/// decision-time suspenders.
+fn refuse_mandatory_overlap(dest: &str, net: &IpNet) -> Result<(), ProjectionError> {
+    for deny in mandatory_deny_ranges() {
+        if nets_overlap(&deny, net) {
+            return Err(ProjectionError::MandatoryDenyOverlap {
+                dest: dest.to_string(),
+                range: deny,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Normalize the wire-format any-port wildcard `(0, 0)` to the
@@ -157,6 +180,7 @@ pub fn canonicalize_effective(
                 cidr: spec.dst_cidr.clone(),
                 source,
             })?;
+        refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
         let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
         rules.push(CanonicalRule {
             proto: Proto::parse(&spec.proto)?,
@@ -206,9 +230,11 @@ fn pinned_allow_list_rules(
         }
         let (port_lo, port_hi) = normalize_ports(*port, *port);
         for pinned in &pin.ips {
+            let net = host_net(*pinned);
+            refuse_mandatory_overlap(host, &net)?;
             rules.push(CanonicalRule {
                 proto: Proto::Tcp,
-                net: host_net(*pinned),
+                net,
                 port_lo,
                 port_hi,
             });
@@ -542,6 +568,78 @@ mod tests {
         let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
         assert!(
             matches!(err, ProjectionError::EmptyPin { .. }),
+            "got {err:?}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────
+    // mandatory-deny overlap refusals
+    // ─────────────────────────────────────────────────
+
+    #[test]
+    fn l4_rule_overlapping_mandatory_deny_refuses() {
+        for cidr in [
+            "169.254.0.0/16",
+            "169.254.169.254/32",
+            "127.0.0.0/8",
+            "100.64.0.0/10",
+        ] {
+            let eff = eff_with_l4(vec![l4("tcp", cidr, 0, 0)]);
+            let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+            assert!(
+                matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
+                "{cidr}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn l4_supernet_of_mandatory_deny_refuses() {
+        // A /0 covers every deny range — refuse, don't carve.
+        let eff = eff_with_l4(vec![l4("tcp", "0.0.0.0/0", 443, 443)]);
+        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rebinding_pin_into_metadata_range_refuses() {
+        // A policy-permitted host whose admission-time resolution
+        // lands in the cloud metadata range is a refusal, not a pin.
+        let eff = eff_with_allow(vec![("rebind.example.com", 443)]);
+        let pins = registry(vec![pin("rebind.example.com", &["169.254.169.254"])]);
+        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rebinding_pin_into_loopback_v6_refuses() {
+        let eff = eff_with_allow(vec![("rebind6.example.com", 443)]);
+        let pins = registry(vec![pin("rebind6.example.com", &["::1"])]);
+        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_pin_one_bad_ip_refuses_whole_projection() {
+        // One good IP + one metadata IP: fail-closed on the whole
+        // projection, no partial admit.
+        let eff = eff_with_allow(vec![("mixed.example.com", 443)]);
+        let pins = registry(vec![pin(
+            "mixed.example.com",
+            &["93.184.216.34", "169.254.169.254"],
+        )]);
+        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
             "got {err:?}"
         );
     }
