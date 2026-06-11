@@ -189,8 +189,7 @@ fn libc_eopnotsupp() -> i32 {
 /// Per-instance rootfs path for `vm_name`: `<vm_state_dir>/rootfs.ext4`. Each
 /// running VM owns its own writable copy so the hypervisor can attach it
 /// writable without conflicting with sibling instances, and the source template
-/// stays pristine. Shared by every backend that needs per-instance ownership
-/// (Plan 53 Plan D / Plan 177 AVF convergence).
+/// stays pristine. Shared by every backend that needs per-instance ownership.
 pub fn instance_rootfs_path(vm_name: &str) -> Result<PathBuf> {
     Ok(mvm_core::config::vm_state_dir(vm_name).join("rootfs.ext4"))
 }

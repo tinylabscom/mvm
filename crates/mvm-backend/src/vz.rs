@@ -232,12 +232,11 @@ impl VmBackend for VzBackend {
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
         crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
-        // Per-instance rootfs (Plan 53 Plan D / Plan 177 AVF convergence). A
-        // non-verity image gets a CoW clone so each VM owns a *writable* root —
-        // pristine template, multi-instance isolation, and the foundation the
-        // checkpoint/fork/warm-pool features build on. A verity/sealed image
-        // stays the read-only golden rootfs (dm-verity requires an immutable,
-        // read-only backing). APFS CoW makes the clone O(1).
+        // A non-verity image gets a CoW clone so each VM owns a writable root:
+        // pristine template, multi-instance isolation, and a clean substrate
+        // for features that require per-instance disk ownership. A verity/sealed
+        // image stays on the read-only golden rootfs because dm-verity requires
+        // an immutable backing. APFS CoW makes the clone O(1).
         let sealed = config.verity_path.is_some();
         let mut launch_config = config.clone();
         if !sealed {
@@ -247,15 +246,15 @@ impl VmBackend for VzBackend {
                     .into_owned();
         }
 
-        // Plan 102 W6.A.5 — spawn host-side gvproxy so the supervisor has
-        // something to connect to. VzBackend is stateless; the child is detached
+        // Spawn host-side gvproxy so the supervisor has something to connect to.
+        // VzBackend is stateless; the child is detached
         // (PID file under state dir lets `stop()` find it later).
         let gvproxy_info = host_gvproxy::spawn_detached(&state_dir)
             .map_err(|e| anyhow!("spawn host-side gvproxy for Vz VM '{}': {e}", config.name))?;
 
         // Vz config build. The `?` propagates allowlist failures from
-        // `audit_substrate::compute_audit_substrate` (unsafe tenant_id
-        // / vm_name) — see Plan 112 Phase 3c.
+        // `audit_substrate::compute_audit_substrate` for unsafe tenant_id /
+        // vm_name values.
         let mut cfg = build_supervisor_config(&launch_config, kernel, &state_dir, &gvproxy_info)?;
         // Attach the rootfs writable for the per-instance clone; verity/sealed
         // stays read-only (the builder defaults read-only).
@@ -1202,7 +1201,7 @@ fn vz_cmdline_with_user_volumes(config: &VmStartConfig) -> String {
 
 /// Best-effort removal of the per-instance rootfs clone on teardown. A verity
 /// VM never created one (it ran the read-only golden), so a missing file is
-/// normal. Mirrors the Apple-container path's cleanup (Plan 53 Plan D).
+/// normal. Mirrors the Apple-container path's cleanup.
 fn remove_instance_rootfs(vm_name: &str) {
     if let Ok(path) = crate::base::cow::instance_rootfs_path(vm_name)
         && path.exists()
