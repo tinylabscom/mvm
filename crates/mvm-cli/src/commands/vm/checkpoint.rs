@@ -18,6 +18,7 @@ use mvm_backend::checkpoint::{
 };
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
 use mvm_core::config::vm_state_dir;
+use mvm_hostd::audit::bind::class_str;
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -361,10 +362,7 @@ fn ls(json: bool) -> Result<()> {
         "ID", "CLASS", "VM", "TAG"
     );
     for m in &metas {
-        let class = match m.class {
-            mvm_core::checkpoint::CheckpointClass::FsQuick => "fs_quick",
-            mvm_core::checkpoint::CheckpointClass::VmFull => "vm_full",
-        };
+        let class = class_str(m.class);
         println!(
             "{:<32} {:<10} {:<20} {:<8} {}",
             m.id.as_str(),
