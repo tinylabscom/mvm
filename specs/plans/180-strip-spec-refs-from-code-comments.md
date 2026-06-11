@@ -1,8 +1,8 @@
-# Plan 176 — Strip plan/PR/ADR/sprint references from code comments (Implementation Plan)
+# Plan 180 — Strip plan/PR/ADR/sprint references from code comments (Implementation Plan)
 
-> **Numbering:** 176 is the next free plan number (`origin/main` holds plans
-> through 175 — 175 = firecracker-warmstart). `check-spec-numbers` rejects
-> duplicates — confirm still-free at merge time.
+> **Numbering:** 180 is the next free plan number (`origin/main` holds plans
+> through 179 — 176 = supervisor-standby-pool, 179 = rvproxy). `check-spec-numbers`
+> rejects duplicates — confirm still-free at merge time.
 
 > **For agentic workers:** mechanical, high-volume sweep. Use
 > `superpowers:subagent-driven-development` and fan the file list out to
