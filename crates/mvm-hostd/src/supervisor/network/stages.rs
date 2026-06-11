@@ -161,7 +161,9 @@ impl RedactingSubstitution {
         // Curated secrets: default Block masks (today's behavior); a per-destination
         // Audit downgrade observes a trusted sink without masking.
         let (mut buf, secrets) = match action.secrets {
-            SecretAction::Block | SecretAction::Redact => self.secrets.redact(payload, REDACTION_MASK),
+            SecretAction::Block | SecretAction::Redact => {
+                self.secrets.redact(payload, REDACTION_MASK)
+            }
             SecretAction::Audit => (payload.to_vec(), self.secrets.scan(payload)),
         };
 
@@ -698,7 +700,10 @@ mod tests {
             .expect("default masks pii+secrets");
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("alice@example.com"), "email not masked: {s}");
-        assert!(!s.contains("AKIAIOSFODNN7EXAMPLE"), "secret not masked: {s}");
+        assert!(
+            !s.contains("AKIAIOSFODNN7EXAMPLE"),
+            "secret not masked: {s}"
+        );
         assert!(hits.pii.contains(&"email"));
         assert!(!hits.secrets.is_empty());
     }
@@ -741,7 +746,10 @@ mod tests {
             String::from_utf8_lossy(&out).contains("AKIAIOSFODNN7EXAMPLE"),
             "audit mode must not mask the secret"
         );
-        assert!(!hits.secrets.is_empty(), "audit mode must still count the hit");
+        assert!(
+            !hits.secrets.is_empty(),
+            "audit mode must still count the hit"
+        );
     }
 
     #[test]

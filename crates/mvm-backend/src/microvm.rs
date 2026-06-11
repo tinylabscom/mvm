@@ -2432,8 +2432,13 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
 #[cfg(target_os = "linux")]
 fn decode_plan_secrets(
     state_dir: &std::path::Path,
-) -> Result<Option<(Vec<mvm_core::plan::SecretBinding>, mvm_core::policy::RedactionPolicy, String)>>
-{
+) -> Result<
+    Option<(
+        Vec<mvm_core::plan::SecretBinding>,
+        mvm_core::policy::RedactionPolicy,
+        String,
+    )>,
+> {
     let plan_path = state_dir.join("plan.json");
     let plan_json = match std::fs::read_to_string(&plan_path) {
         Ok(s) => s,

@@ -326,10 +326,7 @@ impl SubstitutionService {
         &self,
         payload: &[u8],
         action: &mvm_core::policy::RedactionAction,
-    ) -> Option<(
-        Vec<u8>,
-        crate::supervisor::network::stages::RedactionHits,
-    )> {
+    ) -> Option<(Vec<u8>, crate::supervisor::network::stages::RedactionHits)> {
         self.redactor.redact_bytes_for(payload, action)
     }
 
@@ -1446,10 +1443,8 @@ mod server_tests {
     #[test]
     fn from_plan_threads_redaction_policy_onto_the_service() {
         use crate::keyholder::{FileBindingStore, SecretBindingMeta};
-        use mvm_core::policy::{
-            EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile,
-        };
         use mvm_core::plan::{SecretBinding, SecretSource};
+        use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
 
         let dir = tempdir().unwrap();
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
@@ -1465,7 +1460,11 @@ mod server_tests {
             .unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
-            .put("local", "openai", &SecretBox::new(Box::new("sk".to_string())))
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk".to_string())),
+            )
             .unwrap();
         let secret_store: Arc<dyn SecretStore> = Arc::new(store);
 
@@ -1502,8 +1501,10 @@ mod server_tests {
             None,
         )
         .unwrap();
-        let resolved =
-            crate::supervisor::redaction_resolve::resolve(service.redaction_policy(), "api.openai.com");
+        let resolved = crate::supervisor::redaction_resolve::resolve(
+            service.redaction_policy(),
+            "api.openai.com",
+        );
         assert!(
             matches!(resolved.entropy, EntropyMode::Redact { .. }),
             "redaction policy did not reach the service: {:?}",

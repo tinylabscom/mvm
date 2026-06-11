@@ -1121,22 +1121,23 @@ The five slices ship the complete detection + per-destination **mechanism**
 tested and leak-free. What remains to make it **reachable + complete** in
 production:
 
-- [ ] **Admission wiring (makes the feature reachable).** Nothing yet reads a
-  workload-authored redaction policy and calls
-  `SubstitutionService::with_redaction_policy`. Add a `redaction:
-  RedactionPolicy` field to the workload egress policy (mvm-core), thread it
-  through `from_plan` / the supervisor's endpoint-spawn site, and call the
-  builder. Until this lands the feature is mechanism-only — only tests
-  construct a policy; a real workload gets the default all-off action.
-- [ ] **Consume `RedactionAction.pii`.** `redact_bytes_for` currently runs the
-  always-on default PII ruleset and ignores the per-destination `pii`
-  mode/categories. Needs a semantic pass: how a per-destination PII disposition
-  composes with the always-on Phase E redaction (today's curated PII is masked
-  unconditionally). Fail-open risk: an operator setting `pii.mode=block` gets a
-  silent no-op until this lands (the field is doc-marked RESERVED meanwhile).
-- [ ] **Consume `RedactionAction.secrets`.** Curated secrets are always masked
-  (Block-equivalent) regardless of the action; wire the per-destination
-  disposition (field doc-marked RESERVED meanwhile).
+- [x] **Admission carriage (makes the feature reachable end-to-end).** DONE:
+  `redaction: RedactionPolicy` rides inline in the signed `ExecutionPlan` (and
+  `EgressPolicy`); `redaction_from_signed_json` extracts it; the backend
+  (`qemu.rs` + `microvm.rs` endpoint-spawn) extracts it and serializes it into
+  `EndpointConfig`; the endpoint bin's `from_plan` calls `with_redaction_policy`.
+  A plan carrying a redaction policy now flows through to the live service.
+- [ ] **mvm-side authoring surface (the remaining reachability gap).** The CLI
+  synth path (`plan_builder.rs`) only handles policy *refs* — it never resolves
+  a full `EgressPolicy`, so `ExecutionPlan.redaction` is always default on the
+  mvm path. There's no `mvmctl`/workload-IR way for a user to *set*
+  `redaction_profiles` yet. mvmd (fleet) can author it via the bundle; the
+  mvm-standalone authoring surface (a flag or IR field) is the open item.
+- [x] **Consume `RedactionAction.pii` / `.secrets`.** DONE: `redact_bytes_for`
+  honors the per-destination disposition — default preserves today's always-on
+  masking; `pii.mode="disabled"` skips PII for a destination, a category list
+  restricts it; `secrets=Audit` counts without masking. Fields no longer
+  RESERVED.
 - [ ] **Terminator-path redaction + fail-closed gate.** `handle_terminator_connection`
   (the `:80`/`:443` bound-host TLS terminator) does no redaction and no
   fail-closed gate — it never resolves the policy. A redaction-opted-in
