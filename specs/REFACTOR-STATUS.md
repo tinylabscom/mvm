@@ -40,11 +40,16 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
   [x] redirect mechanism box-validated: nft prerouting iifname<tap> REDIRECT + SO_ORIGINAL_DST (Task 0')
   [x] FC wiring: EgressRedirect (nft TAP redirect) + wire_egress_substitution + stop_vm reap — Task 5 — PR #744 (merged)
       (mechanism corrected: FC=TAP+nft NAT, not passt/skuid; passt path deferred to libkrun)
-  [ ] live SDK-free FC box e2e — Task 6 — DEFERRED to a bringup/debug session
+  [ ] live SDK-free FC box e2e — Task 6 — in progress on the dev-kvm box.
       (prompt: specs/prompts/129-fc-bringup-debug.md). Kernel blocker (published
       x86_64 bzImage→ELF vmlinux, #746) FIXED — PR #763 (mvm_build::fc_kernel
-      auto-extracts at boot); local secret-launch glue DONE (#745). Remaining
-      gate: FC guest-agent reachability (live-debug on the dev-kvm box)
+      auto-extracts at boot); local secret-launch glue DONE (#745). FC
+      guest-agent reachability FIXED + box-validated (`up` exit 0): the host
+      transport resolved the vsock UDS at <dir>/runtime/v.sock but FC bound it
+      at <dir>/v.sock, and the connect pre-flight rejected symlinked UDSes
+      (symlink_metadata) — fixed by exposing the UDS under runtime/ + making
+      the pre-flight follow symlinks (also fixes the template path's symlink).
+      Remaining: run the secret-substitution egress e2e itself.
   [x] Stage 2 S2.1–S2.6: name-constrained per-VM CA (crypto::egress_ca) + host
       cert/key split + kernel-cmdline cert + placeholder-env delivery (mvm.egress_ca /
       mvm.secret_env) + SNI-gated TLS terminator (terminate bound / splice unbound,
