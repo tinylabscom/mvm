@@ -103,9 +103,11 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
         redaction_from_signed_json → backend EndpointConfig → from_plan →
         with_redaction_policy (a plan carrying redaction flows end-to-end);
         consume per-dest pii/secrets disposition (no longer RESERVED)
-    [ ] remaining: mvm-side AUTHORING surface (CLI/IR to set redaction_profiles —
-        plan_builder only has policy refs; mvmd can author via bundle),
-        terminator-path redaction, live PII spans. See plan §"Deferred follow-ups".
+    [x] CLI authoring: `mvmctl up --redact HOST[=audit]` parses a per-destination
+        RedactionPolicy → SynthesisInput → synthesize_plan sets ExecutionPlan.redaction
+    [ ] remaining: IR/SDK developer-declared authoring (the only open variant; mvmd
+        can author via bundle), terminator-path redaction, live PII spans.
+        See plan §"Deferred follow-ups".
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 

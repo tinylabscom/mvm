@@ -546,6 +546,25 @@ fn test_up_manifest_flag() {
 }
 
 #[test]
+fn test_up_redact_flag_parses_repeatably() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "up",
+        "--redact",
+        "api.openai.com",
+        "--redact",
+        "logs.example.com=audit",
+    ])
+    .unwrap();
+    match cli.command {
+        Commands::Up(up::Args { redact, .. }) => {
+            assert_eq!(redact, vec!["api.openai.com", "logs.example.com=audit"]);
+        }
+        _ => panic!("Expected Up command"),
+    }
+}
+
+#[test]
 fn test_up_dev_flag_resolves_dev_mode() {
     let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", ".", "--dev"]).unwrap();
     match cli.command {

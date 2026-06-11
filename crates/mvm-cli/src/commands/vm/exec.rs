@@ -548,6 +548,7 @@ fn emit_oci_run_admission(
         bundle_pin: None,
         deps_volume: None,
         shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
     };
     let ledger = InMemoryNonceLedger::new();
     let admitted = admit_for_run(&input, &SystemClock, &ledger, None, None)?;

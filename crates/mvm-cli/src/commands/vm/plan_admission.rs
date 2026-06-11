@@ -438,6 +438,7 @@ mod tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         }
     }
 
