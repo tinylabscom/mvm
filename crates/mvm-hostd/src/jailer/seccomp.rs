@@ -116,6 +116,9 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // Rust std emits the legacy `mkdir` on x86_64.
     ("mkdir", libc::SYS_mkdir),
     ("mkdirat", libc::SYS_mkdirat),
+    // tokio's runtime queries CPU affinity when it spawns workers after
+    // confinement (worker count / NUMA placement).
+    ("sched_getaffinity", libc::SYS_sched_getaffinity),
 ];
 
 #[cfg(target_arch = "aarch64")]
@@ -196,6 +199,9 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // `mkdirat` (the policy layer keeps both names).
     ("mkdir", libc::SYS_mkdirat),
     ("mkdirat", libc::SYS_mkdirat),
+    // tokio's runtime queries CPU affinity when it spawns workers after
+    // confinement (worker count / NUMA placement).
+    ("sched_getaffinity", libc::SYS_sched_getaffinity),
 ];
 
 /// Resolve a syscall by name to its `libc::SYS_*` number on the current
