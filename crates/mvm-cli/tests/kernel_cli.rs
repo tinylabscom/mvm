@@ -18,7 +18,7 @@ fn mvmctl(args: &[&str]) -> std::process::Output {
 /// `mvmctl kernel --help` lists the `build` subcommand.
 #[test]
 fn kernel_help_lists_build() {
-    let out = mvmctl(&["kernel", "--help"]);
+    let out = mvmctl(&["build", "kernel", "--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -35,7 +35,7 @@ fn kernel_help_lists_build() {
 /// `mvmctl kernel build --help` names its flags.
 #[test]
 fn kernel_build_help_names_flags() {
-    let out = mvmctl(&["kernel", "build", "--help"]);
+    let out = mvmctl(&["build", "kernel", "build", "--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
     for expected in &[
@@ -51,7 +51,7 @@ fn kernel_build_help_names_flags() {
 /// `--arch` accepts only the two supported arches.
 #[test]
 fn kernel_build_rejects_unknown_arch() {
-    let out = mvmctl(&["kernel", "build", "--arch", "riscv64"]);
+    let out = mvmctl(&["build", "kernel", "build", "--arch", "riscv64"]);
     assert!(
         !out.status.success(),
         "unknown --arch value should fail to parse"
@@ -71,7 +71,7 @@ fn global_kernel_source_rejects_unknown() {
 /// `--which` accepts only the two kernels; a bogus value is rejected.
 #[test]
 fn kernel_build_rejects_unknown_which() {
-    let out = mvmctl(&["kernel", "build", "--which", "bogus"]);
+    let out = mvmctl(&["build", "kernel", "build", "--which", "bogus"]);
     assert!(
         !out.status.success(),
         "unknown --which value should fail to parse"

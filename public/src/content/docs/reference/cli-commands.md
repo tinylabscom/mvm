@@ -12,15 +12,23 @@ In particular, `mvmctl` does not expose `tenant`, `policy`, or `deploy`
 subcommands; tenant lifecycle, tenant policy authoring/review, and deployment to
 the hosted control plane are `mvmd` responsibilities.
 
-The intentionally kept top-level command families are:
+**Command grouping (Plan 178).** The surface is organized into a small set
+of top-level daily-driver verbs plus noun groups; operations on a single
+running VM live under `vm`, build-time verbs under `build`, observability
+under `ops`, install/environment lifecycle under `env`, and provenance &
+verification under `trust`. Domains that already own their own subcommands
+(`image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`,
+`secret`, `bundle`, `deps`, `artifact`) stay top-level.
 
-| Family | Commands |
+| Group / top-level | Commands |
 |--------|----------|
-| Environment | `bootstrap`, `dev`, `doctor`, `update`, `shell-init`, `cleanup`, `uninstall`, `config`, `cache` |
-| Build and run | `init`, `build`, `compile`, `validate`, `up`, `down`, `run`, `exec`, `invoke`, `ls`, `logs`, `forward`, `console`, `wait`, `boot-report` |
-| Guest RPC and lifecycle | `fs`, `proc`, `cp`, `diff`, `set-ttl`, `pause`, `resume`, `snapshot`, `checkpoint`, `session`, `sandbox`, `volume` |
-| Artifacts and trust | `manifest`, `bundle`, `trust`, `artifact`, `receipt`, `catalog`, `deps`, `storage` |
-| Local operations | `audit`, `attest`, `metrics`, `network`, `mcp`, `secret` |
+| Daily drivers (top-level) | `up`, `run`, `exec`, `invoke`, `ls`, `console`, `down`, `logs`, `dev`, `doctor`, `init` |
+| `vm <sub>` | `pause`, `resume`, `snapshot`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
+| `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel` |
+| `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
+| `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
+| `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
+| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
 
 | Command | Description |
 |---------|-------------|
@@ -47,22 +55,22 @@ The intentionally kept top-level command families are:
 | `mvmctl ls` | List running VMs (aliases: `ps`, `status`) |
 | `mvmctl ls -a` | Show all VMs including stopped |
 | `mvmctl ls --json` | Output as JSON |
-| `mvmctl forward <name> -p PORT` | Forward a port from a running VM to localhost |
+| `mvmctl vm forward <name> -p PORT` | Forward a port from a running VM to localhost |
 | `mvmctl logs <name>` | View guest console logs (`-f` to follow, `-n` for line count) |
 | `mvmctl logs <name> --hypervisor` | View Firecracker hypervisor logs |
-| `mvmctl diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
-| `mvmctl diff <name> --json` | Output filesystem diff as JSON |
-| `mvmctl wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |
-| `mvmctl wait <name> --timeout <secs> --interval-ms <ms>` | Tune the deadline and poll cadence. Defaults: 60s / 250ms. |
-| `mvmctl boot-report <name>` | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4. |
-| `mvmctl boot-report <name> --json` | Same payload as JSON. |
+| `mvmctl vm diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
+| `mvmctl vm diff <name> --json` | Output filesystem diff as JSON |
+| `mvmctl vm wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |
+| `mvmctl vm wait <name> --timeout <secs> --interval-ms <ms>` | Tune the deadline and poll cadence. Defaults: 60s / 250ms. |
+| `mvmctl vm boot-report <name>` | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4. |
+| `mvmctl vm boot-report <name> --json` | Same payload as JSON. |
 
 ## Environment Management
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl bootstrap` | Full setup from scratch: Homebrew deps (macOS), Firecracker, kernel, rootfs (idempotent — safe to re-run) |
-| `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
+| `mvmctl env bootstrap` | Full setup from scratch: Homebrew deps (macOS), Firecracker, kernel, rootfs (idempotent — safe to re-run) |
+| `mvmctl env bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
 | `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects Vz on macOS 26+ Apple Silicon and retries with libkrun when that auto-selected Vz builder path fails; native KVM is used on Linux. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
@@ -81,25 +89,25 @@ The intentionally kept top-level command families are:
 | `mvmctl dev import-image <path>` | Side-load a pre-built dev image artifact into the cache (air-gapped install path; from plan 36 sealed builder image) |
 | `mvmctl doctor` | Run diagnostics + dependency checks + security posture (folded in from the dropped `mvmctl security` verb) |
 | `mvmctl doctor --json` | Output diagnostics as JSON |
-| `mvmctl update` | Check for and install mvmctl updates |
-| `mvmctl update --check` | Only check for updates, don't install |
-| `mvmctl update --force` | Force reinstall even if already up to date |
-| `mvmctl update --skip-verify` | Skip cosign signature verification |
+| `mvmctl env update` | Check for and install mvmctl updates |
+| `mvmctl env update --check` | Only check for updates, don't install |
+| `mvmctl env update --force` | Force reinstall even if already up to date |
+| `mvmctl env update --skip-verify` | Skip cosign signature verification |
 
 ## Building
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl build <path>` | Build from Mvmfile.toml in the given directory |
-| `mvmctl build --flake <ref>` | Build from a Nix flake (local or remote) |
-| `mvmctl build --flake <ref> --profile <variant>` | Build a specific flake package variant |
-| `mvmctl build --flake <ref> --watch` | Build and rebuild on flake.lock changes |
-| `mvmctl build --json` | Output structured JSON events instead of human-readable output |
-| `mvmctl build -o <path>` | Output path for the built .elf image |
-| `mvmctl cleanup` | Remove old dev-build artifacts and run Nix garbage collection |
-| `mvmctl cleanup --all` | Remove all cached build revisions |
-| `mvmctl cleanup --keep <N>` | Keep the N newest build revisions |
-| `mvmctl cleanup --verbose` | Print each cached build path that gets removed |
+| `mvmctl build image <path>` | Build from Mvmfile.toml in the given directory |
+| `mvmctl build image --flake <ref>` | Build from a Nix flake (local or remote) |
+| `mvmctl build image --flake <ref> --profile <variant>` | Build a specific flake package variant |
+| `mvmctl build image --flake <ref> --watch` | Build and rebuild on flake.lock changes |
+| `mvmctl build image --json` | Output structured JSON events instead of human-readable output |
+| `mvmctl build image -o <path>` | Output path for the built .elf image |
+| `mvmctl env cleanup` | Remove old dev-build artifacts and run Nix garbage collection |
+| `mvmctl env cleanup --all` | Remove all cached build revisions |
+| `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |
+| `mvmctl env cleanup --verbose` | Print each cached build path that gets removed |
 
 ## Manifests
 
@@ -118,16 +126,16 @@ The intentionally kept top-level command families are:
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl build [PATH]` | Build the manifest at `PATH` (file or directory; default: cwd walk-up). Persists artifacts to a slot keyed by `sha256(canonical_manifest_path)`. Subsumes today's `mvmctl build --flake .` and the legacy `Mvmfile.toml` flow into one verb |
-| `mvmctl build [PATH] --force` | Rebuild even if the cache hits |
-| `mvmctl build [PATH] --snapshot` | After build, boot, wait for healthy, and capture a Firecracker snapshot (Firecracker backend only) |
-| `mvmctl build [PATH] --update-hash` | Recompute the Nix fixed-output derivation hash |
-| `mvmctl build [PATH] --vcpus N --mem SIZE --data-disk SIZE` | CLI overrides for resource sizing; persisted to the slot record |
-| `mvmctl build [PATH] --json` | Stream structured build events |
+| `mvmctl build image [PATH]` | Build the manifest at `PATH` (file or directory; default: cwd walk-up). Persists artifacts to a slot keyed by `sha256(canonical_manifest_path)`. Subsumes today's `mvmctl build image --flake .` and the legacy `Mvmfile.toml` flow into one verb |
+| `mvmctl build image [PATH] --force` | Rebuild even if the cache hits |
+| `mvmctl build image [PATH] --snapshot` | After build, boot, wait for healthy, and capture a Firecracker snapshot (Firecracker backend only) |
+| `mvmctl build image [PATH] --update-hash` | Recompute the Nix fixed-output derivation hash |
+| `mvmctl build image [PATH] --vcpus N --mem SIZE --data-disk SIZE` | CLI overrides for resource sizing; persisted to the slot record |
+| `mvmctl build image [PATH] --json` | Stream structured build events |
 
 ### Running (top-level — already manifest-aware)
 
-`mvmctl up [PATH]` and `mvmctl exec [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-exec) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
+`mvmctl up [PATH]` and `mvmctl exec [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build image`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-exec) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
 
 ### Inspection / registry (`mvmctl manifest *`)
 
@@ -148,17 +156,17 @@ The intentionally kept top-level command families are:
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl config show` | Print current config as TOML |
-| `mvmctl config edit` | Open the config file in $EDITOR (falls back to nano) |
-| `mvmctl config set <key> <value>` | Set a single config key (e.g. `mvmctl config set dev_vm_cpus 4`) |
+| `mvmctl ops config show` | Print current config as TOML |
+| `mvmctl ops config edit` | Open the config file in $EDITOR (falls back to nano) |
+| `mvmctl ops config set <key> <value>` | Set a single config key (e.g. `mvmctl ops config set dev_vm_cpus 4`) |
 
 ## Audit
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl audit tail` | Show the last 20 audit events from /var/log/mvm/audit.jsonl |
-| `mvmctl audit tail -n <N>` | Show the last N audit events |
-| `mvmctl audit tail -f` | Follow audit log output (poll until Ctrl-C) |
+| `mvmctl trust audit tail` | Show the last 20 audit events from /var/log/mvm/audit.jsonl |
+| `mvmctl trust audit tail -n <N>` | Show the last N audit events |
+| `mvmctl trust audit tail -f` | Follow audit log output (poll until Ctrl-C) |
 
 ## Local Secrets
 
@@ -202,11 +210,11 @@ admission until their transports are wired.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl validate` | Validate a Nix flake before building (current directory) |
-| `mvmctl validate --flake <ref>` | Validate a specific flake path or reference |
-| `mvmctl validate --json` | Output structured JSON instead of human-readable output |
+| `mvmctl build validate` | Validate a Nix flake before building (current directory) |
+| `mvmctl build validate --flake <ref>` | Validate a specific flake path or reference |
+| `mvmctl build validate --json` | Output structured JSON instead of human-readable output |
 
-> Plan 40 renamed this verb from `mvmctl flake check` to `mvmctl validate`.
+> Plan 40 renamed this verb from `mvmctl flake check` to `mvmctl build validate`.
 
 ## Networks
 
@@ -288,8 +296,8 @@ dev-feature guest agent; production guests should use `mvmctl invoke`.
 | `mvmctl run --receipt <path> -- <cmd>` | Write a signed JSON receipt with invocation hashes, output hashes, and exit status. Raw argv, env values, stdout, and stderr are not stored. |
 | `mvmctl run --json -- <cmd>` | Print a redacted JSON execution summary with invocation metadata and output hashes. Guest stdout/stderr are not streamed. |
 | `mvmctl run --json --receipt <path> -- <cmd>` | Print the same JSON summary and also write a signed receipt artifact |
-| `mvmctl receipt verify <path>` | Verify a signed run receipt against `~/.mvm/keys/host-signer.pub` |
-| `mvmctl receipt verify <path> --pubkey <path>` | Verify a signed run receipt against an explicit raw Ed25519 public key |
+| `mvmctl trust receipt verify <path>` | Verify a signed run receipt against `~/.mvm/keys/host-signer.pub` |
+| `mvmctl trust receipt verify <path> --pubkey <path>` | Verify a signed run receipt against an explicit raw Ed25519 public key |
 
 `run --dry-run` is a preflight-only path. It validates profile, env-key,
 resource, and host-share policy, then reports hashes and policy-relevant
@@ -305,10 +313,10 @@ paths.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl sandbox gc` | Dry-run cleanup of stale sandbox name-registry entries for stopped or expired VMs |
-| `mvmctl sandbox gc --dry-run` | Explicit dry-run; reports candidates and does not mutate state |
-| `mvmctl sandbox gc --apply` | Remove stale stopped/expired registry entries and emit a `SandboxGc` audit entry |
-| `mvmctl sandbox gc --json` | Print a machine-readable GC summary with candidates, reasons, and removed count |
+| `mvmctl vm sandbox gc` | Dry-run cleanup of stale sandbox name-registry entries for stopped or expired VMs |
+| `mvmctl vm sandbox gc --dry-run` | Explicit dry-run; reports candidates and does not mutate state |
+| `mvmctl vm sandbox gc --apply` | Remove stale stopped/expired registry entries and emit a `SandboxGc` audit entry |
+| `mvmctl vm sandbox gc --json` | Print a machine-readable GC summary with candidates, reasons, and removed count |
 
 `sandbox gc` never tears down a live VM. Entries that still appear as starting,
 running, or paused in a backend listing are skipped; cleanup only removes stale
@@ -334,12 +342,12 @@ Checkpoint blobs are stored under `~/.mvm/vms/<name>/checkpoints/<checkpoint-nam
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl cp <host-path> <vm>:/absolute/path` | Copy one regular file from the host into a running VM |
-| `mvmctl cp <vm>:/absolute/path <host-path>` | Copy one regular file from a running VM to the host |
-| `mvmctl cp --force <src> <dst>` | Overwrite an existing destination |
-| `mvmctl cp --create-parents <src> <dst>` | Create destination parent directories |
-| `mvmctl cp --max-bytes <n> <src> <dst>` | Refuse copies larger than the byte cap. Default: 16 MiB |
-| `mvmctl cp --json <src> <dst>` | Print a machine-readable copy summary without host paths or file contents |
+| `mvmctl vm cp <host-path> <vm>:/absolute/path` | Copy one regular file from the host into a running VM |
+| `mvmctl vm cp <vm>:/absolute/path <host-path>` | Copy one regular file from a running VM to the host |
+| `mvmctl vm cp --force <src> <dst>` | Overwrite an existing destination |
+| `mvmctl vm cp --create-parents <src> <dst>` | Create destination parent directories |
+| `mvmctl vm cp --max-bytes <n> <src> <dst>` | Refuse copies larger than the byte cap. Default: 16 MiB |
+| `mvmctl vm cp --json <src> <dst>` | Print a machine-readable copy summary without host paths or file contents |
 
 Exactly one endpoint must use `VM:/absolute/path` form. Guest paths are
 validated by the guest agent's filesystem policy before any read or write. Host
@@ -382,7 +390,7 @@ mvmctl exec --launch-plan ./launch.json                # launch-plan entrypoint
 auto-detected. Only the entrypoint is consumed (image selection
 still comes from `--manifest` or the bundled default in v1). Both
 shapes were historically produced by the `mvmforge` toolchain
-([migration guide](/guides/mvmforge-migration/)); `mvmctl compile`
+([migration guide](/guides/mvmforge-migration/)); `mvmctl build compile`
 is the canonical producer today.
 
 **LaunchPlan artifact** (top-level `entrypoint`):
@@ -445,19 +453,19 @@ to cold boot with a warning rather than aborting the exec. See the
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl volume create <name>` | Create a locked mvm-managed encrypted local volume archive |
-| `mvmctl volume create <name> --root <absolute-dir>` | Create the mvm-managed encrypted volume under a specific root |
-| `mvmctl volume create <name> --host-backed` | Create the previous host-backed managed directory, requiring encrypted backing storage |
-| `mvmctl volume unlock <name>` | Decrypt a managed volume into its plaintext mount directory |
-| `mvmctl volume lock <name>` | Seal a managed volume back into its encrypted archive and remove plaintext |
-| `mvmctl volume catalog` | List managed local volumes |
-| `mvmctl volume catalog --json` | List managed local volumes as JSON |
-| `mvmctl volume mount <vm> --volume <name> --guest <absolute-path>` | Register an unlocked managed local virtio-fs volume mount for a VM. Read-only by default |
-| `mvmctl volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path>` | Register an ad-hoc encrypted host directory as a virtio-fs volume mount |
-| `mvmctl volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path> --rw` | Register the volume read-write |
-| `mvmctl volume ls <vm>` | List registered volume mounts |
-| `mvmctl volume ls <vm> --json` | List registered volume mounts as JSON |
-| `mvmctl volume unmount <vm> <guest-path>` | Remove a registered volume mount |
+| `mvmctl vm volume create <name>` | Create a locked mvm-managed encrypted local volume archive |
+| `mvmctl vm volume create <name> --root <absolute-dir>` | Create the mvm-managed encrypted volume under a specific root |
+| `mvmctl vm volume create <name> --host-backed` | Create the previous host-backed managed directory, requiring encrypted backing storage |
+| `mvmctl vm volume unlock <name>` | Decrypt a managed volume into its plaintext mount directory |
+| `mvmctl vm volume lock <name>` | Seal a managed volume back into its encrypted archive and remove plaintext |
+| `mvmctl vm volume catalog` | List managed local volumes |
+| `mvmctl vm volume catalog --json` | List managed local volumes as JSON |
+| `mvmctl vm volume mount <vm> --volume <name> --guest <absolute-path>` | Register an unlocked managed local virtio-fs volume mount for a VM. Read-only by default |
+| `mvmctl vm volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path>` | Register an ad-hoc encrypted host directory as a virtio-fs volume mount |
+| `mvmctl vm volume mount <vm> --volume <name> --host <absolute-dir> --guest <absolute-path> --rw` | Register the volume read-write |
+| `mvmctl vm volume ls <vm>` | List registered volume mounts |
+| `mvmctl vm volume ls <vm> --json` | List registered volume mounts as JSON |
+| `mvmctl vm volume unmount <vm> <guest-path>` | Remove a registered volume mount |
 
 Managed local volumes are encrypted by mvm at rest. `volume create` writes a
 locked AES-256-GCM encrypted archive plus wrapped per-volume data key metadata
@@ -521,12 +529,12 @@ flow and the distinction between build time and runtime boot time.
 |---------|-------------|
 | `mvmctl shell-init` | Print shell configuration (completions + dev aliases) to stdout |
 | `mvmctl shell-init --emit-completions <shell>` | Emit just the shell-completion script (replaces the dropped `mvmctl completions <shell>`) |
-| `mvmctl metrics` | Show runtime metrics (Prometheus text format) |
-| `mvmctl metrics --json` | Show runtime metrics as JSON |
-| `mvmctl uninstall` | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required) |
-| `mvmctl uninstall -y` | Uninstall without confirmation |
-| `mvmctl uninstall --all` | Also remove ~/.mvm/ config dir and /usr/local/bin/mvmctl binary |
-| `mvmctl uninstall --dry-run` | Print what would be removed without removing |
+| `mvmctl ops metrics` | Show runtime metrics (Prometheus text format) |
+| `mvmctl ops metrics --json` | Show runtime metrics as JSON |
+| `mvmctl env uninstall` | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required) |
+| `mvmctl env uninstall -y` | Uninstall without confirmation |
+| `mvmctl env uninstall --all` | Also remove ~/.mvm/ config dir and /usr/local/bin/mvmctl binary |
+| `mvmctl env uninstall --dry-run` | Print what would be removed without removing |
 
 ## Global Options
 

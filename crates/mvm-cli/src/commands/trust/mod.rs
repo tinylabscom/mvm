@@ -43,6 +43,26 @@ pub(in crate::commands) enum TrustAction {
     /// not zeroed — pubkeys aren't secrets, just lookup tokens.
     #[command(alias = "rm")]
     Remove(remove::Args),
+    /// Emit or verify host attestation reports
+    Attest(super::ops::attest::Args),
+    /// Verify signed execution receipts emitted by `mvmctl run --receipt`
+    Receipt(super::vm::exec::ReceiptArgs),
+    /// View and verify the local audit log (~/.mvm/log/audit.jsonl)
+    Audit(super::ops::audit::Args),
+}
+
+impl TrustAction {
+    /// Audit verb name. The provenance verbs folded in by Plan 178
+    /// (attest/receipt/audit) keep their own `cmd.<verb>.*` names; the
+    /// publisher-store verbs (add/list/remove) keep the existing `trust`.
+    pub(in crate::commands) fn verb_name(&self) -> &'static str {
+        match self {
+            TrustAction::Add(_) | TrustAction::List(_) | TrustAction::Remove(_) => "trust",
+            TrustAction::Attest(_) => "attest",
+            TrustAction::Receipt(_) => "receipt",
+            TrustAction::Audit(_) => "audit",
+        }
+    }
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -50,6 +70,9 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         TrustAction::Add(a) => add::run(cli, a, cfg),
         TrustAction::List(a) => list::run(cli, a, cfg),
         TrustAction::Remove(a) => remove::run(cli, a, cfg),
+        TrustAction::Attest(a) => super::ops::attest::run(cli, a, cfg),
+        TrustAction::Receipt(a) => super::vm::exec::run_receipt(cli, a, cfg),
+        TrustAction::Audit(a) => super::ops::audit::run(cli, a, cfg),
     }
 }
 

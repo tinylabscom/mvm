@@ -179,7 +179,8 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
   [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
   [ ] C1/D1 unify reqwest majors + lock gate
 
-PLAN 153 — CLI directory split                  🔴 NOT STARTED
+PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
+  [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
 PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
@@ -190,6 +191,21 @@ PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 
       4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
   [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
       onto supervisor vz + shared console transport + drop apple-container
+
+PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
+  [x] lock tree (D1–D6) + hide internal subprocess commands
+  [x] vm group (14 single-VM verbs)
+  [x] ops group (metrics/bench/config/mcp)
+  [x] build group (image/compile/validate/kernel; kernel.rs→build/)
+  [x] env group (bootstrap/cleanup/uninstall/update/sign)
+  [x] trust group (attest/receipt/audit folded into publisher trust)
+  [x] image.rs/catalog.rs dir split (Plan 153)
+  [x] docs: cli-commands.md + CLAUDE.md grouped forms
+  [ ] run-family merge (up/run/exec/invoke) — CONFIRMED-INTENDED, deferred
+      to Task 7 (read each impl first); tracked, do not drop
+  NOTE: audit taxonomy preserved across all groups (vm pause→cmd.pause,
+  trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
+  Deferred dir-purity: dev/doctor/init modules still live in env/.
 ```
 
 ## Security claims

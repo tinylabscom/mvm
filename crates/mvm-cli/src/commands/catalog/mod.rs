@@ -6,10 +6,13 @@
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::ui;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
+
+mod info;
+mod list;
+mod search;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -35,52 +38,10 @@ pub(in crate::commands) enum CatalogAction {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let catalog = load_bundled_catalog();
-
     match args.action {
-        CatalogAction::List => {
-            if catalog.entries.is_empty() {
-                ui::info("No entries in catalog.");
-            } else {
-                println!(
-                    "{:<20} {:<40} {:<6} {:<8}",
-                    "NAME", "DESCRIPTION", "CPUS", "MEM"
-                );
-                for entry in &catalog.entries {
-                    println!(
-                        "{:<20} {:<40} {:<6} {:<8}",
-                        entry.name,
-                        entry.description,
-                        entry.default_cpus,
-                        format!("{}M", entry.default_memory_mib),
-                    );
-                }
-            }
-            Ok(())
-        }
-        CatalogAction::Search { query } => {
-            let results = catalog.search(&query);
-            if results.is_empty() {
-                ui::info(&format!("No entries matching {:?}", query));
-            } else {
-                println!("{:<20} {:<40} {:<30}", "NAME", "DESCRIPTION", "TAGS");
-                for entry in results {
-                    println!(
-                        "{:<20} {:<40} {:<30}",
-                        entry.name,
-                        entry.description,
-                        entry.tags.join(", "),
-                    );
-                }
-            }
-            Ok(())
-        }
-        CatalogAction::Info { name } => {
-            let entry = catalog
-                .find(&name)
-                .ok_or_else(|| anyhow::anyhow!("Catalog entry {:?} not found", name))?;
-            println!("{}", serde_json::to_string_pretty(entry)?);
-            Ok(())
-        }
+        CatalogAction::List => list::run(&catalog),
+        CatalogAction::Search { query } => search::run(&catalog, query),
+        CatalogAction::Info { name } => info::run(&catalog, name),
     }
 }
 

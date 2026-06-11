@@ -5,7 +5,6 @@ mod cmd_audit;
 mod deps;
 mod env;
 mod image;
-mod kernel;
 mod manifest;
 mod ops;
 /// Plan 118 WS-1 1b — supervisor warm-pool: the `mvmctl pool warm/status` command + the
@@ -65,36 +64,24 @@ pub(in crate::commands) struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Up variant has many CLI fields; boxing breaks Clap derive
 pub(in crate::commands) enum Commands {
-    /// Full environment setup from scratch
-    Bootstrap(env::bootstrap::Args),
+    /// Environment / install lifecycle (bootstrap, update, sign, …)
+    Env(env::group::Args),
     /// Manage the local dev VM
     Dev(env::dev::Args),
-    /// Remove old dev-build artifacts and run Nix garbage collection
-    Cleanup(env::cleanup::Args),
     /// Show console logs from a running microVM
     Logs(vm::logs::Args),
-    /// Forward a port from a running microVM to localhost
-    Forward(vm::forward::Args),
     /// List running VMs
     Ls(vm::ps::Args),
-    /// Check for and install the latest version of mvmctl
-    Update(env::update::Args),
     /// System diagnostics and dependency checks
     Doctor(env::doctor::Args),
-    /// Re-sign mvmctl + supervisors with VZ entitlements (macOS)
-    Sign(env::sign::Args),
-    /// Build the custom microVM kernels (builder / workload)
-    Kernel(kernel::Args),
     /// Manage built manifest slots
     Manifest(manifest::Args),
     /// Inspect cached OCI images
     Image(image::Args),
     /// Inspect the dm-thin storage pool
     Storage(storage::Args),
-    /// Build a microVM image from a Mvmfile.toml config or Nix flake
-    Build(build::build::Args),
-    /// Compile Workload IR into build artifacts
-    Compile(build::compile::Args),
+    /// Build-time commands (image, compile, validate, kernel)
+    Build(build::group::Args),
     /// Build and run a VM
     ///
     /// If neither `--flake` nor `--manifest` is supplied, the bundled
@@ -104,21 +91,10 @@ pub(in crate::commands) enum Commands {
     /// Stop microVMs (from mvm.toml, by name, or all)
     Down(vm::down::Args),
     /// Print shell configuration (completions + dev aliases) to stdout
+    #[command(hide = true)]
     ShellInit(env::shell_init::Args),
-    /// Show runtime metrics (Prometheus text format by default)
-    Metrics(ops::metrics::Args),
-    /// Benchmark microVM operations (e.g. cold launch latency)
-    Bench(ops::bench::Args),
-    /// Read or write global operator config (~/.mvm/config.toml)
-    Config(ops::config::Args),
-    /// Remove local mvm state
-    Uninstall(env::uninstall::Args),
-    /// View the local audit log (~/.mvm/log/audit.jsonl)
-    Audit(ops::audit::Args),
-    /// Validate a Nix flake before building (runs `nix flake check`)
-    Validate(build::validate::Args),
-    /// Show filesystem changes in a running VM
-    Diff(vm::diff::Args),
+    /// Operational / observability commands (metrics, bench, config, mcp)
+    Ops(ops::group::Args),
     /// Manage named dev networks
     Network(ops::network::Args),
     /// Browse the bundled image catalog
@@ -130,61 +106,31 @@ pub(in crate::commands) enum Commands {
     /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
     Pool(pool::Args),
     /// Converge the VM name registry with on-disk runtime state
+    #[command(hide = true)]
     Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
     Init(env::init::Args),
     /// Run one command in a transient microVM
     Run(vm::exec::RunArgs),
-    /// Verify signed execution receipts emitted by `mvmctl run --receipt`.
-    Receipt(vm::exec::ReceiptArgs),
-    /// Inspect and clean sandbox lifecycle state.
-    Sandbox(vm::sandbox::Args),
-    /// Copy one file between the host and a running VM.
-    Cp(vm::cp::Args),
     /// Run one dev command in a transient microVM
     Exec(vm::exec::Args),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
-    /// Manage long-running VM sessions
-    Session(vm::session::Args),
-    /// Expose mvmctl over Model Context Protocol
-    Mcp(ops::mcp::Args),
-    /// Set or clear a sandbox TTL
-    #[command(name = "set-ttl")]
-    SetTtl(vm::set_ttl::Args),
-    /// Run filesystem RPC against a VM
-    Fs(vm::fs::Args),
-    /// Run process-control RPC against a VM
-    Proc(vm::proc::Args),
-    /// Pause and seal a running VM
-    Pause(vm::pause::PauseArgs),
-    /// Verify and resume a sealed snapshot
-    Resume(vm::pause::ResumeArgs),
-    /// Manage sealed instance snapshots (`ls`, `rm`).
-    Snapshot(vm::pause::SnapshotArgs),
-    /// Capture, list, remove, or fork rootfs checkpoints.
-    Checkpoint(vm::checkpoint::CheckpointArgs),
-    /// Manage virtio-fs volume mounts
-    Volume(vm::volume::Args),
+    /// Operate on a running VM (pause, snapshot, checkpoint, cp, fs, …)
+    Vm(vm::group::Args),
     /// Manage local secret namespaces
     Secret(ops::secret::Args),
-    /// Emit or verify host attestation reports
-    Attest(ops::attest::Args),
     /// Seal or verify portable VM bundles
     Bundle(bundle::Args),
     /// Manage trusted bundle publishers
     Trust(trust::Args),
     /// Inspect cached application dependencies
     Deps(deps::Args),
-    /// Wait for guest readiness
-    Wait(vm::wait::WaitArgs),
-    /// Print guest readiness and boot timings
-    BootReport(vm::wait::BootReportArgs),
     /// Pack or verify signed `.mvm` artifacts
     Artifact(vm::artifact::Args),
     /// Manage the persistent builder VM
     #[cfg(feature = "builder-vm")]
-    #[command(name = "persistent-builder")]
+    #[command(name = "persistent-builder", hide = true)]
     PersistentBuilder(build::persistent_builder::Args),
     /// Internal: host-side AF_VSOCK↔UNIX bridge for the QEMU workload
     /// backend (Plan 166 Phase 2). Spawned detached by
@@ -256,7 +202,10 @@ pub fn run() -> Result<()> {
         }
         None => LogFormat::Human,
     };
-    if !matches!(cli.command, Commands::Mcp(_)) {
+    // `mvmctl ops mcp` needs stdout reserved for JSON-RPC framing — skip the
+    // default stdout subscriber and let `mvm_mcp` install its stderr-only one.
+    let is_mcp = matches!(&cli.command, Commands::Ops(a) if a.action.is_mcp());
+    if !is_mcp {
         logging::init(log_format);
     }
 
@@ -314,31 +263,19 @@ pub fn run() -> Result<()> {
     cmd_audit::emit_cmd_invoked(cmd_recorder.as_ref(), verb);
 
     let result = match cli.command.clone() {
-        Commands::Bootstrap(a) => env::bootstrap::run(&cli, a, &cfg),
+        Commands::Env(a) => env::group::run(&cli, a, &cfg),
         Commands::Dev(a) => env::dev::run(&cli, a, &cfg),
-        Commands::Cleanup(a) => env::cleanup::run(&cli, a, &cfg),
         Commands::Logs(a) => vm::logs::run(&cli, a, &cfg),
-        Commands::Forward(a) => vm::forward::run(&cli, a, &cfg),
         Commands::Ls(a) => vm::ps::run(&cli, a, &cfg),
-        Commands::Update(a) => env::update::run(&cli, a, &cfg),
         Commands::Doctor(a) => env::doctor::run(&cli, a, &cfg),
-        Commands::Sign(a) => env::sign::run(&cli, a, &cfg),
-        Commands::Kernel(a) => kernel::run(&cli, a, &cfg),
+        Commands::Build(a) => build::group::run(&cli, a, &cfg),
         Commands::Manifest(a) => manifest::run(&cli, a, &cfg),
         Commands::Image(a) => image::run(&cli, a, &cfg),
         Commands::Storage(a) => storage::run(&cli, a, &cfg),
-        Commands::Build(a) => build::build::run(&cli, a, &cfg),
-        Commands::Compile(a) => build::compile::run(&cli, a, &cfg),
         Commands::Up(a) => vm::up::run(&cli, a, &cfg),
         Commands::Down(a) => vm::down::run(&cli, a, &cfg),
         Commands::ShellInit(a) => env::shell_init::run(&cli, a, &cfg),
-        Commands::Metrics(a) => ops::metrics::run(&cli, a, &cfg),
-        Commands::Bench(a) => ops::bench::run(&cli, a, &cfg),
-        Commands::Config(a) => ops::config::run(&cli, a, &cfg),
-        Commands::Uninstall(a) => env::uninstall::run(&cli, a, &cfg),
-        Commands::Audit(a) => ops::audit::run(&cli, a, &cfg),
-        Commands::Validate(a) => build::validate::run(&cli, a, &cfg),
-        Commands::Diff(a) => vm::diff::run(&cli, a, &cfg),
+        Commands::Ops(a) => ops::group::run(&cli, a, &cfg),
         Commands::Network(a) => ops::network::run(&cli, a, &cfg),
         Commands::Catalog(a) => catalog::run(&cli, a, &cfg),
         Commands::Console(a) => vm::console::run(&cli, a, &cfg),
@@ -347,28 +284,13 @@ pub fn run() -> Result<()> {
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
-        Commands::Receipt(a) => vm::exec::run_receipt(&cli, a, &cfg),
-        Commands::Sandbox(a) => vm::sandbox::run(&cli, a, &cfg),
-        Commands::Cp(a) => vm::cp::run(&cli, a, &cfg),
         Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
-        Commands::Session(a) => vm::session::run(&cli, a, &cfg),
-        Commands::Mcp(a) => ops::mcp::run(&cli, a, &cfg),
-        Commands::SetTtl(a) => vm::set_ttl::run(&cli, a, &cfg),
-        Commands::Fs(a) => vm::fs::run(&cli, a, &cfg),
-        Commands::Proc(a) => vm::proc::run(&cli, a, &cfg),
-        Commands::Pause(a) => vm::pause::run_pause(&cli, a, &cfg),
-        Commands::Resume(a) => vm::pause::run_resume(&cli, a, &cfg),
-        Commands::Snapshot(a) => vm::pause::run_snapshot(&cli, a, &cfg),
-        Commands::Checkpoint(a) => vm::checkpoint::run_checkpoint(&cli, a),
-        Commands::Volume(a) => vm::volume::run(&cli, a, &cfg),
+        Commands::Vm(a) => vm::group::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
-        Commands::Attest(a) => ops::attest::run(&cli, a, &cfg),
         Commands::Bundle(a) => bundle::run(&cli, a, &cfg),
         Commands::Trust(a) => trust::run(&cli, a, &cfg),
         Commands::Deps(a) => deps::run(&cli, a, &cfg),
-        Commands::Wait(a) => vm::wait::run_wait(&cli, a, &cfg),
-        Commands::BootReport(a) => vm::wait::run_boot_report(&cli, a, &cfg),
         Commands::Artifact(a) => vm::artifact::run(&cli, a, &cfg),
         #[cfg(feature = "builder-vm")]
         Commands::PersistentBuilder(a) => build::persistent_builder::run(&cli, a),

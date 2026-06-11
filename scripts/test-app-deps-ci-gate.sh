@@ -141,7 +141,7 @@ assert_nonempty () {
 
 echo "==> 1. compile examples/python/hello-app-with-deps/"
 COMPILE_OUT="$SCRATCH/compile-out"
-"$MVMCTL_BIN" compile examples/python/hello-app-with-deps/app.py --out "$COMPILE_OUT" >/dev/null
+"$MVMCTL_BIN" build compile examples/python/hello-app-with-deps/app.py --out "$COMPILE_OUT" >/dev/null
 
 assert_eq "flake.nix emitted"   "$([ -f "$COMPILE_OUT/flake.nix" ] && echo y || echo n)" "y"
 assert_eq "launch.json emitted" "$([ -f "$COMPILE_OUT/launch.json" ] && echo y || echo n)" "y"
