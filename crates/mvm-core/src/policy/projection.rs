@@ -24,7 +24,9 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 use thiserror::Error;
 
+use crate::policy::dns_pin::DnsPinRegistry;
 use crate::policy::network_policy::is_mandatory_deny;
+use crate::policy::resolver::EffectivePolicy;
 
 /// L4 protocol of a canonical rule. The string forms `"tcp"` /
 /// `"udp"` are the `L4RuleSpec.proto` wire values; anything else
@@ -110,11 +112,80 @@ impl CanonicalEgress {
 pub enum ProjectionError {
     #[error("unknown proto {proto:?} (expected \"tcp\" or \"udp\")")]
     UnknownProto { proto: String },
+    #[error("unparseable dst_cidr {cidr:?}: {source}")]
+    BadCidr {
+        cidr: String,
+        source: ipnet::AddrParseError,
+    },
+}
+
+/// Normalize the wire-format any-port wildcard `(0, 0)` to the
+/// explicit full range. Any other pair passes through verbatim.
+fn normalize_ports(lo: u16, hi: u16) -> (u16, u16) {
+    if lo == 0 && hi == 0 {
+        (0, 65535)
+    } else {
+        (lo, hi)
+    }
+}
+
+/// Lower a resolved policy + admission-time pin registry into the
+/// canonical egress grant set. Pure; fail-closed on every
+/// malformed or unpinnable input. `now` is an RFC 3339 UTC
+/// timestamp (the caller's clock — tests pass a fixed string),
+/// used to refuse expired pins.
+pub fn canonicalize_effective(
+    eff: &EffectivePolicy,
+    pins: &DnsPinRegistry,
+    now: &str,
+) -> Result<CanonicalEgress, ProjectionError> {
+    if eff.egress.mode.as_deref() == Some("open") {
+        return Ok(CanonicalEgress::Unrestricted);
+    }
+    let mut rules = Vec::new();
+    for spec in &eff.network.l4 {
+        let net: IpNet = spec
+            .dst_cidr
+            .parse()
+            .map_err(|source| ProjectionError::BadCidr {
+                cidr: spec.dst_cidr.clone(),
+                source,
+            })?;
+        let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
+        rules.push(CanonicalRule {
+            proto: Proto::parse(&spec.proto)?,
+            net,
+            port_lo,
+            port_hi,
+        });
+    }
+    rules.extend(pinned_allow_list_rules(eff, pins, now)?);
+    rules.sort();
+    rules.dedup();
+    Ok(CanonicalEgress::Rules(rules))
+}
+
+/// Lower `egress.allow_list` (hostname, port) entries through the
+/// pin registry. The hostname leg lands in the next commit; the
+/// L4-only path returns no rules when the allow-list is empty.
+fn pinned_allow_list_rules(
+    eff: &EffectivePolicy,
+    _pins: &DnsPinRegistry,
+    _now: &str,
+) -> Result<Vec<CanonicalRule>, ProjectionError> {
+    if eff.egress.allow_list.is_empty() {
+        return Ok(Vec::new());
+    }
+    unimplemented!("allow-list pinning lands in the next commit on this branch")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::policy::dns_pin::DnsPinRegistry;
+    use crate::policy::policies::L4RuleSpec;
+    use crate::policy::resolver::EffectivePolicy;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -122,6 +193,75 @@ mod tests {
 
     fn net(s: &str) -> ipnet::IpNet {
         s.parse().unwrap()
+    }
+
+    const NOW: &str = "2026-06-11T00:00:00Z";
+
+    fn l4(proto: &str, cidr: &str, lo: u16, hi: u16) -> L4RuleSpec {
+        L4RuleSpec {
+            proto: proto.to_string(),
+            dst_cidr: cidr.to_string(),
+            port_lo: lo,
+            port_hi: hi,
+        }
+    }
+
+    fn eff_with_l4(rules: Vec<L4RuleSpec>) -> EffectivePolicy {
+        let mut eff = EffectivePolicy::default();
+        eff.network.l4 = rules;
+        eff
+    }
+
+    #[test]
+    fn canonicalize_default_policy_is_deny_all() {
+        let eff = EffectivePolicy::default();
+        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert_eq!(eg, CanonicalEgress::Rules(vec![]));
+    }
+
+    #[test]
+    fn canonicalize_open_mode_is_unrestricted() {
+        let mut eff = EffectivePolicy::default();
+        eff.egress.mode = Some("open".to_string());
+        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert_eq!(eg, CanonicalEgress::Unrestricted);
+    }
+
+    #[test]
+    fn canonicalize_lowers_l4_rules_verbatim() {
+        let eff = eff_with_l4(vec![l4("tcp", "93.184.216.0/24", 443, 443)]);
+        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
+    }
+
+    #[test]
+    fn canonicalize_normalizes_any_port_wildcard() {
+        // (0, 0) is the wire-format any-port wildcard.
+        let eff = eff_with_l4(vec![l4("udp", "8.8.8.8/32", 0, 0)]);
+        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 53));
+        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 65535));
+    }
+
+    #[test]
+    fn canonicalize_refuses_unparseable_cidr() {
+        let eff = eff_with_l4(vec![l4("tcp", "not-a-cidr", 443, 443)]);
+        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::BadCidr { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_refuses_unknown_proto() {
+        let eff = eff_with_l4(vec![l4("icmp", "8.8.8.8/32", 0, 0)]);
+        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::UnknownProto { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
