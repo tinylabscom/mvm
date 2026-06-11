@@ -100,10 +100,15 @@ PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
   [x] WS-B parity gate (#703) → Rust-only after Swift deletion (plan-174)
   [x] WS-B finalize: resolver→Rust bin + DELETE Swift crate — plan-174
   [x] WS-E VZ-config hardening (validateSaveRestore, MAC pin) — folded into #700
+  [x] SAVE pause-before-save regression fix (post-finalize) — PR #740 (merged)
+  [x] post-finalize hardening: resource-cap check, self-sign codesign lock,
+      terminal-error fidelity, SAFETY-comment accuracy, doc-truth — PR #772
   [ ] WS-C fork primitive (snapshot/restore done in #700) — separate workstream
   [ ] WS-D nested KVM (/dev/kvm in guest) — separate workstream
   NOTE: Swift control socket self-deadlocked on async VZ ops; Rust fixes it
-  (ADR-056 addendum). Deferred: VzIngest/mvm-vz-drainer dead-code sweep.
+  (ADR-056 addendum). Deferred: VzIngest/mvm-vz-drainer dead-code sweep; +
+  lower-priority supervisor robustness (exit-listener 2nd-conn, control-verb
+  single-flight, validateSaveRestore hard-gate for Restore) noted in #772.
 
 PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
   [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)
