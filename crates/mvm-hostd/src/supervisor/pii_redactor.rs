@@ -305,6 +305,24 @@ impl PiiRedactor {
         hits
     }
 
+    /// Validated match byte ranges (`[start, end)`) across all rules. Same
+    /// precision as `scan`/`redact` (a match failing its validator is excluded).
+    /// For callers that need positions, not just category names — e.g. the name
+    /// detector's co-occurrence signal ("a name adjacent to other PII").
+    pub fn match_spans(&self, body: &[u8]) -> Vec<(usize, usize)> {
+        let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
+        let mut spans = Vec::new();
+        for idx in candidate_indices {
+            let rule = &self.rules[idx];
+            for m in self.regexes[idx].find_iter(body) {
+                if match_passes_validator(rule, m.as_bytes()) {
+                    spans.push((m.start(), m.end()));
+                }
+            }
+        }
+        spans
+    }
+
     /// Replace every *validated* rule match in `body` with
     /// [`REDACTION_MASK`], returning the redacted bytes + the rule names
     /// that fired (stable order, no dups). The mask-and-continue path:

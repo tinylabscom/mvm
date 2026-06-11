@@ -166,11 +166,46 @@ impl RedactingSubstitution {
             SecretAction::Audit => (payload.to_vec(), self.secrets.scan(payload)),
         };
 
+        // The name detector's co-occurrence signal needs the positions of other
+        // PII. Compute them on the current (pre-PII-mask) buffer, then run the name
+        // pass BEFORE masking PII so the offsets line up. Always the curated
+        // ruleset — co-occurrence is a detection signal, independent of the
+        // per-destination PII masking policy.
+        let names_active = !matches!(action.names, NameMode::Off);
+        let pii_spans = if names_active {
+            self.pii.match_spans(&buf)
+        } else {
+            Vec::new()
+        };
+
+        let mut hits = RedactionHits {
+            secrets,
+            pii: Vec::new(),
+            entropy: 0,
+            names: 0,
+        };
+
+        // Names first, on the pre-PII-mask buffer with real PII spans. Names and
+        // structured PII never overlap, so masking names here doesn't disturb the
+        // PII re-scan below.
+        match action.names {
+            NameMode::Off => {}
+            NameMode::Audit => {
+                let (_, n) = NameScanner::with_defaults().redact(&buf, &pii_spans);
+                hits.names += n;
+            }
+            NameMode::Redact => {
+                let (out, n) = NameScanner::with_defaults().redact(&buf, &pii_spans);
+                buf = out;
+                hits.names += n;
+            }
+        }
+
         // Structured PII: a default (empty) action runs the always-on ruleset;
         // an explicit per-destination policy overrides — `disabled` skips it, a
         // category list restricts it. A malformed policy fails safe to always-on.
         let pii_is_default = action.pii.mode.is_none() && action.pii.categories.is_empty();
-        let pii = if pii_is_default {
+        hits.pii = if pii_is_default {
             let (out, p) = self.pii.redact(&buf);
             buf = out;
             p
@@ -188,13 +223,6 @@ impl RedactingSubstitution {
                     p
                 }
             }
-        };
-
-        let mut hits = RedactionHits {
-            secrets,
-            pii,
-            entropy: 0,
-            names: 0,
         };
 
         match &action.entropy {
@@ -215,23 +243,6 @@ impl RedactingSubstitution {
                 let (out, n) = EntropyScanner::new(*min_run_len, *min_bits_per_char).redact(&buf);
                 buf = out;
                 hits.entropy += n;
-            }
-        }
-
-        match action.names {
-            NameMode::Off => {}
-            NameMode::Audit => {
-                // Count without masking: the scanner masks, so dry-redact a copy
-                // for the count and drop the buffer. Live PII match-span plumbing
-                // into co-occurrence is a follow-up — pass empty spans, so the
-                // labeled + gazetteer name signals still fire.
-                let (_, n) = NameScanner::with_defaults().redact(&buf, &[]);
-                hits.names += n;
-            }
-            NameMode::Redact => {
-                let (out, n) = NameScanner::with_defaults().redact(&buf, &[]);
-                buf = out;
-                hits.names += n;
             }
         }
 
@@ -726,6 +737,32 @@ mod tests {
             r.redact_bytes_for(body, &action).is_none(),
             "pii=disabled should leave the email and mask nothing"
         );
+    }
+
+    #[test]
+    fn name_co_occurrence_fires_on_the_live_path() {
+        // "Zephyr Quibblesworth" is neither labeled nor in the gazetteer, so it
+        // only gets masked via the co-occurrence signal — a capitalized pair next
+        // to other PII (the SSN). This proves the live path now threads real PII
+        // spans into the name detector (it would survive with empty spans).
+        use mvm_core::policy::{NameMode, RedactionAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"Zephyr Quibblesworth ssn 123-45-6789 end";
+        let action = RedactionAction {
+            names: NameMode::Redact,
+            ..Default::default()
+        };
+        let (out, hits) = r
+            .redact_bytes_for(body, &action)
+            .expect("name + ssn should fire");
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            !s.contains("Zephyr Quibblesworth"),
+            "co-occurrence name not masked: {s}"
+        );
+        assert!(hits.names >= 1, "expected a name hit, got {hits:?}");
+        // The SSN is still masked by the PII pass.
+        assert!(!s.contains("123-45-6789"), "ssn not masked: {s}");
     }
 
     #[test]
