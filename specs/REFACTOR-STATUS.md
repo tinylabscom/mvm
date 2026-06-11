@@ -4,12 +4,36 @@
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
-> change and bump the "Last updated" date. This is a hand-maintained rollup of
+> change and bump the "Last updated" date — update BOTH the glance checklist
+> and the matching plan in the details. This is a hand-maintained rollup of
 > the per-plan checkboxes in `specs/plans/` and `specs/SPRINT.md` — it is a
 > quick index, not the source of truth. If it disagrees with a plan doc, the
 > plan doc wins; fix this file.
 
-## Plans
+## Plans at a glance
+
+A box is ticked only when the whole plan is ✅ DONE. In-progress (🟢/🟡) and
+not-started (🔴) plans stay unticked — see the per-plan breakdown in **Plan
+details** below for the workstream-level state.
+
+- [x] **PLAN 121** — Crate consolidation (32→15) · ✅
+- [x] **PLAN 169** — Backend-agnostic agent RPC · ✅
+- [x] **PLAN 166** — QEMU Linux dev/test backend · ✅
+- [x] **PLAN 165** — Sealed-prod interactivity (claim 15) · ✅
+- [x] **PLAN 170** — Host lifecycle convergence · ✅ mvm-side (density → mvmd)
+- [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
+- [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
+- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; live FC https e2e gated on agent bringup
+- [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
+- [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
+- [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
+- [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
+- [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
+- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) next
+- [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
+- [ ] **PLAN 180** — Strip spec refs from code comments · 🔴 not started
+
+## Plan details
 
 ```
 PLAN 121 — Crate consolidation (32→15)          ✅ DONE
@@ -115,9 +139,19 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
         square/shopify/digitalocean/vault/postman/linear/figma/google-oauth/
         slack-webhook) in SecretsScanner DEFAULT_RULES — anchored prefixes, low-FP,
         masked on ALL egress by default (no flag). JWT deliberately excluded (legit bearer).
-    [ ] remaining: IR/SDK developer-declared authoring (the only open variant; mvmd
-        can author via bundle), terminator-path redaction, live PII spans.
-        See plan §"Deferred follow-ups".
+    [x] terminator-path redaction + fail-closed + audit (typed TerminatorError;
+        both :80/:443 cores; adversarial fail-closed tests + security review)
+    [x] live PII spans for name co-occurrence: PiiRedactor::match_spans threaded
+        into NameScanner on the live redact_bytes_for path (names run pre-PII-mask)
+    [ ] remaining: IR/SDK developer-declared authoring (descoped — CLI --redact +
+        mvmd bundle cover it). See plan §"Deferred follow-ups".
+  [x] Phase F: egress no-secret-to-guest leak-gate (claim-12/13 backstop) —
+      canary tests (handed_placeholders_never_contain_the_secret_value /
+      substitution_endpoint_refuses_unbound_destination /
+      audit_chain_carries_no_secret_value) in crates/mvm-hostd/tests/
+      egress_secret_leak_gate.rs + claim doc claim-egress-no-secret-to-guest.md +
+      catalog.md row 16 witnesses (Preview), gated on every PR (Test lane +
+      check-claim-catalog)
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
@@ -277,5 +311,6 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
 
 ## Security claims
 
-15/15 shipped, none regressed (`specs/claims/catalog.md`, gated by
-`xtask check-claim-catalog`).
+15/15 shipped, none regressed, + 1 `Preview` (claim 16, egress-substitution
+leak-gate — witnesses machine-checked, ADR-002 promotion pending) (`specs/claims/catalog.md`,
+gated by `xtask check-claim-catalog`).

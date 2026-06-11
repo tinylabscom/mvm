@@ -42,6 +42,15 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 13 | No raw secret value crosses the broker channel | fn:resolved_secrets_placeholders, fn:substitute | destination-bound signed credentials (ADR-049) | Shipped |
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
 | 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + dev-shell-gated agent (Plan 165 WS-C, ADR-002 §W4.3 extension) | Shipped |
+| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-067, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
+
+Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
+it is registered here for witness machine-checking and tracked by its own doc
+(`claim-egress-no-secret-to-guest.md`) at status `Preview`; promotion to a
+numbered claim in ADR-002's source-of-truth table is a separate maintainer
+decision. It does not restate or replace the broker rows 12/13 — those are the
+shipped broker delivery; row 16 backs the same two invariants on the egress
+substitution path.
 
 ## Maintaining this catalog
 

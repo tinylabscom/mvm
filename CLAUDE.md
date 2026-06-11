@@ -144,8 +144,11 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 ## Security model
 
 mvm makes fifteen CI-enforced security claims (numbered 1–15 in
-`specs/claims/catalog.md`, the contiguous ledger). Each one is backed by
-a test or a workflow gate. **ADR-002
+`specs/claims/catalog.md`, the contiguous ledger), plus a `Preview`
+claim 16 (egress-substitution leak-gate, ADR-067 — witnesses are
+machine-checked but promotion into ADR-002's numbered prose is a
+pending maintainer decision, mirroring claim 14's path). Each one is
+backed by a test or a workflow gate. **ADR-002
 (`specs/adrs/002-microvm-security-posture.md`) is the source of truth**
 for the claim numbering, threat model, and per-backend tier matrix;
 this section is the summary. Implementation is sequenced in
