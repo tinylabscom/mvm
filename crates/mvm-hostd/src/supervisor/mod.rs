@@ -42,6 +42,7 @@ pub mod balloon_runtime;
 pub mod circuit_breaker;
 pub mod destination;
 pub mod egress;
+pub mod entropy_scanner;
 pub mod event_bus;
 pub mod firewall;
 // Plan 102 W6.A commit 4 — per-VM gateway flow-event subscriber sink.
@@ -63,6 +64,8 @@ pub mod instance_sampler;
 pub mod keystore;
 pub mod l7_proxy;
 pub mod lifecycle_hooks;
+pub mod name_scanner;
+pub mod names_gazetteer;
 // Plan 113 / ADR-064 — Observer trait + Pipeline builder for the
 // gateway audit substrate. Observers consume `&FlowEvent` references
 // inside `signer_task` (fan-out before chain signing). Host-allowlisted
@@ -72,6 +75,7 @@ pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
+pub mod redaction_resolve;
 /// Plan 129 / ADR-067 §4 + claim 13 — chain-signed `secret.substituted` /
 /// `secret.placeholder_dropped` audit events (metadata only, never the value).
 pub mod secret_audit;

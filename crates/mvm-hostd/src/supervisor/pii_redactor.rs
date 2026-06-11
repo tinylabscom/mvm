@@ -81,6 +81,7 @@ pub struct PiiRule {
 #[derive(Debug, Clone, Copy)]
 pub enum PiiValidator {
     Luhn,
+    Iban,
 }
 
 /// Default curated PII ruleset. Each rule is high-precision; an
@@ -121,6 +122,14 @@ pub const DEFAULT_RULES: &[PiiRule] = &[
         // matching every 10-digit run on the planet.
         pattern: r"\+\d{7,15}",
         validator: None,
+    },
+    PiiRule {
+        name: "iban",
+        // Country (2 alpha) + 2 check digits + 11-30 BBAN chars. mod-97
+        // validated post-match so a random alnum run of the right shape
+        // doesn't fire.
+        pattern: r"\b[A-Za-z]{2}\d{2}[A-Za-z0-9]{11,30}\b",
+        validator: Some(PiiValidator::Iban),
     },
 ];
 
@@ -250,7 +259,7 @@ impl PiiRedactor {
 /// Matches `DEFAULT_RULES.iter().map(|r| r.name)` order. Public so
 /// callers (the W5 resolver and mvmd-facing policy tooling) can
 /// enumerate the valid names.
-pub const PII_CATEGORY_NAMES: &[&str] = &["email", "us_ssn", "credit_card", "e164_phone"];
+pub const PII_CATEGORY_NAMES: &[&str] = &["email", "us_ssn", "credit_card", "e164_phone", "iban"];
 
 /// Errors from [`PiiRedactor::from_policy`]. Each variant names the
 /// offending value + the list of valid alternatives so a single
@@ -343,7 +352,7 @@ pub const REDACTION_MASK: &[u8] = b"XXX";
 fn rule_passes_validator(rule: &PiiRule, re: &Regex, body: &[u8]) -> bool {
     match rule.validator {
         None => true,
-        Some(PiiValidator::Luhn) => re
+        Some(_) => re
             .find_iter(body)
             .any(|m| match_passes_validator(rule, m.as_bytes())),
     }
@@ -356,6 +365,7 @@ fn match_passes_validator(rule: &PiiRule, m: &[u8]) -> bool {
     match rule.validator {
         None => true,
         Some(PiiValidator::Luhn) => luhn_valid(m),
+        Some(PiiValidator::Iban) => iban_valid(m),
     }
 }
 
@@ -383,6 +393,31 @@ fn luhn_valid(digits: &[u8]) -> bool {
         alt = !alt;
     }
     sum.is_multiple_of(10)
+}
+
+/// ISO 7064 mod-97-10 IBAN checksum: move the first 4 chars to the end, map
+/// letters to two-digit numbers (A=10 … Z=35), and check the integer ≡ 1
+/// (mod 97). Computed digit-by-digit to avoid bignum. Case-insensitive.
+fn iban_valid(iban: &[u8]) -> bool {
+    if iban.len() < 15 || iban.len() > 34 {
+        return false;
+    }
+    let rearranged = iban[4..].iter().chain(iban[..4].iter());
+    let mut remainder: u32 = 0;
+    for &b in rearranged {
+        let val = match b {
+            b'0'..=b'9' => u32::from(b - b'0'),
+            b'A'..=b'Z' => u32::from(b - b'A') + 10,
+            b'a'..=b'z' => u32::from(b - b'a') + 10,
+            _ => return false,
+        };
+        if val >= 10 {
+            remainder = (remainder * 100 + val) % 97;
+        } else {
+            remainder = (remainder * 10 + val) % 97;
+        }
+    }
+    remainder == 1
 }
 
 #[async_trait]
@@ -643,5 +678,35 @@ mod tests {
         assert!(r.inspect(&mut c).await.is_allow());
         let mut c = ctx_with_body(b"900-12-3456");
         assert!(r.inspect(&mut c).await.is_allow());
+    }
+
+    #[test]
+    fn iban_valid_is_masked_invalid_is_left() {
+        let r = PiiRedactor::with_default_rules();
+        let body = b"pay GB82WEST12345698765432 not GB82WEST12345698765431 ok";
+        let (out, fired) = r.redact(body);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            !s.contains("GB82WEST12345698765432"),
+            "valid IBAN not masked: {s}"
+        );
+        assert!(
+            s.contains("GB82WEST12345698765431"),
+            "invalid IBAN wrongly masked: {s}"
+        );
+        assert!(fired.contains(&"iban"), "fired={fired:?}");
+    }
+
+    #[test]
+    fn iban_category_is_listed() {
+        assert!(PII_CATEGORY_NAMES.contains(&"iban"));
+    }
+
+    #[test]
+    fn iban_checker_accepts_known_good_and_rejects_bad() {
+        assert!(iban_valid(b"GB82WEST12345698765432"));
+        assert!(iban_valid(b"DE89370400440532013000"));
+        assert!(!iban_valid(b"GB82WEST12345698765431"));
+        assert!(!iban_valid(b"XX00"));
     }
 }

@@ -88,11 +88,17 @@ pub struct RedactingSubstitution {
 pub struct RedactionHits {
     pub secrets: Vec<&'static str>,
     pub pii: Vec<&'static str>,
+    /// Count of high-entropy runs that fired (entropy carries no stable rule
+    /// name — it's a shape, not a labeled pattern — so it's a count, not a
+    /// `Vec<&'static str>`).
+    pub entropy: usize,
+    /// Count of name spans that fired.
+    pub names: usize,
 }
 
 impl RedactionHits {
     pub fn is_empty(&self) -> bool {
-        self.secrets.is_empty() && self.pii.is_empty()
+        self.secrets.is_empty() && self.pii.is_empty() && self.entropy == 0 && self.names == 0
     }
 
     /// Fold another pass's categories in (used when redacting several fields —
@@ -100,6 +106,8 @@ impl RedactionHits {
     pub fn merge(&mut self, other: RedactionHits) {
         self.secrets.extend(other.secrets);
         self.pii.extend(other.pii);
+        self.entropy += other.entropy;
+        self.names += other.names;
     }
 }
 
@@ -125,11 +133,83 @@ impl RedactingSubstitution {
     pub fn redact_bytes(&self, payload: &[u8]) -> Option<(Vec<u8>, RedactionHits)> {
         let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
         let (after_pii, pii) = self.pii.redact(&after_secrets);
-        let hits = RedactionHits { secrets, pii };
+        let hits = RedactionHits {
+            secrets,
+            pii,
+            ..Default::default()
+        };
         if hits.is_empty() {
             return None; // clean payload — pass through unchanged.
         }
         Some((after_pii, hits))
+    }
+
+    /// Per-destination redaction. Curated secrets always run; entropy and names
+    /// run only when the resolved action opts in. Returns `None` when nothing
+    /// fired. `secrets`/`pii` come from the existing curated rulesets; entropy
+    /// + names from the new detectors.
+    pub fn redact_bytes_for(
+        &self,
+        payload: &[u8],
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Option<(Vec<u8>, RedactionHits)> {
+        use crate::supervisor::entropy_scanner::EntropyScanner;
+        use crate::supervisor::name_scanner::NameScanner;
+        use mvm_core::policy::{EntropyMode, NameMode};
+
+        let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
+        let (after_pii, pii) = self.pii.redact(&after_secrets);
+        let mut buf = after_pii;
+        let mut hits = RedactionHits {
+            secrets,
+            pii,
+            entropy: 0,
+            names: 0,
+        };
+
+        match &action.entropy {
+            EntropyMode::Off => {}
+            EntropyMode::Audit {
+                min_bits_per_char,
+                min_run_len,
+            } => {
+                // Audit: counted, not masked.
+                hits.entropy += EntropyScanner::new(*min_run_len, *min_bits_per_char)
+                    .scan(&buf)
+                    .len();
+            }
+            EntropyMode::Redact {
+                min_bits_per_char,
+                min_run_len,
+            } => {
+                let (out, n) = EntropyScanner::new(*min_run_len, *min_bits_per_char).redact(&buf);
+                buf = out;
+                hits.entropy += n;
+            }
+        }
+
+        match action.names {
+            NameMode::Off => {}
+            NameMode::Audit => {
+                // Count without masking: the scanner masks, so dry-redact a copy
+                // for the count and drop the buffer. Live PII match-span plumbing
+                // into co-occurrence is a follow-up — pass empty spans, so the
+                // labeled + gazetteer name signals still fire.
+                let (_, n) = NameScanner::with_defaults().redact(&buf, &[]);
+                hits.names += n;
+            }
+            NameMode::Redact => {
+                let (out, n) = NameScanner::with_defaults().redact(&buf, &[]);
+                buf = out;
+                hits.names += n;
+            }
+        }
+
+        if hits.is_empty() {
+            None
+        } else {
+            Some((buf, hits))
+        }
     }
 }
 
@@ -554,6 +634,27 @@ mod tests {
             "secret survived redaction: {masked}"
         );
         assert!(masked.contains("XXX"), "no mask present: {masked}");
+    }
+
+    #[test]
+    fn redact_bytes_for_applies_entropy_when_action_opts_in() {
+        use mvm_core::policy::{EntropyMode, RedactionAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"k=Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9 e";
+        // default action: entropy off → no hit
+        let off = RedactionAction::default();
+        assert!(r.redact_bytes_for(body, &off).is_none());
+        // opt in → entropy redacts the run
+        let on = RedactionAction {
+            entropy: EntropyMode::Redact {
+                min_bits_per_char: 4.0,
+                min_run_len: 20,
+            },
+            ..Default::default()
+        };
+        let (out, hits) = r.redact_bytes_for(body, &on).expect("entropy hit");
+        assert_eq!(hits.entropy, 1);
+        assert!(!String::from_utf8_lossy(&out).contains("Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9"));
     }
 
     #[test]
