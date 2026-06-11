@@ -736,8 +736,26 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     //
     // No-op on non-Linux hosts (the bridge is Linux-only — see
     // `crates/mvm-firecracker-bridge/src/main.rs`).
+    //
+    // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/Vz
+    // gateway-bridge factory sits behind: the FC bridge lane is not yet
+    // working end-to-end (its confinement spec doesn't grant the
+    // observer-allowlist path it reads post-confinement), and its
+    // watchdog hard-fail policy would tear down an otherwise healthy
+    // VM. Before the egress moat landed, no producer wrote `plan.json`
+    // pre-boot on this path, so the bridge never actually spawned;
+    // the gate preserves that default while the moat (substitution
+    // endpoint + nft redirect below) runs unconditionally.
     #[cfg(target_os = "linux")]
-    let mut bridge_guard = spawn_fc_bridge(&config.slot.name, &abs_dir)?;
+    let mut bridge_guard = if std::env::var("MVM_GATEWAY_BRIDGE").as_deref() == Ok("1") {
+        spawn_fc_bridge(&config.slot.name, &abs_dir)?
+    } else {
+        tracing::debug!(
+            vm = %config.slot.name,
+            "MVM_GATEWAY_BRIDGE not set; skipping mvm-firecracker-bridge sidecar"
+        );
+        AttachedBridgeGuard { child: None }
+    };
 
     // Start Firecracker daemon in per-VM directory
     start_vm_firecracker(&abs_dir, &abs_socket)?;
