@@ -7,10 +7,11 @@
 //! the in-VM proxy is reachable from `localhost:8443`) and
 //! outbound traffic owned by the proxy's uid are allowed out.
 //!
-//! Called from `mvm-host-vm-init`'s boot sequence after the
-//! basic `setup_network()`. Failure is **fatal** — without the
-//! lockdown, the builder VM's egress allowlist is unenforced and
-//! the transitive trust onto the builder VM has no defense layer.
+//! Two call sites, two postures: the install arm locks egress at
+//! entry (fail-closed — untrusted dep code must not reach the network
+//! directly); the persistent dispatch loop sets posture per job kind
+//! before each dispatch (install → locked, flake build → open so nix
+//! can fetch substitutes and pinned inputs without a proxy).
 
 use std::process::Command;
 
@@ -96,13 +97,12 @@ pub fn open_egress(runner: &dyn IptablesRunner) -> Result<(), String> {
 
 /// Re-install the egress lockdown from a known-good in-binary recipe.
 ///
-/// `install_egress_lockdown` runs once at boot. In the persistent
-/// builder VM jobs share the kernel's iptables state across
+/// Called at the start of each install dispatch in the persistent
+/// builder VM. Jobs share the kernel's iptables state across
 /// dispatches — a build that runs `iptables -I OUTPUT 1 -j
 /// ACCEPT` (or exploits a `CAP_NET_ADMIN` leak via the new mount
 /// namespace from `unshare --mount`) poisons every subsequent
-/// job. The persistent dispatch loop calls this between
-/// dispatches to reset the chain.
+/// job, so the dispatch loop resets the chain before each one.
 ///
 /// Implementation: flush the OUTPUT chain, then re-install the 3
 /// baseline rules. Cheap (~10 ms per the plan's estimate) and

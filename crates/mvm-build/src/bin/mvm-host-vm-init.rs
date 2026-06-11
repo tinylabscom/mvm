@@ -1505,6 +1505,25 @@ mod linux {
         }
     }
 
+    /// Set the iptables OUTPUT posture for the given job kind before
+    /// dispatch. Install jobs lock egress (flush + uid-only ACCEPT)
+    /// so untrusted dep code can't reach the network directly; flake
+    /// jobs open egress so nix can fetch substitutes without a proxy.
+    /// Separated from `execute_dispatched_job` so the mapping is
+    /// directly testable — the match is the policy, and an inversion
+    /// would be silent without a unit test pinning the sequences.
+    fn apply_job_posture(
+        job: &crate::builder_request::BuilderJob,
+        ip: &dyn crate::network::IptablesRunner,
+    ) -> Result<(), String> {
+        match job {
+            crate::builder_request::BuilderJob::Install { .. } => {
+                crate::network::reapply_egress_lockdown(ip, crate::network::PROXY_UID)
+            }
+            crate::builder_request::BuilderJob::Flake { .. } => crate::network::open_egress(ip),
+        }
+    }
+
     /// Run one dispatched job: locate cmd.sh under
     /// `/job/<job_dir_relpath>/cmd.sh`, exec it, stream every
     /// stderr line back to `conn` as a `HostVmResponse::StderrChunk`
@@ -1523,24 +1542,11 @@ mod linux {
         job_dir_relpath: &str,
         cold_boot_timings: Option<BootTimings>,
     ) -> String {
-        // Set per-job egress posture before dispatch. Install jobs lock
-        // egress (reset + uid-only ACCEPT) so untrusted dep code can't
-        // reach the network directly; flake-build jobs open egress so
-        // nix can fetch substitutes and pinned inputs without a proxy.
-        // Both belts: the install arm also locks at its own entry (defense
-        // in depth), but the outer reset here ensures a prior flake job's
-        // open chain never leaks into a following install and vice versa.
-        let posture_result = match &job {
-            crate::builder_request::BuilderJob::Install { .. } => {
-                crate::network::reapply_egress_lockdown(
-                    &crate::network::SystemIptables,
-                    crate::network::PROXY_UID,
-                )
-            }
-            crate::builder_request::BuilderJob::Flake { .. } => {
-                crate::network::open_egress(&crate::network::SystemIptables)
-            }
-        };
+        // Set per-job egress posture before dispatch. The install arm
+        // also locks at its own entry for defense in depth, but this
+        // outer reset ensures a prior flake job's open chain never
+        // leaks into a following install and vice versa.
+        let posture_result = apply_job_posture(&job, &crate::network::SystemIptables);
         if let Err(e) = posture_result {
             eprintln!("mvm-host-vm-init: dispatch loop: egress posture failed: {e}");
             let response = crate::dispatch_response::DispatchResponse {
@@ -3272,6 +3278,114 @@ mod linux {
             std::fs::create_dir(&store).expect("create store");
             std::fs::create_dir(store.join("abc123-some-pkg")).expect("create closure path");
             assert!(!nix_store_needs_seed(base.path()));
+        }
+
+        // --- apply_job_posture tests ---
+
+        struct RecordingIp {
+            calls: std::cell::RefCell<Vec<Vec<String>>>,
+            fail_at: Option<usize>,
+        }
+
+        impl RecordingIp {
+            fn new() -> Self {
+                Self {
+                    calls: std::cell::RefCell::new(Vec::new()),
+                    fail_at: None,
+                }
+            }
+            fn fail_at(idx: usize) -> Self {
+                Self {
+                    calls: std::cell::RefCell::new(Vec::new()),
+                    fail_at: Some(idx),
+                }
+            }
+        }
+
+        impl crate::network::IptablesRunner for RecordingIp {
+            fn run(&self, args: &[&str]) -> Result<(), String> {
+                let mut calls = self.calls.borrow_mut();
+                let idx = calls.len();
+                calls.push(args.iter().map(|s| s.to_string()).collect());
+                if Some(idx) == self.fail_at {
+                    Err(format!("forced failure at {idx}"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn install_job() -> crate::builder_request::BuilderJob {
+            crate::builder_request::BuilderJob::Install {
+                spec_path: "/job/spec.json".to_string(),
+            }
+        }
+
+        fn flake_job() -> crate::builder_request::BuilderJob {
+            crate::builder_request::BuilderJob::Flake {
+                flake_ref: "path:/work".to_string(),
+                attr_path: "packages.aarch64-linux.default".to_string(),
+            }
+        }
+
+        #[test]
+        fn apply_job_posture_install_emits_flush_then_three_lockdown_rules() {
+            let ip = RecordingIp::new();
+            apply_job_posture(&install_job(), &ip).expect("happy path");
+            let calls = ip.calls.borrow();
+            // flush + 3 rules = 4 invocations
+            assert_eq!(calls.len(), 4);
+            assert_eq!(calls[0], vec!["-F".to_string(), "OUTPUT".to_string()]);
+            assert_eq!(
+                calls[1],
+                vec![
+                    "-A".to_string(),
+                    "OUTPUT".to_string(),
+                    "-o".to_string(),
+                    "lo".to_string(),
+                    "-j".to_string(),
+                    "ACCEPT".to_string(),
+                ]
+            );
+            assert!(calls[2].iter().any(|a| a == "--uid-owner"));
+            assert!(
+                calls[2]
+                    .iter()
+                    .any(|a| a == &crate::network::PROXY_UID.to_string())
+            );
+            assert!(calls[2].iter().any(|a| a == "ACCEPT"));
+            assert_eq!(
+                calls[3],
+                vec!["-P".to_string(), "OUTPUT".to_string(), "DROP".to_string()]
+            );
+        }
+
+        #[test]
+        fn apply_job_posture_flake_emits_flush_then_accept_policy() {
+            let ip = RecordingIp::new();
+            apply_job_posture(&flake_job(), &ip).expect("happy path");
+            let calls = ip.calls.borrow();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0], vec!["-F".to_string(), "OUTPUT".to_string()]);
+            assert_eq!(
+                calls[1],
+                vec!["-P".to_string(), "OUTPUT".to_string(), "ACCEPT".to_string()]
+            );
+        }
+
+        #[test]
+        fn apply_job_posture_install_propagates_error() {
+            // Fail at invocation 0 (the flush) — error surfaces immediately.
+            let ip = RecordingIp::fail_at(0);
+            let result = apply_job_posture(&install_job(), &ip);
+            assert!(result.is_err(), "posture error must propagate");
+        }
+
+        #[test]
+        fn apply_job_posture_flake_propagates_error() {
+            let ip = RecordingIp::fail_at(0);
+            let result = apply_job_posture(&flake_job(), &ip);
+            assert!(result.is_err(), "posture error must propagate");
         }
     }
 }
