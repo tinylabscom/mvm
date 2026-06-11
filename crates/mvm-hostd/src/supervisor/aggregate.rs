@@ -16,11 +16,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use mvm_core::plan::{
     DepsVolumeBinding, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
 };
+use mvm_core::time::{Clock, SystemClock};
 use mvm_sdk::compile::deps_audit::{VolumeError, verify_sealed_volume};
 use thiserror::Error;
 use tracing::warn;
@@ -50,22 +50,6 @@ use crate::supervisor::secrets_scanner::SecretsScanner;
 use crate::supervisor::ssrf_guard::SsrfGuard;
 use crate::supervisor::state::{PlanState, PlanStateMachine, StateTransitionError};
 use crate::supervisor::tool_gate::{NoopToolGate, ToolGate};
-
-/// Clock abstraction. The supervisor reads the wall clock through
-/// this trait so tests can drive time deterministically; production
-/// uses [`SystemClock`]. Backs validity-window enforcement.
-pub trait Clock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
-}
-
-/// Production clock — `chrono::Utc::now()`.
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -1036,7 +1020,7 @@ mod tests {
     use super::*;
     use crate::supervisor::backend::{BackendLaunchSpec, BackendLauncher};
     use async_trait::async_trait;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::*;
     use rand::rngs::OsRng;

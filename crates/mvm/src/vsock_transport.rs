@@ -376,6 +376,9 @@ mod tests {
         // firecracker surface), the picker must select the Vz transport rather
         // than falling through to the firecracker error. Regression for the
         // "console can't reach a Vz workload" gap.
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
         let name = "vz-picker-probe";

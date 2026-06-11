@@ -479,14 +479,9 @@ fn render_text(report: &DoctorReport) {
 /// Keyed by `&str` rather than `&'static str` so JSON serialisation
 /// gets a stable BTreeMap ordering. Names match `VmBackend::name`.
 fn collect_balloon_support() -> BTreeMap<String, bool> {
-    // Hypervisor selectors mirror `AnyBackend::from_hypervisor`. The
-    // list is hand-maintained because there's no general "iterate
-    // every backend" helper today; adding a new backend means
-    // adding it here so doctor surfaces it without lying.
-    let names = ["firecracker", "apple-container", "libkrun", "qemu"];
     let mut out = BTreeMap::new();
-    for name in names {
-        let backend = AnyBackend::from_hypervisor(name);
+    for entry in mvm_backend::catalog::balloon_support_entries() {
+        let backend = AnyBackend::from_hypervisor(entry.selector);
         out.insert(backend.name().to_string(), backend.capabilities().balloon);
     }
     out
@@ -517,13 +512,10 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 /// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
 /// from a disk snapshot (libkrun) before relying on a warm start.
 fn collect_warm_start_support() -> WarmStartReport {
-    // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
-    // because save/restore is a warm-start tier worth surfacing.
-    let names = ["firecracker", "apple-container", "libkrun", "qemu", "vz"];
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
-    for name in names {
-        let b = AnyBackend::from_hypervisor(name);
+    for entry in mvm_backend::catalog::warm_start_support_entries() {
+        let b = AnyBackend::from_hypervisor(entry.selector);
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
         standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
@@ -2733,12 +2725,27 @@ mod tests {
     #[test]
     fn collect_balloon_support_advertises_firecracker() {
         let support = collect_balloon_support();
-        // The hand-maintained list in collect_balloon_support must
-        // include Firecracker. If a future refactor drops it, this
-        // fails loudly.
+        // The backend catalog must include Firecracker in the balloon
+        // support matrix. If a future refactor drops it, this fails
+        // loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
         assert_eq!(support.get("apple-container"), Some(&false));
+    }
+
+    #[test]
+    fn collect_balloon_support_keeps_catalog_backends_in_stable_order() {
+        let support = collect_balloon_support();
+        let ordered: Vec<_> = support.into_iter().collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("apple-container".to_string(), false),
+                ("firecracker".to_string(), true),
+                ("libkrun".to_string(), false),
+                ("qemu".to_string(), false),
+            ]
+        );
     }
 
     #[test]
@@ -2750,6 +2757,34 @@ mod tests {
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
         // A backend with no warm-start support must not be silently dropped.
         assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
+    }
+
+    #[test]
+    fn collect_warm_start_support_keeps_catalog_backends_in_stable_order() {
+        let r = collect_warm_start_support();
+        let ordered_backends: Vec<_> = r.backends.into_iter().collect();
+        let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
+
+        assert_eq!(
+            ordered_backends,
+            vec![
+                ("apple-container".to_string(), "unsupported"),
+                ("firecracker".to_string(), "live-memory"),
+                ("libkrun".to_string(), "disk-only"),
+                ("qemu".to_string(), "disk-only"),
+                ("vz".to_string(), "save-restore"),
+            ]
+        );
+        assert_eq!(
+            ordered_standby_pool,
+            vec![
+                ("apple-container".to_string(), false),
+                ("firecracker".to_string(), false),
+                ("libkrun".to_string(), true),
+                ("qemu".to_string(), false),
+                ("vz".to_string(), false),
+            ]
+        );
     }
 
     #[test]

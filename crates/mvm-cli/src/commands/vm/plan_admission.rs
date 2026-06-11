@@ -41,7 +41,6 @@
 //! Production callers use `SystemClock` + the host's nonce store.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
@@ -54,20 +53,7 @@ use std::sync::Mutex;
 use super::host_signer::host_signer_id;
 use super::plan_builder::{SynthesisInput, synthesize_plan};
 
-/// Abstracts wall-clock time so tests can drive `check_window`
-/// deterministically.
-pub trait Clock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
-}
-
-/// Production clock — reads the system wall-clock.
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
-    }
-}
+pub use mvm_core::time::{Clock, SystemClock};
 
 /// Production nonce ledger. Holds a `NonceStore` behind a mutex so
 /// it's `Send + Sync`. In v0 we instantiate one per `mvmctl up` —
@@ -404,7 +390,7 @@ pub(crate) fn enforce_admitted_shares(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{DateTime, TimeZone, Utc};
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

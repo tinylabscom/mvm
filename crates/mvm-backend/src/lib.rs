@@ -32,6 +32,7 @@ pub mod apple_container;
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
+pub mod catalog;
 pub mod checkpoint;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
