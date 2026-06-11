@@ -59,6 +59,18 @@ pub(in crate::commands) enum VmCmd {
 }
 
 impl VmCmd {
+    /// Whether this VM op warrants the reconcile-on-entry convergence pass.
+    /// Only the running-VM lifecycle ops (pause/resume/snapshot) converge stale
+    /// dead records first; registry-record and guest-RPC ops (set-ttl, cp, fs,
+    /// wait, forward, …) must not, or convergence would sweep a registered VM
+    /// whose process isn't live before the op reads its record.
+    pub(in crate::commands) fn touches_vm_state(&self) -> bool {
+        matches!(
+            self,
+            VmCmd::Pause(_) | VmCmd::Resume(_) | VmCmd::Snapshot(_)
+        )
+    }
+
     /// Audit verb name for this VM op. Preserves the per-op audit taxonomy
     /// (`cmd.pause.*`, `cmd.cp.*`, …) unchanged across the `vm` grouping —
     /// the CLI path moved to `vm <sub>` but the audit verbs did not, so
