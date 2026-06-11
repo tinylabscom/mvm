@@ -150,6 +150,10 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       restore_checkpoint + retire snapshot save/restore. cache GC.
       PR3 (#780): checkpoint diff <a> <b> (metadata+manifest compare) + Vz
       pause/resume (native vCPU quiesce). WS-2 COMPLETE.
+  [x] Vz workload liveness: /init detaches sealed-workload stdin from the
+      input-less console (`</dev/null`) + examples/sleeper long-lived fixture
+      (unblocks live Vz validation of WS-2 + the fork semantic-A spike);
+      flake-locks-clean CI lane excludes the override-input examples.
   [x] AuditEmitter + host_keypair + plan_persist + pure checkpoint bind helpers
       hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
