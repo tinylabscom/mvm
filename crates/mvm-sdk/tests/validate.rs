@@ -127,6 +127,7 @@ fn admits_secret_ref_with_a_binding() {
                 },
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec!["api.example.com".to_string()],
+                sigv4: None,
             },
         },
     );
@@ -151,6 +152,7 @@ fn rejects_unbound_secret_ref() {
                 },
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec![],
+                sigv4: None,
             },
         },
     );

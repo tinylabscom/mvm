@@ -261,6 +261,7 @@ fn cmd_set(
             &SecretBindingMeta {
                 auth_type,
                 allowed_hosts: hosts,
+                sigv4: None,
             },
         )
     })();
@@ -799,6 +800,7 @@ mod tests {
         let b = SecretBindingMeta {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into(), "*.openai.com".into()],
+            sigv4: None,
         };
         let line = ls_line("openai", Some(&b));
         assert!(line.starts_with("openai"));

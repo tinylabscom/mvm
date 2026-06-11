@@ -1112,6 +1112,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
         }
     }
 
@@ -1225,6 +1226,7 @@ mod server_tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
         }
     }
 
@@ -1515,6 +1517,7 @@ mod server_tests {
                 &SecretBindingMeta {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             )
             .unwrap();
@@ -1564,6 +1567,7 @@ mod server_tests {
                 &SecretBindingMeta {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             )
             .unwrap();

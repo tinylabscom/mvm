@@ -189,6 +189,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["example.amazonaws.com".into()],
+            sigv4: None,
         };
         let sig = Signer::new(&resolver as &dyn SecretResolver)
             .sign_sigv4(&secret, &get_vanilla())

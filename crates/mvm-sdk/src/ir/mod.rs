@@ -30,5 +30,5 @@ pub use workload::{
     App, AuthType, Concurrency, Dependencies, Entrypoint, EnvValue, Format, HostPort, Image,
     InProcessMode, JsonSchemaShape, Mount, MountMode, MountSource, Network, NetworkDns,
     NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
-    SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, host_matches,
+    SecretMount, SecretRef, Sigv4Params, Source, Volume, WarmProcessConfig, Workload, host_matches,
 };
