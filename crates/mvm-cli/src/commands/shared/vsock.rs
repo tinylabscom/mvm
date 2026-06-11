@@ -2,9 +2,8 @@
 //!
 //! Routes through the canonical `mvm::vsock_transport::for_vm`
 //! dispatcher — the same selector `invoke`/`exec`/`readiness` use. It
-//! probes the live backend (apple-container → libkrun → firecracker)
-//! per VM. The previous hardcoded `AppleContainerTransport` left the
-//! libkrun `up` path unable to ever reach its agent.
+//! probes the live backend (libkrun → vz → firecracker) per VM, so a
+//! VM started under any backend reaches its agent on the right transport.
 
 use anyhow::Result;
 

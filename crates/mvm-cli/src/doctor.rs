@@ -2277,7 +2277,7 @@ fn security_snapshot_dirs_check() -> Check {
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    use mvm_backend::providers::apple_container::{collect_sign_targets, entitlements_present};
+    use mvm_backend::codesign::{collect_sign_targets, entitlements_present};
     let targets = collect_sign_targets();
     // `entitlements_present` returns `None` off macOS for every path, so if
     // the first target gives `None` the whole check is n/a.
