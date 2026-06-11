@@ -94,7 +94,7 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
       2026-06-10, specs/notes/plan-129-e1-step2-pii-entropy-redaction-design.md;
       no ML/NER — anchored+gazetteer names; scoped to cleartext vsock endpoint)
     [x] design + honest threat-model framing (hygiene layer, not a boundary)
-    [ ] slice 1: EntropyScanner (Shannon entropy, audit-first, no echo)
+    [x] slice 1: EntropyScanner (Shannon entropy, audit-first, no echo)
     [ ] slice 2: IBAN (mod-97) added to structured PII set
     [ ] slice 3: name detector (field-label + PII co-occurrence + gazetteer)
     [ ] slice 4: RedactionAction + redaction_profiles + resolve (mvm-core)

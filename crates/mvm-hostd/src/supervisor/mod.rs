@@ -42,6 +42,7 @@ pub mod balloon_runtime;
 pub mod circuit_breaker;
 pub mod destination;
 pub mod egress;
+pub mod entropy_scanner;
 pub mod event_bus;
 pub mod firewall;
 // Plan 102 W6.A commit 4 — per-VM gateway flow-event subscriber sink.
