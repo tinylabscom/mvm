@@ -29,8 +29,8 @@ use mvm_sdk::ir::AuthType;
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
     AssembleError, BindingStore, HandedPlaceholders, LocalResolver, SecretResolver,
-    SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
-    find_placeholder,
+    SignDispatchError, SigningInput, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry,
+    assemble_registry, build_sigv4_input, find_placeholder,
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
@@ -72,6 +72,18 @@ pub enum ProxyError {
     BadUrl(String),
     #[error(transparent)]
     Substitute(#[from] SubstituteError),
+    /// The signing path (SigV4/HMAC) refused or failed. Carries the
+    /// bind-check refusal (`DestinationNotBound`), an unknown placeholder, the
+    /// signer error, or a malformed/over-restricted request — every variant is
+    /// fail-closed: `prepare_request` returns `Err` and nothing is forwarded.
+    #[error(transparent)]
+    Sign(#[from] SignDispatchError),
+    /// A signing secret reached the forward path without the data the
+    /// signature needs (e.g. a SigV4 secret with no `access_key_id`/`region`/
+    /// `service` binding, or a request the canonical form can't be built from).
+    /// Fail-closed: refuse rather than forward an unsigned request.
+    #[error("refusing to forward: {0}")]
+    Refused(String),
 }
 
 /// Substitute every placeholder in `req`'s headers against `endpoint`,
@@ -88,25 +100,165 @@ pub fn prepare_request(
     req: ProxyRequest,
 ) -> Result<PreparedRequest, ProxyError> {
     let dest = destination_host(&req.url)?;
+    // Inject pass (Bearer/Basic): the credential is substituted *into* the
+    // header value in place. A signing placeholder (SigV4/HMAC) is left as-is
+    // here and handled in the sign pass below — it never carries the value.
     let mut headers = Vec::with_capacity(req.headers.len());
+    let mut signing: Option<(String, AuthType)> = None;
     for (name, value) in req.headers {
         let new_value = match find_placeholder(&value) {
             Some(ph) => {
                 let ph = ph.to_string();
-                // `substitute` carries the claim-12 bind-check: an unbound
-                // destination or unknown token errors here, before forwarding.
-                endpoint.substitute(&ph, &dest, &value)?.to_string()
+                match endpoint.resolve_ref(&ph).map(|r| r.auth_type) {
+                    Some(AuthType::Bearer) | Some(AuthType::Basic) => {
+                        // `substitute` carries the claim-12 bind-check: an
+                        // unbound destination or unknown token errors here,
+                        // before forwarding.
+                        endpoint.substitute(&ph, &dest, &value)?.to_string()
+                    }
+                    Some(sign_auth @ (AuthType::Sigv4 | AuthType::Hmac)) => {
+                        // A signing secret: remember the placeholder and DROP its
+                        // header value (it only ever held the opaque token). The
+                        // real signature header is assembled in the sign pass.
+                        if signing.is_some() {
+                            return Err(ProxyError::Refused(
+                                "more than one signing placeholder in one request".into(),
+                            ));
+                        }
+                        signing = Some((ph, sign_auth));
+                        continue; // drop this header entirely
+                    }
+                    None => {
+                        // Unknown token: route through `substitute` so the
+                        // existing claim-12 `UnknownPlaceholder` refusal fires.
+                        endpoint.substitute(&ph, &dest, &value)?.to_string()
+                    }
+                }
             }
             None => value,
         };
         headers.push((name, new_value));
     }
+
+    // Sign pass: a SigV4/HMAC secret signs the whole request and adds its own
+    // header. The signing key never leaves the signer; the bind-check is
+    // enforced inside `endpoint.sign` (claim 12). Any failure is fail-closed.
+    if let Some((ph, auth_type)) = signing {
+        sign_into_headers(
+            endpoint,
+            &ph,
+            auth_type,
+            &dest,
+            &req.method,
+            &req.url,
+            &req.body,
+            &mut headers,
+        )?;
+    }
+
     Ok(PreparedRequest {
         method: req.method,
         url: req.url,
         headers,
         body: req.body,
     })
+}
+
+/// `yyyymmddThhmmssZ` UTC, the SigV4 `x-amz-date` format.
+fn amz_date_now() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// Sign the request for a SigV4/HMAC secret and append the signature header,
+/// routing through the bind-checked `endpoint.sign` (claim 12, key-never-leaves).
+/// Fail-closed: a missing SigV4 binding, a bad request, or a refused/failed sign
+/// returns `Err` and the caller forwards nothing.
+#[allow(clippy::too_many_arguments)]
+fn sign_into_headers(
+    endpoint: &SubstitutionEndpoint<'_>,
+    placeholder: &str,
+    auth_type: AuthType,
+    dest: &str,
+    method: &str,
+    url: &str,
+    body: &[u8],
+    headers: &mut Vec<(String, String)>,
+) -> Result<(), ProxyError> {
+    match auth_type {
+        AuthType::Sigv4 => {
+            // The non-secret scope (access_key_id/region/service) is operator-set
+            // in the binding and reconstructed onto the ref at admission. Absent
+            // ⇒ fail closed: we can't name a credential to sign under.
+            let params = endpoint
+                .resolve_ref(placeholder)
+                .and_then(|r| r.sigv4.clone())
+                .ok_or_else(|| {
+                    ProxyError::Refused(
+                        "sigv4 secret missing access_key_id/region/service binding".into(),
+                    )
+                })?;
+            // SigV4 signs `x-amz-date`. Use the guest's if present, else
+            // synthesize one now (UTC) — and make sure it is on the outgoing
+            // request so the signature matches what the destination verifies.
+            let amz_date = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("x-amz-date"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| {
+                    let d = amz_date_now();
+                    headers.push(("x-amz-date".to_string(), d.clone()));
+                    d
+                });
+            // Build the canonical request over the headers we will actually send
+            // (the placeholder header is already dropped; x-amz-date is present).
+            // `build_sigv4_input` reads x-amz-date from this set.
+            let _ = &amz_date;
+            let input =
+                build_sigv4_input(method, url, headers, body, &params.region, &params.service)
+                    .map_err(|e| {
+                        ProxyError::Refused(format!("building sigv4 canonical request: {e}"))
+                    })?;
+            let sig = endpoint.sign(placeholder, dest, &SigningInput::SigV4(input.clone()))?;
+            let scope = input.credential_scope();
+            let authorization = format!(
+                "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+                params.access_key_id, scope, input.signed_headers, sig.hex
+            );
+            // Replace any existing Authorization, else add it. The secret-access-
+            // key never appears here — only the derived signature hex.
+            if let Some(slot) = headers
+                .iter_mut()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            {
+                slot.1 = authorization;
+            } else {
+                headers.push(("Authorization".to_string(), authorization));
+            }
+            Ok(())
+        }
+        AuthType::Hmac => {
+            // HMAC webhook: sign the body, emit the signature in a documented
+            // default header. The key never leaves the signer.
+            let sig = endpoint.sign(
+                placeholder,
+                dest,
+                &SigningInput::Hmac {
+                    payload: body.to_vec(),
+                },
+            )?;
+            if let Some(slot) = headers
+                .iter_mut()
+                .find(|(k, _)| k.eq_ignore_ascii_case("x-mvm-signature"))
+            {
+                slot.1 = sig.hex;
+            } else {
+                headers.push(("x-mvm-signature".to_string(), sig.hex));
+            }
+            Ok(())
+        }
+        // Inject types never reach the sign pass.
+        AuthType::Bearer | AuthType::Basic => Ok(()),
+    }
 }
 
 /// The destination host (no port) from an absolute URL.
@@ -1114,6 +1266,318 @@ mod tests {
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
             sigv4: None,
         }
+    }
+
+    fn sigv4_ref(name: &str, hosts: &[&str], service: &str, region: &str) -> SecretRef {
+        use mvm_sdk::ir::Sigv4Params;
+        SecretRef {
+            name: name.into(),
+            mount: SecretMount::Env { var: "K".into() },
+            auth_type: AuthType::Sigv4,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: Some(Sigv4Params {
+                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                region: region.into(),
+                service: service.into(),
+            }),
+        }
+    }
+
+    fn sigv4_ref_no_params(name: &str, hosts: &[&str]) -> SecretRef {
+        SecretRef {
+            name: name.into(),
+            mount: SecretMount::Env { var: "K".into() },
+            auth_type: AuthType::Sigv4,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
+        }
+    }
+
+    fn hmac_ref(name: &str, hosts: &[&str]) -> SecretRef {
+        SecretRef {
+            name: name.into(),
+            mount: SecretMount::Env { var: "K".into() },
+            auth_type: AuthType::Hmac,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
+        }
+    }
+
+    /// Parse the structured fields of an `AWS4-HMAC-SHA256` Authorization value.
+    fn parse_sigv4_authorization(v: &str) -> (String, String, String) {
+        let rest = v.strip_prefix("AWS4-HMAC-SHA256 ").expect("scheme prefix");
+        let mut credential = String::new();
+        let mut signed_headers = String::new();
+        let mut signature = String::new();
+        for part in rest.split(", ") {
+            if let Some(c) = part.strip_prefix("Credential=") {
+                credential = c.to_string();
+            } else if let Some(s) = part.strip_prefix("SignedHeaders=") {
+                signed_headers = s.to_string();
+            } else if let Some(s) = part.strip_prefix("Signature=") {
+                signature = s.to_string();
+            }
+        }
+        (credential, signed_headers, signature)
+    }
+
+    // The canonical AWS example secret-access-key — used as our seeded signing
+    // key so the no-leak assertions have a distinctive string to grep for.
+    const AWS_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+
+    #[test]
+    fn sigv4_request_gets_a_valid_authorization_header() {
+        let (_dir, resolver) = resolver_with("aws", AWS_SECRET_ACCESS_KEY);
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(sigv4_ref(
+            "aws",
+            &["s3.us-east-1.amazonaws.com"],
+            "s3",
+            "us-east-1",
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+
+        // The guest puts the opaque placeholder in the Authorization header,
+        // exactly like Bearer; the endpoint branches on the resolved auth_type.
+        let req = ProxyRequest {
+            method: "GET".into(),
+            url: "https://s3.us-east-1.amazonaws.com/bucket/key".into(),
+            headers: vec![
+                ("authorization".into(), ph.as_str().to_string()),
+                ("host".into(), "s3.us-east-1.amazonaws.com".into()),
+                ("x-amz-date".into(), "20150830T123600Z".into()),
+            ],
+            body: vec![],
+        };
+        let prepared = prepare_request(&endpoint, req).unwrap();
+
+        let auth = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .expect("Authorization header produced");
+        let (credential, signed_headers, signature) = parse_sigv4_authorization(&auth);
+        assert!(
+            credential.starts_with("AKIAIOSFODNN7EXAMPLE/20150830/us-east-1/s3/aws4_request"),
+            "credential scope: {credential}"
+        );
+        assert!(
+            signed_headers.contains("host"),
+            "signed headers: {signed_headers}"
+        );
+        assert!(
+            signed_headers.contains("x-amz-date"),
+            "signed headers: {signed_headers}"
+        );
+        // 64 hex chars of HMAC-SHA256.
+        assert_eq!(signature.len(), 64, "signature: {signature}");
+        assert!(signature.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // No-leak: the secret-access-key (signing key) appears NOWHERE in the
+        // prepared request — not the Authorization header, not any other header,
+        // not the body, and the opaque placeholder is gone too.
+        for (k, v) in &prepared.headers {
+            assert!(
+                !v.contains(AWS_SECRET_ACCESS_KEY),
+                "key leaked in header {k}: {v}"
+            );
+            assert!(
+                !v.contains(ph.as_str()),
+                "placeholder leaked in header {k}: {v}"
+            );
+        }
+        assert!(
+            !prepared
+                .body
+                .windows(AWS_SECRET_ACCESS_KEY.len())
+                .any(|w| w == AWS_SECRET_ACCESS_KEY.as_bytes())
+        );
+    }
+
+    #[test]
+    fn sigv4_forward_path_matches_the_aws_get_vanilla_signature() {
+        // End-to-end oracle: drive the published aws-sig-v4-test-suite
+        // get-vanilla request through prepare_request and assert the assembled
+        // Authorization carries the published signature — proves the forward
+        // path's canonicalization + signing is byte-correct, not just well-shaped.
+        let (_dir, resolver) = resolver_with("aws", AWS_SECRET_ACCESS_KEY);
+        let mut reg = SubstitutionRegistry::new();
+        // get-vanilla scope: region=us-east-1, service="service".
+        let ph = reg.mint(sigv4_ref(
+            "aws",
+            &["example.amazonaws.com"],
+            "service",
+            "us-east-1",
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let req = ProxyRequest {
+            method: "GET".into(),
+            url: "https://example.amazonaws.com/".into(),
+            headers: vec![
+                ("authorization".into(), ph.as_str().to_string()),
+                ("host".into(), "example.amazonaws.com".into()),
+                ("x-amz-date".into(), "20150830T123600Z".into()),
+            ],
+            body: vec![],
+        };
+        let prepared = prepare_request(&endpoint, req).unwrap();
+        let auth = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let (_, _, signature) = parse_sigv4_authorization(&auth);
+        assert_eq!(
+            signature,
+            "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+        );
+    }
+
+    #[test]
+    fn sigv4_unbound_destination_is_refused_before_signing() {
+        // The key security test: a sigv4 placeholder bound to host A, sent to
+        // host B (not in allowed_hosts), is refused by the bind-check inside
+        // `endpoint.sign` BEFORE any signature is produced. No Authorization.
+        let (_dir, resolver) = resolver_with("aws", AWS_SECRET_ACCESS_KEY);
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(sigv4_ref(
+            "aws",
+            &["s3.us-east-1.amazonaws.com"], // bound to host A only
+            "s3",
+            "us-east-1",
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+
+        let req = ProxyRequest {
+            method: "GET".into(),
+            url: "https://evil.example.com/bucket/key".into(), // host B — unbound
+            headers: vec![
+                ("authorization".into(), ph.as_str().to_string()),
+                ("host".into(), "evil.example.com".into()),
+                ("x-amz-date".into(), "20150830T123600Z".into()),
+            ],
+            body: vec![],
+        };
+        let err = prepare_request(&endpoint, req).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ProxyError::Sign(crate::keyholder::SignDispatchError::DestinationNotBound(_))
+            ),
+            "expected a bind-check refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn sigv4_without_params_is_refused() {
+        // A sigv4 secret with no access_key_id/region/service binding can't be
+        // signed — fail closed rather than forward an unsigned request.
+        let (_dir, resolver) = resolver_with("aws", AWS_SECRET_ACCESS_KEY);
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(sigv4_ref_no_params("aws", &["s3.us-east-1.amazonaws.com"]));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+
+        let req = ProxyRequest {
+            method: "GET".into(),
+            url: "https://s3.us-east-1.amazonaws.com/bucket/key".into(),
+            headers: vec![
+                ("authorization".into(), ph.as_str().to_string()),
+                ("host".into(), "s3.us-east-1.amazonaws.com".into()),
+                ("x-amz-date".into(), "20150830T123600Z".into()),
+            ],
+            body: vec![],
+        };
+        let err = prepare_request(&endpoint, req).unwrap_err();
+        assert!(matches!(err, ProxyError::Refused(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn sigv4_synthesizes_x_amz_date_when_absent() {
+        // When the guest omits x-amz-date, the endpoint synthesizes one and adds
+        // it to the outgoing request so the signature it computes matches.
+        let (_dir, resolver) = resolver_with("aws", AWS_SECRET_ACCESS_KEY);
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(sigv4_ref(
+            "aws",
+            &["s3.us-east-1.amazonaws.com"],
+            "s3",
+            "us-east-1",
+        ));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let req = ProxyRequest {
+            method: "GET".into(),
+            url: "https://s3.us-east-1.amazonaws.com/x".into(),
+            headers: vec![
+                ("authorization".into(), ph.as_str().to_string()),
+                ("host".into(), "s3.us-east-1.amazonaws.com".into()),
+            ],
+            body: vec![],
+        };
+        let prepared = prepare_request(&endpoint, req).unwrap();
+        let amz = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-amz-date"))
+            .map(|(_, v)| v.clone())
+            .expect("x-amz-date synthesized");
+        // yyyymmddThhmmssZ — 16 chars.
+        assert_eq!(amz.len(), 16, "amz date: {amz}");
+        assert!(amz.contains('T') && amz.ends_with('Z'));
+    }
+
+    #[test]
+    fn hmac_request_gets_a_signature_header() {
+        // RFC 4231 case 2: key="Jefe", body="what do ya want for nothing?".
+        let (_dir, resolver) = resolver_with("hook", "Jefe");
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(hmac_ref("hook", &["hooks.example.com"]));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let req = ProxyRequest {
+            method: "POST".into(),
+            url: "https://hooks.example.com/event".into(),
+            headers: vec![("x-sig".into(), ph.as_str().to_string())],
+            body: b"what do ya want for nothing?".to_vec(),
+        };
+        let prepared = prepare_request(&endpoint, req).unwrap();
+        let sig = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-mvm-signature"))
+            .map(|(_, v)| v.clone())
+            .expect("x-mvm-signature produced");
+        assert_eq!(
+            sig,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // No-leak: the signing key ("Jefe") and the placeholder are both gone.
+        for (k, v) in &prepared.headers {
+            assert!(!v.contains("Jefe"), "key leaked in header {k}");
+            assert!(!v.contains(ph.as_str()), "placeholder leaked in header {k}");
+        }
+    }
+
+    #[test]
+    fn hmac_unbound_destination_is_refused_before_signing() {
+        let (_dir, resolver) = resolver_with("hook", "Jefe");
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(hmac_ref("hook", &["hooks.example.com"]));
+        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let req = ProxyRequest {
+            method: "POST".into(),
+            url: "https://evil.example.com/event".into(), // unbound
+            headers: vec![("x-sig".into(), ph.as_str().to_string())],
+            body: b"x".to_vec(),
+        };
+        let err = prepare_request(&endpoint, req).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ProxyError::Sign(crate::keyholder::SignDispatchError::DestinationNotBound(_))
+            ),
+            "expected a bind-check refusal, got {err:?}"
+        );
     }
 
     #[test]

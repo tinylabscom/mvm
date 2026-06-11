@@ -87,6 +87,7 @@ pub fn build_sigv4_input(
         date_stamp,
         region: region.to_string(),
         service: service.to_string(),
+        signed_headers,
     })
 }
 
@@ -164,6 +165,26 @@ mod tests {
              x-amz-date:20150830T123600Z\n\nhost;x-amz-date\n\
              e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         assert_eq!(get_vanilla().canonical_request, expected);
+    }
+
+    #[test]
+    fn signed_headers_is_returned_sorted_and_lowercased() {
+        // The forward path needs SignedHeaders for the Authorization header;
+        // it's the sorted, lowercased, `;`-joined set of header names.
+        let input = build_sigv4_input(
+            "POST",
+            "https://h/p",
+            &[
+                ("X-Amz-Date".into(), "20150830T123600Z".into()),
+                ("Host".into(), "h".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            b"{}",
+            "us-east-1",
+            "s3",
+        )
+        .unwrap();
+        assert_eq!(input.signed_headers, "content-type;host;x-amz-date");
     }
 
     #[test]
