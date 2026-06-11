@@ -279,5 +279,6 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
 
 ## Security claims
 
-15/15 shipped, none regressed (`specs/claims/catalog.md`, gated by
-`xtask check-claim-catalog`).
+15/15 shipped, none regressed, + 1 `Preview` (claim 16, egress-substitution
+leak-gate — witnesses machine-checked, ADR-002 promotion pending) (`specs/claims/catalog.md`,
+gated by `xtask check-claim-catalog`).
