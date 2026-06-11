@@ -94,6 +94,17 @@ fn is_stdin_tty() -> bool {
     unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
 }
 
+/// Connect to the AVF dev VM's guest-agent vsock through the vz
+/// supervisor's per-port Unix socket (`<vm_vz_vsock_dir>/vsock-<port>.sock`)
+/// — the same path `VzTransport` uses. AVF dev VMs run under the per-VM
+/// vz supervisor; the supervisor is the cross-process vsock server, so a
+/// plain connect to its listener is the whole transport.
+fn connect_dev_vsock(vm_id: &str, port: u32) -> std::io::Result<std::os::unix::net::UnixStream> {
+    let sock = mvm_core::config::vm_vz_vsock_dir(vm_id)
+        .join(mvm_core::config::vsock_socket_filename(port));
+    std::os::unix::net::UnixStream::connect(sock)
+}
+
 /// Boot the dev daemon by re-executing this binary as `<exe> dev up`.
 ///
 /// Blocks until `mvmctl dev up` returns (it exits once the proxy socket
@@ -156,7 +167,7 @@ impl AppleContainerEnv {
     /// set (CI shouldn't silently boot a heavyweight VM).
     fn connect_with_auto_start(&self) -> Result<std::os::unix::net::UnixStream> {
         let port = mvm_guest::vsock::GUEST_AGENT_PORT;
-        match crate::providers::apple_container::vsock_connect_any(&self.vm_id, port) {
+        match connect_dev_vsock(&self.vm_id, port) {
             Ok(stream) => Ok(stream),
             Err(initial_err) => {
                 if !auto_start_allowed() {
@@ -171,7 +182,7 @@ impl AppleContainerEnv {
                         self.vm_id
                     )
                 })?;
-                crate::providers::apple_container::vsock_connect_any(&self.vm_id, port).map_err(|e| {
+                connect_dev_vsock(&self.vm_id, port).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to connect to dev VM '{}' after auto-start: {e} (initial: {initial_err})",
                         self.vm_id,
