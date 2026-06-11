@@ -117,6 +117,12 @@ pub enum ProjectionError {
         cidr: String,
         source: ipnet::AddrParseError,
     },
+    #[error("no admission-time DNS pin for allow-list host {host:?}")]
+    MissingPin { host: String },
+    #[error("DNS pin for {host:?} expired at {expires_at}")]
+    ExpiredPin { host: String, expires_at: String },
+    #[error("DNS pin for {host:?} has an empty IP set")]
+    EmptyPin { host: String },
 }
 
 /// Normalize the wire-format any-port wildcard `(0, 0)` to the
@@ -165,25 +171,57 @@ pub fn canonicalize_effective(
     Ok(CanonicalEgress::Rules(rules))
 }
 
+/// A pinned IP as a host-length net (`/32` or `/128`), explicit
+/// so there is no doubt about prefix length.
+fn host_net(ip: IpAddr) -> IpNet {
+    match ip {
+        IpAddr::V4(v4) => IpNet::V4(ipnet::Ipv4Net::new(v4, 32).expect("/32 is always valid")),
+        IpAddr::V6(v6) => IpNet::V6(ipnet::Ipv6Net::new(v6, 128).expect("/128 is always valid")),
+    }
+}
+
 /// Lower `egress.allow_list` (hostname, port) entries through the
-/// pin registry. The hostname leg lands in the next commit; the
-/// L4-only path returns no rules when the allow-list is empty.
+/// pin registry. Allow-list destinations are L7/TCP (they feed the
+/// CONNECT-shaped egress proxy), so the canonical rules are TCP.
+/// Fail-closed: a host without a live pin refuses the whole
+/// projection rather than silently dropping the entry.
 fn pinned_allow_list_rules(
     eff: &EffectivePolicy,
-    _pins: &DnsPinRegistry,
-    _now: &str,
+    pins: &DnsPinRegistry,
+    now: &str,
 ) -> Result<Vec<CanonicalRule>, ProjectionError> {
-    if eff.egress.allow_list.is_empty() {
-        return Ok(Vec::new());
+    let mut rules = Vec::new();
+    for (host, port) in &eff.egress.allow_list {
+        let pin = pins
+            .lookup(host)
+            .ok_or_else(|| ProjectionError::MissingPin { host: host.clone() })?;
+        if !pin.is_valid_at(now) {
+            return Err(ProjectionError::ExpiredPin {
+                host: host.clone(),
+                expires_at: pin.expires_at.clone(),
+            });
+        }
+        if pin.ips.is_empty() {
+            return Err(ProjectionError::EmptyPin { host: host.clone() });
+        }
+        let (port_lo, port_hi) = normalize_ports(*port, *port);
+        for pinned in &pin.ips {
+            rules.push(CanonicalRule {
+                proto: Proto::Tcp,
+                net: host_net(*pinned),
+                port_lo,
+                port_hi,
+            });
+        }
     }
-    unimplemented!("allow-list pinning lands in the next commit on this branch")
+    Ok(rules)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::policy::dns_pin::DnsPinRegistry;
+    use crate::policy::dns_pin::{DnsPin, DnsPinRegistry};
     use crate::policy::policies::L4RuleSpec;
     use crate::policy::resolver::EffectivePolicy;
 
@@ -406,5 +444,105 @@ mod tests {
         }]);
         assert!(!eg.permits(&Proto::Tcp, ip("169.254.169.254"), 80));
         assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
+    }
+
+    // ─────────────────────────────────────────────────
+    // allow-list via DNS pin registry
+    // ─────────────────────────────────────────────────
+
+    fn pin(dest: &str, ips: &[&str]) -> DnsPin {
+        DnsPin::at(
+            dest,
+            ips.iter().map(|s| ip(s)).collect(),
+            "2026-06-10T00:00:00Z",
+            "2027-01-01T00:00:00Z",
+        )
+    }
+
+    fn registry(pins: Vec<DnsPin>) -> DnsPinRegistry {
+        let mut reg = DnsPinRegistry::new();
+        for p in pins {
+            reg.add(p);
+        }
+        reg
+    }
+
+    fn eff_with_allow(list: Vec<(&str, u16)>) -> EffectivePolicy {
+        let mut eff = EffectivePolicy::default();
+        eff.egress.allow_list = list.into_iter().map(|(h, p)| (h.to_string(), p)).collect();
+        eff
+    }
+
+    #[test]
+    fn allow_list_host_lowers_to_pinned_host_nets() {
+        let eff = eff_with_allow(vec![("api.example.com", 443)]);
+        let pins = registry(vec![pin(
+            "api.example.com",
+            &["93.184.216.34", "93.184.216.35"],
+        )]);
+        let eg = canonicalize_effective(&eff, &pins, NOW).unwrap();
+        // Both pinned addresses admitted, TCP, exactly port 443.
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.35"), 443));
+        // An unpinned address of the "same host" is NOT admitted —
+        // the projection enforces pins, not live DNS.
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.36"), 443));
+        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
+        assert!(!eg.permits(&Proto::Udp, ip("93.184.216.34"), 443));
+    }
+
+    #[test]
+    fn allow_list_port_zero_is_any_port() {
+        let eff = eff_with_allow(vec![("api.example.com", 0)]);
+        let pins = registry(vec![pin("api.example.com", &["93.184.216.34"])]);
+        let eg = canonicalize_effective(&eff, &pins, NOW).unwrap();
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 8080));
+    }
+
+    #[test]
+    fn allow_list_ipv6_pin_lowers_to_slash128() {
+        let eff = eff_with_allow(vec![("v6.example.com", 443)]);
+        let pins = registry(vec![pin("v6.example.com", &["2001:db8::42"])]);
+        let eg = canonicalize_effective(&eff, &pins, NOW).unwrap();
+        assert!(eg.permits(&Proto::Tcp, ip("2001:db8::42"), 443));
+        assert!(!eg.permits(&Proto::Tcp, ip("2001:db8::43"), 443));
+    }
+
+    #[test]
+    fn allow_list_host_without_pin_refuses() {
+        let eff = eff_with_allow(vec![("unpinned.example.com", 443)]);
+        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::MissingPin { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn allow_list_expired_pin_refuses() {
+        let eff = eff_with_allow(vec![("stale.example.com", 443)]);
+        let stale = DnsPin::at(
+            "stale.example.com",
+            vec![ip("93.184.216.34")],
+            "2026-01-01T00:00:00Z",
+            "2026-02-01T00:00:00Z", // expired before NOW
+        );
+        let err = canonicalize_effective(&eff, &registry(vec![stale]), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::ExpiredPin { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn allow_list_empty_pin_set_refuses() {
+        let eff = eff_with_allow(vec![("empty.example.com", 443)]);
+        let pins = registry(vec![pin("empty.example.com", &[])]);
+        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::EmptyPin { .. }),
+            "got {err:?}"
+        );
     }
 }
