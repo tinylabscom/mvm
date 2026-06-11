@@ -50,8 +50,19 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     let rw_access = rw_bridge_access();
     for p in &spec.readable_paths {
         let fd = PathFd::new(p).map_err(|e| path_open_error(p, e))?;
+        // A directory-only right (ReadDir) requested on a regular-file fd is
+        // impossible for the kernel to enforce; landlock downgrades that rule
+        // and reports the whole ruleset PartiallyEnforced — which the
+        // fail-closed check below refuses. Grant file rights on files
+        // (ReadFile + Execute, e.g. the bridge's passt binary) and the full
+        // read set on directories, so a correct spec fully enforces.
+        let access = if p.is_dir() {
+            AccessFs::from_read(abi)
+        } else {
+            AccessFs::from_read(abi) & !AccessFs::ReadDir
+        };
         ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, AccessFs::from_read(abi)))
+            .add_rule(PathBeneath::new(fd, access))
             .map_err(|e| JailerError::LandlockApply(format!("{e:?}")))?;
     }
     for p in &spec.read_write_paths {
