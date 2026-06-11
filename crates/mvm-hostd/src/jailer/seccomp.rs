@@ -112,6 +112,10 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("fcntl", libc::SYS_fcntl),           // O_NONBLOCK on accepted sockets
     ("shutdown", libc::SYS_shutdown),     // graceful socket close
     ("clock_nanosleep", libc::SYS_clock_nanosleep), // tokio timer
+    // The audit signer create_dir_all's the audit dir on first open;
+    // Rust std emits the legacy `mkdir` on x86_64.
+    ("mkdir", libc::SYS_mkdir),
+    ("mkdirat", libc::SYS_mkdirat),
 ];
 
 #[cfg(target_arch = "aarch64")]
@@ -188,6 +192,10 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("fcntl", libc::SYS_fcntl),
     ("shutdown", libc::SYS_shutdown),
     ("clock_nanosleep", libc::SYS_clock_nanosleep),
+    // arch divergence: aarch64 has no bare `mkdir` — it folds into
+    // `mkdirat` (the policy layer keeps both names).
+    ("mkdir", libc::SYS_mkdirat),
+    ("mkdirat", libc::SYS_mkdirat),
 ];
 
 /// Resolve a syscall by name to its `libc::SYS_*` number on the current
