@@ -861,11 +861,32 @@ pub struct SessionVm {
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
 /// callers typically pass `"mcp-session-<short-id>"` so `mvmctl ls`
 /// shows which MCP session a VM belongs to.
+/// Plan 129 — the audit substrate an admitted plan contributes to a session VM
+/// so the backend spawns the substitution endpoint (the guest never holds a raw
+/// secret). The caller (`invoke --from-workload-ir`) admits the workload's
+/// lowered secrets and hands these JSON-serialized fields back; `boot_session_vm`
+/// threads them into the `VmStartConfig`. Strings (not typed `mvm-plan` values)
+/// so this module carries no admission-type dep. **Do not log `plan_json`** — the
+/// signed envelope carries secret bindings.
+pub struct SessionAuditSubstrate {
+    pub tenant_id: String,
+    pub plan_json: String,
+    pub bundle_json: Option<String>,
+}
+
+/// Admission callback: given the resolved rootfs + the generated vm_name (both
+/// known only inside `boot_session_vm`), produce the audit substrate, or `None`
+/// when the workload declares no secrets. Lives in the caller so admission stays
+/// in the command layer; `boot_session_vm` just applies the result.
+pub type SessionAdmit<'a> =
+    dyn Fn(&std::path::Path, &str) -> Result<Option<SessionAuditSubstrate>> + 'a;
+
 pub fn boot_session_vm(
     env: &str,
     vm_name_prefix: &str,
     cpus: u32,
     memory_mib: u32,
+    admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
         mvm::vm::template::lifecycle::template_artifacts_dispatched(env)
@@ -881,13 +902,13 @@ pub fn boot_session_vm(
 
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
-    // Plan 112 Phase 3c — session VMs are short-lived MCP-driven boots
-    // that don't go through plan admission. Leave tenant_id / plan_json
-    // / bundle_json at their None defaults so the libkrun supervisor
-    // stays on the legacy path. Adding session VMs to the audit chain is
-    // a separate scope decision (would require synthesis input +
-    // admission inside `boot_session_vm`).
-    let start_config = VmStartConfig {
+    // Plan 112 Phase 3c — session VMs are short-lived MCP-driven boots that
+    // don't go through plan admission, so tenant_id / plan_json / bundle_json
+    // default to None (the libkrun supervisor stays on the legacy path). Plan
+    // 129 lifts that for a secret-declaring ephemeral `invoke`: when `admit`
+    // returns a substrate, the three fields below are populated and the backend
+    // spawns the per-VM substitution endpoint (the guest holds only placeholders).
+    let mut start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
         kernel_path: Some(vmlinux),
@@ -910,7 +931,22 @@ pub fn boot_session_vm(
         ..Default::default()
     };
 
-    let use_snapshot = snap_info.is_some() && backend.capabilities().snapshots;
+    // Plan 129 — admit the workload's lowered secrets (the closure runs
+    // synthesize→sign→verify with the now-known rootfs + vm_name) and thread the
+    // signed plan into the config so `backend.start` spawns the substitution
+    // endpoint. Force a cold boot when secrets are present: snapshot-restore
+    // bypasses the endpoint-spawn path. `None` admit ⇒ unchanged legacy path.
+    let mut secret_workload = false;
+    if let Some(admit_fn) = admit
+        && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
+    {
+        start_config.tenant_id = Some(sub.tenant_id);
+        start_config.plan_json = Some(sub.plan_json);
+        start_config.bundle_json = sub.bundle_json;
+        secret_workload = true;
+    }
+
+    let use_snapshot = !secret_workload && snap_info.is_some() && backend.capabilities().snapshots;
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
