@@ -85,8 +85,11 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
   [x] SSRF resolver port-443 bug FIXED → PR #755: forwarder resolves+SSRF-filters
       itself, pins the safe IPs on the URL's real port (resolve_to_addrs). This
       closed the e2e (http forwards no longer hit :443). web_fetch/MCP unaffected
-  [ ] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
-      + endpoint) — deferred follow-up
+  [~] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
+      + endpoint) — HOST SIDE DONE: `invoke --from-workload-ir <ir>` lowers the
+      workload's secrets + admits a plan inside boot_session_vm (closure seam) so
+      the backend spawns the substitution endpoint; QEMU reads plan_json directly.
+      Box e2e + FC plan.json stash are the remaining (box-gated) follow-ups
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
