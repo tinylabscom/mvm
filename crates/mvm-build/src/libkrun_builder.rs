@@ -2428,6 +2428,7 @@ mod tests {
                 BuilderVmError::LibkrunUnavailable(_)
                     | BuilderVmError::ExtractionFailed(_)
                     | BuilderVmError::NixBuildFailed(_)
+                    | BuilderVmError::DegradedBuilderStore { .. }
             ),
             "unexpected error variant: {err:?}"
         );
@@ -2496,7 +2497,10 @@ mod tests {
         //     a host where libkrun + cache + supervisor are all
         //     present (fully-bootstrapped contributor host) →
         //     NixBuildFailed
-        // All four are legitimate "environment gap" surfaces. The
+        //   - builder store degraded (dangling GC root in the nix
+        //     store) on a host with a populated but corrupted cache →
+        //     DegradedBuilderStore
+        // All five are legitimate "environment gap" surfaces. The
         // fourth is what `mvmctl dev up` reports to operators with
         // a populated cache; the first three are what `mvmctl dev
         // up` reports before the Stage 0 bootstrap completes.
@@ -2511,6 +2515,7 @@ mod tests {
                 BuilderVmError::LibkrunUnavailable(_)
                     | BuilderVmError::ExtractionFailed(_)
                     | BuilderVmError::NixBuildFailed(_)
+                    | BuilderVmError::DegradedBuilderStore { .. }
             ),
             "unexpected error variant: {err:?}"
         );

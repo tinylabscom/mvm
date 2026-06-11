@@ -584,13 +584,19 @@ jobs:
           # plan-89-baseline is an intentionally input-less throw-at-eval
           # boot-timing fixture (see its flake.nix) — no inputs means no
           # lockfile to keep in sync, so exclude it like template_scaffold.
+          # examples/exit_code and examples/sleeper pin inputs.mvm to this
+          # repo's own GitHub URL; their lock is resolved at build time via
+          # --override-input mvm path:... (mvmctl up source-checkout mode),
+          # not from a published release. No stable remote rev to lock against.
           done < <(find . -name flake.nix \
             -not -path './target/*' \
             -not -path './.git/*' \
             -not -path './node_modules/*' \
             -not -path './*/resources/template_scaffold/*' \
             -not -path './resources/template_scaffold/*' \
-            -not -path './tests/fixtures/plan-89-baseline/*')
+            -not -path './tests/fixtures/plan-89-baseline/*' \
+            -not -path './examples/exit_code/*' \
+            -not -path './examples/sleeper/*')
           exit "$fail"
 
   # ── Lane 9: Builder-VM image reproducibility (Plan 107 A2.5) ───────

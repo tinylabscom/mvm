@@ -2148,6 +2148,15 @@ console mode lockdown, VM identifier handling, supervisor as a security
 boundary, crash diagnostics, MDM detection) covered in Plan 97
 §"Security considerations" — checkboxes tracked in the plan file.
 
+### Live Vz validation — unblocked 2026-06-11
+
+Sealed-workload `/init` on Vz now detaches stdin from the input-less
+console (`< /dev/null`), closing the foot-gun where a workload's PID 1
+hit EOF ~5 s after boot and triggered a kernel reboot. `examples/sleeper`
+is the designated long-lived fixture for live Vz round-trip validation.
+Live bringup + fork semantic-A spike are the tracked next step (best-
+effort; gated on host Vz flakiness).
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image

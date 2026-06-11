@@ -212,6 +212,22 @@ fn default_man_dir() -> PathBuf {
     workspace_root().join("man")
 }
 
+#[cfg(test)]
+mod guest_init_tests {
+    #[test]
+    fn guest_init_detaches_workload_stdin_from_console() {
+        // The sealed-workload arm must source the boot command with stdin
+        // redirected away from the input-less serial console; otherwise a
+        // workload that reads stdin EOF-crashes shortly after boot.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../nix/lib/mk-guest.nix");
+        let init = std::fs::read_to_string(path).expect("read mk-guest.nix");
+        assert!(
+            init.contains(". \"$MVM_BOOT\" </dev/null"),
+            "mk-guest.nix workload arm must redirect the workload's stdin to /dev/null"
+        );
+    }
+}
+
 #[cfg(feature = "man")]
 pub fn gen_man(output_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(output_dir).with_context(|| {
