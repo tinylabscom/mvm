@@ -145,6 +145,9 @@ pub struct SynthesisInput<'a> {
     /// into the signed plan + audit log (claim 1 / claim 8). Empty for
     /// the common no-volume case.
     pub shares: Vec<mvm_core::plan::HostShareGrant>,
+    /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
+    /// Default (all-off) preserves the curated-only baseline.
+    pub redaction: mvm_core::policy::RedactionPolicy,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -226,7 +229,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         fs_policy,
         secrets: input.secrets.clone(),
         egress_policy,
-        redaction: Default::default(),
+        redaction: input.redaction.clone(),
         tool_policy,
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
@@ -354,6 +357,7 @@ mod tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         }
     }
 
@@ -552,6 +556,31 @@ mod tests {
         }];
         let plan = synthesize_plan(&inp).unwrap();
         assert_eq!(plan.secrets, inp.secrets);
+    }
+
+    #[test]
+    fn synthesized_plan_carries_redaction_profiles() {
+        use mvm_core::policy::{
+            EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile,
+        };
+        let mut inp = input("myvm");
+        inp.redaction = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![RedactionProfile {
+                host: "api.openai.com".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    names: NameMode::Redact,
+                    ..Default::default()
+                },
+            }],
+        };
+        let plan = synthesize_plan(&inp).unwrap();
+        assert_eq!(plan.redaction.profiles.len(), 1);
+        assert_eq!(plan.redaction.profiles[0].host, "api.openai.com");
     }
 
     #[test]
