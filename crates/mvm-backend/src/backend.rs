@@ -5,23 +5,19 @@ use mvm_core::vm_backend::{
 };
 
 // W8: every backend variant + the FC support modules live in this
-// crate now. `microvm`, `microvm_nix`, `image` are siblings under
+// crate now. `microvm`, `image` are siblings under
 // `crate::`; the substrate (`config`, `shell`, `runtime_meta`) lives
 // in `mvm-base`.
 use crate::apple_container::AppleContainerBackend;
 use crate::base::config::{PortMapping, VMS_DIR};
 use crate::base::shell::run_in_vm_stdout;
-use crate::cloud_hypervisor::CloudHypervisorBackend;
-use crate::docker::DockerBackend;
 use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::vz::VzBackend;
-use crate::{firecracker, microvm, microvm_nix};
-
-pub use microvm_nix::{MicrovmNixBackend, MicrovmNixConfig};
+use crate::{firecracker, microvm};
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -304,8 +300,7 @@ impl VmBackend for FirecrackerBackend {
 /// Plan 76 §"libkrun isolation is not Firecracker isolation": prod
 /// selection must require explicit operator acknowledgement.
 ///
-/// **Tier 3** — Docker, microvm.nix runner, Mock. Fallback or
-/// test-only; `mvmctl up` emits a loud banner before using them.
+/// **Tier 3** — Mock, test-only.
 /// Apple Container sits at Tier 3 today as well: while VZ provides
 /// real virtualization, the security claims have not been audited
 /// against ADR-002.
@@ -334,9 +329,7 @@ impl BackendTier {
 /// backend is active. Each variant delegates to its inner implementation.
 pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
-    MicrovmNix(MicrovmNixBackend),
     AppleContainer(AppleContainerBackend),
-    Docker(DockerBackend),
     /// libkrun (plan 53 §"Plan E") — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
     /// Vz (Apple Virtualization.framework) — Plan 97 / ADR-056. Direct
@@ -345,11 +338,6 @@ pub enum AnyBackend {
     /// `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun
     /// as the macOS default per Plan 97 §"Phase D".
     Vz(VzBackend),
-    /// Cloud Hypervisor — rust-vmm peer of Firecracker at Tier 1. Adds
-    /// VFIO passthrough, virtio-gpu, virtio-fs, and larger guests
-    /// beyond what FC supports. Opt-in via `--hypervisor cloud-hypervisor`;
-    /// auto_select keeps Firecracker as the KVM default.
-    CloudHypervisor(CloudHypervisorBackend),
     /// QEMU workload runtime (Plan 166 Phase 2 / ADR-072) — Linux dev/test
     /// substrate (KVM where present, TCG fallback). Opt-in via
     /// `--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
@@ -371,11 +359,12 @@ impl AnyBackend {
         Self::Firecracker(FirecrackerBackend)
     }
 
-    /// Select backend based on whether the build output includes a
-    /// microvm.nix runner script.
+    /// Select backend based on whether the build output is a non-KVM
+    /// dev/test runner. A runner-style output routes to the QEMU dev/test
+    /// backend (TCG where KVM is absent); otherwise Firecracker.
     pub fn from_build_output(has_runner: bool) -> Self {
         if has_runner {
-            Self::MicrovmNix(MicrovmNixBackend)
+            Self::Qemu(QemuBackend)
         } else {
             Self::Firecracker(FirecrackerBackend)
         }
@@ -383,23 +372,16 @@ impl AnyBackend {
 
     /// Select backend by hypervisor name.
     ///
-    /// Supported: `"firecracker"` (default), `"qemu"` (via microvm.nix),
+    /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
     /// `"apple-container"` (macOS 26+), `"libkrun"` (Linux KVM / macOS
-    /// HVF), `"docker"` (Tier 3 fallback). Unknown names fall back to
-    /// Firecracker.
+    /// HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
         match name {
             "apple-container" => Self::AppleContainer(AppleContainerBackend),
-            "docker" => Self::Docker(DockerBackend),
             "libkrun" | "krun" => Self::Libkrun(LibkrunBackend),
             "vz" | "virtualization" => Self::Vz(VzBackend),
-            "cloud-hypervisor" | "cloud_hypervisor" | "ch" | "clh" => {
-                Self::CloudHypervisor(CloudHypervisorBackend)
-            }
-            // Plan 166 Phase 2 — `"qemu"` now routes to the real QEMU
-            // workload backend, not the vestigial microvm.nix alias.
-            // `MicrovmNixBackend` stays selectable via `from_build_output`
-            // (a flake that emits a microvm.nix runner), not by name.
+            // Plan 166 Phase 2 — `"qemu"` is the Linux dev/test backend
+            // (KVM where present, TCG fallback).
             "qemu" => Self::Qemu(QemuBackend),
             // Test-only in-memory backend. See `crate::mock`. Routing
             // here from a production caller is a misconfiguration, but
@@ -419,7 +401,6 @@ impl AnyBackend {
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
     /// 2. Apple Container (macOS 26+)
     /// 3. raw libkrun
-    /// 4. Docker (Tier 3 fallback — banner emitted; not promoted)
     ///
     /// If none of the above match, the function returns Firecracker as
     /// the default — `start()` will then surface the host-side
@@ -445,14 +426,6 @@ impl AnyBackend {
             return Self::Libkrun(LibkrunBackend);
         }
 
-        // 4. Docker available → universal Tier 3 fallback. The CLI emits
-        //    a loud, suppressible banner when this path is taken (plan 53
-        //    Plan B). Not preferred; only chosen when no microVM tier is
-        //    available on this host.
-        if plat.has_docker() {
-            return Self::Docker(DockerBackend);
-        }
-
         // Final default. Reachable when no tier is available; start()
         // then fails with the production-path error message rather than
         // silently picking a backend the caller didn't ask for.
@@ -466,7 +439,7 @@ impl AnyBackend {
     /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`.
     ///
     /// Returns `None` when no marker is present — the VM isn't one of the
-    /// pid-file backends (e.g. Apple Container / Docker, which track state
+    /// pid-file backends (e.g. Apple Container, which tracks state
     /// out-of-band) or doesn't exist. Callers fall back to the platform
     /// default in that case.
     pub fn for_started_vm(name: &str) -> Option<Self> {
@@ -494,7 +467,6 @@ impl AnyBackend {
             Self::Libkrun(LibkrunBackend),
             Self::Firecracker(FirecrackerBackend),
             Self::AppleContainer(AppleContainerBackend),
-            Self::Docker(DockerBackend),
         ] {
             if let Ok(found) = backend.list() {
                 vms.extend(found);
@@ -516,31 +488,26 @@ impl AnyBackend {
     /// fails CI.
     pub fn tier(&self) -> BackendTier {
         match self {
-            // Tier 1: hardened production. Firecracker (with
-            // jailer + seccomp) and Cloud Hypervisor (peer at the
-            // same maturity).
-            Self::Firecracker(_) | Self::CloudHypervisor(_) => BackendTier::Tier1,
+            // Tier 1: hardened production. Firecracker (with jailer +
+            // seccomp) is the sole Tier-1 VMM.
+            Self::Firecracker(_) => BackendTier::Tier1,
 
             // Tier 2: fast local. libkrun's host/guest boundary
             // is well-engineered but not equivalent to
             // Firecracker + jailer + seccomp; plan 76 §"libkrun
             // isolation is not Firecracker isolation". Apple
-            // Container (Virtualization.framework) and microvm.nix
-            // (qemu) also sit here per their existing
-            // `BackendSecurityProfile.tier` strings.
+            // Container (Virtualization.framework) sits here per its
+            // existing `BackendSecurityProfile.tier` string.
             // QEMU: best-case Tier 2 (KVM-accelerated). The TCG (no-KVM)
             // mode is a runtime Tier-3 degradation surfaced by the QEMU
             // backend's `start` banner + doctor, not by this compile-time
             // classification (Plan 166 / ADR-072).
-            Self::Libkrun(_)
-            | Self::AppleContainer(_)
-            | Self::MicrovmNix(_)
-            | Self::Vz(_)
-            | Self::Qemu(_) => BackendTier::Tier2,
+            Self::Libkrun(_) | Self::AppleContainer(_) | Self::Vz(_) | Self::Qemu(_) => {
+                BackendTier::Tier2
+            }
 
-            // Tier 3: fallback / test. Docker is a userspace
-            // container fallback; Mock is in-memory test-only.
-            Self::Docker(_) | Self::Mock(_) => BackendTier::Tier3,
+            // Tier 3: test-only. Mock is in-memory.
+            Self::Mock(_) => BackendTier::Tier3,
         }
     }
 
@@ -548,12 +515,9 @@ impl AnyBackend {
     fn inner(&self) -> &dyn VmBackend {
         match self {
             Self::Firecracker(b) => b,
-            Self::MicrovmNix(b) => b,
             Self::AppleContainer(b) => b,
-            Self::Docker(b) => b,
             Self::Libkrun(b) => b,
             Self::Vz(b) => b,
-            Self::CloudHypervisor(b) => b,
             Self::Qemu(b) => b,
             Self::Mock(b) => b,
         }
@@ -740,43 +704,10 @@ mod tests {
     }
 
     #[test]
-    fn test_microvm_nix_backend_name() {
-        let backend = MicrovmNixBackend;
-        assert_eq!(backend.name(), "microvm-nix");
-    }
-
-    #[test]
-    fn test_microvm_nix_capabilities() {
-        let backend = MicrovmNixBackend;
-        let caps = backend.capabilities();
-        assert!(!caps.pause_resume);
-        assert!(!caps.snapshots);
-        assert!(caps.vsock);
-        assert!(caps.tap_networking);
-    }
-
-    #[test]
-    fn test_microvm_nix_security_profile_tier_2_partial_claim_3() {
-        let backend = MicrovmNixBackend;
-        let profile = backend.security_profile();
-        assert_eq!(profile.tier, "Tier 2");
-        assert!(profile.layer_coverage.is_microvm());
-        assert_eq!(profile.dropped_claims(), vec![3]);
-    }
-
-    #[test]
     fn test_any_backend_dispatches_security_profile_for_firecracker() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let profile = backend.security_profile();
         assert_eq!(profile.tier, "Tier 1");
-    }
-
-    #[test]
-    fn test_any_backend_dispatches_security_profile_for_docker() {
-        let backend = AnyBackend::from_hypervisor("docker");
-        let profile = backend.security_profile();
-        assert_eq!(profile.tier, "Tier 3");
-        assert!(!profile.layer_coverage.is_microvm());
     }
 
     #[test]
@@ -828,8 +759,10 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_build_output_with_runner() {
+        // A non-KVM dev/test runner output routes to the QEMU backend
+        // (microvm.nix folded into QEMU — ADR-076).
         let backend = AnyBackend::from_build_output(true);
-        assert_eq!(backend.name(), "microvm-nix");
+        assert_eq!(backend.name(), "qemu");
     }
 
     #[test]
@@ -848,43 +781,9 @@ mod tests {
     }
 
     #[test]
-    fn microvm_nix_no_longer_reachable_by_name() {
-        // The "qemu" alias was retired; MicrovmNix is selected via
-        // `from_build_output(true)`, never by hypervisor name.
-        assert_eq!(AnyBackend::from_build_output(true).name(), "microvm-nix");
-        assert_ne!(AnyBackend::from_hypervisor("qemu").name(), "microvm-nix");
-    }
-
-    #[test]
     fn test_any_backend_from_hypervisor_unknown_defaults() {
         let backend = AnyBackend::from_hypervisor("unknown");
         assert_eq!(backend.name(), "firecracker");
-    }
-
-    #[test]
-    fn test_any_backend_from_hypervisor_cloud_hypervisor() {
-        // CH is selectable under multiple aliases — full name, the
-        // snake-case form some tooling emits, and two short aliases
-        // (ch / clh) common in cloud-hypervisor's own docs.
-        for alias in ["cloud-hypervisor", "cloud_hypervisor", "ch", "clh"] {
-            let backend = AnyBackend::from_hypervisor(alias);
-            assert_eq!(
-                backend.name(),
-                "cloud-hypervisor",
-                "alias `{alias}` must resolve to cloud-hypervisor"
-            );
-        }
-    }
-
-    #[test]
-    fn test_cloud_hypervisor_via_any_backend_security_profile_tier_1() {
-        // Same Tier-1 posture as Firecracker (rust-vmm; passes the
-        // fork test). Regression-guard against AnyBackend silently
-        // dropping the variant from inner().
-        let backend = AnyBackend::from_hypervisor("cloud-hypervisor");
-        let p = backend.security_profile();
-        assert_eq!(p.tier, "Tier 1");
-        assert!(p.layer_coverage.is_microvm());
     }
 
     #[test]
@@ -990,31 +889,12 @@ mod tests {
     }
 
     #[test]
-    fn test_any_backend_from_hypervisor_docker() {
-        let backend = AnyBackend::from_hypervisor("docker");
-        assert_eq!(backend.name(), "docker");
-    }
-
-    #[test]
-    fn test_docker_via_any_backend_capabilities() {
-        let backend = AnyBackend::from_hypervisor("docker");
-        let caps = backend.capabilities();
-        assert!(caps.pause_resume);
-        assert!(!caps.snapshots);
-        assert!(!caps.vsock);
-        assert!(!caps.tap_networking);
-    }
-
-    #[test]
     fn test_auto_select_returns_valid_backend() {
         let backend = AnyBackend::auto_select();
         let name = backend.name();
         assert!(
             // The full set of legitimate auto_select returns is:
-            matches!(
-                name,
-                "firecracker" | "apple-container" | "libkrun" | "docker"
-            ),
+            matches!(name, "firecracker" | "apple-container" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
         );
     }
@@ -1024,7 +904,7 @@ mod tests {
     //
     // Backends that don't support pause/resume (capabilities.pause_resume
     // == false) must surface a clear, named bail. Backends that *do*
-    // support it (Firecracker, Cloud Hypervisor, Docker) have real impls
+    // support it (Firecracker, Cloud Hypervisor) have real impls
     // that talk to a live VMM and aren't exercised here — see their
     // module-level tests for input-validation coverage.
     // ------------------------------------------------------------------
@@ -1055,12 +935,6 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_unsupported_on_microvm_nix() {
-        // MicrovmNix is no longer reachable by name; construct it directly.
-        assert_unsupported_pause_resume(AnyBackend::MicrovmNix(MicrovmNixBackend), "microvm-nix");
-    }
-
-    #[test]
     fn pause_resume_unsupported_on_qemu() {
         assert_unsupported_pause_resume(AnyBackend::from_hypervisor("qemu"), "qemu");
     }
@@ -1086,16 +960,6 @@ mod tests {
         assert_eq!(
             AnyBackend::from_hypervisor("libkrun").snapshot_capability(),
             SnapshotCapability::DiskOnly
-        );
-    }
-
-    #[test]
-    fn snapshot_capability_unsupported_on_microvm_nix() {
-        // MicrovmNix is no longer reachable by name (the "qemu" alias was
-        // retired in Plan 166 Phase 2); construct it directly.
-        assert_eq!(
-            AnyBackend::MicrovmNix(MicrovmNixBackend).snapshot_capability(),
-            SnapshotCapability::Unsupported
         );
     }
 
@@ -1161,11 +1025,7 @@ mod tests {
         // live VM, but we can check that the bail (if any) for a
         // missing VM does NOT claim the backend itself is unsupported
         // when the capability says it is.
-        let unsupported: &[&str] = &[
-            "libkrun",
-            "qemu", // → microvm-nix
-            "apple-container",
-        ];
+        let unsupported: &[&str] = &["libkrun", "qemu", "apple-container"];
         for &name in unsupported {
             let b = AnyBackend::from_hypervisor(name);
             assert!(
@@ -1173,13 +1033,11 @@ mod tests {
                 "{name}: capability flag must say pause_resume=false (matches bail in pause/resume)"
             );
         }
-        for name in ["firecracker", "cloud-hypervisor", "docker"] {
-            let b = AnyBackend::from_hypervisor(name);
-            assert!(
-                b.capabilities().pause_resume,
-                "{name}: capability flag must say pause_resume=true (matches the real impl)"
-            );
-        }
+        let fc = AnyBackend::from_hypervisor("firecracker");
+        assert!(
+            fc.capabilities().pause_resume,
+            "firecracker: capability flag must say pause_resume=true (matches the real impl)"
+        );
     }
 
     // Plan 76 Phase 7 — BackendTier coverage.
@@ -1188,11 +1046,9 @@ mod tests {
     fn tier_classification_locks_each_backend_variant() {
         let cases: &[(&str, BackendTier)] = &[
             ("firecracker", BackendTier::Tier1),
-            ("cloud-hypervisor", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
             ("apple-container", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
-            ("docker", BackendTier::Tier3),
             ("mock", BackendTier::Tier3),
         ];
         for (name, expected) in cases {
@@ -1209,15 +1065,7 @@ mod tests {
         // is the Plan 76 Phase 7 closed-enum view of the same fact.
         // Bumping one without the other is a regression — keep them
         // wired.
-        let names = [
-            "firecracker",
-            "cloud-hypervisor",
-            "libkrun",
-            "apple-container",
-            "qemu",
-            "docker",
-            "mock",
-        ];
+        let names = ["firecracker", "libkrun", "apple-container", "qemu", "mock"];
         for name in names {
             let b = AnyBackend::from_hypervisor(name);
             let enum_tier = b.tier();

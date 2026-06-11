@@ -182,6 +182,16 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
+  [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
+  [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
+  [x] Phase 1 fold microvm_nix → qemu
+  [x] Phase 1 prune dead CI lane + Justfile setup recipe
+  [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
+      4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
+  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
+      onto supervisor vz + shared console transport + drop apple-container
+
 PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
   [x] vm group (14 single-VM verbs)

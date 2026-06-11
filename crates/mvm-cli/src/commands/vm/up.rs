@@ -893,7 +893,7 @@ pub(in crate::commands) struct Args {
     /// under /data, /work, or /mnt (system mounts are read-only).
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
-    /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, docker, vz). Default: auto-detect per host
+    /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, vz). Default: auto-detect per host
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
     /// Port mapping (format: HOST:GUEST or PORT). Repeatable
@@ -999,13 +999,11 @@ pub(in crate::commands) struct Args {
     #[arg(long = "from-workload-ir", value_name = "PATH")]
     pub from_workload_ir: Option<std::path::PathBuf>,
     /// Plan 76 Phase 7 — explicit operator acknowledgement that the
-    /// selected backend's isolation tier is acceptable for this
-    /// launch. Without this flag, a non-Tier-1 backend (libkrun,
-    /// microvm.nix qemu, Apple Container, Docker) emits a warning
-    /// on every launch. A future `--prod` mode will *block* rather
-    /// than warn; today we surface the signal without changing
-    /// default behaviour. Plan 76 §"libkrun isolation is not
-    /// Firecracker isolation".
+    /// selected backend's isolation tier is acceptable for this launch.
+    /// A non-Tier-1 backend (libkrun, qemu, Apple Container, vz) requires
+    /// this flag. A future `--prod` mode will *block* rather than warn;
+    /// today we surface the signal without changing default behaviour.
+    /// Plan 76 §"libkrun isolation is not Firecracker isolation".
     #[arg(long)]
     pub accept_tier2_isolation: bool,
 
@@ -1410,16 +1408,10 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // Mirrors AnyBackend::auto_select()'s priority so the CLI default
     // matches the rest of the codebase: native KVM → Apple Container
     // (macOS 26+) → libkrun (typical macOS 13-25 contributor box with
-    // the slp/krun Homebrew tap) → Docker (Tier 3 fallback).
+    // the slp/krun Homebrew tap).
     // Shared with `mvmctl pool` (Plan 118 WS-1 1b) so both agree on the effective backend.
     let effective_hypervisor_owned = super::super::shared::resolve_effective_hypervisor(hypervisor);
     let effective_hypervisor: &str = &effective_hypervisor_owned;
-
-    // ADR-002 / plan 53: emit a loud, suppressible banner when the
-    // active backend is not a hardware-isolated microVM. Today this
-    // only fires for the Docker tier; future non-microVM backends
-    // would inherit the same banner via their `security_profile()`.
-    emit_security_banner_if_needed(effective_hypervisor);
 
     // Plan 152 WS-A: fail fast before boot so the user sees a clear
     // error instead of booting then hitting the generic backend bail.
@@ -2518,59 +2510,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     Ok(())
 }
 
-// ── Security posture banner (ADR-002 / plan 53) ──────────────────────
-
-/// Print a loud warning banner whenever the active backend is not a
-/// hardware-isolated microVM tier (today: Docker only). Suppressible
-/// via `MVM_ACK_DOCKER_TIER=1` or `[security] ack_docker_tier = true`
-/// in `~/.mvm/config.toml`.
-///
-/// Idempotent and side-effect-only (the actual posture data lives in
-/// `mvmctl doctor`); the banner is intentionally noisy because the
-/// security tier change is the most important fact about the run.
-pub(super) fn emit_security_banner_if_needed(hypervisor: &str) {
-    if security_banner_acknowledged() {
-        return;
-    }
-    let backend = AnyBackend::from_hypervisor(hypervisor);
-    let profile = backend.security_profile();
-    if profile.layer_coverage.is_microvm() {
-        return;
-    }
-    let dropped = profile.dropped_claims();
-    let dropped_str = dropped
-        .iter()
-        .map(u8::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    ui::warn(&format!(
-        "⚠ SECURITY POSTURE: {tier} — reduced isolation\n   \
-        Active backend '{name}' is not a hardware-isolated microVM.\n   \
-        Layer L1-L3 collapse to the host kernel; ADR-002 claims [{dropped_str}] do NOT hold.\n   \
-        Recent container-escape CVEs (2024-2025): CVE-2024-21626, CVE-2024-1753,\n   \
-        CVE-2025-9074, CVE-2025-23266, CVE-2025-31133, CVE-2025-52565.\n   \
-        Suppress this banner with MVM_ACK_DOCKER_TIER=1 or\n   \
-        [security] ack_docker_tier = true in ~/.mvm/config.toml.",
-        tier = profile.tier,
-        name = backend.name(),
-    ));
-}
-
-fn security_banner_acknowledged() -> bool {
-    if matches!(
-        std::env::var("MVM_ACK_DOCKER_TIER").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
-    ) {
-        return true;
-    }
-    mvm_core::user_config::load(None).security.ack_docker_tier
-}
-
 /// Plan 124 C1 / ADR-051 — attach the verity-sealed runtime overlay by
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
 /// probe. **Firecracker-only**: it's the sole backend that attaches the
 /// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
-/// libkrun/Vz/apple-container/docker ignore the fields, so we skip them.
+/// libkrun/Vz/apple-container ignore the fields, so we skip them.
 /// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
 /// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
 /// — no build, no download, no `nix` — so this is safe on every host.
@@ -2674,43 +2618,6 @@ mod runtime_overlay_attach_tests {
             sc.runtime_overlay_path.is_none(),
             "cold cache must not attach (legacy boot)"
         );
-    }
-}
-
-#[cfg(test)]
-mod security_banner_tests {
-    use super::*;
-
-    #[test]
-    fn microvm_tier_does_not_trigger_banner_logic() {
-        // Firecracker is a microVM tier — `security_banner_acknowledged`'s
-        // result shouldn't matter because is_microvm() short-circuits.
-        let backend = AnyBackend::from_hypervisor("firecracker");
-        assert!(backend.security_profile().layer_coverage.is_microvm());
-    }
-
-    #[test]
-    fn docker_tier_is_detected_as_non_microvm() {
-        let backend = AnyBackend::from_hypervisor("docker");
-        assert!(!backend.security_profile().layer_coverage.is_microvm());
-    }
-
-    #[test]
-    fn ack_env_var_suppresses_banner() {
-        // SAFETY: tests run single-threaded with --test-threads=1 in CI;
-        // the env var is restored before the function returns.
-        // We use a unique value so concurrent tests don't collide.
-        let prev = std::env::var("MVM_ACK_DOCKER_TIER").ok();
-        unsafe {
-            std::env::set_var("MVM_ACK_DOCKER_TIER", "1");
-        }
-        assert!(security_banner_acknowledged());
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_ACK_DOCKER_TIER", v),
-                None => std::env::remove_var("MVM_ACK_DOCKER_TIER"),
-            }
-        }
     }
 }
 
