@@ -2468,22 +2468,20 @@ fn decode_plan_secrets(
             ));
         }
     };
-    let secrets = match mvm_core::plan::secrets_from_signed_json(&plan_json) {
-        Ok(s) => s,
+    // Both producers land here: the pre-start persist writes the bare
+    // `ExecutionPlan` (the shape the firecracker bridge parses too) and the
+    // gateway-bridge stash writes the signed envelope. Accept either.
+    let plan = match mvm_core::plan::plan_from_admitted_json(&plan_json) {
+        Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "plan.json not a decodable signed plan; skipping egress substitution");
+            tracing::warn!(error = %e, "plan.json not a decodable admitted plan; skipping egress substitution");
             return Ok(None);
         }
     };
-    if secrets.is_empty() {
+    if plan.secrets.is_empty() {
         return Ok(None);
     }
-    // Per-destination redaction rides the same signed plan; a parse hiccup
-    // defaults to all-off rather than failing the boot.
-    let redaction = mvm_core::plan::redaction_from_signed_json(&plan_json).unwrap_or_default();
-    let tenant = mvm_core::plan::tenant_from_signed_json(&plan_json)
-        .map_err(|e| anyhow::anyhow!("extract tenant from plan.json: {e}"))?;
-    Ok(Some((secrets, redaction, tenant)))
+    Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
 }
 
 /// Spawn the per-VM substitution endpoint **before** the guest boots,
