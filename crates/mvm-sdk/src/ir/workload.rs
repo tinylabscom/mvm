@@ -410,6 +410,28 @@ pub struct SecretRef {
     /// Supports `*.` subdomain wildcards (see [`host_matches`]). An empty list
     /// is an unbound secret, rejected at validation (`SecretWithoutBinding`).
     pub allowed_hosts: Vec<String>,
+    /// Non-secret SigV4 parameters, present only for `auth_type = Sigv4`. The
+    /// secret value is the secret-access-key; these name the credential scope
+    /// (operator-set in the binding, reconstructed onto the ref at admission).
+    /// `None` for every other auth type.
+    #[serde(default)]
+    pub sigv4: Option<Sigv4Params>,
+}
+
+/// The non-secret half of a SigV4 credential: the public access-key id and the
+/// credential scope (`region`/`service`). The signing key (the AWS
+/// secret-access-key) is **not** here — it lives in the secret store and never
+/// leaves the signer. Identifying but not secret, so Debug is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Sigv4Params {
+    /// The AWS access-key id (e.g. `AKIA…`). Public; pairs with the
+    /// secret-access-key the signer holds.
+    pub access_key_id: String,
+    /// Credential-scope region (e.g. `us-east-1`).
+    pub region: String,
+    /// Credential-scope service (e.g. `s3`, `execute-api`).
+    pub service: String,
 }
 
 /// How a secret authenticates an outbound request, so the keyholder picks the

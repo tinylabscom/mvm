@@ -4047,6 +4047,7 @@ mod resolve_deps_volume_tests {
                 &SecretBindingMeta {
                     auth_type: mvm_sdk::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             )
             .unwrap();

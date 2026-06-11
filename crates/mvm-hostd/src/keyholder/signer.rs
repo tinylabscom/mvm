@@ -175,6 +175,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
         }
     }
 
