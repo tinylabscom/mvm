@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-10**
+**Last updated: 2026-06-11**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -126,6 +126,8 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       vm_full memory save/restore (saveMachineStateToURL) + vm_full fork arm +
       restore_checkpoint + retire snapshot save/restore. cache GC.
       Remaining: checkpoint diff + pause/resume wiring (PR3)
+  [x] AuditEmitter + host_keypair + plan_persist + pure checkpoint bind helpers
+      hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 

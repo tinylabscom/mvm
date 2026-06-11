@@ -555,7 +555,7 @@ fn emit_oci_run_admission(
     let emitter =
         AuditEmitter::new(signer.signing).context("opening audit chain for OCI provenance")?;
     emitter.emit_admitted(&admitted.plan, &admitted.signer_id)?;
-    emitter.emit_oci_provenance(&admitted.plan, &image.provenance)?;
+    emitter.emit_oci_provenance(&admitted.plan, image.provenance.audit_labels())?;
     Ok(())
 }
 
