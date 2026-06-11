@@ -1194,6 +1194,7 @@ mod tests {
             fs_policy: FsPolicyRef("default".to_string()),
             secrets: vec![],
             egress_policy: PolicyRef("agent-l7".to_string()),
+            redaction: Default::default(),
             tool_policy: PolicyRef("read-only".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
@@ -1893,6 +1894,7 @@ mod tests {
             allow_plain_http,
             body_cap_bytes: 0,
             disabled_inspectors: vec![],
+            redaction: Default::default(),
         }
     }
 

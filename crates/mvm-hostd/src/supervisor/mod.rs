@@ -38,6 +38,7 @@ pub mod balloon_runtime;
 pub mod circuit_breaker;
 pub mod destination;
 pub mod egress;
+pub mod entropy_scanner;
 pub mod event_bus;
 pub mod firewall;
 // Per-VM gateway flow-event subscriber sink. Lives next to
@@ -59,6 +60,8 @@ pub mod instance_sampler;
 pub mod keystore;
 pub mod l7_proxy;
 pub mod lifecycle_hooks;
+pub mod name_scanner;
+pub mod names_gazetteer;
 // Observer trait + Pipeline builder for the gateway audit substrate.
 // Observers consume `&FlowEvent` references inside `signer_task`
 // (fan-out before chain signing). Host-allowlisted via
@@ -68,6 +71,7 @@ pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
+pub mod redaction_resolve;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
 /// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;

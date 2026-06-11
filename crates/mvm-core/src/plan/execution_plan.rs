@@ -51,8 +51,8 @@ pub const SCHEMA_VERSION: u32 = 5;
 ///
 /// The fields here are the rubric — `enforce_*` in `mvm/src/enforce.rs`
 /// walks the plan field-by-field and rejects any plan that doesn't
-/// satisfy its corresponding enforcement row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// satisfy the corresponding enforcement row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
     /// Wire-format version. See [`SCHEMA_VERSION`].
@@ -101,6 +101,13 @@ pub struct ExecutionPlan {
     /// here so an audit entry can show "egress allowed, pii redacted"
     /// as orthogonal facts.
     pub egress_policy: PolicyRef,
+
+    /// Per-destination egress redaction policy. Rides inline in the signed plan
+    /// — like `secrets` — so the per-VM substitution endpoint gets it at spawn
+    /// without resolving the bundle. Default = the all-off curated baseline (no
+    /// per-destination entropy/name redaction).
+    #[serde(default)]
+    pub redaction: crate::policy::RedactionPolicy,
 
     /// Tool-call policy (which tools the model is allowed to invoke
     /// over the supervisor's vsock RPC).

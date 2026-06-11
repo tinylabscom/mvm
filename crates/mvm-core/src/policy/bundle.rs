@@ -24,7 +24,7 @@ pub struct PolicyId(pub String);
 
 /// A bundle of every policy a workload boots under. Resolved from a
 /// `PolicyRef` on `ExecutionPlan`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyBundle {
     pub schema_version: u32,
@@ -49,7 +49,7 @@ pub struct PolicyBundle {
 
 /// Per-tenant overlay. Each field is optional — `None` means
 /// "inherit from the bundle base"; `Some(_)` overrides.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantOverlay {
     pub network: Option<NetworkPolicy>,

@@ -87,11 +87,17 @@ pub struct RedactingSubstitution {
 pub struct RedactionHits {
     pub secrets: Vec<&'static str>,
     pub pii: Vec<&'static str>,
+    /// Count of high-entropy runs that fired (entropy carries no stable rule
+    /// name — it's a shape, not a labeled pattern — so it's a count, not a
+    /// `Vec<&'static str>`).
+    pub entropy: usize,
+    /// Count of name spans that fired.
+    pub names: usize,
 }
 
 impl RedactionHits {
     pub fn is_empty(&self) -> bool {
-        self.secrets.is_empty() && self.pii.is_empty()
+        self.secrets.is_empty() && self.pii.is_empty() && self.entropy == 0 && self.names == 0
     }
 
     /// Fold another pass's categories in (used when redacting several fields —
@@ -99,6 +105,8 @@ impl RedactionHits {
     pub fn merge(&mut self, other: RedactionHits) {
         self.secrets.extend(other.secrets);
         self.pii.extend(other.pii);
+        self.entropy += other.entropy;
+        self.names += other.names;
     }
 }
 
@@ -124,11 +132,114 @@ impl RedactingSubstitution {
     pub fn redact_bytes(&self, payload: &[u8]) -> Option<(Vec<u8>, RedactionHits)> {
         let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
         let (after_pii, pii) = self.pii.redact(&after_secrets);
-        let hits = RedactionHits { secrets, pii };
+        let hits = RedactionHits {
+            secrets,
+            pii,
+            ..Default::default()
+        };
         if hits.is_empty() {
             return None; // clean payload — pass through unchanged.
         }
         Some((after_pii, hits))
+    }
+
+    /// Per-destination redaction. Curated secrets always run; entropy and names
+    /// run only when the resolved action opts in. Returns `None` when nothing
+    /// fired. `secrets`/`pii` come from the existing curated rulesets; entropy
+    /// + names from the new detectors.
+    pub fn redact_bytes_for(
+        &self,
+        payload: &[u8],
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Option<(Vec<u8>, RedactionHits)> {
+        use crate::supervisor::entropy_scanner::EntropyScanner;
+        use crate::supervisor::name_scanner::NameScanner;
+        use crate::supervisor::pii_redactor::PiiRedactor;
+        use mvm_core::policy::{EntropyMode, NameMode, SecretAction};
+
+        // Curated secrets: default Block masks (today's behavior); a per-destination
+        // Audit downgrade observes a trusted sink without masking.
+        let (mut buf, secrets) = match action.secrets {
+            SecretAction::Block | SecretAction::Redact => {
+                self.secrets.redact(payload, REDACTION_MASK)
+            }
+            SecretAction::Audit => (payload.to_vec(), self.secrets.scan(payload)),
+        };
+
+        // Structured PII: a default (empty) action runs the always-on ruleset;
+        // an explicit per-destination policy overrides — `disabled` skips it, a
+        // category list restricts it. A malformed policy fails safe to always-on.
+        let pii_is_default = action.pii.mode.is_none() && action.pii.categories.is_empty();
+        let pii = if pii_is_default {
+            let (out, p) = self.pii.redact(&buf);
+            buf = out;
+            p
+        } else {
+            match PiiRedactor::from_policy(&action.pii) {
+                Ok(None) => Vec::new(),
+                Ok(Some(r)) => {
+                    let (out, p) = r.redact(&buf);
+                    buf = out;
+                    p
+                }
+                Err(_) => {
+                    let (out, p) = self.pii.redact(&buf);
+                    buf = out;
+                    p
+                }
+            }
+        };
+
+        let mut hits = RedactionHits {
+            secrets,
+            pii,
+            entropy: 0,
+            names: 0,
+        };
+
+        match &action.entropy {
+            EntropyMode::Off => {}
+            EntropyMode::Audit {
+                min_bits_per_char,
+                min_run_len,
+            } => {
+                // Audit: counted, not masked.
+                hits.entropy += EntropyScanner::new(*min_run_len, *min_bits_per_char)
+                    .scan(&buf)
+                    .len();
+            }
+            EntropyMode::Redact {
+                min_bits_per_char,
+                min_run_len,
+            } => {
+                let (out, n) = EntropyScanner::new(*min_run_len, *min_bits_per_char).redact(&buf);
+                buf = out;
+                hits.entropy += n;
+            }
+        }
+
+        match action.names {
+            NameMode::Off => {}
+            NameMode::Audit => {
+                // Count without masking: the scanner masks, so dry-redact a copy
+                // for the count and drop the buffer. Live PII match-span plumbing
+                // into co-occurrence is a follow-up — pass empty spans, so the
+                // labeled + gazetteer name signals still fire.
+                let (_, n) = NameScanner::with_defaults().redact(&buf, &[]);
+                hits.names += n;
+            }
+            NameMode::Redact => {
+                let (out, n) = NameScanner::with_defaults().redact(&buf, &[]);
+                buf = out;
+                hits.names += n;
+            }
+        }
+
+        if hits.is_empty() {
+            None
+        } else {
+            Some((buf, hits))
+        }
     }
 }
 
@@ -553,6 +664,91 @@ mod tests {
             "secret survived redaction: {masked}"
         );
         assert!(masked.contains("XXX"), "no mask present: {masked}");
+    }
+
+    #[test]
+    fn redact_bytes_for_applies_entropy_when_action_opts_in() {
+        use mvm_core::policy::{EntropyMode, RedactionAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"k=Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9 e";
+        // default action: entropy off → no hit
+        let off = RedactionAction::default();
+        assert!(r.redact_bytes_for(body, &off).is_none());
+        // opt in → entropy redacts the run
+        let on = RedactionAction {
+            entropy: EntropyMode::Redact {
+                min_bits_per_char: 4.0,
+                min_run_len: 20,
+            },
+            ..Default::default()
+        };
+        let (out, hits) = r.redact_bytes_for(body, &on).expect("entropy hit");
+        assert_eq!(hits.entropy, 1);
+        assert!(!String::from_utf8_lossy(&out).contains("Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9"));
+    }
+
+    #[test]
+    fn default_action_still_masks_email_and_curated_secrets() {
+        // Regression guard: a default (no-profile) action preserves today's
+        // always-on behavior — structured PII + curated secrets are masked.
+        use mvm_core::policy::RedactionAction;
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"contact alice@example.com key AKIAIOSFODNN7EXAMPLE end";
+        let (out, hits) = r
+            .redact_bytes_for(body, &RedactionAction::default())
+            .expect("default masks pii+secrets");
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("alice@example.com"), "email not masked: {s}");
+        assert!(
+            !s.contains("AKIAIOSFODNN7EXAMPLE"),
+            "secret not masked: {s}"
+        );
+        assert!(hits.pii.contains(&"email"));
+        assert!(!hits.secrets.is_empty());
+    }
+
+    #[test]
+    fn pii_disabled_for_destination_leaves_email() {
+        // A trusted sink can disable PII masking; the email survives while a
+        // default destination would mask it.
+        use mvm_core::policy::{PiiPolicy, RedactionAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"contact alice@example.com end";
+        let action = RedactionAction {
+            pii: PiiPolicy {
+                mode: Some("disabled".into()),
+                categories: vec![],
+            },
+            ..Default::default()
+        };
+        // Nothing else opts in, so the whole pass is a no-op → None.
+        assert!(
+            r.redact_bytes_for(body, &action).is_none(),
+            "pii=disabled should leave the email and mask nothing"
+        );
+    }
+
+    #[test]
+    fn secrets_audit_counts_without_masking() {
+        // A per-destination secrets=audit downgrade observes but does not mask.
+        use mvm_core::policy::{RedactionAction, SecretAction};
+        let r = RedactingSubstitution::with_default_rules();
+        let body = b"key AKIAIOSFODNN7EXAMPLE end";
+        let action = RedactionAction {
+            secrets: SecretAction::Audit,
+            ..Default::default()
+        };
+        let (out, hits) = r
+            .redact_bytes_for(body, &action)
+            .expect("audit still reports the hit");
+        assert!(
+            String::from_utf8_lossy(&out).contains("AKIAIOSFODNN7EXAMPLE"),
+            "audit mode must not mask the secret"
+        );
+        assert!(
+            !hits.secrets.is_empty(),
+            "audit mode must still count the hit"
+        );
     }
 
     #[test]

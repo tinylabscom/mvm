@@ -362,6 +362,7 @@ mod tests {
             fs_policy: FsPolicyRef("local-default".to_string()),
             secrets: Vec::new(),
             egress_policy: PolicyRef("local-default".to_string()),
+            redaction: Default::default(),
             tool_policy: PolicyRef("local-default".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: Vec::new(),

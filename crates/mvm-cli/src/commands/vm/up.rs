@@ -148,6 +148,9 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// into the signed plan + emitted to the chain-signed audit log
     /// (claim 1 / claim 8). Empty for the common no-volume case.
     pub shares: Vec<mvm_core::plan::HostShareGrant>,
+    /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
+    /// Default (all-off) preserves the curated-only baseline.
+    pub redaction: mvm_core::policy::RedactionPolicy,
 }
 
 /// Build the signed-plan host-fs grant list from the resolved volume
@@ -304,6 +307,7 @@ pub(super) fn admit_plan_for_boot(
         bundle_pin: bundle_pin.clone(),
         deps_volume: p.deps_volume.clone(),
         shares: p.shares.clone(),
+        redaction: p.redaction.clone(),
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -1027,6 +1031,10 @@ pub(in crate::commands) struct Args {
     /// claim-4 dev-only `do_exec` rule client-side.
     #[arg(long = "up-json")]
     pub up_json: bool,
+    /// Scrub undeclared secrets/PII on egress to HOST (masks); `HOST=audit` only
+    /// reports. Repeatable. Per-destination egress redaction.
+    #[arg(long = "redact", value_name = "HOST[=audit]")]
+    pub redact: Vec<String>,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -1200,6 +1208,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // value is only the string label that names the audit chain file.
     let resolved_tenant = super::tenant_resolution::resolve_tenant(args.tenant.as_deref());
 
+    // Author the per-destination egress redaction policy from
+    // `--redact HOST[=audit]`. Empty → all-off (curated-only baseline).
+    let redaction = super::redaction_flags::parse_redaction_flags(&args.redact)?;
+
     cmd_run(RunParams {
         flake_ref: args.flake.as_deref(),
         template_name: resolved_template_arg.as_deref(),
@@ -1224,6 +1236,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         plan_seccomp_tier,
         plan_secret_release,
         plan_secrets: lowered_plan_secrets.secrets,
+        redaction,
         sandbox_tags,
         sandbox_ttl,
         auto_resume,
@@ -1311,6 +1324,9 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) plan_seccomp_tier: mvm_core::plan::PlanSeccompTier,
     pub(super) plan_secret_release: mvm_core::plan::SecretReleasePolicy,
     pub(super) plan_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
+    /// All-off default preserves the curated-only baseline.
+    pub(super) redaction: mvm_core::policy::RedactionPolicy,
     /// Validated sandbox tags from `--tag k=v`.
     pub(super) sandbox_tags: std::collections::BTreeMap<String, String>,
     /// Parsed `--ttl` duration; reaper tears VM down after this elapses.
@@ -1377,6 +1393,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         plan_seccomp_tier,
         plan_secret_release,
         plan_secrets,
+        redaction,
         sandbox_tags,
         sandbox_ttl,
         auto_resume,
@@ -1526,6 +1543,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             deps_volume: deps_volume_binding.clone(),
             // Re-exec path: user volumes aren't threaded here.
             shares: Vec::new(),
+            redaction: redaction.clone(),
         })?;
 
         let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -1931,6 +1949,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         bundle_pin,
         deps_volume: deps_volume_binding.clone(),
         shares: shares_from_volume_cfg(&volume_cfg),
+        redaction: redaction.clone(),
     })?;
 
     // If a template snapshot exists AND the backend supports snapshots,
@@ -2444,6 +2463,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 bundle_pin,
                 deps_volume: deps_volume_binding.clone(),
                 shares: shares_from_volume_cfg(&w_volume_cfg),
+                redaction: redaction.clone(),
             }) {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -2762,6 +2782,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -2792,6 +2813,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2843,6 +2865,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -2880,6 +2903,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         })
         .unwrap()
         .unwrap();
@@ -2901,6 +2925,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         })
         .unwrap()
         .unwrap();
@@ -2964,6 +2989,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -3051,6 +3077,7 @@ chain_signing = true
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
             },
             &SystemClock,
             &ledger,
@@ -3150,6 +3177,7 @@ stream_destinations = ["file://{}"]
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
             },
             &SystemClock,
             &ledger,
@@ -3248,6 +3276,7 @@ chain_signing = false
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
             },
             &SystemClock,
             &ledger,
@@ -3321,6 +3350,7 @@ chain_signing = false
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
             },
             &SystemClock,
             &ledger,
@@ -3414,6 +3444,7 @@ disabled_inspectors = ["ssrf_guarrd"]
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
             },
             &SystemClock,
             &ledger,
@@ -3513,6 +3544,7 @@ port_hi  = 443
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
             },
             &SystemClock,
             &ledger,

@@ -289,6 +289,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                             bundle_pin: None,
                             deps_volume: None,
                             shares: vec![],
+                            redaction: mvm_core::policy::RedactionPolicy::default(),
                         })?;
                         let Some(c) = ctx else { return Ok(None) };
                         let plan_json = serde_json::to_string(&c.admitted.signed)

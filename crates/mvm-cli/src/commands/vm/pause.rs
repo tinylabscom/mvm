@@ -22,8 +22,10 @@ use mvm::vm::instance_snapshot::{
     CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, pause_and_seal,
     signal_post_restore, verify_and_resume,
 };
+use mvm_backend::backend::AnyBackend;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_core::vm_backend::VmId;
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -51,6 +53,12 @@ pub(in crate::commands) struct ResumeArgs {
     /// `firecracker`. See `pause --help` for the `mock` variant.
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
+}
+
+/// A running VM whose state dir carries a `vz.pid` marker is a Vz VM — it gets
+/// native vCPU pause/resume rather than the Firecracker snapshot-seal path.
+fn is_vz_vm(name: &str) -> bool {
+    matches!(AnyBackend::for_started_vm(name), Some(AnyBackend::Vz(_)))
 }
 
 /// Pick the `SnapshotIO` impl matching the hypervisor selector.
@@ -85,6 +93,19 @@ fn snapshot_io_for(hypervisor: &str, vm_name: &str) -> Result<Box<dyn SnapshotIO
 
 pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+    if is_vz_vm(&args.name) {
+        AnyBackend::Vz(mvm_backend::vz::VzBackend)
+            .pause(&VmId::from(args.name.as_str()))
+            .with_context(|| format!("pausing Vz VM {:?}", args.name))?;
+        let registry_path = mvm::vm::name_registry::registry_path();
+        if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+            let _ = registry.set_paused(&args.name, true);
+            let _ = registry.save(&registry_path);
+        }
+        println!("{}: paused (vz, vCPUs quiesced)", args.name);
+        mvm_core::audit_emit!(WorkloadSleep, vm: &args.name, "backend=vz");
+        return Ok(());
+    }
     let io = snapshot_io_for(&args.hypervisor, &args.name)?;
 
     let sidecar =
@@ -111,6 +132,20 @@ pub(in crate::commands) fn run_resume(
     _cfg: &MvmConfig,
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+    if is_vz_vm(&args.name) {
+        AnyBackend::Vz(mvm_backend::vz::VzBackend)
+            .resume(&VmId::from(args.name.as_str()))
+            .with_context(|| format!("resuming Vz VM {:?}", args.name))?;
+        let registry_path = mvm::vm::name_registry::registry_path();
+        if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+            let _ = registry.set_paused(&args.name, false);
+            let _ = registry.touch_last_active(&args.name, mvm_core::time::utc_now());
+            let _ = registry.save(&registry_path);
+        }
+        println!("{}: resumed (vz, vCPUs running)", args.name);
+        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "backend=vz");
+        return Ok(());
+    }
     // For resume the VM may not yet be running — the snapshot
     // restore path is what brings it back. We still need a
     // Firecracker socket the orchestrator can talk to. v1
@@ -260,4 +295,21 @@ fn snap_rm(name: &str) -> Result<()> {
     println!("{}: snapshot removed", name);
     mvm_core::audit_emit!(SnapshotDelete, vm: name);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_vz_vm_true_for_vz_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let dir = mvm_core::config::vm_state_dir("vzvm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vz.pid"), "1").unwrap();
+        assert!(is_vz_vm("vzvm"));
+        assert!(!is_vz_vm("nope"));
+        unsafe { std::env::remove_var("HOME") };
+    }
 }

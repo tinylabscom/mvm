@@ -131,7 +131,7 @@ pub struct L4RuleSpec {
 /// supervisor honours `mode = Some("open")` as a kill-switch that
 /// skips the proxy entirely. New fields are `#[serde(default)]` so
 /// older bundles continue to parse.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EgressPolicy {
     /// `open` — no proxy. Anything else routes through the L7 chain.
@@ -156,6 +156,10 @@ pub struct EgressPolicy {
     /// `pii_redactor`.
     #[serde(default)]
     pub disabled_inspectors: Vec<String>,
+    /// Per-destination egress redaction. Synthesized into the signed
+    /// `ExecutionPlan.redaction` at admission. Default = all-off.
+    #[serde(default)]
+    pub redaction: crate::policy::RedactionPolicy,
 }
 
 /// Default body cap when `EgressPolicy::body_cap_bytes` is 0.

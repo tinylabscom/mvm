@@ -306,6 +306,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         // deps_volume is wired into the live `mvmctl up` path only.
         deps_volume: None,
         shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
     })
 }
 

@@ -76,6 +76,7 @@ pub fn admit_probe_plan(
         bundle_pin: None,
         deps_volume: None,
         shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(&input, &SystemClock, &ledger, keys_dir, None).context("admitting probe plan")

@@ -82,6 +82,16 @@ pub(in crate::commands) enum CheckpointCmd {
         #[arg(long, value_parser = clap_vm_name)]
         new_id: Option<String>,
     },
+    /// Compare two checkpoints (metadata + content manifest; `b` relative to `a`).
+    Diff {
+        /// Baseline checkpoint id (`a`).
+        a: String,
+        /// Compared checkpoint id (`b`).
+        b: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> Result<()> {
@@ -99,6 +109,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
         CheckpointCmd::Ls { json } => ls(json),
         CheckpointCmd::Rm { id } => rm(&id),
         CheckpointCmd::Fork { id, new_id } => fork(&id, new_id),
+        CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
     }
 }
 
@@ -371,6 +382,58 @@ fn ls(json: bool) -> Result<()> {
             m.tag.as_deref().unwrap_or("-"),
             m.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
         );
+    }
+    Ok(())
+}
+
+fn diff(a: &str, b: &str, json: bool) -> Result<()> {
+    let id_a = validated_checkpoint_id(a)?;
+    let id_b = validated_checkpoint_id(b)?;
+    let store = CheckpointStore::open();
+    let meta_a = store
+        .read_meta(&id_a)
+        .with_context(|| format!("reading checkpoint {a:?}"))?;
+    let meta_b = store
+        .read_meta(&id_b)
+        .with_context(|| format!("reading checkpoint {b:?}"))?;
+    let d = mvm_backend::checkpoint::diff_checkpoints(&meta_a, &meta_b);
+
+    if json {
+        crate::json_out::emit_json(&d)?;
+        return Ok(());
+    }
+
+    use mvm_backend::checkpoint::{BlobStatus, LineageRelation};
+    ui::info(&format!("checkpoint diff: {a} -> {b}"));
+    if d.class_a != d.class_b {
+        ui::info(&format!(
+            "  class: {} -> {}",
+            class_str(d.class_a),
+            class_str(d.class_b)
+        ));
+    }
+    if d.vm_name_a != d.vm_name_b {
+        ui::info(&format!("  vm:    {} -> {}", d.vm_name_a, d.vm_name_b));
+    }
+    if !d.supervisor_config_digest_same {
+        ui::info("  supervisor config: changed");
+    }
+    let rel = match d.lineage {
+        LineageRelation::BChildOfA => format!("{b} is a child of {a}"),
+        LineageRelation::AChildOfB => format!("{a} is a child of {b}"),
+        LineageRelation::Same => "same checkpoint id".to_string(),
+        LineageRelation::Unrelated => "no direct lineage".to_string(),
+    };
+    ui::info(&format!("  lineage: {rel}"));
+    println!("{:<20} STATUS", "BLOB");
+    for blob in &d.blobs {
+        let status = match blob.status {
+            BlobStatus::Unchanged => "unchanged",
+            BlobStatus::Changed => "changed",
+            BlobStatus::AddedInB => "added",
+            BlobStatus::RemovedFromB => "removed",
+        };
+        println!("{:<20} {}", blob.name, status);
     }
     Ok(())
 }

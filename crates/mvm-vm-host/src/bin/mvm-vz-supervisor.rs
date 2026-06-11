@@ -12,9 +12,10 @@
 //! On other targets this is a stub that fails closed, so a non-macOS workspace
 //! build still links the bin without pulling the Apple frameworks.
 //!
-//! Spawned by `mvm_backend::vz` via `resolve_supervisor_path()`. Behind the
-//! parity gate the Swift supervisor still backs production until the Rust path
-//! passes the boot/vsock/control/save-restore parity matrix.
+//! Spawned by `mvm_backend::vz` via `resolve_supervisor_path()`. This is the
+//! production VZ path — the Swift supervisor is deleted. A
+//! boot/vsock/control/save-restore correctness gate lives at
+//! `crates/mvm-build/tests/vz_supervisor_parity.rs`.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -37,6 +38,21 @@ const VZ_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
     <key>com.apple.security.virtualization</key><true/>\n\
     </dict></plist>";
 
+/// Does the on-disk binary already carry the virtualization entitlement?
+#[cfg(target_os = "macos")]
+fn exe_has_virtualization_entitlement(exe: &std::path::Path) -> bool {
+    std::process::Command::new("codesign")
+        .args(["-d", "--entitlements", "-", "--xml"])
+        .arg(exe)
+        .output()
+        .map(|out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .contains("com.apple.security.virtualization")
+        })
+        .unwrap_or(false)
+}
+
 /// Self-sign ad-hoc with the virtualization entitlement, then re-exec — we ship
 /// the bin unsigned, and VZ start is rejected without it. Mirrors
 /// `apple_container::ensure_signed` (virtualization-only). The `MVM_VZ_SIGNED`
@@ -44,8 +60,15 @@ const VZ_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 /// the spawner writes the config to, so this is transparent to `mvm_backend::vz`.
 /// Best-effort: a signing failure logs and proceeds so the real entitlement
 /// error from `start()` is what surfaces.
+///
+/// Serialized by a file lock: the warm pool prelaunches several
+/// supervisors at once, and `codesign --force` rewrites the *shared* binary in
+/// place — concurrent writes/execs of a half-rewritten Mach-O yield `ETXTBSY`
+/// or "invalid signature". The lock makes exactly one launcher sign; the rest
+/// re-check and skip straight to the re-exec.
 #[cfg(target_os = "macos")]
 fn ensure_self_signed() {
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
@@ -55,30 +78,47 @@ fn ensure_self_signed() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    if let Ok(out) = Command::new("codesign")
-        .args(["-d", "--entitlements", "-", "--xml"])
-        .arg(&exe)
-        .output()
-        && out.status.success()
-        && String::from_utf8_lossy(&out.stdout).contains("com.apple.security.virtualization")
-    {
+    if exe_has_virtualization_entitlement(&exe) {
         return;
     }
-    let ent = std::env::temp_dir().join("mvm-vz-supervisor-entitlements.plist");
-    if std::fs::write(&ent, VZ_ENTITLEMENTS_PLIST).is_err() {
-        return;
+
+    // Best-effort exclusive lock; if it can't be taken, fall back to unlocked
+    // (the pre-existing behaviour). Held until `lock` drops (function return or
+    // the explicit drop before re-exec).
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false) // a lock file — never clobber its (empty) contents
+        .open(std::env::temp_dir().join("mvm-vz-supervisor.codesign.lock"))
+        .ok();
+    if let Some(f) = &lock {
+        // SAFETY: flock on a valid fd; LOCK_EX blocks until exclusive.
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
     }
-    let signed = Command::new("codesign")
-        .args(["--sign", "-", "--force", "--entitlements"])
-        .arg(&ent)
-        .arg(&exe)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !signed {
-        eprintln!("mvm-vz-supervisor: ad-hoc codesign failed; VM start may be rejected");
-        return;
+
+    // Re-check under the lock — another launcher may have signed it while we
+    // waited, in which case we skip straight to the re-exec.
+    if !exe_has_virtualization_entitlement(&exe) {
+        let ent = std::env::temp_dir().join("mvm-vz-supervisor-entitlements.plist");
+        if std::fs::write(&ent, VZ_ENTITLEMENTS_PLIST).is_err() {
+            return;
+        }
+        let signed = Command::new("codesign")
+            .args(["--sign", "-", "--force", "--entitlements"])
+            .arg(&ent)
+            .arg(&exe)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !signed {
+            eprintln!("mvm-vz-supervisor: ad-hoc codesign failed; VM start may be rejected");
+            return;
+        }
     }
+    // Release the lock before re-exec: `exec` would otherwise leak the inherited
+    // lock fd for the supervisor's whole life.
+    drop(lock);
+
     let err = Command::new(&exe)
         .args(std::env::args_os().skip(1))
         .env("MVM_VZ_SIGNED", "1")
@@ -114,7 +154,7 @@ fn main() -> anyhow::Result<()> {
 
     // One VM per process; all VZ calls serialize on the VM's own dispatch
     // queue, so a current-thread runtime is enough and keeps the main thread
-    // free for the (later-slice) control socket + vsock proxy.
+    // free for the control socket + vsock proxy.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -80,6 +80,17 @@ pub fn secrets_from_signed_json(plan_json: &str) -> Result<Vec<SecretBinding>, s
     Ok(plan.secrets)
 }
 
+/// Extract the per-destination redaction policy from a signed plan's payload,
+/// without verifying the signature — the caller (backend endpoint spawn) has
+/// already admitted the plan; this just reads the field the endpoint needs.
+pub fn redaction_from_signed_json(
+    plan_json: &str,
+) -> Result<crate::policy::RedactionPolicy, serde_json::Error> {
+    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
+    Ok(plan.redaction)
+}
+
 /// Extract the `tenant` id from a serialised `SignedExecutionPlan` envelope.
 ///
 /// The Firecracker launch path reads the admitted plan from disk
@@ -197,6 +208,7 @@ pub mod test_support {
             fs_policy: FsPolicyRef("default".to_string()),
             secrets: vec![],
             egress_policy: PolicyRef("agent-l7".to_string()),
+            redaction: crate::policy::RedactionPolicy::default(),
             tool_policy: PolicyRef("read-only-tools".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
@@ -273,6 +285,43 @@ mod tests {
             &secrets[0].source,
             SecretSource::Keystore { address } if address == "openai"
         ));
+    }
+
+    #[test]
+    fn redaction_extracted_from_signed_envelope() {
+        use crate::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
+        let mut plan = sample_plan();
+        plan.redaction = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![RedactionProfile {
+                host: "*.untrusted.example".to_string(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+        };
+        let (sk, _vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let json = serde_json::to_string(&signed).unwrap();
+        let recovered = redaction_from_signed_json(&json).unwrap();
+        assert_eq!(recovered, plan.redaction);
+        assert_eq!(recovered.profiles.len(), 1);
+        assert_eq!(recovered.profiles[0].host, "*.untrusted.example");
+    }
+
+    #[test]
+    fn plan_without_redaction_field_defaults_to_all_off() {
+        // A plan JSON missing `redaction` must deserialize via #[serde(default)].
+        let plan = sample_plan();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("redaction");
+        assert!(value.get("redaction").is_none());
+        let parsed: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.redaction, crate::policy::RedactionPolicy::default());
     }
 
     #[test]

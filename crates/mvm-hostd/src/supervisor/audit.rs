@@ -337,6 +337,7 @@ mod tests {
             fs_policy: FsPolicyRef("f".to_string()),
             secrets: vec![],
             egress_policy: PolicyRef("e".to_string()),
+            redaction: Default::default(),
             tool_policy: PolicyRef("t".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec![],

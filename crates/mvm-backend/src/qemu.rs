@@ -245,6 +245,11 @@ impl VmBackend for QemuBackend {
         {
             match mvm_core::plan::secrets_from_signed_json(plan_json) {
                 Ok(secrets) if !secrets.is_empty() => {
+                    // Per-destination redaction rides the same signed plan; a
+                    // parse hiccup defaults to all-off rather than failing the
+                    // boot (secrets already gate that).
+                    let redaction =
+                        mvm_core::plan::redaction_from_signed_json(plan_json).unwrap_or_default();
                     // QEMU is slirp (no host TAP) — no transparent terminator
                     // to install, so `terminator_listen: None`. The vsock
                     // substitution channel alone is unchanged.
@@ -253,6 +258,7 @@ impl VmBackend for QemuBackend {
                         &state_dir,
                         tenant,
                         &secrets,
+                        &redaction,
                         None,
                         // No transparent terminator on slirp ⇒ no TLS leg, so no
                         // per-VM intermediate (https termination is FC-scoped).

@@ -90,6 +90,24 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
       workload's secrets + admits a plan inside boot_session_vm (closure seam) so
       the backend spawns the substitution endpoint; QEMU reads plan_json directly.
       Box e2e + FC plan.json stash are the remaining (box-gated) follow-ups
+  E1 Step 2 — per-destination egress PII + entropy redaction (design approved
+      2026-06-10, specs/notes/plan-129-e1-step2-pii-entropy-redaction-design.md;
+      no ML/NER — anchored+gazetteer names; scoped to cleartext vsock endpoint)
+    [x] design + honest threat-model framing (hygiene layer, not a boundary)
+    [x] slice 1: EntropyScanner (Shannon entropy, audit-first, no echo)
+    [x] slice 2: IBAN (mod-97) added to structured PII set
+    [x] slice 3: name detector (field-label + PII co-occurrence + gazetteer)
+    [x] slice 4: RedactionAction + redaction_profiles + resolve (mvm-core)
+    [x] slice 5: destination-aware wiring; fail-closed over-cap/compressed bodies
+    [x] admission carriage: redaction rides inline in signed ExecutionPlan →
+        redaction_from_signed_json → backend EndpointConfig → from_plan →
+        with_redaction_policy (a plan carrying redaction flows end-to-end);
+        consume per-dest pii/secrets disposition (no longer RESERVED)
+    [x] CLI authoring: `mvmctl up --redact HOST[=audit]` parses a per-destination
+        RedactionPolicy → SynthesisInput → synthesize_plan sets ExecutionPlan.redaction
+    [ ] remaining: IR/SDK developer-declared authoring (the only open variant; mvmd
+        can author via bundle), terminator-path redaction, live PII spans.
+        See plan §"Deferred follow-ups".
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
@@ -100,10 +118,15 @@ PLAN 152 — Rust-native VZ supervisor            🟢 native objc2; no Swift
   [x] WS-B parity gate (#703) → Rust-only after Swift deletion (plan-174)
   [x] WS-B finalize: resolver→Rust bin + DELETE Swift crate — plan-174
   [x] WS-E VZ-config hardening (validateSaveRestore, MAC pin) — folded into #700
+  [x] SAVE pause-before-save regression fix (post-finalize) — PR #740 (merged)
+  [x] post-finalize hardening: resource-cap check, self-sign codesign lock,
+      terminal-error fidelity, SAFETY-comment accuracy, doc-truth — PR #772
   [ ] WS-C fork primitive (snapshot/restore done in #700) — separate workstream
   [ ] WS-D nested KVM (/dev/kvm in guest) — separate workstream
   NOTE: Swift control socket self-deadlocked on async VZ ops; Rust fixes it
-  (ADR-056 addendum). Deferred: VzIngest/mvm-vz-drainer dead-code sweep.
+  (ADR-056 addendum). Deferred: VzIngest/mvm-vz-drainer dead-code sweep; +
+  lower-priority supervisor robustness (exit-listener 2nd-conn, control-verb
+  single-flight, validateSaveRestore hard-gate for Restore) noted in #772.
 
 PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice shipped
   [x] WS-3 mvmctl sign + doctor signing — PR #667 (plan-168)
@@ -120,12 +143,13 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
       SPRINT.md): multi-kernel keying; pool-status liveness filter;
       home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
-  [~] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (PR2): mvmctl checkpoint
+  [x] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (#770): mvmctl checkpoint
       create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
       checkpoint.created/forked/restored audit + fs_quick+vm_full capability +
       vm_full memory save/restore (saveMachineStateToURL) + vm_full fork arm +
       restore_checkpoint + retire snapshot save/restore. cache GC.
-      Remaining: checkpoint diff + pause/resume wiring (PR3)
+      PR3 (#780): checkpoint diff <a> <b> (metadata+manifest compare) + Vz
+      pause/resume (native vCPU quiesce). WS-2 COMPLETE.
   [x] AuditEmitter + host_keypair + plan_persist + pure checkpoint bind helpers
       hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
@@ -222,6 +246,23 @@ PLAN 180 — Strip spec refs from code comments    ✅ DONE
   [x] check-no-spec-refs-in-comments lint gate (string-aware: skips raw
       strings; exempts the two self-referential lint files) wired into the
       Lint CI job
+
+PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; mvm primitive ↔ mvmd product per ADR-070)
+  [ ] WS-A preview ingress: published-ports model (signed in plan) + per-port
+      routing label at gateway seam + wake-on-access VmBackend hook + local
+      single-machine dev ingress (s-<id>-<port>.preview.localhost)
+  [ ] WS-B lifecycle verbs: vm stop (free RAM, wake-on-access) / rm (keep
+      workspace) / purge (delete workspace) / keepalive (extend idle TTL);
+      workspace-data lifecycle in mvm_core::config; distinct cmd.* audit events
+  [ ] WS-C task/files protocol: async streamable task over agent-RPC (169) reusing
+      ExecEvent (172) + SSE-ready event shape + Files API parity on fs RPC + thin
+      mvmctl verbs (agent-agnostic; mvmd owns HTTP/SSE transport)
+  [ ] WS-D install DX: curl|sh installer (folds Plan 159 WS-5 D) + "next steps"
+      output (endpoint + preview URLs + runnable cmds) + graduated env uninstall
+      (--images/--data/--all; keep-workspaces default)
+  NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
+  socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
+  baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
 ```
 
 ## Security claims

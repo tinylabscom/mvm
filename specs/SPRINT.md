@@ -2469,6 +2469,71 @@ Prove the #1 spine end-to-end on macOS/libkrun and lock it behind a regression g
 - Image slimming (deferred, above) and Linux/Firecracker E2E parity (own plan).
 - Encryption-at-rest + Noise vsock (Plan 122).
 
+## Sprint 61 — App-builder product surface (proposed)  [`plans/181-app-builder-product-surface.md`](plans/181-app-builder-product-surface.md) | [`adrs/079-app-builder-product-surface.md`](adrs/079-app-builder-product-surface.md) | boundary: [`adrs/070-browser-reachable-verification-surface.md`](adrs/070-browser-reachable-verification-surface.md)
+
+Graft the AI-app-builder *product loop* (create → coding agent → **live preview
+URL**, stop/wake/keepalive lifecycle, streamable task/files API, one-command
+install) onto mvm's hardened microVM substrate — **without** the weak isolation a
+sibling self-hosted app-builder backend uses to get that DX cheaply (Docker
+socket, host-path mounts, auth/caps off). Every workstream ships an mvm-side
+primitive and names the mvmd-side product leg that consumes it (ADR-070 reserves
+transport + tenant auth for mvmd / Plan 33). The one mvm-local product piece is a
+single-machine `localhost` dev ingress so `mvmctl up`/`run` hands you a working
+URL on one box.
+
+### W1 (Plan 181 WS-D) — Install / uninstall DX  🟡 proposed
+- [ ] `curl | sh` installer (folds the unowned Plan 159 WS-5 D item): prereq
+  detection via `doctor`, idempotent, never touches anything outside mvm dirs.
+- [ ] "Next steps" output after `env bootstrap` / `dev up` / `up`: control
+  surface + preview URL(s) + literal runnable copy-paste commands.
+- [ ] Graduated `env uninstall` (`--images` / `--data` / `--all`), keep-workspaces
+  default, "removes only what mvm created".
+
+### W2 (Plan 181 WS-B) — Lifecycle verb taxonomy  🟡 proposed
+- [ ] `vm stop` (free RAM, wake-on-access) / `vm rm` (drop instance, **keep
+  workspace**) / `vm purge` (drop instance + workspace) / `vm keepalive` (extend
+  idle TTL on the Plan 118/170 reaper).
+- [ ] Workspace-data lifecycle is a named concept in `mvm_core::config`; `--json`
+  reports its state; each verb emits a distinct chain-signed `cmd.*` audit event.
+
+### W3 (Plan 181 WS-A) — Preview ingress  🟡 proposed (headline)
+- [ ] Published-ports model signed into the `ExecutionPlan` (audited, not ambient)
+  + per-port routing label (`s-<vm>-<port>`) at the gateway seam
+  (`gateway_bridge.rs` / rvproxy, Plan 179) — L4 publication, no HTTP parsing.
+- [ ] Wake-on-access `VmBackend` hook (calls `warm_start`, Plan 123 C4 / Plan 175)
+  on a connection to a stopped, RAM-freed instance.
+- [ ] Local single-machine dev ingress: tiny first-party reverse proxy mapping
+  `http://s-<id>-<port>.preview.localhost` → published host port + wake hook;
+  `up`/`run` prints the URL(s). No auth/TLS/wildcard-DNS (mvmd owns those).
+
+### W4 (Plan 181 WS-C) — Streamable task + files protocol  🟡 proposed
+- [ ] Async task protocol over agent-RPC (Plan 169) reusing `ExecEvent` streaming
+  (Plan 172); the "agent" is an **opaque runner**, not a baked-in binary.
+- [ ] SSE-ready event serialization (mvmd forwards as `text/event-stream`).
+- [ ] Files API parity on the existing `fs` RPC (read/write/append, no `exec`);
+  thin `mvmctl vm task` / `vm files` verbs for local testing.
+
+### Cross-repo dependency (mvmd)
+Consumes published-ports + routing label + wake hook (W3) for fleet preview URLs;
+the task/files vsock protocol + SSE shape (W4) for its HTTP API; the
+idle-TTL/keepalive contract (W2) for its density loop (Plan 170 WS-D).
+
+### Sprint 61 success criteria
+- [ ] `mvmctl up --flake <app>` with a published port prints a working
+  `s-<id>-<port>.preview.localhost` URL on one machine; hitting it after `vm stop`
+  wakes the instance.
+- [ ] The four lifecycle verbs honor the instance-vs-workspace split with
+  distinct audit events; a headless task streams incremental events and `vm files`
+  reads/writes without `exec`.
+- [ ] No claim regresses (`xtask check-claim-catalog` green; default-deny egress
+  intact; only published ports routable); `cargo nextest run --workspace` +
+  `--doc` green; clippy/fmt clean.
+
+### Non-goals (explicit — see Plan 181 §Non-goals)
+- Container isolation / Docker-socket control plane; host-path mounts into a
+  workload; auth-off / caps-off defaults; baked-in coding agents; any
+  multi-tenant HTTP listener or tenant auth in mvm (mvmd per ADR-070 §5).
+
 ## Completed Sprints
 
 - [01-foundation.md](sprints/01-foundation.md)

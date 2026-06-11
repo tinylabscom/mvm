@@ -915,6 +915,7 @@ mod tests {
             fs_policy: FsPolicyRef("local-default".into()),
             secrets: Vec::new(),
             egress_policy: PolicyRef("local-default".into()),
+            redaction: Default::default(),
             tool_policy: PolicyRef("local-default".into()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec![],
