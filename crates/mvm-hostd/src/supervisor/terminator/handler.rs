@@ -4,9 +4,10 @@
 //! The TcpStream/SO_ORIGINAL_DST glue lives in the listener (a later task) so
 //! this core stays unit-testable off-Linux.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::net::SocketAddr;
 
+use super::error::TerminatorError;
 use super::request::proxy_request_from_origin_form;
 use crate::keyholder::substitution::SubstitutionEndpoint;
 use crate::supervisor::substitution_proxy::{PreparedRequest, prepare_request};
@@ -15,19 +16,24 @@ use crate::supervisor::substitution_proxy::{PreparedRequest, prepare_request};
 /// (refuses an unbound destination / unknown placeholder BEFORE forwarding —
 /// claim 12), then call `forward` with the prepared request and `orig_dst`.
 /// Returns the raw response bytes from `forward`.
+///
+/// The result is typed ([`TerminatorError`]) so the caller can tell a claim-12
+/// refusal (`Refused`) from a parse or forward failure and audit accordingly.
+/// Every error path means the socket closes without forwarding.
 pub fn handle_request<F>(
     raw: &[u8],
     orig_dst: SocketAddr,
     endpoint: &SubstitutionEndpoint<'_>,
     forward: F,
-) -> Result<Vec<u8>>
+) -> Result<Vec<u8>, TerminatorError>
 where
     F: Fn(&PreparedRequest, SocketAddr) -> Result<Vec<u8>>,
 {
-    let req = proxy_request_from_origin_form(raw, orig_dst)?;
+    let req = proxy_request_from_origin_form(raw, orig_dst)
+        .map_err(|e| TerminatorError::Parse(e.to_string()))?;
     let prepared =
-        prepare_request(endpoint, req).map_err(|e| anyhow!("substitution refused: {e}"))?;
-    forward(&prepared, orig_dst)
+        prepare_request(endpoint, req).map_err(|e| TerminatorError::Refused(e.to_string()))?;
+    forward(&prepared, orig_dst).map_err(|e| TerminatorError::Forward(e.to_string()))
 }
 
 #[cfg(test)]
@@ -130,7 +136,10 @@ mod tests {
             Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
         });
 
-        assert!(result.is_err(), "expected Err for unknown placeholder");
+        assert!(
+            matches!(result, Err(TerminatorError::Refused(_))),
+            "expected Refused for unknown placeholder, got {result:?}"
+        );
         assert!(
             !*forward_called.lock().unwrap(),
             "forward must not be called when substitution is refused"
@@ -156,7 +165,10 @@ mod tests {
             Ok(b"HTTP/1.1 200 OK\r\n\r\n".to_vec())
         });
 
-        assert!(result.is_err(), "expected Err for unbound destination");
+        assert!(
+            matches!(result, Err(TerminatorError::Refused(_))),
+            "expected Refused for unbound destination, got {result:?}"
+        );
         assert!(
             !*forward_called.lock().unwrap(),
             "forward must not be called when substitution is refused"

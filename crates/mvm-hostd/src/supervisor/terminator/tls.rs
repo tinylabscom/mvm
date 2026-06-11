@@ -30,6 +30,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use mvm_sdk::ir::AuthType;
 
+use super::error::TerminatorError;
 use super::read::read_http_request;
 use super::request::proxy_request_from_origin_form_https;
 use crate::keyholder::substitution::SubstitutionEndpoint;
@@ -110,27 +111,32 @@ pub fn terminate_and_substitute<S, F>(
     orig_dst: SocketAddr,
     endpoint: &SubstitutionEndpoint<'_>,
     forward: F,
-) -> Result<TerminateOutcome>
+) -> Result<TerminateOutcome, TerminatorError>
 where
     S: Read + Write,
     F: Fn(&PreparedRequest) -> Result<Vec<u8>>,
 {
-    let conn = rustls::ServerConnection::new(config).context("new rustls server connection")?;
+    let conn = rustls::ServerConnection::new(config)
+        .map_err(|e| TerminatorError::Parse(format!("new rustls server connection: {e}")))?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
 
-    let raw = read_http_request(&mut tls).context("read decrypted request")?;
-    let req = proxy_request_from_origin_form_https(&raw, orig_dst)?;
+    let raw = read_http_request(&mut tls)
+        .map_err(|e| TerminatorError::Parse(format!("read decrypted request: {e}")))?;
+    let req = proxy_request_from_origin_form_https(&raw, orig_dst)
+        .map_err(|e| TerminatorError::Parse(e.to_string()))?;
     // Capture audit metadata before substitution consumes the request (claim-13
     // safe — resolve_meta touches no value), mirroring the `:80` path exactly.
     let substituted = collect_substituted_meta(endpoint, &req.headers);
     let destination = destination_host(&req.url).ok();
 
     let prepared =
-        prepare_request(endpoint, req).map_err(|e| anyhow!("substitution refused: {e}"))?;
-    let resp = forward(&prepared)?;
+        prepare_request(endpoint, req).map_err(|e| TerminatorError::Refused(e.to_string()))?;
+    let resp = forward(&prepared).map_err(|e| TerminatorError::Forward(e.to_string()))?;
 
-    tls.write_all(&resp).context("write terminated response")?;
-    tls.flush().context("flush terminated response")?;
+    tls.write_all(&resp)
+        .map_err(|e| TerminatorError::Forward(format!("write terminated response: {e}")))?;
+    tls.flush()
+        .map_err(|e| TerminatorError::Forward(format!("flush terminated response: {e}")))?;
     Ok(TerminateOutcome {
         substituted,
         destination,
