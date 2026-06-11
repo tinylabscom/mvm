@@ -614,11 +614,28 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      # Plan 115 / ADR-065 — the builder-vm rootfs embeds the cross-compiled,
+      # statically-musl-linked host-vm binaries, read from MVM_HOST_BIN_DIR at
+      # eval time under `--impure`. The runner is x86_64 and the builder VM is
+      # same-arch as its host (build.rs §"x86_64 mvmctl embeds x86_64 bins"), so
+      # cross-compile to x86_64-unknown-linux-musl. The bins are `[[bin]]`s in
+      # mvm-build (not standalone packages), built exactly as `crates/mvm-cli/
+      # build.rs::run_cargo_zigbuild` does: `-p mvm-build --bin <name>`.
+      - uses: ./.github/actions/install-zigbuild
+      - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --locked --target x86_64-unknown-linux-musl \
+            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy
+          # The flake reads `$MVM_HOST_BIN_DIR/<name>` (flat, by manifest name);
+          # the cargo --bin outputs land here under those exact names.
+          echo "MVM_HOST_BIN_DIR=$PWD/target/x86_64-unknown-linux-musl/release" >> "$GITHUB_ENV"
+
       - name: Build A
         run: |
           set -euo pipefail
           nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
-            --no-link --print-out-paths > /tmp/bvm-path-a.txt
+            --impure --no-link --print-out-paths > /tmp/bvm-path-a.txt
           out=$(head -1 /tmp/bvm-path-a.txt)
           # Hash the four outputs the flake commits to under stable
           # relative names so the store-path component (input-hash, not
@@ -630,7 +647,7 @@ jobs:
         run: |
           set -euo pipefail
           nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
-            --rebuild --no-link --print-out-paths > /tmp/bvm-path-b.txt
+            --rebuild --impure --no-link --print-out-paths > /tmp/bvm-path-b.txt
           out=$(head -1 /tmp/bvm-path-b.txt)
           ( cd "$out" && sha256sum vmlinux rootfs.ext4 cmdline.txt manifest.json ) > /tmp/bvm-hash-b.txt
           cat /tmp/bvm-hash-b.txt
