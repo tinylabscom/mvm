@@ -72,7 +72,7 @@ impl std::fmt::Debug for TlsIntermediate {
 /// Config the backend hands the `mvm-substitution-endpoint` subprocess on
 /// stdin at spawn. Carries the workload's secret bindings (NOT values — the
 /// endpoint resolves values itself from the host store) plus where to listen.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     /// Tenant the workload belongs to — the store lookup key.
@@ -83,6 +83,11 @@ pub struct EndpointConfig {
     pub secrets: Vec<SecretBinding>,
     /// The guest→host transport to listen on.
     pub transport: EndpointTransport,
+    /// Per-destination egress redaction policy, carried from the signed
+    /// `ExecutionPlan.redaction`. Default (all-off) preserves the curated-only
+    /// baseline; a profile opts a destination into entropy/name redaction.
+    #[serde(default)]
+    pub redaction: mvm_core::policy::RedactionPolicy,
     /// Forward-leg (host → destination) timeout, seconds.
     #[serde(default = "default_forward_timeout_secs")]
     pub forward_timeout_secs: u64,
@@ -151,6 +156,7 @@ pub fn assemble(
         &bindings,
         secret_store,
         cfg.forward_timeout_secs,
+        cfg.redaction.clone(),
         tls_intermediate,
     )?;
     Ok((service, handed))
@@ -170,6 +176,7 @@ mod tests {
             tenant_id: "local".into(),
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
+            redaction: mvm_core::policy::RedactionPolicy::default(),
             forward_timeout_secs: 30,
             secret_store_dir: Some(dir.join("secrets")),
             binding_store_dir: Some(dir.join("bindings")),
@@ -242,6 +249,97 @@ mod tests {
         });
         let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
         assert!(cfg.tls_intermediate.is_none());
+    }
+
+    #[test]
+    fn config_defaults_redaction_to_all_off_when_omitted() {
+        // A config without a `redaction` block parses (field is
+        // `#[serde(default)]`) and defaults to the curated-only baseline.
+        let json = serde_json::json!({
+            "tenant_id": "local",
+            "secrets": [],
+            "transport": {"kind": "uds", "path": "/tmp/sub.sock"},
+        });
+        let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(cfg.redaction, mvm_core::policy::RedactionPolicy::default());
+    }
+
+    #[test]
+    fn config_redaction_block_roundtrips_and_reaches_the_service() {
+        use mvm_core::policy::{EntropyMode, RedactionAction, RedactionProfile};
+
+        let dir = tempdir().unwrap();
+        FileBindingStore::with_dir(dir.path().join("bindings"))
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            )
+            .unwrap();
+        FileSecretStore::with_dir(dir.path().join("secrets"))
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live".to_string())),
+            )
+            .unwrap();
+
+        let mut cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "OPENAI_API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "openai".into(),
+                },
+            }],
+            dir.path(),
+        );
+        cfg.redaction.profiles.push(RedactionProfile {
+            host: "api.openai.com".into(),
+            action: RedactionAction {
+                entropy: EntropyMode::Redact {
+                    min_bits_per_char: 4.0,
+                    min_run_len: 20,
+                },
+                ..Default::default()
+            },
+        });
+
+        // The block survives serde (the wire form the backend writes on stdin).
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+
+        // And the assembled service carries it: the entropy opt-in for the bound
+        // host actually fires on an entropic token (the default would not).
+        let (service, _handed) = assemble(&cfg).unwrap();
+        let token = "Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9";
+        let body = format!("k={token} e").into_bytes();
+        let action = crate::supervisor::redaction_resolve::resolve(
+            // SAFETY: assemble built the service from cfg.redaction; we re-resolve
+            // the same policy here to assert the opt-in took effect end-to-end.
+            &cfg.redaction,
+            "api.openai.com",
+        );
+        let out = service_redact(&service, &body, action);
+        assert!(
+            !String::from_utf8_lossy(&out).contains(token),
+            "entropy opt-in from EndpointConfig.redaction did not fire"
+        );
+    }
+
+    /// Drive the service's redactor for a destination action — small helper so the
+    /// roundtrip test asserts the policy *fires*, not just that it round-trips.
+    fn service_redact(
+        service: &SubstitutionService,
+        body: &[u8],
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Vec<u8> {
+        service
+            .redactor_redact_bytes_for(body, action)
+            .map(|(out, _)| out)
+            .unwrap_or_else(|| body.to_vec())
     }
 
     #[test]

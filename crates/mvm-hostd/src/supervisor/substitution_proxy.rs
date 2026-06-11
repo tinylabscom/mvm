@@ -312,6 +312,24 @@ impl SubstitutionService {
         self
     }
 
+    /// The attached redaction policy. Test-only: lets the threading tests prove
+    /// a policy carried through `from_plan` actually reached the service.
+    #[cfg(test)]
+    pub(crate) fn redaction_policy(&self) -> &mvm_core::policy::RedactionPolicy {
+        &self.redaction_policy
+    }
+
+    /// Run the service's redactor for a destination action. Test-only seam so the
+    /// endpoint-config tests can prove the threaded policy fires end-to-end.
+    #[cfg(test)]
+    pub(crate) fn redactor_redact_bytes_for(
+        &self,
+        payload: &[u8],
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Option<(Vec<u8>, crate::supervisor::network::stages::RedactionHits)> {
+        self.redactor.redact_bytes_for(payload, action)
+    }
+
     /// Attach a chain-signed audit recorder; each substitution then emits a
     /// `secret.substituted` entry (metadata only — claim 13).
     pub fn with_recorder(mut self, recorder: Recorder) -> Self {
@@ -341,12 +359,14 @@ impl SubstitutionService {
         bindings: &dyn BindingStore,
         secret_store: Arc<dyn SecretStore>,
         forward_timeout_secs: u64,
+        redaction: mvm_core::policy::RedactionPolicy,
         tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
     ) -> Result<(Arc<Self>, HandedPlaceholders), FromPlanError> {
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
         let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
         let mut service = Self::new(Arc::new(registry), resolver, forwarder);
+        service = service.with_redaction_policy(redaction);
         if let Some(intermediate) = tls_intermediate {
             service = service.with_tls_intermediate(intermediate);
         }
@@ -1405,12 +1425,91 @@ mod server_tests {
                 address: "openai".into(),
             },
         }];
-        let (_service, handed) =
-            SubstitutionService::from_plan(&plan, "local", &bindings, secret_store, 30, None)
-                .unwrap();
+        let (_service, handed) = SubstitutionService::from_plan(
+            &plan,
+            "local",
+            &bindings,
+            secret_store,
+            30,
+            mvm_core::policy::RedactionPolicy::default(),
+            None,
+        )
+        .unwrap();
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
         assert!(handed[0].1.as_str().starts_with("mvm-secret-"));
+    }
+
+    #[test]
+    fn from_plan_threads_redaction_policy_onto_the_service() {
+        use crate::keyholder::{FileBindingStore, SecretBindingMeta};
+        use mvm_core::plan::{SecretBinding, SecretSource};
+        use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
+
+        let dir = tempdir().unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                },
+            )
+            .unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk".to_string())),
+            )
+            .unwrap();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(store);
+
+        let plan = [SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }];
+
+        // A policy that opts api.openai.com into entropy redaction. After
+        // from_plan, resolving that host must yield the opted-in action — proving
+        // the policy reached the live service (not just defaulted).
+        let policy = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![RedactionProfile {
+                host: "api.openai.com".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+        };
+        let (service, _handed) = SubstitutionService::from_plan(
+            &plan,
+            "local",
+            &bindings,
+            secret_store,
+            30,
+            policy,
+            None,
+        )
+        .unwrap();
+        let resolved = crate::supervisor::redaction_resolve::resolve(
+            service.redaction_policy(),
+            "api.openai.com",
+        );
+        assert!(
+            matches!(resolved.entropy, EntropyMode::Redact { .. }),
+            "redaction policy did not reach the service: {:?}",
+            resolved.entropy
+        );
     }
 
     #[tokio::test]

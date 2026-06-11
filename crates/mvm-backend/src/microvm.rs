@@ -2432,7 +2432,13 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
 #[cfg(target_os = "linux")]
 fn decode_plan_secrets(
     state_dir: &std::path::Path,
-) -> Result<Option<(Vec<mvm_core::plan::SecretBinding>, String)>> {
+) -> Result<
+    Option<(
+        Vec<mvm_core::plan::SecretBinding>,
+        mvm_core::policy::RedactionPolicy,
+        String,
+    )>,
+> {
     let plan_path = state_dir.join("plan.json");
     let plan_json = match std::fs::read_to_string(&plan_path) {
         Ok(s) => s,
@@ -2454,9 +2460,12 @@ fn decode_plan_secrets(
     if secrets.is_empty() {
         return Ok(None);
     }
+    // Per-destination redaction rides the same signed plan; a parse hiccup
+    // defaults to all-off rather than failing the boot.
+    let redaction = mvm_core::plan::redaction_from_signed_json(&plan_json).unwrap_or_default();
     let tenant = mvm_core::plan::tenant_from_signed_json(&plan_json)
         .map_err(|e| anyhow::anyhow!("extract tenant from plan.json: {e}"))?;
-    Ok(Some((secrets, tenant)))
+    Ok(Some((secrets, redaction, tenant)))
 }
 
 /// Plan 129 Stage 2 (Approach A) — spawn the per-VM substitution endpoint
@@ -2475,7 +2484,7 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
 
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    let Some((secrets, tenant)) = decode_plan_secrets(&state_dir)? else {
+    let Some((secrets, redaction, tenant)) = decode_plan_secrets(&state_dir)? else {
         return Ok(EndpointGuard { vm_name: None });
     };
 
@@ -2493,6 +2502,7 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
         &state_dir,
         &tenant,
         &secrets,
+        &redaction,
         Some(listen),
         tls_intermediate,
     )?;
