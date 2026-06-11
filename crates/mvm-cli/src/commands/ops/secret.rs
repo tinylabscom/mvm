@@ -845,30 +845,34 @@ mod tests {
         )
     }
 
+    /// The injected stores + audit log a `set` test threads through — grouped
+    /// so the SigV4 helper stays under the argument-count lint.
+    struct SetCtx<'a> {
+        store: &'a dyn SecretStore,
+        bindings: &'a dyn BindingStore,
+        audit: &'a AuditLog,
+    }
+
     /// Like [`set`] but for a SigV4 secret: passes the scope params through.
     fn set_sigv4(
-        store: &dyn SecretStore,
-        bindings: &dyn BindingStore,
-        audit: &AuditLog,
+        ctx: SetCtx<'_>,
         name: &str,
         hosts: &[&str],
-        access_key_id: &str,
-        region: &str,
-        service: &str,
+        params: Sigv4Params,
         value: &str,
     ) -> Result<()> {
         cmd_set(
-            store,
-            bindings,
-            audit,
+            ctx.store,
+            ctx.bindings,
+            ctx.audit,
             SetArgs {
                 tenant: "local".into(),
                 name: name.into(),
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 auth_type: AuthType::Sigv4,
-                aws_access_key_id: Some(access_key_id.into()),
-                region: Some(region.into()),
-                service: Some(service.into()),
+                aws_access_key_id: Some(params.access_key_id),
+                region: Some(params.region),
+                service: Some(params.service),
                 value: Some(value.into()),
                 value_file: None,
             },
@@ -916,14 +920,18 @@ mod tests {
         let (_audit_dir, audit) = temp_audit();
 
         set_sigv4(
-            &store,
-            &bindings,
-            &audit,
+            SetCtx {
+                store: &store,
+                bindings: &bindings,
+                audit: &audit,
+            },
             "aws",
             &["s3.us-east-1.amazonaws.com"],
-            "AKIAIOSFODNN7EXAMPLE",
-            "us-east-1",
-            "s3",
+            Sigv4Params {
+                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                region: "us-east-1".into(),
+                service: "s3".into(),
+            },
             "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", // the secret-access-key
         )
         .unwrap();
