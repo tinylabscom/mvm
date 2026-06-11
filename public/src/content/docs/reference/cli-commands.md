@@ -18,7 +18,7 @@ The intentionally kept top-level command families are:
 |--------|----------|
 | Environment | `bootstrap`, `dev`, `doctor`, `update`, `shell-init`, `cleanup`, `uninstall`, `config`, `cache` |
 | Build and run | `init`, `build`, `compile`, `validate`, `up`, `down`, `run`, `exec`, `invoke`, `ls`, `logs`, `forward`, `console`, `wait`, `boot-report` |
-| Guest RPC and lifecycle | `fs`, `proc`, `cp`, `diff`, `set-ttl`, `pause`, `resume`, `snapshot`, `session`, `sandbox`, `volume` |
+| Guest RPC and lifecycle | `fs`, `proc`, `cp`, `diff`, `set-ttl`, `pause`, `resume`, `snapshot`, `checkpoint`, `session`, `sandbox`, `volume` |
 | Artifacts and trust | `manifest`, `bundle`, `trust`, `artifact`, `receipt`, `catalog`, `deps`, `storage` |
 | Local operations | `audit`, `attest`, `metrics`, `network`, `mcp`, `secret` |
 
@@ -315,6 +315,20 @@ running, or paused in a backend listing are skipped; cleanup only removes stale
 host registry records.
 `--json` does not change the safety mode: cleanup remains dry-run unless
 `--apply` is also passed.
+
+## Checkpoint
+
+`mvmctl checkpoint` manages memory-state checkpoints for Vz-backed VMs (`vm-full` class). `mvmctl snapshot ls` / `mvmctl snapshot rm` remain for Firecracker sealed snapshots.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl checkpoint create <name> --class <class>` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
+| `mvmctl checkpoint restore <name> --name <checkpoint>` | Restore a previously created checkpoint. Re-hashes content against the recorded audit entry before loading. |
+| `mvmctl checkpoint fork <name> --name <checkpoint> --into <new-name>` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). |
+| `mvmctl checkpoint ls [<name>]` | List checkpoints for a VM, or all VMs if name is omitted. |
+| `mvmctl checkpoint rm <name> --name <checkpoint>` | Delete a named checkpoint and its blobs. |
+
+Checkpoint blobs are stored under `~/.mvm/vms/<name>/checkpoints/<checkpoint-name>/`. The audit chain records `checkpoint.created` and `checkpoint.restored` entries with content hashes; hash drift between creation and restore is flagged in the restore entry rather than aborting, so operators can review transfers between hosts.
 
 ## File Copy
 

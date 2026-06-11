@@ -28,7 +28,7 @@ language SDK tests prove them.
 | Logs | Target helper | Target helper | `mvmctl logs` |
 | Ports | Target helper | Target helper | port-forwarding CLI commands |
 | Pause/resume | Target helper | Target helper | `mvmctl pause`, `mvmctl resume` |
-| Snapshot save/restore | Target helper | Target helper | `mvmctl snapshot save`, `mvmctl snapshot restore` |
+| Checkpoint create/restore | Target helper | Target helper | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore` |
 | Stop cleanup | context manager or `kill()` | `using`/`Symbol.dispose` or `kill()` | `mvmctl down` |
 
 ## Current paths
@@ -240,8 +240,8 @@ Until those helpers are shipped, use:
 ```sh
 mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
-mvmctl snapshot save agent-sandbox after-index
-mvmctl snapshot restore agent-sandbox after-index
+mvmctl checkpoint create agent-sandbox --class vm-full
+mvmctl checkpoint restore agent-sandbox --name after-index
 mvmctl down agent-sandbox
 ```
 

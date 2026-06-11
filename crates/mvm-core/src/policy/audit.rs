@@ -172,6 +172,8 @@ pub enum LocalAuditKind {
     CheckpointCreated,
     /// `mvmctl checkpoint fork` branched a new sandbox from a checkpoint.
     CheckpointForked,
+    /// `mvmctl checkpoint restore` resumed a VM from a vm_full checkpoint.
+    CheckpointRestored,
     // --- Sandbox SDK foundation (fs/proc/share/pause/TTL/tags) ---
     // The verbs below are state-changing CLI surfaces added by the
     // sandbox-SDK foundation work. Each kind names a single mutation

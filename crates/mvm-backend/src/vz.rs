@@ -31,7 +31,7 @@
 //! - `logs` tails `<vm_state_dir>/console.log` (capture-only console
 //!   per Plan 97 Security §9).
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
     StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -139,6 +139,13 @@ const DRAINER_PID_FILE_NAME: &str = "vz-drainer.pid";
 /// `startup_mode` flipped. Mode 0600 — same tier as the audit
 /// chain and the host signer.
 const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
+
+/// Canonical path to a VM's persisted supervisor config inside its state dir.
+/// The single source of truth for the file name so callers (e.g. the
+/// checkpoint fork path) never re-spell the literal.
+pub(crate) fn supervisor_config_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(SUPERVISOR_CONFIG_FILE_NAME)
+}
 
 /// How long [`VzBackend::start`] waits for the supervisor to write its
 /// PID file before killing the child and bailing. Matches the libkrun
@@ -761,82 +768,285 @@ impl VzBackend {
             machine_id_path: machine_id_path.map(|p| p.display().to_string()),
         };
 
-        let json = cfg
-            .to_json()
-            .map_err(|e| anyhow!("serialize SupervisorConfig for restore: {e}"))?;
-
-        let supervisor_path = resolve_supervisor_path()?;
-        let pid_file = state_dir.join(PID_FILE_NAME);
-        // The VM must not already be running; refuse if a live PID
-        // file exists. Stale PID files (process already exited) are
-        // tolerated and removed.
-        if let Some(pid) = read_pid(&pid_file)
-            && pid_alive(pid)
-        {
-            bail!(
-                "VM {:?} is still running (PID {pid}); stop it with `mvmctl down {}` before restoring",
-                id.0,
-                id.0,
-            );
-        }
-        let _ = std::fs::remove_file(&pid_file);
-        let console_log = state_dir.join("console.log");
-        let _ = crate::libkrun::open_console_capture(&console_log);
-
         ui::info(&format!(
-            "Restoring Vz VM '{}' from {} via {}...",
+            "Restoring Vz VM '{}' from {}...",
             id.0,
             snapshot_path.display(),
-            supervisor_path.display(),
         ));
-
-        let mut child = Command::new(&supervisor_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| anyhow!("spawn {}: {e}", supervisor_path.display()))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
-            .write_all(json.as_bytes())
-            .map_err(|e| anyhow!("pipe SupervisorConfig to supervisor stdin: {e}"))?;
-
-        let deadline = Instant::now() + PID_FILE_TIMEOUT;
-        loop {
-            if pid_file.exists() {
-                break;
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|e| anyhow!("poll supervisor child: {e}"))?
-            {
-                bail!(
-                    "supervisor exited before writing PID file during restore (status: {status}). \
-                     Check stderr above; console log: {}",
-                    console_log.display()
-                );
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                bail!(
-                    "supervisor did not write {} within {:?} during restore; killed. Console log: {}",
-                    pid_file.display(),
-                    PID_FILE_TIMEOUT,
-                    console_log.display(),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        ui::success(&format!(
-            "Vz VM '{}' restored (pid file: {}, console log: {}).",
-            id.0,
-            pid_file.display(),
-            console_log.display()
-        ));
+        spawn_supervisor_with_config(&cfg)?;
+        ui::success(&format!("Vz VM '{}' restored.", id.0));
         Ok(VmId(id.0.clone()))
+    }
+}
+
+/// Spawn `mvm-vz-supervisor` with `cfg` on stdin and block until it writes its
+/// PID file (the supervisor's "I'm up" signal). Shared by `snapshot_restore`
+/// (same-identity resume) and the vm_full fork path (new-identity restore) —
+/// both flip `startup_mode` to `Restore` and hand the supervisor a config whose
+/// shape matches the saved memory state.
+///
+/// Refuses if `cfg`'s VM is already running (a live supervisor would race the
+/// new one over the same disks); a stale PID file (process gone) is removed.
+fn spawn_supervisor_with_config(cfg: &vz::SupervisorConfig) -> Result<()> {
+    let state_dir = PathBuf::from(&cfg.vm_state_dir);
+    let pid_file = cfg.resolved_pid_file();
+    if let Some(pid) = read_pid(&pid_file)
+        && pid_alive(pid)
+    {
+        bail!(
+            "VM {:?} is still running (PID {pid}); stop it with `mvmctl down {}` first",
+            cfg.name,
+            cfg.name,
+        );
+    }
+    let _ = std::fs::remove_file(&pid_file);
+
+    let json = cfg
+        .to_json()
+        .map_err(|e| anyhow!("serialize SupervisorConfig: {e}"))?;
+    let supervisor_path = resolve_supervisor_path()?;
+    let console_log = state_dir.join("console.log");
+    let _ = crate::libkrun::open_console_capture(&console_log);
+
+    let mut child = Command::new(&supervisor_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow!("spawn {}: {e}", supervisor_path.display()))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
+        .write_all(json.as_bytes())
+        .map_err(|e| anyhow!("pipe SupervisorConfig to supervisor stdin: {e}"))?;
+
+    let deadline = Instant::now() + PID_FILE_TIMEOUT;
+    loop {
+        if pid_file.exists() {
+            break;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow!("poll supervisor child: {e}"))?
+        {
+            bail!(
+                "supervisor exited before writing PID file (status: {status}). \
+                 Check stderr above; console log: {}",
+                console_log.display()
+            );
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            bail!(
+                "supervisor did not write {} within {:?}; killed. Console log: {}",
+                pid_file.display(),
+                PID_FILE_TIMEOUT,
+                console_log.display(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+impl crate::checkpoint::VmFullRestore for VzBackend {
+    /// Materialize the checkpoint's rootfs into place (must happen before
+    /// `restoreMachineState` — the saved memory expects the exact disk it was
+    /// captured with), then boot the supervisor in Restore mode.
+    fn restore(
+        &self,
+        target_vm: &str,
+        rootfs_src: &std::path::Path,
+        memory: &std::path::Path,
+        machine_id: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        refuse_if_running(target_vm)?;
+        use crate::checkpoint::VmFullControl as _;
+        let target_rootfs = VzVmFullControl::new(target_vm)
+            .rootfs_path()
+            .context("resolving target VM rootfs path for restore")?;
+        crate::base::cow::clone_rootfs_for_instance(rootfs_src, &target_rootfs)
+            .context("materializing checkpoint rootfs before restore")?;
+        self.snapshot_restore(&VmId(target_vm.to_string()), memory, Some(machine_id))
+            .map(|_| ())
+    }
+}
+
+/// Bridges the checkpoint `VmFullControl` trait to a running Vz VM's control
+/// socket. Capture orchestration PAUSEs first, then SAVEs while paused, so
+/// memory and disk are consistent; the orchestrator calls RESUME itself after.
+pub struct VzVmFullControl {
+    vm_name: String,
+}
+
+impl VzVmFullControl {
+    pub fn new(vm_name: impl Into<String>) -> Self {
+        Self {
+            vm_name: vm_name.into(),
+        }
+    }
+
+    fn sock(&self) -> PathBuf {
+        vz_control::control_socket_path(&vm_state_dir(&self.vm_name))
+    }
+}
+
+impl crate::checkpoint::VmFullControl for VzVmFullControl {
+    fn pause(&self) -> Result<()> {
+        vz_control::send_command(&self.sock(), "PAUSE").map(|_| ())
+    }
+
+    fn resume(&self) -> Result<()> {
+        vz_control::send_command(&self.sock(), "RESUME").map(|_| ())
+    }
+
+    fn save_memory(&self, memory_path: &Path) -> Result<()> {
+        if !memory_path.is_absolute() {
+            anyhow::bail!(
+                "save_memory requires an absolute path, got {}",
+                memory_path.display()
+            );
+        }
+        vz_control::send_command(&self.sock(), &format!("SAVE {}", memory_path.display()))
+            .map(|_| ())
+    }
+
+    fn rootfs_path(&self) -> Result<PathBuf> {
+        let cfg_path = vm_state_dir(&self.vm_name).join(SUPERVISOR_CONFIG_FILE_NAME);
+        let bytes = std::fs::read(&cfg_path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg_path.display()))?;
+        let cfg: vz::SupervisorConfig = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", cfg_path.display()))?;
+        cfg.disks
+            .iter()
+            .find(|d| d.id == "rootfs")
+            .map(|d| PathBuf::from(&d.path))
+            .ok_or_else(|| anyhow::anyhow!("supervisor config has no rootfs disk"))
+    }
+}
+
+/// Derive a fork child's `SupervisorConfig` from the parent's persisted one.
+/// Pure (no I/O, no spawn): the caller passes the already-parsed parent config
+/// and the child's cloned blob paths; this rewrites identity + restore mode.
+///
+/// - `name` → `child_vm_name` (the new identity), which also re-derives the
+///   gvproxy MAC so the forked guest doesn't collide with the parent on the
+///   network. The MAC is an explicit field on `NetworkConfig::Gvproxy`, so it
+///   must be rewritten here — setting `name` alone is not enough.
+/// - `vm_state_dir` → the child's state dir, and every disk `path` is rebased
+///   into that dir (keeping each disk's basename) so the child boots from its
+///   OWN cloned rootfs, never the parent's live image.
+/// - `startup_mode` → `Restore` against the child's cloned `memory.bin` (and
+///   inherited `machine-id` sidecar), so the supervisor resumes the captured
+///   memory state instead of cold-booting the kernel.
+///
+/// Every per-VM *runtime* path (the sockets/dirs/logs `build_supervisor_config`
+/// derives from `state_dir` or from `name`) is rebased onto the child so the
+/// fork writes its own control/vsock/console and connects its own live gvproxy
+/// — never the parent's (which is dead, since the parent is required stopped):
+///
+/// - `vsock.socket_dir`, `control_socket_path`, `console_output_path`, and the
+///   gvproxy `socket_path` are rebased onto `child_state_dir`, reusing the same
+///   basename/sub-path layout the normal builder uses.
+/// - the audit-substrate sockets that key off the VM *name* (gvproxy
+///   `events_ingest_socket_path`, `gateway_audit_socket`) are re-derived for
+///   `child_vm_name` under `~/.mvm/audit/`.
+///
+/// Identity/claim-8 wiring is INHERITED untouched (`tenant_id`, `plan`,
+/// `bundle`, `audit_dir`, `signing_key_path`): the child is the same tenant's
+/// forked workload, not a new admission.
+pub fn build_child_supervisor_config(
+    parent_cfg: &vz::SupervisorConfig,
+    child_vm_name: &str,
+    child_state_dir: &Path,
+    memory_path: &Path,
+    machine_id_path: Option<&Path>,
+) -> Result<vz::SupervisorConfig> {
+    let mut cfg = parent_cfg.clone();
+    cfg.name = child_vm_name.to_string();
+    cfg.vm_state_dir = child_state_dir.to_string_lossy().into_owned();
+
+    for disk in &mut cfg.disks {
+        let basename = Path::new(&disk.path)
+            .file_name()
+            .ok_or_else(|| anyhow!("disk path {:?} has no file name", disk.path))?;
+        disk.path = child_state_dir
+            .join(basename)
+            .to_string_lossy()
+            .into_owned();
+    }
+
+    // Per-VM runtime sockets/dirs/logs — rebase onto the child's own state dir,
+    // matching the layout `build_supervisor_config` derives from `state_dir`.
+    cfg.vsock.socket_dir = child_state_dir.join("vsock").to_string_lossy().into_owned();
+    cfg.control_socket_path = Some(
+        vz_control::control_socket_path(child_state_dir)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    cfg.console_output_path = Some(
+        child_state_dir
+            .join("console.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    if let Some(vz::NetworkConfig::Gvproxy {
+        mac,
+        socket_path,
+        events_ingest_socket_path,
+    }) = cfg.network.as_mut()
+    {
+        // Re-derive the gvproxy MAC for the new identity (explicit field).
+        *mac = host_gvproxy::derive_mac(child_vm_name);
+        // The child boots its OWN gvproxy in its state dir (the spawner starts
+        // it); point the supervisor at that listener, not the parent's dead one.
+        *socket_path = child_state_dir
+            .join(host_gvproxy::SOCKET_FILE_NAME)
+            .to_string_lossy()
+            .into_owned();
+        // Audit ingest socket keys off the VM name under ~/.mvm/audit/ — only
+        // present for an admitted (plan+tenant) parent; re-derive for the child.
+        if events_ingest_socket_path.is_some() {
+            *events_ingest_socket_path = Some(self::events_ingest_socket_path(child_vm_name));
+        }
+    }
+
+    // Audit substrate's per-VM gateway socket also keys off the name.
+    if cfg.gateway_audit_socket.is_some() {
+        cfg.gateway_audit_socket = Some(gateway_audit_socket_path(child_vm_name));
+    }
+
+    cfg.startup_mode = vz::StartupMode::Restore {
+        snapshot_path: memory_path.display().to_string(),
+        machine_id_path: machine_id_path.map(|p| p.display().to_string()),
+    };
+    Ok(cfg)
+}
+
+/// Spawns a forked child supervisor in `Restore` mode by handing the already-
+/// built child config to `mvm-vz-supervisor`. Implements the checkpoint seam so
+/// `fork_vm_full` stays host-testable (a mock spawner replaces this in tests).
+pub struct VzChildSupervisorSpawner;
+
+impl crate::checkpoint::ChildSupervisorSpawner for VzChildSupervisorSpawner {
+    fn spawn(&self, config: &vz::SupervisorConfig) -> Result<()> {
+        // The child config's gvproxy `socket_path` was rebased onto the child
+        // state dir by `build_child_supervisor_config`; spawn a live gvproxy
+        // there first so the supervisor's connect() finds a listener (mirrors
+        // the boot path in `start()`, which spawns gvproxy before the
+        // supervisor). The parent's gvproxy is gone — the parent is stopped.
+        if matches!(config.network, Some(vz::NetworkConfig::Gvproxy { .. })) {
+            let child_state_dir = PathBuf::from(&config.vm_state_dir);
+            host_gvproxy::spawn_detached(&child_state_dir).map_err(|e| {
+                anyhow!(
+                    "spawn child gvproxy for forked Vz VM '{}': {e}",
+                    config.name
+                )
+            })?;
+        }
+        spawn_supervisor_with_config(config)
     }
 }
 
@@ -929,6 +1139,17 @@ fn events_ingest_socket_path(vm_name: &str) -> String {
     PathBuf::from(mvm_core::config::mvm_data_dir())
         .join("audit")
         .join(format!("gateway-events-{vm_name}.sock"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Per-VM gateway audit socket path. Mirrors the `gateway-<vm>.sock` shape
+/// `audit_substrate::compute_audit_substrate` derives, so a forked child can
+/// re-key it onto its own name without reaching back into the substrate builder.
+fn gateway_audit_socket_path(vm_name: &str) -> String {
+    PathBuf::from(mvm_core::config::mvm_data_dir())
+        .join("audit")
+        .join(format!("gateway-{vm_name}.sock"))
         .to_string_lossy()
         .into_owned()
 }
@@ -1424,6 +1645,18 @@ fn pid_alive(pid: libc::pid_t) -> bool {
 
 fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe { libc::kill(pid, sig) };
+}
+
+/// Bail if `target_vm` is currently running. Called before any disk mutation
+/// so callers never corrupt a live VM's rootfs.
+fn refuse_if_running(target_vm: &str) -> anyhow::Result<()> {
+    let pid_path = vm_state_dir(target_vm).join(PID_FILE_NAME);
+    if let Some(pid) = read_pid(&pid_path)
+        && pid_alive(pid)
+    {
+        anyhow::bail!("VM '{target_vm}' is running; stop it before restoring a checkpoint");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1961,6 +2194,285 @@ mod tests {
         // SAFETY: serialized by TEST_ENV_LOCK.
         unsafe {
             std::env::remove_var("MVM_VZ_SUPERVISOR_PATH");
+        }
+    }
+
+    #[test]
+    fn vz_vm_full_control_resolves_rootfs_from_supervisor_config() {
+        use crate::checkpoint::VmFullControl as _;
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        // vm_state_dir("spike") = <MVM_DATA_DIR>/vms/spike
+        let state_dir = tmp.path().join("vms").join("spike");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = mvm_build::vz::SupervisorConfig {
+            name: "spike".into(),
+            vm_state_dir: state_dir.to_string_lossy().into_owned(),
+            pid_file_name: None,
+            kernel: mvm_build::vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "console=hvc0 root=/dev/vda rw init=/init".into(),
+                initrd_path: None,
+            },
+            resources: mvm_build::vz::ResourceConfig {
+                cpu_count: 1,
+                memory_mib: 512,
+            },
+            disks: vec![mvm_build::vz::DiskConfig {
+                id: "rootfs".into(),
+                path: "/abs/rootfs.ext4".into(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: mvm_build::vz::VsockConfig {
+                ports: vec![],
+                socket_dir: state_dir.to_string_lossy().into_owned(),
+            },
+            console_output_path: None,
+            network: None,
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: mvm_build::vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+        };
+        let json = cfg.to_json().unwrap();
+        std::fs::write(state_dir.join(SUPERVISOR_CONFIG_FILE_NAME), json.as_bytes()).unwrap();
+
+        let ctl = VzVmFullControl::new("spike");
+        let resolved = ctl.rootfs_path().expect("resolves rootfs");
+        assert_eq!(resolved, std::path::PathBuf::from("/abs/rootfs.ext4"));
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn vz_vm_full_control_save_memory_requires_absolute_path() {
+        use crate::checkpoint::VmFullControl as _;
+        let ctl = VzVmFullControl::new("any");
+        let err = ctl
+            .save_memory(std::path::Path::new("relative/mem.bin"))
+            .expect_err("relative path rejected");
+        assert!(
+            err.to_string().contains("absolute path"),
+            "error explains requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn vz_vm_full_control_pause_surfaces_missing_socket() {
+        // No supervisor running; pause must surface the socket path.
+        use crate::checkpoint::VmFullControl as _;
+        let ctl = VzVmFullControl::new("definitely-not-running-1234567890");
+        let err = ctl.pause().expect_err("pause should error");
+        assert!(
+            err.to_string().contains("control.sock"),
+            "error mentions socket: {err}"
+        );
+    }
+
+    fn minimal_parent_config(name: &str) -> vz::SupervisorConfig {
+        vz::SupervisorConfig {
+            name: name.into(),
+            vm_state_dir: format!("/parent/state/{name}"),
+            pid_file_name: Some(PID_FILE_NAME.into()),
+            kernel: vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "console=hvc0 root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: vz::ResourceConfig {
+                cpu_count: 2,
+                memory_mib: 1024,
+            },
+            disks: vec![vz::DiskConfig {
+                id: "rootfs".into(),
+                path: "/parent/state/parentvm/rootfs.ext4".into(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: vz::VsockConfig {
+                ports: vec![],
+                socket_dir: "/parent/state/parentvm/vsock".into(),
+            },
+            console_output_path: Some("/parent/state/parentvm/console.log".into()),
+            network: Some(vz::NetworkConfig::Gvproxy {
+                socket_path: "/parent/state/parentvm/gvproxy.sock".into(),
+                mac: host_gvproxy::derive_mac(name),
+                events_ingest_socket_path: Some(
+                    "/parent/audit/gateway-events-parentvm.sock".into(),
+                ),
+            }),
+            balloon: None,
+            control_socket_path: Some("/parent/state/parentvm/control.sock".into()),
+            startup_mode: vz::StartupMode::Boot,
+            // Identity/claim-8 wiring — inherited untouched by the child builder.
+            tenant_id: Some("tenant-x".into()),
+            plan: None,
+            bundle: None,
+            audit_dir: Some("/parent/audit".into()),
+            gateway_audit_socket: Some("/parent/audit/gateway-parentvm.sock".into()),
+            signing_key_path: Some("/parent/keys/host-signer.ed25519".into()),
+        }
+    }
+
+    #[test]
+    fn build_child_supervisor_config_rewrites_identity_disks_and_restore_mode() {
+        let parent = minimal_parent_config("parentvm");
+        let child_dir = Path::new("/child/state/childvm");
+        let mem = child_dir.join("memory.bin");
+        let mid = child_dir.join("machine-id");
+
+        let child =
+            build_child_supervisor_config(&parent, "childvm", child_dir, &mem, Some(&mid)).unwrap();
+
+        assert_eq!(child.name, "childvm");
+        assert_eq!(child.vm_state_dir, child_dir.to_string_lossy());
+        // rootfs disk now lives in the child dir, basename preserved.
+        let rootfs = child.disks.iter().find(|d| d.id == "rootfs").unwrap();
+        assert_eq!(rootfs.path, "/child/state/childvm/rootfs.ext4");
+        // MAC re-derived for the new identity (not the parent's).
+        match child.network.as_ref().unwrap() {
+            vz::NetworkConfig::Gvproxy {
+                mac,
+                socket_path,
+                events_ingest_socket_path,
+            } => {
+                assert_eq!(mac, &host_gvproxy::derive_mac("childvm"));
+                assert_ne!(mac, &host_gvproxy::derive_mac("parentvm"));
+                // gvproxy listener rebased into the child state dir — the child
+                // boots its own gvproxy there, not the parent's dead one.
+                assert!(
+                    socket_path.starts_with("/child/state/childvm/"),
+                    "gvproxy socket_path not rebased: {socket_path}"
+                );
+                assert!(!socket_path.contains("/parent/"));
+                // Audit ingest socket re-keyed onto the child name (it keys off
+                // the VM name under ~/.mvm/audit/, not the state dir).
+                let ev = events_ingest_socket_path.as_deref().unwrap();
+                assert_eq!(ev, self::events_ingest_socket_path("childvm"));
+                assert!(!ev.contains("parentvm"));
+            }
+        }
+        // Every per-VM runtime socket/dir/log now lives under the child state
+        // dir (NOT the parent's) — the core of the fork-path correctness fix.
+        assert_eq!(child.vsock.socket_dir, "/child/state/childvm/vsock");
+        assert_eq!(
+            child.control_socket_path.as_deref(),
+            Some("/child/state/childvm/control.sock")
+        );
+        assert_eq!(
+            child.console_output_path.as_deref(),
+            Some("/child/state/childvm/console.log")
+        );
+        for field in [
+            child.vsock.socket_dir.as_str(),
+            child.control_socket_path.as_deref().unwrap(),
+            child.console_output_path.as_deref().unwrap(),
+        ] {
+            assert!(
+                field.starts_with("/child/state/childvm/"),
+                "runtime path not rebased onto child: {field}"
+            );
+            assert!(
+                !field.contains("/parent/"),
+                "runtime path leaks parent: {field}"
+            );
+        }
+        // Gateway audit socket re-keyed onto the child name.
+        assert_eq!(
+            child.gateway_audit_socket.as_deref(),
+            Some(gateway_audit_socket_path("childvm").as_str())
+        );
+        assert!(
+            !child
+                .gateway_audit_socket
+                .as_deref()
+                .unwrap()
+                .contains("parentvm")
+        );
+        // Identity / claim-8 wiring INHERITED untouched.
+        assert_eq!(child.tenant_id.as_deref(), Some("tenant-x"));
+        assert_eq!(child.audit_dir.as_deref(), Some("/parent/audit"));
+        assert_eq!(
+            child.signing_key_path.as_deref(),
+            Some("/parent/keys/host-signer.ed25519")
+        );
+        // Restore mode pointing at the child's memory + inherited machine-id.
+        match &child.startup_mode {
+            vz::StartupMode::Restore {
+                snapshot_path,
+                machine_id_path,
+            } => {
+                assert_eq!(snapshot_path, &mem.display().to_string());
+                assert_eq!(
+                    machine_id_path.as_deref(),
+                    Some(mid.display().to_string()).as_deref()
+                );
+            }
+            other => panic!("expected Restore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_refuses_running_target_before_touching_disk() {
+        use crate::checkpoint::VmFullRestore as _;
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", tmp.path());
+        }
+
+        // Simulate a live supervisor: write vz.pid with the test process's PID.
+        let state_dir = tmp.path().join("vms").join("target-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join(PID_FILE_NAME), pid.to_string()).unwrap();
+
+        // Sentinel: the target rootfs must NOT be created by a refused restore.
+        let target_rootfs = state_dir.join("rootfs.ext4");
+        assert!(!target_rootfs.exists(), "pre-condition: rootfs absent");
+
+        let err = VzBackend
+            .restore(
+                "target-vm",
+                std::path::Path::new("/nonexistent/rootfs.ext4"),
+                std::path::Path::new("/nonexistent/memory.bin"),
+                std::path::Path::new("/nonexistent/machine-id"),
+            )
+            .expect_err("must refuse restore into a running VM");
+
+        assert!(
+            err.to_string().contains("running"),
+            "error mentions 'running': {err}"
+        );
+        // rootfs must be untouched — the guard fired before the clone.
+        assert!(
+            !target_rootfs.exists(),
+            "rootfs not created by refused restore"
+        );
+
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe {
+            std::env::remove_var("MVM_DATA_DIR");
         }
     }
 }
