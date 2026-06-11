@@ -137,6 +137,7 @@ pub fn spawn_substitution_endpoint(
     state_dir: &Path,
     tenant: &str,
     secrets: &[SecretBinding],
+    redaction: &mvm_core::policy::RedactionPolicy,
     terminator_listen: Option<SocketAddr>,
     tls_intermediate: Option<(String, String)>,
 ) -> Result<()> {
@@ -146,6 +147,10 @@ pub fn spawn_substitution_endpoint(
     let mut cfg = serde_json::json!({
         "tenant_id": tenant,
         "secrets": secrets,
+        // Per-destination redaction policy from the signed plan; the endpoint
+        // applies it to the cleartext it forwards. Default (all-off) is harmless.
+        "redaction": serde_json::to_value(redaction)
+            .expect("RedactionPolicy serializes to JSON"),
         "transport": { "kind": "vsock", "port": mvm_guest::vsock::SUBSTITUTION_PORT },
     });
     if let Some(addr) = terminator_listen {
