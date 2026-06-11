@@ -108,6 +108,74 @@ pub const DEFAULT_RULES: &[SecretRule] = &[
         name: "google_api_key",
         pattern: r"AIza[0-9A-Za-z_-]{35}",
     },
+    SecretRule {
+        name: "google_oauth_client_secret",
+        pattern: r"GOCSPX-[A-Za-z0-9_-]{28}",
+    },
+    SecretRule {
+        name: "github_fine_grained_pat",
+        pattern: r"github_pat_[A-Za-z0-9_]{82}",
+    },
+    SecretRule {
+        name: "gitlab_personal_access_token",
+        pattern: r"glpat-[A-Za-z0-9_-]{20}",
+    },
+    SecretRule {
+        name: "gitlab_pipeline_trigger_token",
+        pattern: r"glptt-[0-9a-f]{40}",
+    },
+    SecretRule {
+        name: "stripe_test_secret_key",
+        pattern: r"sk_test_[A-Za-z0-9]{24,}",
+    },
+    SecretRule {
+        name: "stripe_restricted_key",
+        pattern: r"rk_live_[A-Za-z0-9]{24,}",
+    },
+    SecretRule {
+        name: "sendgrid_api_key",
+        pattern: r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}",
+    },
+    SecretRule {
+        name: "npm_access_token",
+        pattern: r"npm_[A-Za-z0-9]{36}",
+    },
+    SecretRule {
+        name: "pypi_api_token",
+        pattern: r"pypi-[A-Za-z0-9_-]{50,}",
+    },
+    SecretRule {
+        name: "square_access_token",
+        pattern: r"sq0atp-[A-Za-z0-9_-]{22}",
+    },
+    SecretRule {
+        name: "shopify_access_token",
+        pattern: r"shp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}",
+    },
+    SecretRule {
+        name: "digitalocean_pat",
+        pattern: r"dop_v1_[a-f0-9]{64}",
+    },
+    SecretRule {
+        name: "hashicorp_vault_token",
+        pattern: r"hvs\.[A-Za-z0-9_-]{90,}",
+    },
+    SecretRule {
+        name: "postman_api_key",
+        pattern: r"PMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}",
+    },
+    SecretRule {
+        name: "linear_api_key",
+        pattern: r"lin_api_[A-Za-z0-9]{40}",
+    },
+    SecretRule {
+        name: "figma_personal_access_token",
+        pattern: r"figd_[A-Za-z0-9_-]{40,}",
+    },
+    SecretRule {
+        name: "slack_webhook_url",
+        pattern: r"https://hooks\.slack\.com/services/[A-Za-z0-9+/]{43,}",
+    },
     // PEM private-key blocks — covers RSA, EC, OpenSSH, plain.
     SecretRule {
         name: "pem_private_key",
@@ -341,6 +409,73 @@ mod tests {
         let body = b"AKIASHORTSTRING1";
         let mut c = ctx_with_body(body);
         assert!(scanner.inspect(&mut c).await.is_allow());
+    }
+
+    #[test]
+    fn curated_vendor_patterns_fire_on_representative_samples() {
+        let s = SecretsScanner::with_default_rules();
+        let cases: &[(&str, String)] = &[
+            (
+                "google_oauth_client_secret",
+                format!("GOCSPX-{}", "a".repeat(28)),
+            ),
+            (
+                "github_fine_grained_pat",
+                format!("github_pat_{}", "A".repeat(82)),
+            ),
+            (
+                "gitlab_personal_access_token",
+                format!("glpat-{}", "a".repeat(20)),
+            ),
+            (
+                "gitlab_pipeline_trigger_token",
+                format!("glptt-{}", "a".repeat(40)),
+            ),
+            (
+                "stripe_test_secret_key",
+                format!("sk_test_{}", "a".repeat(24)),
+            ),
+            (
+                "stripe_restricted_key",
+                format!("rk_live_{}", "a".repeat(24)),
+            ),
+            (
+                "sendgrid_api_key",
+                format!("SG.{}.{}", "a".repeat(22), "b".repeat(43)),
+            ),
+            ("npm_access_token", format!("npm_{}", "a".repeat(36))),
+            ("pypi_api_token", format!("pypi-{}", "A".repeat(50))),
+            ("square_access_token", format!("sq0atp-{}", "a".repeat(22))),
+            ("shopify_access_token", format!("shpat_{}", "a".repeat(32))),
+            ("digitalocean_pat", format!("dop_v1_{}", "a".repeat(64))),
+            ("hashicorp_vault_token", format!("hvs.{}", "A".repeat(90))),
+            (
+                "postman_api_key",
+                format!("PMAK-{}-{}", "a".repeat(24), "b".repeat(34)),
+            ),
+            ("linear_api_key", format!("lin_api_{}", "a".repeat(40))),
+            (
+                "figma_personal_access_token",
+                format!("figd_{}", "a".repeat(40)),
+            ),
+            (
+                "slack_webhook_url",
+                format!("https://hooks.slack.com/services/{}", "A".repeat(44)),
+            ),
+        ];
+        for (name, sample) in cases {
+            let hits = s.scan(sample.as_bytes());
+            assert!(hits.contains(name), "{name} did not fire; hits={hits:?}");
+        }
+    }
+
+    #[test]
+    fn enriched_rules_do_not_fire_on_benign_prose() {
+        // The curated list stays high-precision: ordinary prose mentioning
+        // keys/tokens/npm must not trip any rule.
+        let s = SecretsScanner::with_default_rules();
+        let hits = s.scan(b"installing npm packages and rotating api keys with the gitlab cli");
+        assert!(hits.is_empty(), "false positive on prose: {hits:?}");
     }
 
     #[test]
