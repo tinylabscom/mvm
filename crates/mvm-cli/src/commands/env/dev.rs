@@ -11,8 +11,6 @@
 //! - **native Linux + KVM** → `super::linux_native` treats the host shell as
 //!   the dev environment, installs Firecracker + downloads kernel/
 //!   rootfs assets, and optionally spawns an interactive subshell.
-//!   This is the W8.C path — replaces the W7-deleted Lima
-//!   `dev_up`/`dev_down`/`dev_status` helpers.
 //!
 //! macOS Intel, macOS pre-26, Linux without KVM, WSL2, and native
 //! Windows bail with a clear unsupported-platform message. WSL2 with
@@ -44,10 +42,10 @@ enum DevBackend {
     /// macOS with libkrun — Hypervisor.framework-backed dev VM.
     Libkrun,
     /// macOS 13+ with Apple Virtualization.framework — Vz-backed
-    /// dev VM. Plan 98 Slice 2B: selected when the builder backend
-    /// resolves to Vz (auto-detect on macOS 26+ Apple Silicon, or
-    /// explicit override via `--builder vz` / `MVM_BUILDER_BACKEND=vz`)
-    /// so the dev VM rides the same VMM as the build path.
+    /// dev VM. Selected when the builder backend resolves to Vz
+    /// (auto-detect on macOS 26+ Apple Silicon, or explicit override
+    /// via `--builder vz` / `MVM_BUILDER_BACKEND=vz`) so the dev VM
+    /// rides the same VMM as the build path.
     Vz,
     /// macOS 26+ Apple Silicon — Apple Container dev VM.
     AppleContainer,
@@ -262,8 +260,8 @@ pub(in crate::commands) enum DevAction {
     },
     /// Import a dev image from local files (air-gapped install).
     ///
-    /// Plan 36 §"Air-gapped install path": runs the same cosign sig +
-    /// SHA-256 + version-pin + max-age + revocation verification
+    /// Runs the same cosign sig + SHA-256 + version-pin + max-age +
+    /// revocation verification
     /// pipeline as the network path, against local files. On success
     /// the verified artifacts are deposited into the version-namespaced
     /// cache (`~/.cache/mvm/dev/prebuilt/v{version}/`) and the next
@@ -315,7 +313,7 @@ fn bail_no_dev_backend() -> Result<()> {
     );
 }
 
-/// Plan 98 §2.5 — cross-backend coexistence helpers.
+/// Cross-backend coexistence helpers.
 ///
 /// Both `LibkrunBackend` and `VzBackend` boot a runtime VM named
 /// `apple_container::DEV_VM_NAME` ("mvm-dev"). Their status probes
@@ -373,8 +371,8 @@ fn switch_notice(current: DevVmBackend, other_running: Option<&str>) -> Option<S
     })
 }
 
-/// Plan 98 §2.5 (revised) — when the *other* backend's `mvm-dev` is up, stop
-/// it and take over instead of refusing. The dev VM is an ephemeral builder;
+/// When the *other* backend's `mvm-dev` is up, stop it and take over instead
+/// of refusing. The dev VM is an ephemeral builder;
 /// both backends share the `mvm-dev` name + dev network and so can't coexist,
 /// making "switch" the only sensible outcome. Mirrors the best-effort
 /// cross-stop already in `cmd_dev_*_down`.
@@ -440,7 +438,7 @@ fn cmd_dev_libkrun(
     let backend = LibkrunBackend;
     let id = VmId(apple_container::DEV_VM_NAME.to_string());
 
-    // Plan 98 §2.5 — take over a stale Vz dev VM rather than refusing.
+    // Take over a stale Vz dev VM rather than refusing.
     take_over_from_other_backend(DevVmBackend::Libkrun)?;
 
     if matches!(backend.status(&id)?, VmStatus::Running) {
@@ -473,8 +471,8 @@ fn cmd_dev_libkrun(
     Ok(())
 }
 
-/// Plan 98 §2.5 — `dev down` is best-effort over both backends so
-/// a user who switched backends without `dev down` first can still
+/// `dev down` is best-effort over both backends so a user who switched
+/// backends without `dev down` first can still
 /// recover cleanly. The current-backend stop is the primary
 /// surface; the other-backend stop is best-effort (logged but not
 /// surfaced as a hard error).
@@ -503,7 +501,7 @@ fn cmd_dev_libkrun_status() -> Result<()> {
     ui::info("Backend:  libkrun (Hypervisor.framework)");
     ui::info(&format!("VM:       {}", apple_container::DEV_VM_NAME));
     ui::info(&format!("Status:   {state}"));
-    // Plan 98 §2.5 — surface the other backend's state too.
+    // Surface the other backend's state too.
     if let Ok(Some(other)) = other_backend_dev_vm_running(DevVmBackend::Libkrun) {
         ui::info(&format!(
             "Note: a {other} dev VM is also running. The next `mvmctl dev up` \
@@ -513,8 +511,8 @@ fn cmd_dev_libkrun_status() -> Result<()> {
     Ok(())
 }
 
-/// Plan 98 Slice 2B — Vz-backed dev VM. Parallel to
-/// [`cmd_dev_libkrun`]; same `VmStartConfig` surface, only the
+/// Vz-backed dev VM. Parallel to [`cmd_dev_libkrun`]; same
+/// `VmStartConfig` surface, only the
 /// concrete `VmBackend` impl differs. The dev VM image (kernel +
 /// rootfs) is built by `apple_container::ensure_dev_image()` which
 /// already honours `MVM_BUILDER_BACKEND` through the Phase 1
@@ -524,7 +522,7 @@ fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool, volumes: &[VmVolume]
     let backend = VzBackend;
     let id = VmId(apple_container::DEV_VM_NAME.to_string());
 
-    // Plan 98 §2.5 — take over a stale libkrun dev VM rather than refusing.
+    // Take over a stale libkrun dev VM rather than refusing.
     take_over_from_other_backend(DevVmBackend::Vz)?;
 
     if matches!(backend.status(&id)?, VmStatus::Running) {
@@ -559,7 +557,7 @@ fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool, volumes: &[VmVolume]
 
 fn cmd_dev_vz_down() -> Result<()> {
     let id = VmId(apple_container::DEV_VM_NAME.to_string());
-    // Plan 98 §2.5 — best-effort stop of the libkrun side too.
+    // Best-effort stop of the libkrun side too.
     if let Ok(VmStatus::Running | VmStatus::Starting | VmStatus::Paused) =
         LibkrunBackend.status(&id)
         && let Err(e) = LibkrunBackend.stop(&id)
@@ -582,7 +580,7 @@ fn cmd_dev_vz_status() -> Result<()> {
     ui::info("Backend:  Vz (Apple Virtualization.framework)");
     ui::info(&format!("VM:       {}", apple_container::DEV_VM_NAME));
     ui::info(&format!("Status:   {state}"));
-    // Plan 98 §2.5 — surface the other backend's state too.
+    // Surface the other backend's state too.
     if let Ok(Some(other)) = other_backend_dev_vm_running(DevVmBackend::Vz) {
         ui::info(&format!(
             "Note: a {other} dev VM is also running. The next `mvmctl dev up` \
@@ -608,10 +606,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         volume: Vec::new(),
     });
 
-    // Plan 98 Slice 2B — §2.C1 grace guard removed. `current_backend()`
-    // now honours `MVM_BUILDER_BACKEND=vz` / `--builder vz` (folded into
-    // env at startup by `commands::run`) directly, routing the dev VM
-    // through `VzBackend` instead of bailing.
+    // `current_backend()` honours `MVM_BUILDER_BACKEND=vz` / `--builder vz`
+    // (folded into env at startup by `commands::run`) directly, routing the
+    // dev VM through `VzBackend`.
     let backend = current_backend();
     match action {
         DevAction::Up {
@@ -635,7 +632,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // which needs a real terminal. Without one (CI, scripts, the
             // core_demo test — stdin is redirected) `console_interactive`'s
             // openpty() fails. Boot the VM and return instead; `dev shell`
-            // attaches later once a TTY is present. (#582)
+            // attaches later once a TTY is present.
             let want_shell = effective_up_shell(shell, no_shell);
             let open_shell = want_shell && std::io::IsTerminal::is_terminal(&std::io::stdin());
             if want_shell && !open_shell {
@@ -819,7 +816,7 @@ mod tests {
     use mvm_core::platform::Platform;
 
     // ──────────────────────────────────────────────────────────────
-    // Slice §2.5 — cross-backend coexistence dispatch.
+    // Cross-backend coexistence dispatch.
     // ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -863,24 +860,16 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Slice 2B — `select_dev_backend` priority. Hermetic; injects
-    // platform + builder choice + per-capability bools so the
-    // dispatch is testable without touching the live host.
-    // ──────────────────────────────────────────────────────────────
-
-    // ──────────────────────────────────────────────────────────────
-    // Slice 2B — `select_dev_backend` priority. Hermetic; injects
-    // platform + builder choice + per-capability bools so the
-    // dispatch is testable without touching the live host.
+    // `select_dev_backend` priority. Hermetic; injects platform +
+    // builder choice + per-capability bools so the dispatch is
+    // testable without touching the live host.
     // ──────────────────────────────────────────────────────────────
 
     #[test]
     fn builder_vz_with_vz_available_picks_vz_dev_backend() {
-        // §2.S11 regression test: after Slice 2B removes the §2.C1
-        // grace guard, `MVM_BUILDER_BACKEND=vz` (or `--builder vz`)
-        // must actually route the dev VM through `VzBackend`. The
-        // earlier guard silently rejected; this asserts the new
-        // path actually selects Vz when the host supports it.
+        // Regression test: `MVM_BUILDER_BACKEND=vz` (or `--builder vz`)
+        // must actually route the dev VM through `VzBackend` when the
+        // host supports it — an earlier grace guard silently rejected.
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,

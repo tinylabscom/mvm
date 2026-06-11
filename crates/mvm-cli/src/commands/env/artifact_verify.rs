@@ -1,22 +1,21 @@
 //! Artifact download + SHA-256 integrity verification for the dev-image
 //! / builder-VM fetch paths.
 //!
-//! Extracted from `apple_container.rs` as a pure mechanical refactor —
-//! no behavior changes. These are the generic "pull a file over curl and
-//! check it against the published checksum manifest" helpers that back
-//! ADR-002 §W5.1 (hash-verified downloads); the dev-image and builder-VM
-//! download orchestration in `apple_container.rs` calls them.
+//! These are the generic "pull a file over curl and check it against the
+//! published checksum manifest" helpers that back hash-verified downloads;
+//! the dev-image and builder-VM download orchestration in
+//! `apple_container.rs` calls them.
 
 use anyhow::{Context, Result};
 
 use crate::ui;
 
-/// Bump the dev_image_verify_<outcome> counter. Plan 36 §Layer 4 step 11.
+/// Bump the dev_image_verify_<outcome> counter.
 ///
 /// Caller passes the outcome name; centralising the lookup keeps the
-/// counter set discoverable in one place. mvmd plan 23's
-/// reconciliation loop will alert on attack-shaped spikes
-/// (sig_invalid, digest_mismatch, revoked).
+/// counter set discoverable in one place. mvmd's reconciliation loop
+/// will alert on attack-shaped spikes (sig_invalid, digest_mismatch,
+/// revoked).
 ///
 /// Security-relevant outcomes (everything except `network`, which is
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
@@ -74,8 +73,9 @@ pub(super) fn url_exists(url: &str) -> Result<bool> {
 /// Download the per-release `sha256sum`-format checksum file and parse it
 /// into a `name -> hex-digest` map for the artifacts we plan to download.
 ///
-/// The checksum file is the trust anchor for ADR-002 §W5.1. It is fetched
-/// from the same GitHub release URL as the artifacts, over TLS. Anyone
+/// The checksum file is the trust anchor for the hash-verified download.
+/// It is fetched from the same GitHub release URL as the artifacts, over
+/// TLS. Anyone
 /// who can swap the artifact can also swap the checksum file, so the
 /// real defence is end-to-end signing (cosign on the .tar.gz / SBOM
 /// today, on the checksum file itself in a future iteration). What we
@@ -131,8 +131,7 @@ pub(super) fn fetch_expected_hashes(
 /// Stream `path` through SHA-256 and compare to `expected` (lowercase
 /// hex). On mismatch, delete the file and bail with a clear message.
 /// On `MVM_SKIP_HASH_VERIFY=1`, log a warning and accept — the env-var
-/// is the documented escape hatch for emergency-rotation scenarios per
-/// plan 29.
+/// is the documented escape hatch for emergency-rotation scenarios.
 pub(super) fn verify_artifact_hash(
     path: &str,
     name: &str,
@@ -258,7 +257,7 @@ mod tests {
 
     /// Cargo test runs tests in parallel within a single binary. Two
     /// of these tests touch `MVM_SKIP_HASH_VERIFY` (the global env-var
-    /// escape hatch from ADR-002 §W5.1), so they have to be serialised
+    /// escape hatch), so they have to be serialised
     /// against each other and against any other test that hashes a
     /// real artifact. Static mutex held for the test's lifetime.
     static ENV_LOCK: Mutex<()> = Mutex::new(());

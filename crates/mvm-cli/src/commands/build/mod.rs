@@ -1,14 +1,14 @@
 //! Build & artifact commands — flake/Mvmfile builds + flake validation.
-//! (Plan 40: `image` catalog moved to top-level `catalog` module;
-//! `flake` validation renamed to `validate`.)
+//! The `image` catalog lives in the top-level `catalog` module; `flake`
+//! validation is the `validate` subcommand.
 
 #[allow(clippy::module_inception)]
 pub(super) mod build;
 pub(super) mod compile;
 pub(super) mod group;
 pub(super) mod kernel;
-/// Plan 89 W3 part 5 — `mvmctl persistent-builder` user-facing
-/// verb. Wires the host-side `LibkrunPersistentHostVm` and
+/// `mvmctl persistent-builder` user-facing verb. Wires the
+/// host-side `LibkrunPersistentHostVm` and
 /// `PersistentBuilderSupervisor` together via three subcommands
 /// (start / submit / stop) so contributors can exercise the
 /// dispatch path end-to-end without going through `mvmctl dev up`.

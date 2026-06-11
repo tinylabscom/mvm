@@ -52,7 +52,7 @@ const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// After the PID file appears the supervisor still has to bind the
 /// per-port vsock listener socket; callers (the console attach,
 /// `shell_exec` via `connect_with_auto_start`) race that window and
-/// wrongly see the VM as "not running" (#582). `start` waits for the
+/// wrongly see the VM as "not running". `start` waits for the
 /// agent socket before returning so "ready" actually means reachable.
 const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -78,8 +78,9 @@ const WORKLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
 /// input. The sole interactive path into a guest is the dev-shell-gated
-/// agent vsock console (claim 15), absent from sealed
-/// prod agents. Centralized so the write-only invariant lives in one place.
+/// agent vsock console (claim 15 — no interactive access to a sealed prod
+/// microVM), absent from sealed prod agents. Centralized so the write-only
+/// invariant lives in one place.
 pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .create(true)
@@ -105,7 +106,7 @@ const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 /// re-verifies the signed envelope before trusting any decoded field.
 /// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring +
 /// the configured virtio-net gateway. **No rootfs** (the cold path sets the workload
-/// rootfs; a 1b prelaunched standby leaves it `None` until claim) and **no user volumes**.
+/// rootfs; a prelaunched standby leaves it `None` until claim) and **no user volumes**.
 /// Shared verbatim by `build_supervisor_config` (cold) and `standby_base_config` (warm)
 /// so the two launch paths can't drift.
 fn krun_context_base(
@@ -140,7 +141,7 @@ fn krun_context_base(
     }
 }
 
-/// Translate a backend-agnostic [`StandbySpec`] into the 1a `SupervisorBaseConfig`
+/// Translate a backend-agnostic [`StandbySpec`] into the `SupervisorBaseConfig`
 /// (workload-independent) the prelaunched supervisor reads on stdin. `rootfs_path` stays
 /// `None` — the workload rootfs arrives in the attach at claim.
 fn standby_base_config(spec: &StandbySpec) -> SupervisorBaseConfig {
@@ -164,7 +165,7 @@ fn standby_base_config(spec: &StandbySpec) -> SupervisorBaseConfig {
     }
 }
 
-/// Translate a [`StandbyClaim`] into the 1a `SupervisorAttachConfig`, echoing the
+/// Translate a [`StandbyClaim`] into the `SupervisorAttachConfig`, echoing the
 /// standby's binding nonce. `plan_json`/`bundle_json` decode to `serde_json::Value`
 /// carriers (the same shape `SupervisorConfig.plan` uses).
 fn standby_attach_config(
@@ -215,7 +216,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push_str(&uvols);
     }
     // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
-    // verbatim with the 1b standby spawn so the two paths can't drift. The cold path
+    // verbatim with the standby spawn so the two paths can't drift. The cold path
     // then sets the workload rootfs + user volumes below.
     let mut krun = krun_context_base(
         &config.name,
@@ -234,7 +235,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // sparse-created by the CLI orchestrator before start; a RO disk image
     // is RO at the hypervisor (krun_add_disk takes read_only).
     //
-    // Tier A.2 — libkrun's `krun_add_virtiofs` has NO host-side read-only
+    // libkrun's `krun_add_virtiofs` has NO host-side read-only
     // toggle, so a "read-only" virtio-fs share would only be ro by the
     // guest's own mount flag — a compromised guest could remount it rw.
     // Rather than make a false ro promise, refuse it and point at the
@@ -443,7 +444,7 @@ impl VmBackend for LibkrunBackend {
         // The PID file means the supervisor process is up, but it binds the
         // per-port vsock listener a beat later. Wait for the agent socket so
         // the console attach / shell_exec that immediately follow don't race
-        // a not-yet-bound socket and report the VM "not running" (#582).
+        // a not-yet-bound socket and report the VM "not running".
         let agent_sock = mvm_core::config::vm_vsock_port_socket(
             &config.name,
             mvm_guest::vsock::GUEST_AGENT_PORT,
@@ -577,7 +578,7 @@ impl VmBackend for LibkrunBackend {
 
         // Disk-only warm-start = fast reboot from a copy-on-write disk
         // snapshot: boot a private writable clone of the golden rootfs so the
-        // base image stays immutable across resumes (Phase B3 `SnapshotUpper`).
+        // base image stays immutable across resumes (via `SnapshotUpper`).
         let base = Path::new(&config.rootfs_path);
         let base_dir = base.parent().ok_or_else(|| {
             WarmStartError::Failed(format!("rootfs has no parent: {}", base.display()))
@@ -617,8 +618,8 @@ impl VmBackend for LibkrunBackend {
                 std::os::unix::fs::PermissionsExt::from_mode(0o700),
             );
         }
-        // The bin dispatches the prelaunch arm on the `prelaunch_base` wrapper key
-        // (1a); legacy callers send a bare SupervisorConfig and are unaffected.
+        // The bin dispatches the prelaunch arm on the `prelaunch_base` wrapper key;
+        // legacy callers send a bare SupervisorConfig and are unaffected.
         let envelope = serde_json::to_vec(&serde_json::json!({ "prelaunch_base": base }))
             .map_err(|e| StandbyError::SpawnFailed(format!("encode base config: {e}")))?;
 
@@ -677,7 +678,7 @@ impl VmBackend for LibkrunBackend {
         })?;
         libkrun_sys::framing::write_json_frame_sync(&mut stream, &attach)
             .map_err(|e| StandbyError::ClaimFailed(format!("send attach: {e}")))?;
-        // The supervisor re-verifies the attach (1a) then start_enters, writing its pid
+        // The supervisor re-verifies the attach then start_enters, writing its pid
         // into vm_state_dir. The VM is identified by the standby id (its state lives under
         // vms/<id>/, so stop/status/console resolve it like any cold-booted VM).
         Ok(VmId(handle.id.clone()))
@@ -1037,7 +1038,7 @@ mod tests {
         assert!(cfg.bundle.is_none());
     }
 
-    /// Tier A.2 / claim 1: libkrun can't enforce a read-only virtio-fs
+    /// claim 1 (host-fs isolation): libkrun can't enforce a read-only virtio-fs
     /// share at the hypervisor, so it refuses one rather than make a
     /// false ro promise (a compromised guest could remount it rw). A
     /// read-write share, or a read-only disk image, is fine.

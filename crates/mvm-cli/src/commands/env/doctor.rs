@@ -14,7 +14,7 @@ pub(in crate::commands) struct Args {
     pub json: bool,
     /// Scope checks to a specific user workflow. Filters the report
     /// (and the exit-code blocking set) to checks relevant for the
-    /// named workflow. Default is all checks (plan 74 W5).
+    /// named workflow. Default is all checks.
     #[arg(long, value_enum)]
     pub workflow: Option<crate::doctor::DoctorWorkflow>,
 }

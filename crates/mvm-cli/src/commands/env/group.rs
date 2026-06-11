@@ -1,9 +1,9 @@
 //! `mvmctl env <sub>` — mvm environment / install lifecycle.
 //!
-//! Plan 178 / ADR-077 (D5): `bootstrap`, `cleanup`, `uninstall`, `update`,
-//! `sign` collapse under one `env` namespace (set up / maintain / tear down
-//! the mvm install + dev environment). The daily/entry commands `dev`,
-//! `doctor`, `init` stay top-level. Leaf modules are unchanged.
+//! `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` collapse under one
+//! `env` namespace (set up / maintain / tear down the mvm install + dev
+//! environment). The daily/entry commands `dev`, `doctor`, `init` stay
+//! top-level. Leaf modules are unchanged.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};

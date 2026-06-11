@@ -213,12 +213,15 @@ PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferr
   trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
   Deferred dir-purity: dev/doctor/init modules still live in env/.
 
-PLAN 180 — Strip spec refs from code comments    🔴 NOT STARTED
-  [ ] worklist + canonical detection regex
-  [ ] pilot batch (7 heaviest files)
-  [ ] fan-out sweep (~2,531 comment hits)
-  [ ] verify just ci green, comment-only diff
-  [ ] check-no-spec-refs-in-comments lint gate
+PLAN 180 — Strip spec refs from code comments    ✅ DONE
+  [x] worklist + canonical detection regex (494 files / ~3,097 line-hits baseline)
+  [x] pilot batch (7 heaviest files)
+  [x] fan-out sweep — comment-only; ~1,000+ citations removed across ~280 files
+      (string literals / wire data / `claim N` security-property names kept)
+  [x] verify comment-only diff + workspace build green
+  [x] check-no-spec-refs-in-comments lint gate (string-aware: skips raw
+      strings; exempts the two self-referential lint files) wired into the
+      Lint CI job
 ```
 
 ## Security claims

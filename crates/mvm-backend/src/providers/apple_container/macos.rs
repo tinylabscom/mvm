@@ -48,7 +48,7 @@ fn persist_vm_state(id: &str) {
 /// Path to the cross-process vsock proxy Unix socket for VM `id`. Both the
 /// listener (`start_vsock_proxy_listener`) and the connector resolve through
 /// this, and it must equal what `mvm_core::config` hands the rest of mvm —
-/// the single source of truth that keeps the two ends from drifting (#582).
+/// the single source of truth that keeps the two ends from drifting.
 fn vsock_proxy_socket_path(id: &str) -> std::path::PathBuf {
     mvm_core::config::vm_vsock_proxy_socket(id)
 }

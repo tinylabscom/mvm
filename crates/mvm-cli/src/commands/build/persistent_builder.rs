@@ -1,9 +1,8 @@
-//! Plan 89 W3 part 5 — `mvmctl persistent-builder` CLI verb.
+//! `mvmctl persistent-builder` CLI verb.
 //!
-//! Wires the W3 parts 1-4 pieces (host-side
-//! `LibkrunPersistentHostVm` + `PersistentBuilderSupervisor`
-//! + the in-guest dispatch loop) into a user-facing command.
-//! Three subcommands:
+//! Wires the host-side `LibkrunPersistentHostVm` +
+//! `PersistentBuilderSupervisor` + the in-guest dispatch loop into
+//! a user-facing command. Three subcommands:
 //!
 //! - **`start --workspace <path>`** — spawns the long-lived
 //!   builder VM and records the dispatch socket path so
@@ -15,11 +14,10 @@
 //! - **`stop`** — sends `HostVmRequest::Shutdown` to the dispatch
 //!   loop, waits for the supervisor child to exit cleanly.
 //!
-//! This is deliberately separate from `mvmctl dev up`. Plan 89's
+//! This is deliberately separate from `mvmctl dev up`. The
 //! lifecycle binding (`mvmctl dev up` auto-starts the persistent
-//! supervisor) lands in a follow-up to avoid colliding with the
-//! ur-seed work in flight on `mvmctl dev`. Once both stacks are
-//! merged, `mvmctl dev up` becomes a thin caller of the same
+//! supervisor) lands in a follow-up. Once it does, `mvmctl dev up`
+//! becomes a thin caller of the same
 //! `LibkrunPersistentHostVm::start()` this verb invokes.
 //!
 //! ## Session state
@@ -27,14 +25,14 @@
 //! The running VM's dispatch-socket path + supervisor PID get
 //! recorded at `~/.mvm/run/persistent-builder.json` so `submit` /
 //! `stop` find them across process invocations. The file is mode
-//! 0600 to match the ADR-002 W1.5 contract for `~/.mvm/run/`.
+//! 0600 to match the security contract for `~/.mvm/run/`.
 //!
 //! ## What's deferred
 //!
 //! - Auto-start from `mvmctl dev up` (post-merge follow-up).
 //! - `mvmctl build` routing into the persistent supervisor when a
-//!   session is active (W3 part 7+ — `submit` from W3 part 6
-//!   now produces real artifacts, so the routing target exists).
+//!   session is active (`submit` now produces real artifacts, so
+//!   the routing target exists).
 //! - Install variant dispatch.
 //! - Stderr streaming.
 
@@ -604,8 +602,8 @@ mod tests {
 
     #[test]
     fn stage_flake_cmd_sh_creates_artifact_output_subdir() {
-        // Plan 89 W3 part 6: the cmd.sh dispatches `nix build`
-        // and then copies vmlinux + rootfs.ext4 to a per-dispatch
+        // The cmd.sh dispatches `nix build` and then copies
+        // vmlinux + rootfs.ext4 to a per-dispatch
         // out/ subdir. The host stages the empty subdir up-front
         // so the cmd.sh's `mkdir -p` is a no-op on success path
         // (and so the host can read from a known path without

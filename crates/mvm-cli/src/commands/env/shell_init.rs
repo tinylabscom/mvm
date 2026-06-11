@@ -1,8 +1,8 @@
 //! `mvmctl shell-init` — print the shell init block (completions + dev aliases) to stdout.
 //!
-//! Plan 40 folded the standalone `mvmctl completions <shell>` verb into
-//! a hidden `--emit-completions <shell>` flag here, so the eval'd init
-//! block is self-contained.
+//! The standalone `mvmctl completions <shell>` verb folded into a hidden
+//! `--emit-completions <shell>` flag here, so the eval'd init block is
+//! self-contained.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;

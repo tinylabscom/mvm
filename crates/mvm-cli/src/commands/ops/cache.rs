@@ -793,7 +793,7 @@ mod tests {
         assert!(joined.contains("Builder persistent /nix store images:"));
         assert!(joined.contains("nix-store-aarch64.img:"));
         assert!(joined.contains("cap (sparse)"));
-        // The auto-GC note + env override name must be present (#630).
+        // The auto-GC note + env override name must be present.
         assert!(joined.contains("auto-GC cap:"));
         assert!(joined.contains("MVM_BUILDER_STORE_GC_GIB"));
         assert!(joined.contains("--delete-older-than 14d"));

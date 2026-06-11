@@ -82,9 +82,8 @@ pub(in crate::commands) fn dispatch_sdk_mode(mode: RunMode, args: &RunArgs) -> R
     }
 }
 
-/// Spawn the user's Sandbox-shaped script with `MVM_SDK_MODE=live`
-/// + the resolved `mvmctl`
-/// binary path on the env so the SDK shells each `Sandbox`
+/// Spawn the user's Sandbox-shaped script with `MVM_SDK_MODE=live` and the
+/// resolved `mvmctl` binary path on the env so the SDK shells each `Sandbox`
 /// operation to `mvmctl up` / `proc start` / `fs write` / `down`
 /// against a real microVM.
 ///

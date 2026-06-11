@@ -12,7 +12,7 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 
 /// Optionally rewrite an absolute system path under a sandbox prefix.
-/// Plan 70: when `MVM_UNINSTALL_PATH_PREFIX` is set, the verb's
+/// When `MVM_UNINSTALL_PATH_PREFIX` is set, the verb's
 /// `/var/lib/mvm` and `/usr/local/bin/mvmctl` targets relocate under
 /// the prefix and the sudo invocation is skipped (plain
 /// `std::fs::remove_*`) because the rewritten paths live in
@@ -78,10 +78,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
     }
 
-    // Plan 70: when MVM_UNINSTALL_PATH_PREFIX is set the system
-    // paths below get rewritten under that prefix and sudo is
-    // skipped. Surface the bypass loudly so a misconfigured
-    // production caller can't miss it.
+    // When MVM_UNINSTALL_PATH_PREFIX is set the system paths below get
+    // rewritten under that prefix and sudo is skipped. Surface the bypass
+    // loudly so a misconfigured production caller can't miss it.
     let prefix_set = std::env::var("MVM_UNINSTALL_PATH_PREFIX")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
@@ -92,8 +91,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         );
     }
 
-    // Stop running microVMs first (best-effort). Plan-60 / ADR-013
-    // dropped Lima; there is no Lima VM to destroy.
+    // Stop running microVMs first (best-effort). Lima was dropped; there
+    // is no Lima VM to destroy.
     if let Err(e) = microvm::stop() {
         tracing::warn!("failed to stop microVMs before uninstall: {e}");
     }

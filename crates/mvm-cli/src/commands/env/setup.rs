@@ -1,6 +1,6 @@
-//! Setup helpers used by `bootstrap`. Plan 40 dropped the standalone
-//! `mvmctl setup` verb — `bootstrap` runs the full flow idempotently,
-//! so the separate subcommand was redundant. The helpers below
+//! Setup helpers used by `bootstrap`. The standalone `mvmctl setup`
+//! verb is gone — `bootstrap` runs the full flow idempotently, so the
+//! separate subcommand was redundant. The helpers below
 //! (`run_setup_steps`, `setup_security_baseline`) remain and are
 //! imported by `bootstrap.rs`.
 
@@ -13,11 +13,11 @@ use mvm::shell;
 use mvm_backend::firecracker;
 
 pub(super) fn run_setup_steps(force: bool, _builder_cpus: u32, _builder_mem: u32) -> Result<()> {
-    // Plan-60 / ADR-013 dropped Lima; what remains here is the
-    // Firecracker asset pipeline (kernel + rootfs + security
-    // baseline). The builder-VM sizing args are kept on the
-    // signature so callers don't break, but they're inert until
-    // W8 wires up direct-launch for the macOS / no-KVM path.
+    // Lima is gone; what remains here is the Firecracker asset
+    // pipeline (kernel + rootfs + security baseline). The builder-VM
+    // sizing args are kept on the signature so callers don't break,
+    // but they're inert until direct-launch is wired up for the
+    // macOS / no-KVM path.
     let total = 4;
 
     // Step 1: Firecracker (+ jailer from same release tarball)

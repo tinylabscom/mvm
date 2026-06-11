@@ -80,6 +80,9 @@ jobs:
       - name: Unique spec numbers
         run: cargo run -p xtask -- check-spec-numbers
 
+      - name: No spec refs in source comments
+        run: cargo run -p xtask -- check-no-spec-refs-in-comments
+
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
 
