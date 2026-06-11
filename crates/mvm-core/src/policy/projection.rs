@@ -243,6 +243,116 @@ fn pinned_allow_list_rules(
     Ok(rules)
 }
 
+/// One outbound target in the WASI-facing (hostname-keyed) shape.
+/// `PinnedHost` is what a `WasiCtx` outbound-host grant becomes
+/// once pinned; `Net` carries an L4 CIDR rule that has no
+/// hostname. The wasmtime runner maps this shape onto the actual
+/// `WasiCtxBuilder`; nothing here depends on wasmtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasiTarget {
+    PinnedHost { host: String, ips: Vec<IpAddr> },
+    Net(IpNet),
+}
+
+/// One outbound grant in the WASI-facing shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasiOutboundGrant {
+    pub target: WasiTarget,
+    pub proto: Proto,
+    pub port_lo: u16,
+    pub port_hi: u16,
+}
+
+/// The WASI-facing projection of a resolved policy's egress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasiEgress {
+    Unrestricted,
+    Grants(Vec<WasiOutboundGrant>),
+}
+
+/// Project the resolved policy into the WASI-facing shape. A
+/// deliberately separate walk from [`canonicalize_effective`] —
+/// the cross-projection witness compares the two paths' decisions
+/// and exists to catch drift between them. The refusal ladder
+/// (bad CIDR, unknown proto, missing/expired/empty pin,
+/// mandatory-deny overlap) is intentionally identical.
+pub fn to_wasi_grants(
+    eff: &EffectivePolicy,
+    pins: &DnsPinRegistry,
+    now: &str,
+) -> Result<WasiEgress, ProjectionError> {
+    if eff.egress.mode.as_deref() == Some("open") {
+        return Ok(WasiEgress::Unrestricted);
+    }
+    let mut grants = Vec::new();
+    for spec in &eff.network.l4 {
+        let net: IpNet = spec
+            .dst_cidr
+            .parse()
+            .map_err(|source| ProjectionError::BadCidr {
+                cidr: spec.dst_cidr.clone(),
+                source,
+            })?;
+        refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
+        let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
+        grants.push(WasiOutboundGrant {
+            target: WasiTarget::Net(net),
+            proto: Proto::parse(&spec.proto)?,
+            port_lo,
+            port_hi,
+        });
+    }
+    for (host, port) in &eff.egress.allow_list {
+        let pin = pins
+            .lookup(host)
+            .ok_or_else(|| ProjectionError::MissingPin { host: host.clone() })?;
+        if !pin.is_valid_at(now) {
+            return Err(ProjectionError::ExpiredPin {
+                host: host.clone(),
+                expires_at: pin.expires_at.clone(),
+            });
+        }
+        if pin.ips.is_empty() {
+            return Err(ProjectionError::EmptyPin { host: host.clone() });
+        }
+        for pinned in &pin.ips {
+            refuse_mandatory_overlap(host, &host_net(*pinned))?;
+        }
+        let (port_lo, port_hi) = normalize_ports(*port, *port);
+        grants.push(WasiOutboundGrant {
+            target: WasiTarget::PinnedHost {
+                host: host.clone(),
+                ips: pin.ips.clone(),
+            },
+            proto: Proto::Tcp,
+            port_lo,
+            port_hi,
+        });
+    }
+    Ok(WasiEgress::Grants(grants))
+}
+
+/// The WASI-side decision function. Must agree with
+/// [`CanonicalEgress::permits`] for every probe — that agreement
+/// is the cross-projection witness.
+pub fn wasi_allows(egress: &WasiEgress, proto: &Proto, ip_addr: IpAddr, port: u16) -> bool {
+    if is_mandatory_deny(ip_addr) {
+        return false;
+    }
+    match egress {
+        WasiEgress::Unrestricted => true,
+        WasiEgress::Grants(grants) => grants.iter().any(|g| {
+            g.proto == *proto
+                && g.port_lo <= port
+                && port <= g.port_hi
+                && match &g.target {
+                    WasiTarget::PinnedHost { ips, .. } => ips.contains(&ip_addr),
+                    WasiTarget::Net(net) => net.contains(&ip_addr),
+                }
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,5 +752,62 @@ mod tests {
             matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
             "got {err:?}"
         );
+    }
+
+    // ─────────────────────────────────────────────────
+    // WASI-facing projection
+    // ─────────────────────────────────────────────────
+
+    #[test]
+    fn wasi_projection_default_policy_denies_everything() {
+        let eff = EffectivePolicy::default();
+        let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
+    }
+
+    #[test]
+    fn wasi_projection_pinned_host_allows_only_pinned_ips() {
+        let eff = eff_with_allow(vec![("api.example.com", 443)]);
+        let pins = registry(vec![pin("api.example.com", &["93.184.216.34"])]);
+        let w = to_wasi_grants(&eff, &pins, NOW).unwrap();
+        assert!(wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.35"), 443));
+        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 80));
+    }
+
+    #[test]
+    fn wasi_projection_l4_net_target() {
+        let eff = eff_with_l4(vec![l4("udp", "8.8.8.0/24", 53, 53)]);
+        let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert!(wasi_allows(&w, &Proto::Udp, ip("8.8.8.8"), 53));
+        assert!(!wasi_allows(&w, &Proto::Udp, ip("8.8.9.8"), 53));
+        assert!(!wasi_allows(&w, &Proto::Tcp, ip("8.8.8.8"), 53));
+    }
+
+    #[test]
+    fn wasi_projection_mandatory_deny_unconditional() {
+        let mut eff = EffectivePolicy::default();
+        eff.egress.mode = Some("open".to_string());
+        let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
+        assert!(matches!(w, WasiEgress::Unrestricted));
+        assert!(!wasi_allows(&w, &Proto::Tcp, ip("169.254.169.254"), 443));
+        assert!(wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
+    }
+
+    #[test]
+    fn wasi_projection_refuses_same_inputs_canonical_refuses() {
+        // Shared refusal ladder: missing pin and rebinding pin
+        // refuse here exactly as in the canonical walk.
+        let eff = eff_with_allow(vec![("unpinned.example.com", 443)]);
+        assert!(matches!(
+            to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap_err(),
+            ProjectionError::MissingPin { .. }
+        ));
+        let eff = eff_with_allow(vec![("rebind.example.com", 443)]);
+        let pins = registry(vec![pin("rebind.example.com", &["169.254.169.254"])]);
+        assert!(matches!(
+            to_wasi_grants(&eff, &pins, NOW).unwrap_err(),
+            ProjectionError::MandatoryDenyOverlap { .. }
+        ));
     }
 }
