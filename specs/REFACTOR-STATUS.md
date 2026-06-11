@@ -23,15 +23,15 @@ details** below for the workstream-level state.
 - [x] **PLAN 170** — Host lifecycle convergence · ✅ mvm-side (density → mvmd)
 - [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
-- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; live FC https e2e gated on agent bringup
+- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; FC agent reachability fixed (#793); live FC egress e2e is the remaining step
 - [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
 - [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
-- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) next
+- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
-- [ ] **PLAN 180** — Strip spec refs from code comments · 🔴 not started
+- [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 
 ## Plan details
 
@@ -41,7 +41,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (box-validated on QEMU); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC kernel blocker fixed (#763); live FC https e2e gated only on agent bringup
+PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (box-validated on QEMU); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC kernel blocker fixed (#763); FC guest-agent reachability fixed + box-validated (#793) — live FC egress e2e is the remaining step
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -255,15 +255,19 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
 
-PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 in progress (gate cleared: Plan 152 WS-B + save/pause landed)  (ADR-076)
   [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
   [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
   [x] Phase 1 fold microvm_nix → qemu
   [x] Phase 1 prune dead CI lane + Justfile setup recipe
   [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
       4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
-  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
-      onto supervisor vz + shared console transport + drop apple-container
+  [ ] Phase 2 — AVF convergence onto supervisor vz + shared console transport
+      + drop apple-container. IN PROGRESS (gate cleared: Plan 152 WS-B + save/pause
+      landed). Branch feat/plan-177-phase2-avf: apple_container backend +
+      providers/ deleted, AnyBackend converted, macOS-26 default→vz, console/
+      transport reattached, codesign + port-proxy relocated; remaining = the
+      mvmctl dev dev-daemon + up -d launchd convergence, CoW port, hardware smoke.
 
 PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
