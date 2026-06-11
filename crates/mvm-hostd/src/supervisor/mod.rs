@@ -64,6 +64,8 @@ pub mod instance_sampler;
 pub mod keystore;
 pub mod l7_proxy;
 pub mod lifecycle_hooks;
+pub mod name_scanner;
+pub mod names_gazetteer;
 // Plan 113 / ADR-064 — Observer trait + Pipeline builder for the
 // gateway audit substrate. Observers consume `&FlowEvent` references
 // inside `signer_task` (fan-out before chain signing). Host-allowlisted
