@@ -75,6 +75,7 @@ pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
+pub mod redaction_resolve;
 /// Plan 129 / ADR-067 §4 + claim 13 — chain-signed `secret.substituted` /
 /// `secret.placeholder_dropped` audit events (metadata only, never the value).
 pub mod secret_audit;

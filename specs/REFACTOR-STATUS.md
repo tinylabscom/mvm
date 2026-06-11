@@ -97,7 +97,7 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
     [x] slice 1: EntropyScanner (Shannon entropy, audit-first, no echo)
     [x] slice 2: IBAN (mod-97) added to structured PII set
     [x] slice 3: name detector (field-label + PII co-occurrence + gazetteer)
-    [ ] slice 4: RedactionAction + redaction_profiles + resolve (mvm-core)
+    [x] slice 4: RedactionAction + redaction_profiles + resolve (mvm-core)
     [ ] slice 5: destination-aware wiring; fail-closed over-cap/compressed bodies
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
