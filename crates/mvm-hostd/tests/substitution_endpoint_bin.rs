@@ -80,6 +80,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
             },
         }],
         transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
         forward_timeout_secs: 30,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
