@@ -1953,6 +1953,28 @@ fn test_checkpoint_create_defaults_fs_quick() {
 }
 
 #[test]
+fn test_checkpoint_diff_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "vm",
+        "checkpoint",
+        "diff",
+        "ckpt-a",
+        "ckpt-b",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Vm(group::Args {
+            action: group::VmCmd::Checkpoint(checkpoint::CheckpointArgs {
+                command: checkpoint::CheckpointCmd::Diff { json: true, .. }
+            })
+        })
+    ));
+}
+
+#[test]
 fn test_snapshot_save_is_gone() {
     assert!(Cli::try_parse_from(["mvmctl", "snapshot", "save", "vm", "--path", "/x"]).is_err());
 }
