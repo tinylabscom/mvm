@@ -45,8 +45,8 @@ pub async fn serve(
 }
 
 /// Variant of [`serve`] for tests + cases where the caller already has
-/// a `UnixListener` (the supervisor-side spawn path in W1b.2 will call
-/// this with a pre-bound listener).
+/// a `UnixListener` (the supervisor-side spawn path calls this with a
+/// pre-bound listener).
 pub async fn serve_on_listener(
     listener: UnixListener,
     keystore: SharedKeystore,
@@ -93,10 +93,9 @@ fn dispatch(req: &SignRequest, keystore: &SharedKeystore) -> SignResponse {
 }
 
 /// Read a length-prefixed JSON frame.
-// Length-prefixed JSON framing lives in `crate::framing` (plan 126 B5;
-// was `mvm_core::framing`); these wrappers keep the host-signer error
-// context on the shared transport. The cap-before-alloc gate is enforced
-// there.
+// Length-prefixed JSON framing lives in `crate::framing`; these wrappers
+// keep the host-signer error context on the shared transport. The
+// cap-before-alloc gate is enforced there.
 async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,
@@ -113,9 +112,9 @@ async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T) ->
         .context("mvm-host-signer frame write failed")
 }
 
-/// Build an `Err` response with the supplied typed code. Kept around
-/// so future paths (W1b.2 unsigned-config, W8 enclave-error) have a
-/// uniform constructor. Currently unused in the happy-path dispatch.
+/// Build an `Err` response with the supplied typed code. Kept around so
+/// future paths (config-rejection, enclave-error) have a uniform
+/// constructor. Currently unused in the happy-path dispatch.
 #[allow(dead_code)]
 pub fn err_response(
     request_id: impl Into<String>,

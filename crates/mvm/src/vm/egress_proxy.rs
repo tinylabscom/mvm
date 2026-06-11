@@ -1,25 +1,25 @@
-//! Hypervisor-level L7 egress proxy supervision (plan 32 / Proposal D / ADR-004).
+//! Hypervisor-level L7 egress proxy supervision.
 //!
 //! Today (this branch): stub. The L3 tier of egress enforcement
 //! (`apply_network_policy` / `cleanup_network_policy` in `vm/network.rs`)
 //! is shipped via `NetworkPreset::Agent` and friends. The L7 tier
-//! (HTTPS-proxy + DNS-pinning) lands in the follow-up plan
-//! `specs/plans/34-egress-l7-proxy.md`. This module exists so callers
-//! that opt into `EgressMode::L3PlusL7` get a clear "not implemented
-//! yet" error from the runtime instead of a silent downgrade to L3.
+//! (HTTPS-proxy + DNS-pinning) lands in a follow-up. This module exists
+//! so callers that opt into `EgressMode::L3PlusL7` get a clear "not
+//! implemented yet" error from the runtime instead of a silent downgrade
+//! to L3.
 //!
-//! The trait surface here is the integration point: when plan 34
-//! implements the mitmdump supervisor, it implements `EgressProxy`
-//! and `tap_create` calls `start_for_vm` after the L3 rules are
-//! installed. See `EgressProxy::start_for_vm` for the contract.
+//! The trait surface here is the integration point: when the mitmdump
+//! supervisor lands, it implements `EgressProxy` and `tap_create` calls
+//! `start_for_vm` after the L3 rules are installed. See
+//! `EgressProxy::start_for_vm` for the contract.
 
 use std::fmt;
 
 use mvm_core::network_policy::{EgressMode, NetworkPolicy};
 
 /// Per-VM proxy handle. Returned by [`EgressProxy::start_for_vm`]
-/// and consumed by [`EgressProxy::stop_for_vm`]. Plan 34 fills in
-/// the actual fields (PID, listening port, allowlist hash).
+/// and consumed by [`EgressProxy::stop_for_vm`]. The real implementation
+/// fills in the actual fields (PID, listening port, allowlist hash).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyHandle {
     pub vm_name: String,
@@ -27,12 +27,12 @@ pub struct ProxyHandle {
 }
 
 /// Errors from the L7 supervisor. Stable across the v1 stub and the
-/// plan-34 real implementation so callers don't have to re-match.
+/// real implementation so callers don't have to re-match.
 #[derive(Debug)]
 pub enum EgressProxyError {
     /// `EgressMode::L3PlusL7` was requested but the runtime backing
-    /// the proxy isn't implemented yet (plan 34). Callers should
-    /// fall back to `EgressMode::L3Only` or surface the error.
+    /// the proxy isn't implemented yet. Callers should fall back to
+    /// `EgressMode::L3Only` or surface the error.
     NotImplemented,
     /// Unrelated runtime failure (process spawn, port allocation,
     /// CA cert load).
@@ -61,7 +61,7 @@ impl From<anyhow::Error> for EgressProxyError {
 }
 
 /// L7 egress supervisor. The trait is the integration point with
-/// `vm/network.rs`; plan 34 wires it up.
+/// `vm/network.rs`; the follow-up wires it up.
 ///
 /// Contract:
 /// - `start_for_vm`: spawn / configure the proxy for a single VM.
@@ -81,7 +81,7 @@ pub trait EgressProxy: Send + Sync {
 }
 
 /// Stub supervisor used when no real backing is configured. Returns
-/// `NotImplemented` for every operation. Plan 34 will replace this
+/// `NotImplemented` for every operation. The follow-up will replace this
 /// with a `MitmdumpSupervisor` that wraps `mitmdump` from nixpkgs.
 pub struct StubEgressProxy;
 

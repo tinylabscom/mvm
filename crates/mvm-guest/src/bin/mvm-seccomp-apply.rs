@@ -25,8 +25,6 @@
 //! on `target_os = "linux"`; on other targets it errors with a clear
 //! message so `cargo check --workspace` still passes for CLI dev on a
 //! Mac.
-//!
-//! Architecture decision: ADR-002 §W2.4. Plan: `specs/plans/26-w2-defense-in-depth.md`.
 
 #[cfg(not(target_os = "linux"))]
 fn main() {

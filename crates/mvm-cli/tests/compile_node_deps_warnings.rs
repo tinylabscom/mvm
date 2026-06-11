@@ -2,7 +2,7 @@
 //! installed: no lockfile at all, or a pnpm/yarn lockfile the npm-only
 //! build-time bake can't consume. Without these the gap is silent — the
 //! bundle copies the source with no `node_modules` and the miss only shows up
-//! as a runtime import failure. Plan 145 WS-B/WS-C.
+//! as a runtime import failure.
 
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;

@@ -1,4 +1,4 @@
-//! CLI surface tests for `mvmctl artifact` model commands (plan 134 Phase E).
+//! CLI surface tests for `mvmctl artifact` model commands.
 //!
 //! Asserts `--help` lists the model subcommands and that each parses
 //! correctly without requiring an actual artifact directory on disk.

@@ -12,19 +12,18 @@
 //! supervisor consumes the resolved [`NetworkingPreference`].
 //!
 //! claim-10: the provider only chooses between the two existing gvproxy/passt →
-//! gateway-bridge paths; there is no no-gateway / TSI bypass to select (Plan
-//! 102 W6.A removed TSI). Every guest byte still transits the gateway-bridge
-//! chokepoint, so routing the selection through the trait does not move the
-//! enforcement point.
+//! gateway-bridge paths; there is no no-gateway / TSI bypass to select (TSI was
+//! removed). Every guest byte still transits the gateway-bridge chokepoint, so
+//! routing the selection through the trait does not move the enforcement point.
 //!
-//! Scope (L3 slice A): this is the additive provider only. The two live
+//! Scope: this is the additive provider only. The two live
 //! selection sites still inline their own choice and **diverge** — the workload
 //! path (`mvm_backend::libkrun::build_supervisor_config`) hardcodes
 //! `cfg!(target_os = "macos")` (per-OS default, ignores `MVM_NETWORKING`),
 //! while the builder path ([`apply_networking_mode`](crate::libkrun_builder))
 //! honors `MVM_NETWORKING` via [`resolve_networking_mode`]. Re-pointing both
-//! through this provider (slice B) must first reconcile that divergence, so it
-//! is deferred rather than silently changing the workload selection.
+//! through this provider must first reconcile that divergence, so it is deferred
+//! rather than silently changing the workload selection.
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;

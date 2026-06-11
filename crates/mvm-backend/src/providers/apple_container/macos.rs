@@ -83,8 +83,8 @@ fn start_vsock_proxy_listener(id: &str) -> Result<(), String> {
     let listener = UnixListener::bind(&socket_path)
         .map_err(|e| format!("bind vsock proxy socket {}: {e}", socket_path.display()))?;
 
-    // ADR-002 W1.2: lock the socket to mode 0700 so a same-host other
-    // user can't speak the proxy protocol. Without this the socket
+    // Lock the socket to mode 0700 so a same-host other user can't
+    // speak the proxy protocol. Without this the socket
     // inherits umask (typically 0755), and any process running as
     // anyone on the same Mac could open the dev VM's guest agent
     // and call `Exec` (in the dev image) or `ConsoleOpen` (in any
@@ -106,7 +106,7 @@ fn start_vsock_proxy_listener(id: &str) -> Result<(), String> {
 }
 
 /// Decide whether a port that arrived over the proxy socket is one we
-/// should forward to the in-process VM's vsock. ADR-002 W1.3.
+/// should forward to the in-process VM's vsock.
 ///
 /// The proxy speaks a one-byte-prefix protocol: client sends a u32 LE
 /// port and then expects bidirectional bytes to that vsock port. Without
@@ -333,8 +333,8 @@ fn read_persisted_vm_ids() -> Vec<String> {
 /// - `com.apple.security.virtualization` — gates `mvm-providers`'s
 ///   Virtualization framework usage.
 /// - `com.apple.security.hypervisor` — gates libkrun's direct
-///   `Hypervisor.framework` calls (plan 72 W1 wires this into the
-///   builder-VM launcher).
+///   `Hypervisor.framework` calls (wired into the builder-VM
+///   launcher).
 ///
 /// If either is missing, signs ad-hoc with both keys and re-runs the
 /// binary via the existing self-restart path below.
@@ -354,9 +354,10 @@ pub fn ensure_signed() {
     };
     let exe_str = exe.to_str().unwrap_or("");
 
-    // Both entitlements must be present. Binaries signed before W2
-    // landed have only `virtualization`; the missing `hypervisor`
-    // key forces a one-time re-sign on first run after upgrade.
+    // Both entitlements must be present. Binaries signed before the
+    // hypervisor entitlement was added have only `virtualization`;
+    // the missing `hypervisor` key forces a one-time re-sign on first
+    // run after upgrade.
     if let Ok(output) = std::process::Command::new("codesign")
         .args(["-d", "--entitlements", "-", "--xml", exe_str])
         .output()
@@ -384,9 +385,9 @@ pub fn ensure_signed() {
 
 /// Ad-hoc entitlements plist applied by [`sign_binary`]. Lifted to a
 /// const so the entitlement set is testable from the module's unit
-/// tests (`test_entitlements_cover_both_frameworks`) — the merged W2
-/// change inlined the XML, which made the "did we keep both keys"
-/// invariant invisible to CI.
+/// tests (`test_entitlements_cover_both_frameworks`) — inlining the
+/// XML would make the "did we keep both keys" invariant invisible to
+/// CI.
 const ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
     <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
     \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -637,7 +638,7 @@ pub fn start_vm(
         // the cmdline, constructs /dev/mapper/root, and switch_root's
         // to /sysroot/init). The kernel-level `root=` setting is
         // irrelevant in that case — the initramfs picks the real root
-        // explicitly. ADR-002 §W3.
+        // explicitly.
         let mut cmdline = if verity.is_some() {
             "console=hvc0 init=/init".to_string()
         } else {
@@ -867,8 +868,8 @@ pub fn start_vm(
             config.setDirectorySharingDevices(&NSArray::from_retained_slice(&supers));
         }
 
-        // Serial console — write kernel and init output to log file
-        // ADR-002 W1.4: console log is mode 0600. The kernel + init
+        // Serial console — write kernel and init output to log file.
+        // The console log is mode 0600. The kernel + init
         // write every byte of guest stdout/stderr there, including
         // anything a guest service prints — secrets, environment,
         // command output. Default umask leaves it 0644 (world-readable
@@ -1182,7 +1183,7 @@ mod tests {
         format!("{}-{}", std::process::id(), nanos)
     }
 
-    /// Plan 57 W2: both `com.apple.security.virtualization` (VZ) and
+    /// Both `com.apple.security.virtualization` (VZ) and
     /// `com.apple.security.hypervisor` (direct Hypervisor.framework /
     /// libkrun) must be stamped by the same ad-hoc sign so a single
     /// `mvmctl` binary can drive both backends without re-signing on
@@ -1253,7 +1254,7 @@ mod tests {
         });
     }
 
-    /// ADR-002 W1.2: the proxy socket is born with mode `0700`.
+    /// The proxy socket is born with mode `0700`.
     ///
     /// We verify this by binding via the same code path the daemon
     /// uses (`start_vsock_proxy_listener`), then asking the file
@@ -1282,8 +1283,8 @@ mod tests {
         });
     }
 
-    /// ADR-002 W1.3: the proxy port allowlist accepts the three
-    /// ranges mvmctl actually uses and rejects everything else.
+    /// The proxy port allowlist accepts the three ranges mvmctl
+    /// actually uses and rejects everything else.
     /// Pure logic — no daemon needed; just the predicate.
     ///
     /// Ranges:
@@ -1302,7 +1303,7 @@ mod tests {
         ));
         // Specifically, 52 — the historical privileged-port choice —
         // must be rejected now: it's outside the agent port and outside
-        // both forwarder ranges. ADR-002 §W4.5.
+        // both forwarder ranges.
         assert!(!proxy_port_is_allowed(52));
 
         // Allowed: port-forward range edges + interior.
@@ -1342,7 +1343,7 @@ mod tests {
         assert!(!proxy_port_is_allowed(u32::MAX));
     }
 
-    // ──── Verity input validation (ADR-002 §W3.2) ────────────────────
+    // ──── Verity input validation ────────────────────
     //
     // The `start_vm` body validates the verity config's roothash shape
     // before constructing any objc objects. Live boot through VZ is

@@ -54,7 +54,7 @@ pub use mvm_core as core;
 
 /// Security posture evaluation, command gating, and threat classification.
 ///
-/// Folded into `mvm_core::crypto` (plan 121 B3); the `security` facade
+/// Folded into `mvm_core::crypto`; the `security` facade
 /// path is preserved as an alias. See [`mvm_core::crypto`].
 pub use mvm_core::crypto as security;
 
@@ -65,8 +65,7 @@ pub use mvm as runtime;
 
 /// Concrete `VmBackend` implementations + `AnyBackend` dispatch.
 ///
-/// See [`mvm_backend`] for full documentation. Plan-60 W7+W8 owned
-/// the move out of `mvm::vm::*` into a dedicated crate.
+/// See [`mvm_backend`] for full documentation.
 pub use mvm_backend as backend;
 
 /// Nix builder pipeline for creating guest images.

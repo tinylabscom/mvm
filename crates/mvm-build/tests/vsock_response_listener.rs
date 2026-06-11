@@ -1,5 +1,5 @@
-//! Plan 89 W2 part 4 — integration tests for the host-side vsock
-//! response listener in `mvm_build::libkrun_builder`.
+//! Integration tests for the host-side vsock response listener in
+//! `mvm_build::libkrun_builder`.
 //!
 //! These live in `tests/` (not inline in `libkrun_builder.rs::tests`)
 //! because they need `UnixListener::bind` to simulate libkrun's
@@ -83,10 +83,10 @@ fn spawn_vsock_response_listener_decodes_guest_response() {
 
 #[test]
 fn spawn_vsock_response_listener_yields_empty_eof_when_no_send() {
-    // Guest opens the socket but writes nothing — simulates a
-    // pre-W2-part-3 cached dev image (or a guest that hit a fault
-    // before reaching the W2-part-3 send code). Listener helper
-    // must classify as EmptyEof so the caller falls back to the
+    // Guest opens the socket but writes nothing — simulates a cached
+    // dev image from before the guest learned to send a response (or a
+    // guest that hit a fault before reaching the send code). Listener
+    // helper must classify as EmptyEof so the caller falls back to the
     // file path silently.
     let scratch = tempfile::tempdir().expect("tempdir");
     let socket_path = socket_path_in(scratch.path());

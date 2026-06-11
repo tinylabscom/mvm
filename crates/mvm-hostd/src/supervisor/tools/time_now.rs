@@ -1,7 +1,7 @@
 //! `mvm.time_now` — host wall-clock time as a host-mediated tool.
 //!
-//! The simplest possible Phase 7 tool: zero network, zero filesystem,
-//! pure function over the system clock. Useful as:
+//! The simplest possible host-mediated tool: zero network, zero
+//! filesystem, pure function over the system clock. Useful as:
 //!
 //! - The first walking-skeleton impl of [`HostMediatedTool`] —
 //!   exercises the trait + [`crate::supervisor::tools::ToolRegistry`] dispatch
@@ -143,9 +143,9 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_rejects_unknown_field() {
-        // `#[serde(deny_unknown_fields)]` per ADR-002 §W4.1 —
-        // unexpected fields fail closed so a stale agent that adds a
-        // `timezone` param doesn't silently drop the timezone.
+        // `#[serde(deny_unknown_fields)]` makes unexpected fields
+        // fail closed, so a stale agent that adds a `timezone` param
+        // doesn't silently drop the timezone.
         let t = TimeNowTool;
         let err = t
             .invoke(serde_json::json!({ "format": "rfc3339", "timezone": "UTC" }))

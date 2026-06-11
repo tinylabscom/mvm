@@ -76,10 +76,10 @@ fn mvmctl(args: &[&str], scratch: &std::path::Path, label: &str, budget: Duratio
         .process_group(0);
     // The E2E pins the builder backend to libkrun on macOS so the test
     // doesn't depend on the Swift mvm-vz-supervisor having been built.
-    // Plan 98's auto-select would otherwise pick Vz on macOS 26+ Apple
-    // Silicon and bail with "mvm-vz-supervisor binary not found." Both
-    // pins are per-child so they don't leak into other tests in the same
-    // cargo invocation.
+    // Auto-select would otherwise pick Vz on macOS 26+ Apple Silicon and
+    // bail with "mvm-vz-supervisor binary not found." Both pins are
+    // per-child so they don't leak into other tests in the same cargo
+    // invocation.
     #[cfg(target_os = "macos")]
     {
         cmd.env("MVM_BUILDER_BACKEND", "libkrun");

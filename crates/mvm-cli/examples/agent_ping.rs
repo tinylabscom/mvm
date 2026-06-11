@@ -1,5 +1,5 @@
 //! Throwaway: prove a running workload microVM's guest agent answers the
-//! ADR-053 protocol hello (the same handshake `wait_for_guest_agent` does),
+//! protocol hello (the same handshake `wait_for_guest_agent` does),
 //! since no CLI verb yet targets an arbitrary workload VM by name.
 //!
 //!   cargo run -p mvm-cli --example agent_ping -- <vm-name>

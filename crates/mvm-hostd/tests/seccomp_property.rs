@@ -1,4 +1,4 @@
-//! ADR-064 — seccomp property test (`mvm-jailer-lite`).
+//! Seccomp property test (`mvm-jailer-lite`).
 //!
 //! Parent test forks the test binary with `SECCOMP_PROBE=1`; child
 //! applies `ConfinementSpec::firecracker_bridge` confinement and

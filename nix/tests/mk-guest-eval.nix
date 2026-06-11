@@ -74,17 +74,16 @@ in
   metadata_propagates = (meta shellGuest).name == "shell-test"
     && (meta shellGuest).hypervisor == "firecracker";
 
-  # ── busybox-as-PID-1 invariants (W5.1) ────────────────────────
+  # ── busybox-as-PID-1 invariants ───────────────────────────────
   #
-  # ADR-013 §"Boot-time budget" pins the init system. Asserting it
-  # here so a future PR that swaps back to NixOS+systemd (e.g.,
-  # because it's "easier") fails this gate before merge.
+  # The boot-time budget pins the init system. Asserting it here so a
+  # future change that swaps back to NixOS+systemd (e.g., because it's
+  # "easier") fails this gate before merge.
   init_system_is_busybox = (meta shellGuest).initSystem == "busybox";
 
-  # ADR-013 floor: every backend ≤ 300 ms cold p50. The metadata
-  # surfaces the budget on every derivation; CI's xtask perf
-  # enforces. Guarding it here so a future PR can't silently
-  # regress the floor.
+  # Floor: every backend ≤ 300 ms cold p50. The metadata surfaces the
+  # budget on every derivation; CI's xtask perf enforces. Guarding it
+  # here so a future change can't silently regress the floor.
   boot_budget_firecracker_is_300ms =
     (meta shellGuest).expectedBootMs == 300;
 
@@ -98,7 +97,7 @@ in
     in
     (meta msbGuest).expectedBootMs == 300;
 
-  # ── Privilege model invariants (W6.1 rootless) ────────────────
+  # ── Privilege model invariants (rootless) ─────────────────────
   #
   # Defaults: dev image runs entrypoint as root (debug-friendly
   # shell); prod image runs entrypoint as uid 1000 (rootless
@@ -151,24 +150,23 @@ in
     (meta g).uids.agent == 5000
     && (meta g).uids.entrypoint == 1000;  # default unaffected
 
-  # ── Agent supervision invariants (W6.1.1) ────────────────────
+  # ── Agent supervision invariants ─────────────────────────────
   #
   # Every mkGuest output advertises whether the bundled
-  # mvm-guest-agent is the stub (W6.1.1) or the real binary
-  # (W6.1.2+). Since W6.1.2 swapped in the cross-compiled Rust
-  # binary, every mkGuest output reports "real". A future
-  # production lint can fail any deployment whose
+  # mvm-guest-agent is the stub or the real binary. The agent is now
+  # the cross-compiled Rust binary, so every mkGuest output reports
+  # "real". A future production lint can fail any deployment whose
   # `passthru.mvm.agentBinary` is not "real".
 
   agent_binary_is_real = (meta shellGuest).agentBinary == "real"
     && (meta commandGuest).agentBinary == "real"
     && (meta servicesGuest).agentBinary == "real";
 
-  # ── Plan 74 W1.4b (ADR-051) — runtime overlay awareness ───────
+  # ── Runtime overlay awareness ─────────────────────────────────
   #
   # Every image built by mkGuest must advertise that its rootfs
   # carries the `/mvm/runtime` bind-mount target and that the
-  # init script prefers the overlay-provided agent. A future PR
+  # init script prefers the overlay-provided agent. A future change
   # that drops the overlay-aware code path (e.g. reverting the
   # /init agent-resolution block) flips this metadata to `false`
   # before the boot regression surfaces, giving CI a tight signal
@@ -178,7 +176,7 @@ in
   overlay_aware_metadata_set_on_command = (meta commandGuest).overlayAware == true;
   overlay_aware_metadata_set_on_services = (meta servicesGuest).overlayAware == true;
 
-  # ── Plan 165 WS-B B2: dev console wiring ──────────────────────
+  # ── Dev console wiring ────────────────────────────────────────
   #
   # `withDevShell` is the console-wiring fact: it gates the agent's
   # PTY-over-vsock relay (and `do_exec`) via the `dev-shell` Cargo

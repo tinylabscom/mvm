@@ -1,4 +1,4 @@
-//! mvm-guest-helpers — in-guest helper binaries (plan 121 D3).
+//! mvm-guest-helpers — in-guest helper binaries.
 //!
 //! Two small helpers baked into the microVM rootfs by `mkGuest` and run
 //! inside the guest (never on the host). Each ships as a `[[bin]]`; the

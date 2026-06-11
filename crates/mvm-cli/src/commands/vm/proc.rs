@@ -1,9 +1,9 @@
 //! `mvmctl proc <verb> <vm> <args>` — process control RPC against
-//! a running microVM. W1 / A2 of the filesystem-volumes plan.
+//! a running microVM.
 //!
-//! **Dev-only.** Production guest agents strip the handler module
-//! per ADR-002 §W4.3 + ADR-007 §W5; calls against a prod agent
-//! return `ProcErrorKind::UnsupportedInProduction`. The host CLI
+//! **Dev-only.** Production guest agents strip the handler module,
+//! so calls against a prod agent return
+//! `ProcErrorKind::UnsupportedInProduction`. The host CLI
 //! surface is always available — only the guest-side handler is
 //! gated.
 
@@ -124,7 +124,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 /// Send a non-streaming proc-control RPC to `name`'s guest agent over the
-/// backend-aware transport (Plan 169). Like `fs::fs_request`, the
+/// backend-aware transport. Like `fs::fs_request`, the
 /// `--hypervisor mock` fast path (a mock agent at the VM dir's
 /// `runtime/v.sock`) stays ahead of the `vsock_transport::for_vm` probe,
 /// which resolves the right socket per VMM (Firecracker's `v.sock`, or the
@@ -142,7 +142,7 @@ fn proc_request(name: &str, req: GuestRequest) -> Result<ProcResult> {
 }
 
 /// Stream a `ProcWait` for `name`'s guest agent over the backend-aware
-/// transport (Plan 169), same mock-vs-`for_vm` resolution as [`proc_request`].
+/// transport, same mock-vs-`for_vm` resolution as [`proc_request`].
 fn proc_wait<F: FnMut(&ProcWaitEvent)>(
     name: &str,
     token: &str,
@@ -197,7 +197,7 @@ fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) ->
         stdin: vec![],
         timeout_secs: None,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
@@ -211,7 +211,7 @@ fn cmd_start(name: &str, argv: &[String], envs: &[String], cwd: Option<&str>) ->
 }
 
 fn cmd_ls(name: &str, json: bool) -> Result<()> {
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &GuestRequest::ProcList);
     let result = unwrap_proc(proc_request(name, GuestRequest::ProcList)?)?;
     match result {
@@ -248,7 +248,7 @@ fn cmd_signal(name: &str, token: &str, signum: i32) -> Result<()> {
         pid_token: token.to_string(),
         signum,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
@@ -264,7 +264,7 @@ fn cmd_kill(name: &str, token: &str) -> Result<()> {
     let req = GuestRequest::ProcKill {
         pid_token: token.to_string(),
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
@@ -290,7 +290,7 @@ fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
         pid_token: token.to_string(),
         bytes,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_proc(proc_request(name, req)?)?;
     match result {
@@ -304,11 +304,10 @@ fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
 }
 
 fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit. The
-    // `proc_wait` helper constructs the wire-format
-    // ProcWait internally; we synthesize an equivalent request
-    // here purely so the audit kind_name lines up with what the
-    // guest receives.
+    // Inbound vsock RPC audit. The `proc_wait` helper constructs
+    // the wire-format ProcWait internally; we synthesize an
+    // equivalent request here purely so the audit kind_name lines
+    // up with what the guest receives.
     super::shared::emit_vsock_rpc_audit(
         name,
         &GuestRequest::ProcWait {
@@ -328,11 +327,10 @@ fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {
             let _ = stderr.flush();
         }
         ProcWaitEvent::Backpressure { reason, detail } => {
-            // ADR-053 §5 / plan 74 W4: a streaming resource is
-            // throttled. Surface the typed reason + bounded detail
-            // to stderr with a clearly-labeled prefix so the wait
-            // continues without polluting the captured stdout the
-            // user is consuming. Per ADR-053, `detail` is
+            // A streaming resource is throttled. Surface the typed
+            // reason + bounded detail to stderr with a clearly-labeled
+            // prefix so the wait continues without polluting the
+            // captured stdout the user is consuming. `detail` is
             // metadata-only (byte counts, threshold, cap) —
             // payload bytes never appear here.
             let _ = writeln!(stderr, "[mvmctl-backpressure] {reason:?}: {detail}");

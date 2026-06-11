@@ -1,4 +1,4 @@
-//! Plan 129 — transparent egress terminator.
+//! Transparent egress terminator.
 //!
 //! The host nft `nat` chain REDIRECTs a guest's outbound TCP to the terminator
 //! listener, which recovers the original destination, substitutes any opaque

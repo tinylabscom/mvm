@@ -1,6 +1,6 @@
 //! Compile-time Rust mirror of `nix/lib/mvm-host-binaries.nix`.
 //! Parity with the Nix attrset is asserted by the
-//! `check-mvm-host-binaries-sync` xtask (Task 3).
+//! `check-mvm-host-binaries-sync` xtask.
 
 #[derive(Debug, Clone, Copy)]
 pub struct HostBinary {
@@ -14,7 +14,7 @@ pub struct HostBinary {
     /// Unix mode (e.g. 0o755) applied via the flake's extraFiles.
     /// Mirror note: `nix/lib/mvm-host-binaries.nix` stores this as
     /// a decimal string (`"0755"`); the `check-mvm-host-binaries-sync`
-    /// xtask (Task 3) parses + compares numerically.
+    /// xtask parses + compares numerically.
     pub mode: u32,
 }
 
@@ -37,5 +37,5 @@ pub const HOST_BINARIES: &[HostBinary] = &[
 /// and are absent from `nix/lib/mvm-host-binaries.nix` (the
 /// `check-mvm-host-binaries-sync` xtask only mirrors `HOST_BINARIES`).
 /// The host extracts these by name and lays them down directly:
-/// `stage0-init` becomes the Stage 0 nix-seed's `/init` (plan 160).
+/// `stage0-init` becomes the Stage 0 nix-seed's `/init`.
 pub const SEED_BINARIES: &[&str] = &["stage0-init"];

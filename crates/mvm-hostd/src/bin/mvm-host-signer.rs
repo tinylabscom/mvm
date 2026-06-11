@@ -1,20 +1,18 @@
-//! `mvm-host-signer` binary — the host-signer subprocess entry point
-//! (Plan 104 §H-L1.1, ADR-061 §"Decision").
+//! `mvm-host-signer` binary — the host-signer subprocess entry point.
 //!
-//! Spawn contract (W1b.1; W1b.2 + W8 close the deferred items):
+//! Spawn contract (some steps still deferred, noted inline):
 //!
-//! 1. Supervisor cosign-verifies this binary at spawn (§H-L3.1 —
-//!    supervisor side; W1b.2).
+//! 1. Supervisor cosign-verifies this binary at spawn (deferred).
 //! 2. Supervisor spawns under workload-specific cgroup + PID/mount
-//!    namespace + seccomp + setpriv (§H-L1.4, §H-L3.3, §H-L3.9 — W1b.2).
+//!    namespace + seccomp + setpriv (deferred).
 //! 3. Supervisor writes a JSON `SubprocessConfig` to stdin, then
-//!    closes stdin. W1b.1 parses unsigned; W1b.2 wraps in a signed
-//!    envelope per §H-L3.6.
-//! 4. This process loads or generates a software in-memory key
-//!    (W1b.1); W8 replaces with HW enclave keygen / handle.
+//!    closes stdin. Parsed unsigned today; a signed envelope wraps it
+//!    later.
+//! 4. This process loads or generates a software in-memory key; a
+//!    hardware enclave keygen / handle replaces it later.
 //! 5. Process binds a UDS at `cfg.uds_path` and enters the sign loop.
 //! 6. Process exits when the supervisor dies (parent-death signal —
-//!    wired in W1b.2).
+//!    deferred).
 
 use std::io::Read;
 use std::sync::Arc;

@@ -1,16 +1,12 @@
 //! mvm-supervisor — trusted host-side supervisor.
 //!
-//! Plan 37 §7B (CORNERSTONE). A single host-side process that owns:
-//! egress proxy (§15), tool gate (§2.2/§15), keystore releaser (§12.2),
-//! audit signer (§22), artifact collector (§21), and the plan
+//! A single host-side process that owns: egress proxy, tool gate,
+//! keystore releaser, audit signer, artifact collector, and the plan
 //! execution state machine. **Tenant code never runs in Zone B.**
 //!
-//! Wave 1.3 of plan 37 lands the *skeleton*: each component is a
-//! trait + a `Noop` impl returning a typed error / pass-through, and
-//! the plan state machine carries every transition the launch path
-//! will eventually walk. The actual lift of `mvm-hostd`'s daemon
-//! binary into a `mvm-supervisor` binary, plus systemd unit + launchd
-//! plist, lands in Wave 1.4 (Supervisor::launch happy path).
+//! Each component is a trait + a `Noop` impl returning a typed error /
+//! pass-through, and the plan state machine carries every transition
+//! the launch path walks.
 //!
 //! Why scaffold-first: each component lifts a sizeable chunk of
 //! today's `mvm/src/security/*`. Landing the trait surface
@@ -44,16 +40,16 @@ pub mod destination;
 pub mod egress;
 pub mod event_bus;
 pub mod firewall;
-// Plan 102 W6.A commit 4 — per-VM gateway flow-event subscriber sink.
-// Lives next to `event_bus` and `firewall` as a peer fan-out
-// substrate; the bridge in commit 5 emits each FlowEvent through
-// here in parallel with the signer mpsc.
+// Per-VM gateway flow-event subscriber sink. Lives next to
+// `event_bus` and `firewall` as a peer fan-out substrate; the gateway
+// bridge emits each FlowEvent through here in parallel with the signer
+// mpsc.
 pub mod gateway_audit;
-// Plan 102 W6.A commit 5 — per-VM gateway audit bridge. Splices
-// guest virtio-net <-> host gateway (passt / gvproxy / Vz ingest),
-// emits FlowOpened/FlowClosed through a per-VM signer_task into the
-// claim-8 chain, broadcasts NDJSON to gateway_audit subscribers,
-// and exposes a `FlowPolicy` hook for Plan 74 / SNI / L7 inspectors.
+// Per-VM gateway audit bridge. Splices guest virtio-net <-> host
+// gateway (passt / gvproxy / Vz ingest), emits FlowOpened/FlowClosed
+// through a per-VM signer_task into the claim-8 chain, broadcasts
+// NDJSON to gateway_audit subscribers, and exposes a `FlowPolicy` hook
+// for SNI / L7 inspectors.
 pub mod gateway_bridge;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
@@ -63,37 +59,34 @@ pub mod instance_sampler;
 pub mod keystore;
 pub mod l7_proxy;
 pub mod lifecycle_hooks;
-// Plan 113 / ADR-064 — Observer trait + Pipeline builder for the
-// gateway audit substrate. Observers consume `&FlowEvent` references
-// inside `signer_task` (fan-out before chain signing). Host-allowlisted
-// via `~/.mvm/observers/allowlist.toml` (mode 0600).
+// Observer trait + Pipeline builder for the gateway audit substrate.
+// Observers consume `&FlowEvent` references inside `signer_task`
+// (fan-out before chain signing). Host-allowlisted via
+// `~/.mvm/observers/allowlist.toml` (mode 0600).
 pub mod network;
 pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
-/// Plan 129 / ADR-067 §4 + claim 13 — chain-signed `secret.substituted` /
-/// `secret.placeholder_dropped` audit events (metadata only, never the value).
+/// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
+/// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;
 pub mod secrets_scanner;
-/// Plan 129 — the per-VM substitution endpoint subprocess library half: the
+/// The per-VM substitution endpoint subprocess library half: the
 /// stdin config contract + store-opening/service assembly. The
 /// `mvm-substitution-endpoint` bin is the process wrapper.
 pub mod substitution_endpoint;
-/// Plan 129 / ADR-067 §1 — host substitution endpoint request preparation
-/// (placeholder → real credential, binding-checked). The forward leg + the
-/// guest-facing listener are separate transport steps.
+/// Host substitution endpoint request preparation (placeholder → real
+/// credential, binding-checked). The forward leg + the guest-facing
+/// listener are separate transport steps.
 pub mod substitution_proxy;
-/// Plan 129 stage 1b — transparent egress terminator primitives: original
-/// destination recovery after nft REDIRECT, plus the future forward/substitute
+/// Transparent egress terminator primitives: original destination
+/// recovery after nft REDIRECT, plus the future forward/substitute
 /// legs (orig_dst is the only piece here now).
 pub mod terminator;
-// Plan 104 W1b.2a — supervisor-side UDS proxy clients for the three
-// broker subprocesses (mvm-broker, mvm-host-signer,
-// mvm-audit-signer; ADR-062 dropped mvm-secrets-dispatcher).
-// Stateless client libraries that open a fresh UDS connection per
-// call; pooling + per-spawn response-signature verification +
-// retry-on-restart land in W1b.2b.
+// Supervisor-side UDS proxy clients for the three broker subprocesses
+// (mvm-broker, mvm-host-signer, mvm-audit-signer). Stateless client
+// libraries that open a fresh UDS connection per call.
 pub mod aggregate;
 pub mod services;
 pub mod ssrf_guard;

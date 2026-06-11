@@ -34,23 +34,23 @@ fn main() {
     println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
 
     // HOST_BINARIES (installed into the builder/dev VM rootfs) + SEED_BINARIES
-    // (host-side only, e.g. the Stage 0 nix-seed's /init — plan 160). Both are
+    // (host-side only, e.g. the Stage 0 nix-seed's /init). Both are
     // `mvm-build` `[[bin]]`s; both get cross-compiled + embedded the same way.
     let mut manifest = read_rust_manifest(&workspace_root);
     manifest.extend(read_seed_binaries(&workspace_root));
     let mut entries = Vec::new();
 
     // The host-vm bins are statically musl-linked and embedded for the host
-    // arch (`pin.target`, picked from CARGO_CFG_TARGET_ARCH — Plan 164). They
+    // arch (`pin.target`, picked from CARGO_CFG_TARGET_ARCH). They
     // are always cross-compiled with cargo-zigbuild, even when host arch ==
     // target arch: `ring` (pulled transitively) compiles C, so the musl target
     // needs a musl *C* cross-compiler. zig supplies it; a plain
     // `cargo build --target <arch>-musl` would instead demand a system
     // `<arch>-linux-musl-gcc`, which neither CI nor the documented contributor
     // setup carries (both standardize on zig + cargo-zigbuild — see CLAUDE.md
-    // "Host dependencies"). zigbuild is the single portable path. (Plan 164
-    // briefly added a same-arch plain-`cargo build` fast-path on the false
-    // premise that the bins are C-free; it broke CI, which has no musl-gcc.)
+    // "Host dependencies"). zigbuild is the single portable path. (A same-arch
+    // plain-`cargo build` fast-path was once tried on the false premise that
+    // the bins are C-free; it broke CI, which has no musl-gcc.)
 
     // Fast path for local test/dev iteration: skip the nested
     // `cargo zigbuild --release` cross-compile of the host-vm binaries and
@@ -62,7 +62,7 @@ fn main() {
     // `e2e-core-demo` recipe never sets this var, so a stub build can't
     // masquerade as a passing E2E. NEVER set this in CI release builds:
     // the shipped mvmctl must embed the real reproducible binaries
-    // (Plan 115 / ADR-065 claim 11).
+    // (claim 11).
     let skip_embed = std::env::var("MVM_SKIP_EMBED_BINARIES").as_deref() == Ok("1");
     println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
     if skip_embed {
@@ -120,8 +120,8 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
     let p = &v["workspace"]["metadata"]["mvm"]["toolchain"];
     // The embed target follows the arch mvmctl is built for: the local
     // builder/Stage 0 VM is always same-arch as the host, so an x86_64
-    // mvmctl must embed x86_64 bins and an aarch64 mvmctl aarch64 bins
-    // (Plan 164). `CARGO_CFG_TARGET_ARCH` is set by cargo for build scripts.
+    // mvmctl must embed x86_64 bins and an aarch64 mvmctl aarch64 bins.
+    // `CARGO_CFG_TARGET_ARCH` is set by cargo for build scripts.
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH is set by cargo for build scripts");
     Pin {
@@ -153,7 +153,7 @@ fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
 /// `crates/mvm-cli/src/host_binaries/manifest.rs`.
 ///
 /// Returns binary names in declaration order. Each name is a `[[bin]]`
-/// of `mvm-build` (plan 121 D4) — the build script cross-compiles each
+/// of `mvm-build` — the build script cross-compiles each
 /// with `cargo build -p mvm-build --bin <name>`.
 fn read_rust_manifest(root: &Path) -> Vec<String> {
     let src =
@@ -169,7 +169,7 @@ fn read_rust_manifest(root: &Path) -> Vec<String> {
 
 /// Parse the bare-string array `pub const SEED_BINARIES: &[&str] = &[ ... ]`
 /// from `manifest.rs`. These are host-side-only embedded binaries (no VM
-/// install_path, absent from the nix attrset) — plan 160.
+/// install_path, absent from the nix attrset).
 fn read_seed_binaries(root: &Path) -> Vec<String> {
     let src =
         std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();

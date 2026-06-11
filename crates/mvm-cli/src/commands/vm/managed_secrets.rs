@@ -4,8 +4,9 @@ use mvm_sdk::ir::{App, Entrypoint, EnvValue, SecretMount, Workload};
 // allow(secret-debug): `SecretBinding` is a reference type carrying
 // only metadata (provider id, binding name, release policy) — it does
 // not hold the secret value itself. Raw secret bytes resolve at admit
-// time inside `mvm-supervisor` per ADR-049 / ADR-059 (claim 13). The
-// `Debug` derive prints binding refs only, never plaintext.
+// time inside `mvm-supervisor` (claim 13: no raw secret crosses the
+// channel). The `Debug` derive prints binding refs only, never
+// plaintext.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct LoweredPlanSecrets {
     pub secrets: Vec<SecretBinding>,

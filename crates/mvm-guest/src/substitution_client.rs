@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §1 — in-guest substitution client (the relay half).
+//! In-guest substitution client (the relay half).
 //!
 //! The guest-local forward proxy relays a workload's secret-bearing request to
 //! the host substitution endpoint over vsock, carrying an opaque placeholder.

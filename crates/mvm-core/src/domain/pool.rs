@@ -391,7 +391,7 @@ pub struct ArtifactPaths {
     /// NixOS initrd (optional — present when the flake produces one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initrd: Option<String>,
-    /// Artifact file sizes (optional — populated by builds after Sprint 37).
+    /// Artifact file sizes (optional — populated by builds when available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sizes: Option<ArtifactSizes>,
 }

@@ -1,5 +1,5 @@
 //! Copy-on-write storage abstraction for instance rootfs and
-//! snapshots. Plan 47 / ADR-008.
+//! snapshots.
 //!
 //! # What this is
 //!
@@ -11,11 +11,11 @@
 //! sandbox-as-a-service workload pattern (frequent agent-loop
 //! checkpointing) breaks this cost model.
 //!
-//! Per ADR-008, the substrate adopts **dm-thin** (device-mapper thin
+//! The substrate adopts **dm-thin** (device-mapper thin
 //! provisioning) so per-instance volumes clone from a verity-sealed
 //! base in O(metadata) and snapshot chains share unchanged blocks.
 //!
-//! # Phase 1 scope (this module)
+//! # Scope (this module)
 //!
 //! - Trait surface (`ThinPool` / `ThinVolume`) abstracting `dmsetup`
 //!   so tests don't depend on Linux + root.
@@ -26,9 +26,9 @@
 //!   query the pool through the trait.
 //! - Audit kinds for pool operations.
 //!
-//! Phase 2 (separate PR) wires the actual instance-create path in
+//! A follow-on change wires the actual instance-create path in
 //! `vm/template/lifecycle.rs` to use `ThinPool::clone_from_base`
-//! instead of `cp -a`. That's the behavioral change; this PR is the
+//! instead of `cp -a`. That's the behavioral change; this is the
 //! tested substrate it depends on.
 
 pub mod backend;

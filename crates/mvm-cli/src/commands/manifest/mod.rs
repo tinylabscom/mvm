@@ -1,5 +1,5 @@
 //! `mvmctl manifest` — registry / inspection / object-storage operations
-//! on built manifest slots (plan 38 §4).
+//! on built manifest slots.
 //!
 //! Top-level user-facing verbs (`init`, `build`, `up`, `run`, `exec`)
 //! handle the everyday flow. This module hosts the less-common ops:
@@ -41,8 +41,8 @@ pub(in crate::commands) enum ManifestAction {
     Rm(rm::Args),
     /// Cleanup orphaned slots (slots whose source manifest file is gone)
     Prune(prune::Args),
-    /// Verify a slot's artifacts against its checksums (and, post plan
-    /// 36, cosign signatures)
+    /// Verify a slot's artifacts against its checksums (and cosign
+    /// signatures)
     Verify(verify::Args),
     /// Manage free-form tags on a template (`add`, `rm`, `ls`).
     /// Tags filter `mvmctl manifest ls` and surface in catalogs.

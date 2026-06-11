@@ -1,4 +1,4 @@
-//! Plan 122 D — guest-side VMGenID reseed.
+//! Guest-side VMGenID reseed.
 //!
 //! On a snapshot resume the host delivers a fresh generation token (see
 //! [`mvm_core::crypto::vmgenid`]). When the token **changes** — meaning this
@@ -9,7 +9,7 @@
 //!
 //! The pure change-detection lives in [`GenIdState`]; this wraps it with the
 //! guest-side reseed I/O. Delivery (the host sending the token over the
-//! resume RPC) is the remaining wiring — see the plan's deferred follow-up.
+//! resume RPC) is the remaining wiring.
 
 use std::io::Write;
 

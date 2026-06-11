@@ -7,7 +7,7 @@ mod env;
 mod image;
 mod manifest;
 mod ops;
-/// Plan 118 WS-1 1b — supervisor warm-pool: the `mvmctl pool warm/status` command + the
+/// Supervisor warm-pool: the `mvmctl pool warm/status` command + the
 /// launch glue (`try_warm_claim`/`replenish_after_launch`) the `up` path calls to claim a
 /// warm standby (auto-named, bridge-admitted launches) and top the pool back up.
 mod pool;
@@ -39,8 +39,8 @@ pub(in crate::commands) struct Cli {
     #[arg(long, global = true)]
     pub fc_version: Option<String>,
 
-    /// Override which hypervisor drives the builder VM
-    /// (Plan 98). Highest priority — beats `MVM_BUILDER_BACKEND`
+    /// Override which hypervisor drives the builder VM.
+    /// Highest priority — beats `MVM_BUILDER_BACKEND`
     /// env and the platform-default auto-detect (macOS 26+ Apple
     /// Silicon → vz; everywhere else → libkrun).
     #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu"])]
@@ -131,8 +131,8 @@ pub(in crate::commands) enum Commands {
     #[command(name = "persistent-builder", hide = true)]
     PersistentBuilder(build::persistent_builder::Args),
     /// Internal: host-side AF_VSOCK↔UNIX bridge for the QEMU workload
-    /// backend (Plan 166 Phase 2). Spawned detached by
-    /// `mvm_backend::qemu`; not a user-facing command.
+    /// backend. Spawned detached by `mvm_backend::qemu`; not a
+    /// user-facing command.
     #[command(name = "__qemu-vsock-bridge", hide = true)]
     QemuVsockBridge(qemu_bridge::Args),
 }
@@ -183,9 +183,8 @@ pub fn run() -> Result<()> {
     // Initialize logging.
     //
     // The MCP stdio subcommand needs *exclusive* control of stdout so
-    // JSON-RPC framing isn't corrupted by stray log lines (cross-cutting
-    // "A: stdout-only-JSON-RPC discipline" — plan 32 §"Cross-cutting
-    // considerations"). Skip the default `logging::init` (which installs
+    // JSON-RPC framing isn't corrupted by stray log lines (stdout-only
+    // JSON-RPC discipline). Skip the default `logging::init` (which installs
     // a stdout-writing subscriber) for `mvmctl mcp` and let
     // `mvm_mcp::init_stderr_tracing` install its own stderr-only one.
     let log_format = match cli.log_format.as_deref() {
@@ -207,9 +206,9 @@ pub fn run() -> Result<()> {
         logging::init(log_format);
     }
 
-    // Plan 166 Phase 2 — the internal QEMU vsock bridge is a detached,
-    // long-running helper (spawned by `mvm_backend::qemu`), not a user
-    // command. Short-circuit before the ctrl-c handler, operator-config
+    // The internal QEMU vsock bridge is a detached, long-running helper
+    // (spawned by `mvm_backend::qemu`), not a user command.
+    // Short-circuit before the ctrl-c handler, operator-config
     // load, and the cmd-audit envelope — none of which apply to it.
     if let Commands::QemuVsockBridge(a) = &cli.command {
         return qemu_bridge::run(a);
@@ -223,7 +222,7 @@ pub fn run() -> Result<()> {
             return;
         }
         eprintln!("\nInterrupted, cleaning up...");
-        // W7 handle registry: walk Attached-mode libkrun VMs and
+        // Handle registry: walk Attached-mode libkrun VMs and
         // gracefully stop each. Best-effort; failures get logged. Runs
         // before the child-pid sweep so SIGTERM-on-children doesn't
         // race the sandbox's own teardown ordering.
@@ -241,7 +240,7 @@ pub fn run() -> Result<()> {
         tracing::warn!("failed to install signal handler: {e}");
     }
 
-    // Plan 170 WS-A / ADR-074 — reconcile-on-entry convergence. For any
+    // Reconcile-on-entry convergence. For any
     // state-touching command, cheaply (registry read + pid-liveness stat
     // only) heal registry/runtime drift before dispatch, so stale records
     // self-heal instead of surfacing as a confusing failure three layers
@@ -253,7 +252,7 @@ pub fn run() -> Result<()> {
     // Load operator config once; used as fallback for dev_vm_cpus, dev_vm_mem_gib, cpus, memory.
     let cfg = mvm_core::user_config::load(None);
 
-    // Plan 60 Phase 4 — wrap dispatch in cmd.<verb>.{invoked,completed,failed}
+    // Wrap dispatch in cmd.<verb>.{invoked,completed,failed}
     // audit envelope. Best-effort: a recorder failure logs a warning and the
     // command runs without cmd-level audit.
     let cmd_recorder = cmd_audit::build_cmd_recorder();
@@ -302,7 +301,7 @@ pub fn run() -> Result<()> {
 }
 
 /// Run the cheap reconcile-on-entry convergence for state-touching
-/// commands (Plan 170 WS-A / ADR-074), unless `MVM_SKIP_RECONCILE=1`.
+/// commands, unless `MVM_SKIP_RECONCILE=1`.
 /// Fail-open: `converge` collects errors internally and never returns an
 /// `Err`, so this can never block the requested command.
 fn maybe_converge_on_entry(command: &Commands) {

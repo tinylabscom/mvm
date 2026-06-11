@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §3 — the injecting keyholder (bearer/basic fallback).
+//! The injecting keyholder (bearer/basic fallback).
 //!
 //! For transmitted-value auth (bearer tokens, basic credentials) the raw
 //! value must reach the wire, so there is no "host never sees it" — and we

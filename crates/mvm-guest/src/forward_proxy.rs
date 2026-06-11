@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §1 (model ii) — the in-guest forward-proxy front.
+//! The in-guest forward-proxy front (substitution model ii).
 //!
 //! The workload points `HTTP_PROXY`/`HTTPS_PROXY` (or the SDK's thin client) at
 //! this guest-local proxy and makes ordinary requests carrying an opaque

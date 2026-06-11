@@ -1,4 +1,4 @@
-//! Test fixture for `entrypoint::execute` (plan 41 W2 / ADR-007).
+//! Test fixture for `entrypoint::execute`.
 //!
 //! Stands in for the production wrapper binaries (e.g. `python-runner`)
 //! when exercising the per-call lifecycle — spawn, drain, poll, kill.

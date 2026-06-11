@@ -1,8 +1,8 @@
 //! `mvmctl deps` — user-facing CLI for the sealed deps-volume cache.
 //!
-//! Plan 73 Followup C wires three verbs over the Phase 9 primitives
-//! in `mvm_sdk::compile::deps_audit` and the Followup B host
-//! orchestrator in `mvm_build::app_deps`:
+//! Three verbs over the sealed-volume primitives in
+//! `mvm_sdk::compile::deps_audit` and the host orchestrator in
+//! `mvm_build::app_deps`:
 //!
 //! - **`mvmctl deps inspect <volume_hash>`** — pretty-print the four
 //!   sealed sidecars (SBOM, fetch.log, cve.json, meta.json) so a user
@@ -25,7 +25,7 @@
 //!
 //! Cache root resolution always routes through
 //! [`mvm_build::app_deps::resolve_cache_root`] so the supervisor's
-//! admission gate (Followup A) and this CLI agree on where volumes
+//! admission gate and this CLI agree on where volumes
 //! live. The optional `--cache-root` flag exists for tests + the
 //! `MVM_DEPS_VOLUMES_DIR` env var; production users have no reason
 //! to override.
@@ -82,7 +82,7 @@ pub(in crate::commands) enum DepsAction {
     ///      operate on a tampered cache entry — same posture as
     ///      `mvm_build::app_deps::install_app_deps`).
     ///   2. Recover the language from the volume's
-    ///      `meta.json.annotations.language` (B.2 records it there).
+    ///      `meta.json.annotations.language` (the sealer records it there).
     ///   3. Dispatch `pip-audit` or `pnpm audit --json` on the host.
     ///   4. Write the fresh result to `cve.json`, bump
     ///      `meta.json.last_audit_at`, and reseal.

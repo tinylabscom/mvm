@@ -1,4 +1,4 @@
-// Plan 115 / ADR-065 E2E smoke. Boots Stage 0, lets it produce
+// E2E smoke. Boots Stage 0, lets it produce
 // the builder-VM image with the embedded host-bins baked in,
 // asserts the produced rootfs.ext4 has the expected files with
 // the expected SHA-256.

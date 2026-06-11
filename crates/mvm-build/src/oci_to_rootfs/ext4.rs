@@ -5,7 +5,7 @@
 //! `rootfs.ext4` image that Firecracker / libkrun / Apple
 //! Container load as the guest's root device. Output is **byte-
 //! deterministic** for a given staged tree + options — this is
-//! load-bearing for ADR-050's pull-time verity story: the verity
+//! load-bearing for the pull-time verity story: the verity
 //! sidecar generated next would otherwise differ across runs and
 //! defeat the per-digest verity cache.
 //!
@@ -28,18 +28,17 @@
 //!
 //! `mke2fs` is Linux-only. On Linux, [`materialize_to_ext4`]
 //! shells out directly. On macOS / Windows the same function
-//! returns [`OciUnpackError::HostUnsupported`]; the W1.5 CLI
-//! orchestrator routes the call through the libkrun builder VM
-//! per ADR-050. This module's job is to be the in-process
-//! orchestrator; the host-vs-VM routing decision lives one layer
-//! up.
+//! returns [`OciUnpackError::HostUnsupported`]; the CLI
+//! orchestrator routes the call through the libkrun builder VM.
+//! This module's job is to be the in-process orchestrator; the
+//! host-vs-VM routing decision lives one layer up.
 
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::unpack::StagedRootfs;
 use std::path::{Path, PathBuf};
 
 /// Knobs for [`materialize_to_ext4`]. Defaults produce a
-/// byte-deterministic image suitable for ADR-050 verity
+/// byte-deterministic image suitable for verity
 /// generation; callers can override any field to e.g. label the
 /// filesystem differently for a non-mvm consumer.
 #[derive(Debug, Clone)]
@@ -68,9 +67,9 @@ pub struct Mke2fsOptions {
     /// not correctness.
     pub size_padding_bytes: u64,
     /// `SOURCE_DATE_EPOCH` env value passed to `mke2fs`. Default
-    /// 0 — every file timestamp becomes the Unix epoch. This is
-    /// what ADR-050's verity story expects so two runs of the
-    /// same source tree produce byte-identical ext4.
+    /// 0 — every file timestamp becomes the Unix epoch. The verity
+    /// story needs this so two runs of the same source tree
+    /// produce byte-identical ext4.
     pub source_date_epoch: u64,
     /// Override the `mke2fs` binary location. Default `None` —
     /// the binary is resolved via `$PATH`. Tests use this to
@@ -140,10 +139,9 @@ pub fn estimate_image_size(
 /// (staged tree, options) pair.
 ///
 /// Linux-only at runtime; non-Linux hosts return
-/// [`OciUnpackError::HostUnsupported`]. The W1.5 CLI orchestrator
-/// routes the macOS path through the libkrun builder VM (per
-/// ADR-050) — that routing lives one layer up, not in this
-/// module.
+/// [`OciUnpackError::HostUnsupported`]. The CLI orchestrator
+/// routes the macOS path through the libkrun builder VM — that
+/// routing lives one layer up, not in this module.
 pub fn materialize_to_ext4(
     staged: &StagedRootfs,
     output: &Path,
@@ -200,14 +198,14 @@ fn run_mke2fs(
     // single comma-separated `-E` so `hash_seed` actually takes effect
     // (without this, mke2fs picks a fresh random hash seed each call,
     // shifting the htree layout and breaking the byte-determinism the
-    // ADR-050 verity cache depends on).
+    // verity cache depends on).
     let mut cmd = std::process::Command::new(binary);
     cmd.env("SOURCE_DATE_EPOCH", options.source_date_epoch.to_string())
         .args(["-F"]) // overwrite the preallocated output file
         .args(["-t", "ext4"])
         // Disable `orphan_file`: e2fsprogs >= 1.47 enables it by default,
         // and it allocates an orphan-file inode whose on-disk bytes vary
-        // between otherwise-identical runs — defeating the ADR-050 verity
+        // between otherwise-identical runs — defeating the verity
         // cache's byte-determinism (and `^metadata_csum_seed` is moot
         // because `-U` already pins the seed). It's only a crash-recovery
         // optimization, irrelevant for a read-only verity rootfs.

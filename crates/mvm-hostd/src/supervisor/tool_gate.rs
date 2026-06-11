@@ -1,10 +1,9 @@
-//! Tool-call gate slot. Wave 2 differentiator.
+//! Tool-call gate slot.
 //!
-//! Plan 37 §2.2 / §15: the supervisor mediates every tool the
-//! workload invokes via vsock RPC. The gate consults the plan's
-//! `tool_policy: PolicyRef`, looks the bundle up via
-//! `mvm-policy::ToolPolicy`, and allow/deny per call. Audit entries
-//! reference both the plan id and the tool name.
+//! The supervisor mediates every tool the workload invokes via vsock
+//! RPC. The gate consults the plan's `tool_policy: PolicyRef`, looks
+//! the bundle up via `mvm-policy::ToolPolicy`, and allow/deny per
+//! call. Audit entries reference both the plan id and the tool name.
 
 use async_trait::async_trait;
 use thiserror::Error;

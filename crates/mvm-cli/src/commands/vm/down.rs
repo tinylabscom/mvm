@@ -33,8 +33,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // (resolved from its state-dir pid marker) so a QEMU/libkrun
             // VM is stopped by its own VMM, not the platform default.
             let backend = AnyBackend::for_started_vm(n).unwrap_or_else(platform_default);
-            // ADR-053 §3 / plan 74 W2: persist the `Stopping`
-            // readiness milestone BEFORE the backend stop call so a
+            // Persist the `Stopping` readiness milestone BEFORE the
+            // backend stop call so a
             // concurrent `mvmctl ls --json` running during the stop
             // window sees the in-flight state. On a successful stop
             // the entry is deregistered below and the milestone goes
@@ -56,7 +56,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 registry.deregister(n);
                 let _ = registry.save(&registry_path);
             }
-            // B21: state-changing CLI verb emits an audit entry. The
+            // State-changing CLI verb emits an audit entry. The
             // matching VmStart emit lives in `vm/up.rs`; without this
             // VmStop there is no audit trail of the stop happening.
             // Best-effort — the underlying op already succeeded or
@@ -66,7 +66,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             result
         }
         None => {
-            // Plan-38 §"Boundary statement": fleet/multi-VM is mvmd's job.
+            // Fleet/multi-VM is mvmd's job.
             // `mvmctl down` (no args) just stops every running VM — across
             // every backend, each dispatched to its owning VMM so QEMU /
             // libkrun VMs are stopped too (not just the platform default).

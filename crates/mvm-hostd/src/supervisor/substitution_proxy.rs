@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §1 — host substitution endpoint: request preparation.
+//! Host substitution endpoint: request preparation.
 //!
 //! The guest's SDK client routes a secret-bearing request to this host-local
 //! endpoint carrying an opaque placeholder. [`prepare_request`] is the
@@ -194,7 +194,7 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 /// client is built **per request**: we resolve the host, SSRF-filter the IPs,
 /// and pin them on the URL's *real* port via `resolve_to_addrs` — the shared
 /// `SsrfFilteringResolver` hardcodes 443 and would send an `http` forward to the
-/// HTTPS port. Plan 129 / ADR-067.
+/// HTTPS port.
 pub struct ReqwestForwarder {
     timeout_secs: u64,
 }
@@ -264,13 +264,13 @@ impl Forwarder for ReqwestForwarder {
 
 /// The running host substitution endpoint: the admission-minted placeholder
 /// registry, the secret resolver, and the forward leg. Placeholders are minted
-/// at admission (ADR-067 §4), so the registry is read-only while serving.
+/// at admission, so the registry is read-only while serving.
 pub struct SubstitutionService {
     registry: Arc<SubstitutionRegistry>,
     resolver: Arc<dyn SecretResolver>,
     forwarder: Arc<dyn Forwarder>,
-    /// Egress redactor (Plan 129 Phase E). Masks *undeclared* secret-shaped /
-    /// PII content out of an outbound request before forwarding — the
+    /// Egress redactor. Masks *undeclared* secret-shaped / PII content out
+    /// of an outbound request before forwarding — the
     /// request-level twin of the gateway bridge's packet redactor, sharing one
     /// `RedactingSubstitution` definition so every backend that routes egress
     /// through this endpoint scrubs identically. Built once (rule compilation).
@@ -278,9 +278,9 @@ pub struct SubstitutionService {
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
     recorder: Option<Recorder>,
-    /// Plan 129 Stage 2 — the per-VM name-constrained intermediate the `https`
-    /// terminator mints per-SNI leaves under. `None` ⇒ no TLS leg (Stage 1b
-    /// `http`-only). Set from `EndpointConfig.tls_intermediate` at assemble.
+    /// The per-VM name-constrained intermediate the `https` terminator mints
+    /// per-SNI leaves under. `None` ⇒ no TLS leg (`http`-only). Set from
+    /// `EndpointConfig.tls_intermediate` at assemble.
     tls_intermediate: Option<Arc<mvm_core::crypto::egress_ca::VmIntermediate>>,
 }
 
@@ -307,8 +307,8 @@ impl SubstitutionService {
         self
     }
 
-    /// Plan 129 Stage 2 — attach the per-VM egress intermediate so the
-    /// terminator can terminate bound-host `https`. Absent ⇒ `http`-only.
+    /// Attach the per-VM egress intermediate so the terminator can terminate
+    /// bound-host `https`. Absent ⇒ `http`-only.
     pub fn with_tls_intermediate(
         mut self,
         intermediate: mvm_core::crypto::egress_ca::VmIntermediate,
@@ -393,8 +393,8 @@ impl SubstitutionService {
         }
     }
 
-    /// Accept loop for the transparent egress **terminator** (Plan 129 stage
-    /// 1b): the host nft `nat` chain REDIRECTs a guest's outbound TCP here, we
+    /// Accept loop for the transparent egress **terminator**: the host nft
+    /// `nat` chain REDIRECTs a guest's outbound TCP here, we
     /// recover the original destination via `SO_ORIGINAL_DST`, substitute any
     /// secret placeholder in the request (claim-12 bind-checked), and splice
     /// the request to the real destination — returning its response verbatim.
@@ -460,7 +460,7 @@ impl SubstitutionService {
         std_stream.set_write_timeout(Some(timeout))?;
 
         // Recover the original destination first (cheap getsockopt) so we can
-        // branch http(:80, Stage 1b) vs https(:443, Stage 2) before reading.
+        // branch http(:80) vs https(:443) before reading.
         let (std_stream, orig_dst) = tokio::task::spawn_blocking(move || {
             let orig_dst = terminator::orig_dst::original_dst(&std_stream)?;
             anyhow::Ok((std_stream, orig_dst))
@@ -473,7 +473,7 @@ impl SubstitutionService {
                 .await;
         }
 
-        // ── Stage 1b: cleartext :80 ──
+        // ── cleartext :80 ──
         let mut std_stream = std_stream;
         let (mut std_stream, raw) = tokio::task::spawn_blocking(move || {
             let raw = terminator::read::read_http_request(&mut std_stream)?;
@@ -523,7 +523,7 @@ impl SubstitutionService {
         Ok(())
     }
 
-    /// Stage 2 (`:443`): peek the ClientHello SNI, then **terminate** TLS for a
+    /// `:443`: peek the ClientHello SNI, then **terminate** TLS for a
     /// bound host (mint a leaf under the per-VM intermediate, decrypt, substitute,
     /// re-originate over the hardened reqwest forwarder) or **splice** an unbound
     /// host straight through without decrypting. Fail-closed: a bound host whose
@@ -654,7 +654,7 @@ impl SubstitutionService {
             .headers
             .iter()
             .any(|(_, v)| find_placeholder(v).is_some());
-        // Phase E: scrub undeclared secret-shaped / PII content before any
+        // Scrub undeclared secret-shaped / PII content before any
         // substitution. Runs first so a declared placeholder (not secret-shaped,
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
@@ -699,7 +699,7 @@ impl SubstitutionService {
     /// real credential is substituted into it next, and the host-reserved
     /// placeholder is not secret-shaped); every other header value and the body
     /// are scrubbed. Returns the rewritten request plus the categories that
-    /// fired, for the claim-13 audit. Plan 129 Phase E / ADR-067.
+    /// fired, for the claim-13 audit.
     fn redact_outbound(&self, mut req: ProxyRequest) -> (ProxyRequest, RedactionHits) {
         let mut hits = RedactionHits::default();
         for (_, value) in req.headers.iter_mut() {
@@ -1230,8 +1230,8 @@ mod server_tests {
         server.abort();
     }
 
-    /// Plan 129 Phase E / ADR-067: the endpoint scrubs an *undeclared*
-    /// secret-shaped run from the outbound body before forwarding (the same
+    /// The endpoint scrubs an *undeclared* secret-shaped run from the
+    /// outbound body before forwarding (the same
     /// redaction the gateway bridge applies, at the endpoint chokepoint so
     /// every backend routing egress through it is covered), while a *declared*
     /// placeholder is still substituted to its real credential. The destination

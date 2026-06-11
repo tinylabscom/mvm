@@ -3,7 +3,7 @@
 //! device) stays `VmBackend`'s job; this layer only answers "where do the
 //! bytes come from". External sources (S3, Hetzner Volume, NFS) register
 //! under their `provider` string without a core-enum edit — the IR's
-//! `MountSource::External` (plan 123 B4).
+//! `MountSource::External`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use crate::provider::{StorageProvider, VolumeSpec};
 
 /// A resolved mount source `VmBackend` can attach into a guest. More variants
 /// (`BlockDev`, `Fuse`) arrive with their producers — the LUKS block-volume
-/// arm (B2 Linux follow-up) and a lazy-FUSE S3 source — so they're not
+/// arm and a lazy-FUSE S3 source — so they're not
 /// declared until something constructs them.
 #[derive(Debug)]
 pub enum Mountable {
@@ -180,8 +180,8 @@ impl MountProvider for VolumeFs {
 
     fn release(&self, _m: Mountable) -> Result<(), MountError> {
         // Detach is keyed off the StorageProvider handle, not the Mountable
-        // path; the caller owning the handle drives detach. B4 keeps the
-        // borrow model simple — richer release lands with the block arm.
+        // path; the caller owning the handle drives detach. The borrow model
+        // stays simple here — richer release lands with the block arm.
         Ok(())
     }
 }

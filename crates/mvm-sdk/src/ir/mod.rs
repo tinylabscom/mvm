@@ -5,9 +5,9 @@
 //! crate emits; the host toolchain consumes instances of these types to
 //! produce Nix flakes and launch plans.
 //!
-//! Governing ADRs: ADR-0002 (declaration/execution separation), ADR-0003
-//! (schema source of truth and SDK conformance model). Field shapes follow
-//! Plan-0002 Appendix A.
+//! Two invariants govern the shape: declaration and execution stay separate,
+//! and the JSON Schema emitted here is the single source of truth that every
+//! per-language SDK conforms to.
 
 mod addon;
 mod canonicalize;

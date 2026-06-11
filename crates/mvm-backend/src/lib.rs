@@ -1,7 +1,7 @@
 //! mvm-backend — concrete `VmBackend` implementations.
 //!
-//! Plan-60 W7+W8 ended this crate's life as a re-export façade.
-//! Every concrete backend now lives here:
+//! This crate is no longer a re-export façade — every concrete backend
+//! now lives here:
 //!
 //! - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
 //!   dispatch enum + `FirecrackerConfig` — the production Tier 1 path.
@@ -14,7 +14,7 @@
 //! `microvm` (lifecycle), `image` (Mvmfile.toml), `network` (TAP/
 //! bridge wiring).
 //!
-//! ## Dependency direction (post-W8)
+//! ## Dependency direction
 //!
 //!   mvm-core              ← VmBackend trait + types
 //!   base (module)         ← config + shell + linux_env + ui +
@@ -35,17 +35,17 @@ pub mod backend;
 pub mod checkpoint;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
-// former Lima-era `mvm-base` crate (plan 121 A2). It lives here, not
-// in `mvm`, because `mvm-backend`'s concrete backends are its heaviest
+// former Lima-era `mvm-base` crate. It lives here, not in `mvm`,
+// because `mvm-backend`'s concrete backends are its heaviest
 // consumer and sit below `mvm`; folding it up into `mvm` would cycle
 // (`mvm → mvm-backend → mvm`). `mvm` re-exports these at their old
 // paths so the mvmd `mvmctl::runtime::{shell,ui,shell_mock}` contract
 // surface keeps resolving.
 pub mod base;
 pub mod compat;
-/// Plan 129 Task 5 — per-VM transparent egress redirect (nft prerouting
-/// REDIRECT scoped to the guest TAP) steering guest :80 to the host-side
-/// substitution terminator. Linux-only mechanism; consumed by the FC path.
+/// Per-VM transparent egress redirect (nft prerouting REDIRECT scoped
+/// to the guest TAP) steering guest :80 to the host-side substitution
+/// terminator. Linux-only mechanism; consumed by the FC path.
 pub mod egress_redirect;
 pub mod firecracker;
 pub mod handle_registry;
@@ -56,28 +56,28 @@ pub mod mock;
 pub mod mock_guest_agent;
 pub mod netinit_audit;
 pub mod network;
-/// plan 123 A1 step 2 — `NetworkProvider` impl over the bridge+TAP path.
+/// `NetworkProvider` impl over the bridge+TAP path.
 pub mod network_provider;
 /// Apple Container / Apple Virtualization.framework runtime interface
 /// (objc2 + Swift bridge, process spawn + verity wiring) — folded in
-/// from the former `mvm-providers` crate (plan 121 C2). The
+/// from the former `mvm-providers` crate. The
 /// `apple_container` backend dispatch (`AppleContainerBackend`) stays in
 /// `apple_container.rs`; this is the lower-level interface it drives.
 pub mod providers;
-/// Plan 166 Phase 2 / ADR-072 — QEMU workload runtime backend (dev/test).
+/// QEMU workload runtime backend (dev/test).
 pub mod qemu;
-/// Plan 118 WS-1 1b — backend-agnostic supervisor standby pool registry
-/// (`~/.mvm/pool/` state-dir; record/select-idle-by-kernel/remove/reap).
+/// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
+/// state-dir; record/select-idle-by-kernel/remove/reap).
 pub mod standby_pool;
-/// Plan 129 — shared per-VM substitution-endpoint spawn/reap helpers used by
-/// the QEMU + Firecracker launch paths (one impl, no drift).
+/// Shared per-VM substitution-endpoint spawn/reap helpers used by the
+/// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
-// Plan 97 Phase B — Vz (Apple Virtualization.framework) backend.
-// Currently a skeleton: trait surface + capabilities + security profile
-// + availability probe; lifecycle methods land in a follow-up slice.
+// Vz (Apple Virtualization.framework) backend. Currently a skeleton:
+// trait surface + capabilities + security profile + availability
+// probe; lifecycle methods land in a follow-up slice.
 pub mod vz;
-// Plan 97 Phase E — Rust client for the Vz supervisor's control
-// socket (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
+// Rust client for the Vz supervisor's control socket
+// (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
 pub mod vz_control;
 
 pub use apple_container::AppleContainerBackend;
@@ -87,7 +87,7 @@ pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;
 
-/// Plan 129 Stage 2 — the per-VM egress-TLS cert/key split helper. `mvmctl up`
+/// The per-VM egress-TLS cert/key split helper. `mvmctl up`
 /// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
 /// pushed onto the drive, the key is persisted host-side for the terminator
 /// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].

@@ -1,4 +1,4 @@
-//! `PolicyBundle` — the policy half of plan 37 §10.
+//! `PolicyBundle` — the bundle of policies a workload boots under.
 
 use std::collections::BTreeMap;
 

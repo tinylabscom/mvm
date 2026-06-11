@@ -1,9 +1,8 @@
-// Plan 113 §Task 15 / ADR-064 — fuzz the host-side `BridgeConfigJson`
-// JSON parser.
+// Fuzz the host-side `BridgeConfigJson` JSON parser.
 //
 // `mvm-firecracker-bridge`'s `main()` reads a `BridgeConfigJson`
 // document on stdin before any libkrun / Firecracker / Landlock call.
-// The bytes come from a pipe Task 13's `FirecrackerBackend` writes —
+// The bytes come from a pipe `FirecrackerBackend` writes —
 // same-uid trust, but the parser is the entry point for the bridge's
 // lifetime. A panic here turns into a hard process death before
 // confinement is applied, before the FlowEvent pipeline is up, and
@@ -14,9 +13,9 @@
 // harness goal is "never panic on any input"; `serde_json::Error` is
 // the expected outcome for malformed bytes.
 //
-// `BridgeConfigJson` carries `#[serde(deny_unknown_fields)]` (Task 12
-// / Task 15 — see `crates/mvm-firecracker-bridge/src/parse.rs`) so
-// unknown / attacker-controlled keys fail-closed during deserialization.
+// `BridgeConfigJson` carries `#[serde(deny_unknown_fields)]` (see
+// `crates/mvm-firecracker-bridge/src/parse.rs`) so unknown /
+// attacker-controlled keys fail-closed during deserialization.
 
 #![no_main]
 

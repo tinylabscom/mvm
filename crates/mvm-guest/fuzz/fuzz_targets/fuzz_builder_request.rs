@@ -1,4 +1,4 @@
-// Plan 89 W2 — fuzz the persistent builder VM dispatch wire.
+// Fuzz the persistent builder VM dispatch wire.
 //
 // Mirror of fuzz_guest_request.rs / fuzz_authenticated_frame.rs:
 // arbitrary bytes are fed straight into

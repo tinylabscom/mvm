@@ -17,7 +17,7 @@
 //! happy path plus a couple of error injections (5xx-then-200 for
 //! retry tests, content tamper for digest-mismatch tests). Auth,
 //! manifest upload, and the full v2 catalog API are out of scope —
-//! W1.1/W1.2 ship anonymous-pull-only.
+//! the fixture is anonymous-pull-only.
 
 #![allow(dead_code)] // not every helper is used by every test
 

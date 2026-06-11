@@ -1,4 +1,4 @@
-//! Warm-process worker pool — plan 43 / mvmforge ADR-0011 tier 2.
+//! Warm-process worker pool.
 //!
 //! When `/etc/mvm/runtime.json` carries `concurrency.kind =
 //! "warm_process"`, the agent stands up a fixed-size pool of
@@ -10,12 +10,12 @@
 //! - The wrapper's interpreter cold-start happens once per worker,
 //!   not once per invoke. Per-call latency drops by hundreds of ms
 //!   (Python especially).
-//! - The M12 single-call invariant is bypassed: up to `pool_size`
+//! - The single-call-per-VM invariant is bypassed: up to `pool_size`
 //!   calls can be in flight in the same VM. Backpressure is a FIFO
 //!   queue, capped at `max_queue_depth` (default `2 * pool_size`).
 //! - Workers are recycled on call-count, RSS, or wrapper crash.
-//! - Cross-call wrapper state is the user's responsibility (ADR-0011);
-//!   the agent does not scrub state between calls.
+//! - Cross-call wrapper state is the user's responsibility; the agent
+//!   does not scrub state between calls.
 //!
 //! The host wire (vsock `RunEntrypoint` → `EntrypointEvent` stream)
 //! is bit-identical to the cold path. The agent synthesizes the
@@ -104,7 +104,7 @@ pub enum DispatchError {
     NoLiveWorkers,
     /// Pool processes have spawned but the `after_start.sh` readiness
     /// probe has not yet succeeded — the workload says it's still
-    /// warming up. SDK port Phase 10c / Plan 73 Followup E. Maps to
+    /// warming up. Maps to
     /// `EntrypointEvent::Error { kind: Busy }` host-side with a
     /// distinguishing message; admission can surface this as
     /// "warming up" rather than overload.
@@ -136,8 +136,8 @@ pub struct DispatchOutcome {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     /// Per-call control-channel records the wrapper emitted via the
-    /// new structured-envelope path (Phase 4c). The agent forwards
-    /// each as one `EntrypointEvent::Control` frame.
+    /// structured-envelope path. The agent forwards each as one
+    /// `EntrypointEvent::Control` frame.
     pub controls: Vec<ControlRecord>,
     pub outcome: WorkerOutcome,
 }
@@ -177,7 +177,7 @@ pub struct WorkerPool {
     /// `set_idle_timeout` (driven by the `UpdateIdleTimeout` vsock
     /// verb). The recycler-sweep thread reads this value each tick.
     idle_timeout_secs: AtomicU64,
-    /// SDK port Phase 10c / Plan 73 Followup E. Flips to `true` after
+    /// Flips to `true` after
     /// the workload's `after_start.sh` readiness probe exits 0 (or
     /// the script is absent / the workload declares no after_start
     /// hook). Until then, `dispatch` refuses with
@@ -246,7 +246,7 @@ impl WorkerPool {
             // `UpdateIdleTimeout` vsock verb sets this at runtime;
             // host-side reaper remains the safety net regardless.
             idle_timeout_secs: AtomicU64::new(0),
-            // Plan 73 Followup E: workers are spawned but not yet
+            // Workers are spawned but not yet
             // dispatchable until the after_start probe says they are
             // (or the caller calls `mark_ready` directly because no
             // probe was declared). `dispatch` returns `NotReady` while
@@ -282,7 +282,7 @@ impl WorkerPool {
 
     /// Snapshot whether the pool is currently dispatchable. `false`
     /// until `wait_for_ready` / `mark_ready` flips it; once set,
-    /// stays `true` until the pool is dropped. Plan 73 Followup E.
+    /// stays `true` until the pool is dropped.
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
@@ -290,7 +290,7 @@ impl WorkerPool {
     /// Mark the pool dispatchable without running a readiness probe.
     /// Used by the agent when the workload declared no `after_start`
     /// hook (the baked script is missing), and by tests that don't
-    /// want to script a probe binary. Plan 73 Followup E.
+    /// want to script a probe binary.
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
@@ -302,7 +302,7 @@ impl WorkerPool {
     /// factory always bakes the script, but defensive handling keeps
     /// us robust if rootfs assembly is interrupted.
     ///
-    /// Plan 73 Followup E. Called by the agent's `init_warm_pool`
+    /// Called by the agent's `init_warm_pool`
     /// after [`WorkerPool::start`] returns, before the accept loop
     /// begins handling traffic. On timeout / exec error, the pool
     /// stays `NotReady` and subsequent `dispatch` calls refuse fast;
@@ -344,8 +344,8 @@ impl WorkerPool {
         timeout_secs: u64,
         env: Vec<(String, String)>,
     ) -> Result<DispatchOutcome, DispatchError> {
-        // Plan 73 Followup E: refuse dispatch until the after_start
-        // probe has succeeded. Cheap atomic load on the hot path.
+        // Refuse dispatch until the after_start probe has succeeded.
+        // Cheap atomic load on the hot path.
         if !self.ready.load(Ordering::Acquire) {
             return Err(DispatchError::NotReady);
         }
@@ -368,8 +368,8 @@ impl WorkerPool {
             Ok(resp) => DispatchOutcome {
                 stdout: resp.stdout,
                 stderr: resp.stderr,
-                // Phase 4c: forward the worker-emitted control records
-                // through to the agent as `ControlRecord`s. The shape
+                // Forward the worker-emitted control records through to
+                // the agent as `ControlRecord`s. The shape
                 // matches `entrypoint::ControlRecord` modulo base64
                 // encoding on the warm-worker JSON wire.
                 controls: resp
@@ -591,7 +591,7 @@ fn spawn_worker(
     // Same envelope as `entrypoint::execute` minus the per-call
     // tmpdir (workers are shared across calls so a per-worker tmpdir
     // would leak per-call state — the wrapper takes responsibility
-    // for per-call hygiene, ADR-0011 §state). env_clear first, then
+    // for per-call hygiene). env_clear first, then
     // apply the curated `worker_env` set, then own pgrp, RLIMIT_CORE
     // inheritance from set_no_core_dumps in start().
     let mut cmd = Command::new(&program);
@@ -800,7 +800,6 @@ mod tests {
         assert!(format!("{}", DispatchError::QueueFull).contains("queue full"));
         assert!(format!("{}", DispatchError::ShuttingDown).contains("shutting down"));
         assert!(format!("{}", DispatchError::NoLiveWorkers).contains("no live workers"));
-        // Plan 73 Followup E.
         assert!(format!("{}", DispatchError::NotReady).contains("warming up"));
     }
 

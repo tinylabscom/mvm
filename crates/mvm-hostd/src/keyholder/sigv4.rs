@@ -1,6 +1,6 @@
-//! Plan 129 / ADR-067 §3 — AWS SigV4 canonical-request construction.
+//! AWS SigV4 canonical-request construction.
 //!
-//! The C1 [`Signer::sign_sigv4`](super::signer::Signer::sign_sigv4) takes a
+//! [`Signer::sign_sigv4`](super::signer::Signer::sign_sigv4) takes a
 //! *prepared* [`SigV4Input`] (a canonical request + scope). This module builds
 //! that canonical request from an actual HTTP request so the substitution
 //! endpoint can sign a SigV4 secret's request on the forward path — the signing
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn get_vanilla_signs_to_the_published_signature_end_to_end() {
         // From raw request → canonical → string-to-sign → signature, against
-        // the published get-vanilla signature (closes the loop with the C1 signer).
+        // the published get-vanilla signature (closes the loop with the signer).
         let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path());
         store

@@ -2,13 +2,12 @@
 //!
 //! Today: stdio-only transport. Reads JSON-RPC requests from stdin,
 //! writes responses to stdout, dispatches `tools/call run` into
-//! transient microVMs via [`crate::exec::run_captured`]. ADR-003 has
-//! the threat model and design.
+//! transient microVMs via [`crate::exec::run_captured`].
 //!
 //! Note: `mvmctl mcp` is *always* present in CLI builds (no Cargo
 //! feature gate at the host level), matching `mvmctl exec`'s pattern.
-//! The guest-side `Exec` handler is the actual gate per ADR-002 §W4.3
-//! — production guest agents are built without `dev-shell`, so the
+//! The guest-side `Exec` handler is the actual gate — production guest
+//! agents are built without `dev-shell`, so the
 //! `tools/call run` dispatch returns "exec not available" instead of
 //! executing. This composition is intentional: the MCP server is
 //! useful when pointed at dev VMs, harmless when pointed at prod ones.
@@ -108,7 +107,6 @@ const REAPER_TICK_SECS: u64 = 30;
 /// Concrete dispatcher backed by [`crate::exec::run_captured`] (cold)
 /// or [`crate::exec::dispatch_in_session`] (warm, when `session=ID`).
 ///
-/// Plan 32 / Proposal A.2:
 /// - **Bookkeeping (v1)**: the `SessionMap` records each session's
 ///   metadata, and a 30 s-tick reaper sweeps idle/expired entries.
 /// - **Warm VM materialisation (v2)**: the per-session handle map
@@ -123,7 +121,7 @@ struct ExecDispatcher {
     sessions: Arc<Mutex<SessionMap>>,
     warm_vms: WarmVms,
     reaper: Arc<DispatcherReaper>,
-    /// Plan 60 Phase 7 host-mediated tools (`mvm.time_now`,
+    /// Host-mediated tools (`mvm.time_now`,
     /// `mvm.web_fetch`, `mvm.web_search`). Built once at dispatcher
     /// construction; shared across every `tools/call` invocation.
     /// Default registry ships fail-closed for the web tools —
@@ -149,7 +147,7 @@ impl Default for ExecDispatcher {
     }
 }
 
-/// Plan 65 W4 — operator-rotatable provider credentials. When set,
+/// Operator-rotatable provider credentials. When set,
 /// the value names a secret stored via `mvmctl secret put` (default
 /// tenant `local`). The supervisor fetches the value through
 /// `mvm_core::crypto::secret_store::default_secret_store()` — OS
@@ -172,7 +170,7 @@ const GOOGLE_CSE_ID_FROM_SECRET_ENV_VAR: &str = "GOOGLE_CSE_ID_FROM_SECRET";
 /// and reference it via `BRAVE_API_KEY_FROM_SECRET=brave-api-key`.
 const PROVIDER_CREDENTIAL_TENANT: &str = "local";
 
-/// Plan 65 W4 — resolve a provider credential from either the
+/// Resolve a provider credential from either the
 /// direct-value env var (v0 posture, visible to the calling user
 /// via `/proc/<pid>/environ`) or a named secret in the secret store
 /// (hardened posture, file mode 0600 or OS keyring).
@@ -187,7 +185,7 @@ const PROVIDER_CREDENTIAL_TENANT: &str = "local";
 ///    invoke time, which is the operator's downstream signal.
 /// 3. Otherwise — `None` (caller treats as unconfigured).
 ///
-/// Plan 65 W6: the return type is `SecretBox<String>` (not a raw
+/// The return type is `SecretBox<String>` (not a raw
 /// `String`) so the bytes zeroize on drop — even if the provider
 /// constructor that consumes it panics mid-build, the
 /// SecretBox-wrapped value still gets cleaned up. Each provider's
@@ -222,7 +220,7 @@ fn resolve_provider_credential(
     }
 }
 
-/// Build the Phase 7 tool registry the MCP dispatcher hands out.
+/// Build the tool registry the MCP dispatcher hands out.
 ///
 /// Today:
 /// - `mvm.time_now` — always reachable.
@@ -246,7 +244,7 @@ fn resolve_provider_credential(
 fn build_tool_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::with_defaults();
 
-    // Plan 60 Phase 4 wire-up: every successful tool invocation
+    // Every successful tool invocation
     // emits a `cmd.tool.<name>.{completed,failed}` chain-signed
     // entry through the host signer's FileAuditSigner. When the
     // signer isn't reachable (no $HOME, key not initialized, loose
@@ -281,7 +279,7 @@ fn build_tool_registry() -> ToolRegistry {
         .unwrap_or_else(|| "noop".to_string());
     let mut search_tool =
         web_search::WebSearchTool::with_allowlist(search_allow.iter().cloned(), default_provider);
-    // Plan 65 W4 — credentials resolve through env var OR named
+    // Credentials resolve through env var OR named
     // secret-store entry. The secret_store backs `mvmctl secret`
     // (OS keyring on Mac/Linux with gnome-keyring, file fallback
     // elsewhere). Operators rotate by re-running `mvmctl secret
@@ -694,7 +692,7 @@ impl Dispatcher for ExecDispatcher {
         }
     }
 
-    /// Plan 60 Phase 7 — route registry tools through
+    /// Route registry tools through
     /// `mvm_hostd::supervisor::ToolRegistry`. The legacy `run` tool stays
     /// on its dedicated method; everything else (`mvm.time_now`,
     /// `mvm.web_fetch`, `mvm.web_search`, …) lands here.
@@ -902,13 +900,13 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 7 — invoke_tool routes through ToolRegistry
+    // invoke_tool routes through ToolRegistry
     // ──────────────────────────────────────────────────────────────
 
     #[test]
     fn invoke_tool_routes_time_now_through_registry() {
         // The default ExecDispatcher carries a registry with the 3
-        // Phase 7 builtins. `mvm.time_now` is unconditionally
+        // host-mediated builtins. `mvm.time_now` is unconditionally
         // reachable (no allowlist needed), so this is the
         // simplest "the wiring works" smoke test.
         let dispatcher = ExecDispatcher::default();
@@ -949,7 +947,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 65 W4 — resolve_provider_credential
+    // resolve_provider_credential
     //
     // Env-var manipulation in tests is process-global, so each
     // test uses a unique env-var name to avoid races with parallel

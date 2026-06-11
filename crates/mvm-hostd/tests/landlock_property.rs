@@ -1,4 +1,4 @@
-//! ADR-064 — Landlock property test (`mvm-jailer-lite`).
+//! Landlock property test (`mvm-jailer-lite`).
 //!
 //! Same-process test: applies `ConfinementSpec::firecracker_bridge`
 //! confinement, writes inside the spec's `audit_dir` (must succeed

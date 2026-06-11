@@ -1,7 +1,7 @@
 //! `mvmforge explain` — describe a stable error code from the registry.
 //!
-//! Every error mvmforge emits carries a stable string ID (ADR-0004,
-//! `schema/error-codes.json`). This command surfaces that registry so
+//! Every error mvmforge emits carries a stable string ID, defined in
+//! `schema/error-codes.json`. This command surfaces that registry so
 //! users don't need to grep the repo:
 //!
 //!   - `mvmforge explain E_FOO` — description + applicable fields + docs link

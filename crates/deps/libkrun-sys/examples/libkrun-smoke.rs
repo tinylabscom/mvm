@@ -1,11 +1,11 @@
-//! Plan 57 W3 smoke test — boot a Nix-built kernel + ext4 rootfs via
-//! libkrun on macOS Apple Silicon and observe the result.
+//! Smoke test — boot a Nix-built kernel + ext4 rootfs via libkrun on
+//! macOS Apple Silicon and observe the result.
 //!
 //! Build:
 //!   cargo build --example libkrun-smoke -p mvm-libkrun --features libkrun-sys
 //!
 //! Run (defaults pull from `~/.mvm/dev/current/`, the dev-VM artifacts
-//! shipped by `mvmctl dev up` pre-Plan-72):
+//! shipped by `mvmctl dev up`):
 //!   target/debug/examples/libkrun-smoke
 //!
 //! Override any path:
@@ -36,16 +36,16 @@
 //!   `KernelFormat::Elf`.
 //! - The default vsock port (`GUEST_AGENT_PORT`) is configured so the
 //!   guest-agent listener has a host-side socket to bind to; the
-//!   actual health-check ping is a follow-on W3.3 task and is *not*
-//!   run from this binary (the calling process becomes the guest, so
-//!   there is no opportunity to dial the socket from here).
+//!   actual health-check ping is a follow-on and is *not* run from
+//!   this binary (the calling process becomes the guest, so there is
+//!   no opportunity to dial the socket from here).
 //!
 //! ## Not yet wired
 //!
 //! - Boot timing / health-check ping over vsock — needs a separate
 //!   host process or a fork(); the smoke binary is single-process and
 //!   inherits the process-exits-on-success contract of
-//!   `krun_start_enter`. W3.3 covers that wiring in a follow-on PR.
+//!   `krun_start_enter`. That wiring is a follow-on.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -68,8 +68,8 @@ fn main() -> ExitCode {
     }
 
     // macOS Hypervisor.framework rejects any process that lacks the
-    // `com.apple.security.hypervisor` entitlement (plan 57 W2 added
-    // the joint VZ + Hypervisor entitlement set). `ensure_signed`
+    // `com.apple.security.hypervisor` entitlement (the joint VZ +
+    // Hypervisor entitlement set). `ensure_signed`
     // ad-hoc codesigns the current binary on first run and re-spawns
     // with `MVM_SIGNED=1`; subsequent runs are silent. Without this
     // call, `krun_start_enter` fails at VM creation with rc -22.
@@ -120,7 +120,7 @@ fn main() -> ExitCode {
     // Per-VM vsock socket dir. The smoke binary doesn't run a sibling
     // listener (it becomes the guest), so any AF_VSOCK connect inside
     // the guest will fail with ECONNREFUSED — that's expected for the
-    // W3 spike. Plan 57 W4's supervisor adds the host-side listener.
+    // spike. The supervisor adds the host-side listener.
     let socket_dir = format!("{}/.mvm/vms/mvm-libkrun-smoke", args.home);
     if let Err(e) = std::fs::create_dir_all(&socket_dir) {
         eprintln!("warn: create_dir_all {socket_dir}: {e}");

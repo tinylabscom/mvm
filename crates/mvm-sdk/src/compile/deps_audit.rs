@@ -1,7 +1,6 @@
-//! Application-dependency audit primitives. SDK port Phase 9.
+//! Application-dependency audit primitives.
 //!
-//! Phase 9's "Auditing the dep volume" section calls for every
-//! application-dep volume to ship four sealed artifacts beside the
+//! Every application-dep volume ships four sealed artifacts beside the
 //! installed bytes:
 //!
 //! ```text
@@ -38,7 +37,7 @@
 //! behind an egress allowlist, generating the SBOM via
 //! `cyclonedx-py` / `pnpm sbom`, capturing the fetch log,
 //! running `pip-audit` / `pnpm audit`) lives in `mvm-build` and
-//! lands with Plan 72 W4 once the builder VM actually boots. The
+//! lands once the builder VM actually boots. The
 //! audit gate stays *here* in the SDK so the same types are
 //! consumed by the CLI (`mvmctl deps audit`, `mvmctl deps inspect`)
 //! and the supervisor's admission path with no schema drift.

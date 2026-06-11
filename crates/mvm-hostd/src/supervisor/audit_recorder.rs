@@ -1,22 +1,21 @@
-//! Plan 60 Phase 4 — single audit `Recorder` substrate.
+//! Single audit `Recorder` substrate.
 //!
-//! Phase 4's framing: "Audit instrumentation lives in a single
-//! `mvm-supervisor::audit::Recorder` that every other crate calls
-//! — there is one audit path, not many." This module is that
-//! unifier.
+//! Audit instrumentation lives in one `mvm-supervisor::audit::Recorder`
+//! that every other crate calls — there is one audit path, not many.
+//! This module is that unifier.
 //!
-//! Before Phase 4 there were three independent audit streams:
+//! It supersedes three independent audit streams:
 //!
 //! - **`~/.mvm/audit/<tenant>.jsonl`** — plan-bound chain-signed
-//!   events (`plan.admitted`, `plan.launched`, `plan.failed`)
-//!   from plan 64. Shape: `AuditEntry` carries
+//!   events (`plan.admitted`, `plan.launched`, `plan.failed`).
+//!   Shape: `AuditEntry` carries
 //!   `plan_id`/`plan_version`/`image_*` mandatorily.
 //! - **`~/.mvm/audit/secrets.jsonl`** — operator `mvmctl secret`
-//!   CRUD audit from plan 63 W4. Ad-hoc JSON shape.
+//!   CRUD audit. Ad-hoc JSON shape.
 //! - **`~/.mvm/log/audit.jsonl`** — legacy LocalAudit stream
-//!   (pre-plan-64; `mvmctl audit tail` defaults to this).
+//!   (`mvmctl audit tail` defaults to this).
 //!
-//! Phase 4 unifies them through a typed [`EventCategory`] taxonomy
+//! This module unifies them through a typed [`EventCategory`] taxonomy
 //! and a [`Recorder`] that wraps an [`crate::supervisor::AuditSigner`] +
 //! routes every emit through the same chain-signed envelope. The
 //! per-stream files stay distinct on disk (operator-secret events
@@ -25,8 +24,8 @@
 //!
 //! ## Categories (9)
 //!
-//! Per ADR-002 + plan 60 §"Comprehensive audit catalog" (the
-//! mvmctl audit tail's `cat` filter):
+//! The comprehensive audit catalog (the `mvmctl audit tail` `cat`
+//! filter):
 //!
 //! | Category | Examples | Plan-bound? |
 //! |---|---|---|
@@ -85,9 +84,9 @@ pub enum EventCategory {
     /// Used by `mvmctl audit verify` results, chain-rotation
     /// announcements, etc.
     Audit,
-    /// Workload-emitted audit entries via `host.audit.v1` (Plan 104
-    /// §host.audit.v1, ADR-062). Distinct from system-emitted
-    /// categories so the chain verifier can compute workload-asserted
+    /// Workload-emitted audit entries via `host.audit.v1`. Distinct
+    /// from system-emitted categories so the chain verifier can
+    /// compute workload-asserted
     /// vs system-asserted entry rates separately.
     WorkloadAudit,
 }
@@ -149,7 +148,7 @@ pub enum RecorderError {
 }
 
 /// Unified audit-event recorder. Owns an `Arc<dyn AuditSigner>`
-/// (the chain-signing piece from plan 64 W4); every emit routes
+/// (the chain-signing piece); every emit routes
 /// through it. Cheap to clone; share one recorder across every
 /// emit site in a binary.
 #[derive(Clone)]
@@ -190,7 +189,7 @@ impl Recorder {
     /// requires either an Arc-of-Arc (`Arc::new(...)` per caller,
     /// shared accumulator via the Arc internals) or a follow-up
     /// that changes `global()` to return `Arc<Metrics>` directly.
-    /// For Phase 4 v1, callers that want global semantics
+    /// For now, callers that want global semantics
     /// construct a single `Arc::new(Metrics::new())` at process
     /// start and pass that Arc everywhere — same shape, no
     /// 'static juggling.
@@ -303,7 +302,7 @@ pub const UNBOUND_PLAN_ID: &str = "00000000-0000-0000-0000-000000000000";
 pub const UNBOUND_IMAGE_NAME: &str = "<unbound>";
 
 /// Sentinel `image_sha256` — 64 zero hex chars matches the field's
-/// length constraint in plan 64.
+/// length constraint.
 pub const UNBOUND_IMAGE_SHA256: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -647,7 +646,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Metrics integration (Phase 4 piece 2)
+    // Metrics integration
     // ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -750,8 +749,8 @@ mod tests {
 
     #[test]
     fn prometheus_exposition_carries_all_nine_audit_counters() {
-        // The Phase 4 catalog: every category has a stable metric
-        // name in the prometheus exposition. Pin all 9 here so a
+        // Every category has a stable metric name in the prometheus
+        // exposition. Pin all 9 here so a
         // refactor of write_metric calls can't silently drop one.
         let metrics = Metrics::new();
         let prom = metrics.prometheus_exposition();

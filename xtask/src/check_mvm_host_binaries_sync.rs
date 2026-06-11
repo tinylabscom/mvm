@@ -1,6 +1,6 @@
 //! `xtask check-mvm-host-binaries-sync`
 //!
-//! Plan 115 / ADR-065 CI lint — asserts the Rust manifest at
+//! CI lint — asserts the Rust manifest at
 //! `crates/mvm-cli/src/host_binaries/manifest.rs` and the Nix
 //! attrset at `nix/lib/mvm-host-binaries.nix` agree on the set of
 //! entries and their install paths. Adding or renaming a binary

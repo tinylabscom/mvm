@@ -1,5 +1,4 @@
-//! Bundler reachability scoping for function-entrypoint workloads
-//! (plan-0007 §Phase 2 + ADR-0014 "Static analysis posture").
+//! Bundler reachability scoping for function-entrypoint workloads.
 //!
 //! After the full source tree is bundled, this module walks the
 //! reachable Python (and Node / TypeScript) module graph starting

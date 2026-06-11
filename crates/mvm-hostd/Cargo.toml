@@ -13,7 +13,7 @@ authors.workspace = true
 # listeners plus the broker / host-signer / audit-signer subprocess UDS
 # servers are all legitimate substrate servers (was the per-crate metadata
 # on mvm-broker/mvm-host-signer/mvm-audit-signer + the per-file globs on
-# mvm-supervisor; consolidated here in plan 121 D1).
+# mvm-supervisor; consolidated here).
 [package.metadata.mvm.architecture]
 substrate_server_category = "host daemon roles substrate (supervisor + broker + key signers)"
 
@@ -32,18 +32,18 @@ path = "src/bin/mvm-host-signer.rs"
 name = "mvm-audit-signer"
 path = "src/bin/mvm-audit-signer.rs"
 
-# Plan 129 — per-VM secret-substitution moat (the one process holding secrets
+# Per-VM secret-substitution moat (the one process holding secrets
 # in the clear; opens the host stores, serves guest→host substitution).
 [[bin]]
 name = "mvm-substitution-endpoint"
 path = "src/bin/mvm-substitution-endpoint.rs"
 
 [dependencies]
-# `egress-ca`: Plan 129 Stage 2 — the https terminator mints per-SNI leaves
+# `egress-ca`: the https terminator mints per-SNI leaves
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
 mvm-core = { workspace = true, features = ["egress-ca"] }
 mvm-backend.workspace = true
-# plan 123 A2 — the EgressEnforcer seam this crate's SupervisorEgressEnforcer
+# The EgressEnforcer seam this crate's SupervisorEgressEnforcer
 # implements. Acyclic HIGH->LOW: mvm-network deps only mvm-core + mvm-sdk.
 mvm-network.workspace = true
 # `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
@@ -57,8 +57,8 @@ base64.workspace = true
 chrono.workspace = true
 # rand_core feature for the signers' Ed25519 keygen.
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
-# Plan 141 / ADR-064 — packet parse + payload rebuild for the gateway
-# observer pipeline (see workspace dep comment).
+# Packet parse + payload rebuild for the gateway observer pipeline
+# (see workspace dep comment).
 etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
@@ -71,15 +71,15 @@ serde_json.workspace = true
 # RFC 8785 JSON Canonicalization Scheme — audit-signer stable bytes-to-sign.
 serde_jcs = "0.1"
 sha2.workspace = true
-# Plan 129 keyholder — HMAC-SHA256 signer (webhook HMAC + AWS SigV4 key derivation).
+# keyholder HMAC-SHA256 signer (webhook HMAC + AWS SigV4 key derivation).
 hmac.workspace = true
-# Plan 141 — hex digests for flow-byte-log record refs.
+# hex digests for flow-byte-log record refs.
 hex.workspace = true
 thiserror = "1"
 toml.workspace = true
 url = "2"
 reqwest = { workspace = true }
-# Plan 129 Stage 2 — server-side TLS termination for bound-host https egress.
+# Server-side TLS termination for bound-host https egress.
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 zeroize.workspace = true
@@ -99,7 +99,7 @@ landlock = { workspace = true }
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
-# ADR-070 audit-chain drift tripwire (supervisor tests).
+# audit-chain drift tripwire (supervisor tests).
 mvm-verify = { path = "../mvm-verify" }
 # jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
 ctor = "0.2"

@@ -15,7 +15,7 @@ build = "build.rs"
 # libkrun is a library-style VMM: linked directly into the calling
 # binary, no out-of-process daemon. On Linux it uses KVM; on macOS it
 # uses Hypervisor.framework. mvm uses it as a Tier 2 microVM backend
-# and (post-Plan-71) the builder-VM substrate.
+# and the builder-VM substrate.
 #
 # Two build modes:
 #
@@ -27,9 +27,8 @@ build = "build.rs"
 #     libkrun.h on the host (probed by build.rs at the standard install
 #     locations) and a working libkrun shared library at link time.
 #
-# Plan 57 W1 lands the bindings; W2 adds macOS codesigning entitlements;
-# W3 validates an end-to-end boot. This crate stays narrowly focused on
-# the FFI surface — backend dispatch lives in mvm-backend.
+# This crate stays narrowly focused on the FFI surface — backend
+# dispatch lives in mvm-backend.
 
 [dependencies]
 mvm-core.workspace = true
@@ -42,11 +41,11 @@ tracing = "0.1"
 # itself. Compile cost is marginal; serde is already in nearly
 # every other workspace crate's dep graph.
 serde = { workspace = true }
-# Plan 102 W6.A.5 — `SupervisorConfig` carries the per-VM
-# ExecutionPlan + PolicyBundle as `Option<serde_json::Value>` so the
-# bin (`mvm-libkrun-supervisor`) can feed them into the bridge
-# factory without forcing mvm-libkrun to depend on mvm-plan / mvm-
-# policy (which would close the `mvm-libkrun ← mvm-core ← mvm-plan`
+# `SupervisorConfig` carries the per-VM ExecutionPlan + PolicyBundle as
+# `Option<serde_json::Value>` so the bin (`mvm-libkrun-supervisor`) can
+# feed them into the bridge factory without forcing mvm-libkrun to
+# depend on mvm-plan / mvm-policy (which would close the
+# `mvm-libkrun ← mvm-core ← mvm-plan`
 # cycle). The bin crate, being a leaf, deserializes the Values into
 # typed `ExecutionPlan` / `PolicyBundle` since it can depend on
 # both. Always-on (not feature-gated) because `SupervisorConfig` is
@@ -62,15 +61,14 @@ serde_json.workspace = true
 # The `libkrun-smoke` example keeps `mvm-guest` as a dev-dep because
 # dev-deps are excluded from cycle analysis.
 #
-# Plan 102 W6.A.5 moved the `mvm-libkrun-supervisor` bin out into
-# its own leaf crate (`crates/mvm-libkrun-supervisor/`) so the bin
-# can also depend on `mvm-supervisor` for the gateway audit
-# substrate. The optional `mvm-providers` + `serde_json` deps that
-# previously gated the bin moved with it. `serde_json` is still
-# needed in `[dev-dependencies]` for the `SupervisorConfig` /
-# `KrunContext` serde-roundtrip tests.
-# Plan 87 W2 — `passt` module probes $PATH for the `passt` binary
-# before spawning it. `which` is already in the workspace dep tree
+# The `mvm-libkrun-supervisor` bin lives in its own leaf crate
+# (`crates/mvm-libkrun-supervisor/`) so it can also depend on
+# `mvm-supervisor` for the gateway audit substrate. The optional
+# `mvm-providers` + `serde_json` deps that previously gated the bin
+# moved with it. `serde_json` is still needed in `[dev-dependencies]`
+# for the `SupervisorConfig` / `KrunContext` serde-roundtrip tests.
+# The `passt` module probes $PATH for the `passt` binary before
+# spawning it. `which` is already in the workspace dep tree
 # (mvm-cli/mvm-build); pulling it in here keeps the dep graph
 # uniform and avoids reinventing PATH search.
 which.workspace = true
@@ -87,33 +85,33 @@ default = []
 # Opt-in: generate FFI bindings and link `libkrun`. Off by default so
 # the workspace builds on hosts without libkrun installed (CI fast lane,
 # Linux contributors who don't run the Tier 2 backend). With the
-# supervisor bin moved to `mvm-libkrun-supervisor` (Plan 102 W6.A.5),
-# this feature only gates the FFI surface in lib.rs (`configure_*`,
+# supervisor bin moved to `mvm-libkrun-supervisor`, this feature only
+# gates the FFI surface in lib.rs (`configure_*`,
 # `run_supervisor`, etc.); the bin pulls its own dep chain.
 libkrun-sys = []
 
 [dev-dependencies]
-# Plan 87 W2 — passt supervisor tests stage scratch dirs.
+# passt supervisor tests stage scratch dirs.
 tempfile.workspace = true
-# The plan 57 W3 smoke example shares `GUEST_AGENT_PORT` with the
-# production vsock plumbing.
+# The smoke example shares `GUEST_AGENT_PORT` with the production vsock
+# plumbing.
 mvm-guest.workspace = true
-# `ensure_signed()` is plan 57 W2's codesigning gate. macOS rejects
+# `ensure_signed()` is the codesigning gate. macOS rejects
 # any process that calls `Hypervisor.framework` without
 # `com.apple.security.hypervisor`; the smoke binary self-signs on
 # first run and re-spawns, same as `mvmctl up --hypervisor
 # apple-container` does.
 mvm-backend.workspace = true
-# Plan 72 W4 prerequisite: unit tests for `KrunContext`'s serde
-# shape (incl. the new `virtio_fs_mounts` field with `#[serde(default)]`
+# Unit tests for `KrunContext`'s serde shape (incl. the new
+# `virtio_fs_mounts` field with `#[serde(default)]`
 # back-compat) exercise the JSON pipe shape the supervisor binary
 # carries. serde_json is already an optional regular dep behind
 # `libkrun-sys`; listing it again as a dev-dep makes the test build
 # independent of feature flags.
 serde_json = { workspace = true }
 
-# Plan 57 W3 — manual smoke binary that boots a Nix-built kernel +
-# ext4 rootfs via libkrun and blocks until the guest exits. Gated on
+# Manual smoke binary that boots a Nix-built kernel + ext4 rootfs via
+# libkrun and blocks until the guest exits. Gated on
 # `libkrun-sys` so the example only compiles on hosts with libkrun.h
 # present.
 [[example]]
@@ -121,10 +119,9 @@ name = "libkrun-smoke"
 path = "examples/libkrun-smoke.rs"
 required-features = ["libkrun-sys"]
 
-# Plan 57 W4 — long-running supervisor process. One process per
-# libkrun guest. The bin moved to its own leaf crate
-# (`crates/mvm-libkrun-supervisor/`) under Plan 102 W6.A.5 so it can
-# depend on `mvm-supervisor` (gateway audit substrate) without
+# Long-running supervisor process. One process per libkrun guest. The
+# bin moved to its own leaf crate (`crates/mvm-libkrun-supervisor/`) so
+# it can depend on `mvm-supervisor` (gateway audit substrate) without
 # closing the `mvm-supervisor → mvm-backend → mvm-libkrun` cycle.
 
 [lints]

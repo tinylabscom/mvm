@@ -1,5 +1,5 @@
-//! virtio-fs volume mount handler — plan 45 §D5 (Path C; renamed
-//! from the prior `share` module without behavioural change).
+//! virtio-fs volume mount handler (renamed from the prior `share`
+//! module without behavioural change).
 //!
 //! Production-safe. Every host-supplied path runs through
 //! `mvm_core::crypto::policy::MountPathPolicy` before the agent

@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §2 — the `SecretResolver` trait + `LocalResolver`.
+//! The `SecretResolver` trait + `LocalResolver`.
 //!
 //! A resolver maps a workload's [`SecretRef`] (by name) to its raw
 //! credential value, handed back in a zeroizing `SecretBox`. The value
@@ -8,7 +8,7 @@
 //!
 //! Raw bytes never widen past this boundary — the value lands in a
 //! `SecretBox<Vec<u8>>` that zeroizes on drop, and the keyholder
-//! (Phase C) consumes it on egress without copying it into the guest.
+//! consumes it on egress without copying it into the guest.
 
 use std::sync::Arc;
 

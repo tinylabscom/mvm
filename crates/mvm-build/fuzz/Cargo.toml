@@ -25,7 +25,7 @@ serde_json = "1"
 path = ".."
 default-features = false
 
-# Plan 97 / ADR-002 claim 5 — fuzz the host-side `SupervisorConfig`
+# claim 5 — fuzz the host-side `SupervisorConfig`
 # JSON parser. The Swift `mvm-vz-supervisor` reads attacker-
 # influenced JSON on stdin; the Rust shape this fuzzes is the
 # canonical source the Swift `JSONDecoder` mirrors, so a panic-free

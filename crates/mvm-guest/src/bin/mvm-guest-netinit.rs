@@ -1,4 +1,4 @@
-//! `mvm-guest-netinit` — guest-side network defense (Plan 74 W2).
+//! `mvm-guest-netinit` — guest-side network defense.
 //!
 //! Run as PID >1, uid 0 inside every microVM at boot, before the
 //! main `mvm-guest-agent` is forked under setpriv. Installs kernel

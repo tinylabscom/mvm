@@ -1,7 +1,7 @@
-// Plan 141 / ADR-064 — fuzz the gateway packet parser + payload rebuilder.
+// Fuzz the gateway packet parser + payload rebuilder.
 //
 // `packet::parse` is the first real parse on the guest's network path
-// (pre-Plan-141 the bridge byte-copied opaquely). `rebuild_with_payload`
+// (the bridge previously byte-copied opaquely). `rebuild_with_payload`
 // re-serializes a frame after an observer's `Verdict::Modify`. Both run on
 // attacker-influenced bytes (claim 5). The harness goal is "never panic on
 // any input": `parse` must fail closed to `None` on garbage, and rebuilding

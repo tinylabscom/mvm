@@ -1,8 +1,8 @@
 pub mod aead;
 pub mod attestation;
 pub mod command_gate;
-// Plan 129 Stage 2 (ADR-006): per-VM name-constrained egress CA for transparent
-// https substitution. Gated so the runtime-free default build skips `rcgen`.
+// Per-VM name-constrained egress CA for transparent https substitution.
+// Gated so the runtime-free default build skips `rcgen`.
 #[cfg(feature = "egress-ca")]
 pub mod egress_ca;
 pub mod image_verify;

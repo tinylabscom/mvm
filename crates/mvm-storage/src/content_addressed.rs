@@ -2,7 +2,7 @@
 //!
 //! Identical content lands at the same path and is written once, so a
 //! golden rootfs/memfile shared by many warm-start clones costs one copy on
-//! disk (plan 123 B3 — the storage half of the Phase C diff-snapshot). The
+//! disk — the storage half of the diff-snapshot. The
 //! digest is the name, so the store is immutable: a put either finds the
 //! object already present or writes it atomically.
 

@@ -1,4 +1,4 @@
-//! Integration tests for plan 37 Addendum G4 — replay protection.
+//! Integration tests for replay protection.
 //!
 //! Covers `check_window` (validity timing), `NonceStore` (replay
 //! ledger), and `Nonce` (wire format).

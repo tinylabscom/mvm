@@ -1,10 +1,10 @@
 //! Handler registry — the in-subprocess lookup that dispatches a
 //! `ServiceCall` to the right [`ServiceHandler`].
 //!
-//! W1a ships the registry shape with zero handlers registered (every
-//! call returns `Err(NotBound)`). W3 (`host.time.v1`), W4a
-//! (`host.cost.v1` workload verb), and the `broker.v1/list_services`
-//! introspection verb wire in their handlers via [`Registry::register`].
+//! The registry starts with zero handlers registered (every call
+//! returns `Err(NotBound)`); `host.time.v1`, the `host.cost.v1`
+//! workload verb, and the `broker.v1/list_services` introspection verb
+//! wire in their handlers via [`Registry::register`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use mvm_core::protocol::handler::{
 
 /// Per-subprocess handler registry. Handlers registered at startup live
 /// for the subprocess lifetime; runtime registration is not supported
-/// (the static catalog is the Plan 104 contract).
+/// (the static catalog is the contract).
 pub struct Registry {
     handlers: HashMap<ServiceId, Arc<dyn ServiceHandler>>,
 }

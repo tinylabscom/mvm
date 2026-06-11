@@ -1,4 +1,4 @@
-// ADR-002 §W4.2 — fuzz the host→guest JSON deserializer. Every byte
+// Fuzz the host→guest JSON deserializer. Every byte
 // arriving on `GUEST_AGENT_PORT` (5252) lands in
 // `serde_json::from_slice::<GuestRequest>` before any agent logic
 // runs, so this is the agent's first parser-shaped surface. The

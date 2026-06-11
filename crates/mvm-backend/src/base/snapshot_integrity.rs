@@ -1,11 +1,11 @@
 //! HMAC-SHA256 sealing + verification for Firecracker template
-//! snapshots. ADR-007 / plan 41 W4 / M9.
+//! snapshots.
 //!
-//! Plan-60 W8 lifted these helpers out of
-//! `mvm::vm::template::lifecycle` so the snapshot **verify**
-//! side (called from `mvm_backend::microvm::restore_from_template_snapshot`)
-//! can reach them without `mvm-backend` taking a back-edge on
-//! `mvm`. The **seal** side (called from
+//! These helpers live here (out of `mvm::vm::template::lifecycle`) so
+//! the snapshot **verify** side (called from
+//! `mvm_backend::microvm::restore_from_template_snapshot`) can reach
+//! them without `mvm-backend` taking a back-edge on `mvm`. The
+//! **seal** side (called from
 //! `mvm::vm::template::lifecycle::create_snapshot`) keeps its
 //! original call shape via the same module.
 //!
@@ -15,7 +15,8 @@
 //!   context. Snapshot files that exist but can't be sealed are left
 //!   on disk so the operator can inspect them.
 //! - **Verification**: a missing sidecar is a non-fatal warning by
-//!   default (preserves restorability of pre-W4 snapshots).
+//!   default (preserves restorability of snapshots sealed before
+//!   integrity sidecars existed).
 //!   `MVM_SNAPSHOT_HMAC_STRICT=1` flips that to a hard error.
 //!   `MVM_ALLOW_STALE_SNAPSHOT=1` lets a version mismatch through —
 //!   used when the operator wants to resume a snapshot sealed by an
@@ -26,7 +27,6 @@ use anyhow::{Context, Result};
 use crate::base::ui;
 
 /// Seal a freshly-created snapshot with an HMAC-SHA256 sidecar.
-/// ADR-007 / plan 41 W4 / M9.
 ///
 /// Reads the host-local key (creating it on first run), computes a
 /// tag over the snapshot files plus the current `mvmctl` version,
@@ -43,10 +43,10 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     let files = mvm_core::crypto::snapshot_hmac::files_in(snap_path);
     let mvmctl_version = env!("CARGO_PKG_VERSION");
     // Bump the per-resource epoch counter so a future `verify` call
-    // can detect a captured-and-replayed older envelope (G5 of the
-    // filesystem-volumes plan). Counter lives next to the snapshot files
-    // so re-creating the dir with `mvmctl template build --force`
-    // resumes from the previous high-water mark.
+    // can detect a captured-and-replayed older envelope. Counter lives
+    // next to the snapshot files so re-creating the dir with
+    // `mvmctl template build --force` resumes from the previous
+    // high-water mark.
     let epoch_store = mvm_core::crypto::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
     let next_epoch = epoch_store
         .next()
@@ -59,8 +59,8 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         secrecy::ExposeSecret::expose_secret(&key),
     )
     .with_context(|| format!("sealing snapshot at {snap_dir}"))?;
-    // Plan 122 C — additionally content-address + Ed25519-sign the snapshot
-    // under the host attestation identity. The signature (not the symmetric
+    // Additionally content-address + Ed25519-sign the snapshot under
+    // the host attestation identity. The signature (not the symmetric
     // HMAC, which anyone holding the host key could forge) is the
     // authentication gate at resume admit.
     let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
@@ -71,14 +71,13 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
 }
 
 /// Verify the integrity sidecar for a snapshot before resume.
-/// ADR-007 / plan 41 W4 / M9.
 ///
 /// Returns `Ok(())` on a clean match. Honours `MVM_ALLOW_STALE_SNAPSHOT=1`
 /// for the version-mismatch case (e.g. a snapshot sealed by an earlier
 /// `mvmctl` build that the operator wants to resume anyway). The
 /// `MVM_SNAPSHOT_HMAC_STRICT=1` env var flips a missing sidecar from a
-/// non-fatal warning (default — preserves restorability of pre-W4
-/// snapshots) into a hard error.
+/// non-fatal warning (default — preserves restorability of snapshots
+/// sealed before integrity sidecars existed) into a hard error.
 pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     use mvm_core::crypto::snapshot_hmac::VerifyError;
     use std::path::Path;
@@ -109,7 +108,7 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     let mvmctl_version = env!("CARGO_PKG_VERSION");
     let allow_stale = std::env::var("MVM_ALLOW_STALE_SNAPSHOT").as_deref() == Ok("1");
     // Read the per-resource high-water mark; the verifier rejects
-    // any envelope whose epoch is below it (G5 replay defence).
+    // any envelope whose epoch is below it (replay defence).
     let epoch_store = mvm_core::crypto::snapshot_hmac::EpochStore::new(snap_path.join(".epoch"));
     let min_epoch = epoch_store.load();
 
@@ -147,16 +146,16 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         }
     };
 
-    // Plan 122 C — the Ed25519 signature is the authentication gate. The
-    // HMAC above is cheap local integrity; this proves the host signed these
+    // The Ed25519 signature is the authentication gate. The HMAC above
+    // is cheap local integrity; this proves the host signed these
     // exact bytes at this epoch.
     verify_snapshot_signature(snap_dir, snap_path, &files, hmac_sidecar.epoch)
 }
 
 /// Verify the `snapshot.sig` Ed25519 sidecar. Missing signatures are a
 /// non-fatal warning by default (preserves restorability of snapshots
-/// sealed before plan 122 C); `MVM_SNAPSHOT_HMAC_STRICT=1` makes them a
-/// hard error. A present-but-invalid signature is always fatal.
+/// sealed before signing existed); `MVM_SNAPSHOT_HMAC_STRICT=1` makes
+/// them a hard error. A present-but-invalid signature is always fatal.
 fn verify_snapshot_signature(
     snap_dir: &str,
     snap_path: &std::path::Path,

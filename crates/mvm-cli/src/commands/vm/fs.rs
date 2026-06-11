@@ -1,5 +1,5 @@
 //! `mvmctl fs <verb> <vm> <args>` — filesystem RPC against a
-//! running microVM. W1 / A1 of the filesystem-volumes plan.
+//! running microVM.
 //!
 //! Production-safe surface: every call routes through the agent's
 //! `mvm_core::crypto::policy::PathPolicy` (deny-list +
@@ -162,8 +162,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// Send an FS RPC to `name`'s guest agent over the backend-aware transport
-/// (Plan 169). `vsock_transport::for_vm` picks the right socket per VMM —
+/// Send an FS RPC to `name`'s guest agent over the backend-aware transport.
+/// `vsock_transport::for_vm` picks the right socket per VMM —
 /// Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU expose
 /// — so `mvmctl fs`/`cp` work regardless of which backend launched the VM.
 /// The `--hypervisor mock` fast path (a mock agent at the VM dir's
@@ -194,7 +194,7 @@ fn cmd_read(name: &str, path: &str, offset: u64, length: u64) -> Result<()> {
         length,
         follow_symlinks: true,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
@@ -229,7 +229,7 @@ fn cmd_write(
         create_parents,
         follow_symlinks,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
@@ -247,7 +247,7 @@ fn cmd_ls(name: &str, path: &str, json: bool) -> Result<()> {
         path: path.to_string(),
         follow_symlinks: true,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
@@ -289,7 +289,7 @@ fn cmd_stat(name: &str, path: &str, follow_symlinks: bool, json: bool) -> Result
         path: path.to_string(),
         follow_symlinks,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
@@ -317,7 +317,7 @@ fn cmd_mkdir(name: &str, path: &str, mode: u32, parents: bool) -> Result<()> {
         mode,
         parents,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
@@ -335,7 +335,7 @@ fn cmd_rm(name: &str, path: &str, recursive: bool) -> Result<()> {
         recursive,
         follow_symlinks: false,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {
@@ -354,7 +354,7 @@ fn cmd_mv(name: &str, from: &str, to: &str) -> Result<()> {
         to: to.to_string(),
         follow_symlinks: false,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let result = unwrap_fs(fs_request(name, req)?)?;
     match result {

@@ -1,9 +1,9 @@
 //! `mvmctl vm <sub>` — operations on an existing/running microVM.
 //!
-//! Plan 178 / ADR-077: the single-VM operational verbs collapse under one
-//! `vm` namespace (everything that acts on a VM that's already been launched).
-//! The leaf modules are unchanged — this is purely the grouped surface and
-//! its dispatch. The everyday flow (`up`/`run`/`exec`/`invoke`/`ls`/`console`/
+//! The single-VM operational verbs collapse under one `vm` namespace
+//! (everything that acts on a VM that's already been launched). The leaf
+//! modules are unchanged — this is purely the grouped surface and its
+//! dispatch. The everyday flow (`up`/`run`/`exec`/`invoke`/`ls`/`console`/
 //! `down`/`logs`) stays top-level.
 
 use anyhow::Result;
@@ -74,7 +74,7 @@ impl VmCmd {
     /// Audit verb name for this VM op. Preserves the per-op audit taxonomy
     /// (`cmd.pause.*`, `cmd.cp.*`, …) unchanged across the `vm` grouping —
     /// the CLI path moved to `vm <sub>` but the audit verbs did not, so
-    /// claims 8/12/13 event names are stable.
+    /// the claims 8/12/13 event names are stable.
     pub(in crate::commands) fn verb_name(&self) -> &'static str {
         match self {
             VmCmd::Pause(_) => "pause",

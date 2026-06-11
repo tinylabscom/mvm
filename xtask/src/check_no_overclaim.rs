@@ -2,8 +2,7 @@
 //!
 //! Refuses any user-facing repo text that uses phrases declared
 //! "gated" by a claim file in `specs/claims/` whose status is not
-//! `Shipped`. Plan 75 W0 introduces this pattern; plan 74 W0
-//! ratifies it.
+//! `Shipped`.
 //!
 //! The lint reads every `specs/claims/*.md` (excluding `README.md`),
 //! parses its YAML frontmatter, and builds a `phrase → (claim, status,

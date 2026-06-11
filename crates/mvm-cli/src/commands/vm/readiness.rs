@@ -1,5 +1,4 @@
-//! Shared host-side readiness milestone emission (ADR-053 §3 /
-//! plan 74 W2).
+//! Shared host-side readiness milestone emission.
 //!
 //! Every `mvmctl` subcommand that observes a VM-lifecycle milestone
 //! the user might want to see in `mvmctl ls/ps --json` ends up here.

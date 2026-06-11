@@ -9,16 +9,15 @@ pub const PROTOCOL_VERSION_AUTHENTICATED: u8 = 2;
 pub const PROTOCOL_VERSION_LEGACY: u8 = 1;
 
 // ============================================================================
-// Signature algorithm identifier (Plan 104 §H-L4.1)
+// Signature algorithm identifier
 // ============================================================================
 
 /// Ed25519 signatures (the v1 default; `ed25519-dalek` v2.x).
 pub const SIG_ALG_ED25519: u8 = 0x01;
 
-/// ECDSA P-256 signatures (the macOS Secure Enclave host-signer path that
-/// lands in Plan 104 W8 — the SE only exposes P-256 keys). Reserved at
-/// W1a; broker rejects frames with this `sig_alg` until W8 wires the
-/// verification path.
+/// ECDSA P-256 signatures (the macOS Secure Enclave host-signer path — the
+/// SE only exposes P-256 keys). Reserved; the broker rejects frames with
+/// this `sig_alg` until the verification path is wired.
 pub const SIG_ALG_ECDSA_P256: u8 = 0x02;
 
 // ============================================================================
@@ -29,20 +28,18 @@ pub const SIG_ALG_ECDSA_P256: u8 = 0x02;
 ///
 /// After the initial CONNECT/OK handshake and session establishment,
 /// every frame becomes an `AuthenticatedFrame` containing the signed inner
-/// payload (the original `GuestRequest`/`GuestResponse` or, post-Plan-104
-/// W1a, a `ServiceCall`/`ServiceResponse`) plus a 1-byte algorithm
-/// identifier so the signature can be verified without out-of-band
-/// algorithm negotiation.
+/// payload (the original `GuestRequest`/`GuestResponse`, or a
+/// `ServiceCall`/`ServiceResponse`) plus a 1-byte algorithm identifier so
+/// the signature can be verified without out-of-band algorithm negotiation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticatedFrame {
     /// Protocol version (2 = authenticated, 1 = legacy/unauthenticated).
     pub version: u8,
-    /// Signature algorithm identifier (Plan 104 §H-L4.1). Currently
-    /// `SIG_ALG_ED25519` (0x01); `SIG_ALG_ECDSA_P256` (0x02) reserved for
-    /// the macOS Secure Enclave host-signer path in W8. Unknown values
-    /// must be rejected at frame parse so a future PQC scheme can land
-    /// without a wire-format hard fork.
+    /// Signature algorithm identifier. Currently `SIG_ALG_ED25519` (0x01);
+    /// `SIG_ALG_ECDSA_P256` (0x02) reserved for the macOS Secure Enclave
+    /// host-signer path. Unknown values must be rejected at frame parse so
+    /// a future PQC scheme can land without a wire-format hard fork.
     pub sig_alg: u8,
     /// Unique per-session identifier (assigned during handshake).
     pub session_id: String,
@@ -51,8 +48,7 @@ pub struct AuthenticatedFrame {
     /// ISO 8601 timestamp of frame creation.
     pub timestamp: String,
     /// The signed inner payload. The bytes-to-sign for JSON payloads
-    /// use JCS (RFC 8785, Plan 104 §S28) under whichever `sig_alg`
-    /// the frame carries.
+    /// use JCS (RFC 8785) under whichever `sig_alg` the frame carries.
     pub signed: SignedPayload,
 }
 
@@ -89,7 +85,7 @@ pub struct SessionHelloAck {
 }
 
 // ============================================================================
-// Agent profile (plan 76 Phase 1)
+// Agent profile
 // ============================================================================
 
 /// Profile baked into an mvm guest image. Determines the set of vsock
@@ -100,8 +96,8 @@ pub struct SessionHelloAck {
 ///
 /// **Source of truth.** The profile is declared by the image config
 /// — `/etc/mvm/security.json` on a sealed-prod image lives on a
-/// dm-verity rootfs (ADR-002 §W3), so the value cannot be widened at
-/// runtime: any modification breaks the verity hash and the kernel
+/// dm-verity rootfs, so the value cannot be widened at runtime: any
+/// modification breaks the verity hash and the kernel
 /// panics in `mvm-verity-init` before userspace. The loader treats
 /// absence of the policy file as an unprovisioned dev image
 /// (`SecurityPolicy::dev_defaults`).
@@ -116,8 +112,8 @@ pub struct SessionHelloAck {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentProfile {
-    /// Hardened production guest. Only ADR-002 production-safe verbs
-    /// pass the dispatcher gate.
+    /// Hardened production guest. Only production-safe verbs pass the
+    /// dispatcher gate.
     #[default]
     SealedProd,
     /// Development guest. Adds shell exec, process RPC, filesystem
@@ -147,8 +143,8 @@ pub struct SecurityPolicy {
     #[serde(default = "default_true")]
     pub require_auth: bool,
 
-    /// Image profile (plan 76 Phase 1). Drives the agent's dispatcher
-    /// allowlist. Defaults to `SealedProd` for a serialized policy
+    /// Image profile. Drives the agent's dispatcher allowlist.
+    /// Defaults to `SealedProd` for a serialized policy
     /// that omits the field; `dev_defaults()` constructs with `Dev`.
     #[serde(default)]
     pub profile: AgentProfile,
@@ -528,8 +524,8 @@ mod tests {
 
     #[test]
     fn test_authenticated_frame_missing_sig_alg_field_rejected() {
-        // `deny_unknown_fields` + no default → an old (pre-W1a) frame
-        // without `sig_alg` must fail to parse. This is the no-backcompat
+        // `deny_unknown_fields` + no default → an old frame without
+        // `sig_alg` must fail to parse. This is the no-backcompat
         // contract: old frames hard-fail rather than silently decoding to
         // a default (which would let a forged frame pretend to be a
         // future PQC algorithm).
@@ -632,7 +628,7 @@ mod tests {
     #[test]
     fn test_security_policy_missing_profile_field_is_sealed_prod() {
         // An older or hand-rolled policy file that omits `profile`
-        // must NOT silently widen to `Dev`. ADR-002 fail-closed.
+        // must NOT silently widen to `Dev`. Fail closed.
         let json = "{}";
         let policy: SecurityPolicy = serde_json::from_str(json).unwrap();
         assert_eq!(policy.profile, AgentProfile::SealedProd);

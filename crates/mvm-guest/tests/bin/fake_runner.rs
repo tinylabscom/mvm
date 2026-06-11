@@ -1,4 +1,4 @@
-//! Test fixture for the warm-process worker pool (plan 43).
+//! Test fixture for the warm-process worker pool.
 //!
 //! Reads framed [`WorkerCallRequest`]s from stdin and writes
 //! [`WorkerCallResponse`]s to stdout in a loop. Honours an env var
@@ -46,8 +46,8 @@ enum Behavior {
     Leak50MibPerCall,
     SlowSecs(u64),
     /// Emit one envelope-style control record per call alongside the
-    /// response. Phase 4c — exercises the new `controls` channel
-    /// end-to-end through the warm-process pool.
+    /// response. Exercises the `controls` channel end-to-end through
+    /// the warm-process pool.
     EmitControl,
 }
 
@@ -213,7 +213,7 @@ fn main() -> ExitCode {
                     stdout: req.stdin.clone(),
                     // stderr stays as opaque user output — proves the
                     // host can't be tricked into reparsing stderr as
-                    // an envelope (the spoof gadget Phase 4c
+                    // an envelope (the spoof gadget this design
                     // eliminates).
                     stderr: b"MVMFORGE_ENVELOPE: this-must-not-be-parsed\n".to_vec(),
                     controls: vec![WorkerControlRecord {

@@ -1,4 +1,4 @@
-//! Per-VM metrics sampler — A3 of the filesystem-volumes plan.
+//! Per-VM metrics sampler.
 //!
 //! Pulls CPU, memory, disk, and network counters for one VM and
 //! pushes them into `mvm_core::observability::instance_metrics`.
@@ -6,8 +6,8 @@
 //! can stub the readings without touching `/proc` or `/sys`; the
 //! production `OsSources` impl reads the live host filesystem.
 //!
-//! The supervisor's tick loop (Wave 1.4 of plan 37) drives the
-//! sampler on a 5-second cadence. Until that loop lands, callers
+//! The supervisor's tick loop drives the sampler on a 5-second
+//! cadence. Until that loop lands, callers
 //! invoke `Sampler::sample_once` directly — it's idempotent and
 //! safe to call from any thread.
 

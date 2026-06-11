@@ -1,13 +1,12 @@
 //! Host services broker — wire envelope, error codes, and handler-config
-//! enums (Plan 104 W1a foundation slice).
+//! enums.
 //!
 //! The types here cross every process boundary in the broker subprocess set
-//! (`mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`; ADR-062 dropped
-//! `mvm-secrets-dispatcher`) plus the supervisor's UDS proxies. They MUST
-//! stay in `mvm-core` so all four processes can import them without pulling
-//! each other's runtime deps. See [ADR-061 §"Wire format"] and Plan 104
-//! §"Hardening posture L4.1" for the algorithm-identifier byte that pairs
-//! with these envelopes on the vsock side.
+//! (`mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`) plus the
+//! supervisor's UDS proxies. They MUST stay in `mvm-core` so all four
+//! processes can import them without pulling each other's runtime deps.
+//! An algorithm-identifier byte pairs with these envelopes on the vsock
+//! side.
 
 use std::time::Duration;
 
@@ -104,12 +103,12 @@ pub enum ServiceIdParseError {
 }
 
 // ============================================================================
-// CorrelationId — supervisor-assigned per-call identifier (H-L4.6 / G4)
+// CorrelationId — supervisor-assigned per-call identifier
 // ============================================================================
 
 /// Per-call correlation identifier, assigned by the supervisor at frame
-/// ingress (Plan 104 §H-L4.6). Workload-supplied values are rewritten or
-/// rejected — this is enforced at the broker gate, not by the type.
+/// ingress. Workload-supplied values are rewritten or rejected — this is
+/// enforced at the broker gate, not by the type.
 ///
 /// Wire form is a string for forward-compatibility (the supervisor today
 /// formats ULIDs; a future change to Snowflake or other id format is a
@@ -142,8 +141,8 @@ impl std::fmt::Display for CorrelationId {
 ///
 /// The envelope itself is strictly typed (`deny_unknown_fields`); the
 /// `payload` is `serde_json::Value` because per-handler payloads vary.
-/// The handler's `parse_payload` step (Plan 104 §"Capability gating" gate 5)
-/// is the *real* schema gate for payload contents.
+/// The handler's `parse_payload` step is the *real* schema gate for
+/// payload contents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceCall {
@@ -192,10 +191,9 @@ impl ServiceResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ServiceErrorCode {
     /// The workload's `ExecutionPlan.services` did not bind this service.
-    /// (Plan 104 §"Capability gating" gate 3.)
     NotBound,
     /// The service exists in the static catalog but the verb is not
-    /// implemented yet (e.g. `host.cost.v1::tenant` before W4b).
+    /// implemented yet.
     NotImplemented,
     /// The handler's typed `parse_payload` rejected the payload shape.
     BadRequest,
@@ -203,26 +201,26 @@ pub enum ServiceErrorCode {
     RateLimitExceeded,
     /// Lifetime quota for this `(workload, service)` exhausted.
     LifetimeQuotaExhausted,
-    /// Bounded vsock receive queue at capacity (Plan 104 §S21).
+    /// Bounded vsock receive queue at capacity.
     QueueFull,
-    /// Handler response exceeded `response_size_cap()` (§S11).
+    /// Handler response exceeded `response_size_cap()`.
     ResponseTooLarge,
-    /// Handler call timed out per `call_timeout()` (§C4).
+    /// Handler call timed out per `call_timeout()`.
     Timeout,
     /// Handler-internal failure: dispatch panic, circuit-breaker open,
     /// downstream (e.g. mvmd) unavailable.
     Unavailable,
-    /// Subprocess hasn't finished initial config + listener bring-up yet.
-    /// (§S16: "bootstrap-order failure mode".)
+    /// Subprocess hasn't finished initial config + listener bring-up yet
+    /// (bootstrap-order failure mode).
     NotReady,
-    /// Service composition exceeded the depth cap (Plan 104 §A5).
+    /// Service composition exceeded the depth cap.
     CompositionDepth,
-    /// Service composition exceeded the width cap (Plan 104 §H-L6.5).
+    /// Service composition exceeded the width cap.
     CompositionWidth,
     /// Per-workload total-call/minute budget exceeded; escalates to audit
-    /// + (optional) workload pause (§S3).
+    /// + (optional) workload pause.
     ServiceCallAbuse,
-    /// Operator revoked this workload's broker session (§S27).
+    /// Operator revoked this workload's broker session.
     SessionRevoked,
     /// Catch-all for unexpected handler-internal errors. Never carries
     /// payload-derived information in the message.
@@ -230,7 +228,7 @@ pub enum ServiceErrorCode {
 }
 
 // ============================================================================
-// Handler-side configuration enums (Plan 104 §C3 / §C4)
+// Handler-side configuration enums
 // ============================================================================
 
 /// Per-handler idempotency contract. Different services tolerate different
@@ -246,15 +244,15 @@ pub enum Idempotency {
     /// `host.cost.v1::workload` ships here at 1000ms.
     CacheRecent { ttl_ms: u32 },
     /// Reject a second call with the same `correlation_id`. The
-    /// host-logging follow-on plan's `host.audit.v1` will ship here.
+    /// `host.audit.v1` host-logging service will ship here.
     DedupByCorrelation,
 }
 
 /// How fast the handler's audit entry needs to reach durable storage.
 ///
 /// `PerCall` calls fsync before responding. `Batched(window)` queues the
-/// entry synchronously (so a supervisor crash doesn't strand it — Plan
-/// 104 §S22) but fsyncs in a window-driven background flush.
+/// entry synchronously (so a supervisor crash doesn't strand it) but
+/// fsyncs in a window-driven background flush.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditDurability {
     PerCall,
@@ -262,7 +260,7 @@ pub enum AuditDurability {
 }
 
 impl AuditDurability {
-    /// Default for non-secret services. 100ms matches Plan 104 §S22's knob.
+    /// Default for non-secret services. 100ms is the standard flush window.
     pub fn default_batched() -> Self {
         AuditDurability::Batched(Duration::from_millis(100))
     }

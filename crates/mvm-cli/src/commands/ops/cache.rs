@@ -34,8 +34,8 @@ pub(in crate::commands) enum CacheAction {
         /// `gvproxy`, and console-tail processes that were reparented
         /// to launchd when the parent `mvmctl` was killed mid-run, plus
         /// their `~/.cache/mvm/builder-vm/vms/<id>/` cache directories.
-        /// Plan 95 §FU-1. Skips dirs whose PIDs are still children of a
-        /// live `mvmctl` (those are in-flight `dev up` runs, not orphans).
+        /// Skips dirs whose PIDs are still children of a live `mvmctl`
+        /// (those are in-flight `dev up` runs, not orphans).
         #[arg(long)]
         reap_orphans: bool,
     },
@@ -45,7 +45,7 @@ pub(in crate::commands) enum CacheAction {
         #[arg(long)]
         json: bool,
     },
-    /// Repair a degraded builder VM store (#640). Clears
+    /// Repair a degraded builder VM store. Clears
     /// `~/.cache/mvm/builder-vm/` so the next `dev up`/`build` cold-rebuilds it.
     /// Use this when `dev up` keeps failing with a dangling-store error
     /// (`error: path '/nix/store/…-source/flake.nix' does not exist`).
@@ -115,9 +115,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 "Disk usage: {}",
                 human_bytes(info.disk_usage_bytes.unwrap_or(0))
             );
-            // Plan 93 Phase 3: surface vendored-blob ages, the
-            // cross-target builder-VM cache size, assembled rootfs ages,
-            // and the last Stage 0 source fingerprint.
+            // Surface vendored-blob ages, the cross-target builder-VM
+            // cache size, assembled rootfs ages, and the last Stage 0
+            // source fingerprint.
             for line in &info.detail_lines {
                 println!("{line}");
             }
@@ -161,8 +161,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             orphan_builds,
             reap_orphans,
         } => {
-            // Plan 95 §FU-1 — reap orphaned per-VM helpers. Done first
-            // so subsequent steps see a clean process list and so the
+            // Reap orphaned per-VM helpers. Done first so subsequent
+            // steps see a clean process list and so the
             // sweeper can drop the per-VM cache dirs along with the
             // helpers that were holding their sockets/PIDs.
             if reap_orphans {
@@ -231,7 +231,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             let mut removed = 0u64;
             let mut freed = 0u64;
 
-            // Plan 77 W2: sweep orphaned Stage 0 staging dirs first.
+            // Sweep orphaned Stage 0 staging dirs first.
             // They live under `~/.cache/mvm/builder-vm/.<arch>.stage0-*`
             // (or the legacy `<arch>-staging` shape) and are left
             // behind by crashed `mvmctl dev up` invocations. The sweep
@@ -257,7 +257,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
-            // Plan 141 — flow-byte-log retention sweep. Per-tenant subdirs
+            // Flow-byte-log retention sweep. Per-tenant subdirs
             // under `<audit>/flow-bytes/` hold opt-in payload records;
             // remove files older than the default window. No tenant policy
             // is in scope at prune time, so use the conservative default.
@@ -277,10 +277,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
-            // Plan 118 WS-1 1b — reap stale supervisor standbys under `~/.mvm/pool/`.
+            // Reap stale supervisor standbys under `~/.mvm/pool/`.
             // The TTL guards a fresh pool (only dead-pid or expired standbys go); a
             // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
-            // dropped, so idle entitled processes never accumulate (B-ii residual risk 3).
+            // dropped, so idle entitled processes never accumulate.
             const STANDBY_POOL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
             if dry_run {
                 if let Ok(pool) = mvm_backend::standby_pool::SupervisorStandbyPool::open()
@@ -363,7 +363,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 ));
             }
 
-            // #630: make the persistent /nix store images' footprint
+            // Make the persistent /nix store images' footprint
             // visible at prune time. We don't boot a VM to GC on demand
             // (out of scope); GC now runs automatically in-build past the
             // cap. Report the sizes + the cap so the operator can see the
@@ -371,8 +371,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             for line in builder_store_gc_report(path) {
                 println!("{line}");
             }
-            // Plan 37 §6: every state-changing CLI verb emits one
-            // audit record. We only mutate disk on the non-dry-run
+            // Every state-changing CLI verb emits one audit record.
+            // We only mutate disk on the non-dry-run
             // path; dry-run reads only and stays out of the log.
             if !dry_run {
                 mvm_core::audit_emit!(CachePrune, "removed={removed} freed_bytes={freed}");
@@ -412,7 +412,7 @@ fn file_age_secs(path: &std::path::Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-/// Build the Plan 93 Phase 3 `cache info` enrichment lines: vendored
+/// Build the `cache info` enrichment lines: vendored
 /// Stage 0 blob ages, the builder-VM cross-target cache size, per-arch
 /// assembled rootfs ages, and the last Stage 0 source-fingerprint
 /// prefix. Path-injectable + side-effect-free (only stats + reads the
@@ -524,13 +524,13 @@ fn stage0_cache_report(
 }
 
 /// Report the builder VM's persistent `nix-store-*.img` footprints plus
-/// the in-build GC cap (#630). Path-injectable + side-effect-free so it's
+/// the in-build GC cap. Path-injectable + side-effect-free so it's
 /// hermetically testable. `len()` is the sparse *apparent* cap; allocated
 /// blocks (`st_blocks * 512`, via [`file_allocated_bytes`]) are the real
 /// footprint that grows unbounded without GC — so we surface both.
 ///
 /// We only *report* here: booting a builder VM to GC on demand is out of
-/// scope for #630. GC runs automatically at the end of every in-VM build
+/// scope. GC runs automatically at the end of every in-VM build
 /// once the store crosses the cap.
 fn builder_store_gc_report(cache_root: &std::path::Path) -> Vec<String> {
     let builder = cache_root.join("builder-vm");
@@ -574,7 +574,7 @@ fn builder_store_gc_report(cache_root: &std::path::Path) -> Vec<String> {
     }
     // Surface the resolved cap (honours MVM_BUILDER_STORE_GC_GIB) and note
     // that GC is automatic — so the operator doesn't go hunting for a
-    // `cache gc` verb that intentionally doesn't exist (#630).
+    // `cache gc` verb that intentionally doesn't exist.
     let cap_gib = mvm_build::builder_vm_runtime::builder_store_gc_cap_kib() / 1024 / 1024;
     lines.push(format!(
         "  auto-GC cap: {cap_gib} GiB used (override {}). \

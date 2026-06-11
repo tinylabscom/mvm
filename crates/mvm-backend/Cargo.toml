@@ -13,37 +13,37 @@ authors.workspace = true
 # Concrete `VmBackend` implementations that are *not* coupled to the
 # Lima-era Firecracker substrate (`vm::microvm`, `vm::image`,
 # `vm::firecracker` helpers, the `run_in_vm` shell shim, etc.).
-# Plan-60 W7 moved these out of `mvm/src/vm/` so the alt
-# backends can sit *below* `mvm` in the dependency graph,
-# breaking the previous facade-only re-export pattern.
+# These were moved out of `mvm/src/vm/` so the alt backends can sit
+# *below* `mvm` in the dependency graph, breaking the previous
+# facade-only re-export pattern.
 #
 # Lives here:
 #   - apple_container.rs   (macOS 26+ Apple Virtualization.framework)
 #   - libkrun.rs           (raw libkrun shim — Linux KVM / macOS HVF)
 #
-# Stays in `mvm` (W8 will move):
+# Stays in `mvm` (a later move will pull these out):
 #   - firecracker.rs (Lima-era installer helpers)
 #   - microvm.rs (Firecracker lifecycle via `run_in_vm`)
 #   - vm/backend.rs (`AnyBackend` dispatch + `FirecrackerBackend`)
 #
 # `mvm`'s `vm::backend.rs` imports the alt backends from this
 # crate to populate the `AnyBackend` dispatch enum. That direction —
-# `mvm` → `mvm-backend` — is the post-W7 invariant; the
-# previous `mvm-backend` → `mvm` re-export façade is gone.
+# `mvm` → `mvm-backend` — is the invariant; the previous
+# `mvm-backend` → `mvm` re-export façade is gone.
 [dependencies]
-# `egress-ca`: Plan 129 Stage 2 — `substitution_spawn::build_egress_tls_delivery`
+# `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
 mvm-core = { workspace = true, features = ["egress-ca"] }
-# plan 123 A1 step 2 — the NetworkProvider seam this crate implements
-# (BridgeTapNetworkProvider). Acyclic: mvm-network deps only mvm-core + mvm-sdk.
+# The NetworkProvider seam this crate implements (BridgeTapNetworkProvider).
+# Acyclic: mvm-network deps only mvm-core + mvm-sdk.
 mvm-network.workspace = true
-# plan 123 C4 — `SnapshotUpper` materializes the disk snapshot the libkrun
-# disk-only warm-start boots from. Acyclic: mvm-storage deps only mvm-core +
+# `SnapshotUpper` materializes the disk snapshot the libkrun disk-only
+# warm-start boots from. Acyclic: mvm-storage deps only mvm-core +
 # mvm-sdk (both already in this crate's graph).
 mvm-storage.workspace = true
 mvm-guest.workspace = true
-# `mvm-build` for the W2 overlay-aware admission gate
+# `mvm-build` for the overlay-aware admission gate
 # (`builder_vm::admit_overlay_aware`) called from every backend's
 # `start` impl. The base substrate's sidecar reader already pulls
 # `mvm-build`, so this doesn't widen the dependency graph.
@@ -54,12 +54,12 @@ mvm-guest.workspace = true
 # which this crate already depends on non-optionally — so no new dep.
 mvm-build = { workspace = true, features = ["builder-vm"] }
 libkrun-sys.workspace = true
-# Plan 97 Phase B — Vz backend foundation crate (SupervisorConfig types,
-# supervisor-binary path resolution). Pure data + helpers; no Swift dep.
-# Folded in with the former mvm-base crate (plan 121 A2): the base
-# substrate's ui (colored/indicatif/inquire spinners + prompts) and
-# secret handling (secrecy). Crypto helpers come from mvm_core::crypto
-# (plan 121 B3), already available via the mvm-core dep above.
+# Vz backend foundation crate (SupervisorConfig types, supervisor-binary
+# path resolution). Pure data + helpers; no Swift dep.
+# Folded in with the former mvm-base crate: the base substrate's ui
+# (colored/indicatif/inquire spinners + prompts) and secret handling
+# (secrecy). Crypto helpers come from mvm_core::crypto, already available
+# via the mvm-core dep above.
 colored.workspace = true
 indicatif.workspace = true
 inquire.workspace = true
@@ -85,8 +85,8 @@ tracing.workspace = true
 
 # Apple Virtualization.framework bindings (objc2 + Swift bridge) for the
 # `providers::apple_container` interface — folded in with the former
-# mvm-providers crate (plan 121 C2). macOS-only; the workspace lock
-# already carries these (no new third-party dep).
+# mvm-providers crate. macOS-only; the workspace lock already carries
+# these (no new third-party dep).
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = "0.3"

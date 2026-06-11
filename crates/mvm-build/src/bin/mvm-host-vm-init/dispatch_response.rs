@@ -1,12 +1,11 @@
-//! Plan 89 W2 part 3 — hand-rolled JSON for the
-//! `HostVmResponse::Result` wire frame builder-init sends right
-//! before reboot.
+//! Hand-rolled JSON for the `HostVmResponse::Result` wire frame
+//! builder-init sends right before reboot.
 //!
 //! ## Why hand-roll
 //!
-//! `mvm-host-vm-init` keeps a ≤ 1.5 MiB rootfs size budget
-//! (Plan 72 §W3) and deliberately does not pull `serde_json`
-//! (`Cargo.toml` comment at the deps section). The host-side
+//! `mvm-host-vm-init` keeps a ≤ 1.5 MiB rootfs size budget and
+//! deliberately does not pull `serde_json` (`Cargo.toml` comment at
+//! the deps section). The host-side
 //! consumer (`mvm_build::builder_protocol::HostVmResponse::Result`)
 //! is a typed serde enum; this module mirrors its wire shape
 //! exactly so the host's `serde_json::from_slice::<HostVmResponse>`
@@ -25,8 +24,7 @@
 //! - `job_id` is the nil UUID
 //!   (`00000000-0000-0000-0000-000000000000`). The host's
 //!   single-shot caller knows to ignore it; persistent dispatch
-//!   (W3) will populate it from the `HostVmRequest::Run` it
-//!   correlates against.
+//!   populates it from the `HostVmRequest::Run` it correlates against.
 //! - `dispatch_ms` and `teardown_ms` are `0`. Only `build_ms`
 //!   carries a meaningful value, measured by the caller as
 //!   `job_end_ms - job_start_ms`.
@@ -34,14 +32,14 @@
 use crate::boot_timings::BootTimings;
 
 /// The nil UUID used by the single-shot path when no incoming
-/// dispatch supplied a `job_id`. Persistent-dispatch callers
-/// (Plan 89 W3 part 3) echo back the request's id instead.
+/// dispatch supplied a `job_id`. Persistent-dispatch callers echo
+/// back the request's id instead.
 pub(crate) const NIL_JOB_ID: &str = "00000000-0000-0000-0000-000000000000";
 
 /// Owned snapshot of the data needed to hand-roll a
 /// `HostVmResponse::Result` JSON frame. The producer (the linux
-/// module's `run` path for single-shot, or the W3 dispatch loop)
-/// gathers these fields after the inner build returns.
+/// module's `run` path for single-shot, or the persistent dispatch
+/// loop) gathers these fields after the inner build returns.
 #[derive(Debug, Clone)]
 pub(crate) struct DispatchResponse {
     /// UUID-string echoed from the incoming `HostVmRequest::Run`.
@@ -86,15 +84,15 @@ impl DispatchResponse {
     }
 }
 
-/// Plan 89 W3 part 3 — wire JSON for `HostVmResponse::Bye`,
-/// the dispatch loop's acknowledgement of `HostVmRequest::Shutdown`.
-/// Static body; no fields to escape.
+/// Wire JSON for `HostVmResponse::Bye`, the dispatch loop's
+/// acknowledgement of `HostVmRequest::Shutdown`. Static body; no
+/// fields to escape.
 pub(crate) fn bye_json() -> &'static str {
     r#"{"kind":"bye"}"#
 }
 
-/// Plan 89 W3 part 9 — wire JSON for `HostVmResponse::StderrChunk`,
-/// one frame per stderr line the dispatch loop streams back to the
+/// Wire JSON for `HostVmResponse::StderrChunk`, one frame per stderr
+/// line the dispatch loop streams back to the
 /// host while a build is running. Matches the serde-derived shape in
 /// `mvm_build::builder_protocol::HostVmResponse::StderrChunk`
 /// (`{"kind":"stderr_chunk","job_id":"...","line":"..."}`); the
@@ -113,7 +111,7 @@ pub(crate) fn stderr_chunk_json(job_id: &str, line: &str) -> String {
     out
 }
 
-/// Plan 107 A2.2 — wire JSON for `HostVmResponse::WorkloadStarted`
+/// Wire JSON for `HostVmResponse::WorkloadStarted`
 /// (`{"kind":"workload_started","workload_id":"...","pid":N}`).
 /// Mirrors the serde-derived field order; the cross-validation test
 /// below pins it against the typed enum.
@@ -127,7 +125,7 @@ pub(crate) fn workload_started_json(workload_id: &str, pid: u32) -> String {
     out
 }
 
-/// Plan 107 A2.2 — wire JSON for `HostVmResponse::WorkloadStopped`.
+/// Wire JSON for `HostVmResponse::WorkloadStopped`.
 pub(crate) fn workload_stopped_json(workload_id: &str) -> String {
     let mut out = String::with_capacity(64 + workload_id.len());
     out.push_str(r#"{"kind":"workload_stopped","workload_id":""#);
@@ -136,8 +134,7 @@ pub(crate) fn workload_stopped_json(workload_id: &str) -> String {
     out
 }
 
-/// Plan 107 A2.2 — wire JSON for
-/// `HostVmResponse::WorkloadStatusReport`.
+/// Wire JSON for `HostVmResponse::WorkloadStatusReport`.
 pub(crate) fn workload_status_report_json(workload_id: &str, status: &str) -> String {
     let mut out = String::with_capacity(80 + workload_id.len() + status.len());
     out.push_str(r#"{"kind":"workload_status_report","workload_id":""#);
@@ -148,8 +145,8 @@ pub(crate) fn workload_status_report_json(workload_id: &str, status: &str) -> St
     out
 }
 
-/// Plan 107 A2.2 — wire JSON for `HostVmResponse::WorkloadFailed`,
-/// the fail-closed negative path (spawn / collision / parse error).
+/// Wire JSON for `HostVmResponse::WorkloadFailed`, the fail-closed
+/// negative path (spawn / collision / parse error).
 pub(crate) fn workload_failed_json(workload_id: &str, error: &str) -> String {
     let mut out = String::with_capacity(80 + workload_id.len() + error.len());
     out.push_str(r#"{"kind":"workload_failed","workload_id":""#);
@@ -260,9 +257,9 @@ mod tests {
         assert_eq!(parsed["stderr_tail"], "");
     }
 
-    /// Plan 89 W3 part 3 — `boot_timings: None` produces a JSON
-    /// `null` rather than an object. Mirrors the persistent VM's
-    /// second-and-subsequent dispatches.
+    /// `boot_timings: None` produces a JSON `null` rather than an
+    /// object. Mirrors the persistent VM's second-and-subsequent
+    /// dispatches.
     #[test]
     fn dispatch_response_emits_null_boot_timings_when_none() {
         let resp = DispatchResponse {
@@ -288,9 +285,9 @@ mod tests {
         ));
     }
 
-    /// Plan 89 W3 part 9 — hand-rolled `StderrChunk` must
-    /// deserialize as the typed enum variant with the same field
-    /// values. Bumps either shape and this test breaks.
+    /// Hand-rolled `StderrChunk` must deserialize as the typed enum
+    /// variant with the same field values. Bumps either shape and this
+    /// test breaks.
     #[test]
     fn stderr_chunk_json_matches_typed_builder_response() {
         let job_id = "01234567-89ab-cdef-0123-456789abcdef";
@@ -365,9 +362,9 @@ mod tests {
         }
     }
 
-    /// Plan 107 A2.2 — every workload-lifecycle emitter must
-    /// deserialize as the typed `HostVmResponse` variant with the
-    /// expected fields. Drift on either side trips this.
+    /// Every workload-lifecycle emitter must deserialize as the typed
+    /// `HostVmResponse` variant with the expected fields. Drift on
+    /// either side trips this.
     #[test]
     fn workload_emitters_parse_as_typed_builder_response() {
         use mvm_build::builder_protocol::{HostVmResponse, WorkloadId};

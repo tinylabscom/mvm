@@ -76,7 +76,7 @@ struct FcConfigFile {
 const DEFAULT_VCPU_COUNT: u32 = 1;
 const DEFAULT_MEM_SIZE_MIB: u64 = 512;
 // Guest CID for vsock — mirrors `mvm_guest::vsock::GUEST_CID` without pulling
-// in the dep. The value is fixed by the mvm vsock protocol (claim 12/13).
+// in the dep. The value is fixed by the mvm vsock protocol.
 const DEFAULT_GUEST_CID: u32 = 3;
 
 // ── writer ────────────────────────────────────────────────────────────────────
@@ -138,8 +138,8 @@ fn build_config(artifact: &MicrovmArtifact, artifact_dir: &std::path::Path) -> F
             path_on_host: artifact.rootfs.path.display().to_string(),
             is_root_device: true,
             // Derived from the artifact: verified-boot/prod sets read_only=true
-            // (ADR-002 W3 — dm-verity requires RO so the Merkle check holds);
-            // dev/sandbox may set read_only=false for writable overlay mounts.
+            // (dm-verity requires RO so the Merkle check holds); dev/sandbox may
+            // set read_only=false for writable overlay mounts.
             is_read_only: artifact.rootfs.read_only,
         }],
         machine_config: MachineConfig {

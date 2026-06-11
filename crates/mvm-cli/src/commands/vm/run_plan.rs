@@ -2,7 +2,7 @@
 //!
 //! Two transports share this module:
 //!
-//! - **plan** (Followup H-plan, already shipped): runs a
+//! - **plan**: runs a
 //!   Sandbox-shaped script with the SDK in record mode, lowers the
 //!   captured recording, synthesises one `ExecutionPlan` per app
 //!   and routes each through `mvm_hostd::supervisor::admit_for_run` for a
@@ -10,12 +10,12 @@
 //!   is that admission gates (signature, validity window, replay
 //!   store, policy resolution) fire end-to-end without the cost of
 //!   booting and tearing down a VM.
-//! - **live** (Followup H-live, this module's other half): spawns
+//! - **live** (this module's other half): spawns
 //!   the user's script with `MVM_SDK_MODE=live` and
 //!   `MVM_CLI_BIN=<path-to-mvmctl>` so the SDK shells each
 //!   `Sandbox` operation to existing `mvmctl up` / `proc start` /
 //!   `fs write` / `down` against a real microVM. No plan
-//!   synthesis here — the SDK drives plan-64 admission once per
+//!   synthesis here — the SDK drives admission once per
 //!   per-call shell via the wrapped verbs.
 //!
 //! ## How it works
@@ -69,8 +69,8 @@ use crate::commands::build::sandbox_record::{auto_exec_record_script, script_lan
 use super::exec::{RunArgs, RunMode};
 
 /// Dispatch an SDK-mode `mvmctl run` invocation. Plan and Live both
-/// reach this entry now (Followup H-plan + Followup H-live);
-/// `Record` is still refused at the `resolve_run_mode` layer.
+/// reach this entry now; `Record` is still refused at the
+/// `resolve_run_mode` layer.
 pub(in crate::commands) fn dispatch_sdk_mode(mode: RunMode, args: &RunArgs) -> Result<()> {
     match mode {
         RunMode::Plan => run_plan_mode(args),
@@ -82,8 +82,8 @@ pub(in crate::commands) fn dispatch_sdk_mode(mode: RunMode, args: &RunArgs) -> R
     }
 }
 
-/// Followup H-live (Plan 73): spawn the user's Sandbox-shaped
-/// script with `MVM_SDK_MODE=live` + the resolved `mvmctl`
+/// Spawn the user's Sandbox-shaped script with `MVM_SDK_MODE=live`
+/// + the resolved `mvmctl`
 /// binary path on the env so the SDK shells each `Sandbox`
 /// operation to `mvmctl up` / `proc start` / `fs write` / `down`
 /// against a real microVM.
@@ -302,10 +302,9 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         exec_timeout_secs: 0,
         destroy_on_exit: true,
         bundle_pin: None,
-        // Plan-mode synthesis (Followup H-plan) does not run the
-        // install pipeline; it synthesizes one plan per Sandbox call
-        // for dry-run admission. Followup B.3 wires deps_volume into
-        // the live `mvmctl up` path only.
+        // Plan-mode synthesis does not run the install pipeline; it
+        // synthesizes one plan per Sandbox call for dry-run admission.
+        // deps_volume is wired into the live `mvmctl up` path only.
         deps_volume: None,
         shares: Vec::new(),
     })

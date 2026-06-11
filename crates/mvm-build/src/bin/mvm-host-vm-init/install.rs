@@ -1,4 +1,4 @@
-//! Install-pipeline runner. Plan 73 Followup B.2, ADR-047.
+//! Install-pipeline runner.
 //!
 //! Given an [`InstallSpec`] (parsed from `/job/install_spec.json`)
 //! and a job directory, run the per-language installer + the audit
@@ -12,14 +12,14 @@
 //!    <lockfile> --target <content_dir>` (Python) or `pnpm install
 //!    --frozen-lockfile --dir <content_dir>` (Node). stdout + stderr
 //!    are tee'd to `<job_dir>/fetch.log` so every URL the installer
-//!    dialed is captured for the ADR-047 audit gate.
+//!    dialed is captured for the audit gate.
 //! 2. **SBOM.** `cyclonedx-py environment <content_dir>` (Python)
 //!    or `pnpm sbom --dir <content_dir>` (Node). Output written to
 //!    `<job_dir>/sbom.cdx.json`. **Optional gate**: if the tool
 //!    isn't on PATH, write a CycloneDX-1.5 empty-stub and log a
 //!    warning rather than fail the install. Hard-gating on missing
-//!    SBOM tools is a follow-on slice (B.2.x) once the builder VM
-//!    flake guarantees their presence.
+//!    SBOM tools is a follow-on, once the builder VM flake guarantees
+//!    their presence.
 //! 3. **CVE scan.** `pip-audit --requirement <lockfile> --format
 //!    json` or `pnpm audit --json` against the populated content
 //!    dir. Same fallback as SBOM: missing tool → stub + warn.
@@ -52,7 +52,7 @@ use crate::proxy::{PROXY_URL, ProxyLifecycle};
 /// can rename `<job_dir>` straight into a sealed volume without
 /// shuffling files. Mirrors that constant explicitly rather than
 /// re-exporting because `mvm-host-vm-init` doesn't depend on
-/// `mvm-sdk` (kept tiny per Plan 72 §W3 size budget).
+/// `mvm-sdk` (kept tiny to stay within the init binary's size budget).
 pub const CONTENT_SUBDIR: &str = "content";
 pub const SBOM_FILENAME: &str = "sbom.cdx.json";
 pub const FETCH_LOG_FILENAME: &str = "fetch.log";
@@ -60,9 +60,9 @@ pub const CVE_FILENAME: &str = "cve.json";
 pub const RESULT_FILENAME: &str = "result.json";
 
 /// CycloneDX-1.5 empty stub. Emitted when the SBOM tool is missing
-/// from the builder VM PATH. ADR-047 §"Lifecycle gates" treats a
-/// stub SBOM as a `dev`-gate-only artifact; `prod` gating on a stub
-/// is wired in a follow-on slice (B.2.x).
+/// from the builder VM PATH. A stub SBOM is treated as a
+/// `dev`-gate-only artifact; `prod` gating on a stub is wired in a
+/// follow-on.
 const SBOM_EMPTY_STUB: &str = r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}"#;
 
 /// Minimal pip-audit / pnpm-audit empty stub. Same dev-vs-prod
@@ -131,9 +131,9 @@ pub trait CommandRunner {
     /// Like [`Self::run`] but accepts extra environment variables
     /// to set on the child. The installer wrap path
     /// ([`run_install`]) uses this to inject `HTTP_PROXY` +
-    /// `HTTPS_PROXY` pointing at the in-VM `mvm-egress-proxy`
-    /// (Plan 73 Followup B.2.x). Implementors that don't need
-    /// env-var injection can rely on the default impl of
+    /// `HTTPS_PROXY` pointing at the in-VM `mvm-egress-proxy`.
+    /// Implementors that don't need env-var injection can rely on
+    /// the default impl of
     /// [`Self::run`] and override only this method.
     fn run_with_env(
         &self,
@@ -272,8 +272,8 @@ pub struct InstallContext<'a> {
     pub runner: &'a dyn CommandRunner,
     pub extra_path: Option<&'a Path>,
     /// Egress-proxy lifecycle. Started before the installer
-    /// spawns, stopped after. Plan 73 Followup B.2.x. Production
-    /// uses [`crate::proxy::ChildProxyLifecycle`]; tests use
+    /// spawns, stopped after. Production uses
+    /// [`crate::proxy::ChildProxyLifecycle`]; tests use
     /// [`crate::proxy::NoopProxyLifecycle`] or a fake.
     pub proxy: &'a mut dyn ProxyLifecycle,
 }
@@ -292,10 +292,10 @@ pub struct InstallContext<'a> {
 /// whole directory into the deps cache in one syscall, without
 /// shuffling files across mount points.
 ///
-/// ## Egress allowlist (Plan 73 Followup B.2.x)
+/// ## Egress allowlist
 ///
 /// Before invoking the installer we start `ctx.proxy` (an HTTP
-/// CONNECT proxy that refuses anything outside ADR-047's four
+/// CONNECT proxy that refuses anything outside the four allowed
 /// hostnames) and set `HTTP_PROXY` + `HTTPS_PROXY` on the
 /// installer's env to `http://127.0.0.1:8443`. After the
 /// installer exits — whether successfully or not — we tear the
@@ -340,7 +340,7 @@ pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallErro
     // installer dials `http://127.0.0.1:8443` for every fetch;
     // it must be listening before `uv` / `pnpm` makes the first
     // request. A proxy startup failure is a hard error — without
-    // the allowlist the install would bypass ADR-047's gate.
+    // the allowlist the install would bypass the egress gate.
     proxy
         .start()
         .map_err(|e| InstallError::Io(format!("egress proxy start: {e}")))?;
@@ -377,9 +377,8 @@ pub fn run_install(ctx: InstallContext<'_>) -> Result<InstallReport, InstallErro
 
     // Best-effort SBOM + CVE; the optional-gate fallback emits a
     // CycloneDX-1.5 empty stub if the tool isn't available. The
-    // host's audit-gate slice (B.3) decides whether a stub is
-    // acceptable for `--prod`; today both gate levels accept it
-    // with a warning.
+    // host's audit gate decides whether a stub is acceptable for
+    // `--prod`; today both gate levels accept it with a warning.
     let sbom_emitted = run_sbom(spec.language, &content_dir, &sbom, runner, extra_path);
     let cve_emitted = run_cve(spec.language, &lockfile_in_vm, &cve, runner, extra_path);
 
@@ -841,8 +840,7 @@ mod tests {
         assert!(calls[0].args.contains(&"--no-deps".to_string()));
         assert!(calls[0].args.contains(&"/work/uv.lock".to_string()));
         assert!(calls[0].logged, "installer must tee to fetch.log");
-        // Plan 73 Followup B.2.x: HTTPS_PROXY + HTTP_PROXY env on
-        // the installer's invocation.
+        // HTTPS_PROXY + HTTP_PROXY env on the installer's invocation.
         let env_keys: Vec<&str> = calls[0].env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(env_keys.contains(&"HTTPS_PROXY"), "env: {:?}", calls[0].env);
         assert!(env_keys.contains(&"HTTP_PROXY"), "env: {:?}", calls[0].env);
@@ -1022,10 +1020,9 @@ mod tests {
         );
     }
 
-    /// Plan 73 Followup B.2.x: if the egress proxy can't be
-    /// started, the install fails *before* the installer runs.
-    /// Bypassing the proxy would violate ADR-047's allowlist
-    /// invariant — fail-closed is mandatory.
+    /// If the egress proxy can't be started, the install fails
+    /// *before* the installer runs. Bypassing the proxy would
+    /// violate the allowlist invariant — fail-closed is mandatory.
     #[test]
     fn proxy_start_failure_aborts_before_installer() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1055,8 +1052,8 @@ mod tests {
         );
     }
 
-    /// Plan 73 Followup B.2.x: the proxy env vars match the
-    /// `crate::proxy::PROXY_URL` constant. If someone changes
+    /// The proxy env vars match the `crate::proxy::PROXY_URL`
+    /// constant. If someone changes
     /// the URL on one side and forgets the other, this test
     /// flags the drift.
     #[test]

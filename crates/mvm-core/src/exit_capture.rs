@@ -1,4 +1,4 @@
-//! Workload exit-code file convention (Plan 152 WS-A).
+//! Workload exit-code file convention.
 //!
 //! The supervisor captures a finished one-shot workload's exit code
 //! (written by the guest `/init` over the control vsock port) and

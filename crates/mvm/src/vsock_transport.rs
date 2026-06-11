@@ -91,7 +91,7 @@ impl LibkrunTransport {
         // Single source of truth for the per-VM dir (honors MVM_DATA_DIR).
         // for_vm(name).socket_path(port) now equals
         // mvm_core::config::vm_vsock_port_socket(name, port) — the same path
-        // the dev-VM connect resolver uses, so they can't drift (#582).
+        // the dev-VM connect resolver uses, so they can't drift.
         Self::new(mvm_core::config::vm_state_dir(vm_name))
     }
 
@@ -176,8 +176,7 @@ impl VsockTransport for AppleContainerTransport {
 /// owns the framework-side VM and exposes a per-VM Unix socket where
 /// each new connection writes the destination vsock port as a
 /// 4-byte little-endian prefix and the daemon then forwards bytes
-/// to the framework. Mode-0700 is the security boundary
-/// (ADR-002 §W1.2).
+/// to the framework. Mode-0700 is the security boundary.
 pub struct VsockProxyTransport {
     proxy_path: String,
 }
@@ -201,7 +200,7 @@ impl VsockTransport for VsockProxyTransport {
     }
 }
 
-/// Connects through the Plan 107 A3 nesting hop: the outer host
+/// Connects through the nesting hop: the outer host
 /// reaches a workload microVM's vsock *via* the long-lived libkrun
 /// host VM. The hop socket is the host VM's libkrun UDS for
 /// [`mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT`]

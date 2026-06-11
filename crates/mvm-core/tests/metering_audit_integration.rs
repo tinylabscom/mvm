@@ -1,4 +1,4 @@
-//! Plan 46: end-to-end smoke test for metering → audit chain.
+//! End-to-end smoke test for metering → audit chain.
 //!
 //! Producers (the supervisor's instance sampler, when the daemon
 //! integration lands) emit `MeteringSample`s, aggregate into per-

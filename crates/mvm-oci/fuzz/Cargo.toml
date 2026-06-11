@@ -24,7 +24,7 @@ tempfile = "3"
 [dependencies.mvm-oci]
 path = ".."
 
-# Plan 85 §R1 — layer-unpack fuzz target. Feeds arbitrary bytes to
+# Layer-unpack fuzz target. Feeds arbitrary bytes to
 # `mvm_oci::unpack::unpack_layer` against a fresh tempdir and asserts
 # no panic, no escape past the tempdir root. CI gate is wired in
 # `.github/workflows/ci.yml::oci-unpack-fuzz` with a 30-min budget

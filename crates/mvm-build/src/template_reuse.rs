@@ -44,9 +44,9 @@ pub(crate) fn reuse_template_artifacts(
 
     // Build-identity check: profile + flake.lock must match (via composite cache key).
     // Build a pool-side "expected" cache key from the pool spec and the template's
-    // flake_lock_hash. Plan 38 dropped `role` from this key: role-shaped flake
-    // variants now live behind the flake's profile selector or its passthru, not
-    // in the host-side cache identity.
+    // flake_lock_hash. `role` is deliberately excluded from this key: role-shaped
+    // flake variants now live behind the flake's profile selector or its passthru,
+    // not in the host-side cache identity.
     let pool_cache_key = {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();

@@ -62,8 +62,8 @@ fn top_level_command_summaries_stay_short() {
 
 #[test]
 fn internal_subprocess_commands_are_hidden_from_help() {
-    // Plan 178 Task 2 — subprocess/internal commands must not clutter the
-    // user-facing surface. They stay dispatchable but `hide = true`.
+    // Subprocess/internal commands must not clutter the user-facing
+    // surface. They stay dispatchable but `hide = true`.
     let visible: Vec<String> = cli_command()
         .get_subcommands()
         .filter(|cmd| !cmd.is_hide_set())
@@ -594,11 +594,11 @@ fn test_up_dev_and_prod_are_mutually_exclusive() {
     );
 }
 
-// Plan 73 Followup B.3 — `--from-workload-ir <path>` flag wires
-// `mvmctl up` into the app-deps install pipeline. These tests pin
-// the flag-parse surface (clap-side); the install-pipeline integration
-// itself is covered by `app_deps_gate::tests` + the helper unit tests
-// in `vm/up.rs::resolve_deps_volume_binding`-adjacent fixtures.
+// `--from-workload-ir <path>` wires `mvmctl up` into the app-deps
+// install pipeline. These tests pin the flag-parse surface (clap-side);
+// the install-pipeline integration itself is covered by
+// `app_deps_gate::tests` + the helper unit tests in
+// `vm/up.rs::resolve_deps_volume_binding`-adjacent fixtures.
 
 #[test]
 fn test_up_from_workload_ir_flag_parses() {
@@ -627,8 +627,8 @@ fn test_up_from_workload_ir_flag_parses() {
 #[test]
 fn test_up_from_workload_ir_absent_means_none() {
     // Claim-8 preservation guard: when the user doesn't pass the
-    // flag, `from_workload_ir` is `None` and `mvmctl up` runs its
-    // pre-Followup-B.3 path with `deps_volume = None` on the plan.
+    // flag, `from_workload_ir` is `None` and `mvmctl up` runs the
+    // no-deps-volume path with `deps_volume = None` on the plan.
     let cli = Cli::try_parse_from(["mvmctl", "up", "--flake", "."]).unwrap();
     match cli.command {
         Commands::Up(up::Args {
@@ -942,8 +942,7 @@ fn test_env_vars_to_drive_file_empty() {
 
 // ---- Up/Down command tests ----
 
-// Plan 38 §"Boundary statement" (fleet removal follow-up to slice 7c):
-// the `mvmctl down -f <fleet-config>` flag was removed along with
+// The `mvmctl down -f <fleet-config>` flag was removed along with
 // fleet.rs — multi-VM orchestration is mvmd's job. `down::Args` now
 // has only `name`.
 
@@ -1142,9 +1141,9 @@ fn test_parse_port_spec_invalid() {
 }
 
 // -------------------------------------------------------------------------
-// Top-level verb tests (plan 40 dropped `ps`, `start`, `flake`,
-// `image`, `setup`, `completions`, `security` — `ls`/`up`/`validate`/
-// `catalog`/`doctor` cover the cleaned surface). `run` was reintroduced
+// Top-level verb tests. `ps`, `start`, `flake`, `image`, `setup`,
+// `completions`, and `security` were dropped — `ls`/`up`/`validate`/
+// `catalog`/`doctor` cover the cleaned surface. `run` was reintroduced
 // later as the secure one-shot execution UX, distinct from the old `up`
 // alias.
 // -------------------------------------------------------------------------
@@ -1715,10 +1714,8 @@ fn test_run_cli_flag_overrides_config_memory() {
 
 #[test]
 fn test_resolve_network_policy_default_is_deny_all() {
-    // ADR-002 claim 10: the safe default is deny-all. Workloads
-    // that need network access opt in explicitly. Pre-Sprint 52
-    // this test asserted `is_unrestricted()` — flipped here as
-    // part of the default flip.
+    // Claim 10: the safe default is deny-all. Workloads that need
+    // network access opt in explicitly.
     let policy = resolve_network_policy(None, &[]).unwrap();
     assert!(!policy.is_unrestricted());
     let rules = policy
@@ -1962,7 +1959,7 @@ fn test_snapshot_restore_is_gone() {
     assert!(Cli::try_parse_from(["mvmctl", "snapshot", "restore", "vm", "--path", "/x"]).is_err());
 }
 
-// --- Catalog CLI tests (plan 40 replaced `mvmctl image *`) ---
+// --- Catalog CLI tests (replaced `mvmctl image *`) ---
 
 #[test]
 fn test_image_pull_parses() {
@@ -2658,7 +2655,7 @@ fn run_transient_requires_argv() {
     assert!(cli.is_err());
 }
 
-// --- Init CLI tests (plan 40: pure project-scaffold; DIR is required) ---
+// --- Init CLI tests (pure project-scaffold; DIR is required) ---
 
 #[test]
 fn test_init_requires_dir() {
@@ -2732,7 +2729,7 @@ fn test_cache_prune() {
 
 #[test]
 fn test_pool_warm_parses_optional_count() {
-    // Plan 118 WS-1 1b — `mvmctl pool warm` (default count) and `pool warm N`.
+    // `mvmctl pool warm` (default count) and `pool warm N`.
     assert!(Cli::try_parse_from(["mvmctl", "pool", "warm"]).is_ok());
     let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "3"]).unwrap();
     match cli.command {
@@ -2796,10 +2793,9 @@ fn test_cache_prune_orphan_builds_flag() {
 
 #[test]
 fn test_cache_prune_reap_orphans_flag() {
-    // Plan 95 §FU-1 — `--reap-orphans` sweeps orphaned
-    // mvm-libkrun-supervisor / gvproxy / console-tail processes
-    // left behind by killed `mvmctl dev up` runs, plus their
-    // per-VM cache dirs.
+    // `--reap-orphans` sweeps orphaned mvm-libkrun-supervisor /
+    // gvproxy / console-tail processes left behind by killed
+    // `mvmctl dev up` runs, plus their per-VM cache dirs.
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--reap-orphans"]).unwrap();
     match cli.command {
         Commands::Cache(cache::Args {
@@ -2901,9 +2897,9 @@ fn test_up_network_custom() {
     }
 }
 
-// Plan 38 §4 (slice 7b): the `mvmctl template *` namespace was removed
-// outright. The two tests previously here covered `template init …`
-// preset/prompt parsing — equivalent coverage now lives on
+// The `mvmctl template *` namespace was removed outright. The two
+// tests previously here covered `template init …` preset/prompt
+// parsing — equivalent coverage now lives on
 // `mvmctl init <DIR> --preset/--prompt` (smart-dispatch in
 // `commands/env/init.rs`). See `test_init_*` below.
 
@@ -2984,13 +2980,12 @@ fn _runparams_has_lifetime() {
     fn _take(_p: RunParams<'_>) {}
 }
 
-// ---- Plan-64 W3 admission flags ----
+// ---- admission flags ----
 
 #[test]
 fn test_up_tenant_parse_default_is_none() {
-    // Plan 113 §Task 6 / ADR-064 §Decision 9 — the clap field is
-    // `Option<String>`; the `"local"` default has moved into
-    // `vm::tenant_resolution::resolve_tenant` so the 4-level
+    // The clap field is `Option<String>`; the `"local"` default has
+    // moved into `vm::tenant_resolution::resolve_tenant` so the 4-level
     // precedence (built-in → config.toml → env → flag) can apply.
     let cli = Cli::try_parse_from(["mvmctl", "up"]).expect("parse");
     match cli.command {
@@ -3035,7 +3030,7 @@ fn test_up_no_supervisor_flag_parses() {
     }
 }
 
-// ---- SDK-port Phase 7d — `mvmctl compile --from-recording` ----
+// ---- `mvmctl compile --from-recording` ----
 
 #[test]
 fn test_compile_from_recording_parses() {
@@ -3114,7 +3109,7 @@ fn test_compile_default_no_from_flags_leaves_them_none() {
     }
 }
 
-// ── Plan 98 — `--builder` global flag (Phase 1 §1.4 + §0.2) ──
+// ── `--builder` global flag ──
 
 #[test]
 fn builder_flag_appears_in_help() {
@@ -3165,7 +3160,7 @@ fn builder_flag_unset_by_default() {
     assert_eq!(cli.builder, None);
 }
 
-// --- Session start --ephemeral tests (Task 3.3) ---
+// --- Session start --ephemeral tests ---
 
 #[test]
 fn test_session_start_ephemeral_parses() {
@@ -3182,7 +3177,7 @@ fn test_session_start_ephemeral_parses() {
     }
 }
 
-// --- Session attach --continue / --resume tests (Task 3.2) ---
+// --- Session attach --continue / --resume tests ---
 
 #[test]
 fn test_session_attach_continue_parses() {
@@ -3253,7 +3248,7 @@ fn test_session_attach_resume_parses() {
     }
 }
 
-// -------- Plan 170 WS-A: reconcile-on-entry gate --------
+// -------- reconcile-on-entry gate --------
 
 fn touches(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv)

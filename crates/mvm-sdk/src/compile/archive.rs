@@ -1,9 +1,9 @@
 //! Deterministic gzipped-tar archiver for `mvmforge compile`.
 //!
-//! Per ADR-0012, `mvmforge compile --out path.tar.gz` produces a single
+//! `mvmforge compile --out path.tar.gz` produces a single
 //! `.tar.gz` containing the same logical contents the directory mode
-//! emits today: `flake.nix`, `launch.json`, `source/...`, and (during
-//! the W4 transition) `nix/factories/...`. The archive is byte-
+//! emits today: `flake.nix`, `launch.json`, `source/...`, and
+//! `nix/factories/...`. The archive is byte-
 //! reproducible across runs of the same IR — same input always
 //! produces the same `sha256sum` — by:
 //!

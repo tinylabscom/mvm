@@ -188,7 +188,7 @@ impl AppleContainerEnv {
         let wrapped = format!("{SUDO_SHIM}\n{script}");
         let mut out_buf: Vec<u8> = Vec::new();
         let mut err_buf: Vec<u8> = Vec::new();
-        // Plan 159 WS-5 E: accumulate streamed ExecEvent chunks.
+        // Accumulate streamed ExecEvent chunks.
         let terminal = mvm_guest::vsock::send_exec_streaming(
             &mut stream,
             &wrapped,

@@ -1,9 +1,9 @@
 //! `SsrfGuard` — block outbound traffic to private/internal IPs.
 //!
-//! Plan 37 §15 third-line defence (Wave 2.3). Where Wave 2.1's
-//! `DestinationPolicy` filters by **(host, port) string** and Wave
-//! 2.2's `SecretsScanner` filters by body content, this inspector
-//! filters by **resolved IP**. It refuses requests whose destination
+//! Third-line defence. Where `DestinationPolicy` filters by
+//! **(host, port) string** and `SecretsScanner` filters by body
+//! content, this inspector filters by **resolved IP**. It refuses
+//! requests whose destination
 //! IP falls into any of:
 //!
 //! - RFC1918 private ranges (10/8, 172.16/12, 192.168/16)

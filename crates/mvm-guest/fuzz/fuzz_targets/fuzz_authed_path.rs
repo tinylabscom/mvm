@@ -1,4 +1,4 @@
-// ADR-002 §W4.2 — fuzz the *signed* path of the authenticated-frame
+// Fuzz the *signed* path of the authenticated-frame
 // pipeline. The two existing targets (`fuzz_authenticated_frame`,
 // `fuzz_guest_request`) cover the *pre-auth* parsers — they feed raw
 // bytes into `serde_json::from_slice` and assert "never panic." That

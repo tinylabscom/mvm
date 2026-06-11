@@ -1,5 +1,5 @@
-//! `mvmctl catalog` — browse the bundled image catalog. Plan 40
-//! folded the old top-level `image` namespace down to this metadata
+//! `mvmctl catalog` — browse the bundled image catalog. The old
+//! top-level `image` namespace was folded down to this metadata
 //! browser; project scaffolding from a catalog entry now goes through
 //! `mvmctl init <DIR> --catalog <name>`.
 

@@ -1,6 +1,6 @@
 //! In-process mock of the in-guest `mvm-guest-agent` vsock surface.
 //!
-//! Plan 66 W2. Pairs with [`crate::mock::MockBackend`]: every mock VM
+//! Pairs with [`crate::mock::MockBackend`]: every mock VM
 //! gets its own `MockGuestAgent` listening on `<vm_dir>/runtime/v.sock`,
 //! the same Unix-domain socket path Firecracker exposes for the
 //! vsock UDS multiplexer. The host-side fs/proc helpers in
@@ -23,8 +23,8 @@
 //!   counter.
 //! - **Read-only verbs** (`FsRead`, `FsStat`, `FsList`, `FsDiff`,
 //!   `ProcList`, `ProcWait`) return empty / zero-state responses — they exist to
-//!   keep the wire surface complete for the pinned no-emit tests in
-//!   plan 66 W4, not to model real filesystem / proc state.
+//!   keep the wire surface complete for the pinned no-emit tests,
+//!   not to model real filesystem / proc state.
 //! - **Everything else** comes back as `GuestResponse::Error` so a
 //!   future verb that lands without a matching mock arm fails loud
 //!   instead of hanging.
@@ -204,11 +204,10 @@ fn handle_connection(mut stream: UnixStream, next_token: Arc<AtomicU64>) {
     }
 
     // Read length-prefixed JSON requests until the client closes the
-    // stream or an error occurs. ADR-053 / plan 74 W1 (hard cutover)
-    // changed the host-side helpers so a single session can issue
-    // `ProtocolHello` then the operational request on the same
-    // connection — a one-shot mock would close after the hello and
-    // strand the follow-up request. The real agent
+    // stream or an error occurs. The host-side helpers let a single
+    // session issue `ProtocolHello` then the operational request on
+    // the same connection — a one-shot mock would close after the
+    // hello and strand the follow-up request. The real agent
     // (`handle_client` in `mvm-guest-agent`) also reads multiple
     // frames per session, so this matches production semantics.
     loop {
@@ -291,9 +290,9 @@ fn write_error(stream: &mut UnixStream, message: &str) -> Result<()> {
 /// in one place.
 fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
     match req {
-        // ── Protocol negotiation (ADR-053 / plan 74 W1) ─────────────
-        // Hard cutover: every call site now hellos before the first
-        // operational request. The mock answers with whatever the
+        // ── Protocol negotiation ────────────────────────────────────
+        // Every call site hellos before the first operational request.
+        // The mock answers with whatever the
         // real `protocol_hello_response` would produce so the host
         // helpers (`negotiate_protocol` / `require_capabilities`) see
         // the same ack shape they expect from a real agent.
@@ -309,7 +308,7 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
             &requested_capabilities,
         ),
 
-        // ── Integration status (ADR-053 §3 / plan 74 W2) ────────────
+        // ── Integration status ──────────────────────────────────────
         // Mock VMs have no integrations to report. Returning an empty
         // list lets the host's services-ready poll transition straight
         // to `ServicesReady` rather than timing out on a "verb not
@@ -363,7 +362,7 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
             GuestResponse::ProcWaitEvent(ProcWaitEvent::Exit { code: 0 })
         }
 
-        // ── Filesystem diff (Plan 169) ──────────────────────────────
+        // ── Filesystem diff ─────────────────────────────────────────
         // Mock VMs have no overlay to walk; report no changes so
         // `mvmctl diff --hypervisor mock` succeeds rather than hitting
         // the loud catch-all.
@@ -393,7 +392,7 @@ mod tests {
 
     /// Connect a CONNECT-handshaked stream to a running mock agent —
     /// the same shape `mvm::vsock_transport::for_vm(...).connect(...)`
-    /// hands the backend-agnostic `*_on` helpers (Plan 169).
+    /// hands the backend-agnostic `*_on` helpers.
     fn connect_stream(dir: &TempDir) -> std::os::unix::net::UnixStream {
         connect_to(&vsock_uds_path(&dir.path().to_string_lossy()), 5).expect("connect mock stream")
     }
@@ -567,8 +566,8 @@ mod tests {
         }
     }
 
-    // ── Plan 169: stream-based `*_on` entry points round-trip ────────
-    // These drive the new backend-agnostic helpers directly on a
+    // ── Stream-based `*_on` entry points round-trip ──────────────────
+    // These drive the backend-agnostic helpers directly on a
     // CONNECT-handshaked stream (what `vsock_transport::for_vm` yields
     // for QEMU/libkrun), instead of the dir-based wrappers.
 

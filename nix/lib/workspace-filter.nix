@@ -4,7 +4,7 @@
 #   nix/images/builder-vm/flake.nix
 #   nix/images/runtime-overlay/flake.nix
 #
-# Note: nix/images/builder/flake.nix was deleted in Plan 115 / ADR-065.
+# Note: there is no longer a separate nix/images/builder/flake.nix.
 # The builder-vm flake now produces both the headless (default) and
 # interactive (dev) attrs — no separate builder/ flake is needed.
 #

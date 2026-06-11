@@ -1,10 +1,10 @@
-//! Plan 129 Stage 2 — server-side TLS termination for bound-host `https` egress.
+//! Server-side TLS termination for bound-host `https` egress.
 //!
 //! The nft `nat` chain REDIRECTs the guest's outbound `:443` here alongside
 //! `:80`. We peek the TLS ClientHello SNI **without consuming the stream**:
 //!   - **bound SNI** (a host the plan's secrets are allowed to reach) → terminate
 //!     TLS under a leaf minted by the per-VM name-constrained intermediate,
-//!     decrypt, substitute (the Stage 1b `handle_request` core), re-originate a
+//!     decrypt, substitute (the `:80` `handle_request` core), re-originate a
 //!     real upstream TLS connection (root-validated, via the reused reqwest
 //!     forwarder), stream the response back encrypted.
 //!   - **unbound SNI** → byte-splice passthrough; the terminator never decrypts,
@@ -103,7 +103,7 @@ pub fn server_config_for_sni(
 /// `forward` is injected so the substitution + termination core stays testable
 /// with a mock upstream; production passes the reused reqwest forwarder. A
 /// substitution refusal closes the connection without forwarding — the same
-/// fail-closed invariant as the Stage 1b `:80` path.
+/// fail-closed invariant as the `:80` path.
 pub fn terminate_and_substitute<S, F>(
     stream: S,
     config: Arc<rustls::ServerConfig>,
@@ -437,7 +437,7 @@ mod tests {
     }
 
     /// A rustls client config that trusts exactly `intermediate_cert_pem` — the
-    /// guest's posture after the S2.3 boot step installs the per-VM cert.
+    /// guest's posture after the boot step installs the per-VM cert.
     fn client_config_trusting(intermediate_cert_pem: &str) -> rustls::ClientConfig {
         let mut roots = rustls::RootCertStore::empty();
         for c in super::pem_certs(intermediate_cert_pem).unwrap() {

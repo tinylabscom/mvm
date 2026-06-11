@@ -1,4 +1,4 @@
-//! Retry-storm dedup for audit emission. Plan 37 Addendum G2.
+//! Retry-storm dedup for audit emission.
 //!
 //! A workload that gets blocked at the same boundary will often
 //! retry. Each retry produces an audit entry. Without dedup, a

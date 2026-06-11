@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 /// Config the supervisor hands to a `mvm-host-signer` subprocess at
 /// spawn.
 ///
-/// W1b.1 parses the envelope unsigned. Plan 104 §H-L3.6 (G1) — to close
-/// in W1b.2 — wraps this struct in a release-key-signed envelope so a
-/// compromised supervisor cannot induce the subprocess to point its
+/// The envelope is currently parsed unsigned. A future revision wraps
+/// this struct in a release-key-signed envelope so a compromised
+/// supervisor cannot induce the subprocess to point its
 /// audit-back-channel at `/dev/null` or its proxy UDS at a sibling
 /// workload's socket.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,14 +22,14 @@ pub struct SubprocessConfig {
     pub uds_path: PathBuf,
     /// Audit-signer UDS path. Sign events (`host_signer.plan_signed`,
     /// `host_signer.credential_signed`) flow through it for chain-
-    /// signing. Unused in W1b.1; wired in W1b.2.
+    /// signing. Not yet wired.
     #[serde(default)]
     pub audit_signer_uds_path: Option<PathBuf>,
-    /// Optional path to a pre-existing key file (W1b.1 software-fallback
-    /// path — used by tests + persisted-key dev workflows). If absent,
-    /// the subprocess generates a fresh in-memory key at boot.
-    /// W8 replaces this with `enclave_keypair_handle: TpmHandle` (Linux)
-    /// or `enclave_keychain_label: String` (macOS SE).
+    /// Optional path to a pre-existing key file (software-fallback path —
+    /// used by tests + persisted-key dev workflows). If absent, the
+    /// subprocess generates a fresh in-memory key at boot. A future
+    /// revision replaces this with an enclave key handle (`TpmHandle` on
+    /// Linux, a keychain label on macOS SE).
     #[serde(default)]
     pub software_key_path: Option<PathBuf>,
 }

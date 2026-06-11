@@ -1,22 +1,21 @@
-//! Plan 60 Phase 9 — performance gates via `cargo xtask perf`.
+//! Performance gates via `cargo xtask perf`.
 //!
 //! Two subcommands so far:
 //!
 //! - **`rootfs-size`** — assert a built rootfs is at or under the
 //!   `mvm` minimal-template budget. Pure file-size check; runs on
-//!   every host (no KVM/Lima required). Closes the plan-60 Phase 9
-//!   line "rootfs < 20 MB for minimal template".
+//!   every host (no KVM/Lima required). Enforces the "rootfs < 20 MB
+//!   for minimal template" line.
 //! - **`boot`** — statistical cold-boot benchmark. Boots a real
 //!   Firecracker / libkrun VM `--runs N` times, computes
 //!   p50/p95/max wall-clock, asserts thresholds. Linux + KVM
 //!   required; gated by `MVM_LIVE_SMOKE=1` + a rootfs path so a
-//!   bare macOS host skips cleanly. Closes the plan-60 Phase 9
-//!   line "cold-boot ≤ 500ms Firecracker / ≤ 1s libkrun".
+//!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
+//!   Firecracker / ≤ 1s libkrun" line.
 //!
-//! The thresholds come from ADR-013 §"Per-backend boot budgets" +
-//! plan 60 §"Phase 9 perf gates"; they're pinned by tests in this
-//! module so a drift in the plan/ADR vs. the code is caught at PR
-//! review.
+//! The thresholds are the per-backend boot budgets; they're pinned
+//! by tests in this module so a drift in the documented budget vs.
+//! the code is caught at review.
 //!
 //! ## Usage
 //!
@@ -27,15 +26,14 @@
 //!
 //! ## What this does NOT do (yet)
 //!
-//! - **Regression alert against historical p50.** The plan spec
-//!   mentions ">10% p50 increase fails the test"; we'd need a
-//!   historical-baseline file (probably in `specs/perf/baseline.json`)
-//!   that this command compares against. Substrate-only today;
-//!   the boot subcommand asserts against absolute thresholds.
+//! - **Regression alert against historical p50.** A ">10% p50
+//!   increase fails the test" gate would need a historical-baseline
+//!   file (probably in `specs/perf/baseline.json`) that this command
+//!   compares against. Substrate-only today; the boot subcommand
+//!   asserts against absolute thresholds.
 //! - **Snapshot-clone-boot benchmark.** Currently the boot
 //!   subcommand only times cold boots. Snapshot-clone timing
-//!   needs the snapshot pool from plan-60 Phase 9, which doesn't
-//!   ship in this slice.
+//!   needs the snapshot pool, which doesn't ship in this slice.
 //! - **PGO / MUSL build-time perf gates.** Those land alongside
 //!   the release-build configuration; this module focuses on
 //!   runtime behaviour.
@@ -44,7 +42,7 @@
 // `Backend::budget()` — we ship the constants + the lookup helper
 // so the eventual N-run benchmark loop can scaffold against a
 // stable API. The dead-code allow goes once the benchmark loop
-// lands (Phase 9 follow-up).
+// lands.
 #![allow(dead_code)]
 
 use std::path::Path;
@@ -53,20 +51,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-/// Plan-60 Phase 9 budget for the `minimal` template's rootfs.
+/// Budget for the `minimal` template's rootfs.
 /// Anything above this triggers a perf-regression alert: typically
 /// "someone bundled tools they shouldn't have" or "the Nix closure
 /// pulled in a transitive dep that bloats the image."
 pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 
 /// Cold-boot wall-clock budget for the Firecracker backend.
-/// ADR-013 floor is 300ms; Phase 9's strict gate is 500ms p50.
+/// The floor is 300ms; the strict gate is 500ms p50.
 pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
 
 /// Cold-boot wall-clock budget for the libkrun backend. Slower than
 /// Firecracker because libkrun's startup +
-/// the in-VM init script aren't as tight; the plan-60 spec sets
-/// 1s as the worst-case envelope.
+/// the in-VM init script aren't as tight; 1s is the worst-case
+/// envelope.
 pub const LIBKRUN_BOOT_BUDGET: Duration = Duration::from_millis(1000);
 
 /// Dispatch entry — called from `xtask/src/main.rs`.
@@ -111,10 +109,9 @@ fn budgets_subcommand(args: &[String]) -> Result<()> {
 }
 
 /// One performance budget the project commits to. The full set
-/// is the single source of truth for plan-60 Phase 9 perf claims
-/// plus plan-65 and plan-7a per-resource caps; the budgets are
-/// pinned by tests in this module so doc/code drift is caught at
-/// PR review.
+/// is the single source of truth for the boot-time perf claims
+/// plus the per-resource caps; the budgets are pinned by tests in
+/// this module so doc/code drift is caught at review.
 #[derive(Debug, serde::Serialize)]
 pub struct PerfBudget {
     pub name: &'static str,
@@ -320,11 +317,10 @@ fn boot_subcommand(args: &[String]) -> Result<()> {
         "[xtask perf boot] backend={backend:?} runs={runs} rootfs={}",
         rootfs.display()
     );
-    // The actual N-run benchmark loop is deferred — it's the
-    // Phase 9 follow-up that links against `mvm_backend` to invoke
-    // `start_with_mode` + measure. Substrate today: arg parsing +
-    // threshold lookup + the budget assertion shape so consumers
-    // can scaffold.
+    // The actual N-run benchmark loop is deferred — it links against
+    // `mvm_backend` to invoke `start_with_mode` + measure. Substrate
+    // today: arg parsing + threshold lookup + the budget assertion
+    // shape so consumers can scaffold.
     bail!(
         "live boot benchmark not yet implemented in xtask perf — \
          run backend-specific live boot validation from the builder VM"
@@ -393,9 +389,8 @@ fn parse_backend_arg(args: &[String]) -> Result<Backend> {
         }
         i += 1;
     }
-    // Default to Firecracker — matches ADR-013's Tier 1 default
-    // for Linux+KVM hosts (the only environment this subcommand
-    // actually runs in).
+    // Default to Firecracker — the Tier 1 default for Linux+KVM
+    // hosts (the only environment this subcommand actually runs in).
     Ok(Backend::Firecracker)
 }
 
@@ -405,14 +400,14 @@ mod tests {
     use std::io::Write;
 
     // ──────────────────────────────────────────────────────────────
-    // Threshold pinning — sync between plan spec + code
+    // Threshold pinning — sync between documented budget + code
     // ──────────────────────────────────────────────────────────────
 
     #[test]
     fn rootfs_budget_is_20_mib() {
-        // The plan-60 Phase 9 spec calls out 20 MB explicitly. Pin
-        // the constant so a "let's bump it" PR has to update both
-        // the plan doc and this test.
+        // The budget is 20 MB explicitly. Pin the constant so a
+        // "let's bump it" change has to update both the documented
+        // budget and this test.
         assert_eq!(ROOTFS_MAX_BYTES, 20 * 1024 * 1024);
     }
 
@@ -429,7 +424,7 @@ mod tests {
     #[test]
     fn budgets_obey_firecracker_below_libkrun_order() {
         // Firecracker is the faster path; if anyone flips this, the
-        // ADR-013 tier ordering has drifted.
+        // tier ordering has drifted.
         assert!(FIRECRACKER_BOOT_BUDGET < LIBKRUN_BOOT_BUDGET);
     }
 

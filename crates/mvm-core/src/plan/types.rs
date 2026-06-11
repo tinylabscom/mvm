@@ -1,18 +1,18 @@
 //! `*Ref` and `*Spec` types referenced from `ExecutionPlan`.
 //!
-//! Most fields here are opaque newtype wrappers so plan 37's later
-//! waves can introduce real resolvers without churning the wire
-//! format. Every type carries `#[serde(deny_unknown_fields)]` so
+//! Most fields here are opaque newtype wrappers so later resolvers
+//! can be introduced without churning the wire format. Every type
+//! carries `#[serde(deny_unknown_fields)]` so
 //! adding a field is a fail-closed schema bump for older verifiers.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for an `ExecutionPlan` instance. Plan 37 §3.3
-/// specifies a ULID; we keep the type opaque so the constructor can
-/// switch generators (UUIDv7, snowflake, etc.) without touching the
-/// wire format. Audit entries reference this id verbatim.
+/// Stable identifier for an `ExecutionPlan` instance. Currently a
+/// ULID; we keep the type opaque so the constructor can switch
+/// generators (UUIDv7, snowflake, etc.) without touching the wire
+/// format. Audit entries reference this id verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlanId(pub String);
@@ -26,14 +26,14 @@ pub struct TenantId(pub String);
 pub struct WorkloadId(pub String);
 
 /// Reference to a runtime profile (Firecracker / Apple Container /
-/// MicrovmNix / Lima / containerd). Plan 37 §3.1's open
-/// `BackendRegistry` resolves the name to a backend factory.
+/// MicrovmNix / Lima / containerd). The open `BackendRegistry`
+/// resolves the name to a backend factory.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RuntimeProfileRef(pub String);
 
-/// Reference to a signed image. Mirrors plan 36's `ArtifactDigest`
-/// shape: SHA-256 of the rootfs + name. The `cosign_bundle` field
+/// Reference to a signed image. SHA-256 of the rootfs + name. The
+/// `cosign_bundle` field
 /// is the path or URL to the cosign keyless bundle that
 /// `mvm-security::image_verify` validates against; in dev mode the
 /// resolver may stub this to `None` and accept the digest alone.
@@ -46,12 +46,12 @@ pub struct SignedImageRef {
     /// Cosign-keyless `.bundle` reference. Path on disk or URL
     /// resolvable by the supervisor. Stub in dev.
     pub cosign_bundle: Option<String>,
-    /// Plan 165 WS-B B4: false iff the sealed image declares no workload
-    /// entrypoint. Defaults to true (every legacy plan + every dev image),
-    /// and is skip-serialized when true so existing signed-plan fixtures
-    /// stay byte-identical (the field is inside the signed payload). The
+    /// False iff the sealed image declares no workload entrypoint.
+    /// Defaults to true (every legacy plan + every dev image), and is
+    /// skip-serialized when true so existing signed-plan fixtures stay
+    /// byte-identical (the field is inside the signed payload). The
     /// supervisor refuses a plan whose image asserts entrypoint_present ==
-    /// false — admission-time defense in depth behind the SDK's B3 compile
+    /// false — admission-time defense in depth behind the SDK's compile
     /// gate.
     #[serde(
         default = "default_entrypoint_present",
@@ -89,10 +89,10 @@ pub struct TimeoutSpec {
     pub exec_secs: u32,
 }
 
-/// Opaque pointer to a policy bundle. Wave 2 introduces the real
-/// `mvm-policy::PolicyBundle` resolver; until then this is a name
-/// the supervisor's `Noop` resolver maps to a default-deny / open
-/// stance per its bundle.
+/// Opaque pointer to a policy bundle. Until the real
+/// `mvm-policy::PolicyBundle` resolver lands, this is a name the
+/// supervisor's `Noop` resolver maps to a default-deny / open stance
+/// per its bundle.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PolicyRef(pub String);
@@ -246,14 +246,14 @@ impl AdmissionProfile {
 /// Workload variant — `Dev` is the development sandbox (carries the
 /// dev guest agent's RCE-by-design Exec handler, accepts looser
 /// policies), `Prod` is the production posture (no dev primitives,
-/// strict policy gates). Wave 2.6's `L7EgressProxy` consults this
-/// at construction time to refuse plain-HTTP egress for `Prod`.
+/// strict policy gates). The `L7EgressProxy` consults this at
+/// construction time to refuse plain-HTTP egress for `Prod`.
 ///
 /// Mirrors `passthru.variant` from Nix-side `mkGuest`. The supervisor
 /// resolves it from the workload's `SignedImageRef.name` suffix or
-/// from the policy bundle's bound variant — Wave 1 already has
-/// `audit::AuditEntry::variant` recording this for every entry, so
-/// the value flows through the audit chain unchanged.
+/// from the policy bundle's bound variant; `audit::AuditEntry::variant`
+/// records this for every entry, so the value flows through the audit
+/// chain unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Variant {
@@ -271,7 +271,7 @@ impl Variant {
 }
 
 /// A secret binding from a name (visible inside the guest) to its
-/// source (resolved by the supervisor's `KeystoreReleaser` per Wave 3).
+/// source (resolved by the supervisor's `KeystoreReleaser`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretBinding {
@@ -281,10 +281,10 @@ pub struct SecretBinding {
     pub source: SecretSource,
 }
 
-/// Where a secret comes from. Plan 37 §25 lists pluggable providers
-/// (Vault, AWS SM, GCP SM); Wave 3 adds the per-run attestation-gated
-/// release. The `Static` variant is a compile-time literal for tests
-/// only — `mvmctl plan validate --prod` rejects plans that contain it.
+/// Where a secret comes from. Pluggable providers (Vault, AWS SM,
+/// GCP SM) plus per-run attestation-gated release. The `Static`
+/// variant is a compile-time literal for tests only — `mvmctl plan
+/// validate --prod` rejects plans that contain it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SecretSource {
@@ -299,8 +299,8 @@ pub enum SecretSource {
 }
 
 /// Artifact-capture policy for the run. `capture_paths` are guest-side
-/// directories the supervisor's `ArtifactCollector` (Wave 3) sweeps
-/// post-run; `retention_days` controls the cleanup sweeper.
+/// directories the supervisor's `ArtifactCollector` sweeps post-run;
+/// `retention_days` controls the cleanup sweeper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactPolicy {
@@ -321,9 +321,9 @@ pub struct AttestationRequirement {
     pub mode: AttestationMode,
 }
 
-/// Plan 37 §14 attestation modes. Wave 3 introduces real TPM2 / SEV
-/// providers; the `Noop` mode lets every plan launch without
-/// attestation (today's behaviour) for backwards compat.
+/// Attestation modes. Real TPM2 / SEV providers land later; the
+/// `Noop` mode lets every plan launch without attestation (today's
+/// behaviour) for backwards compat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestationMode {
@@ -332,22 +332,22 @@ pub enum AttestationMode {
     /// TPM2 EK + AK quote. Supervisor's `KeystoreReleaser` gates
     /// secret release on a successful quote.
     Tpm2,
-    /// AMD SEV-SNP report. Provider lands in Wave 6.
+    /// AMD SEV-SNP report. Provider not yet implemented.
     SevSnp,
-    /// Intel TDX quote. Provider lands in Wave 6.
+    /// Intel TDX quote. Provider not yet implemented.
     Tdx,
 }
 
-/// Plan 37 §11 release pinning: the workload runs at a specific
-/// release of mvm/mvmd. Mismatch is grounds for refusal at admission.
+/// Release pinning: the workload runs at a specific release of
+/// mvm/mvmd. Mismatch is grounds for refusal at admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleasePin {
     pub release_id: String,
 }
 
-/// Plan 37 §27 lifecycle directives. The supervisor's plan state
-/// machine consults these on workload exit / idle.
+/// Lifecycle directives. The supervisor's plan state machine
+/// consults these on workload exit / idle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostRunLifecycle {
@@ -369,7 +369,7 @@ pub type AuditLabels = BTreeMap<String, String>;
 /// the plan signer. The supervisor's `NonceStore` (see
 /// `crate::plan::validity`) refuses a second admission with the same
 /// nonce for the same signer until the plan's `valid_until`
-/// passes. Plan 37 Addendum G4.
+/// passes.
 ///
 /// Wire format: 32-character lowercase hex string. Stored as a
 /// string rather than `[u8; 16]` so JSON readers can eyeball it;
@@ -437,8 +437,8 @@ pub enum NonceParseError {
 
 /// Pin from an `ExecutionPlan` to an application-dependencies volume.
 ///
-/// Plan 73 Followup A / ADR-047 security claim 9. When a workload
-/// mounts a deps volume at `/app/.venv` (Python) or
+/// Backs security claim 9. When a workload mounts a deps volume at
+/// `/app/.venv` (Python) or
 /// `/app/node_modules` (Node), the plan binds the on-disk volume's
 /// deterministic hashes here so the supervisor's admission gate can
 /// re-verify them before launch.
@@ -537,8 +537,8 @@ pub enum ShareKind {
 /// claim 8. Today user volumes attach as a host-side launch detail; this
 /// binding makes each an *admitted, signed, audited* grant so the Vz
 /// supervisor's future "refuse a share the admitted plan didn't name"
-/// gate (Plan 97 Phase D) can allow them, and every admission emits the
-/// list to the chain-signed audit log. `deny_unknown_fields` + the
+/// gate can allow them, and every admission emits the list to the
+/// chain-signed audit log. `deny_unknown_fields` + the
 /// absolute-path check keep a forged plan from smuggling a grant past
 /// the envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,8 +555,8 @@ pub struct HostShareGrant {
     pub guest_path: String,
     pub kind: ShareKind,
     pub read_only: bool,
-    /// Disk-only: in-guest encryption requested (Plan 101). Always
-    /// false for a directory share.
+    /// Disk-only: in-guest encryption requested. Always false for a
+    /// directory share.
     #[serde(default)]
     pub encrypted: bool,
 }
@@ -634,8 +634,8 @@ mod host_share_grant_tests {
 mod signed_image_ref_tests {
     use super::*;
 
-    /// Byte-identity guard (Plan 165 WS-B B4): a default-true
-    /// `entrypoint_present` must NOT serialize, so every existing
+    /// Byte-identity guard: a default-true `entrypoint_present` must
+    /// NOT serialize, so every existing
     /// signed-plan fixture (which never carried the field) hashes the
     /// same bytes and its Ed25519 signature stays valid.
     #[test]
@@ -660,7 +660,7 @@ mod signed_image_ref_tests {
     }
 
     /// The guard field is serialized only when false — the one case the
-    /// supervisor's B4 admission gate must see on the wire.
+    /// supervisor's admission gate must see on the wire.
     #[test]
     fn serde_emits_entrypoint_present_when_false() {
         let r = SignedImageRef {

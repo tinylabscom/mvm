@@ -1,8 +1,6 @@
-//! Hostname + port allowlist for the builder-VM egress proxy
-//! (Plan 73 Followup B.2.x, ADR-047 §"Build-time gates" → "Registry
-//! allowlist").
+//! Hostname + port allowlist for the builder-VM egress proxy.
 //!
-//! ADR-047 names four hostnames the builder VM is allowed to dial
+//! Four hostnames the builder VM is allowed to dial
 //! during `uv pip install` / `pnpm install`:
 //!
 //! - `pypi.org` — the Python package index API.
@@ -25,23 +23,22 @@
 //! rather than letting the connection through and discovering
 //! the protocol error inside the TLS / pip layer.
 //!
-//! Future extension: when ADR-047 grows registry-mirror support,
+//! Future extension: when registry-mirror support lands,
 //! the allowlist will move from hard-coded to manifest-driven.
-//! Today's closed list mirrors the ADR's call exactly.
 //!
 //! ## Hostname matching
 //!
-//! Exact match only. No wildcards in v1 — `pypi.org` does NOT
+//! Exact match only. No wildcards — `pypi.org` does NOT
 //! cover `pkg.pypi.org`, `*.pythonhosted.org` does NOT cover
-//! `mirror.pythonhosted.org`. ADR-047 lists exactly four; we
-//! enforce exactly four. A future "subdomain wildcard" extension
-//! requires an ADR revision.
+//! `mirror.pythonhosted.org`. We enforce exactly the four listed
+//! hostnames; a future "subdomain wildcard" extension is a
+//! deliberate policy change.
 //!
 //! Comparison is case-insensitive (DNS is case-insensitive per
 //! RFC 4343); we lowercase the candidate before comparing to the
 //! lowercase static list.
 
-/// The four ADR-047 hostnames, lowercased. Order doesn't matter;
+/// The four allowed hostnames, lowercased. Order doesn't matter;
 /// the matcher walks the slice with `.iter().any()`.
 pub const PRODUCTION_HOSTNAMES: &[&str] = &[
     "pypi.org",
@@ -50,8 +47,8 @@ pub const PRODUCTION_HOSTNAMES: &[&str] = &[
     "objects.githubusercontent.com",
 ];
 
-/// Only port the proxy permits. ADR-047 §"Registry allowlist"
-/// implies HTTPS-only. See module docs for the rationale on
+/// Only port the proxy permits — the allowlisted hosts serve
+/// HTTPS exclusively. See module docs for the rationale on
 /// rejecting other ports.
 pub const ALLOWED_PORT: u16 = 443;
 
@@ -65,7 +62,7 @@ pub struct Allowlist {
 }
 
 impl Allowlist {
-    /// Build the production allowlist — the four ADR-047
+    /// Build the production allowlist — the four allowed
     /// hostnames + port 443. This is what `main.rs` constructs
     /// when the `dev-shell` feature is **off** (i.e., the binary
     /// shipped inside the builder VM). No env-var override; the
@@ -154,8 +151,8 @@ mod tests {
     #[test]
     fn production_allowlist_rejects_subdomain_of_allowed_host() {
         // Exact match only — `mirror.pypi.org` is NOT covered by
-        // `pypi.org`. ADR-047 wants the closed list; future
-        // wildcards need an ADR amendment.
+        // `pypi.org`. The closed list is the policy; future
+        // wildcards are a deliberate change.
         let a = Allowlist::production();
         assert!(!a.is_allowed("mirror.pypi.org", 443));
         assert!(!a.is_allowed("foo.files.pythonhosted.org", 443));
@@ -209,10 +206,9 @@ mod tests {
 
     #[test]
     fn allowed_port_constant_is_443() {
-        // Lock the contract: ADR-047 implies HTTPS-only via the
-        // "Registry allowlist" wording. If a future ADR opens
-        // port 80 we want this test to flag the constant change
-        // explicitly.
+        // Lock the contract: the allowlisted hosts are HTTPS-only.
+        // If a future change opens port 80 we want this test to
+        // flag the constant change explicitly.
         assert_eq!(ALLOWED_PORT, 443);
         assert_eq!(Allowlist::production().port(), 443);
     }

@@ -5,7 +5,7 @@
 //! It puts the existing [`crate::network`] provisioning (`bridge_ensure` +
 //! `tap_create` + `apply_network_policy`) behind the seam so the Firecracker
 //! start path goes through the trait instead of calling the free functions
-//! directly (plan 123 Phase A, A1 step 2). The gvproxy/passt (libkrun) path
+//! directly. The gvproxy/passt (libkrun) path
 //! and the WireGuard/Tailscale mesh (mvmd) are separate `NetworkProvider`
 //! impls — this one only owns the iptables-on-TAP egress mechanism.
 //!

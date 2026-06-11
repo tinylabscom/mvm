@@ -1,4 +1,4 @@
-//! Plan 60 Phase 4 piece 3 — host-side lifecycle event bus.
+//! Host-side lifecycle event bus.
 //!
 //! `tokio::sync::broadcast`-based pub/sub channel that carries
 //! every VM/instance state transition. The supervisor publishes
@@ -26,8 +26,8 @@
 //! process subscribers (mvmd in a different binary, an external
 //! `mvmctl events` invocation) need a forwarder: a long-lived task
 //! that subscribes to the bus + serialises events out a Unix
-//! socket or HTTP SSE endpoint. That forwarder is Phase 4
-//! follow-up work; this module is the in-process substrate.
+//! socket or HTTP SSE endpoint. That forwarder is follow-up
+//! work; this module is the in-process substrate.
 //!
 //! ## Relationship to the audit Recorder
 //!
