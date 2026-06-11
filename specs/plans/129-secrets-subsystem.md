@@ -128,11 +128,62 @@ endpoint validation above**); this ties them on a real QEMU guest.
    >   substitute → real http forward → destination echo — is validated on a live
    >   QEMU guest.** "A raw secret never enters the microVM" is proven end-to-end.
 
+### Clean-room recipe e2e (2026-06-11, dev-kvm)
+
+The full **user-facing recipe** was re-proven from a fresh isolated env
+(`MVM_DATA_DIR`/`MVM_CACHE_DIR` clean-room) on the box, using only the
+documented verbs — no test harness, no pre-seeded state:
+
+1. `mvmctl secret set echo-key --host httpbin.org --type bearer --value -`
+   (marker `REALKEY-7f3a9c2e`) → `secret.set` audited, write-only, encrypted
+   at rest.
+2. `mvmctl build compile examples/python/secret-egress/app.py --out <dir>` →
+   artifacts carry the `API_KEY → echo-key` binding and are **clean of the
+   real value** (grep-verified).
+3. `mvmctl up --hypervisor qemu --flake <dir>` → plan admitted with secrets,
+   `mvm-substitution-endpoint` spawned, guest env holds **only**
+   `API_KEY=mvm-secret-<hex>` (`substitution-env.json` verified).
+4. `echo "[[], {}]" | mvmctl invoke <vm> --attach --stdin -` → httpbin.org
+   reflects `"Authorization": "Bearer REALKEY-7f3a9c2e"` (the **real**
+   credential, real external destination over the internet) while the guest
+   never held it. Audit chain carries the full
+   `plan.admitted → plan.launched → cmd.invoke.completed` lifecycle.
+
+The same recipe on `--hypervisor firecracker` boots (after #793) but spawns
+**no endpoint** — see the new follow-ups below.
+
 ### Deferred follow-ups (surfaced by the local-launch e2e)
 
 - [x] **SSRF resolver hardcodes port 443 → broke http egress forwards** —
       FIXED in PR #755 (forwarder resolves + SSRF-filters itself, pins the safe
       IPs on the URL's real port via `resolve_to_addrs`). This closed the e2e.
+- [ ] **FC endpoint gap, precisely located:** `should_thread_signed_plan`
+      (`mvm-cli/src/commands/vm/up.rs`) threads the admitted plan onto the
+      backend config only for `qemu` (or `MVM_GATEWAY_BRIDGE=1`), and the
+      endpoint spawn keys off `config.plan_json` — so Firecracker can never
+      spawn the substitution endpoint today. Closing it = thread the plan for
+      `firecracker` + add an FC endpoint-spawn arm (terminator-backend
+      decision: QEMU→passt vs FC).
+- [ ] **FC `up --flake` workload-kernel gap:** mkGuest flake builds emit only
+      `rootfs.ext4`; the FC boot path assumes `{build_dir}/vmlinux` exists and
+      fails with `preparing FC-loadable kernel … No such file or directory`.
+      `--kernel-source download` feeds only the Stage-0 builder, not the
+      workload boot. (libkrun materializes its bundled kernel centrally; QEMU
+      boots the downloaded bzImage.) FC needs the same central
+      kernel-resolution fallback. Box workaround: hand-stage the
+      default-microvm bzImage into the build dir (`ensure_fc_loadable_kernel`
+      extracts the ELF from it).
+- [ ] **Per-substitution audit not wired in the spawned endpoint:** the
+      `SubstitutionService` audit `Recorder` (`secret.substituted` /
+      `placeholder_dropped`) is optional, and the per-VM endpoint `up` spawns
+      runs without it — a live substituting invoke leaves no substitution
+      event in the chain-signed log. Wire the Recorder into the spawn path.
+- [ ] **`invoke` empty-stdin default violates the wire contract:** default
+      stdin is empty, but the wrapper requires a JSON `[args, kwargs]`
+      payload → a bare `invoke --attach` fails with `JSONDecodeError`. Default
+      to `[[], {}]` when no stdin is given (and fix the stale
+      `mvmctl compile` → `mvmctl build compile` docstring in
+      `examples/python/secret-egress/app.py`).
 - [ ] **Forward proxy + `https`/`CONNECT`** — standard clients tunnel `https`
       through `HTTP_PROXY` via `CONNECT`, hiding headers from the proxy, so
       substitution only works for `http`/absolute-form today. TLS-destination

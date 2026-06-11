@@ -23,7 +23,7 @@ details** below for the workstream-level state.
 - [x] **PLAN 170** — Host lifecycle convergence · ✅ mvm-side (density → mvmd)
 - [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
 - [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
-- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; SigV4/HMAC forward-path signing landed (bind-checked, key-never-leaves); FC agent reachability fixed (#793) — live FC egress e2e is the remaining step
+- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 clean-room recipe e2e GREEN on QEMU (real key at httpbin, placeholder-only guest, 2026-06-11); SigV4/HMAC forward-path signing landed (bind-checked, key-never-leaves); FC leg blocked: endpoint spawn is qemu-only + FC flake-kernel gap
 - [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
 - [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
 - [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
@@ -42,7 +42,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (box-validated on QEMU); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC kernel blocker fixed (#763); FC guest-agent reachability fixed + box-validated (#793) — live FC egress e2e is the remaining step
+PLAN 129 — Secrets / SigV4 substitution         🟢 clean-room recipe e2e GREEN on QEMU 2026-06-11 (secret set → build compile → up → invoke --attach; httpbin reflects the real key, guest holds placeholder only); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC boots (#793) but its egress leg is blocked: endpoint spawn is qemu-only (`should_thread_signed_plan`) + FC flake-kernel gap — see plan §"Deferred follow-ups"
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -65,16 +65,19 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
   [x] redirect mechanism box-validated: nft prerouting iifname<tap> REDIRECT + SO_ORIGINAL_DST (Task 0')
   [x] FC wiring: EgressRedirect (nft TAP redirect) + wire_egress_substitution + stop_vm reap — Task 5 — PR #744 (merged)
       (mechanism corrected: FC=TAP+nft NAT, not passt/skuid; passt path deferred to libkrun)
-  [ ] live SDK-free FC box e2e — Task 6 — in progress on the dev-kvm box.
-      (prompt: specs/prompts/129-fc-bringup-debug.md). Kernel blocker (published
-      x86_64 bzImage→ELF vmlinux, #746) FIXED — PR #763 (mvm_build::fc_kernel
-      auto-extracts at boot); local secret-launch glue DONE (#745). FC
-      guest-agent reachability FIXED + box-validated (`up` exit 0): the host
-      transport resolved the vsock UDS at <dir>/runtime/v.sock but FC bound it
-      at <dir>/v.sock, and the connect pre-flight rejected symlinked UDSes
-      (symlink_metadata) — fixed by exposing the UDS under runtime/ + making
-      the pre-flight follow symlinks (also fixes the template path's symlink).
-      Remaining: run the secret-substitution egress e2e itself.
+  [ ] live SDK-free FC box e2e — Task 6 — clean-room recipe e2e ran 2026-06-11
+      (prompt: specs/prompts/129-fc-bringup-debug.md). QEMU leg GREEN end-to-end:
+      `secret set` → `build compile` (artifacts clean of the value) → `up`
+      (endpoint spawned, guest env = placeholder only) → `invoke --attach`
+      (httpbin reflects `Bearer REALKEY-…`, the real credential). FC leg: boots
+      (#793) but spawns NO endpoint — `should_thread_signed_plan` threads the
+      plan onto the backend config only for qemu, so FC never sees plan_json;
+      plus mkGuest flake builds emit no vmlinux and the FC boot path assumes
+      `{build_dir}/vmlinux` (hand-staged bzImage as box workaround). Both
+      recorded as plan-129 deferred follow-ups, with two more: the spawned
+      endpoint runs without the audit Recorder (no `secret.substituted` entry
+      in a live run), and `invoke`'s empty-stdin default violates the
+      `[args, kwargs]` wire contract.
   [x] Stage 2 S2.1–S2.6: name-constrained per-VM CA (crypto::egress_ca) + host
       cert/key split + kernel-cmdline cert + placeholder-env delivery (mvm.egress_ca /
       mvm.secret_env) + SNI-gated TLS terminator (terminate bound / splice unbound,
@@ -153,6 +156,11 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
       egress_secret_leak_gate.rs + claim doc claim-egress-no-secret-to-guest.md +
       catalog.md row 16 witnesses (Preview), gated on every PR (Test lane +
       check-claim-catalog)
+  [x] substitution-endpoint jailer wrap: self-applied Landlock + seccomp-BPF
+      (ConfinementSpec::substitution_endpoint — store dirs + TLS/DNS read-only,
+      BRIDGE_SYSCALLS + tokio/rustls additions), fail-closed before serving the
+      first guest byte; macOS stub no-op. Allowlist completeness box-validated
+      (Linux runtime check) like the firecracker-bridge confinement
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [x] forward-path signing integration (SigV4 + HMAC)  — prepare_request branches
       on the resolved auth_type, routes SigV4/HMAC through the bind-checked
