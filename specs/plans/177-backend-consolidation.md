@@ -119,23 +119,30 @@ Modified:
 > the code references here are from pre-merge `main` and WILL move.
 
 ### Task 6: Re-baseline against merged 152 work
-- [ ] Rebase this branch on `main` after the gate clears.
-- [ ] Re-read `crates/mvm-backend/src/vz.rs`, `crates/mvm-vm-host` VZ
-      supervisor bin, and `crates/mvm-backend/src/providers/apple_container/`
-      (`mod.rs` + `macos.rs`). Re-confirm: (a) `VzBackend` still owns
-      snapshot/restore + pause/resume; (b) what `AppleContainerBackend`
-      uniquely does that `VzBackend` does not (admission gate ordering, CoW
-      rootfs clone via `prepare_instance_rootfs`, `runtime_meta` recording);
-      (c) the console attach point. Write the delta as a checklist comment
-      on this task before editing.
+- [x] Rebase this branch on `main` after the gate clears.
+- [x] Re-read against merged main. **Delta found:** (a) `VzBackend` owns
+      snapshot/restore + pause/resume — confirmed; (b) of the three unique
+      behaviors, `admit_overlay_aware` + `runtime_meta` were ALREADY in
+      `vz.rs` — the only real gap was the CoW per-instance rootfs clone
+      (`vz`'s `read_only: true` rootfs was the workaround for not cloning,
+      not a sealed-image choice); (c) the console attach already goes
+      through the shared `VsockTransport` seam with a `VzTransport` arm —
+      Task 8 as written is largely shipped; the residual is replacing the
+      try-connect probe chain with backend-resolved transports (PR2.5).
+      **Also found:** the macOS-26 dev environment (`mvmctl dev`) drives the
+      in-process provider directly (start/list/vsock/launchd), outside
+      `VmBackend` — so the provider deletion is split out (PR3) behind a
+      dev-env repoint, and the codesigning helpers relocate with it.
 
 ### Task 7: Port AppleContainerBackend-unique behavior onto VzBackend
 **Files:** `crates/mvm-backend/src/vz.rs`; reference `apple_container.rs`.
 
-- [ ] **Step 1 — failing test.** Add a `VzBackend::start` test asserting the macOS-26 admission behaviors the in-process path had: refuses a pre-`/mvm/runtime` rootfs (`admit_overlay_aware`), CoW-clones to a per-instance rootfs, and records `runtime_meta` from the source sidecar. FAIL initially.
-- [ ] **Step 2 — port.** Move the unique logic (admission gate ordering, `prepare_instance_rootfs` CoW clone, `runtime_meta::record_from_rootfs`) into the `VzBackend::start` path, reusing the existing helpers (don't fork copies). Whatever is shared host substrate goes through `base`.
-- [ ] **Step 3 — green.** `cargo nextest run -p mvm-backend -E 'test(vz)'` (scope to avoid the SIGKILL bin); clippy clean.
-- [ ] **Step 4 — commit.** `git commit -m "feat(backend): port apple_container admission+CoW onto VzBackend"`
+- [x] Ported (PR #789, merged): `prepare_instance_rootfs` /
+      `instance_rootfs_path` lifted to shared `base::cow` (with tests);
+      `VzBackend::start` CoW-clones per instance and attaches the rootfs
+      **writable for non-verity** images (verity keeps the read-only golden —
+      dm-verity needs an immutable backing); `stop` removes the clone.
+      Admission + runtime_meta needed no port (already present).
 
 ### Task 8: Shared libkrun+vz console transport
 **Files:** new shared console-attach in `crates/mvm-backend/src/base/` (or the existing libkrun console module if that's the established home); modify `vz.rs`, `console.rs` callers.
@@ -149,11 +156,34 @@ Modified:
 ### Task 9: Delete the in-process AVF duplicate + collapse the alias
 **Files:** delete `crates/mvm-backend/src/providers/apple_container/`, `crates/mvm-backend/src/apple_container.rs`; modify `lib.rs`, `backend.rs`, `doctor.rs`, CLI alias.
 
-- [ ] **Step 1 — who-calls audit.** `rg -n 'AppleContainerBackend|providers::apple_container|apple-container|has_apple_containers' crates/ src/`. Confirm Task 7/8 covered every unique behavior and that nothing else (dev env path, mvmd facade) needs the in-process type.
-- [ ] **Step 2 — failing assertion.** Change tests: `from_hypervisor("apple-container")` and `from_hypervisor("vz")` BOTH resolve to `Vz(VzBackend)`; `auto_select` on macOS-26 returns `Vz`. FAIL initially.
-- [ ] **Step 3 — remove + repoint.** In `from_hypervisor`, map `"apple-container"` → `Vz(VzBackend)` (kept as a deprecated-input alias only, or dropped per no-backcompat — pick drop unless a current caller needs it; record the choice). Repoint `auto_select`'s `has_apple_containers()` branch (`backend.rs:438-439`) to `Vz(VzBackend)`. Delete the `AppleContainer` variant, the module + provider dir, the `pub mod`s, and the `doctor` apple-container row.
-- [ ] **Step 4 — green.** `cargo nextest run -p mvm-backend -p mvm-cli` (scoped); clippy clean. On this Mac, hardware-verify a macOS-26 `mvmctl up` boots on the unified `vz` default (`project_dev_host_runs_builder_via_vz`; isolate with `MVM_CACHE_DIR`/`MVM_DATA_DIR`).
-- [ ] **Step 5 — commit.** `git commit -m "refactor(backend): converge AVF on supervisor vz; drop in-process apple_container"`
+- [x] **Step 1 — who-calls audit.** Done. Finding: the macOS-26 dev env
+      (`mvmctl dev` → `commands/env/apple_container.rs`) drives the
+      in-process provider directly (start/list_ids/vsock_proxy/launchd),
+      and the codesigning helpers (`ensure_signed`/`sign_binaries`/
+      `collect_sign_targets`) live in the provider module but serve
+      libkrun+vz too. So the deletion is staged: workload dispatch now;
+      provider dir + dev-env repoint + signing relocation in a follow-up.
+- [x] **Step 2+3 — workload dispatch converged.** `from_hypervisor`
+      maps `"apple-container"` → `Vz(VzBackend)` (alias KEPT, not dropped:
+      unknown names fall back to Firecracker, which cannot run on macOS —
+      a silent wrong-backend pick is worse than honoring the old name; the
+      CLI resolver normalizes the string to `"vz"` so downstream string
+      matches see one name). `auto_select` macOS-26 → `Vz`. Deleted: the
+      `AppleContainer` variant, `apple_container.rs` (backend impl), the
+      `up.rs` launchd-detach + in-process-foreground branches (every
+      surviving backend is process-per-VM — the lifecycle special-cases
+      went with the in-process model), doctor list dedup; `down`/`ps`/
+      `sandbox` fallbacks now say `vz`. vz joined the post-launch
+      agent-verification gate (it had none — the silent-boot-failure hole).
+- [ ] **Step 4 — hardware-verify** a macOS-26 `mvmctl up` on the unified
+      `vz` default (consolidated smoke, after the provider deletion lands).
+- [x] **Step 5 — commit.** Landed as the Phase 2 PR2 branch
+      (`feat/plan-177-p2-port-avf` follow-on commit).
+
+**Residual for the follow-up (PR3):** repoint the dev env onto the vz
+supervisor; relocate the signing helpers out of `providers/apple_container`;
+delete the provider dir + `AppleContainerTransport` + the console picker's
+provider probe; remove the direct-boot path's `start_port_proxy` wart.
 
 ### Task 10: Phase 2 verification + docs
 - [ ] `rg -n 'AppleContainerBackend|providers/apple_container' crates/ src/` returns nothing.

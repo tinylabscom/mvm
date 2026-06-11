@@ -66,9 +66,8 @@ pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
-// Vz (Apple Virtualization.framework) backend. Currently a skeleton:
-// trait surface + capabilities + security profile + availability
-// probe; lifecycle methods land in a follow-up slice.
+// Vz (Apple Virtualization.framework) backend — full lifecycle via the
+// per-VM Rust supervisor (boot/stop/pause/resume/snapshot/console).
 pub mod vz;
 // Rust client for the Vz supervisor's control socket
 // (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.

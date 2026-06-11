@@ -483,7 +483,7 @@ fn collect_balloon_support() -> BTreeMap<String, bool> {
     // list is hand-maintained because there's no general "iterate
     // every backend" helper today; adding a new backend means
     // adding it here so doctor surfaces it without lying.
-    let names = ["firecracker", "apple-container", "libkrun", "qemu"];
+    let names = ["firecracker", "vz", "libkrun", "qemu"];
     let mut out = BTreeMap::new();
     for name in names {
         let backend = AnyBackend::from_hypervisor(name);
@@ -519,7 +519,7 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 fn collect_warm_start_support() -> WarmStartReport {
     // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
     // because save/restore is a warm-start tier worth surfacing.
-    let names = ["firecracker", "apple-container", "libkrun", "qemu", "vz"];
+    let names = ["firecracker", "libkrun", "qemu", "vz"];
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
     for name in names {
@@ -2738,7 +2738,7 @@ mod tests {
         // fails loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
-        assert_eq!(support.get("apple-container"), Some(&false));
+        assert_eq!(support.get("qemu"), Some(&false));
     }
 
     #[test]

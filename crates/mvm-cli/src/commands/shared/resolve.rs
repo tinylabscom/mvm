@@ -184,10 +184,17 @@ pub fn resolve_network_policy(
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → apple-container, macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
-/// "not available" error). Any explicit value is returned as-is. Single source of truth,
-/// shared by `mvmctl up` and `mvmctl pool` so they agree on the backend.
+/// → vz (Apple Virtualization.framework via the per-VM supervisor), macOS 13-25 +
+/// libkrun → libkrun, else firecracker (surfaces a clear
+/// "not available" error). Any explicit value is returned as-is, except
+/// `apple-container`, which normalizes to `vz` — the in-process AVF backend
+/// converged onto the supervisor-model one, and normalizing here (the single
+/// source of truth) keeps every downstream string comparison on the new name.
+/// Shared by `mvmctl up` and `mvmctl pool` so they agree on the backend.
 pub fn resolve_effective_hypervisor(requested: &str) -> String {
+    if requested == "apple-container" {
+        return "vz".to_string();
+    }
     if requested != "firecracker" {
         return requested.to_string();
     }
