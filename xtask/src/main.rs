@@ -213,7 +213,7 @@ fn default_man_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+mod guest_init_tests {
     #[test]
     fn guest_init_detaches_workload_stdin_from_console() {
         // The sealed-workload arm must source the boot command with stdin
