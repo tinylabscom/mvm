@@ -52,9 +52,16 @@ pub enum SecretAction {
 #[serde(deny_unknown_fields, default)]
 pub struct RedactionAction {
     pub entropy: EntropyMode,
-    /// Structured-regex PII (email/ssn/cc/phone/iban) — reuse the existing knob.
+    /// RESERVED — parsed and resolved but not yet consumed by the redactor,
+    /// which currently applies the always-on structured-PII ruleset regardless
+    /// of this value. Per-destination PII mode/categories interact with that
+    /// always-on pass and need their own semantic pass before this knob takes
+    /// effect; until then a value here has no runtime effect.
     pub pii: PiiPolicy,
     pub names: NameMode,
+    /// RESERVED — parsed and resolved but not yet consumed; curated secrets are
+    /// always masked (Block-equivalent) regardless of this value. Wiring it is a
+    /// tracked follow-up.
     pub secrets: SecretAction,
 }
 

@@ -99,6 +99,10 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
     [x] slice 3: name detector (field-label + PII co-occurrence + gazetteer)
     [x] slice 4: RedactionAction + redaction_profiles + resolve (mvm-core)
     [x] slice 5: destination-aware wiring; fail-closed over-cap/compressed bodies
+    [ ] reachability: admission wiring (workload egress policy → with_redaction_policy)
+        — mechanism complete + tested; NOT yet reachable in prod. + consume
+        action.pii/action.secrets (RESERVED), terminator-path redaction. See plan
+        §"Deferred follow-ups".
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
