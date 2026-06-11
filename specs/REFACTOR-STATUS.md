@@ -4,12 +4,36 @@
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
-> change and bump the "Last updated" date. This is a hand-maintained rollup of
+> change and bump the "Last updated" date — update BOTH the glance checklist
+> and the matching plan in the details. This is a hand-maintained rollup of
 > the per-plan checkboxes in `specs/plans/` and `specs/SPRINT.md` — it is a
 > quick index, not the source of truth. If it disagrees with a plan doc, the
 > plan doc wins; fix this file.
 
-## Plans
+## Plans at a glance
+
+A box is ticked only when the whole plan is ✅ DONE. In-progress (🟢/🟡) and
+not-started (🔴) plans stay unticked — see the per-plan breakdown in **Plan
+details** below for the workstream-level state.
+
+- [x] **PLAN 121** — Crate consolidation (32→15) · ✅
+- [x] **PLAN 169** — Backend-agnostic agent RPC · ✅
+- [x] **PLAN 166** — QEMU Linux dev/test backend · ✅
+- [x] **PLAN 165** — Sealed-prod interactivity (claim 15) · ✅
+- [x] **PLAN 170** — Host lifecycle convergence · ✅ mvm-side (density → mvmd)
+- [x] **PLAN 153** — CLI directory split · ✅ (subsumed into Plan 178)
+- [x] **PLAN 178** — CLI surface consolidation (~56→~28) · ✅ (dir-purity deferred)
+- [ ] **PLAN 129** — Secrets / SigV4 substitution · 🟢 declared + undeclared landed; live FC https e2e gated on agent bringup
+- [ ] **PLAN 152** — Rust-native VZ supervisor · 🟢 native objc2, Swift deleted; WS-C/D separate workstreams
+- [ ] **PLAN 159** — vz-inspired macOS VZ DX · 🟡 warm pool + checkpoint/fork shipped; WS-5 D + delta-image remain
+- [ ] **PLAN 123** — Network / storage / warm-start · 🟢 Phase A/B done; C2/C3 (FC/Vz warm-start) gated
+- [ ] **PLAN 124** — Lean guest agent · 🟡 ~65%; SDK codegen + signed on-device config remain
+- [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
+- [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) next
+- [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
+- [ ] **PLAN 180** — Strip spec refs from code comments · 🔴 not started
+
+## Plan details
 
 ```
 PLAN 121 — Crate consolidation (32→15)          ✅ DONE
