@@ -84,6 +84,11 @@ impl CanonicalRule {
 /// The canonical projection of a resolved policy's egress grants.
 /// `Unrestricted` is the `egress.mode = "open"` kill-switch made
 /// explicit; mandatory-deny still applies to it.
+///
+/// Translators that lower `Rules` into an enforcement backend must
+/// keep installing mandatory-deny independently and first — the
+/// unconditional check in [`Self::permits`] is this module's backstop,
+/// not a substitute for the enforcement layer's own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalEgress {
     Unrestricted,
@@ -125,6 +130,12 @@ pub enum ProjectionError {
     EmptyPin { host: String },
     #[error("grant for {dest:?} overlaps mandatory-deny range {range}")]
     MandatoryDenyOverlap { dest: String, range: IpNet },
+    #[error("inverted port range {port_lo}..={port_hi} for {dest:?}")]
+    InvertedPortRange {
+        dest: String,
+        port_lo: u16,
+        port_hi: u16,
+    },
 }
 
 /// True when two CIDRs share any address. For valid CIDRs, two
@@ -158,6 +169,20 @@ fn normalize_ports(lo: u16, hi: u16) -> (u16, u16) {
     }
 }
 
+/// Refuse a wire-format range with `lo > hi`. A silent
+/// never-matching rule would be fail-closed but invisible;
+/// loud refusal at projection matches the L4 gate's posture.
+fn refuse_inverted_ports(dest: &str, lo: u16, hi: u16) -> Result<(), ProjectionError> {
+    if lo > hi {
+        return Err(ProjectionError::InvertedPortRange {
+            dest: dest.to_string(),
+            port_lo: lo,
+            port_hi: hi,
+        });
+    }
+    Ok(())
+}
+
 /// Lower a resolved policy + admission-time pin registry into the
 /// canonical egress grant set. Pure; fail-closed on every
 /// malformed or unpinnable input. `now` is an RFC 3339 UTC
@@ -181,6 +206,7 @@ pub fn canonicalize_effective(
                 source,
             })?;
         refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
+        refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
         let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
         rules.push(CanonicalRule {
             proto: Proto::parse(&spec.proto)?,
@@ -294,6 +320,7 @@ pub fn to_wasi_grants(
                 source,
             })?;
         refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
+        refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
         let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
         grants.push(WasiOutboundGrant {
             target: WasiTarget::Net(net),
@@ -837,6 +864,21 @@ mod tests {
             to_wasi_grants(&eff, &pins, NOW).unwrap_err(),
             ProjectionError::MandatoryDenyOverlap { .. }
         ));
+    }
+
+    #[test]
+    fn l4_inverted_port_range_refuses() {
+        let eff = eff_with_l4(vec![l4("tcp", "93.184.216.0/24", 443, 80)]);
+        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::InvertedPortRange { .. }),
+            "got {err:?}"
+        );
+        let err = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
+        assert!(
+            matches!(err, ProjectionError::InvertedPortRange { .. }),
+            "got {err:?}"
+        );
     }
 
     // ─────────────────────────────────────────────────

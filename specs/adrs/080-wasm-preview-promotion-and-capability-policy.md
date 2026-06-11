@@ -192,7 +192,7 @@ that does not share the wasm layer's bugs.
 gap rather than hand-waving it.** WASI grants are hostname-shaped; nftables
 rules are CIDR-shaped. "The projections agree" and "intersection-only" have
 no canonical meaning across namespaces, and DNS is the attacker's friend in
-the gap (a granted hostname re-resolving to a metadata or RFC1918 address
+the gap (a granted hostname re-resolving to a metadata, loopback, or CGNAT address
 widens effective reach past everything). Therefore:
 
 - **One canonical address space at projection time.** Hostname grants are
@@ -200,11 +200,15 @@ widens effective reach past everything). Therefore:
   are then compared and enforced over the same pinned set. The coarse layer
   enforces the pinned IPs, not live DNS.
 - **Mandatory-deny is unconditional.** The existing `mandatory_deny_ranges`
-  (loopback, link-local/metadata, RFC1918, CGNAT) are denied by the coarse
-  projection regardless of any grant — a hostname grant that resolves into a
-  mandatory-deny range yields a refusal, not a pin. Negative witness: a
-  rebinding-shaped fixture (grant resolves into 169.254.0.0/16) must be
-  denied by both projections.
+  (cloud metadata + link-local, CGNAT, loopback — v4 and v6) are denied by
+  the coarse projection regardless of any grant — a hostname grant that
+  resolves into a mandatory-deny range yields a refusal, not a pin. Negative
+  witness: a rebinding-shaped fixture (grant resolves into 169.254.0.0/16)
+  must be denied by both projections. RFC1918 is deliberately not in the
+  mandatory set (the const's rationale: legitimate VPN/cluster traffic, and
+  the dev network itself is RFC1918) — a tenant that must not reach private
+  ranges expresses that through its resolved policy, not the unconditional
+  floor.
 - **The consistency witness is property-based, not a fixture.** A single
   fixture proves one example; drift lives in wildcard semantics, v4/v6,
   ports, and resolution divergence. The witness generates grant sets over the
