@@ -1,4 +1,4 @@
-//! Plan 64 W2 — host-local Ed25519 signer for `ExecutionPlan` envelopes.
+//! Host-local Ed25519 signer for `ExecutionPlan` envelopes.
 //!
 //! Stores keypair under `~/.mvm/keys/host-signer.{ed25519,pub}`:
 //!
@@ -13,8 +13,8 @@
 //!
 //! ## Why files instead of OS keychain
 //!
-//! `keyring` integration is plan 63 W3's job (cross-platform secret
-//! storage). For plan 64's wiring, the host signer is local-only and
+//! `keyring` integration (cross-platform secret storage) is a separate
+//! workstream. For now, the host signer is local-only and
 //! "the host trusts itself" is the established model (CLAUDE.md
 //! security model §non-goals — "Defending against a malicious *host*.
 //! mvmctl trusts the host with the hypervisor, GC roots, and private
@@ -131,9 +131,8 @@ impl std::fmt::Debug for HostSigner {
 
 impl HostSigner {
     /// Verbatim copy of the public key for trusted-keys-list use.
-    /// Consumed by W4's audit chain (`FileAuditSigner` is built around
-    /// the host signer's keypair); kept on the surface in W3 so the
-    /// `pub` API is stable across the staged commits.
+    /// Consumed by the audit chain (`FileAuditSigner` is built around
+    /// the host signer's keypair).
     #[allow(dead_code)]
     pub fn verifying_key(&self) -> VerifyingKey {
         self.verifying

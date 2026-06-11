@@ -93,26 +93,25 @@ impl VmBackend for AppleContainerBackend {
             );
         }
 
-        // Plan 74 W2 / ADR-051 admission gate — refuse pre-W1.4b
-        // rootfs that lack the `/mvm/runtime` mount point. Runs
-        // before the CoW clone so a refusal exits clean (no
-        // per-instance disk written, no half-formed VM state).
-        // Sidecar lives next to the *source* rootfs.
+        // Admission gate — refuse rootfs that lack the `/mvm/runtime`
+        // mount point. Runs before the CoW clone so a refusal exits
+        // clean (no per-instance disk written, no half-formed VM
+        // state). Sidecar lives next to the *source* rootfs.
         let original_rootfs = std::path::Path::new(&config.rootfs_path);
         let original_dir = original_rootfs
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(original_dir)?;
 
-        // Plan 53 Plan D: clone the rootfs to a per-instance path so
-        // each running VM owns its disk image. Apple VZ refuses to
+        // Clone the rootfs to a per-instance path so each running VM
+        // owns its disk image. Apple VZ refuses to
         // attach the same writable disk to two VMs concurrently; the
         // clone also keeps templates pristine across multiple instances.
         // APFS Copy-on-Write makes this O(1) regardless of rootfs size
         // when source and destination live on the same volume.
         let effective_rootfs = prepare_instance_rootfs(&config.name, &config.rootfs_path)?;
 
-        // W6.2.1: read the sidecar next to the *original* rootfs (the
+        // Read the sidecar next to the *original* rootfs (the
         // per-instance clone is a CoW copy under a different name; the
         // sidecar lives next to the source). Populates the
         // accessible/sealed flag for `mvmctl console`'s gate.
@@ -145,7 +144,7 @@ impl VmBackend for AppleContainerBackend {
     fn stop(&self, id: &VmId) -> Result<()> {
         let stop_result = crate::providers::apple_container::stop(&id.0)
             .map_err(|e| anyhow::anyhow!("Apple Container stop failed: {e}"));
-        // Best-effort: remove the per-instance rootfs clone (Plan D).
+        // Best-effort: remove the per-instance rootfs clone.
         // A missing file means stop already cleaned up or the VM never
         // reached the clone step.
         if let Ok(path) = instance_rootfs_path(&id.0)
@@ -256,9 +255,9 @@ impl VmBackend for AppleContainerBackend {
 
     fn security_profile(&self) -> BackendSecurityProfile {
         // Tier 2: hardware isolation via Apple VZ (Hypervisor.framework).
-        // Claim 3 (verified boot via dm-verity) is partial — the W3
-        // pipeline currently targets Firecracker; the VZ-backed rootfs
-        // still boots without the dm-verity initramfs.
+        // Claim 3 (verified boot via dm-verity) is partial — the
+        // verified-boot pipeline currently targets Firecracker; the
+        // VZ-backed rootfs still boots without the dm-verity initramfs.
         BackendSecurityProfile {
             claims: [
                 ClaimStatus::Holds,       // 1 — host-fs isolation via VZ
@@ -281,8 +280,8 @@ impl VmBackend for AppleContainerBackend {
 
 /// Per-instance rootfs path inside `~/.mvm/vms/<vm_name>/`.
 ///
-/// Plan 53 Plan D: the rootfs clone (CoW on APFS, byte copy elsewhere)
-/// lives here. Each running Apple Container VM owns its own copy so VZ
+/// The rootfs clone (CoW on APFS, byte copy elsewhere) lives here.
+/// Each running Apple Container VM owns its own copy so VZ
 /// can attach it writable without conflicting with sibling instances.
 fn instance_rootfs_path(vm_name: &str) -> Result<std::path::PathBuf> {
     Ok(mvm_core::config::vm_state_dir(vm_name).join("rootfs.ext4"))

@@ -1,12 +1,12 @@
-//! Plan 112 Phase 3c — shared audit-substrate resolution for backends
-//! that own a `SupervisorConfig`-shaped audit surface (libkrun, Vz).
+//! Shared audit-substrate resolution for backends that own a
+//! `SupervisorConfig`-shaped audit surface (libkrun, Vz).
 //!
 //! Lifts the path-derivation + `vm_name` / `tenant_id` allowlist
 //! validation out of the per-backend `start()` paths so libkrun.rs and
-//! vz.rs share one source of truth. The next plan after 112 — a
-//! `NetworkProvider` trait — will lift `compute_audit_substrate(...)`
-//! into a trait method (`provider.activate_audit(...)`). Keeping the
-//! free-function signature stable now makes that extraction mechanical.
+//! vz.rs share one source of truth. A future `NetworkProvider` trait
+//! will lift `compute_audit_substrate(...)` into a trait method
+//! (`provider.activate_audit(...)`). Keeping the free-function
+//! signature stable now makes that extraction mechanical.
 //!
 //! Today there's no trait; just one shared module.
 
@@ -27,15 +27,15 @@ pub struct AuditSubstrate {
     pub signing_key_path: Option<PathBuf>,
 }
 
-/// Plan 112 Phase 3c — RFC 1123 DNS-label-shaped allowlist for
-/// identifiers that flow into filesystem paths (`tenant_id`,
-/// `vm_name`). Allowlist + length cap + ASCII-only — fail-closed.
-/// Deny-list patterns (rejecting `..`, `/`, NUL, etc.) are fail-open
-/// by construction; allowlist is the correct shape.
+/// RFC 1123 DNS-label-shaped allowlist for identifiers that flow into
+/// filesystem paths (`tenant_id`, `vm_name`). Allowlist + length cap +
+/// ASCII-only — fail-closed. Deny-list patterns (rejecting `..`, `/`,
+/// NUL, etc.) are fail-open by construction; allowlist is the correct
+/// shape.
 ///
 /// `mvm-plan`'s `TenantId` is an unchecked `String` newtype today
-/// (only sha256_hex is validated at `mvm-plan/src/types.rs`); this is
-/// the defense-in-depth boundary.
+/// (only sha256_hex is validated); this is the defense-in-depth
+/// boundary.
 fn validate_dns_label(label: &str, kind: &str) -> Result<()> {
     if label.is_empty() {
         bail!("{kind} must not be empty");
@@ -64,15 +64,15 @@ pub fn validate_vm_name(name: &str) -> Result<()> {
     validate_dns_label(name, "vm_name")
 }
 
-/// Plan 112 Phase 3c — derive the five audit-substrate paths for
-/// `vm_name` from `mvm_core::config::mvm_data_dir()` when `tenant_id`
-/// is `Some`. Returns `AuditSubstrate::default()` (all fields `None`)
-/// when `tenant_id` is `None` so the calling backend's supervisor
-/// takes the legacy `run_supervisor` path. Validates both `vm_name`
-/// and `tenant_id` against the DNS-label allowlist before any path
+/// Derive the five audit-substrate paths for `vm_name` from
+/// `mvm_core::config::mvm_data_dir()` when `tenant_id` is `Some`.
+/// Returns `AuditSubstrate::default()` (all fields `None`) when
+/// `tenant_id` is `None` so the calling backend's supervisor takes the
+/// legacy `run_supervisor` path. Validates both `vm_name` and
+/// `tenant_id` against the DNS-label allowlist before any path
 /// derivation.
 ///
-/// **Forward-compat note:** Plan N+1 (NetworkProvider trait) will lift
+/// **Forward-compat note:** a future NetworkProvider trait will lift
 /// this into a trait method on each provider. This function's
 /// signature is the seam — `provider.activate_audit(vm_name,
 /// tenant_id)` returning the same `AuditSubstrate` value. Keep that

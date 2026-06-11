@@ -458,9 +458,8 @@ fn slots_from_bundle(
     path: &std::path::Path,
 ) -> Result<ResolvedSlots, ResolveError> {
     // L4 gate: translate `[[network.l4]]` rows into a `LiveL4Gate`.
-    // The empty-rows case yields a default-deny gate (matches
-    // ADR-002's fail-closed posture); explicit rows are the only way
-    // to permit outbound flows.
+    // The empty-rows case yields a default-deny gate (fail-closed);
+    // explicit rows are the only way to permit outbound flows.
     let l4 = LiveL4Gate::from_specs(&bundle.network.l4).map_err(|e: L4SpecError| {
         ResolveError::L4SpecInvalid {
             value: ref_value.to_string(),
@@ -1256,7 +1255,7 @@ port_hi  = {port}
         // A parsed bundle's `[[network.l4]]` row yields a live
         // L4Gate — on-rule flow returns Allow, off-rule flow returns
         // Deny. The `NotWired` error is what a NoopL4Gate would emit
-        // and proves Slice B's wiring is in place when absent.
+        // and proves the live gate is wired in when absent.
         let tmp = tempfile::tempdir().unwrap();
         write_bundle(
             tmp.path(),
@@ -1412,11 +1411,9 @@ port_hi  = {port}
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 3 follow-on — full L7 inspector chain in
-    // `slots_from_bundle`.
+    // Full L7 inspector chain in `slots_from_bundle`.
     //
-    // Before this slice, `slots_from_bundle` hand-wired only
-    // `DestinationPolicy`. Now it delegates to the supervisor's
+    // `slots_from_bundle` delegates to the supervisor's
     // canonical `build_inspector_chain`, which pulls in
     // `SsrfGuard` / `SecretsScanner` / `InjectionGuard` /
     // `PiiRedactor` and respects `bundle.egress.disabled_inspectors`.
@@ -1933,9 +1930,9 @@ stream_destinations = [{list}]
 
     #[test]
     fn slice_b_egress_still_denies_off_allow_list_with_full_chain() {
-        // Regression for Slice A's invariant: after we swap the
-        // hand-rolled DestinationPolicy chain for the full
-        // `build_inspector_chain` one, the off-allow-list deny path
+        // Regression: with the full `build_inspector_chain` chain
+        // (rather than a hand-rolled DestinationPolicy one), the
+        // off-allow-list deny path
         // still fires (DestinationPolicy stays first in the chain
         // order, so it short-circuits before SSRF / secrets /
         // injection / PII).

@@ -1,5 +1,4 @@
-//! `host.audit.v1` payload types — workload-emitted audit entries
-//! (Plan 104 §host.audit.v1, ADR-062).
+//! `host.audit.v1` payload types — workload-emitted audit entries.
 //!
 //! Two verbs:
 //!
@@ -43,8 +42,7 @@ pub const BROKER_AUDIT_BATCH_MAX: usize = 100;
 /// Maximum total bytes across all entries in one `emit_batch` call.
 pub const BROKER_AUDIT_BATCH_BYTES: usize = 256 * 1024;
 
-/// Workload-side rate limit, tokens per second per workload (Plan 104
-/// §host.audit.v1).
+/// Workload-side rate limit, tokens per second per workload.
 pub const BROKER_AUDIT_TOKENS_PER_SEC: u32 = 20;
 
 // ============================================================================
@@ -56,8 +54,7 @@ pub const BROKER_AUDIT_TOKENS_PER_SEC: u32 = 20;
 #[serde(deny_unknown_fields)]
 pub struct EmitRequest {
     /// Wall-clock timestamp in RFC 3339 form. The broker handler
-    /// records its own timestamp in addition for clock-jump detection
-    /// (Plan 104 §H-L5.5).
+    /// records its own timestamp in addition for clock-jump detection.
     pub ts: String,
     /// Typed workload-supplied fields. The broker treats them as opaque
     /// JSON; they're carried verbatim into the chain entry's `fields`

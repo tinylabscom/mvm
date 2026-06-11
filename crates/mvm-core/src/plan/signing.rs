@@ -1,8 +1,8 @@
 //! `SignedExecutionPlan` — Ed25519-signed envelope around an
 //! `ExecutionPlan`.
 //!
-//! Plan 37 §3.3 requires that every plan outside dev mode arrive
-//! through a signed envelope. The supervisor verifies the signature
+//! Every plan outside dev mode must arrive through a signed envelope.
+//! The supervisor verifies the signature
 //! against a trusted-keys set before parsing the plan body — the
 //! plan's content is never deserialised from attacker-controlled
 //! bytes prior to signature check.
@@ -68,12 +68,12 @@ pub fn sign_plan(plan: &ExecutionPlan, key: &SigningKey, signer_id: &str) -> Sig
 /// Extract the `secrets` bindings from a serialised `SignedExecutionPlan`
 /// envelope JSON, decoding the inner `ExecutionPlan` from the signed payload.
 ///
-/// Used by a backend to hand the per-VM substitution endpoint (Plan 129) only
-/// the secret bindings it needs — never the rest of the plan. The signature is
-/// **not** re-verified here: the host verified it at admission (ADR-041), and
-/// the endpoint's security boundary is the local binding store (a secret is
-/// only ever substituted toward a host-bound destination), not the plan
-/// signature. The host is in the TCB per ADR-002.
+/// Used by a backend to hand the per-VM substitution endpoint only the secret
+/// bindings it needs — never the rest of the plan. The signature is **not**
+/// re-verified here: the host verified it at admission, and the endpoint's
+/// security boundary is the local binding store (a secret is only ever
+/// substituted toward a host-bound destination), not the plan signature. The
+/// host is in the TCB.
 pub fn secrets_from_signed_json(plan_json: &str) -> Result<Vec<SecretBinding>, serde_json::Error> {
     let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
     let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
@@ -82,11 +82,11 @@ pub fn secrets_from_signed_json(plan_json: &str) -> Result<Vec<SecretBinding>, s
 
 /// Extract the `tenant` id from a serialised `SignedExecutionPlan` envelope.
 ///
-/// The Firecracker launch path (Plan 129 Task 5B) reads the admitted plan from
-/// disk (`plan.json`) and needs the tenant to scope the substitution endpoint's
+/// The Firecracker launch path reads the admitted plan from disk
+/// (`plan.json`) and needs the tenant to scope the substitution endpoint's
 /// binding store — but, unlike `VmStartConfig`, `FlakeRunConfig` carries no
 /// out-of-band tenant field. Same trust posture as `secrets_from_signed_json`:
-/// the signature was checked at admission (ADR-041); the host is in the TCB.
+/// the signature was checked at admission; the host is in the TCB.
 pub fn tenant_from_signed_json(plan_json: &str) -> Result<String, serde_json::Error> {
     let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
     let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
@@ -361,12 +361,11 @@ mod tests {
 
     #[test]
     fn plan_with_deps_volume_signs_and_verifies() {
-        // Plan 73 Followup A: ExecutionPlan carries
-        // `deps_volume: Option<DepsVolumeBinding>`. A plan with a
-        // populated binding must round-trip through sign → verify
-        // unchanged, and the resulting bytes must canonicalize
-        // deterministically so the host signer always produces the
-        // same signature input for the same plan.
+        // ExecutionPlan carries `deps_volume: Option<DepsVolumeBinding>`.
+        // A plan with a populated binding must round-trip through
+        // sign → verify unchanged, and the resulting bytes must
+        // canonicalize deterministically so the host signer always
+        // produces the same signature input for the same plan.
         let mut plan = sample_plan();
         plan.deps_volume = Some(
             crate::plan::DepsVolumeBinding::new("a".repeat(64), "b".repeat(64))
@@ -393,7 +392,7 @@ mod tests {
         // `#[serde(default, skip_serializing_if = "Option::is_none")]`
         // means a `None` binding doesn't appear in the canonical
         // bytes — preserves byte compatibility for existing
-        // claim-8-only plans signed before Followup A.
+        // claim-8-only plans signed before deps volumes existed.
         let plan = sample_plan();
         assert!(plan.deps_volume.is_none());
         let bytes = serde_json::to_vec(&plan).unwrap();

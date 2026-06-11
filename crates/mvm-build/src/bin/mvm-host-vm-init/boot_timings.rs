@@ -1,4 +1,4 @@
-//! Per-phase cold-path timings for the builder VM. Plan 76 Phase 5.
+//! Per-phase cold-path timings for the builder VM.
 //!
 //! The builder VM init pipeline has obvious points where time is
 //! spent (pseudofs mount, /dev/vdb format-or-mount, /nix-store seed,
@@ -6,13 +6,13 @@
 //! sees `mvmctl build` take longer than expected, the right question
 //! is "which phase ate the wall clock?" — and the right answer is a
 //! per-phase millisecond breakdown written next to `/job/result` so
-//! the host can surface it through `mvmctl boot-report` (Phase 4)
+//! the host can surface it through `mvmctl boot-report`
 //! without parsing console logs.
 //!
 //! **Wire shape.** JSON object, hand-rolled with the same JSON
 //! escaper used for `/job/result` so we don't pull `serde_json` into
-//! the builder-init crate's size budget (Plan 72 W3 caps the
-//! static-linked init at 1.5 MiB). Every field is `u64` ms-since-
+//! the builder-init crate's size budget (the static-linked init is
+//! capped at 1.5 MiB). Every field is `u64` ms-since-
 //! init-start or `null` for "phase didn't run this boot" (e.g.
 //! `nix_seeded_ms` on a second-boot reuse).
 //!

@@ -1,13 +1,11 @@
 # `mvm-guest-agent` — the production guest agent binary.
 #
-# Plan-60 W6.1.2 swaps the W6.1.1 sh-script stub
-# (`nix/lib/mk-guest.nix::agentBinary`) for the real Rust binary
-# defined at `crates/mvm-guest/src/bin/mvm-guest-agent.rs` (~2400
-# LOC of vsock RPC + worker-pool dispatch + integration manifest +
-# system metrics). Side-bins `mvm-seccomp-apply` (the per-service
-# seccomp shim, ADR-002 §W2.4) and `mvm-verity-init` (the verity-
-# initrd PID 1, ADR-002 §W3) ride the same derivation since the
-# rootfs needs them too.
+# The real Rust binary defined at
+# `crates/mvm-guest/src/bin/mvm-guest-agent.rs` (~2400 LOC of vsock
+# RPC + worker-pool dispatch + integration manifest + system
+# metrics). Side-bins `mvm-seccomp-apply` (the per-service seccomp
+# shim) and `mvm-verity-init` (the verity-initrd PID 1) ride the
+# same derivation since the rootfs needs them too.
 #
 # ## Build environment
 #
@@ -24,7 +22,7 @@
 # host with nix-darwin's linux-builder configured, the caller
 # resolves `pkgs.pkgsCross.aarch64-multiplatform.pkgs` and hands
 # it here). For native Linux + KVM the caller's own `pkgs` is
-# already the right thing. The W7.x.2 builder VM sets this up
+# already the right thing. The builder VM sets this up
 # transparently — `nix build` inside the sandbox runs on Linux,
 # so `pkgs` is Linux pkgs.
 #
@@ -33,9 +31,8 @@
 # `dev-shell` is opt-in. With it, the agent accepts the `Exec`
 # vsock request and shells out arbitrary commands — required for
 # `mvmctl exec`/`mvmctl console` against dev images. Without it
-# (production), the `Exec` symbol is absent (ADR-002 §W4.3's
-# `prod-agent-no-exec` CI gate is what enforces this on the
-# release lane).
+# (production), the `Exec` symbol is absent — the
+# `prod-agent-no-exec` CI gate enforces this on the release lane.
 
 { pkgs
 , lib
@@ -62,9 +59,9 @@ pkgs.rustPlatform.buildRustPackage {
     "--bin" "mvm-guest-agent"
     "--bin" "mvm-seccomp-apply"
     "--bin" "mvm-verity-init"
-    # Plan 74 W2 — guest-side network defense. Installs kernel
-    # blackhole routes for `MANDATORY_DENY_RANGES` at boot from
-    # `/init` (uid 0) before the main agent forks under setpriv.
+    # Guest-side network defense. Installs kernel blackhole routes
+    # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
+    # the main agent forks under setpriv.
     "--bin" "mvm-guest-netinit"
   ] ++ lib.optionals withDevShell [
     "--features" "mvm-guest/dev-shell"

@@ -1,4 +1,4 @@
-//! Boot-time validation of `/etc/mvm/entrypoint`. ADR-007 / plan 41 W2.
+//! Boot-time validation of `/etc/mvm/entrypoint`.
 //!
 //! `RunEntrypoint` runs only the program named by this marker file. The
 //! agent reads the marker once at boot, resolves it through `realpath`,
@@ -322,7 +322,7 @@ impl std::error::Error for ValidationError {}
 // ============================================================================
 // Per-call runner — executes the validated entrypoint with stdin piped in,
 // stdout/stderr captured under caps, timeout enforced, output returned for
-// the host-side handler to emit as `EntrypointEvent`s. ADR-007 / plan 41 W2.
+// the host-side handler to emit as `EntrypointEvent`s.
 // ============================================================================
 
 use std::io::{Read, Write};
@@ -334,7 +334,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Per-call resource caps. Plan 41 W2 v1: 1 MiB on each stream.
+/// Per-call resource caps. v1: 1 MiB on each stream.
 #[derive(Debug, Clone, Copy)]
 pub struct CallCaps {
     /// Maximum bytes accepted for the wrapper's stdin.
@@ -343,8 +343,8 @@ pub struct CallCaps {
     pub stdout_max: usize,
     /// Maximum bytes captured from the wrapper's stderr.
     pub stderr_max: usize,
-    /// Maximum bytes captured from the wrapper's fd-3 control channel
-    /// (Plan-0010 §B4 / phase 4b). Excess bytes are silently dropped
+    /// Maximum bytes captured from the wrapper's fd-3 control channel.
+    /// Excess bytes are silently dropped
     /// — control-channel overflow does not kill the wrapper, since
     /// the channel is for structured records the host correlates by
     /// kind, not for unbounded user output.
@@ -471,10 +471,10 @@ pub fn execute(
 
     // RLIMIT_CORE=0 in the parent: child inherits, so a wrapper crash
     // doesn't write process memory containing in-flight payload bytes
-    // to disk. ADR-007 / plan 41 M11.
+    // to disk.
     set_no_core_dumps();
 
-    // Phase 4b: open a pipe for the fd-3 control channel. The child
+    // Open a pipe for the fd-3 control channel. The child
     // gets the write end at fd 3 (via `pre_exec` + `dup2`); the parent
     // reads the read end on a drain thread and parses the framed
     // record stream into `ControlRecord`s.
@@ -488,7 +488,7 @@ pub fn execute(
     };
 
     // The workload launches under `env_clear()`, then only the explicitly
-    // injected vars are added back (e.g. Plan 129 HTTP_PROXY + secret
+    // injected vars are added back (e.g. HTTP_PROXY + secret
     // placeholder vars). `env` arrives from the host over the authenticated
     // agent frame, but a malformed entry must never crash the agent:
     // `Command::env` panics if a key is empty / contains '=' or NUL, or a
@@ -732,7 +732,7 @@ fn dup_above_fd3(original: &std::fs::File) -> std::io::Result<std::os::fd::Owned
     // safety is preserved, not weakened. The fd is read-only to a
     // world-readable (0555) wrapper, so leaking it into the runner + its
     // children grants nothing. ELF runners are unaffected (the kernel
-    // reads the image during the first execve). ADR-007 hardened-exec note.
+    // reads the image during the first execve).
     // SAFETY: fcntl is async-signal-safe; arguments are validated.
     let new_raw = unsafe { libc::fcntl(raw, libc::F_DUPFD, 4) };
     if new_raw < 0 {
@@ -839,7 +839,7 @@ fn signal_of(_status: &std::process::ExitStatus) -> i32 {
 }
 
 /// Drain the parent end of the fd-3 pipe and parse framed control
-/// records. Frame layout (Plan-0010 §B4):
+/// records. Frame layout:
 ///
 /// ```text
 ///   header_len:  u32 LE   (4 bytes; max 64 KiB)

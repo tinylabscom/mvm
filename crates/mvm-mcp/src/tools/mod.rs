@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// `session`).
 ///
 /// `deny_unknown_fields` is the same fail-closed hygiene applied to
-/// every host-boundary type per ADR-002 §W4.1.
+/// every host-boundary type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunParams {
@@ -34,15 +34,15 @@ pub struct RunParams {
     /// Program text. For `env=shell`/`env=bash`, evaluated via
     /// `bash -c <code>`. For `env=python`/`env=node`, written to a
     /// temp file and passed as the interpreter's first argv. The
-    /// shell-env case is intentional and noted in ADR-003: there is
+    /// shell-env case is intentional: there is
     /// no in-microVM interpreter sandbox beyond the microVM itself.
     pub code: String,
-    /// Reserved for Proposal A.2 — session-pinned warm VMs. Ignored
+    /// Reserved for session-pinned warm VMs. Ignored
     /// in v1; sending it does not error so clients can adopt the
     /// session API ahead of the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-    /// Reserved for Proposal A.2 — when paired with `session`, signals
+    /// Reserved — when paired with `session`, signals
     /// "this is the last call against this session, tear the VM down
     /// (snapshot first if the env was registered with
     /// `persist_on_close=true`)". Ignored in v1; the schema accepts
@@ -213,9 +213,8 @@ pub fn web_search_input_schema() -> serde_json::Value {
 /// All tools exposed by mvmctl mcp.
 ///
 /// - `run` — legacy single-tool "boot a microVM and execute code".
-/// - `mvm.time_now`, `mvm.web_fetch`, `mvm.web_search` — plan 60
-///   Phase 7 host-mediated tools (implementations live in
-///   `mvm-supervisor::tools`).
+/// - `mvm.time_now`, `mvm.web_fetch`, `mvm.web_search` — host-mediated
+///   tools (implementations live in `mvm-supervisor::tools`).
 pub fn all_tools() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
@@ -284,7 +283,7 @@ mod tests {
 
     #[test]
     fn run_params_accepts_session_and_close() {
-        // A.2 schema readiness: clients adopting session+close ahead
+        // Schema readiness: clients adopting session+close ahead
         // of server-side support must not get a parse error.
         let json = r#"{"env":"shell","code":"x","session":"s1","close":true}"#;
         let parsed: RunParams = serde_json::from_str(json).unwrap();
@@ -314,8 +313,8 @@ mod tests {
     #[test]
     fn tools_list_token_budget_under_2000() {
         // Byte-count heuristic where 1 token ≈ 4 bytes (well-known
-        // approximation for Claude/GPT-4 family). Plan 60 Phase 7
-        // grows the tool count from 1 to 4; budget scales with it.
+        // approximation for Claude/GPT-4 family). The host-mediated
+        // tools grow the tool count from 1 to 4; budget scales with it.
         // 2000 tokens (~8000 bytes) leaves headroom for the planned
         // `upload`/`download`/`code_eval` additions; tighten once
         // those land.

@@ -1,4 +1,4 @@
-// Plan 85 §R1 — adversarial fuzz for the layer-to-tree unpacker.
+// Adversarial fuzz for the layer-to-tree unpacker.
 //
 // Feeds arbitrary bytes to `mvm_oci::unpack::unpack_layer` against a
 // fresh tempdir and asserts:
@@ -7,17 +7,15 @@
 //   (b) nothing escapes the tempdir — every materialized entry's
 //       location resolves under the tempdir root
 //
-// Property (c) from the Phase A.2 handoff ("no leaked file
-// descriptors") is implicit in libFuzzer's process model: each
-// iteration runs in the same process, so an FD leak would surface
-// as a process-wide `EMFILE` over a 30-minute fuzz budget. We
-// don't add an explicit FD-count check because reading
-// `/proc/self/fd` per iteration would dominate the unpack cost
-// itself.
+// A third property ("no leaked file descriptors") is implicit in
+// libFuzzer's process model: each iteration runs in the same
+// process, so an FD leak would surface as a process-wide `EMFILE`
+// over a 30-minute fuzz budget. We don't add an explicit FD-count
+// check because reading `/proc/self/fd` per iteration would
+// dominate the unpack cost itself.
 //
 // CI gate: `.github/workflows/ci.yml::oci-unpack-fuzz`, gated by
-// dorny/paths-filter on `crates/mvm-oci/**`. 30-min budget per
-// Plan 85 §R1 + §R4.
+// dorny/paths-filter on `crates/mvm-oci/**`. 30-min budget.
 
 #![no_main]
 

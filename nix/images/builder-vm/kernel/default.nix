@@ -16,8 +16,8 @@
 #   - NAMESPACES + cgroup cluster — the nix-build sandbox needs user
 #     namespaces and cgroups v2. A sealed single-workload guest doesn't.
 #   - NETFILTER / iptables cluster — `mvm-host-vm-init` installs an
-#     OUTPUT-chain default-deny egress lockdown (Plan 73 B.2.y /
-#     ADR-047). Workload egress is enforced host-side (egress proxy) +
+#     OUTPUT-chain default-deny egress lockdown. Workload egress is
+#     enforced host-side (egress proxy) +
 #     via guest blackhole *routes* (mvm-guest-netinit, rtnetlink), not
 #     iptables, so the guest kernel needs no netfilter tables.
 #
@@ -42,7 +42,7 @@ base.mkKernel {
     "CGROUP_PIDS" "CGROUP_FREEZER" "CGROUP_DEVICE" "CGROUP_CPUACCT"
     "CPUSETS"
 
-    # iptables-legacy — egress lockdown (ADR-047 / Plan 73 B.2.y). Only
+    # iptables-legacy — egress lockdown. Only
     # the OUTPUT owner-match + default-DROP ruleset is used
     # (mvm-host-vm-init network.rs); no conntrack/state/mark match, so
     # those symbols are force-dropped in extraDisables below.

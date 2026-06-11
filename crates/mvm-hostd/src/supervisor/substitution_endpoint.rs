@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 — the per-VM substitution endpoint subprocess.
+//! The per-VM substitution endpoint subprocess.
 //!
 //! The substitution endpoint is the one host process that ever holds a
 //! workload's secrets in the clear. It is spawned per-VM as its own process
@@ -46,7 +46,7 @@ pub enum EndpointTransport {
     Uds { path: PathBuf },
 }
 
-/// Plan 129 Stage 2 — the per-VM name-constrained intermediate the terminator
+/// The per-VM name-constrained intermediate the terminator
 /// terminates bound-host TLS under. The guest trusts the matching cert (delivered
 /// via its secrets drive); the key stays here, in the endpoint process, used only
 /// to mint per-SNI leaves during termination. `cert_pem` is also the guest's
@@ -94,16 +94,16 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub binding_store_dir: Option<PathBuf>,
     /// When set, also bind the transparent egress **terminator** TCP listener
-    /// (Plan 129 stage 1b) on this host address. The nft `nat` chain REDIRECTs
+    /// on this host address. The nft `nat` chain REDIRECTs
     /// the guest's outbound TCP here; the endpoint recovers the original
     /// destination, substitutes secrets, and splices to the real host. Linux-
     /// only. `None` (the default) preserves the substitution-channel-only
     /// behaviour — no terminator, no nft redirect.
     #[serde(default)]
     pub terminator_listen: Option<std::net::SocketAddr>,
-    /// Plan 129 Stage 2 — the per-VM egress intermediate (cert+key) the
-    /// transparent `https` terminator (S2.4) terminates bound-host TLS under.
-    /// `None` ⇒ `http`-only termination (Stage 1b) / no TLS leg. Set alongside
+    /// The per-VM egress intermediate (cert+key) the
+    /// transparent `https` terminator terminates bound-host TLS under.
+    /// `None` ⇒ `http`-only termination / no TLS leg. Set alongside
     /// `terminator_listen` when the plan has secrets and the backend delivered
     /// the matching cert to the guest's trust bundle.
     #[serde(default)]
@@ -134,9 +134,9 @@ pub fn assemble(
         Some(dir) => FileBindingStore::with_dir(dir),
         None => FileBindingStore::default_location()?,
     };
-    // Plan 129 Stage 2 — reconstruct the per-VM intermediate minter from the
-    // delivered PEMs (the key never left the host) so the terminator can
-    // terminate bound-host `https`. Absent ⇒ `http`-only (Stage 1b).
+    // Reconstruct the per-VM intermediate minter from the delivered PEMs (the
+    // key never left the host) so the terminator can terminate bound-host
+    // `https`. Absent ⇒ `http`-only.
     let tls_intermediate = match &cfg.tls_intermediate {
         Some(ti) => Some(
             mvm_core::crypto::egress_ca::VmIntermediate::from_pem(&ti.cert_pem, &ti.key_pem)
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn config_defaults_tls_intermediate_to_none() {
-        // Stage 1b configs (no `tls_intermediate`) must still parse — the field
+        // Configs without `tls_intermediate` must still parse — the field
         // is `#[serde(default)]`, so http-only termination keeps working.
         let json = serde_json::json!({
             "tenant_id": "local",

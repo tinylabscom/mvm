@@ -1,7 +1,7 @@
 //! `mvmctl trust` — manage the local bundle-publisher trust store
 //! at `~/.mvm/trusted-publishers/<key_id>.pub`.
 //!
-//! Sprint 52 W2: a bundle's publisher key never lives in the
+//! A bundle's publisher key never lives in the
 //! bundle itself; consumers establish trust out-of-band by
 //! enrolling a publisher's Ed25519 public key under a derived
 //! `key_id` filename. This command makes that enrolment a
@@ -52,7 +52,7 @@ pub(in crate::commands) enum TrustAction {
 }
 
 impl TrustAction {
-    /// Audit verb name. The provenance verbs folded in by Plan 178
+    /// Audit verb name. The folded-in provenance verbs
     /// (attest/receipt/audit) keep their own `cmd.<verb>.*` names; the
     /// publisher-store verbs (add/list/remove) keep the existing `trust`.
     pub(in crate::commands) fn verb_name(&self) -> &'static str {

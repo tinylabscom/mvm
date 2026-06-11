@@ -1,15 +1,15 @@
-//! Plan 113 §Task 12 / ADR-064 — per-VM Firecracker bridge sidecar.
+//! Per-VM Firecracker bridge sidecar.
 //!
-//! Linux-only A2 process that runs alongside every Firecracker microVM
+//! Linux-only process that runs alongside every Firecracker microVM
 //! the host launches via `mvm-backend::firecracker`. Reads a
 //! [`mvm_vm_host::firecracker_bridge::parse::BridgeConfigJson`] document from
 //! stdin, verifies the operator-pinned `passt` binary hash, applies
-//! `mvm-jailer-lite` confinement (seccomp + Landlock — Plan 113 §Task 8),
+//! `mvm-jailer-lite` confinement (seccomp + Landlock),
 //! reconstructs the parent-inherited socketpair fds into a
 //! [`BridgeEndpoints::Passt`] pair, and hands the packet loop to
 //! `mvm_hostd::supervisor::gateway_bridge::spawn_bridge_thread`.
 //!
-//! Spawned by Plan 113 §Task 13's `FirecrackerBackend::start` between
+//! Spawned by `FirecrackerBackend::start` between
 //! the host passt `spawn_detached` step and the Firecracker VM boot.
 //! The parent owns an `AttachedBridgeGuard` that kills this process on
 //! early return / panic / VM teardown; the bridge's own `catch_unwind →
@@ -18,23 +18,23 @@
 //! ## Trust model
 //!
 //! The bridge's stdin contract is identical to `mvm-vz-drainer`'s and
-//! `mvm-libkrun-supervisor`'s: the producer (Task 13's
-//! `FirecrackerBackend`) is trusted and has already verified the
+//! `mvm-libkrun-supervisor`'s: the producer (`FirecrackerBackend`) is
+//! trusted and has already verified the
 //! signed plan envelope via `mvm-cli`'s `admit_for_run` path before
 //! launch. The bridge parses the plan JSON directly into an
 //! [`ExecutionPlan`] without an additional envelope check — mirroring
-//! `mvm-vz-drainer`'s pattern (PR a51fbc7f / Task 10) and
-//! `mvm-libkrun-supervisor`'s. Re-verification of the plan envelope at
+//! `mvm-vz-drainer`'s and `mvm-libkrun-supervisor`'s pattern.
+//! Re-verification of the plan envelope at
 //! this leaf would require host signer state (`mvm-cli::host_signer`)
 //! which the bridge cannot reach without closing a dependency cycle
-//! (`mvm-cli → mvm-supervisor → mvm-cli`). ADR-002 names the host as
-//! in-scope; the bridge runs in the same TCB as the supervisor.
+//! (`mvm-cli → mvm-supervisor → mvm-cli`). The host is in-scope under
+//! the trust model; the bridge runs in the same TCB as the supervisor.
 //!
 //! ## Parser surface
 //!
 //! `BridgeConfigJson`, `PasstHashesFile`, and `verify_passt_hash` live
 //! in `mvm_vm_host::firecracker_bridge::parse` (the crate's `src/lib.rs` /
-//! `src/parse.rs`). Plan 113 §Task 15's `firecracker-bridge-fuzz` CI
+//! `src/parse.rs`). The `firecracker-bridge-fuzz` CI
 //! lane drives `cargo fuzz` against those serde deserializers
 //! directly via the crate's lib surface; the binary's `main()` uses
 //! the same parser entry points so the fuzzed code path and the
@@ -45,7 +45,7 @@
 //! `gateway_fd_raw` + `supervisor_fd_raw` in `BridgeConfigJson` are
 //! raw fd numbers (`i32`) that name file descriptors already open in
 //! this process's fd table. **Standard Rust `std::process::Command`
-//! only inherits stdin/stdout/stderr;** Task 13's `FirecrackerBackend`
+//! only inherits stdin/stdout/stderr;** `FirecrackerBackend`
 //! honours the bridge contract via `CommandExt::pre_exec` — it
 //! `dup2`s the socketpair fds into known raw positions, clears
 //! `O_CLOEXEC` on each, and then `exec`s this binary. By the time
@@ -55,7 +55,7 @@
 //!
 //! ## Capability profile
 //!
-//! ADR-064 §Decision 8 — Firecracker leaves report
+//! Firecracker leaves report
 //! `payload_tap: true`. The bridge sits directly on the virtio-net
 //! byte stream between the guest and host passt, so payload-tap
 //! observers (a future SNI inspector / L7 MITM) can plug into the same
@@ -142,7 +142,7 @@ fn run() -> Result<()> {
     //
     // Per `confine_self`'s partial-confinement contract: any error
     // here MUST cause hard exit. We propagate up to `main()` which
-    // turns the error into `ExitCode::FAILURE`; Task 13's watchdog
+    // turns the error into `ExitCode::FAILURE`; the parent's watchdog
     // sees the nonzero exit and tears down the VM.
     let spec = ConfinementSpec::firecracker_bridge(
         cfg.audit_dir.clone(),
@@ -153,8 +153,8 @@ fn run() -> Result<()> {
 
     // ── Step 4: parse trusted plan + bundle ─────────────────────────
     //
-    // Trust model (see module doc): the producer (Task 13's
-    // `FirecrackerBackend`) has already verified the signed envelope
+    // Trust model (see module doc): the producer (`FirecrackerBackend`)
+    // has already verified the signed envelope
     // via `mvm-cli::admit_for_run`; we parse the inner ExecutionPlan
     // body directly.
     let plan: ExecutionPlan = serde_json::from_str(&cfg.plan_json)
@@ -188,9 +188,8 @@ fn run() -> Result<()> {
 
     // ── Step 6: resolve observer chain from admitted plan ───────────
     //
-    // Plan 113 §Task 4 — observer chain from admitted plan + host
-    // allowlist. Firecracker reports `payload_tap: true` (ADR-064
-    // §Decision 8) so payload-tap observers admit at the
+    // Observer chain from admitted plan + host allowlist. Firecracker
+    // reports `payload_tap: true` so payload-tap observers admit at the
     // `from_admitted` gate.
     let leaf_caps = ProviderCapabilities {
         flow_events: true,
@@ -223,7 +222,7 @@ fn run() -> Result<()> {
     //      cleared,
     //   3. no other code in this process holds owning references to
     //      those fds (ownership transfers to the returned `OwnedFd`).
-    // Task 13's `FirecrackerBackend` honours this via the
+    // `FirecrackerBackend` honours this via the
     // `CommandExt::pre_exec` dup2 + fcntl(FD_CLOEXEC clear) path
     // documented in its module header. There is no validation we
     // can perform on the host side (the kernel will EBADF on first

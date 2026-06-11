@@ -48,10 +48,10 @@ impl Platform {
         }
     }
 
-    /// Whether this platform supports nested KVM — required for Plan
-    /// 100's symmetric builder-VM-on-Linux story (libkrun builder VM
-    /// runs in a nested KVM under the host's KVM). Plan 105 W1 uses
-    /// this to gate the opt-in `MVM_LINUX_BUILDER_VM=1` dispatch path.
+    /// Whether this platform supports nested KVM — required for the
+    /// symmetric builder-VM-on-Linux story (libkrun builder VM runs in
+    /// a nested KVM under the host's KVM). Gates the opt-in
+    /// `MVM_LINUX_BUILDER_VM=1` dispatch path.
     ///
     /// Linux-only — macOS / Windows / WSL2 / no-KVM return `false`
     /// unconditionally because the question doesn't apply. On
@@ -88,9 +88,9 @@ impl Platform {
     /// Whether Apple Virtualization.framework (Vz) is available on
     /// this host.
     ///
-    /// Plan 97 / ADR-056. Vz is built into macOS — no separate library
-    /// to probe, no Homebrew install — so detection collapses to a
-    /// combined OS-and-version check. macOS 13 (Ventura) is the floor
+    /// Vz is built into macOS — no separate library to probe, no
+    /// Homebrew install — so detection collapses to a combined
+    /// OS-and-version check. macOS 13 (Ventura) is the floor
     /// because the full virtio surface we use
     /// (`VZMultipleDirectoryShare`, `VZDiskBlockDeviceStorageDeviceAttachment`)
     /// lands there. macOS 11–12 hosts fall back to libkrun (no
@@ -112,8 +112,8 @@ impl Platform {
 
     /// Whether libkrun is installed on this host.
     ///
-    /// libkrun (plan 53 §"Plan E") is a library-style VMM that runs on
-    /// Linux KVM and macOS Hypervisor.framework on Apple Silicon.
+    /// libkrun is a library-style VMM that runs on Linux KVM and
+    /// macOS Hypervisor.framework on Apple Silicon.
     /// macOS Intel and native Windows are intentionally unsupported.
     /// WSL2 is treated as future/experimental even if nested KVM is
     /// exposed. Detection is a filesystem probe of standard install
@@ -204,8 +204,7 @@ fn has_nested_kvm_at(intel_path: &str, amd_path: &str) -> bool {
 }
 
 /// Check whether the current macOS version is 13.0 (Ventura) or later.
-/// Plan 97 §"Minimum macOS version" — Vz's full virtio surface lands
-/// here. macOS 11–12 fall back to libkrun.
+/// Vz's full virtio surface lands here; macOS 11–12 fall back to libkrun.
 fn is_macos_13_or_later() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -319,7 +318,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    // ── Plan 105 W1 — has_nested_kvm_at ──────────────────────────
+    // ── has_nested_kvm_at ────────────────────────────────────────
 
     fn write_sysfs(dir: &std::path::Path, name: &str, contents: &str) -> std::path::PathBuf {
         let path = dir.join(name);

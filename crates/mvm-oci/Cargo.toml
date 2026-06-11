@@ -12,8 +12,8 @@ description = "OCI image distribution client for mvm — registry resolution, ma
 [dependencies]
 async-trait = "0.1"
 hex.workspace = true
-# Plan 85 Phase A — `libc::O_NOFOLLOW` for the O_NOFOLLOW open flag.
-# Used in `unpack::write_regular_file` so a tar entry whose target
+# `libc::O_NOFOLLOW` for the O_NOFOLLOW open flag. Used in
+# `unpack::write_regular_file` so a tar entry whose target
 # parent chain *appears* clean still can't be redirected through a
 # concurrently-planted symlink between the parent-chain check and
 # the open(2) call.
@@ -24,10 +24,10 @@ serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
-# Plan 85 Phase A — layer-to-tree unpacker. We use `tar::Archive` to
-# iterate entries but never call `entry.unpack()` (it bypasses the
-# Plan 85 §"Security envelope" allow-lists); each entry's header
-# drives a manual write through our own safety-checking helpers.
+# Layer-to-tree unpacker. We use `tar::Archive` to iterate entries
+# but never call `entry.unpack()` (it bypasses our security-envelope
+# allow-lists); each entry's header drives a manual write through
+# our own safety-checking helpers.
 tar = { workspace = true }
 thiserror = "1"
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "time"] }
@@ -35,8 +35,8 @@ url = "2"
 xattr = { workspace = true }
 
 [dev-dependencies]
-# Plan 85 Phase A tests build in-memory tar fixtures into a temp
-# tree and assert post-unpack invariants.
+# Tests build in-memory tar fixtures into a temp tree and assert
+# post-unpack invariants.
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
 # Hermetic OCI registry fixture — wiremock spawns a real HTTP

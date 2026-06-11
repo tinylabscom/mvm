@@ -11,10 +11,9 @@
 //! Three protections layer (no pun intended) on top of each other:
 //!
 //! - **Size cap.** [`LayerFetchOptions::max_size`] bounds the byte
-//!   count. Plan 74 §Risks R10 names decompression bombs and
-//!   oversized layers as a CVE-class category; the cap fails fast
-//!   before the rest of the pull pipeline reads a single byte of
-//!   poisoned content.
+//!   count. Decompression bombs and oversized layers are a CVE-class
+//!   category; the cap fails fast before the rest of the pull
+//!   pipeline reads a single byte of poisoned content.
 //! - **Digest verification.** SHA-256 over the streamed bytes is
 //!   compared against the descriptor's pinned digest. Mismatches
 //!   surface as [`OciError::DigestMismatch`]. Always fail closed.
@@ -54,7 +53,7 @@ pub struct LayerDescriptor {
     pub size: u64,
     /// `mediaType` field from the manifest entry
     /// (e.g. `application/vnd.oci.image.layer.v1.tar+gzip`). Layer
-    /// unpack (W1.3) uses this to pick the right decoder.
+    /// unpack uses this to pick the right decoder.
     pub media_type: String,
 }
 
@@ -68,7 +67,7 @@ pub struct LayerFetchOptions {
     /// (`tensorflow/tensorflow:latest-gpu` is ~3 GiB and we
     /// deliberately reject those at the default), small enough
     /// that a decompression-bomb attacker can't run the host out
-    /// of disk through a small manifest. Plan 74 §Risks R10.
+    /// of disk through a small manifest.
     pub max_size: u64,
     /// Attempts on transient registry failure (5xx, network).
     /// Permanent errors skip retry. Default 3.
@@ -87,9 +86,9 @@ impl Default for LayerFetchOptions {
     }
 }
 
-/// Real layer fetcher backed by [`oci_client`]. Anonymous-only
-/// (W1.1 scope discipline); private-registry auth lands in a later
-/// W1 PR with credential material flowing through `secrecy`.
+/// Real layer fetcher backed by [`oci_client`]. Anonymous-only for
+/// now; private-registry auth lands later with credential material
+/// flowing through `secrecy`.
 pub struct OciLayerFetcher {
     client: Client,
     options: LayerFetchOptions,
@@ -398,9 +397,9 @@ fn validate_layer_digest(d: &str) -> Result<(), OciError> {
 /// `oci-client` 0.16's `OciDistributionError` doesn't expose
 /// structured status codes for every variant, so this is
 /// string-shaped today. Tightening it to typed status inspection
-/// is a follow-up — for W1.2 the optimistic-retry policy is good
-/// enough (the worst case is "we waited a bit before reporting a
-/// permanent error," which is harmless).
+/// is a follow-up — the optimistic-retry policy is good enough (the
+/// worst case is "we waited a bit before reporting a permanent
+/// error," which is harmless).
 fn map_oci_error(e: oci_client::errors::OciDistributionError) -> OciError {
     OciError::Registry(e.to_string())
 }

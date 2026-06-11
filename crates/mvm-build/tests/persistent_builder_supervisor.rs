@@ -1,5 +1,4 @@
-//! Plan 89 W3 part 1 — integration tests for
-//! `PersistentBuilderSupervisor`.
+//! Integration tests for `PersistentBuilderSupervisor`.
 //!
 //! These live in `tests/` (not inline in `persistent_builder.rs::tests`)
 //! because they need server-binding patterns to simulate the
@@ -264,7 +263,7 @@ fn shutdown_writes_shutdown_request_and_consumes_bye() {
 #[allow(dead_code)]
 fn _force_use(_: DispatchOutcome) {}
 
-/// Plan 89 W3 part 14 — recording fake for `BuilderAuditSink`.
+/// Recording fake for `BuilderAuditSink`.
 /// Captures every emit (kind + job_id + payload digest) so tests
 /// can assert on the exact pair the supervisor emitted around a
 /// dispatch round.
@@ -453,7 +452,7 @@ fn submit_without_audit_sink_emits_nothing() {
     // branches don't dereference None.
 }
 
-// ── Plan 107 A4 — workload lifecycle dispatch ───────────────────
+// ── workload lifecycle dispatch ─────────────────────────────────
 
 fn sample_workload_params() -> WorkloadStartParams {
     WorkloadStartParams {

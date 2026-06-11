@@ -3,8 +3,8 @@
 //! A `SnapshotUpper` presents a base directory plus a writable upper:
 //! reads prefer the upper and fall back to the base; writes always land in
 //! the upper, so the base is never mutated and the upper holds only the
-//! delta. This is the userspace model of the warm-start diff-snapshot
-//! (plan 123 B3 → Phase C): on Linux the production path is an overlayfs /
+//! delta. This is the userspace model of the warm-start diff-snapshot:
+//! on Linux the production path is an overlayfs /
 //! dm-snapshot mount, but the COW semantics — base immutable, upper carries
 //! the changes — are the same, and modelling them here keeps the storage
 //! half testable without a kernel mount.
@@ -42,7 +42,7 @@ impl SnapshotUpper {
 
     /// Materialize a private, writable boot image from a single base file,
     /// leaving the golden base untouched. Returns the upper-side path, ready
-    /// to boot from for a disk-only warm-start (libkrun, plan 123 C4): the
+    /// to boot from for a disk-only warm-start (libkrun): the
     /// base stays immutable, per-instance writes land in the clone, and a
     /// re-resume reuses the existing clone rather than clobbering it.
     ///

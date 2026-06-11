@@ -14,7 +14,7 @@ pub const HOSTD_SOCKET_PATH: &str = "/run/mvm/hostd.sock";
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
 /// Wire-protocol version for hostd IPC (mvmd ↔ mvm-hostd Unix-socket
-/// control channel). Plan 60 Phase 8.
+/// control channel).
 ///
 /// **Bump policy.** Increment when ANY of the following change in a
 /// way that's not backward-compatible with a peer at the previous
@@ -45,7 +45,7 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 /// regenerate them in the same commit that bumps the version.
 ///
 /// **History:**
-/// - `1`: initial shape (plan 60 Phase 8, ADR-043).
+/// - `1`: initial shape.
 /// - `2`: workspace-volume attach — `workspace_id` threaded through
 ///   every instance-scoped `HostdRequest` variant and `volumes:
 ///   Vec<VolumeAttach>` added to `StartInstance`. All new fields are
@@ -142,7 +142,7 @@ pub enum HostdResponse {
 // ============================================================================
 // Frame protocol (length-prefixed JSON over Unix socket)
 //
-// The hostd IPC async transport (plan 126 B5). Gated behind
+// The hostd IPC async transport. Gated behind
 // `hostd-transport` so the default `mvm-core` build carries no tokio; the
 // `HostdRequest`/`HostdResponse` types above stay unconditional. mvmd
 // consumes these via the `mvmctl::core::protocol` facade.
@@ -240,7 +240,7 @@ mod tests {
     use super::*;
     use crate::tenant::TenantNet;
 
-    /// Plan 60 Phase 8 — pin the protocol version constant. mvmd's
+    /// Pin the protocol version constant. mvmd's
     /// `tests/mvmd_compat.rs` reads `PROTOCOL_VERSION` and compares
     /// against its own frozen-byte fixtures; if this binary
     /// disagrees with the mvmd snapshot, the fixture-set has
@@ -455,7 +455,7 @@ mod tests {
     /// PROTOCOL_VERSION 2 canonical fixture for StartInstance with the
     /// new fields populated. mvmd-side `tests/mvmd_compat.rs` mirrors
     /// this shape; if the serialized bytes drift, both sides need a
-    /// refresh in the same commit (ADR-043).
+    /// refresh in the same commit.
     #[test]
     fn test_hostd_request_start_v2_fixture() {
         use crate::instance::{VolumeAttach, VolumeMode};

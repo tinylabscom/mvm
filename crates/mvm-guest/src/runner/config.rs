@@ -3,7 +3,7 @@
 //! The file is baked into the rootfs at image build time via mvm's
 //! `mkGuest extraFiles` mechanism; nothing is decided at call time
 //! except the args bytes that come in over stdin (build-time-everything
-//! invariant, ADR-0009).
+//! invariant).
 //!
 //! Fields mirror the IR's `Entrypoint::Function` variant; the source
 //! of truth is `mvm-ir/src/workload.rs` and the JSON Schema regen
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Closed enum: the language interpreter the runtime dispatches into.
 /// Mirrors the languages mvm has Nix factories for — additions to
 /// this enum land alongside additions to mvm's
-/// `SUPPORTED_LANGUAGES` allowlist (per ADR-0010 §4).
+/// `SUPPORTED_LANGUAGES` allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
@@ -26,7 +26,7 @@ pub enum Language {
     /// stdin → fn → stdout wire contract via WASI host functions
     /// provided by wasmtime. Generic across any compile-to-WASM
     /// language (Rust, Go, Zig, AssemblyScript, .NET NativeAOT-LLVM,
-    /// Kotlin/Wasm, …) per ADR-0010 §4.
+    /// Kotlin/Wasm, …).
     Wasm,
 }
 
@@ -61,7 +61,7 @@ impl Language {
 }
 
 /// Closed enum: serialization format for stdin args + stdout return.
-/// Code-executing serializer formats are forbidden by ADR-0009.
+/// Code-executing serializer formats are forbidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {

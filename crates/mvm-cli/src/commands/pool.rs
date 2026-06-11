@@ -1,4 +1,4 @@
-//! Plan 118 WS-1 1b — warm-pool launch glue + the `mvmctl pool` command.
+//! Warm-pool launch glue + the `mvmctl pool` command.
 //!
 //! Owns the bits that must live above the backend: the kernel-identity hash (part of the
 //! base-compat key), the per-spawn binding nonce, and the host signer identity/key path
@@ -6,9 +6,9 @@
 //! `StandbySpec` and drives the `SupervisorStandbyPool` + `VmBackend` trait methods.
 //!
 //! v1 is default-shaped only: a standby is claimable by a launch whose kernel **and**
-//! resources match (`StandbyCompat`) and that carries no extra volumes (1a's attach only
+//! resources match (`StandbyCompat`) and that carries no extra volumes (the attach only
 //! threads the rootfs). Anything else cold-boots. Multi-kernel keying + honouring an
-//! explicit `--name`/volumes for warm launches are deferred follow-ups (SPRINT.md).
+//! explicit `--name`/volumes for warm launches are deferred follow-ups.
 
 use std::path::Path;
 
@@ -228,7 +228,7 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// shaped, not bridge-admitted, or any error → `None` (the caller cold-boots as normal).
 ///
 /// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
-/// `--name` — a claimed VM is named by its standby-id), no extra volumes (1a's attach
+/// `--name` — a claimed VM is named by its standby-id), no extra volumes (the attach
 /// threads only the rootfs), the backend supports the pool, and the **admitted plan +
 /// tenant** are threaded into the config — which only the gateway-bridge path
 /// (`MVM_GATEWAY_BRIDGE=1`) does, and which a claimed standby's `run_with_bridge` requires.
@@ -614,7 +614,7 @@ mod tests {
     }
 }
 
-// ── `mvmctl pool` command (Plan 118 WS-1 1b) ────────────────────────────────────────
+// ── `mvmctl pool` command ───────────────────────────────────────────────────────────
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -696,7 +696,7 @@ fn run_warm(pool: &SupervisorStandbyPool, cfg: &MvmConfig, target: u32) -> Resul
             target,
         },
     )?;
-    // Plan 37 §6 — a state-changing verb emits one audit record per attempt.
+    // A state-changing verb emits one audit record per attempt.
     mvm_core::audit_emit!(PoolWarm, "spawned={spawned} target={target}");
     if spawned == 0 {
         crate::ui::info(&format!("Pool already at or above target {target}."));

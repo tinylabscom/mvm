@@ -13,7 +13,7 @@ pub struct VmStartParams<'a> {
     pub initrd_path: Option<String>,
     /// Optional dm-verity sidecar (Merkle tree). Production microVMs
     /// built with `verifiedBoot = true` ship this alongside the rootfs;
-    /// dev VMs leave it None. ADR-002 §W3.
+    /// dev VMs leave it None.
     pub verity_path: Option<String>,
     /// Lowercase-hex root hash; required when `verity_path` is Some.
     pub roothash: Option<String>,
@@ -30,7 +30,7 @@ pub struct VmStartParams<'a> {
     pub config_files: &'a [microvm::DriveFile],
     pub secret_files: &'a [microvm::DriveFile],
     pub port_mappings: &'a [config::PortMapping],
-    /// Plan 118 WS-1 1b — warm-pool target (`--warm-pool-size`); 0 = off.
+    /// Warm-pool target (`--warm-pool-size`); 0 = off.
     pub warm_pool_size: u32,
 }
 
@@ -89,12 +89,11 @@ impl VmStartParams<'_> {
                 })
                 .collect(),
             runner_dir: None,
-            // Plan 74 W1.4b — runtime overlay wiring lives behind
-            // the `mvmctl run --runtime-overlay` opt-in surface,
-            // not this generic params struct. Leaving the three
-            // overlay fields at their `None` defaults keeps the
-            // boot path identical to pre-W1.4b for every caller
-            // that goes through `VmStartParams`.
+            // Runtime overlay wiring lives behind the `mvmctl run
+            // --runtime-overlay` opt-in surface, not this generic
+            // params struct. Leaving the three overlay fields at
+            // their `None` defaults keeps the boot path identical
+            // for every caller that goes through `VmStartParams`.
             ..Default::default()
         }
     }

@@ -44,11 +44,10 @@ pub struct VmRegistration {
     /// or `mvmctl snapshot rm`. Distinct from the backends' own
     /// "running"/"stopped" reports — those describe the live VM,
     /// while `paused` describes the sealed-snapshot lifecycle.
-    /// W1 / A4.
     #[serde(default)]
     pub paused: bool,
-    /// Finer-grained host-observed readiness (ADR-053 §3 / plan 74
-    /// W2). Updated by `mvmctl up` as each launch milestone is
+    /// Finer-grained host-observed readiness. Updated by `mvmctl up`
+    /// as each launch milestone is
     /// reached (`LaunchAccepted` → `AgentConnecting` → `AgentReady`,
     /// with the rest of the taxonomy wiring in subsequent PRs).
     /// `None` on legacy records and on VMs that haven't yet been
@@ -60,9 +59,9 @@ pub struct VmRegistration {
     #[serde(default)]
     pub last_readiness_change_at: Option<String>,
     /// RFC 3339 timestamp of the last observed guest activity — console
-    /// attach, vsock agent request, or a successful `wake` (Plan 170 WS-B).
+    /// attach, vsock agent request, or a successful `wake`.
     /// Drives the activity-driven idle reaper. `#[serde(default)]` keeps
-    /// pre-WS-B records loadable; `None` means "never touched", which the
+    /// older records loadable; `None` means "never touched", which the
     /// reaper treats as `registered_at` so a just-registered VM isn't
     /// instantly idle.
     #[serde(default)]
@@ -154,7 +153,7 @@ impl VmNameRegistry {
         }
     }
 
-    /// Record observed guest activity (Plan 170 WS-B). Returns
+    /// Record observed guest activity. Returns
     /// `Ok(true)` if updated, `Ok(false)` if the name is unknown.
     /// Callers pass the timestamp explicitly so fixtures stay
     /// deterministic, mirroring [`set_readiness`](Self::set_readiness).
@@ -187,9 +186,9 @@ impl VmNameRegistry {
         }
     }
 
-    /// Record a host-observed readiness milestone (ADR-053 §3 /
-    /// plan 74 W2). Returns `Ok(true)` if updated, `Ok(false)` if
-    /// the name is unknown. Updates both `readiness` and
+    /// Record a host-observed readiness milestone. Returns `Ok(true)`
+    /// if updated, `Ok(false)` if the name is unknown. Updates both
+    /// `readiness` and
     /// `last_readiness_change_at` atomically; callers pass the
     /// timestamp explicitly so test fixtures stay deterministic.
     pub fn set_readiness(
@@ -280,9 +279,8 @@ pub struct RegisterParams<'a> {
 
 impl<'a> RegisterParams<'a> {
     /// Convenience: a `RegisterParams` with no tags, no TTL, and
-    /// `auto_resume = true` — the shape used by every callsite
-    /// before A5 lands. Lets new callers focus only on the fields
-    /// they actually want to change.
+    /// `auto_resume = true` — the common shape. Lets new callers focus
+    /// only on the fields they actually want to change.
     pub fn minimal(name: &'a str, vm_dir: &'a str, network: &'a str) -> Self {
         Self {
             name,
@@ -468,7 +466,7 @@ mod tests {
         assert!(!reg.set_expires_at("ghost", Some("x".to_string())).unwrap());
     }
 
-    // -------- last_active / idle activity (Plan 170 WS-B) --------
+    // -------- last_active / idle activity --------
 
     #[test]
     fn last_active_defaults_none_on_new_registration() {
@@ -518,7 +516,7 @@ mod tests {
             parsed.lookup("vm1").unwrap().last_active.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
-        // A record persisted before WS-B (no last_active key) still loads.
+        // A record persisted before the last_active key existed still loads.
         let legacy = r#"{"vms":{"old":{"vm_dir":"/tmp/old","network":"default",
             "guest_ip":null,"slot_index":0,"registered_at":"2024-01-01T00:00:00Z"}}}"#;
         let parsed: VmNameRegistry = serde_json::from_str(legacy).unwrap();
@@ -639,14 +637,14 @@ mod tests {
         assert!(r.tags.is_empty());
         assert!(r.expires_at.is_none());
         assert!(r.auto_resume);
-        // ADR-053 / plan 74 W2 readiness fields default cleanly on
-        // legacy records that pre-date the field. mvm-cli `ls --json`
-        // emits them as `null` on legacy rows.
+        // Readiness fields default cleanly on legacy records that
+        // pre-date the field. mvm-cli `ls --json` emits them as
+        // `null` on legacy rows.
         assert_eq!(r.readiness, None);
         assert_eq!(r.last_readiness_change_at, None);
     }
 
-    // -------- Readiness milestones (ADR-053 §3 / plan 74 W2) --------
+    // -------- Readiness milestones --------
 
     #[test]
     fn set_readiness_returns_false_for_unknown_vm() {

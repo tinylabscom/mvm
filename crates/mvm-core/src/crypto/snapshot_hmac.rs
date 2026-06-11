@@ -1,7 +1,7 @@
-//! Snapshot integrity via HMAC-SHA256. ADR-007 / plan 41 W4 / M9.
+//! Snapshot integrity via HMAC-SHA256.
 //!
 //! Firecracker snapshots are a memory image plus a state file written
-//! to disk. dm-verity (W3) protects rootfs *disk* reads, but a saved
+//! to disk. dm-verity protects rootfs *disk* reads, but a saved
 //! snapshot's memory image is a separate trust path — anyone who can
 //! write to the snapshot directory can swap it for arbitrary bytes
 //! and cause `mvmctl` to resume into attacker-controlled state.
@@ -67,13 +67,12 @@ pub const SIDECAR_FILENAME: &str = "integrity.json";
 /// Schema version of the sidecar JSON. Bump on any breaking change to
 /// the structure or HMAC computation.
 ///
-/// Schema 2 (W1 / A4 of the filesystem-volumes plan): added `epoch: u64`
+/// Schema 2 added `epoch: u64`
 /// inside the HMAC envelope. The epoch advances monotonically per
 /// resource (per-template for template snapshots, per-instance for
-/// instance snapshots). Replay defence per G5 of the parity plan —
-/// without it, a host-compromise scenario could swap a current
-/// snapshot for a captured earlier one of the same resource and
-/// roll back state.
+/// instance snapshots). Replay defence: without it, a host-compromise
+/// scenario could swap a current snapshot for a captured earlier one
+/// of the same resource and roll back state.
 pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
 
 /// Files that get HMAC'd into a single snapshot integrity record.
@@ -102,7 +101,7 @@ pub struct IntegritySidecar {
     /// snapshot. Advances on every reseal; verifiers refuse to
     /// resume an envelope whose epoch is below the persisted high-
     /// water mark for the resource. See `EpochStore` for the disk
-    /// format. Schema-2 addition (G5 — replay defence).
+    /// format. Replay defence.
     pub epoch: u64,
     pub mvmctl_version: String,
     /// HMAC-SHA256 tag, hex-encoded (lowercase, 64 chars).
@@ -159,7 +158,7 @@ pub enum VerifyError {
 /// provides), creating it if missing with 32 random bytes and mode
 /// 0600. Returns the key wrapped in `SecretBox` so accidental
 /// `Debug`/`Display` is a compile error and the bytes are zeroized
-/// on drop (plan 63 W2). Callers consume the key via
+/// on drop. Callers consume the key via
 /// `.expose_secret()` before passing it to `seal` / `verify`.
 /// Idempotent on repeated calls against an existing key file.
 pub fn load_or_init_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> {
@@ -342,8 +341,8 @@ pub fn seal(
 /// to refuse boot or honour `--allow-stale-snapshot`).
 ///
 /// `min_epoch` is the persisted high-water mark for this resource —
-/// the verifier refuses any envelope whose epoch is below it (G5
-/// replay defence). Pass `0` when no high-water mark is yet known
+/// the verifier refuses any envelope whose epoch is below it
+/// (replay defence). Pass `0` when no high-water mark is yet known
 /// (first verify).
 pub fn verify(
     snap_dir: &Path,
@@ -428,7 +427,7 @@ pub fn verify(
 }
 
 // ============================================================================
-// Epoch high-water-mark store (G5 — snapshot replay defence)
+// Epoch high-water-mark store (snapshot replay defence)
 // ============================================================================
 
 /// Persistent monotonic epoch counter for a single resource (a

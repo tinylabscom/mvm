@@ -1,15 +1,15 @@
-//! PID 1 of the Stage 0 bootstrap VM — the **nix-tarball seed** (plan 160).
+//! PID 1 of the Stage 0 bootstrap VM — the **nix-tarball seed**.
 //! Boots under **two** builder backends (selected by the `mvm.backend=qemu`
 //! kernel cmdline marker), carrying the official Nix release tarball's
 //! `/nix/store` + this binary as `/init` — no Alpine, no apk, no busybox.
 //!
-//! **libkrun** (macOS/aarch64, plan 160): the seed root arrives over virtiofs
+//! **libkrun** (macOS/aarch64): the seed root arrives over virtiofs
 //! (`krun_set_root`) on libkrunfw's bundled kernel; shares are virtio-fs; we
 //! copy the seed `/nix/store` into a tmpfs and bind it over `/nix` (virtiofs
 //! writes fail under FUSE); eth0 + DHCP come from libkrun, so we just point
 //! `/etc/resolv.conf` at gvproxy's gateway. Proven E2E on aarch64.
 //!
-//! **QEMU** (Linux/x86_64, plan 166 / ADR-072): the stock distro kernel +
+//! **QEMU** (Linux/x86_64): the stock distro kernel +
 //! initramfs mount the seed as an **ext4** root (`/dev/vda`, writable — so
 //! `/nix` needs no tmpfs copy), shares are ext4 block disks (`vdb`/`vdc`/`vdd`),
 //! and networking is QEMU slirp's fixed addresses configured statically over
@@ -31,8 +31,8 @@ fn main() -> ExitCode {
     {
         // The seed init only ever runs inside the Linux Stage 0 guest. The
         // crate still compiles on macOS/Windows contributor hosts (the bin
-        // is cross-compiled to aarch64-musl + embedded by mvm-cli/build.rs,
-        // ADR-065) so workspace builds stay green.
+        // is cross-compiled to aarch64-musl + embedded by
+        // mvm-cli/build.rs) so workspace builds stay green.
         eprintln!("stage0-init: only runs as PID 1 inside the Linux Stage 0 guest");
         ExitCode::FAILURE
     }
@@ -100,8 +100,8 @@ mod linux {
         }
     }
 
-    /// True when stage0-init runs under the **QEMU** builder backend (Plan
-    /// 166, Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
+    /// True when stage0-init runs under the **QEMU** builder backend
+    /// (Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
     /// on the kernel cmdline; libkrun does not. This drives every host-vs-VMM
     /// difference: share transport (ext4 block disks vs virtiofs), the nix
     /// store layout (writable ext4 root vs tmpfs copy), and networking
@@ -334,7 +334,7 @@ mod linux {
     /// First cut for the boot proof: a full-tmpfs store can exhaust RAM on
     /// the full builder-VM build — the persistent ext4 `/dev/vda` (bootstrap
     /// e2fsprogs via nix, mkfs, copy the store onto it) is the production
-    /// follow-up (plan 160).
+    /// follow-up.
     fn setup_nix_store() -> Result<(), String> {
         // Copy BEFORE hiding the seed: mount a tmpfs at NIX_SEED_RO, copy the
         // seed `/nix/store` (still directly readable on the virtiofs root)

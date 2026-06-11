@@ -1,7 +1,6 @@
-//! Chain head + JSONL append + secondary persistence (Plan 104 §H-L5.1
-//! and §H-L5.2).
+//! Chain head + JSONL append + secondary persistence.
 //!
-//! Holds the chain-signing key (W1b.1 software in-memory) + the
+//! Holds the chain-signing key (software in-memory) + the
 //! `O_APPEND`-only FD on the JSONL + the latest chain head. The single
 //! entry point is [`Chain::append_entry`]: takes a typed
 //! [`AppendEntryRequest::AppendEntry`], synthesizes a `CanonicalEntry`
@@ -78,9 +77,9 @@ impl Chain {
         };
         let pub_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
 
-        // O_APPEND-only — gate H-L5.1. Combined with the dir-immutable
-        // flag the supervisor sets on the parent dir (W1b.2), this means
-        // we can only append; we can't rewrite, truncate, or unlink.
+        // O_APPEND-only. Combined with the dir-immutable flag the
+        // supervisor sets on the parent dir, this means we can only
+        // append; we can't rewrite, truncate, or unlink.
         let jsonl_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -93,9 +92,9 @@ impl Chain {
                 )
             })?;
 
-        // Determine initial head. W1b.1 reads the existing file end-to-
-        // end if present; W1b.2 will short-circuit via the secondary head
-        // file (which is faster and tamper-evident).
+        // Determine initial head by reading the existing file end-to-end
+        // if present. A future revision can short-circuit via the
+        // secondary head file (which is faster and tamper-evident).
         let head = match std::fs::read_to_string(jsonl_path) {
             Ok(contents) if !contents.is_empty() => {
                 let last_line = contents.lines().last().unwrap_or("");
@@ -136,9 +135,9 @@ impl Chain {
 
     /// Append one canonical entry. Returns the new head on success.
     pub fn append(&mut self, mut entry: CanonicalEntry) -> Result<String, AuditSignerErrorCode> {
-        // Allow-list gate (ADR-062): unknown categories are rejected
-        // before any signing work happens. Keeps the chain to a known set
-        // of values so downstream tooling can rely on category meaning.
+        // Allow-list gate: unknown categories are rejected before any
+        // signing work happens. Keeps the chain to a known set of values
+        // so downstream tooling can rely on category meaning.
         if !crate::audit_signer::category::is_allowed(&entry.category) {
             return Err(AuditSignerErrorCode::InvalidRequest);
         }
@@ -172,11 +171,11 @@ impl Chain {
         // Append line + newline. O_APPEND ensures the write is atomic
         // up to the OS write-size guarantee (typically 4 KiB on Linux).
         writeln!(self.jsonl_file, "{}", line).map_err(|_| AuditSignerErrorCode::FsyncFailed)?;
-        // Fsync. Hard-fail on error per §H-L6.6.
+        // Fsync. Hard-fail on error.
         self.jsonl_file
             .sync_all()
             .map_err(|_| AuditSignerErrorCode::FsyncFailed)?;
-        // Update in-memory head + persist secondary location (§H-L5.2).
+        // Update in-memory head + persist secondary location.
         self.head = entry_hash.clone();
         std::fs::write(&self.secondary_head_path, &self.head)
             .map_err(|_| AuditSignerErrorCode::FsyncFailed)?;

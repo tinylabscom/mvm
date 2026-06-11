@@ -1,4 +1,4 @@
-//! CLI surface tests for `mvmctl reconcile` (Plan 170 WS-A).
+//! CLI surface tests for `mvmctl reconcile`.
 
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
@@ -33,7 +33,7 @@ fn reconcile_help_lists_dry_run_and_json_flags() {
 
 #[test]
 fn reconcile_is_hidden_from_top_level_help_but_dispatchable() {
-    // Plan 178 Task 2 — `reconcile` is an internal registry-converge command,
+    // `reconcile` is an internal registry-converge command,
     // hidden from `--help` but still runnable (its own `--help` works).
     let top = mvmctl(&["--help"]);
     let top_out = String::from_utf8_lossy(&top.stdout);

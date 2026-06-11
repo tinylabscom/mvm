@@ -1,6 +1,6 @@
 //! Session lifecycle for the MCP `run` tool.
 //!
-//! Plan 32 / Proposal A.2. v1 ships the bookkeeping layer:
+//! v1 ships the bookkeeping layer:
 //!
 //! - [`SessionMap`] tracks `(session_id → SessionState)` with idle and
 //!   max-lifetime expiry — *protocol-only safe*, no I/O.
@@ -11,13 +11,12 @@
 //!   stdio server and mvmd's hosted variant each plug in their own.
 //!
 //! Warm-VM materialisation (booting a long-running VM that persists
-//! across `tools/call` invocations) is deferred to A.2 v2 because the
+//! across `tools/call` invocations) is deferred to v2 because the
 //! existing `crate::exec` boot/dispatch/teardown path is tightly
 //! coupled and a clean split is risky without live-KVM integration
 //! tests. The wire schema (`session`, `close`) is already in place —
 //! v1 honours the schema for bookkeeping/correlation; v2 will materialise
-//! the VM behind the bookkeeping. ADR-003 §"Decisions" 6 documents the
-//! split.
+//! the VM behind the bookkeeping.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -188,7 +187,7 @@ impl SessionMap {
         self.sessions.get(session_id)
     }
 
-    /// Record the warm-VM name on an existing session. Used by A.2 v2
+    /// Record the warm-VM name on an existing session. Used by v2
     /// after `boot_session_vm` succeeds, so the reaper has something
     /// to tear down. No-op if the session is unknown (the VM was
     /// reaped between insert and this call — caller should tear down
@@ -407,7 +406,7 @@ mod tests {
 
     #[test]
     fn set_vm_name_records_after_boot() {
-        // A.2 v2: dispatcher inserts on first call (vm_name=None),
+        // v2: dispatcher inserts on first call (vm_name=None),
         // then sets the name once boot_session_vm returns.
         let mut map = SessionMap::new(cfg(300, 3600));
         map.touch_or_insert("s1", "shell", None);

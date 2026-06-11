@@ -1,22 +1,20 @@
-# mkFunctionService — bake a function-call workload (ADR-0009 / plan
-# 0003 phase 4). Generic across languages: the `language` input drives
-# a registry lookup (`languages/<lang>.nix`) that contributes the
-# interpreter package + wrapper-script source. The factory body itself
-# is identical for every language — it composes the `extraFiles` /
-# `servicePackages` / `service` triple that mvm's `mkGuest` consumes.
+# mkFunctionService — bake a function-call workload. Generic across
+# languages: the `language` input drives a registry lookup
+# (`languages/<lang>.nix`) that contributes the interpreter package +
+# wrapper-script source. The factory body itself is identical for every
+# language — it composes the `extraFiles` / `servicePackages` /
+# `service` triple that mvm's `mkGuest` consumes.
 #
-# Plan 60 Phase 5 Slice E1. Replaces mvmforge's per-language factories
-# (`mkPythonFunctionService.nix`, `mkNodeFunctionService.nix`) with a
-# single dispatcher + a language registry. Adding a new language is
-# now one file under `languages/`, not a new factory + caller switch.
+# A single dispatcher + a language registry replaces per-language
+# factories. Adding a new language is now one file under `languages/`,
+# not a new factory + caller switch.
 #
 # v1 wrapper hardening lives inside the per-language wrapper sources
 # (`nix/wrappers/python/{oneshot,longrunning}.py`, same for `node/*.mjs`),
-# which mirror the audited Rust `mvm-runner` crate's semantics. A
-# follow-up PR replaces the inlined script with the compiled
-# `mvm-runner` binary at `/usr/lib/mvm/wrappers/runner`; until then,
-# **changes to mvm-runner's hardening must be mirrored into the
-# wrappers.**
+# which mirror the audited Rust `mvm-runner` crate's semantics. The
+# inlined script is to be replaced with the compiled `mvm-runner`
+# binary at `/usr/lib/mvm/wrappers/runner`; until then, **changes to
+# mvm-runner's hardening must be mirrored into the wrappers.**
 #
 # Inputs:
 #   pkgs        — nixpkgs.legacyPackages.<system>
@@ -26,10 +24,9 @@
 #   function    — IR entrypoint.function
 #   format      — IR entrypoint.format ("json" | "msgpack")
 #   appPkg      — derivation built from the bundled user source
-#                 (per ADR-0008)
 #   sourcePath  — absolute path inside the rootfs where the user
 #                 source tree lives (e.g. "/app")
-#   concurrency — optional ADR-0011 concurrency block. When non-null,
+#   concurrency — optional concurrency block. When non-null,
 #                 the registry picks the language's `longrunning`
 #                 wrapper instead of `oneshot`, and the agent picks
 #                 the value out of `/etc/mvm/runtime.json` to start
@@ -50,7 +47,7 @@
 , appPkg
 , sourcePath ? "/app"
 , concurrency ? null
-, # Pre-merged per-phase hook command lists (SDK port Phase 10a). The
+, # Pre-merged per-phase hook command lists. The
   # caller passes the launch.hooks JSON object verbatim; each phase
   # is `{ kind = "shell"; line = …; }` or `{ kind = "argv"; argv = […]; }`
   # entries. Empty / absent phases are no-ops. Defaults to all-empty
@@ -76,7 +73,7 @@ let
   # the resolved source path. Baked into the rootfs at build time —
   # nothing here is decided at call time.
   #
-  # The `concurrency` block (ADR-0011) opts the agent into the
+  # The `concurrency` block opts the agent into the
   # warm-process worker pool. Schema mirrors `mvm_guest::
   # runtime_config::RuntimeConfig` exactly so mvm's
   # `serde(deny_unknown_fields)` parse succeeds.
@@ -98,7 +95,7 @@ let
     mode = "prod";
   };
 
-  # Lifecycle hooks (SDK port Phase 10b). Each phase is rendered into
+  # Lifecycle hooks. Each phase is rendered into
   # a shell script under `/etc/mvm/hooks/<phase>.sh`. The script
   # iterates the per-phase command list — `kind = "shell"` lines run
   # via `${pkgs.runtimeShell} -c <line>`; `kind = "argv"` lines run
@@ -179,13 +176,12 @@ in
       content = runtimeJson;
       mode = "0644";
     };
-    # Lifecycle hook scripts (SDK port Phase 10b). The bootScript
+    # Lifecycle hook scripts. The bootScript
     # invokes `before_start.sh` before exec'ing PID 1's idle loop;
     # `after_start.sh` is the readiness probe a future watchdog will
     # poll; `before_stop.sh` runs at shutdown when wired by the agent;
     # `before_build.sh` is rendered for parity but runs in the builder
-    # VM, which is mid-transition (Plan 72) — the builder consumer
-    # lands in Phase 10c.
+    # VM, whose consumer is not yet wired.
     # `source =` (copy the script file), NOT `content =` (which would
     # writeText the store-PATH string as the file body — a 0755 file
     # whose only content is a bare /nix/store path with no shebang,

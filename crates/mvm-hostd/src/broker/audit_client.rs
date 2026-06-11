@@ -1,8 +1,7 @@
-//! UDS client to `mvm-audit-signer` for the `host.audit.v1` handler
-//! (Plan 104 §host.audit.v1, ADR-062).
+//! UDS client to `mvm-audit-signer` for the `host.audit.v1` handler.
 //!
 //! Each `append` opens a fresh UDS connection. Pooling lives at the
-//! supervisor's `AuditSignerProxy` (Plan 104 §C5); the broker is a
+//! supervisor's `AuditSignerProxy`; the broker is a
 //! direct client because the audit-signer's UDS path is part of the
 //! broker's `SubprocessConfig`, and going through the supervisor would
 //! add a hop per workload-emitted entry.

@@ -1,33 +1,32 @@
-//! `mvm-broker` binary — the general-broker subprocess entry point
-//! (Plan 104 §H-L1.3, ADR-061 + ADR-062 §"Decision").
+//! `mvm-broker` binary — the general-broker subprocess entry point.
 //!
 //! Spawn contract:
 //!
-//! 1. The supervisor cosign-verifies this binary at spawn (§H-L3.1 —
-//!    supervisor side, lands in W1b).
+//! 1. The supervisor cosign-verifies this binary at spawn
+//!    (supervisor side).
 //! 2. The supervisor spawns this process under a workload-specific
-//!    cgroup + PID/mount namespace + seccomp + setpriv (§H-L1.4,
-//!    §H-L3.3, §H-L3.9 — supervisor side, lands in W1b).
+//!    cgroup + PID/mount namespace + seccomp + setpriv
+//!    (supervisor side).
 //! 3. The supervisor writes a JSON [`SubprocessConfig`] to this
-//!    process's stdin, then closes stdin. W1a parses unsigned;
-//!    W1b will require a signed envelope (§H-L3.6, G1).
+//!    process's stdin, then closes stdin. Today the config is parsed
+//!    unsigned; a signed envelope will be required.
 //! 4. This process binds a UDS at `cfg.uds_path` (mode 0600 set by the
 //!    supervisor on the parent dir) and enters the dispatch loop.
 //! 5. It exits when the supervisor dies (parent-death signal — Linux
 //!    `PR_SET_PDEATHSIG`, macOS kqueue parent-pid watcher — wired by
-//!    the supervisor side in W1b; defensive double-attach in this
+//!    the supervisor side; defensive double-attach in this
 //!    binary lands at the same time).
 //!
 //! Handlers registered at startup:
 //!
-//! - `host.audit.v1` — workload-emitted audit emission (ADR-062). Only
+//! - `host.audit.v1` — workload-emitted audit emission. Only
 //!   registered when `cfg.audit_signer_uds_path` is set, since the
 //!   handler needs a UDS path to forward to. If the supervisor spawns
 //!   without an audit-signer (test fixtures, doctor probes), the
 //!   binary logs a warn and `host.audit.v1` calls return `NotBound`.
 //!
 //! `host.time.v1`, `host.cost.v1`, and `broker.v1` are still
-//! unregistered (W3 / W4a / W3 wave the handler scaffolds).
+//! unregistered; their handler scaffolds land later.
 
 use std::io::Read;
 use std::sync::Arc;

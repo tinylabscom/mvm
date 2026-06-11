@@ -1,7 +1,7 @@
-//! Plan 60 Phase 7 — host-mediated agent tools substrate.
+//! Host-mediated agent tools substrate.
 //!
-//! Phase 7's framing: an LLM agent (Claude Code, opencode, future
-//! mvmforge clients) calls into host-mediated tools — `mvm.web_search`,
+//! An LLM agent (Claude Code, opencode, future mvmforge clients)
+//! calls into host-mediated tools — `mvm.web_search`,
 //! `mvm.web_fetch`, `mvm.time_now`, `mvm.upload`/`download`, etc. The
 //! agent doesn't reach these directly; every call routes through the
 //! supervisor so:
@@ -12,7 +12,7 @@
 //!    [`ToolRegistry::invoke`]; this substrate trusts its caller did
 //!    that.
 //! 2. **Audit emission** — every successful or failed invoke fires
-//!    a chain-signed entry through the plan-60 Phase 4
+//!    a chain-signed entry through the
 //!    [`Recorder`](crate::supervisor::Recorder) under `EventCategory::Cmd` with
 //!    the canonical event name `cmd.tool.<name>.{completed,failed}`.
 //!    The audit is best-effort: a chain-signer failure does not
@@ -27,8 +27,8 @@
 //! - Not a tool gate. [`crate::supervisor::tool_gate::ToolGate`] +
 //!   [`crate::supervisor::policy_tool_gate::PolicyToolGate`] decide
 //!   allow/deny; this module decides "given allow, what happens".
-//! - Not a transport. The MCP server (plan 60 Phase 7,
-//!   `mvm-mcp/src/server.rs`) and the future agent vsock RPC are the
+//! - Not a transport. The MCP server (`mvm-mcp/src/server.rs`) and
+//!   the future agent vsock RPC are the
 //!   two consumers; both call [`ToolRegistry::invoke`] after the
 //!   gate clears.
 //! - Not a place for per-tenant state. Tools are stateless from the
@@ -137,7 +137,7 @@ impl ToolRegistry {
         }
     }
 
-    /// Build with the default tool set: every Phase 7 builtin is
+    /// Build with the default tool set: every builtin is
     /// registered with its fail-closed `Default::default()` config.
     ///
     /// Today's registrations:
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn with_defaults_registers_all_phase_7_builtins() {
-        // The Phase 7 substrate ships five tools out of the box.
+        // The substrate ships five tools out of the box.
         // `time_now` is reachable; the rest are wired with
         // fail-closed defaults so an operator who calls them
         // without configuring an allowlist / staging area gets a

@@ -1,7 +1,7 @@
-//! Plan 60 Phase 6 — hardware attestation provider stubs.
+//! Hardware attestation provider stubs.
 //!
 //! Three feature-gated providers reserve the API surface for real
-//! hardware integrations landing post-Phase-6:
+//! hardware integrations landing later:
 //!
 //! - `attestation-tpm2`     — TPM2 quote (Linux/Windows hosts with a
 //!   TPM). Real impl pulls in `tss-esapi`.
@@ -17,9 +17,8 @@
 //!
 //! For v0, every wired provider's `measure()` returns
 //! `AttestationError::NotYetImplemented`. The real bring-up work is
-//! sequenced post-Phase-6 when the hosted mvmd cloud needs hardware
-//! attestation for compliance (plan 60 §"Hardware attestation
-//! everywhere", tier 5).
+//! sequenced for when the hosted mvmd cloud needs hardware
+//! attestation for compliance.
 
 use crate::crypto::attestation::error::AttestationError;
 use serde::{Deserialize, Serialize};

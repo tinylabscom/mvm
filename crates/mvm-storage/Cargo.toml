@@ -14,7 +14,7 @@ async-trait = "0.1"
 bytes = "1"
 chrono.workspace = true
 mvm-core.workspace = true
-# IR `MountSource` that MountProvider resolves (B4). Acyclic: mvm-sdk does
+# IR `MountSource` that MountProvider resolves. Acyclic: mvm-sdk does
 # not depend on mvm-storage, and its only mvm-* normal dep is mvm-core.
 mvm-sdk.workspace = true
 serde.workspace = true
@@ -24,11 +24,11 @@ tokio = { workspace = true, features = ["fs", "io-util", "rt", "macros"] }
 tracing.workspace = true
 # DEK held in the EncryptedStorage struct is zeroized on drop.
 zeroize.workspace = true
-# S3 MountProvider — OFF by default (B4 step 4). The lean object_store, not
+# S3 MountProvider — OFF by default. The lean object_store, not
 # aws-sdk-s3 (which drags in aws-config/aws-smithy + the aws-lc-rs C crypto
 # closure the dep budget rejects). Only the `s3` feature pulls it, so the
-# default tree stays clean. The opendal -> object_store consolidation (plan 126
-# B2) is DONE — `mvm`'s template registry now uses object_store too, and opendal
+# default tree stays clean. The opendal -> object_store consolidation is
+# DONE — `mvm`'s template registry now uses object_store too, and opendal
 # is gone from the workspace.
 object_store = { version = "0.11", optional = true, default-features = false, features = [
     "aws",

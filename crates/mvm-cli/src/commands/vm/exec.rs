@@ -1,9 +1,9 @@
 //! `mvmctl run` — boot a transient microVM, run a single command, tear down.
 //!
-//! Plan 178 Task 7 merged the former bare `mvmctl exec` into `run`: `run` was
-//! already a strict superset (see `RunArgs::into_exec_args`), so `exec` is
-//! gone and `run --profile dev -- <argv>` covers its dev-shell case. The
-//! `Args` struct + internal request machinery stay — `run_secure` reuses them.
+//! The former bare `mvmctl exec` was folded into `run`: `run` was already a
+//! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
+//! `run --profile dev -- <argv>` covers its dev-shell case. The `Args`
+//! struct + internal request machinery stay — `run_secure` reuses them.
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -41,7 +41,7 @@ pub(in crate::commands) struct Args {
     pub memory: String,
     /// Share a host directory into the guest. Format: `HOST_PATH:/GUEST_PATH[:MODE]`
     /// where MODE is `ro` (default, writes are discarded) or `rw` (writes are
-    /// rsynced back to the host directory after the command exits — see ADR-002). Repeatable
+    /// rsynced back to the host directory after the command exits). Repeatable
     #[arg(short = 'd', long)]
     pub add_dir: Vec<String>,
     /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides any env vars
@@ -136,21 +136,21 @@ pub(in crate::commands) struct RunArgs {
     pub launch_plan: Option<String>,
     /// SDK transport mode for `mvmctl run`.
     ///
-    /// - `--mode plan` (Followup H-plan): synthesize an
-    ///   ExecutionPlan per Sandbox call and route through
-    ///   `mvm_hostd::supervisor::admit_for_run`; no microVM ever boots.
-    /// - `--mode live` (Followup H-live, Plan 73): spawn the user's
-    ///   script with `MVM_SDK_MODE=live` so the SDK shells each
-    ///   `Sandbox` operation to existing `mvmctl up` / `proc start` /
-    ///   `fs write` / `down` against a real microVM.
+    /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
+    ///   and route through `mvm_hostd::supervisor::admit_for_run`; no
+    ///   microVM ever boots.
+    /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
+    ///   so the SDK shells each `Sandbox` operation to existing
+    ///   `mvmctl up` / `proc start` / `fs write` / `down` against a
+    ///   real microVM.
     /// - `--mode record` redirects users to `mvmctl compile` (where
     ///   record is the default mode).
     ///
     /// When unset, the verb behaves as a transient-sandbox runner
-    /// over the trailing argv — its pre-Followup-H semantics.
+    /// over the trailing argv.
     #[arg(long = "mode", value_enum)]
     pub mode: Option<RunMode>,
-    /// Friendly alias for `--mode live` (Plan 73 Followup H-live).
+    /// Friendly alias for `--mode live`.
     #[arg(long = "dev", conflicts_with_all = ["prod", "mode"])]
     pub dev: bool,
     /// Friendly alias for `--mode record`. `mvmctl run --prod`
@@ -176,7 +176,6 @@ pub(in crate::commands) struct RunArgs {
 pub(in crate::commands) enum RunMode {
     /// Live transport — Sandbox calls shell out to existing mvmctl
     /// up / proc start / fs write / down against a real microVM.
-    /// Plan 73 Followup H-live.
     Live,
     /// Plan transport — synthesise one ExecutionPlan per Sandbox
     /// operation and route through `mvm_hostd::supervisor::admit_for_run`.
@@ -243,11 +242,11 @@ pub(in crate::commands) fn run_receipt(
 }
 
 pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig) -> Result<()> {
-    // Followup H — when an SDK transport mode is requested, peel off
-    // the SDK-shaped surface before the sandbox-runner validation
-    // kicks in. `--dev` (alias for live) is refused in v1; `--prod`
-    // (alias for record) redirects to `mvmctl compile`; `--mode plan`
-    // routes through the plan-mode admission dry-run.
+    // When an SDK transport mode is requested, peel off the
+    // SDK-shaped surface before the sandbox-runner validation kicks
+    // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
+    // for record) redirects to `mvmctl compile`; `--mode plan` routes
+    // through the plan-mode admission dry-run.
     if let Some(mode) = resolve_run_mode(&args)? {
         return super::run_plan::dispatch_sdk_mode(mode, &args);
     }
@@ -426,8 +425,8 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
-    // Plan 38 §4: --manifest <PATH> accepts a manifest path / dir in
-    // addition to legacy names. Resolve up front so the downstream
+    // --manifest <PATH> accepts a manifest path / dir in addition to
+    // legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
     // hash (manifest), and the dispatched lifecycle helpers handle
     // both keys transparently.

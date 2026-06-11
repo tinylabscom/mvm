@@ -1,4 +1,4 @@
-//! Policy precedence resolver. Plan 37 Addendum E2.
+//! Policy precedence resolver.
 //!
 //! When a workload boots, three sources can describe its policy:
 //!
@@ -9,10 +9,10 @@
 //!
 //! These can disagree. Without explicit precedence, the merge
 //! result depends on which code path resolves first — exactly the
-//! kind of silent runtime mutation §6 invariant 6 forbids ("no
-//! silent release mutation").
+//! kind of silent runtime mutation the "no silent release mutation"
+//! invariant forbids.
 //!
-//! Precedence rules (plan 37 Addendum E2):
+//! Precedence rules:
 //!
 //! - **Emergency deny wins over everything.** A tool name on the
 //!   emergency deny list is removed from the effective allowed set
@@ -24,7 +24,7 @@
 //! - **Future "deny wins over allow"** comes online once the
 //!   sub-policy types grow allow/deny pairs (today only
 //!   `ToolPolicy.allowed` exists, and there's no `denied`
-//!   counterpart yet — Wave 2 introduces it).
+//!   counterpart yet).
 //!
 //! The resolver is pure — given the same inputs it always returns
 //! the same `EffectivePolicy`. CI's golden-fixture table walks
@@ -39,14 +39,13 @@ use crate::policy::policies::{
     ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
 
-/// An out-of-band deny instruction with bounded lifetime. Plan 37
-/// §18.1 emergency deny rules are signed updates that bypass the
-/// normal release cycle to revoke a destination, tool, or workload
-/// class fast.
+/// An out-of-band deny instruction with bounded lifetime. Emergency
+/// deny rules are signed updates that bypass the normal release cycle
+/// to revoke a destination, tool, or workload class fast.
 ///
-/// Wave 1.5 (this PR) ships the `tools` field — the only allow list
-/// in the sub-policies today. Wave 2 grows this with `destinations`
-/// once `EgressPolicy` carries a real allow list. `expires_at` makes
+/// Today only the `tools` field ships — the only allow list in the
+/// sub-policies. A future `destinations` field follows once
+/// `EgressPolicy` carries a real allow list. `expires_at` makes
 /// the rule self-expiring so a leftover emergency deny doesn't pin
 /// the fleet forever after the incident clears.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

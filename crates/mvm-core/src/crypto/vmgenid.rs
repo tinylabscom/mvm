@@ -1,4 +1,4 @@
-//! Plan 122 D — VMGenID-style generation token for snapshot-resume reseed.
+//! VMGenID-style generation token for snapshot-resume reseed.
 //!
 //! Resuming two clones of one snapshot leaves both guests with identical
 //! CSPRNG state — they'd generate the same nonces/keys, a real key-reuse
@@ -6,8 +6,8 @@
 //! host emits a fresh generation token over the config/vsock path on every
 //! resume; the guest reseeds and drops its session when the token changes.
 //!
-//! The token is bound to the snapshot's content-address (plan 122 C) so a
-//! token minted for one snapshot can't be replayed onto a different one.
+//! The token is bound to the snapshot's content-address so a token minted
+//! for one snapshot can't be replayed onto a different one.
 //!
 //! This module is the shared substrate: the host mints tokens
 //! ([`fresh_generation_token`]); the guest tracks them ([`GenIdState`]) and
@@ -27,7 +27,7 @@ pub const GENID_BYTES: usize = 16;
 pub struct GenerationToken {
     /// Fresh random per resume — the reseed nonce the guest mixes in.
     pub token: [u8; GENID_BYTES],
-    /// sha256-hex of the snapshot this token was minted for (plan 122 C).
+    /// sha256-hex of the snapshot this token was minted for.
     /// The guest refuses a token whose binding doesn't match the snapshot it
     /// resumed, so a token can't be replayed onto a different snapshot.
     pub content_hash: String,

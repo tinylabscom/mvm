@@ -7,7 +7,7 @@ use mvm::shell;
 use mvm_backend::firecracker;
 
 /// Resolve a VM name to its absolute directory path and verify the VM
-/// is running. Lima preconditions removed — ADR-013 dropped Lima.
+/// is running.
 pub fn resolve_running_vm(name: &str) -> Result<String> {
     let abs_vms = shell::run_in_vm_stdout(&format!("echo {}", config::VMS_DIR))?;
     let abs_dir = format!("{}/{}", abs_vms, name);
@@ -28,7 +28,7 @@ pub fn resolve_running_vm(name: &str) -> Result<String> {
 /// a slot hash.
 ///
 /// `mvmctl up` / `mvmctl exec` accept either form via their
-/// `--manifest` flag. The `Slot` variant is the post-plan-38 path;
+/// `--manifest` flag. The `Slot` variant is the current path;
 /// `Name` is kept only to resolve any pre-existing name-keyed slots.
 ///
 /// Callers that need the persisted manifest re-read it via
@@ -58,7 +58,7 @@ pub enum ManifestArgRef {
 pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
 
-    // `<template>@<alias>` form (W1 / A6). Aliases live in the
+    // `<template>@<alias>` form. Aliases live in the
     // template-tags catalog; we resolve them up front so a typo
     // surfaces as "alias not found" rather than booting the
     // current revision silently. Today we validate the alias and
@@ -174,20 +174,19 @@ pub fn resolve_network_policy(
     }
 }
 
-// Plan 38 §4 (slice 7b): `resolve_optional_network_policy` was used
-// by `mvmctl template create --network-preset` to bake a default
-// policy into the TemplateSpec. With the `template *` namespace
-// gone and `[network]` removed from `mvm.toml` (plan 38 §3),
-// runtime policy now lives entirely in `mvmctl up` flags / the
-// user-global config / mvmd tenant config. Function deleted; the
-// `resolve_network_policy` form (always returns Some) is the only
-// remaining helper.
+// `resolve_optional_network_policy` was used by `mvmctl template
+// create --network-preset` to bake a default policy into the
+// TemplateSpec. With the `template *` namespace gone and `[network]`
+// removed from `mvm.toml`, runtime policy now lives entirely in
+// `mvmctl up` flags / the user-global config / mvmd tenant config.
+// Function deleted; the `resolve_network_policy` form (always returns
+// Some) is the only remaining helper.
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
 /// → apple-container, macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
 /// "not available" error). Any explicit value is returned as-is. Single source of truth,
-/// shared by `mvmctl up` and `mvmctl pool` (Plan 118 WS-1 1b) so they agree on the backend.
+/// shared by `mvmctl up` and `mvmctl pool` so they agree on the backend.
 pub fn resolve_effective_hypervisor(requested: &str) -> String {
     if requested != "firecracker" {
         return requested.to_string();

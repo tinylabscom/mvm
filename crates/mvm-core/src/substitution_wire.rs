@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §1 — the guest↔host substitution-endpoint wire contract.
+//! The guest↔host substitution-endpoint wire contract.
 //!
 //! The guest's SDK routes a secret-bearing request to the host substitution
 //! endpoint over a host-local socket as a length-prefixed JSON [`WireRequest`];
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// carry an opaque placeholder where a credential goes; the host substitutes it
 /// toward the bound destination and forwards to `url`.
 ///
-/// `deny_unknown_fields` fails closed on an unexpected field (W4.1).
+/// `deny_unknown_fields` fails closed on an unexpected field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireRequest {

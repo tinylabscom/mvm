@@ -6,13 +6,13 @@
 //!
 //! Lives here — next to the `SupervisorBaseConfig`/`SupervisorAttachConfig` wire types it
 //! frames — because both ends need it without a dependency cycle: the **writer** is
-//! `mvm-backend`'s libkrun `claim_standby` (Plan 118 WS-1 1b) and the **reader** is the
-//! `mvm-libkrun-supervisor` bin's prelaunch attach path (Plan 118 WS-1 1a). `mvm-backend`
+//! `mvm-backend`'s libkrun `claim_standby` and the **reader** is the
+//! `mvm-libkrun-supervisor` bin's prelaunch attach path. `mvm-backend`
 //! cannot depend on `mvm-hostd` (that crate depends on `mvm-backend`), so this can't live
 //! in `mvm_hostd::framing` (which keeps the *async* tokio variants for its own channels).
 //!
 //! This is the no-auth transport — correct for the same-uid control UDS. The trust
-//! boundary is the supervisor's independent plan re-verify on the attach (1a), not this
+//! boundary is the supervisor's independent plan re-verify on the attach, not this
 //! frame.
 
 use std::io::{Read, Write};

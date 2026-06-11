@@ -1,10 +1,9 @@
 //! Security policy, audit log, secret bindings, network policy, plus
 //! the tenant policy-bundle authoring/resolution/signing surface folded
-//! in from the former `mvm-policy` crate (plan 121 B2).
+//! in from the former `mvm-policy` crate.
 
 pub mod audit;
-/// Plan 74 W2 / mvmd ADR 0022 §"Layer 3 — DNS pinning" — DNS
-/// admission-time pin data model. State-only slice (types +
+/// DNS admission-time pin data model. State-only slice (types +
 /// tests, no resolver / no enforcement / no audit emission).
 pub mod dns_pin;
 pub mod network_policy;
@@ -12,8 +11,8 @@ pub mod secret_binding;
 pub mod security;
 
 // Tenant policy bundles — authoring, resolution, signing, TOML loading.
-// Folded in from the former `mvm-policy` crate (plan 121 B2). mvmd
-// consumes the resolver + bundle types via the facade.
+// Folded in from the former `mvm-policy` crate. mvmd consumes the
+// resolver + bundle types via the facade.
 pub mod bundle;
 pub mod policies;
 pub mod resolver;

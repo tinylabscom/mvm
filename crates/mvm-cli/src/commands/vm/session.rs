@@ -1,5 +1,5 @@
 //! `mvmctl session ls / info / kill / set-timeout` — session lifecycle
-//! verbs (Phase 3 / mvmforge `specs/upstream-mvm-prompt.md` deliverable D).
+//! verbs.
 //!
 //! Session metadata is persisted at
 //! `$XDG_RUNTIME_DIR/mvm/sessions/<id>.json` (see
@@ -14,17 +14,17 @@
 //! `state = Killed` for human-initiated `mvmctl session kill` calls or
 //! removes the file on graceful exit). Because `mvmctl invoke` today
 //! still boots-and-tears-down per call, sessions are short-lived; the
-//! warm-process pool path (Phase 5) is what keeps a session
-//! materialised across multiple invokes.
+//! warm-process pool path is what keeps a session materialised across
+//! multiple invokes.
 //!
 //! ## What's deferred
 //!
 //! - `set-timeout` writes the new value into the on-disk record; the
 //!   guest-agent-side enforcement (`UpdateIdleTimeout` vsock verb) is
-//!   a Phase 5 follow-up. The CLI verb is wired now so SDKs can call
-//!   it ahead of substrate-side enforcement.
+//!   a follow-up. The CLI verb is wired now so SDKs can call it ahead
+//!   of substrate-side enforcement.
 //! - `kind="session-killed"` envelope on inflight `RunEntrypoint`
-//!   calls is a guest-agent change (Phase 4c/5).
+//!   calls is a guest-agent change.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
@@ -57,10 +57,10 @@ pub(in crate::commands) enum Cmd {
     /// Boot a microVM and register a session without dispatching
     /// anything into it. The session id is printed on stdout for
     /// capture by SDK callers; subsequent `session attach`/`exec`/
-    /// `run-code`/`console` calls use that id. Phase 5d.
+    /// `run-code`/`console` calls use that id.
     Start(StartArgs),
     /// Re-attach to an existing session and dispatch a `RunEntrypoint`
-    /// call into its VM. Phase 5 (`Session.attach()` from mvmforge SDK).
+    /// call into its VM (the SDK's `Session.attach()`).
     Attach(AttachArgs),
     /// Run an arbitrary shell command against a dev-mode session.
     /// Refused on prod-mode sessions.
@@ -554,7 +554,7 @@ fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> 
         &[mvm_guest::vsock::GuestCapability::UpdateIdleTimeout],
     )?;
     let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
     let resp = mvm_guest::vsock::send_request(&mut stream, &req)?;
     match resp {
@@ -735,8 +735,8 @@ fn cmd_run_code(args: RunCodeArgs) -> Result<()> {
     //
     // v1 is stateless — each call gets a fresh interpreter, so
     // `from foo import bar` in call 1 isn't visible in call 2. v2
-    // (Plan-0010 Choice A) routes through the warm-process pool's
-    // wrapper for stateful eval; the wire shape stays identical.
+    // routes through the warm-process pool's wrapper for stateful
+    // eval; the wire shape stays identical.
     dispatch_run_code(&id, &record, args.code, args.timeout)
 }
 
@@ -764,18 +764,18 @@ fn dispatch_run_code(
     let mut stream = transport
         .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {:?}", record.vm_name))?;
-    // ADR-053 / plan 74 W1: hard cutover requires hello before any
-    // operational request. `RunCode` is a dev-shell request not
+    // Hard cutover requires hello before any operational request.
+    // `RunCode` is a dev-shell request not
     // covered by the closed `GuestCapability` enum, so request no
     // specific capability — the hello alone unblocks dispatch.
     let _ = mvm_guest::vsock::negotiate_protocol(&mut stream, Vec::new())
         .with_context(|| format!("Negotiating guest agent protocol on {:?}", record.vm_name))?;
     let req = mvm_guest::vsock::GuestRequest::RunCode { code, timeout_secs };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(&record.vm_name, &req);
-    // RunCode now streams ExecEvent frames (Plan 159 WS-5 E). The hello +
-    // request write above mirror the old send_request path; read_exec_stream
-    // takes over from here.
+    // RunCode now streams ExecEvent frames. The hello + request write
+    // above mirror the old send_request path; read_exec_stream takes
+    // over from here.
     mvm_guest::vsock::write_frame(&mut stream, &req)?;
     let terminal = mvm_guest::vsock::read_exec_stream(&mut stream, |event| match event {
         mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
@@ -833,7 +833,7 @@ fn require_dev_mode(
 /// own streams; exits non-zero with the wrapper's exit code on failure.
 ///
 /// Note: `Exec` is dev-only on the guest side (gated by the `dev-shell`
-/// agent feature, ADR-002 §W4.3). This verb is itself gated by
+/// agent feature). This verb is itself gated by
 /// `require_dev_mode` above, but if the session's substrate VM was
 /// somehow built with a prod agent the underlying call will fail
 /// with `Error { message: "exec not available" }` — surface that to
@@ -895,8 +895,8 @@ fn rfc3339_now() -> String {
 /// SDK / shell capture; subsequent `session attach` / `exec` /
 /// `run-code` / `console` calls operate on it.
 ///
-/// Phase 5d. Mirrors mvmforge's `Session(env=<template>)` constructor
-/// — creates the session lifecycle, no work yet.
+/// Mirrors the SDK's `Session(env=<template>)` constructor — creates
+/// the session lifecycle, no work yet.
 fn cmd_start(args: StartArgs) -> Result<()> {
     use mvm_core::session::{SessionMode, SessionRecord};
 
@@ -981,7 +981,7 @@ fn cmd_reap(args: ReapArgs) -> Result<()> {
 }
 
 /// Open an interactive PTY shell into a dev-mode session. Refused on
-/// prod sessions. Phase 5d.
+/// prod sessions.
 fn cmd_console(args: ConsoleArgs) -> Result<()> {
     let (id, record) = require_running_session(&args.session_id)?;
     require_dev_mode(&id, &record, "console")?;

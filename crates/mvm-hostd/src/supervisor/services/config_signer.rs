@@ -1,20 +1,10 @@
-//! Supervisor-side config envelope signer (Plan 104 §H-L3.6 / G1).
+//! Supervisor-side config envelope signer.
 //!
 //! Holds the per-instance signing key the supervisor uses to wrap each
 //! subprocess's startup `SubprocessConfig` bytes before writing them to
 //! stdin. Each subprocess verifies the envelope (via
 //! [`mvm_core::protocol::signed_config::verify_envelope`]) against a
 //! pinned verifying key before deserialising the inner config.
-//!
-//! W1b.2b.3 ships this helper standalone. Wiring lands later:
-//! - W1b.2b.3.5 (or folded into W1b.2b.5): each subprocess crate's
-//!   `config::parse` switches to `parse_signed` that calls
-//!   `verify_envelope` first. Unsigned `parse` deleted per no-backcompat.
-//! - W1b.2b.5 (admission ceremony): `ConfigSigner` is constructed at
-//!   supervisor startup and threaded into
-//!   `ProcessSpawner::with_config_signer(...)` so the spawner wraps
-//!   bytes before stdin write. The corresponding verifying key is
-//!   handed to each subprocess at spawn time.
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use mvm_core::protocol::signed_config::{SignedConfigEnvelope, encode_envelope, wrap_payload};
@@ -36,10 +26,8 @@ pub struct ConfigSigner {
 
 impl ConfigSigner {
     /// Generate a fresh signing key from `OsRng`. Each supervisor
-    /// instance gets its own key (the per-spawn ephemeral pattern
-    /// from Plan 104 §H-L4.2 — the wave that wraps the proxy seam,
-    /// not this one — has the same lifetime semantics: bound to the
-    /// supervisor process).
+    /// instance gets its own key, bound to the supervisor process
+    /// lifetime.
     pub fn generate() -> Self {
         let mut rng = OsRng;
         Self {

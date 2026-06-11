@@ -1,4 +1,4 @@
-//! Plan 60 Phase 3 Slice B — L4 egress policy substrate.
+//! L4 egress policy substrate.
 //!
 //! `(proto, dst_cidr, dst_port_range)` allow-list evaluated against
 //! `(proto, dst_ip, dst_port)` at flow-establishment time. Default-
@@ -24,14 +24,14 @@
 //! - **No TUN device management.** The Linux TUN + smoltcp
 //!   integration that turns an `L4Policy::evaluate` decision into
 //!   accept/drop on a per-VM TAP lives in the per-tenant
-//!   network-namespace work (Phase 3 Slice C / mvm-hostd lift).
+//!   network-namespace work.
 //! - **No audit emission.** The consumer wires
 //!   `EgressAuditSink::record` with the flow tuple + decision.
 //!   This module returns the decision; the *what to do with it*
 //!   is the consumer's concern.
 //! - **No firewall rules.** Linux nftables / macOS pf / Windows
-//!   WFP rules are Slice C — the firewall is additive enforcement
-//!   beneath the proxy, not the proxy itself.
+//!   WFP rules are additive enforcement beneath the proxy, not the
+//!   proxy itself.
 
 use std::net::IpAddr;
 
@@ -141,8 +141,7 @@ impl L4Policy {
     }
 
     /// Default-deny sentinel. Useful as the resolver's fall-back
-    /// when no policy bundle is provisioned (matches the "fail
-    /// closed" framing in ADR-002).
+    /// when no policy bundle is provisioned (fail closed).
     pub fn deny_all() -> Self {
         Self::default()
     }
@@ -165,13 +164,13 @@ impl L4Policy {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// L4Gate — supervisor slot consumed by the W5 policy resolver.
+// L4Gate — supervisor slot consumed by the policy resolver.
 //
 // Symmetric with `EgressProxy` (L7) / `ToolGate` / `KeystoreReleaser` /
 // `ArtifactCollector`: a `Box<dyn L4Gate>` slot the supervisor consults
-// at admission. Slice B wires `LiveL4Gate { policy: L4Policy }` from
-// a parsed bundle's `[[network.l4]]` rows; the smoltcp / TUN consumer
-// that turns an `Allow` into accept-the-connection ships with Slice C.
+// at admission. `LiveL4Gate { policy: L4Policy }` is wired from a parsed
+// bundle's `[[network.l4]]` rows; the smoltcp / TUN consumer that turns
+// an `Allow` into accept-the-connection ships separately.
 // ──────────────────────────────────────────────────────────────────────
 
 /// Errors `L4Gate::evaluate` can return. `NotWired` is the
@@ -216,9 +215,9 @@ impl L4Gate for NoopL4Gate {
     }
 }
 
-/// Live impl backed by a concrete `L4Policy`. Plan 60 Phase 3 Slice B
-/// constructs this from a parsed policy bundle's `[[network.l4]]`
-/// rows via [`LiveL4Gate::from_specs`].
+/// Live impl backed by a concrete `L4Policy`. Constructed from a
+/// parsed policy bundle's `[[network.l4]]` rows via
+/// [`LiveL4Gate::from_specs`].
 #[derive(Debug, Default)]
 pub struct LiveL4Gate {
     pub policy: L4Policy,

@@ -1,4 +1,4 @@
-//! Builder for `launch.json` per ADR-0006 §4.
+//! Builder for `launch.json`.
 //!
 //! The launch plan is the canonical-JSON document `mvm` reads to know what to
 //! run. It carries the IR's effective fields plus toolchain/IR provenance so
@@ -9,7 +9,7 @@ use crate::compile::source::SourcePlan;
 use crate::ir::{Hooks, Workload, canonicalize, ir_hash};
 use serde::Serialize;
 
-/// Bumped from `"1.0"` to `"1.1"` at addon GA (ADR-0018). The
+/// Bumped from `"1.0"` to `"1.1"` at addon GA. The
 /// `addons` and `mesh` fields below are the additive payload; older
 /// mvmd MUST refuse `1.1` artifacts with a clear "requires mvmd ≥ X.Y"
 /// error so consumers can't silently lose addon connectivity.
@@ -32,8 +32,8 @@ struct LaunchPlan<'a> {
     /// The workload's primary entrypoint — the function `mvmctl
     /// invoke <id>` (no `--fn` selector) dispatches. For
     /// single-entrypoint apps (the common case) this is the sole
-    /// entry. For multi-function apps (ADR-0014 Phase 2) this is
-    /// the entry with `primary = true`.
+    /// entry. For multi-function apps this is the entry with
+    /// `primary = true`.
     entrypoint: serde_json::Value,
     /// All entrypoints, in IR order. Multi-function apps surface
     /// non-primary entries here; the wrapper resolves `--fn <name>`
@@ -44,18 +44,18 @@ struct LaunchPlan<'a> {
     mounts: serde_json::Value,
     network: serde_json::Value,
     source: &'a SourcePlan,
-    /// Composer's threat tier (ADR-0018). Drives mvmd's SMT-affinity
-    /// scheduler matrix together with each addon's `[security].trust_tier`.
+    /// Composer's threat tier. Drives mvmd's SMT-affinity scheduler
+    /// matrix together with each addon's `[security].trust_tier`.
     threat_tier: serde_json::Value,
     /// Addon-uses passed through from the IR. v1 carries the raw
     /// AddonUse list (name, alias, tier, ref, sha256, params); the
     /// manifest-expanded fields (exports, persistent_storage_gb,
     /// security.seccomp_profile, egress_allowlist) are folded in by
-    /// `addon::resolve_and_validate` in a follow-up patch and become
-    /// the authoritative input for mvmd's instantiation flow.
+    /// `addon::resolve_and_validate` and become the authoritative
+    /// input for mvmd's instantiation flow.
     addons: serde_json::Value,
-    /// Mesh declaration (ADR-0020). `enabled` is `true` whenever
-    /// `addons` is non-empty; `expected_peers` is the alias-resolved
+    /// Mesh declaration. `enabled` is `true` whenever `addons` is
+    /// non-empty; `expected_peers` is the alias-resolved
     /// (or name-resolved) `*.mesh.local` host names mvmd will set up
     /// for the consumer's in-guest DNS resolver.
     mesh: serde_json::Value,
@@ -65,13 +65,12 @@ struct LaunchPlan<'a> {
     /// without re-merging at flake-evaluation time. Empty phases
     /// serialize as empty arrays.
     hooks: serde_json::Value,
-    /// Application-dep declaration (ADR-047 / Plan 73 Followup D).
-    /// `null` for stdlib-only workloads or apps declared with
-    /// `mvm.no_deps()`. Carries `{ "kind": "python" | "node",
-    /// "lockfile": "...", "tool": "uv"|"pip_tools"|"pnpm"|"npm"|"yarn" }`
-    /// otherwise. The builder VM's install pipeline (Followup B.2)
-    /// reads this field to dispatch the right installer; the
-    /// supervisor admission gate (Followup A) reads the resolved
+    /// Application-dep declaration. `null` for stdlib-only workloads
+    /// or apps declared with `mvm.no_deps()`. Carries `{ "kind":
+    /// "python" | "node", "lockfile": "...", "tool":
+    /// "uv"|"pip_tools"|"pnpm"|"npm"|"yarn" }` otherwise. The builder
+    /// VM's install pipeline reads this field to dispatch the right
+    /// installer; the supervisor admission gate reads the resolved
     /// `volume_hash` separately from the build manifest.
     #[serde(skip_serializing_if = "Option::is_none")]
     dependencies: Option<serde_json::Value>,
@@ -99,8 +98,8 @@ pub fn build_launch_json(
     // a flat array.
     let addon_hooks: Vec<&Hooks> = app.addons.iter().map(|a| &a.hooks).collect();
     let merged_hooks = merge_hooks(&app.hooks, &addon_hooks);
-    // ADR-047 / Plan 73 Followup D: only emit a `dependencies` block
-    // when the app declares lockfile-backed deps. `Dependencies::None`
+    // Only emit a `dependencies` block when the app declares
+    // lockfile-backed deps. `Dependencies::None`
     // and `None` both flatten to "no deps key in launch.json" so the
     // Nix factory consuming this can `if launch.dependencies?` to
     // branch the install path.

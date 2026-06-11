@@ -1,6 +1,6 @@
 //! Transport-agnostic `Dispatcher` trait.
 //!
-//! Available under `protocol-only` so plan 33's mvmd hosted variant
+//! Available under `protocol-only` so the mvmd hosted variant
 //! can plug in its own dispatcher (HTTP-fronted, tenant-aware) without
 //! depending on this crate's stdio loop. The mvm stdio binary
 //! provides one impl in `mvm-cli::commands::ops::mcp`.
@@ -12,7 +12,7 @@
 //!   transient microVM (or the transport's equivalent). Kept as a
 //!   dedicated method because the wire shape is fixed and the VM
 //!   dispatch path is structurally different from a JSON-only tool.
-//! - [`Dispatcher::invoke_tool`] — plan 60 Phase 7 addition. Routes
+//! - [`Dispatcher::invoke_tool`] — routes
 //!   the typed-name tools (`mvm.time_now`, `mvm.web_fetch`,
 //!   `mvm.web_search`, future `mvm.upload` / `mvm.download` /
 //!   `mvm.code_eval`) through a shared registry. Default impl
@@ -35,14 +35,14 @@ pub trait Dispatcher {
     /// instead of surfacing).
     fn run(&self, params: RunParams) -> ToolResult;
 
-    /// Plan 60 Phase 7 — dispatch a named registry tool (anything
+    /// Dispatch a named registry tool (anything
     /// other than the legacy `run`). `params` is the raw `arguments`
     /// JSON the MCP client sent; the impl deserializes into its own
     /// typed shape and calls the matching tool in
     /// `mvm-supervisor::tools::ToolRegistry`.
     ///
     /// Default impl returns an `is_error: true` ToolResult naming
-    /// the unwired tool. Plan-33 dispatchers that don't yet route
+    /// the unwired tool. Dispatchers that don't yet route
     /// registry tools inherit this default and degrade gracefully:
     /// the MCP client sees a clear "tool not implemented" message
     /// rather than a JSON-RPC method-not-found, which keeps the

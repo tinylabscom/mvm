@@ -1,10 +1,10 @@
-//! Process control RPC handler — A2 of the filesystem-volumes plan.
+//! Process control RPC handler.
 //!
 //! **Dev-only.** The whole module is gated behind
 //! `#[cfg(feature = "dev-shell")]` in `lib.rs`, so its symbols are
-//! absent from the production guest agent (ADR-002 §W4.3 +
-//! ADR-007 §W5; the combined `prod-agent-runentry-contract` CI
-//! gate enforces the symbol contract).
+//! absent from the production guest agent (the combined
+//! `prod-agent-runentry-contract` CI gate enforces the symbol
+//! contract).
 //!
 //! See doc comments on individual handlers for the security
 //! envelope (process_group(0), RLIMIT_CORE=0, env_clear,
@@ -497,7 +497,7 @@ fn output_backpressure_threshold(caps: &Caps) -> usize {
 ///
 /// `detail` is a short metadata-only sentence (byte counts +
 /// threshold + cap) — never includes payload bytes, paths, argv,
-/// env, or stdin content (ADR-053 redaction invariant).
+/// env, or stdin content (redaction invariant).
 fn check_output_backpressure(
     record: &ProcessRecord,
     caps: &Caps,
@@ -599,7 +599,7 @@ pub fn handle_proc_wait<W: FnMut(ProcWaitEvent)>(
     let mut bp_watch = BackpressureWatch::default();
 
     loop {
-        // ADR-053 §5 / plan 74 W4: emit `Backpressure` BEFORE draining
+        // Emit `Backpressure` BEFORE draining
         // so the host learns the buffer crossed its high-water mark
         // before it sees the chunk that triggered the crossing. Rising
         // edge only — `BackpressureWatch` suppresses repeat emissions
@@ -910,7 +910,7 @@ mod tests {
         );
     }
 
-    // ---------------- Backpressure (ADR-053 §5 / plan 74 W4) ----------------
+    // ---------------- Backpressure ----------------
     //
     // Tests target `check_output_backpressure` directly. The unit
     // doesn't need a real child process — it just needs a

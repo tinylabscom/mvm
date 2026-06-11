@@ -1,28 +1,26 @@
-//! Signed config envelope for subprocess startup (Plan 104 §H-L3.6 / G1).
+//! Signed config envelope for subprocess startup.
 //!
 //! The supervisor signs each subprocess's `SubprocessConfig` bytes with
 //! its config-signing key before writing them to the subprocess's stdin.
 //! The subprocess unwraps the envelope, verifies the signature against
 //! a pinned verifying key, and only then parses the inner config.
 //!
-//! Closes the gap described in Plan 104 §G1 (subprocess config-injection
-//! by a compromised supervisor): without this envelope, a UAF that
-//! survives long enough to influence a *new* spawn can hand the
-//! subprocess a config pointing audit-back-channel at `/dev/null` or
-//! the proxy UDS at a sibling-workload's socket. With the envelope, the
-//! subprocess refuses any config not signed by the expected key.
+//! Closes the subprocess config-injection gap (a compromised
+//! supervisor): without this envelope, a UAF that survives long
+//! enough to influence a *new* spawn can hand the subprocess a config
+//! pointing audit-back-channel at `/dev/null` or the proxy UDS at a
+//! sibling-workload's socket. With the envelope, the subprocess
+//! refuses any config not signed by the expected key.
 //!
-//! W1b.2b.3 ships this module + the supervisor-side
+//! This module ships alongside the supervisor-side
 //! `crate::services::config_signer::ConfigSigner` helper (in
-//! mvm-supervisor). What gets WIRED follows in subsequent PRs:
-//! - W1b.2b.3.5 (or folded into W1b.2b.5): each of the four subprocess
-//!   crates updates its `config::parse` to call
-//!   [`verify_envelope`] before deserialising the inner config; the
-//!   unsigned `config::parse` is deleted per the no-backcompat rule.
-//! - W1b.2b.5 (admission ceremony): the production supervisor wires a
-//!   `ConfigSigner` into `ProcessSpawner::with_config_signer` and the
-//!   verifying key it produces is baked into / handed to each
-//!   subprocess at build time.
+//! mvm-supervisor). The wiring follows separately:
+//! - Each of the four subprocess crates updates its `config::parse` to
+//!   call [`verify_envelope`] before deserialising the inner config;
+//!   the unsigned `config::parse` is deleted per the no-backcompat rule.
+//! - The production supervisor wires a `ConfigSigner` into
+//!   `ProcessSpawner::with_config_signer` and the verifying key it
+//!   produces is baked into / handed to each subprocess at build time.
 
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -80,8 +78,8 @@ pub enum SignedConfigError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedConfigEnvelope {
-    /// One of [`SIG_ALG_ED25519`] or `SIG_ALG_ECDSA_P256` (reserved
-    /// for W8 — algorithm-identifier byte per Plan 104 §H-L4.1).
+    /// Algorithm-identifier byte. One of [`SIG_ALG_ED25519`] or
+    /// `SIG_ALG_ECDSA_P256` (the latter reserved for future use).
     pub sig_alg: u8,
     /// Hex-encoded SHA-256 of the signer's verifying key. Lets the
     /// subprocess sanity-check that the envelope is signed by the key
@@ -144,8 +142,8 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<SignedConfigEnvelope, SignedConfi
 /// raw (decoded) inner config bytes on success. The caller then
 /// deserialises those bytes as its own `SubprocessConfig` shape.
 ///
-/// The expected key is what the subprocess hardcodes (W1b.2b.5 wires
-/// a build-time constant). Passing the *expected* key here means the
+/// The expected key is what the subprocess hardcodes (a build-time
+/// constant). Passing the *expected* key here means the
 /// subprocess won't accept signatures from any other key, even if the
 /// envelope's `signer_key_id` happens to match a different valid key —
 /// because we cross-check the id against the expected key's id before

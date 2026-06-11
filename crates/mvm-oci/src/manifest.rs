@@ -153,8 +153,8 @@ impl FetchedManifest {
     /// in order. For an image manifest (single platform) this
     /// returns the layers verbatim; for an image index (multi-arch
     /// manifest list) this returns an error because platform
-    /// selection is the caller's responsibility (lands in a later
-    /// W1 PR alongside `--platform` handling).
+    /// selection is the caller's responsibility (handled alongside
+    /// `--platform` support).
     pub fn layers(&self) -> Result<Vec<LayerDescriptor>, OciError> {
         let manifest: OciManifest = serde_json::from_slice(&self.bytes)
             .map_err(|e| OciError::Registry(format!("parse manifest: {e}")))?;
@@ -179,16 +179,15 @@ impl FetchedManifest {
 
 /// Contract for "fetch the manifest of this image and verify its
 /// digest." Returns the raw bytes; parsing into typed layer
-/// descriptors is the caller's responsibility (and W1.2's task).
+/// descriptors is the caller's responsibility.
 #[async_trait]
 pub trait ManifestFetcher: Send + Sync {
     async fn fetch(&self, reference: &ImageReference) -> Result<FetchedManifest, OciError>;
 }
 
-/// Real fetcher backed by [`oci_client`]. Anonymous-only in W1.1;
-/// private-registry auth lands in a later W1 PR with the credential
-/// material flowing through [`secrecy::SecretString`] and the
-/// `check-no-display-on-secret-types` lint.
+/// Real fetcher backed by [`oci_client`]. Private-registry auth
+/// flows the credential material through [`secrecy::SecretString`]
+/// and the `check-no-display-on-secret-types` lint.
 pub struct OciManifestFetcher {
     client: Client,
     auth: RegistryAuthConfig,
@@ -302,8 +301,7 @@ impl OciManifestFetcher {
 /// one and serves the matching manifest variant. Image manifest,
 /// Docker v2 (which most registries still serve by default), and
 /// the multi-arch index (which we surface as an error from
-/// [`FetchedManifest::layers`] until W1.3 grows platform
-/// selection).
+/// [`FetchedManifest::layers`] until platform selection lands).
 const ACCEPTED_MANIFEST_MEDIA: &[&str] = &[
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",

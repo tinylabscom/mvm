@@ -1,5 +1,4 @@
-//! Plan 74 §Risks R10 attack-surface evidence for OCI layer
-//! unpack.
+//! Attack-surface evidence for OCI layer unpack.
 //!
 //! Each `#[test]` constructs a hostile tar in memory and asserts
 //! that [`ImageStaging::apply_layer`] rejects it with the
@@ -35,7 +34,7 @@ fn fresh_staging_with(opts: StagingOptions) -> (TempDir, ImageStaging) {
 }
 
 // =============================================================
-// R10 — Path traversal class
+// Path traversal class
 // =============================================================
 
 #[test]
@@ -86,7 +85,7 @@ fn rejects_tar_entry_at_reserved_absolute_mvm_path() {
 }
 
 // =============================================================
-// R10 — Symlink escape class
+// Symlink escape class
 // =============================================================
 
 #[test]
@@ -138,7 +137,7 @@ fn permits_legitimate_absolute_symlink_within_rootfs() {
 }
 
 // =============================================================
-// R10 — Hardlink escape class
+// Hardlink escape class
 // =============================================================
 
 #[test]
@@ -185,7 +184,7 @@ fn permits_hardlink_to_existing_staging_file() {
 }
 
 // =============================================================
-// R10 — Decompression-bomb / size-cap class
+// Decompression-bomb / size-cap class
 // =============================================================
 
 #[test]
@@ -236,7 +235,7 @@ fn rejects_layer_total_exceeding_per_layer_cap() {
 }
 
 // =============================================================
-// R10 — Unsupported entry types
+// Unsupported entry types
 // =============================================================
 
 #[test]
@@ -282,12 +281,12 @@ fn rejects_fifo_entry() {
 }
 
 // =============================================================
-// R10 — Setuid preservation (W2.3 setpriv neutralizes at launch)
+// Setuid preservation (setpriv neutralizes at launch)
 // =============================================================
 
 #[test]
 fn preserves_setuid_bits_on_disk_in_staging() {
-    // ADR-051 says setpriv at launch drops capabilities; the
+    // setpriv at launch drops capabilities; the
     // bits themselves are preserved on disk for tooling visibility
     // (e.g. `find -perm -4000`). The unpack must not silently
     // strip them — that would mask a hostile image's intent.

@@ -1,11 +1,10 @@
 //! Egress-proxy lifecycle hook for the application-deps install
-//! pipeline (Plan 73 Followup B.2.x, ADR-047 §"Build-time gates"
-//! → "Registry allowlist").
+//! pipeline.
 //!
 //! `mvm-host-vm-init` runs the installer (`uv` / `pnpm`) with
 //! `HTTP_PROXY` + `HTTPS_PROXY` pointing at `mvm-egress-proxy`,
 //! which sits between the installer and the network and refuses
-//! anything outside ADR-047's four-hostname allowlist.
+//! anything outside the four-hostname registry allowlist.
 //!
 //! The proxy is a separate Linux binary
 //! (`crates/mvm-egress-proxy`); we drive it as a subprocess:
@@ -25,13 +24,13 @@
 //! `mvm-egress-proxy`; tests use [`NoopProxyLifecycle`] (does
 //! nothing) or [`FakeProxyLifecycle`] (records start/stop calls).
 //!
-//! ## Future B.2.y — complementary iptables drop-rule
+//! ## Future complementary iptables drop-rule
 //!
 //! The proxy is currently the only enforcement mechanism. A future
 //! followup will add a defense-in-depth iptables rule that drops
 //! outbound traffic *not* originating from the proxy's UID, so a
 //! pathological installer that ignores `HTTPS_PROXY` can't slip
-//! around the allowlist. Tracked as B.2.y in plan 73.
+//! around the allowlist.
 
 use std::net::{SocketAddr, TcpStream};
 #[cfg(target_os = "linux")]
@@ -68,7 +67,8 @@ pub trait ProxyLifecycle {
     /// if the proxy didn't come up, the installer runs without
     /// proxy env vars + the host treats the volume as compromised
     /// via a separate gate. (Currently the proxy is hard-required;
-    /// future B.2.y may relax this for offline-only builds.)
+    /// a future iptables drop-rule may relax this for offline-only
+    /// builds.)
     fn is_running(&self) -> bool;
 }
 
@@ -116,8 +116,8 @@ impl ProxyLifecycle for ChildProxyLifecycle {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit());
         // Drop to the dedicated low-priv uid that the in-VM
-        // iptables OUTPUT rule matches (Plan 73 Followup B.2.y).
-        // Without this the proxy inherits PID 1's uid (root) and
+        // iptables OUTPUT rule matches. Without this the proxy
+        // inherits PID 1's uid (root) and
         // the `--uid-owner` rule wouldn't match, so the lockdown
         // would block the proxy too. Linux-only: macOS dev/test
         // builds don't run the lockdown.
@@ -231,7 +231,7 @@ impl Drop for ChildProxyLifecycle {
 
 /// Test-only lifecycle that does nothing. Used by tests that
 /// exercise the install pipeline without caring about the proxy
-/// side. The installer's env vars are still injected (B.2's
+/// side. The installer's env vars are still injected (the
 /// install-pipeline tests assert that) but no real socket is
 /// bound.
 pub struct NoopProxyLifecycle {

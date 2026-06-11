@@ -1,4 +1,4 @@
-//! Plan 63 W5 — chunked AES-256-GCM for snapshot artifacts.
+//! Chunked AES-256-GCM for snapshot artifacts.
 //!
 //! `crate::crypto::snapshot_crypto` provides AES-256-GCM over byte
 //! slices. Snapshots can be multi-GB, so this module adds the
@@ -44,7 +44,7 @@
 //!   responsibility of [`snapshot_hmac`] — which already HMACs the
 //!   whole sealed bundle.
 //! - **Manage the DEK.** Caller supplies a 32-byte key; key
-//!   provisioning is `KeyProvider`'s job (plan 63 W3).
+//!   provisioning is `KeyProvider`'s job.
 //! - **Decide whether to encrypt.** Caller (the pause/resume
 //!   pipeline) chooses based on whether a tenant DEK is
 //!   available.
@@ -70,8 +70,7 @@ pub use crate::crypto::aead::{KEY_SIZE, NONCE_SIZE, TAG_SIZE};
 pub const MAGIC: &[u8; 4] = b"MVSE";
 
 /// On-disk header schema version. Bumps invalidate existing
-/// snapshots; the v1 → v2 migration documented in ADR-039 is the
-/// only break planned today.
+/// snapshots; the v1 → v2 migration is the only break planned today.
 pub const SCHEMA_VERSION: u8 = 1;
 
 /// Header size on disk (bytes). Fixed across schema versions

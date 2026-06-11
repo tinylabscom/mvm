@@ -896,7 +896,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // pause/resume — Track B / PR 1a coverage
+    // pause/resume coverage
     //
     // Backends that don't support pause/resume (capabilities.pause_resume
     // == false) must surface a clear, named bail. Backends that *do*

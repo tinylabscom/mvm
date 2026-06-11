@@ -1,4 +1,4 @@
-//! Mount-path policy — D of the filesystem-volumes plan.
+//! Mount-path policy.
 //!
 //! Restricts where a host-supplied virtio-fs share can land inside
 //! the guest. Shares cross the verity boundary (they're not part
@@ -37,9 +37,9 @@ pub const DEFAULT_MOUNT_ALLOW_ROOTS: &[&str] = &["/mnt", "/data", "/work"];
 /// would block everything.
 ///
 /// **Nix-immutable paths** (`/nix`, `/run/booted-system`,
-/// `/run/current-system`) are denied per plan 45 §"Nix semantics
-/// alignment" — the Nix store is content-addressed and
-/// reproducibility-critical; volumes must never overlay it.
+/// `/run/current-system`) are denied — the Nix store is
+/// content-addressed and reproducibility-critical; volumes must
+/// never overlay it.
 pub const DEFAULT_MOUNT_DENY_PREFIXES: &[&str] = &[
     "/etc",
     "/usr",
@@ -54,7 +54,7 @@ pub const DEFAULT_MOUNT_DENY_PREFIXES: &[&str] = &[
     "/dev",
     "/run/mvm-secrets",
     "/run/mvm-etc",
-    // Nix-immutable paths (plan 45 §"Nix semantics alignment").
+    // Nix-immutable paths.
     "/nix",
     "/run/booted-system",
     "/run/current-system",
@@ -306,7 +306,7 @@ mod tests {
             "/dev/null",
             "/run/mvm-secrets/foo",
             "/run/mvm-etc/passwd",
-            // Nix-immutable paths (plan 45 §"Nix semantics alignment").
+            // Nix-immutable paths.
             "/nix",
             "/nix/store/abc123-pkg",
             "/nix/var/log",

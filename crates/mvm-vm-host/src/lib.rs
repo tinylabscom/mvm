@@ -1,4 +1,4 @@
-//! mvm-vm-host — per-VM supervisor host processes (plan 121 D2).
+//! mvm-vm-host — per-VM supervisor host processes.
 //!
 //! One process per guest VM. The three roles ship as cfg-gated
 //! `[[bin]]`s (see Cargo.toml): `mvm-libkrun-supervisor`,
@@ -14,11 +14,11 @@
 pub mod exit_capture;
 pub mod firecracker_bridge;
 
-/// Plan 118 WS-1 1a — the prelaunched-supervisor attach verify+merge. Pure
-/// (no VM, no `start_enter`) so the rejection ladder is unit-testable.
+/// The prelaunched-supervisor attach verify+merge. Pure (no VM, no
+/// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
 
-// Rust-native Vz supervisor objc2 bridge (Plan 152 WS-B). macOS-only — the
+// Rust-native Vz supervisor objc2 bridge. macOS-only — the
 // objc2 Virtualization.framework stack only exists there; the
 // `mvm-vz-supervisor` bin is the sole consumer. Kept in the lib (not inline in
 // the bin) so the config→VZ translation and the dispatch/delegate bridge get

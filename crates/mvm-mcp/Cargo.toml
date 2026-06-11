@@ -8,11 +8,11 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
-# ── Feature flags (plan 33: cross-repo handoff with mvmd) ──────────────
+# ── Feature flags (cross-repo handoff with mvmd) ──────────────
 #
 # `protocol-only` is the wire-only surface: JSON-RPC types, tool
 # schemas, the Dispatcher trait. No stdin/stdout. This is what mvmd's
-# hosted MCP transport (plan 33) will depend on so the wire schema
+# hosted MCP transport will depend on so the wire schema
 # stays a single source of truth.
 #
 # `stdio` (default) layers on the JSON-RPC stdio loop. No dispatcher

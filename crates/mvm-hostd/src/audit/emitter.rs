@@ -1,11 +1,11 @@
-//! Plan 64 W4 — host-side chain-signed audit emitter.
+//! Host-side chain-signed audit emitter.
 //!
 //! Wraps `mvm_hostd::supervisor::FileAuditSigner` so `mvmctl up` can emit
 //! tamper-evident `plan.admitted` / `plan.launched` / `plan.failed`
-//! entries bound to the plan-64 `AdmittedPlan`. The chain is signed
-//! under the host signer's keypair (same Ed25519 key W2 introduced for
-//! plan envelopes); a future workstream may split audit-signer and
-//! plan-signer keys per plan 60 Phase 3.
+//! entries bound to the `AdmittedPlan`. The chain is signed under the
+//! host signer's keypair (the same Ed25519 key used for plan
+//! envelopes); a future workstream may split the audit-signer and
+//! plan-signer keys.
 //!
 //! ## On-disk layout
 //!
@@ -18,8 +18,8 @@
 //! ## Async bridge
 //!
 //! `FileAuditSigner::sign_and_emit` is async because the trait is
-//! shared with the in-process supervisor path (plan-37 §22 Wave 3),
-//! but `mvmctl up` is synchronous. We build a single-threaded tokio
+//! shared with the in-process supervisor path, but `mvmctl up` is
+//! synchronous. We build a single-threaded tokio
 //! runtime per emit (mirrors `mvm-backend::libkrun::block_on`).
 //! Audit emission is rare (3 entries per `mvmctl up` invocation), so
 //! the runtime-construction overhead is negligible compared to the VM
@@ -29,7 +29,7 @@
 //!
 //! Audit failures should NEVER block a boot in this v0 — the audit
 //! chain is supplementary tamper-evidence, not part of the
-//! admission decision. Callers `tracing::warn` and continue. The W6
+//! admission decision. Callers `tracing::warn` and continue. A
 //! follow-up tightens this to "audit failure fails the boot" once
 //! the chain is reliably reachable.
 //!
@@ -76,9 +76,8 @@ impl AuditEmitter {
     pub fn with_dir(signing_key: SigningKey, audit_dir: &Path) -> Result<Self> {
         // Tighten the audit dir to 0700 if we created it. We use
         // `create_dir_all` first (idempotent) then `set_permissions`.
-        // CLAUDE.md security model §"W1.5 — ~/.mvm / ~/.cache/mvm are
-        // mode 0700" — the audit chain inherits that posture since
-        // its contents bind to plan-signed entries.
+        // The audit chain inherits the same mode-0700 posture as the
+        // rest of ~/.mvm, since its contents bind to plan-signed entries.
         if !audit_dir.exists() {
             std::fs::create_dir_all(audit_dir)
                 .with_context(|| format!("creating audit dir at {}", audit_dir.display()))?;
@@ -156,16 +155,16 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `plan.policy_resolved` — fires after the W5 resolver
+    /// Emit `plan.policy_resolved` — fires after the resolver
     /// successfully constructs `ResolvedSlots` from the plan's policy
     /// refs. `slots_mode` is `"noop"` when all four refs are
     /// `"local-default"` (no bundle on disk) or `"live"` when a
     /// `<tenant>:<workload>` bundle parsed cleanly.
     ///
     /// The audit entry is informational — the supervisor's hard
-    /// admission decision is still `plan.admitted` (W2/W3). This
-    /// event lets operators answer "did my bundle actually parse on
-    /// the last boot, or did I fall back to local-default?" via
+    /// admission decision is still `plan.admitted`. This event lets
+    /// operators answer "did my bundle actually parse on the last
+    /// boot, or did I fall back to local-default?" via
     /// `mvmctl audit tail --chain`.
     pub fn emit_policy_resolved(&self, plan: &ExecutionPlan, slots_mode: &str) -> Result<()> {
         self.emit(
@@ -275,7 +274,7 @@ impl AuditEmitter {
     }
 
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
-    /// carrying its captured exit code. Plan 152 WS-A.
+    /// carrying its captured exit code.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
         self.emit(
             plan,

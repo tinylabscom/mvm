@@ -1,4 +1,4 @@
-//! Source-tree bundling per ADR-0008.
+//! Source-tree bundling.
 //!
 //! Walks `app.source.path`, applies include/exclude globs, copies files into
 //! `<staging>/src/` deterministically, and computes a stable `tree_hash` over
@@ -52,8 +52,8 @@ pub struct SourcePlan {
 
 /// Re-walk an already-staged source directory and produce a fresh
 /// `SourcePlan` reflecting its current contents. Used after bundler
-/// reachability scoping (plan-0007 §Phase 2) prunes unreachable
-/// files — the tree_hash needs to reflect what's actually shipped.
+/// reachability scoping prunes unreachable files — the tree_hash
+/// needs to reflect what's actually shipped.
 pub fn rehash(out_dir: &Path) -> Result<SourcePlan, SourceError> {
     if !out_dir.is_dir() {
         return Err(SourceError::PathNotDir(out_dir.to_path_buf()));
@@ -116,8 +116,7 @@ fn rehash_walk(root: &Path, cur: &Path, entries: &mut Vec<TreeEntry>) -> Result<
 }
 
 /// Copy `src_root` into `out_dir`, applying globs, and return a `SourcePlan`
-/// summarizing the result. The output includes a content-addressed `tree_hash`
-/// per ADR-0008 §6.
+/// summarizing the result. The output includes a content-addressed `tree_hash`.
 pub fn copy_source(
     src_root: &Path,
     out_dir: &Path,
@@ -186,8 +185,8 @@ fn build_glob_set(patterns: &[String], default: &[String]) -> Result<GlobSet, So
 enum EntryKind {
     File,
     Symlink,
-    /// Reserved for future use; ADR-0008 §6 admits a `d` kind in `tree_hash`
-    /// but v0.1 does not emit directory entries (empty dirs are not preserved).
+    /// Reserved for future use; the `tree_hash` format admits a `d` kind but
+    /// v0.1 does not emit directory entries (empty dirs are not preserved).
     #[allow(dead_code)]
     Directory,
 }

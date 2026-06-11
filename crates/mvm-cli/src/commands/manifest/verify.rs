@@ -1,5 +1,5 @@
-//! `mvmctl manifest verify` — checksum verification (and, post plan 36,
-//! cosign signatures) for a built slot.
+//! `mvmctl manifest verify` — checksum verification (and, once
+//! cosign-signed builder images land, signatures) for a built slot.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -19,7 +19,7 @@ pub(in crate::commands) struct Args {
     #[arg(long)]
     pub revision: Option<String>,
     /// Verify cosign signatures in addition to checksums. Reserved
-    /// for plan 36 (sealed-signed-builder-image); today returns
+    /// for the sealed-signed-builder-image work; today returns
     /// "not yet implemented" if passed.
     #[arg(long)]
     pub check_signature: bool,

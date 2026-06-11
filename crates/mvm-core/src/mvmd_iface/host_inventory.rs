@@ -3,8 +3,6 @@
 //! `mvmd` runs placement against an aggregated inventory of hosts. Each
 //! host's local `mvm` reports its capacity and current state up to `mvmd`
 //! over a signed envelope. This module declares the contract.
-//!
-//! Plan-37 §17.1, mvmd ADR-0006 (§"Host Registry").
 
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +34,7 @@ pub struct HostCapacity {
 }
 
 /// Orchestration state of a host as observed by `mvm` and consumed by
-/// `mvmd`. Mirrors the states named in mvmd ADR-0006 §"Host Registry".
+/// `mvmd`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum HostState {

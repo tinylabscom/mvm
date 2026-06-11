@@ -6,7 +6,7 @@
 //! `mvm.metadata` remain at their stable attribute paths.
 //!
 //! For `entrypoint.kind == "function"` workloads the flake dispatches through
-//! `mvm.lib.<system>.mk<Lang>FunctionService` (Option A, amended 2026-05-06).
+//! `mvm.lib.<system>.mk<Lang>FunctionService`.
 //! The factory returns
 //! `{ extraFiles, servicePackages, service }`, which we merge into
 //! `mkGuest`. mvm does not ship local copies of the factories;

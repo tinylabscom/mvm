@@ -1,10 +1,9 @@
 //! `PiiRedactor` — detect (and eventually redact) PII in outbound bodies.
 //!
-//! Plan 37 §15 (Wave 2.5, detect-only first cut). Sibling to
-//! `SecretsScanner`: same single-pass `RegexSet` machinery, same
-//! "audit-safe deny reasons" discipline (rule names, never values).
-//! The difference is the threat shape and the eventual verdict
-//! semantics.
+//! Detect-only first cut. Sibling to `SecretsScanner`: same
+//! single-pass `RegexSet` machinery, same "audit-safe deny reasons"
+//! discipline (rule names, never values). The difference is the
+//! threat shape and the eventual verdict semantics.
 //!
 //! Threat shape addressed (PII-specific, distinct from secrets):
 //! - Workload uploads a CSV of customer rows to an LLM for "summary"
@@ -26,9 +25,9 @@
 //! redactor to *transform* it before forwarding. Mixing the two
 //! into one ruleset would couple their lifecycles.
 //!
-//! Wave 2.5 ships **detect-only** semantics: the inspector returns
+//! Today the inspector ships **detect-only** semantics: it returns
 //! a `Transform { note }` audit signal on match (so operators see
-//! it) but never blocks traffic. A future wave promotes this to
+//! it) but never blocks traffic. A future step promotes this to
 //! true redaction (mutate `ctx.body` in place, replacing matches
 //! with `<REDACTED:rule_name>`) gated by `Mode::Redact`, and to
 //! `Mode::Block` for HIPAA-class workloads. The `Mode` enum is in
@@ -56,7 +55,7 @@
 //!
 //! High-recall PII detection (names, addresses, free-form fields) is
 //! not in this ruleset — it requires NER models and falls outside
-//! "high-precision regex" territory. A future wave can plug in a
+//! "high-precision regex" territory. A future step can plug in a
 //! model-backed detector behind the same `Inspector` trait without
 //! changing the chain.
 
@@ -124,23 +123,23 @@ pub const DEFAULT_RULES: &[PiiRule] = &[
     },
 ];
 
-/// Verdict semantics. Detect-only is the sole shipping mode in
-/// Wave 2.5; the other variants are present so the type doesn't
-/// grow a breaking variant when later waves promote it.
+/// Verdict semantics. Detect-only is the sole shipping mode today;
+/// the other variants are present so the type doesn't grow a
+/// breaking variant when later steps promote it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Match → `Transform { note }` (allows traffic). Default.
     #[default]
     Detect,
     /// Match → mutate `ctx.body`, replacing each match with
-    /// `<REDACTED:rule_name>`, then `Transform { note }`. Wave 2.5+1.
+    /// `<REDACTED:rule_name>`, then `Transform { note }`.
     Redact,
-    /// Match → `Deny`. Wave 2.5+2 (HIPAA-class workloads).
+    /// Match → `Deny` (HIPAA-class workloads).
     Block,
 }
 
-/// Inspector that scans outbound bodies for PII shapes. Wave 2.5
-/// ships in **detect-only** mode; see [`Mode`] for the planned
+/// Inspector that scans outbound bodies for PII shapes. Ships in
+/// **detect-only** mode today; see [`Mode`] for the planned
 /// promotion path.
 pub struct PiiRedactor {
     set: RegexSet,
@@ -248,7 +247,7 @@ impl PiiRedactor {
 
 /// Stable list of category names recognised by [`PiiRedactor::from_policy`].
 /// Matches `DEFAULT_RULES.iter().map(|r| r.name)` order. Public so
-/// callers (the W5 resolver and mvmd-facing policy tooling) can
+/// callers (the policy resolver and mvmd-facing policy tooling) can
 /// enumerate the valid names.
 pub const PII_CATEGORY_NAMES: &[&str] = &["email", "us_ssn", "credit_card", "e164_phone"];
 
@@ -299,9 +298,9 @@ impl PiiRedactor {
 
     /// Replace every *validated* rule match in `body` with
     /// [`REDACTION_MASK`], returning the redacted bytes + the rule names
-    /// that fired (stable order, no dups). The Plan 129 Phase E
-    /// mask-and-continue path: an undeclared PII run on egress is scrubbed
-    /// in place rather than dropping the request. A match that fails its
+    /// that fired (stable order, no dups). The mask-and-continue path:
+    /// an undeclared PII run on egress is scrubbed in place rather than
+    /// dropping the request. A match that fails its
     /// validator (e.g. a 16-digit run that isn't Luhn-valid) is left
     /// intact — the same precision `scan` uses, so we never mangle
     /// non-PII. Returns `(body.to_vec(), [])` unchanged when nothing fires.
@@ -333,8 +332,8 @@ impl PiiRedactor {
     }
 }
 
-/// The token an undeclared secret/PII match is replaced with on egress
-/// (Plan 129 Phase E). Fixed + short; the matched bytes never leave the host.
+/// The token an undeclared secret/PII match is replaced with on egress.
+/// Fixed + short; the matched bytes never leave the host.
 pub const REDACTION_MASK: &[u8] = b"XXX";
 
 /// True iff at least one regex match in `body` survives the rule's
@@ -404,10 +403,9 @@ impl Inspector for PiiRedactor {
             Mode::Detect => InspectorVerdict::Transform {
                 note: format!("pii detected (detect-only mode): {names}"),
             },
-            // Redact ships its actual mutation logic in a later
-            // wave; today it's behaviourally identical to Detect
-            // but with a distinct note so audit channels can tell
-            // them apart.
+            // Redact's actual mutation logic ships later; today it's
+            // behaviourally identical to Detect but with a distinct
+            // note so audit channels can tell them apart.
             Mode::Redact => InspectorVerdict::Transform {
                 note: format!("pii detected (redaction mode — not yet implemented): {names}"),
             },

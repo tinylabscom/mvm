@@ -1,19 +1,19 @@
 //! MCP wire protocol: JSON-RPC 2.0 frames and tool-result types.
 //!
 //! Hand-rolled to avoid pulling in `rmcp` as a new external dependency
-//! (every workspace dep needs to clear ADR-002's supply-chain bar:
+//! (every workspace dep needs to clear the supply-chain bar:
 //! `cargo-deny`, `cargo-audit`, audited and pinned). The protocol is
 //! ~200 LoC; the operational risk of writing it ourselves is lower
 //! than the supply-chain cost of importing it.
 //!
-//! Available under `protocol-only` so mvmd (per plan 33) can consume
-//! these types without dragging in stdio I/O.
+//! Available under `protocol-only` so mvmd can consume these types
+//! without dragging in stdio I/O.
 
 use serde::{Deserialize, Serialize};
 
 /// MCP protocol revision we advertise during `initialize`. Pinned to
-/// the current spec at implementation time. Plan 32: bump in lockstep
-/// with the upstream spec, never silently drift.
+/// the current spec at implementation time. Bump in lockstep with the
+/// upstream spec, never silently drift.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Server identity advertised in `initialize` responses.
@@ -153,8 +153,8 @@ mod tests {
 
     #[test]
     fn jsonrpc_request_rejects_unknown_fields() {
-        // `deny_unknown_fields` is W4.1 hygiene — every type that
-        // crosses an untrusted boundary fails closed on extras.
+        // `deny_unknown_fields` hygiene — every type that crosses an
+        // untrusted boundary fails closed on extras.
         let bad = r#"{"jsonrpc":"2.0","id":1,"method":"x","params":{},"unknown":42}"#;
         assert!(serde_json::from_str::<JsonRpcRequest>(bad).is_err());
     }

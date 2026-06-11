@@ -1,12 +1,11 @@
-//! Plan 74 W2 / mvmd ADR 0022 §"Layer 3 — DNS pinning" — DNS
-//! admission-time pin data model.
+//! DNS admission-time pin data model.
 //!
 //! When a workload's [`NetworkPolicy`] permits a host
 //! destination (e.g. `api.openai.com:443`), the supervisor
 //! resolves that host *once* at admission time and records the
 //! resulting IP set in a [`DnsPinRegistry`] keyed by the
-//! destination. The L7 egress proxy (Plan 51 W4) and the L4
-//! substrate consult the registry on every outbound flow:
+//! destination. The L7 egress proxy and the L4 substrate
+//! consult the registry on every outbound flow:
 //!
 //! - Connection observed → `registry.lookup(host)?` returns the
 //!   pin
@@ -15,14 +14,13 @@
 //!   "permitted" gate
 //!
 //! A divergence between pinned and observed IPs is a DNS
-//! rebinding signal and emits `LocalAuditKind::DnsPinReject`
-//! (audit kind reserved by mvm PR #275).
+//! rebinding signal and emits `LocalAuditKind::DnsPinReject`.
 //!
 //! This module is a **state-only slice**: types + tests, no
 //! resolver, no enforcement, no audit emission. Those land in
-//! mvmd Plan 51 W3 (resolver) and W4 (L7 proxy). Shipping the
-//! type now lets emission sites and resolver impls land
-//! independently without re-bumping the wire format.
+//! mvmd's resolver and L7 proxy. Shipping the type now lets
+//! emission sites and resolver impls land independently without
+//! re-bumping the wire format.
 //!
 //! ## Wire format stability
 //!
@@ -31,7 +29,8 @@
 //! `DnsPin`'s serde shape is the canonical contract between
 //! `mvm-core` (producer of the type) and `mvmd`'s tenant audit
 //! aggregation (consumer). Adding fields uses `#[serde(default)]`
-//! per the ADR 0006 cross-repo extension pattern.
+//! to stay backward-compatible with old logs across the repo
+//! boundary.
 //!
 //! [`NetworkPolicy`]: crate::policy::network_policy::NetworkPolicy
 
@@ -75,8 +74,7 @@ impl DnsPin {
     /// Construct a pin from the canonical inputs. Computes
     /// `resolved_at = Utc::now()` and `expires_at =
     /// resolved_at + ttl`. The `ttl` is the operator-supplied
-    /// validity window — typically 1h, capped per tenant policy
-    /// (mvmd Plan 51 W3 §"TTL").
+    /// validity window — typically 1h, capped per tenant policy.
     pub fn new(dest: impl Into<String>, ips: Vec<IpAddr>, ttl: Duration) -> Self {
         let now = Utc::now();
         let expires = now + ttl;
@@ -131,9 +129,9 @@ impl DnsPin {
     }
 
     /// Derived TTL in seconds — `expires_at - resolved_at`.
-    /// The audit detail format for `DnsPinSet`
-    /// (mvm PR #275) carries `ttl_s=<n>`; this helper produces
-    /// it directly. Returns `0` if either timestamp fails to
+    /// The audit detail format for `DnsPinSet` carries
+    /// `ttl_s=<n>`; this helper produces it directly. Returns
+    /// `0` if either timestamp fails to
     /// parse — defensive but a malformed pin wouldn't pass
     /// admission anyway.
     pub fn ttl_secs(&self) -> i64 {

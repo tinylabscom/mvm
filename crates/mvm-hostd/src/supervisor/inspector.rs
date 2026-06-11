@@ -1,41 +1,36 @@
 //! Inspector trait + InspectorChain — the L7 egress security backbone.
 //!
-//! Plan 37 §15 (CORNERSTONE / DIFFERENTIATOR). Every outbound HTTP
-//! request the workload makes is mediated by the supervisor's
-//! `EgressProxy` (Wave 2.6 wires the real impl). The proxy threads
-//! the request through an ordered chain of `Inspector`s, each of
-//! which can:
+//! Every outbound HTTP request the workload makes is mediated by the
+//! supervisor's `EgressProxy`. The proxy threads the request through
+//! an ordered chain of `Inspector`s, each of which can:
 //!   - allow the request through (default verdict)
 //!   - deny it with a reason that's surfaced to the workload + audit
-//!   - rewrite the request (PiiRedactor in Wave 2.5)
+//!   - rewrite the request (PiiRedactor)
 //!
 //! The chain short-circuits on the first `Deny` — subsequent
 //! inspectors don't run. This matches the threat model: each
 //! inspector defends against one threat, and a single block is a
 //! definitive answer; nothing downstream can override it.
 //!
-//! Wave 2.1 ships the trait surface + chain runner + the simplest
-//! concrete inspector (`DestinationPolicy`, an explicit
-//! (host, port) allowlist). Subsequent waves layer on:
-//!   - 2.2 SecretsScanner (regex on outbound bodies)
-//!   - 2.3 SsrfGuard (block private IP ranges + cloud metadata IPs)
-//!   - 2.4 InjectionGuard (model-output → tool-arg untainting)
-//!   - 2.5 AiProviderRouter + PiiRedactor (detect-only first)
-//!   - 2.6 Wire `L7EgressProxy` into the supervisor (replaces
-//!     `NoopEgressProxy` default)
+//! Concrete inspectors layer on top of the trait surface + chain
+//! runner:
+//!   - `DestinationPolicy` (an explicit (host, port) allowlist)
+//!   - SecretsScanner (regex on outbound bodies)
+//!   - SsrfGuard (block private IP ranges + cloud metadata IPs)
+//!   - InjectionGuard (model-output → tool-arg untainting)
+//!   - AiProviderRouter + PiiRedactor
 
 use std::fmt;
 use std::net::IpAddr;
 
 use async_trait::async_trait;
 
-/// Mutable inspection context threaded through the chain. Wave 2.1
-/// carries host/port/path; Wave 2.2 adds `body` so `SecretsScanner`
-/// can scan outbound payloads. Later waves extend with `headers`,
-/// `payload_classification`, etc. — the chain continues to
-/// short-circuit on the first deny regardless of what fields are
-/// populated. `body` is `Vec<u8>` (not `&[u8]`) so `Transform`
-/// inspectors (e.g., PiiRedactor in 2.5) can mutate it in place.
+/// Mutable inspection context threaded through the chain. Carries
+/// host/port/path plus `body` so `SecretsScanner` can scan outbound
+/// payloads; extends with `headers`, `payload_classification`, etc. —
+/// the chain continues to short-circuit on the first deny regardless
+/// of what fields are populated. `body` is `Vec<u8>` (not `&[u8]`) so
+/// `Transform` inspectors (e.g., PiiRedactor) can mutate it in place.
 #[derive(Debug, Clone)]
 pub struct RequestCtx {
     pub host: String,
@@ -46,8 +41,8 @@ pub struct RequestCtx {
     /// bodies may be binary (protobuf, multipart, etc.).
     pub body: Vec<u8>,
     /// Resolved destination IP, populated by the proxy after DNS
-    /// lookup but before opening the connection. `SsrfGuard` (Wave
-    /// 2.3) inspects this to refuse private/internal/metadata IPs.
+    /// lookup but before opening the connection. `SsrfGuard`
+    /// inspects this to refuse private/internal/metadata IPs.
     /// `None` when the host is an IP literal (the proxy uses
     /// `host` directly) or before the proxy has resolved DNS — the
     /// guard handles both cases. The proxy must pin the IP it
@@ -126,9 +121,9 @@ pub trait Inspector: Send + Sync {
 
 /// Ordered chain of inspectors. The order matters — earlier
 /// inspectors see unmutated requests and can deny before later
-/// inspectors do their (potentially expensive) work. Plan 37 §15's
-/// recommended order: `DestinationPolicy` → `SsrfGuard` →
-/// `SecretsScanner` → `InjectionGuard` → `PiiRedactor`.
+/// inspectors do their (potentially expensive) work. Recommended
+/// order: `DestinationPolicy` → `SsrfGuard` → `SecretsScanner` →
+/// `InjectionGuard` → `PiiRedactor`.
 pub struct InspectorChain {
     inspectors: Vec<Box<dyn Inspector>>,
 }

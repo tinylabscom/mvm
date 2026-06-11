@@ -1,6 +1,6 @@
 //! User-facing manifest file (`mvm.toml` or `Mvmfile.toml`) — the
 //! "what to build and how to size it" primitive that drives the
-//! template flow per plan 38 (manifest-driven template DX).
+//! manifest-driven template flow.
 //!
 //! A manifest is identified by its canonical filesystem path. The
 //! registry slot for its build artifacts will live at
@@ -290,7 +290,7 @@ pub fn canonical_key_for_path(path: &Path) -> Result<String> {
 /// Slot directory for a given canonical-path-hash:
 /// `~/.mvm/templates/<slot_hash>/`. Reuses
 /// `crate::template::templates_base_dir()` so legacy and modern
-/// slots share the same base. Documented in plan 38 §3.
+/// slots share the same base.
 pub fn slot_dir(slot_hash: &str) -> String {
     format!("{}/{}", crate::template::templates_base_dir(), slot_hash)
 }
@@ -342,8 +342,7 @@ pub fn slot_dir_for_manifest_path(path: &Path) -> Result<String> {
 
 /// True if `name` looks like a modern slot directory name —
 /// 64 lowercase hex characters. Used to distinguish hash-keyed
-/// slots from legacy name-keyed slots during migration (plan 38
-/// §8a "Migration strategy").
+/// slots from legacy name-keyed slots during migration.
 pub fn is_slot_hash_dirname(name: &str) -> bool {
     name.len() == 64
         && name
@@ -352,16 +351,14 @@ pub fn is_slot_hash_dirname(name: &str) -> bool {
 }
 
 /// Build provenance recorded alongside each slot's persisted
-/// manifest. Defined in plan 38 §3 / §7c. Ties the artifacts back
-/// to the build environment without introducing a new signing
-/// scheme.
+/// manifest. Ties the artifacts back to the build environment without
+/// introducing a new signing scheme.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Provenance {
     /// `mvmctl` (workspace) version that wrote this slot.
     pub toolchain_version: String,
     /// SHA-256 (or similar) digest of the sealed-signed builder
     /// image used. `None` for builds done outside that pipeline.
-    /// Populated when plan 36 is in use.
     #[serde(default)]
     pub builder_image_digest: Option<String>,
     /// Host arch + OS, e.g. `"x86_64-linux"`, `"aarch64-darwin"`.
@@ -393,8 +390,7 @@ impl Provenance {
 
 /// Slot-resident JSON record that persists what `template build`
 /// stored about a slot. Lives at
-/// `~/.mvm/templates/<sha256(canonical_manifest_path)>/manifest.json`
-/// per plan 38 §3.
+/// `~/.mvm/templates/<sha256(canonical_manifest_path)>/manifest.json`.
 ///
 /// Coexists with the legacy name-keyed `TemplateSpec` for the
 /// duration of the refactor. The runtime layer migrates to this
@@ -438,9 +434,9 @@ pub struct PersistedManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// VM backend the slot was built on. Used by §7b's
-    /// "warn on backend mismatch at boot" check. Free-form string
-    /// matching `AnyBackend::name()`.
+    /// VM backend the slot was built on. Drives the "warn on backend
+    /// mismatch at boot" check. Free-form string matching
+    /// `AnyBackend::name()`.
     pub backend: String,
 
     pub provenance: Provenance,
@@ -506,8 +502,7 @@ impl PersistedManifest {
     /// Atomically write `<slot_dir>/manifest.json`
     /// (write-temp-then-rename via `tempfile::NamedTempFile::persist`).
     /// Crash mid-write leaves either the previous file or no
-    /// change — never a half-written file. Plan 38 §7b "Atomic
-    /// slot writes".
+    /// change — never a half-written file.
     pub fn write_to_slot(&self, slot_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(slot_dir)
             .with_context(|| format!("Failed to create slot dir {}", slot_dir.display()))?;

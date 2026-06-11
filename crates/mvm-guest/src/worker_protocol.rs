@@ -1,4 +1,4 @@
-//! Wire types for the agent ↔ warm-process worker pipe — plan 43 / ADR-0011.
+//! Wire types for the agent ↔ warm-process worker pipe.
 //!
 //! Each worker is a long-running wrapper process spawned by the
 //! agent at boot. The agent talks to it over its stdin/stdout pipes
@@ -10,8 +10,8 @@
 //! depend on `mvm-guest` directly for the schema — single source of
 //! truth, no risk of independent drift between agent and wrapper.
 //!
-//! `serde(deny_unknown_fields)` on every type satisfies ADR-002 §W4.1
-//! / `prod-agent-no-exec` companion contract.
+//! `serde(deny_unknown_fields)` on every type makes unexpected fields
+//! fail closed — the `prod-agent-no-exec` companion contract.
 
 use std::io::{self, Read, Write};
 
@@ -22,8 +22,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Frame size cap matching the vsock framing (`vsock.rs` MAX_FRAME_SIZE).
 /// 256 KiB covers stdin payloads up to ~190 KiB after base64 expansion;
-/// payloads larger than that need the streaming chunked-output v2 work
-/// (sprint 45 deferred follow-up), not warm-process.
+/// payloads larger than that need the streaming chunked-output v2 work,
+/// not warm-process.
 pub const MAX_PIPE_FRAME_SIZE: usize = 256 * 1024;
 
 /// Request frame: agent → worker. One per call.
@@ -37,7 +37,7 @@ pub struct WorkerCallRequest {
     /// SIGKILL-on-expiry watchdog regardless of whether the wrapper
     /// honors it; the field is informational for the wrapper.
     pub timeout_secs: u64,
-    /// Env vars injected into the workload after `env_clear()` (Plan 129).
+    /// Env vars injected into the workload after `env_clear()`.
     /// Empty for a plain call; omitted on the wire defaults to empty.
     #[serde(default)]
     pub env: Vec<(String, String)>,
@@ -58,15 +58,15 @@ pub struct WorkerCallResponse {
     /// Per-call control-channel records. Replaces the old `stderr`
     /// envelope-mixing pattern: wrappers emit structured envelopes
     /// through this field, leaving stderr as opaque user output the
-    /// host streams to its caller verbatim. Phase 4c — see
+    /// host streams to its caller verbatim. See
     /// `mvm_guest::vsock::EntrypointEvent::Control` for the wire
     /// shape.
     ///
     /// `#[serde(default)]` makes this backward-compatible: a worker
-    /// built before Phase 4c that doesn't know about the field will
-    /// produce a response without it, and that still deserializes
-    /// to an empty Vec. Today's in-tree Python and Node wrappers
-    /// haven't been flipped yet (Phase 4d will), so this field is
+    /// built before the control channel existed doesn't know about
+    /// the field, produces a response without it, and that still
+    /// deserializes to an empty Vec. Today's in-tree Python and Node
+    /// wrappers haven't been flipped to emit it yet, so this field is
     /// almost always empty in real boots.
     #[serde(default)]
     pub controls: Vec<WorkerControlRecord>,

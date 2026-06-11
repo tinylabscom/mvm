@@ -1,5 +1,5 @@
-//! `mvm-substitution-endpoint` — the per-VM secret-substitution moat (Plan 129
-//! / ADR-067). Spawned per-VM by the backend, it is the one process that holds
+//! `mvm-substitution-endpoint` — the per-VM secret-substitution moat.
+//! Spawned per-VM by the backend, it is the one process that holds
 //! the workload's secrets in the clear: it opens the host's encrypted secret +
 //! binding stores, builds the per-VM [`SubstitutionService`], and serves the
 //! guest→host substitution channel. The guest only ever holds the opaque
@@ -15,7 +15,7 @@
 //! 3. The endpoint binds its listener and serves until the backend kills it.
 //!
 //! All logging goes to **stderr** so stdout carries exactly the one handshake
-//! line. Sibling to `mvm-broker` / `mvm-host-signer` (ADR-066 §3 process moat).
+//! line. Sibling to `mvm-broker` / `mvm-host-signer` in the process moat.
 
 use std::io::{Read, Write};
 
@@ -54,8 +54,8 @@ fn main() -> Result<()> {
 
     // Bind BEFORE the handshake so the backend knows the endpoint is reachable
     // the moment it reads the ready line — no listen/connect race at boot. The
-    // terminator listener (Plan 129 stage 1b) binds here too when configured,
-    // so the nft redirect target is live before the guest boots.
+    // terminator listener binds here too when configured, so the nft redirect
+    // target is live before the guest boots.
     let bound = bind_transport(&cfg.transport)?;
     let terminator = bind_terminator(cfg.terminator_listen)?;
 

@@ -1,6 +1,5 @@
 //! Linux-gated integration test for the runtime-overlay build
-//! orchestrator (plan 74 W1.4b.3a) against the W1.4b.2 flake at
-//! `nix/images/runtime-overlay/`.
+//! orchestrator against the flake at `nix/images/runtime-overlay/`.
 //!
 //! Gates on:
 //!
@@ -12,11 +11,11 @@
 //!    builder-vm flake already have `nix` installed via the
 //!    same `nixpkgs/nixos-25.11` channel.
 //!
-//! These tests build the real artifact and then run the W1.4b.1
-//! resolver over the produced files. End-to-end: the producer
-//! (W1.4b.2 flake) and consumer (W1.4b.1 resolver) agree on the
-//! cache layout. If they disagree on file names or VERSION
-//! content this test fires before contributors hit it at boot.
+//! These tests build the real artifact and then run the resolver
+//! over the produced files. End-to-end: the producer (flake) and
+//! consumer (resolver) agree on the cache layout. If they disagree
+//! on file names or VERSION content this test fires before
+//! contributors hit it at boot.
 
 #![cfg(target_os = "linux")]
 
@@ -125,10 +124,9 @@ fn build_produces_resolver_compatible_artifact() {
 
 #[test]
 fn build_is_byte_deterministic_for_same_workspace() {
-    // ADR-051's per-version cache hinges on byte-identical
-    // builds against the same workspace producing the same
-    // roothash. Run the build twice and compare overlay.ext4
-    // bytes + roothash.
+    // The per-version cache hinges on byte-identical builds against
+    // the same workspace producing the same roothash. Run the build
+    // twice and compare overlay.ext4 bytes + roothash.
     if skip_if_no_nix() {
         return;
     }

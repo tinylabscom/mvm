@@ -1,4 +1,4 @@
-//! Plan 60 Phase 3 Slice C — host-side firewall enforcement.
+//! Host-side firewall enforcement.
 //!
 //! The firewall is **additive enforcement** beneath the proxy: even
 //! if the L4/L7 proxies' allow-list is misconfigured, the firewall's
@@ -9,11 +9,9 @@
 //!
 //! - **Linux** (`linux_nft`) — `nftables`-based rules. Available
 //!   today.
-//! - **macOS** (`macos_pf`) — `pfctl` shell-out. Deferred to
-//!   Slice E per the plan-60 §"Phase 3 risk: pf and WFP shell-outs
-//!   are fragile" note.
-//! - **Windows** (`windows_wfp`) — WFP via `windivert`. Deferred
-//!   to Slice E.
+//! - **macOS** (`macos_pf`) — `pfctl` shell-out. Deferred; pf and
+//!   WFP shell-outs are fragile.
+//! - **Windows** (`windows_wfp`) — WFP via `windivert`. Deferred.
 //!
 //! Each platform ships its own rule-formatter + apply function;
 //! the operator-facing surface stays uniform — pass the per-VM
@@ -24,7 +22,7 @@ use thiserror::Error;
 
 #[cfg(any(target_os = "linux", test))]
 pub mod linux_nft;
-/// plan 123 A2.1 — adapts `FirewallEnforcer` to `mvm_network::EgressEnforcer`.
+/// Adapts `FirewallEnforcer` to `mvm_network::EgressEnforcer`.
 pub mod seam;
 
 /// Runtime VM firewall wiring. The TAP interface is the VM-facing

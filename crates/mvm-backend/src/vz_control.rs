@@ -1,5 +1,4 @@
-//! Plan 97 Phase E — Rust client for the `mvm-vz-supervisor`
-//! control socket.
+//! Rust client for the `mvm-vz-supervisor` control socket.
 //!
 //! The supervisor binds a `SOCK_STREAM` unix socket at
 //! `<vm_state_dir>/control.sock` mode 0700 and accepts newline-framed
@@ -25,9 +24,8 @@ use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Per-VM control socket location. Plan 97 Phase E — the supervisor
-/// binds this path when `control_socket_path` is set in its
-/// `SupervisorConfig`.
+/// Per-VM control socket location. The supervisor binds this path when
+/// `control_socket_path` is set in its `SupervisorConfig`.
 pub fn control_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join("control.sock")
 }

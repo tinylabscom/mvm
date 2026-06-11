@@ -1,5 +1,4 @@
-//! HTTP CONNECT proxy with hostname allowlist (Plan 73 Followup
-//! B.2.x, ADR-047).
+//! HTTP CONNECT proxy with hostname allowlist.
 //!
 //! ## Why explicit-proxy CONNECT
 //!
@@ -195,7 +194,7 @@ fn handle_connection(mut client: TcpStream, allowlist: &Allowlist) -> io::Result
     eprintln!("mvm-egress-proxy: ALLOW {host}:{port}");
 
     // Resolve + dial upstream. We use ToSocketAddrs lookup; the
-    // builder VM's libkrun-provided DNS resolves the four ADR-047
+    // builder VM's libkrun-provided DNS resolves the allowlisted
     // hostnames to their public IPs. Failure here is reported as
     // 502 Bad Gateway so the client can distinguish "allowlist
     // refused" (403) from "we tried and the upstream is down"
@@ -269,8 +268,8 @@ fn read_request_head(client: &mut TcpStream) -> io::Result<String> {
 /// Parse the host + port out of the first line of `request`. The
 /// expected shape is `CONNECT host:port HTTP/1.1\r\n`.
 ///
-/// IPv6 literal targets (`[::1]:443`) are not handled — the four
-/// ADR-047 hostnames are all DNS-resolved IPv4/IPv6 records, not
+/// IPv6 literal targets (`[::1]:443`) are not handled — the
+/// allowlisted hostnames are all DNS-resolved IPv4/IPv6 records, not
 /// literal addresses; we don't need to parse the literal form.
 /// An installer that somehow asks for a literal IPv6 target gets a
 /// 400 from here. Documented as a known limitation.

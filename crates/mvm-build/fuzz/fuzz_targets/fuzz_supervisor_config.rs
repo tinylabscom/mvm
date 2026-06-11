@@ -1,15 +1,11 @@
-// Plan 97 Phase A / ADR-002 claim 5 — fuzz the host-side
-// `SupervisorConfig` JSON parser the `mvm-vz-supervisor` Swift binary
-// reads on stdin.
+// Claim 5 — fuzz the host-side `SupervisorConfig` JSON parser the
+// `mvm-vz-supervisor` Swift binary reads on stdin.
 //
-// The Rust parser is the canonical schema; the Swift `JSONDecoder` in
-// the Rust `SupervisorConfig` schema
+// The Rust parser is the canonical schema; the Swift `JSONDecoder`
 // mirrors it field-for-field with deny-unknown-fields semantics
-// (`StrictKeys` protocol). The intent of the corpus equivalence
-// assertion (Plan 97 Phase A checklist item) is "the Rust and Swift
-// decoders reject the same inputs"; for both decoders to be
-// rejection-equivalent, neither can panic — `serde_json::Error` is the
-// expected outcome for malformed bytes.
+// (`StrictKeys` protocol). The Rust and Swift decoders must reject the
+// same inputs; for them to be rejection-equivalent, neither can panic —
+// `serde_json::Error` is the expected outcome for malformed bytes.
 //
 // Analog of `crates/mvm-libkrun/fuzz/fuzz_targets/fuzz_supervisor_config.rs`.
 

@@ -1,4 +1,4 @@
-//! Plan 60 Phase 6 — attestation report format.
+//! Attestation report format.
 //!
 //! An `AttestationReport` is a signed envelope around an
 //! `AttestationBody`. The body carries the data downstream verifiers
@@ -7,8 +7,8 @@
 //! - `schema_version` — wire format version (currently 1). The
 //!   verifier refuses anything > `SCHEMA_VERSION`.
 //! - `boot_measurement` — hex SHA-256 of the boot integrity state.
-//!   Plan-60 tier 3 (boot attestation) ships the real measurement
-//!   pipeline later; for v0 callers populate this from
+//!   The boot-attestation tier ships the real measurement pipeline
+//!   later; for v0 callers populate this from
 //!   `BootMeasurement::placeholder()` and the comment trails point
 //!   at the dm-verity root hash that will replace it.
 //! - `identity_pubkey_hex` — the Ed25519 verifying key whose
@@ -62,9 +62,9 @@ pub const NONCE_BYTES: usize = 24;
 pub struct AttestationBody {
     pub schema_version: u32,
     /// SHA-256 hex of the boot integrity measurement. v0 ships a
-    /// placeholder until plan 60 tier 3 wires the real dm-verity
-    /// root-hash pipeline; the field is here so the format is
-    /// stable across the transition.
+    /// placeholder until the boot-attestation tier wires the real
+    /// dm-verity root-hash pipeline; the field is here so the format
+    /// is stable across the transition.
     pub boot_measurement: String,
     /// Hex of the Ed25519 verifying key whose signature seals this
     /// report. Echoed inside the body for self-describing reports;

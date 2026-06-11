@@ -1,11 +1,11 @@
-//! Reconcile-on-entry convergence (Plan 170 WS-A / ADR-074).
+//! Reconcile-on-entry convergence.
 //!
 //! The VM name registry (`VmNameRegistry`, `{mvm_share_dir}/vm-names.json`)
 //! is the source of truth; this module converges on-disk runtime reality to
 //! it. A record whose supervisor process is dead has its leftover state torn
-//! down and the record dropped — never adopted (ADR-074): an orphan process
-//! that lost its admission context must not be resurrected outside the
-//! signed-admission path. State dirs with no record are reaped; records whose
+//! down and the record dropped — never adopted: an orphan process that lost
+//! its admission context must not be resurrected outside the signed-admission
+//! path. State dirs with no record are reaped; records whose
 //! state has vanished are dropped. Convergence is idempotent — running it
 //! twice is a no-op.
 //!
@@ -14,7 +14,7 @@
 //! [`ReconcileActions`] and need no real backend, clock, or filesystem.
 //! [`converge`] is the thin real-filesystem adapter the CLI entry path calls.
 //!
-//! **Cheapness is a hard constraint (ADR-074).** Liveness is a `kill(pid, 0)`
+//! **Cheapness is a hard constraint.** Liveness is a `kill(pid, 0)`
 //! stat against the recorded supervisor pid files only — never `pgrep` / `ps`
 //! (which spawn subprocesses), never a VM boot, never Nix. The heavier
 //! helper-PID argv sweep stays in `mvmctl cache prune --reap-orphans`. This
@@ -255,7 +255,7 @@ fn remove_state_dir(dir: &Path) -> Result<(), String> {
 /// Real-filesystem [`RuntimeView`] rooted at a `vms` directory
 /// (`{mvm_data_dir}/vms`). State presence is a `stat`; liveness is
 /// `kill(pid, 0)` on the recorded supervisor pid files — no subprocess
-/// spawn, no VM boot (ADR-074's cheapness budget).
+/// spawn, no VM boot (the cheapness budget).
 pub struct FsRuntimeView {
     vms_root: PathBuf,
 }
@@ -326,7 +326,7 @@ impl ReconcileActions for FsReconcileActions {
 /// [`converge`]. Loads the registry, sweeps it against `vms_root`, and
 /// (unless `dry_run`) saves it back when records were dropped. Fail-open:
 /// a load/save error is recorded in the report and the pass still returns
-/// — never an `Err` that could block the calling command (ADR-074).
+/// — never an `Err` that could block the calling command.
 ///
 /// Does not emit audit; that belongs to the real entry point [`converge`]
 /// so this stays free of process-global state and hermetically testable.
@@ -364,7 +364,7 @@ pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -
 /// Reconcile the default on-disk registry — the cheap convergence pass the
 /// CLI entry path runs for state-touching commands, and the body of
 /// `mvmctl reconcile`. Never returns an error: drift-healing must never
-/// block the requested command (ADR-074 fail-open). On the non-dry-run
+/// block the requested command (fail-open). On the non-dry-run
 /// path emits a `RegistryReconcile` audit line per healed item so the
 /// self-heal is observable and `audit verify` still chains.
 pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
@@ -379,7 +379,7 @@ pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
 
 /// Emit one `RegistryReconcile` audit line per healed item. Best-effort
 /// (the audit layer swallows write failures); consistent with the Stage 0
-/// audit-emit contract (ADR-044).
+/// audit-emit contract.
 fn emit_audit(report: &ConvergeReport) {
     for name in &report.dead_process_reaped {
         mvm_core::audit_emit!(RegistryReconcile, vm: name.as_str(), "action=dead_process_left_state");

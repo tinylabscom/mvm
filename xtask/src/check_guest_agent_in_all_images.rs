@@ -1,6 +1,6 @@
 //! `xtask check-guest-agent-in-all-images`
 //!
-//! Plan 124 B2 / ADR-066 §6 — the universal-agent invariant. Every
+//! The universal-agent invariant. Every
 //! bootable mvm image must fork `mvm-guest-agent` in its launch path, so
 //! the *same* agent runs in every VM type (workload, dev, builder). This
 //! gate is the tripwire: if a launcher's agent-fork is deleted, the
@@ -10,7 +10,7 @@
 //!   1. **mkGuest `/init`** (`nix/lib/mk-guest.nix`) — the workload and
 //!      dev-shell images. Forks the agent via `setpriv … -- "$MVM_AGENT_BIN"`.
 //!   2. **`mvm-host-vm-init`** — PID 1 of the libkrun builder VM. Forks
-//!      the agent via `fork_guest_agent()` (Plan 124 B1).
+//!      the agent via `fork_guest_agent()`.
 //!
 //! Source-grep, not a build: the launch paths are a Nix shell script and
 //! a `cfg(linux)` Rust binary, neither of which this gate can execute on
@@ -31,7 +31,7 @@ const AGENT_LAUNCHERS: &[(&str, &str, &str)] = &[
         "nix/lib/mk-guest.nix",
         "MVM_AGENT_BIN",
     ),
-    // The builder VM's PID 1 forks the agent via this fn (Plan 124 B1).
+    // The builder VM's PID 1 forks the agent via this fn.
     (
         "builder VM PID 1 (mvm-host-vm-init)",
         "crates/mvm-build/src/bin/mvm-host-vm-init.rs",

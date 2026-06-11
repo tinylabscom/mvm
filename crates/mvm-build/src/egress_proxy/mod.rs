@@ -1,7 +1,6 @@
-//! egress_proxy — builder VM egress allowlist proxy (Plan 73 Followup
-//! B.2.x, ADR-047 §"Build-time gates" → "Registry allowlist").
+//! egress_proxy — builder VM egress allowlist proxy.
 //!
-//! Folded in from the former `mvm-egress-proxy` crate (plan 121 D4) as
+//! Folded in from the former `mvm-egress-proxy` crate as
 //! a library module so its pub API stays dead-code-clean cross-platform
 //! and the unit tests run everywhere. The `mvm-egress-proxy` binary
 //! (`src/bin/mvm-egress-proxy.rs`, Linux-only at runtime) is a thin

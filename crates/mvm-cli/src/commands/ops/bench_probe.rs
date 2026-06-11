@@ -1,7 +1,6 @@
 //! Live boot orchestration for `mvmctl bench microvm-launch`. Kept
 //! out of `bench.rs` so the pure stats/schema substrate stays
-//! VM-free. See Plan 119
-//! (`specs/plans/119-live-bench-probe-impl-plan.md`).
+//! VM-free.
 
 use anyhow::{Context, Result};
 
@@ -16,8 +15,8 @@ use crate::commands::vm::plan_builder::SynthesisInput;
 /// Resolved inputs for one benchmarked boot. `kernel`/`rootfs` come
 /// from the same `ensure_default_microvm_image()` `mvmctl up` uses —
 /// the canonical runtime image, NOT the dev-shell rootfs.
-// Fields are read by Task 5's live `boot_measure_once` + Task 9's
-// HostDescriptor kernel-sha; until then only the test reads them.
+// Fields are read by the live `boot_measure_once` + the HostDescriptor
+// kernel-sha; until then only the test reads them.
 #[allow(dead_code)]
 pub struct ProbeImage {
     pub kernel: String,
@@ -93,7 +92,7 @@ pub fn admit_probe_plan(
 use crate::commands::ops::bench::BootMarks;
 
 /// Per-VM state dir the libkrun backend writes the supervisor PID file and host-side
-/// vsock socket into (`~/.mvm/vms/<name>`). Plan 118 WS-1 1b fix: delegate to the
+/// vsock socket into (`~/.mvm/vms/<name>`). Delegate to the
 /// canonical `mvm_core::config::vm_state_dir` the backend itself uses, instead of building
 /// the path from `mvm_state_dir()` — that's the **XDG** state dir (`~/.local/state/mvm`),
 /// which the supervisor never writes to, so the `start_to_pid` mark never resolved and the
@@ -183,7 +182,7 @@ fn wait_for_pid_file(vm_name: &str) -> Result<std::time::Instant> {
 /// the host-side socket-path resolution; for v1 the first successful
 /// ping is both `connected` and `ready`, folding `handshake_ms` into
 /// `total_ready_ms`. The decision-relevant spans — `start_to_pid_ms`
-/// (process spawn, the span PR-10b's warm pool collapses) and
+/// (process spawn, the span a warm pool collapses) and
 /// `total_ready_ms` (headline) — are measured accurately. Deadline at
 /// 90 s.
 #[cfg(feature = "libkrun-live")]
@@ -211,7 +210,7 @@ fn wait_for_ready(vm_name: &str) -> Result<(std::time::Instant, std::time::Insta
 mod tests {
     use super::*;
 
-    // Plan 118 WS-1 1b — the probe pid path must resolve under the backend's data dir
+    // The probe pid path must resolve under the backend's data dir
     // (`~/.mvm`, honouring MVM_DATA_DIR), NOT the XDG state dir the supervisor never
     // writes to. Regression guard for the `start_to_pid` timeout this fix closed.
     #[cfg(feature = "libkrun-live")]

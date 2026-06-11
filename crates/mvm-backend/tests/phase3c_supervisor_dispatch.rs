@@ -1,4 +1,4 @@
-//! Plan 112 Phase 3c — supervisor dispatch smoke.
+//! Supervisor dispatch smoke.
 //!
 //! End-to-end verification that the producer-side wire format
 //! (`VmStartConfig` → `audit_substrate::compute_audit_substrate` →
@@ -13,11 +13,11 @@
 //!   substrate ⇒ supervisor reaches the `plan.json` decode step
 //!   before failing on the placeholder envelope. Failure message
 //!   `decode cfg.plan into ExecutionPlan` is the witness that the
-//!   bridge branch was entered. Claim-10-leg-2 substrate is live.
+//!   bridge branch was entered.
 //!
 //! - `supervisor_takes_legacy_path_when_tenant_id_none` — empty
 //!   substrate ⇒ supervisor calls `run_supervisor` (the legacy
-//!   pre-W6.A.5 path) and fails downstream at libkrun's
+//!   path) and fails downstream at libkrun's
 //!   `krun_start_enter` (rc -22 because the fake kernel/rootfs
 //!   don't exist). Confirms the back-compat path for `mvmctl dev`,
 //!   session VMs, and template restore.
@@ -113,8 +113,8 @@ fn supervisor_takes_bridge_path_when_tenant_id_some() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     eprintln!("--- supervisor stderr ---\n{stderr}\n--- end ---");
 
-    // Phase 3c gate: when tenant_id is Some, the supervisor must
-    // reach the bridge-factory branch. The downstream libkrun call
+    // When tenant_id is Some, the supervisor must reach the
+    // bridge-factory branch. The downstream libkrun call
     // will fail (fake kernel), but we expect to see the
     // `starting bridge-mode libkrun supervisor` trace before that.
     //

@@ -1,4 +1,4 @@
-//! Plan 57 W4.3 — end-to-end LibkrunBackend lifecycle test.
+//! End-to-end LibkrunBackend lifecycle test.
 //!
 //! Validates that `LibkrunBackend::start → status → stop → status`
 //! drives a real `mvm-libkrun-supervisor` subprocess against a real
@@ -9,7 +9,7 @@
 //!
 //! ## Why SIGTERM and not a clean `init=/sbin/poweroff`?
 //!
-//! The dev-VM rootfs at `~/.mvm/dev/current/` (built before plan 72's
+//! The dev-VM rootfs at `~/.mvm/dev/current/` (built before the
 //! builder-VM migration) doesn't ship `/sbin/poweroff` and its own
 //! `/init` crashes on a BusyBox-vs-util-linux setpriv incompatibility
 //! before any cleanup runs. A clean shutdown path needs either the

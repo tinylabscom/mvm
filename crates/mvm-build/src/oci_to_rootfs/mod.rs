@@ -12,19 +12,18 @@
 //! 3. Caller calls `finalize` to release the staging directory and
 //!    get a [`StagedRootfs`] descriptor pointing at it.
 //! 4. Caller hands the descriptor to [`materialize_to_ext4`]
-//!    (Linux-only at runtime; W1.5 routes non-Linux through the
-//!    libkrun builder VM per ADR-050), which produces a
-//!    byte-deterministic ext4 image.
+//!    (Linux-only at runtime; non-Linux routes through the libkrun
+//!    builder VM), which produces a byte-deterministic ext4 image.
 //! 5. Caller hands the [`MaterializedRootfs`] to
 //!    [`seal_with_verity`] (also Linux-only) to generate the
-//!    dm-verity sidecar + root hash that satisfies ADR-050. Two
-//!    runs against byte-identical ext4 input produce
+//!    dm-verity sidecar + root hash. Two runs against byte-identical
+//!    ext4 input produce
 //!    byte-identical sidecars + the same root hash; this is the
 //!    invariant the per-digest verity cache depends on.
 //!
-//! Layers are assumed to arrive *decompressed*. The caller (W1.5
-//! CLI orchestrator) is responsible for piping fetched layer bytes
-//! through the right decoder based on the manifest's
+//! Layers are assumed to arrive *decompressed*. The CLI orchestrator
+//! is responsible for piping fetched layer bytes through the right
+//! decoder based on the manifest's
 //! `mediaType` — gzip via `flate2::read::GzDecoder`, zstd via
 //! `zstd::stream::Decoder`, plain tar passes through. Keeping the
 //! decoder choice out of the unpack module means hostile-tar tests
@@ -38,10 +37,10 @@
 //! inline. The whiteout marker file itself is never written to
 //! staging; its effect is to remove the corresponding path.
 //!
-//! ## Plan-74 R10 attack-surface coverage
+//! ## Attack-surface coverage
 //!
 //! The integration tests under `mvm-build/tests/oci_unpack_*` are
-//! the canonical R10 mitigation evidence. Every variant in
+//! the canonical mitigation evidence. Every variant in
 //! [`OciUnpackError`] has at least one negative test that proves
 //! the corresponding attack class is rejected without a partial
 //! write landing in staging.

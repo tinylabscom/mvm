@@ -1,5 +1,5 @@
 //! Host-side orchestrator for the application-dependency install
-//! pipeline (ADR-047, Plan 73 Followup B).
+//! pipeline.
 //!
 //! This module is the host-side seam between a user's `mvmctl build`
 //! invocation and the builder-VM-side install pipeline that runs
@@ -13,8 +13,8 @@
 //!    [`mvm_sdk::compile::deps_audit::verify_sealed_volume`]. A hit
 //!    returns `InstallResult { cache_hit: true, .. }` carrying the
 //!    canonical `volume_hash` + `manifest.sha256` the supervisor's
-//!    admission gate (Followup A) pins.
-//! 2. **Cache miss → builder-VM dispatch.** Slice B.2 calls
+//!    admission gate pins.
+//! 2. **Cache miss → builder-VM dispatch.** Calls
 //!    [`InstallDriver::run_install`] (blanket-impl'd for every
 //!    [`crate::builder_vm::BuilderVm`]) with the canonical mount
 //!    layout (source_root → `/work`, an in-cache scratch dir →
@@ -26,8 +26,8 @@
 //!
 //! ### Why the cache key is a lockfile hash
 //!
-//! ADR-047 §"Lifecycle gates" pins the *volume* hash at admission
-//! time, but the volume hash bakes in `cve.json` and `meta.json` —
+//! The lifecycle gate pins the *volume* hash at admission time, but
+//! the volume hash bakes in `cve.json` and `meta.json` —
 //! values only the builder VM knows after the install runs. The
 //! orchestrator needs a key it can derive *before* the VM runs so it
 //! can answer "have I already installed this lockfile?" without a
@@ -61,7 +61,7 @@
 //! installer. Every operation here is pure I/O — sha256 streaming,
 //! filesystem reads, `verify_sealed_volume`, and a typed dispatch
 //! through [`InstallDriver`]. The actual install runs inside the
-//! libkrun builder VM (slice B.2), which the driver wraps.
+//! libkrun builder VM, which the driver wraps.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -106,11 +106,10 @@ impl Language {
     }
 }
 
-/// ADR-047 §"Lifecycle gates" — the gate level controls strictness
-/// of the builder-VM-side checks (attestations, CVE severity). The
-/// orchestrator carries it through to slice B.2; in B.1 it
-/// participates in the cache key so a `--dev` cache entry can't
-/// satisfy a `--prod` request.
+/// The gate level controls strictness of the builder-VM-side checks
+/// (attestations, CVE severity). The orchestrator carries it through
+/// to the install dispatch, and it participates in the cache key so a
+/// `--dev` cache entry can't satisfy a `--prod` request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateLevel {
@@ -138,9 +137,9 @@ pub struct InstallSpec {
     /// not parse it.
     pub lockfile: PathBuf,
     /// Project root that holds the lockfile + any auxiliary inputs
-    /// the installer needs (`pyproject.toml`, `package.json`). Slice
-    /// B.2 bind-mounts this into the builder VM; B.1 records the
-    /// path on `InstallResult` for diagnostics but does not read
+    /// the installer needs (`pyproject.toml`, `package.json`). The
+    /// builder VM bind-mounts this; the cache-resolution path records
+    /// the path on `InstallResult` for diagnostics but does not read
     /// from it.
     pub source_root: PathBuf,
     pub language: Language,
@@ -148,15 +147,15 @@ pub struct InstallSpec {
     /// Optional override for the deps-volumes cache root. When
     /// `None`, resolves to
     /// [`mvm_core::config::mvm_deps_volumes_dir`] (which itself
-    /// honors `MVM_DEPS_VOLUMES_DIR` — same env knob Followup A's
+    /// honors `MVM_DEPS_VOLUMES_DIR` — the same env knob the
     /// admission verifier uses).
     pub cache_root_override: Option<PathBuf>,
 }
 
-/// Result of a successful install resolution. The caller (slice
-/// B.3's `mvmctl build` wiring + Followup A's `ExecutionPlan`
-/// synthesis) pins both `volume_hash` and `manifest_sha256` into
-/// the plan so the admission verifier can re-derive them.
+/// Result of a successful install resolution. The caller (`mvmctl
+/// build` wiring + `ExecutionPlan` synthesis) pins both `volume_hash`
+/// and `manifest_sha256` into the plan so the admission verifier can
+/// re-derive them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallResult {
     pub volume_hash: String,
@@ -165,7 +164,7 @@ pub struct InstallResult {
     /// The path the supervisor will read from at admission time.
     pub volume_dir: PathBuf,
     /// The sha256 of the lockfile bytes, surfaced for diagnostics +
-    /// `mvmctl deps inspect` (slice B.3).
+    /// `mvmctl deps inspect`.
     pub lockfile_sha256: String,
 }
 
@@ -311,9 +310,9 @@ impl<T: BuilderVm> InstallDriver for T {
         let job = BuilderJob::Install {
             spec_path: spec_path.to_path_buf(),
         };
-        // Plan 115 / ADR-065: install jobs don't embed host-vm binaries
-        // into a rootfs, so host_bin_dir is unused. Use a private temp
-        // dir as a valid placeholder so validate_mounts passes.
+        // Install jobs don't embed host-vm binaries into a rootfs, so
+        // host_bin_dir is unused. Use a private temp dir as a valid
+        // placeholder so validate_mounts passes.
         let _host_bins_tmp = tempfile::TempDir::new().map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("creating temp host_bin_dir: {e}"))
         })?;
@@ -478,7 +477,7 @@ fn run_install_via_driver(
 
     // Seal the artifacts. `seal_volume` reads + hashes the four
     // sidecars; the annotations capture lockfile-key context for
-    // `mvmctl deps inspect` (B.3).
+    // `mvmctl deps inspect`.
     let content = volume_dir.join(FILE_CONTENT_DIR);
     let sbom = volume_dir.join(FILE_SBOM);
     let fetch_log = volume_dir.join(FILE_FETCH_LOG);
@@ -629,8 +628,8 @@ pub fn derive_lockfile_hash(lockfile_sha256: &str, language: Language, gate: Gat
 /// Resolve the deps-volumes cache root, honoring the per-call
 /// override and falling back to
 /// [`mvm_core::config::mvm_deps_volumes_dir`] (which itself honors
-/// `MVM_DEPS_VOLUMES_DIR`). Shared lookup with Followup A's
-/// admission verifier — no duplication.
+/// `MVM_DEPS_VOLUMES_DIR`). Shared lookup with the admission
+/// verifier — no duplication.
 pub fn resolve_cache_root(override_path: Option<&Path>) -> PathBuf {
     override_path
         .map(Path::to_path_buf)

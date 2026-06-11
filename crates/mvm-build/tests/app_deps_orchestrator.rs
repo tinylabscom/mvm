@@ -1,9 +1,8 @@
 //! End-to-end coverage for the [`mvm_build::app_deps`] host
-//! orchestrator (Plan 73 Followup B.1). Uses on-disk sealed-volume
-//! fixtures hand-authored via
+//! orchestrator. Uses on-disk sealed-volume fixtures hand-authored via
 //! [`mvm_sdk::compile::deps_audit::seal_volume`] so the cache-hit
-//! path exercises the same wire format the builder VM will emit in
-//! slice B.2.
+//! path exercises the same wire format the builder VM will emit when
+//! the live dispatch path lands.
 //!
 //! The cache layout under test:
 //!
@@ -181,7 +180,7 @@ fn cache_hit_returns_verified_install_result() {
     assert_eq!(res.volume_dir, fx.cache_root.join(&sealed.volume_hash));
     // manifest_sha256 is the sha256 of the on-disk meta.json bytes —
     // the supervisor's admission gate pins this separately from the
-    // volume_hash (Followup A §"manifest_sha256 cross-check").
+    // volume_hash.
     assert!(!res.manifest_sha256.is_empty());
     assert_eq!(res.manifest_sha256.len(), 64);
     // Lockfile sha is the un-mixed-in value; deterministic over the
@@ -202,7 +201,7 @@ fn cache_miss_without_driver_returns_driver_not_provided() {
             assert_eq!(language, "python");
             assert_eq!(gate, "dev");
             // The lockfile_hash is the derived key; check it matches
-            // the helper so users + slice B.2 can reproduce it.
+            // the helper so callers can reproduce it.
             let expected =
                 derive_lockfile_hash(&sha256_file(&fx.lockfile), Language::Python, GateLevel::Dev);
             assert_eq!(lockfile_hash, expected);
@@ -333,7 +332,7 @@ fn override_takes_precedence_over_env() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Cache-miss dispatch path — Plan 73 Followup B.2.
+// Cache-miss dispatch path.
 //
 // A mock `InstallDriver` impl simulates the builder VM by directly
 // populating the `artifact_out` directory with hand-authored

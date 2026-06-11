@@ -14,8 +14,8 @@ use mvm_core::pool::ArtifactPaths;
 use mvm_core::template::{TemplateRevision, template_current_symlink};
 use mvm_core::time::utc_now;
 
-// `clone_rootfs_for_instance` moved to `mvm_backend::base::cow` (W7
-// substrate split). Re-exported here so existing
+// `clone_rootfs_for_instance` moved to `mvm_backend::base::cow`.
+// Re-exported here so existing
 // `crate::vm::template::lifecycle::clone_rootfs_for_instance` callers
 // keep resolving without each one having to migrate.
 pub use mvm_backend::base::cow::clone_rootfs_for_instance;
@@ -119,12 +119,12 @@ pub fn template_init(id: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Plan 38 slice 4: manifest-keyed slot primitives.
+// Manifest-keyed slot primitives.
 //
 // These coexist with the legacy name-keyed primitives above. They operate on
 // `~/.mvm/templates/<sha256(canonical_manifest_path)>/manifest.json` —
-// `PersistedManifest` is the slot-resident JSON record from slice 2. Callers
-// migrate slice-by-slice; nothing in the legacy path changes here.
+// `PersistedManifest` is the slot-resident JSON record. Callers migrate
+// incrementally; nothing in the legacy path changes here.
 // ---------------------------------------------------------------------------
 
 use mvm_core::manifest::{
@@ -237,8 +237,7 @@ pub fn template_list_slot_hashes() -> Result<Vec<String>> {
 
 /// List legacy name-keyed template directory names — anything in
 /// `~/.mvm/templates/` whose dirname isn't a 64-char lowercase-hex
-/// slot hash. Powers the §8a migration banner / `template list
-/// --legacy` (slice 8).
+/// slot hash. Powers the migration banner / `template list --legacy`.
 #[instrument(skip_all)]
 pub fn template_list_legacy_names() -> Result<Vec<String>> {
     let names = read_templates_base_subdir_names()?;
@@ -342,8 +341,7 @@ pub fn template_snapshot_info_for_slot(slot_hash: &str) -> Result<Option<Snapsho
 /// `template_id` is set to the manifest hash; `role` is empty (manifest
 /// schema doesn't carry a role); `default_network_policy` is `None`
 /// (the manifest schema doesn't carry network policy either —
-/// runtime policy comes from CLI flags / `~/.mvm/config.toml` / mvmd
-/// per plan 38).
+/// runtime policy comes from CLI flags / `~/.mvm/config.toml` / mvmd).
 fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
     TemplateSpec {
         schema_version: p.schema_version,
@@ -369,9 +367,8 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
 ///    `template_artifacts_for_slot`.
 /// 3. **Bundle sha256** (also 64-char hex, but the slot dir doesn't
 ///    exist; the bundle registry under `~/.mvm/bundles/<sha>/` does)
-///    → [`bundle_artifacts_for_sha`]. Sprint 52 W2 registry-
-///    replacement substrate — bundles are content-addressed images
-///    fetched + installed via `mvmctl bundle install`.
+///    → [`bundle_artifacts_for_sha`]. Bundles are content-addressed
+///    images fetched + installed via `mvmctl bundle install`.
 ///
 /// Used by `mvmctl up` / `mvmctl exec` so the CLI can resolve a
 /// `--manifest <PATH>` argument to a slot hash and pass it through
@@ -463,7 +460,7 @@ fn bundle_artifacts_for_sha(
     // wins when set (BUNDLE_SCHEMA_VERSION 2+ bundles ship this).
     // Falls back to operator config for v1 bundles or when the
     // publisher chose to omit. CLI `--cpus` / `--memory` still
-    // overrides both at `mvmctl up` time.
+    // override both at `mvmctl up` time.
     let user_cfg = mvm_core::user_config::load(None);
     let (vcpus_u32, mem_mib) = match installed.manifest.resources.as_ref() {
         Some(r) => (r.vcpus, r.mem_mib),
@@ -550,7 +547,7 @@ pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
 /// Verify a slot's artifacts against its `checksums.json`. Returns
 /// `Ok(())` if every recorded file matches; an error otherwise listing
 /// which file mismatched. The checksums file is written by
-/// `template_push_slot` (slice 8b) and is also produced inline by
+/// `template_push_slot` and is also produced inline by
 /// `template_build_from_manifest` once push lands; until then a slot
 /// without a `checksums.json` errors with a hint.
 ///
@@ -674,7 +671,7 @@ pub fn template_list_slots() -> Result<Vec<SlotEntry>> {
 
 /// Build a manifest-keyed slot using the dev build pipeline (local Nix in
 /// Lima or host). Mirrors [`template_build`] but operates on a
-/// [`PersistedManifest`] from slice 2 instead of looking up by name.
+/// [`PersistedManifest`] instead of looking up by name.
 ///
 /// On success, the slot's `current` symlink points at
 /// `artifacts/revisions/<revision_hash>/`, the persisted manifest record
@@ -829,8 +826,8 @@ pub fn template_build_from_manifest(
         profile: persisted.profile.clone(),
         // role is preserved on the on-disk struct for backward
         // compatibility with old revision.json files; manifest-built
-        // slots emit an empty string. Plan 38 §3: cache_key drops
-        // role (slice 3); this field is informational only.
+        // slots emit an empty string. cache_key no longer keys off
+        // role; this field is informational only.
         role: String::new(),
         vcpus: persisted.vcpus,
         mem_mib: persisted.mem_mib,
@@ -1129,7 +1126,7 @@ pub struct Checksums {
 
 fn require_local_template_fs() -> Result<()> {
     // Registry push/pull needs direct file access to ~/.mvm/templates.
-    // With Lima gone (ADR-013) the host always has direct access; no-op.
+    // With Lima gone the host always has direct access; no-op.
     Ok(())
 }
 
@@ -1421,7 +1418,7 @@ pub fn template_verify(id: &str, revision: Option<&str>) -> Result<()> {
 }
 
 // `seal_snapshot_artifacts` + `verify_snapshot_artifacts` moved to
-// `mvm_backend::base::snapshot_integrity` (W8.B). Re-exported below so
+// `mvm_backend::base::snapshot_integrity`. Re-exported below so
 // the local `create_snapshot` call site keeps resolving without
 // renaming.
 pub use mvm_backend::base::snapshot_integrity::{
@@ -1613,14 +1610,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Plan 38 slice 4: classify_template_dir_entries (pure helper).
+    // classify_template_dir_entries (pure helper).
     //
     // Filesystem-independent unit tests. The slot-keyed
     // persist/load/delete/list_* wrappers are thin delegations to
-    // mvm_core::manifest primitives that already have full coverage in
-    // slice 2 (26 tests against tempdir-backed scenarios), so we
-    // intentionally don't re-test the env-driven path resolution here:
-    // doing so would force MVM_DATA_DIR mutation and serialise tests.
+    // mvm_core::manifest primitives that already have full coverage
+    // against tempdir-backed scenarios, so we intentionally don't
+    // re-test the env-driven path resolution here: doing so would force
+    // MVM_DATA_DIR mutation and serialise tests.
     // -----------------------------------------------------------------
 
     fn hex_dirname() -> String {

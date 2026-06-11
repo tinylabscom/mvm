@@ -1,4 +1,4 @@
-//! Rust-native Vz supervisor (Plan 152 WS-B) — one process per Vz guest.
+//! Rust-native Vz supervisor — one process per Vz guest.
 //!
 //! Reads a [`mvm_build::vz::SupervisorConfig`] JSON document on stdin (the same
 //! contract the Swift `mvm-vz-supervisor` consumed), builds the
@@ -13,8 +13,8 @@
 //! build still links the bin without pulling the Apple frameworks.
 //!
 //! Spawned by `mvm_backend::vz` via `resolve_supervisor_path()`. Behind the
-//! Plan 152 WS-B parity gate the Swift supervisor still backs production until
-//! the Rust path passes the boot/vsock/control/save-restore parity matrix.
+//! parity gate the Swift supervisor still backs production until the Rust path
+//! passes the boot/vsock/control/save-restore parity matrix.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

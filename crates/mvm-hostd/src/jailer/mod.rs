@@ -1,5 +1,5 @@
-//! ADR-064 §Decision 5 — A2 confinement helper for per-VM sibling
-//! processes that run alongside Firecracker on Linux.
+//! Confinement helper for per-VM sibling processes that run alongside
+//! Firecracker on Linux.
 //!
 //! Wraps `seccompiler` (Firecracker-maintained) + `landlock` (official
 //! Rust LSM binding) behind a single `confine_self(&ConfinementSpec)`
@@ -92,8 +92,8 @@ impl ConfinementSpec {
 /// code is strictly worse than a confined one. The
 /// `mvm-firecracker-bridge` sidecar honours this contract by returning
 /// the error up to `main`, which logs and exits nonzero; the
-/// supervisor's `BridgeRestartPolicy::HardFail` (ADR-064 §Decision 6)
-/// is the cleanup mechanism that turns the exit into a VM teardown.
+/// supervisor's `BridgeRestartPolicy::HardFail` is the cleanup
+/// mechanism that turns the exit into a VM teardown.
 #[cfg(target_os = "linux")]
 pub fn confine_self(spec: &ConfinementSpec) -> Result<(), JailerError> {
     crate::jailer::landlock::apply(spec)?;

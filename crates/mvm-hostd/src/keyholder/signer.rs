@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §3 — the signing keyholder (gold path).
+//! The signing keyholder (gold path).
 //!
 //! For signing-based auth (AWS SigV4, HMAC webhooks) the secret key never
 //! goes on the wire: the signer resolves the key into confined memory,
@@ -6,7 +6,7 @@
 //! zeroizes. The returned [`Signature`] carries the digest only — no key
 //! material — so a leaked signature reveals nothing about the key.
 //!
-//! Software-first, hardware-optional (ADR-067 §3): the default path is
+//! Software-first, hardware-optional: the default path is
 //! pure software (key encrypted at rest, decrypted only here, wiped after
 //! use). A Secure Enclave / TPM, when present, strengthens this to "host
 //! never sees the key" through the *same* interface — no DX change.

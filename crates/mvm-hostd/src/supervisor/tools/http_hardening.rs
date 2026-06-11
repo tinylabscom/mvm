@@ -1,21 +1,21 @@
-//! Shared HTTP-client hardening for Phase 7 tools.
+//! Shared HTTP-client hardening for the search/fetch tools.
 //!
 //! Until this module existed, only [`crate::supervisor::tools::web_fetch::ReqwestHttpFetcher`]
-//! had the full plan-65 hardening posture. Each search provider
+//! had the full hardening posture. Each search provider
 //! (`BraveSearchProvider`, `TavilySearchProvider`,
 //! `GoogleSearchProvider`) built its own bare `reqwest::Client` with
 //! `timeout` set but neither `Policy::none()` redirects nor any
 //! SSRF guarding — meaning DNS poisoning of `api.search.brave.com`
 //! to a private IP would have routed credentials at a local
-//! attacker before plan 65 caught it.
+//! attacker.
 //!
 //! This module exports a [`hardened_client_builder`] that every
 //! reqwest-using tool surface goes through. It carries:
 //!
-//! - **W1 — no auto-redirect**: `reqwest::redirect::Policy::none()`.
+//! - **No auto-redirect**: `reqwest::redirect::Policy::none()`.
 //!   An upstream that responds 3xx surfaces the status code +
 //!   headers to the caller; nothing follows silently.
-//! - **W2 — SSRF / DNS-rebinding defense**: a
+//! - **SSRF / DNS-rebinding defense**: a
 //!   [`SsrfFilteringResolver`] that wraps the system resolver
 //!   ([`tokio::net::lookup_host`]) and discards every returned IP
 //!   that [`SsrfGuard::classify`] rejects — RFC1918, loopback,
@@ -24,12 +24,12 @@
 //!   `resolve()` returns an error mentioning the SSRF guard so
 //!   the operator sees the cause; if *any* IPs survive, only the
 //!   safe set is handed to reqwest.
-//! - **W7 — TLS 1.3 minimum**: `min_tls_version` pinned to
+//! - **TLS 1.3 minimum**: `min_tls_version` pinned to
 //!   [`reqwest::tls::Version::TLS_1_3`]. TLS 1.2 is acceptable
 //!   today but only TLS 1.3 mandates forward secrecy on every
 //!   cipher suite, drops the static-RSA key-exchange escape
 //!   hatch, and removes the legacy MAC-then-encrypt construction.
-//!   All Phase-7-targeted upstreams (Brave / Tavily / Google /
+//!   All targeted upstreams (Brave / Tavily / Google /
 //!   OpenAI / Anthropic / Cloudflare / AWS / Azure / GCP) support
 //!   TLS 1.3; pinning the floor at 1.3 closes a downgrade vector
 //!   without breaking any legitimate operator workflow.
@@ -58,15 +58,16 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 use crate::supervisor::ssrf_guard::SsrfGuard;
 
-/// Minimum TLS version every Phase 7 reqwest client accepts.
-/// Plan 65 W7 — pin at TLS 1.3 to mandate forward secrecy +
+/// Minimum TLS version every reqwest client here accepts.
+/// Pinned at TLS 1.3 to mandate forward secrecy +
 /// AEAD-only ciphers + remove the static-RSA + MAC-then-encrypt
 /// legacy paths. All operator-likely upstreams support 1.3.
 pub const MIN_TLS_VERSION: reqwest::tls::Version = reqwest::tls::Version::TLS_1_3;
 
-/// Build a `reqwest::ClientBuilder` pre-configured with W1, W2,
-/// and W7 hardening. Callers add their own per-tool config
-/// (headers, user-agent, etc.) before `.build()`.
+/// Build a `reqwest::ClientBuilder` pre-configured with the
+/// no-redirect, SSRF-filtering, and TLS-1.3-floor hardening. Callers
+/// add their own per-tool config (headers, user-agent, etc.) before
+/// `.build()`.
 pub fn hardened_client_builder(timeout_secs: u64) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
@@ -198,7 +199,7 @@ pub async fn resolve_ssrf_safe_ips(host: &str) -> Result<Vec<std::net::IpAddr>, 
         .collect())
 }
 
-/// A hardened reqwest builder (W1 no-redirect + W7 TLS-1.3 floor + timeout)
+/// A hardened reqwest builder (no-redirect + TLS-1.3 floor + timeout)
 /// **without** the port-hardcoding [`SsrfFilteringResolver`]. Pair it with
 /// `.resolve_to_addrs(host, &[ip:url_port, …])` built from
 /// [`resolve_ssrf_safe_ips`] so SSRF filtering survives while the connection
@@ -277,11 +278,10 @@ mod tests {
 
     #[test]
     fn w7_min_tls_version_is_pinned_at_1_3() {
-        // Plan 65 W7 pin: the MIN_TLS_VERSION constant must remain
-        // at TLS 1.3. A future refactor that loosens it (e.g. for
-        // a one-off legacy upstream) needs to update the plan-65
-        // doc + flip this assertion explicitly. The pin keeps the
-        // hardening posture visible from a one-line grep.
+        // The MIN_TLS_VERSION constant must remain at TLS 1.3. A
+        // future refactor that loosens it (e.g. for a one-off legacy
+        // upstream) needs to flip this assertion explicitly. The pin
+        // keeps the hardening posture visible from a one-line grep.
         assert_eq!(MIN_TLS_VERSION, reqwest::tls::Version::TLS_1_3);
     }
 

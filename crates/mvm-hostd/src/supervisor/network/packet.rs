@@ -1,4 +1,4 @@
-//! Plan 141 / ADR-064 — pure L3/L4 parse + payload rebuild for the
+//! Pure L3/L4 parse + payload rebuild for the
 //! gateway packet-observer pipeline. No sockets, no async: takes `&[u8]`
 //! ethernet frames, returns borrowed views, and rebuilds frames with
 //! replaced payloads (recomputing IP length + IP/TCP/UDP checksums).
@@ -7,7 +7,7 @@
 //! closed to `None` (the bridge forwards unparsed frames unchanged).
 //! `rebuild_with_payload` refuses anything it cannot serialize safely
 //! (over-MTU, IP extension headers, >u16 payloads), so a redactor can
-//! never silently leak (Plan 141 Q8, fail-closed).
+//! never silently leak (fail-closed).
 
 use std::net::IpAddr;
 
@@ -19,7 +19,7 @@ pub enum L4Proto {
 
 /// Connection identity used as the `killed_flows` key. Direction-agnostic
 /// at the type level; the bridge stores keys per its coarse per-direction
-/// flow model (one guest = one workload, ADR-002).
+/// flow model (one guest = one workload).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlowKey {
     pub proto: L4Proto,

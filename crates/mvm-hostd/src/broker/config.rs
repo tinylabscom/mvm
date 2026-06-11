@@ -1,9 +1,9 @@
 //! Subprocess startup config (read from stdin at spawn).
 //!
 //! The supervisor passes this JSON on stdin once at startup, then closes
-//! the pipe. The W1a parser is unsigned-passthrough; W1b will require an
-//! enclosing signed envelope (Plan 104 §H-L3.6) before the broker accepts
-//! the config.
+//! the pipe. The parser is currently unsigned-passthrough; a future
+//! revision will require an enclosing signed envelope before the broker
+//! accepts the config.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -12,12 +12,11 @@ use serde::{Deserialize, Serialize};
 
 /// Config the supervisor hands to a `mvm-broker` subprocess at spawn.
 ///
-/// The envelope is currently unsigned (W1a). Plan 104 §H-L3.6 (G1) — to
-/// close in W1b — wraps this struct in a release-key-signed envelope so a
-/// compromised supervisor cannot induce the subprocess to point its
-/// audit-back-channel at `/dev/null` or its proxy UDS at a sibling
-/// workload's socket. The TODO comment at the parse site is the
-/// commitment to that closure.
+/// The envelope is currently unsigned. A future revision wraps this
+/// struct in a release-key-signed envelope so a compromised supervisor
+/// cannot induce the subprocess to point its audit-back-channel at
+/// `/dev/null` or its proxy UDS at a sibling workload's socket. The
+/// TODO comment at the parse site is the commitment to that closure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SubprocessConfig {
@@ -31,19 +30,18 @@ pub struct SubprocessConfig {
     /// Path to the host signer's *public* key (for response-payload
     /// signature verification on the secrets dispatcher — the broker
     /// reads it too so its in-process composition can verify
-    /// secrets-dispatcher responses; see ADR-061 §"Decision" T0.5).
+    /// secrets-dispatcher responses).
     pub host_signer_public_key_path: PathBuf,
     /// Path to the audit-signer's UDS (so the broker can forward audit
-    /// subentries via the supervisor proxy). Unused in W1a — included
-    /// in the config now so W1b doesn't change the envelope shape.
+    /// subentries via the supervisor proxy). Currently unused — carried
+    /// in the config now so adding the signed envelope later doesn't
+    /// change the envelope shape.
     #[serde(default)]
     pub audit_signer_uds_path: Option<PathBuf>,
-    /// Maximum frame size in bytes. Plan 104 §"Capability gating" gate 1
-    /// caps this at 64 KiB by default.
+    /// Maximum frame size in bytes. Capped at 64 KiB by default.
     #[serde(default = "default_max_frame_bytes")]
     pub max_frame_bytes: usize,
-    /// Parse timeout in milliseconds. Plan 104 §"Capability gating" gate 1
-    /// caps this at 50ms by default.
+    /// Parse timeout in milliseconds. Capped at 50ms by default.
     #[serde(default = "default_parse_timeout_ms", with = "duration_ms")]
     pub parse_timeout: Duration,
 }
@@ -73,11 +71,11 @@ mod duration_ms {
 
 /// Parse a [`SubprocessConfig`] from a JSON byte slice.
 ///
-/// TODO(W1b / Plan 104 §H-L3.6): wrap in a signed envelope before parse;
-/// reject the config + audit `broker.subprocess.config_signature_invalid`
-/// on mismatch. v1 of the envelope ships the algorithm-identifier byte
-/// (Plan 104 §H-L4.1) so the signing key can swap (Ed25519 → P-256 on the
-/// macOS SE path → future PQC) without a hard fork.
+/// TODO: wrap in a signed envelope before parse; reject the config +
+/// audit `broker.subprocess.config_signature_invalid` on mismatch. v1
+/// of the envelope ships the algorithm-identifier byte so the signing
+/// key can swap (Ed25519 → P-256 on the macOS SE path → future PQC)
+/// without a hard fork.
 pub fn parse(bytes: &[u8]) -> Result<SubprocessConfig, serde_json::Error> {
     serde_json::from_slice(bytes)
 }

@@ -1,10 +1,10 @@
-//! Pre-spawn binary integrity check (Plan 104 §H-L3.1).
+//! Pre-spawn binary integrity check.
 //!
 //! Before [`super::spawn::ProcessSpawner::spawn`] hands control to a
 //! subprocess binary, the supervisor mmaps the file, computes its
 //! SHA-256, and verifies an Ed25519 signature against a pinned release
 //! key. Refuse-to-spawn on any mismatch; the supervisor's lifecycle
-//! code (W1b.2b.5) translates the refusal into an audit entry
+//! code translates the refusal into an audit entry
 //! `<subprocess>.signature_invalid`.
 //!
 //! Signature shape (sidecar file `<binary>.sig`):
@@ -19,20 +19,19 @@
 //!
 //! The `signer_key_id` lets the supervisor look up the verifying key in
 //! its pinned [`ReleaseKeyBundle`]; the bundle is shipped with mvmctl
-//! itself (W1b.2b.5 will wire a hard-coded build-time-injected key
-//! constant). If the `signer_key_id` isn't in the bundle, refuse —
+//! itself (a hard-coded build-time-injected key constant). If the
+//! `signer_key_id` isn't in the bundle, refuse —
 //! signature-from-untrusted-key is structurally distinct from
 //! signature-doesn't-verify.
 //!
-//! **Important — TOCTOU window remains in this PR (deferred).** This
+//! **Important — TOCTOU window remains (deferred).** This
 //! module verifies the binary's bytes *before* [`Command::spawn`] is
 //! called; the kernel then reads the same path during exec. An
 //! attacker who can swap the binary file between verify-time and
 //! exec-time wins. Closing the window requires Linux `fexecve` (or
 //! macOS `posix_spawn_file_actions_addopen` + open-then-spawn) — that
-//! work lives in a follow-on PR (likely alongside the W1b.2c cgroup +
-//! seccomp work, since both touch low-level fork plumbing).
-//! Plan 104 §H-L3.2 carries the goal; this module sets up the seam.
+//! work is deferred (likely alongside the cgroup + seccomp work, since
+//! both touch low-level fork plumbing). This module sets up the seam.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -101,9 +100,9 @@ pub enum IntegrityError {
     /// verify-time.
     #[error("integrity check: signature verification failed for {binary}")]
     SignatureMismatch { binary: PathBuf },
-    /// `sig_alg` is not one we know how to verify. W1b.2b.2 supports
+    /// `sig_alg` is not one we know how to verify. We support
     /// only Ed25519 (`SIG_ALG_ED25519` = 0x01); ECDSA-P256 reservation
-    /// is for the macOS Secure Enclave host-signer path in W8.
+    /// is for the macOS Secure Enclave host-signer path.
     #[error("integrity check: unsupported sig_alg {sig_alg} (only Ed25519 supported in W1b.2b.2)")]
     UnsupportedAlgorithm { sig_alg: u8 },
 }
@@ -117,7 +116,7 @@ pub enum IntegrityError {
 #[serde(deny_unknown_fields)]
 pub struct BinarySignature {
     /// One of [`mvm_core::security::SIG_ALG_ED25519`] or
-    /// `SIG_ALG_ECDSA_P256` (reserved for W8).
+    /// `SIG_ALG_ECDSA_P256` (reserved).
     pub sig_alg: u8,
     /// Base64-encoded signature over the binary's bytes.
     pub signature_b64: String,
@@ -170,12 +169,12 @@ impl BinarySignature {
 
 /// The set of verifying keys mvmctl trusts to sign subprocess binaries.
 ///
-/// W1b.2b.5 will wire a build-time-injected key constant (the release
-/// signer's public key, baked into the mvmctl binary). For W1b.2b.2 the
+/// A build-time-injected key constant (the release signer's public key,
+/// baked into the mvmctl binary) is the eventual source. For now the
 /// bundle is constructed at runtime — tests build their own
-/// single-key bundle; production code paths in this PR are not yet
-/// reached (the W1b.2b.5 admission-ceremony PR is what'll call into
-/// here from the supervisor's lifecycle).
+/// single-key bundle; production code paths are not yet reached (the
+/// admission ceremony in the supervisor's lifecycle is what'll call
+/// into here).
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseKeyBundle {
     keys_by_id: std::collections::HashMap<String, VerifyingKey>,
@@ -236,7 +235,7 @@ impl IntegrityChecker for SignedBinaryChecker {
     fn verify(&self, binary: &Path) -> Result<(), IntegrityError> {
         let sidecar = BinarySignature::load_for(binary)?;
 
-        // Only Ed25519 supported in W1b.2b.2. Future W8 SE / TPM path
+        // Only Ed25519 supported. Future SE / TPM path
         // adds SIG_ALG_ECDSA_P256 verification here.
         if sidecar.sig_alg != SIG_ALG_ED25519 {
             return Err(IntegrityError::UnsupportedAlgorithm {
@@ -263,7 +262,7 @@ impl IntegrityChecker for SignedBinaryChecker {
         let signature = Signature::from_bytes(&sig_arr);
 
         // mmap-read the binary. `memmap2` would be the more efficient
-        // path; W1b.2b.2 stays dep-light and reads the full file into
+        // path; we stay dep-light and read the full file into
         // memory. mvm-broker / mvm-host-signer / mvm-audit-signer
         // binaries are all small (single-digit MB), so the read is
         // cheap relative to the spawn cost.
@@ -308,7 +307,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// Keep [`File`] around as a no-op import so `cargo doc --no-deps`
 /// renders without an unused-import warning (we'll wire it in
-/// W1b.2b.2.5 when mmap-then-fexecve lands and we need a long-lived
+/// when mmap-then-fexecve lands and we need a long-lived
 /// FD for the TOCTOU close).
 #[allow(dead_code)]
 fn _unused_file_import() -> Option<File> {

@@ -1,4 +1,4 @@
-//! ADR-064 — seccomp-BPF filter via `seccompiler`.
+//! seccomp-BPF filter via `seccompiler`.
 //!
 //! `seccompiler` 0.5 expects syscall numbers (libc::SYS_*) keyed by
 //! `i64` in the rules map; it does not ship a public name-to-nr table
@@ -161,7 +161,7 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     // SeccompAction::Trap (vs Errno(EACCES)) is intentional: the
     // bridge sidecar is expected to be killed by SIGSYS on a forbidden
     // syscall, and the supervisor's BridgeRestartPolicy::HardFail
-    // (ADR-064 §Decision 6) tears the VM down. Errno would let a
+    // tears the VM down. Errno would let a
     // compromised bridge observe the rejection and retry or pivot,
     // which is exactly what we want to forbid. SECCOMP.md §"Refusal
     // posture" documents this trade-off.

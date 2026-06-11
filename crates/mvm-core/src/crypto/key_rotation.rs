@@ -1,7 +1,7 @@
-//! Plan 63 W1 — encryption-key rotation primitives.
+//! Encryption-key rotation primitives.
 //!
-//! Phase 2 needs to roll three flavors of key without re-encrypting
-//! the data they protect:
+//! These roll three flavors of key without re-encrypting the data they
+//! protect:
 //!
 //! 1. **Per-volume DEK** wrapped under a versioned master key
 //!    ([`WrappedKey`] in `crate::domain::volume`). When the master
@@ -21,9 +21,9 @@
 //!
 //! ## Scope boundary
 //!
-//! Per plan 45 §D5 / plan 63 §"Convergence rule", the actual
-//! `EncryptedBackend<B>` decorator + AEAD/AES-SIV/HKDF crypto code
-//! live in mvmd, not mvm. This module's `rewrap_dek` therefore
+//! The actual `EncryptedBackend<B>` decorator + AEAD/AES-SIV/HKDF
+//! crypto code live in mvmd, not mvm. This module's `rewrap_dek`
+//! therefore
 //! supports `WrapAlgorithm::Aes256Gcm` (mvm-side substrate via
 //! [`snapshot_crypto`]) and returns
 //! [`RotationError::UnsupportedAlgorithm`] for `WrapAlgorithm::AesKwp`
@@ -121,7 +121,7 @@ pub fn rewrap_dek(
                 wrapped: new_ct,
                 algorithm: WrapAlgorithm::Aes256Gcm,
                 // Re-wrapping changes only the master that protects the DEK,
-                // not the artifact it's bound to (plan 122 B2) — carry it.
+                // not the artifact it's bound to — carry it.
                 bound: wrapped.bound.clone(),
             })
         }
@@ -506,8 +506,8 @@ mod tests {
 
     #[test]
     fn rewrap_dek_preserves_binding() {
-        // Plan 122 B2 — re-wrapping rolls the master, not the artifact, so
-        // the DEK's binding must survive a rotation.
+        // Re-wrapping rolls the master, not the artifact, so the DEK's
+        // binding must survive a rotation.
         let dek = [0x5u8; 32];
         let m1 = random_master_key();
         let m2 = random_master_key();
@@ -539,9 +539,9 @@ mod tests {
 
     #[test]
     fn rewrap_dek_rejects_aes_kwp_with_clear_error() {
-        // AES-KWP lives mvmd-side per plan 45 §D5 — mvm-security's
-        // rewrap path must refuse with a clear error rather than
-        // silently mis-handling the envelope.
+        // AES-KWP lives mvmd-side — mvm-security's rewrap path must
+        // refuse with a clear error rather than silently mis-handling
+        // the envelope.
         let wrapped = WrappedKey {
             master_key_version: 1,
             wrapped: vec![0u8; 40], // arbitrary; rewrap won't reach decode
@@ -578,9 +578,8 @@ mod tests {
 
     #[test]
     fn rewrap_dek_randomized_100_round_trips() {
-        // Stand-in for the proptest the plan-63 spec wanted —
-        // 100 random (dek, old_master, new_master) triples must
-        // round-trip cleanly.
+        // Stand-in for a proptest: 100 random (dek, old_master,
+        // new_master) triples must round-trip cleanly.
         let mut rng = rand::thread_rng();
         for _ in 0..100 {
             let dek_len: usize = rng.gen_range(1..256);

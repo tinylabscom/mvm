@@ -73,7 +73,7 @@ pub(in crate::commands) struct Args {
 
 /// Refuse to attach if the VM's image was built sealed (dev = false /
 /// `passthru.mvm.accessible = false`). The state file is best-effort:
-/// missing or pre-W6.2 files are treated as accessible.
+/// missing or legacy files without the field are treated as accessible.
 fn enforce_accessible_gate(name: &str, force: bool) -> Result<()> {
     if force {
         return Ok(());
@@ -93,15 +93,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let command = args.command.as_deref();
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     enforce_accessible_gate(name, args.force)?;
-    // Plan 170 WS-B — a console attach (one-shot exec or interactive PTY)
-    // is guest activity; refresh idle tracking so an in-use session isn't
-    // idle-slept underneath the user. Best-effort.
+    // A console attach (one-shot exec or interactive PTY) is guest activity;
+    // refresh idle tracking so an in-use session isn't idle-slept underneath
+    // the user. Best-effort.
     touch_activity(name);
 
     if let Some(cmd) = command {
         let transport = pick_console_transport(name)?;
         let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-        // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit (verb=exec).
+        // Inbound vsock RPC audit (verb=exec).
         super::shared::emit_vsock_rpc_audit(
             name,
             &mvm_guest::vsock::GuestRequest::Exec {
@@ -110,7 +110,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 timeout_secs: None,
             },
         );
-        // send_exec_streaming does the protocol hello internally (Plan 159 WS-5 E).
+        // send_exec_streaming does the protocol hello internally.
         use std::io::Write as _;
         let terminal = mvm_guest::vsock::send_exec_streaming(
             &mut stream,
@@ -150,7 +150,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// Record a coarse guest-activity touch on the named VM (Plan 170 WS-B).
+/// Record a coarse guest-activity touch on the named VM.
 /// Best-effort: only rewrites the registry when the name is registered;
 /// any load/save hiccup is swallowed so console attach never blocks.
 fn touch_activity(name: &str) {
@@ -185,7 +185,7 @@ pub(in crate::commands) fn console_interactive(name: &str) -> Result<()> {
         &[mvm_guest::vsock::GuestCapability::Console],
     )?;
     let req = mvm_guest::vsock::GuestRequest::ConsoleOpen { cols, rows };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
     let resp = mvm_guest::vsock::send_request(&mut stream, &req)?;
 
@@ -568,8 +568,8 @@ mod accessible_gate_tests {
         });
     }
 
-    // Plan 165 WS-C / claim 15 witness: `mvmctl console` refuses to attach
-    // to a VM built from a sealed (accessible == false) production image.
+    // claim 15 witness: `mvmctl console` refuses to attach to a VM built
+    // from a sealed (accessible == false) production image.
     #[test]
     fn console_refused_on_sealed_image() {
         with_home(|_| {

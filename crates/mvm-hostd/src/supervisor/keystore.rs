@@ -1,9 +1,9 @@
-//! Keystore releaser slot. Wave 3 — attestation-gated key release.
+//! Keystore releaser slot — attestation-gated key release.
 //!
-//! Plan 37 §12.2: per-run secret grants. The supervisor releases a
-//! plan's `secrets: Vec<SecretBinding>` only after `attestation`
-//! passes (Wave 3 wires Tpm2 / SevSnp / Tdx providers). Grants are
-//! revoked on plan exit; an audit entry is emitted on grant + revoke.
+//! Per-run secret grants: the supervisor releases a plan's
+//! `secrets: Vec<SecretBinding>` only after `attestation` passes
+//! (the Tpm2 / SevSnp / Tdx providers). Grants are revoked on plan
+//! exit; an audit entry is emitted on grant + revoke.
 //!
 //! ## Three states
 //!
@@ -16,9 +16,8 @@
 //!   the mvm-hostd supervisor lift. Methods return
 //!   `NotImplemented` (distinct from `NotWired`) so operators can
 //!   tell "no bundle" from "bundle present, consumer pending".
-//! - **The real impl (mvm-hostd Wave 3)** — actually mints
-//!   `SecretGrant`s, gates on attestation, emits audit. Not in
-//!   this crate yet.
+//! - **The real impl** — actually mints `SecretGrant`s, gates on
+//!   attestation, emits audit. Not in this crate yet.
 
 use async_trait::async_trait;
 use mvm_core::plan::SecretBinding;
@@ -26,9 +25,8 @@ use thiserror::Error;
 
 /// A live secret grant — name (workload-visible) + opaque value the
 /// supervisor surfaces via the secrets-mount filesystem
-/// (`/run/mvm-secrets/<name>`). The `value` is wrapped in a
-/// zeroize-on-drop type in Wave 3; today it's a plain String stub
-/// for shape only.
+/// (`/run/mvm-secrets/<name>`). The `value` will be wrapped in a
+/// zeroize-on-drop type; today it's a plain String stub for shape only.
 #[derive(Debug, Clone)]
 pub struct SecretGrant {
     pub name: String,
@@ -56,11 +54,10 @@ pub enum KeystoreError {
 
 #[async_trait]
 pub trait KeystoreReleaser: Send + Sync {
-    /// Resolve a `SecretBinding` to a live grant. Wave 3's real impl
-    /// gates this on attestation evidence collected during launch;
-    /// the trait signature is intentionally loose so Wave 3 can pass
-    /// the attestation evidence without changing this method's
-    /// shape.
+    /// Resolve a `SecretBinding` to a live grant. The real impl gates
+    /// this on attestation evidence collected during launch; the trait
+    /// signature is intentionally loose so that evidence can be passed
+    /// without changing this method's shape.
     async fn release(&self, binding: &SecretBinding) -> Result<SecretGrant, KeystoreError>;
 
     /// Revoke a previously-released grant. Called on plan teardown.
@@ -88,7 +85,7 @@ impl KeystoreReleaser for NoopKeystoreReleaser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveKeystoreReleaser {
     /// 0 = no rotation required; the supervisor warns but accepts.
-    /// Plan 37 §12.2's per-tenant secret rotation hint.
+    /// Per-tenant secret rotation hint.
     pub rotation_interval_days: u32,
 }
 

@@ -1,10 +1,9 @@
-//! Client for `mvm-audit-signer` (the audit chain-signer subprocess;
-//! Plan 104 §H-L1.2).
+//! Client for `mvm-audit-signer` (the audit chain-signer subprocess).
 //!
 //! Two verb-specific methods: `probe` (health check used by the
 //! admission ceremony to confirm the subprocess is ready before
-//! admitting a workload — Plan 104 §H-L5.7), and `append_entry`
-//! (one typed audit entry per call). Both return a typed result.
+//! admitting a workload), and `append_entry` (one typed audit entry
+//! per call). Both return a typed result.
 
 use std::path::PathBuf;
 

@@ -1,20 +1,18 @@
-//! Parser surface for `mvm-firecracker-bridge` (Plan 113 §Task 12 +
-//! Task 15 / ADR-064).
+//! Parser surface for `mvm-firecracker-bridge`.
 //!
 //! Extracted from `src/main.rs` so the cargo-fuzz harness under
-//! `crates/mvm-firecracker-bridge/fuzz/` (Plan 113 §Task 15) can call
-//! the same serde deserializers and the same hash-verify helper the
-//! binary uses at startup. The binary's `main()` imports
-//! [`BridgeConfigJson`], [`PasstHashesFile`], and
-//! [`verify_passt_hash`] from this module verbatim — there is no
-//! parser duplication.
+//! `crates/mvm-firecracker-bridge/fuzz/` can call the same serde
+//! deserializers and the same hash-verify helper the binary uses at
+//! startup. The binary's `main()` imports [`BridgeConfigJson`],
+//! [`PasstHashesFile`], and [`verify_passt_hash`] from this module
+//! verbatim — there is no parser duplication.
 //!
 //! Both deserializer shapes carry `#[serde(deny_unknown_fields)]` so
 //! a malicious or merely sloppy producer can never inject an
 //! attacker-controlled field that a future schema bump would
 //! interpret. The fuzz target's contract is "no panic on any input,"
-//! mirroring `fuzz_supervisor_config` / `fuzz_guest_request` (ADR-002
-//! claim 5).
+//! mirroring `fuzz_supervisor_config` / `fuzz_guest_request` (claim 5
+//! vsock/config fuzzing).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -23,7 +21,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// Stdin JSON contract. Producer is Task 13's `FirecrackerBackend`.
+/// Stdin JSON contract. Producer is the `FirecrackerBackend`.
 /// All paths are absolute and already-canonicalised by the parent.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,7 +65,7 @@ pub struct BridgeConfigJson {
     pub passt_hashes_path: PathBuf,
 
     /// Raw fd number of the parent half of the passt socketpair.
-    /// Task 13's `pre_exec` `dup2`s the parent socketpair fd into
+    /// The parent's `pre_exec` `dup2`s the parent socketpair fd into
     /// this slot and clears `O_CLOEXEC` so the kernel preserves
     /// the fd across exec. The bridge takes ownership via
     /// `OwnedFd::from_raw_fd`.

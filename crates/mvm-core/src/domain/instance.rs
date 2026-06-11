@@ -11,8 +11,8 @@ use crate::pool::Role;
 // ============================================================================
 //
 // These types are the canonical mvm-core definitions for the workspace
-// volume attach surface introduced in mvmd Phase 1057/1058 (plan 32 —
-// `mvmd-integrations` memory service). They were defined locally in
+// volume attach surface introduced by mvmd's `mvmd-integrations` memory
+// service. They were defined locally in
 // `mvmd-runtime` first and are promoted here so the protocol types can
 // thread them without a circular dep. mvmd will drop its local copies
 // and re-export from `mvm_core::instance` once it bumps its mvm pin.
@@ -117,7 +117,7 @@ impl std::fmt::Display for InstanceStatus {
 }
 
 // ============================================================================
-// Runtime readiness (ADR-053 / plan 74 W2)
+// Runtime readiness
 // ============================================================================
 //
 // `InstanceStatus` is the coarse lifecycle. `InstanceReadiness` is a
@@ -137,7 +137,7 @@ impl std::fmt::Display for InstanceStatus {
 /// Closed enum: every reason is named, and drift between host and
 /// guest fails the serde `deny_unknown_fields`-equivalent path
 /// (variants must match). Detail strings carried alongside this enum
-/// in W4 are bounded and redacted — never argv / env / stdin / stdout
+/// are bounded and redacted — never argv / env / stdin / stdout
 /// / stderr / filesystem paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -291,9 +291,9 @@ pub struct InstanceState {
     /// explicitly.
     #[serde(default = "default_auto_resume")]
     pub auto_resume: bool,
-    /// Finer-grained runtime readiness (ADR-053 / plan 74 W2),
-    /// composed alongside `status`. `None` on instances created
-    /// before W2 — legacy state JSON keeps deserializing through
+    /// Finer-grained runtime readiness, composed alongside `status`.
+    /// `None` on instances created before readiness tracking existed —
+    /// legacy state JSON keeps deserializing through
     /// `#[serde(default)]`.
     #[serde(default)]
     pub readiness: Option<InstanceReadiness>,
@@ -518,9 +518,9 @@ mod tests {
         assert!(parsed.tags.is_empty());
         assert_eq!(parsed.expires_at, None);
         assert!(parsed.auto_resume);
-        // ADR-053 / plan 74 W2: readiness fields are absent on
-        // legacy records and default to `None`. The host-side launch
-        // path is what populates them on next start.
+        // Readiness fields are absent on legacy records and default
+        // to `None`. The host-side launch path is what populates them
+        // on next start.
         assert_eq!(parsed.readiness, None);
         assert_eq!(parsed.last_readiness_change_at, None);
     }
@@ -534,7 +534,7 @@ mod tests {
 
     // ---------------- InstanceReadiness / BackpressureReason ----------------
     //
-    // ADR-053 / plan 74 W2. Lock the wire shape of every readiness
+    // Lock the wire shape of every readiness
     // and backpressure variant — these become a JSON contract the
     // moment `mvmctl ls/status --json`, the SDK, and the supervisor
     // consume them, so a serde rename or variant tweak is a breaking
@@ -853,7 +853,7 @@ mod tests {
     fn test_desired_instance_backward_compat() {
         // Pre-workspace JSON (no workspace_id, volumes, workload_class)
         // must still deserialize with defaults — sandbox-class sandboxes
-        // produced before Phase 1058 land here.
+        // produced before workspace identity existed land here.
         let json = r#"{
             "instance_id": "i-legacy",
             "pool_id": "workers",

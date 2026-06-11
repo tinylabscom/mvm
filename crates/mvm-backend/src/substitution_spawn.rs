@@ -1,4 +1,4 @@
-//! Plan 129 — shared per-VM substitution-endpoint spawn/reap helpers.
+//! Shared per-VM substitution-endpoint spawn/reap helpers.
 //!
 //! One implementation behind the two workload backends that need it (QEMU
 //! slirp + Firecracker TAP), so the moat-spawn logic can't drift between
@@ -18,13 +18,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// Plan 129 Stage 2 — the per-VM egress intermediate cert lands in the guest's
-/// `mvm-secrets` drive under this filename; the S2.3 mkGuest boot step appends
-/// it to the guest trust bundle before the entrypoint runs.
+/// The per-VM egress intermediate cert lands in the guest's `mvm-secrets`
+/// drive under this filename; the mkGuest boot step appends it to the guest
+/// trust bundle before the entrypoint runs.
 pub const EGRESS_CERT_DRIVE_NAME: &str = "mvm-egress.crt";
 
-/// Plan 129 Stage 2 — the cert/key split the egress CA exists to enforce. The
-/// guest receives only `guest_cert` (the intermediate's PEM **cert**, so it can
+/// The cert/key split the egress CA exists to enforce. The guest receives
+/// only `guest_cert` (the intermediate's PEM **cert**, so it can
 /// trust host-terminated bound-host TLS); the terminator endpoint receives the
 /// cert **and** key (`endpoint_cert_pem` / `endpoint_key_pem`) to mint per-SNI
 /// leaves. The intermediate key never enters the guest secrets drive — the same
@@ -51,8 +51,8 @@ impl std::fmt::Debug for EgressTlsDelivery {
     }
 }
 
-/// Plan 129 Stage 2 (S2.2) — mint the per-VM name-constrained intermediate
-/// (loading/initialising the long-lived host egress CA under `ca_dir`) and split
+/// Mint the per-VM name-constrained intermediate (loading/initialising the
+/// long-lived host egress CA under `ca_dir`) and split
 /// it: cert to the guest secrets drive, cert+key to the terminator endpoint. A
 /// pure, unit-testable helper; the boot path calls it when the admitted plan
 /// carries secrets and threads the result into `create_dev_secrets_drive` (guest)
@@ -77,7 +77,7 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
     })
 }
 
-/// Plan 129 — PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
+/// PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
 /// file holding the `(guest var, placeholder)` env pairs it minted (the invoke
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when
 /// the admitted plan carries secret bindings.
@@ -121,13 +121,13 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
     bail!("could not locate the {BIN} binary (set MVM_SUBSTITUTION_ENDPOINT_PATH)")
 }
 
-/// Plan 129 — spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
+/// Spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
 /// plan's secret bindings on stdin, reads back the minted `(guest var,
 /// placeholder)` handshake line, and persists it to the per-VM substitution env
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
 /// endpoint binds a host AF_VSOCK listener on `SUBSTITUTION_PORT` (the guest→
 /// host substitution channel); when `terminator_listen` is `Some`, it *also*
-/// runs the transparent HTTP terminator on that host TCP addr (Task 4) — the FC
+/// runs the transparent HTTP terminator on that host TCP addr — the FC
 /// nft TAP REDIRECT steers guest :80 there. Detached via `setsid` so it
 /// outlives `mvmctl up`; the stop path reaps it via [`SUBST_PID_FILE`]. The real
 /// secret values never leave the endpoint's address space — only the opaque
@@ -149,14 +149,14 @@ pub fn spawn_substitution_endpoint(
         "transport": { "kind": "vsock", "port": mvm_guest::vsock::SUBSTITUTION_PORT },
     });
     if let Some(addr) = terminator_listen {
-        // `EndpointConfig.terminator_listen: Option<SocketAddr>` (Task 4):
+        // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
         // present ⇒ the endpoint runs the host TCP terminator concurrently with
         // the vsock substitution transport. `SocketAddr`'s Display ("ip:port")
         // is the wire form `serde(SocketAddr)` round-trips.
         cfg["terminator_listen"] = serde_json::Value::String(addr.to_string());
     }
     if let Some((cert_pem, key_pem)) = tls_intermediate {
-        // `EndpointConfig.tls_intermediate` (Stage 2): the per-VM name-constrained
+        // `EndpointConfig.tls_intermediate`: the per-VM name-constrained
         // intermediate the `https` terminator mints per-SNI leaves under. The
         // KEY only ever reaches this host endpoint — never the guest.
         cfg["tls_intermediate"] = serde_json::json!({
@@ -287,7 +287,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── Plan 129 Stage 2 (S2.2): the cert-to-guest / key-to-endpoint split ──
+    // ── the cert-to-guest / key-to-endpoint split ──
 
     // The whole point of the egress CA: the guest may trust the per-VM
     // intermediate cert (to accept host-terminated bound-host TLS), but the

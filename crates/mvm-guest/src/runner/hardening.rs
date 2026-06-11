@@ -4,9 +4,8 @@
 //! The single load-bearing primitive is `prctl(PR_SET_DUMPABLE, 0)` on
 //! Linux: combined with mvm's agent-side `RLIMIT_CORE = 0`, this is
 //! belt-and-suspenders against in-flight payload bytes hitting a
-//! coredump if the runtime or the interpreter crashes (ADR-0009 prod
-//! invariants). The seccomp tier is applied agent-side per ADR-007 §6;
-//! the runtime does not duplicate it.
+//! coredump if the runtime or the interpreter crashes. The seccomp
+//! tier is applied agent-side; the runtime does not duplicate it.
 //!
 //! On non-Linux hosts (the cargo-test path during local development on
 //! macOS) the `prctl` shim is a no-op; tests assert the function
@@ -48,8 +47,8 @@ mod platform {
 
 /// Apply prod-mode hardening before the first stdin byte is read.
 /// Currently a single primitive — the entry point exists so future
-/// invariants (e.g. a per-language seccomp tier set guest-side as a
-/// follow-up to plan 0003) can land without touching `main.rs`.
+/// invariants (e.g. a per-language seccomp tier set guest-side) can
+/// land without touching `main.rs`.
 pub fn apply_prod_hardening() -> std::io::Result<()> {
     platform::disable_coredump()
 }

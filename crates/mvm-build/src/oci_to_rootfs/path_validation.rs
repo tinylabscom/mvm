@@ -9,8 +9,8 @@
 //!   UNC paths). OCI rootfs paths are POSIX; anything else is a
 //!   sign of a malicious or malformed tar.
 //! - Null bytes in any component.
-//! - Components named `mvm` at the top level — reserved by
-//!   ADR-051 for the runtime overlay disk's mount point.
+//! - Components named `mvm` at the top level — reserved for the
+//!   runtime overlay disk's mount point.
 //!
 //! Symlink targets get an additional check via
 //! [`validate_symlink_target`]: the target, resolved relative to
@@ -22,9 +22,8 @@
 use crate::oci_to_rootfs::error::OciUnpackError;
 use std::path::{Component, Path, PathBuf};
 
-/// Top-level path prefix reserved by ADR-051 for the mvm runtime
-/// overlay disk. OCI images that ship content at or under this
-/// prefix are rejected.
+/// Top-level path prefix reserved for the mvm runtime overlay disk.
+/// OCI images that ship content at or under this prefix are rejected.
 pub(crate) const RESERVED_PREFIX: &str = "mvm";
 
 /// Normalize a tar entry's `header.path()` into a relative
@@ -94,9 +93,8 @@ pub(crate) fn normalize_entry_path(raw: &Path) -> Result<PathBuf, OciUnpackError
 }
 
 /// Reject entries whose top-level component is the reserved
-/// `mvm` prefix (ADR-051). The check applies to the normalized
-/// path; an entry like `./mvm/x` normalizes to `mvm/x` and is
-/// caught.
+/// `mvm` prefix. The check applies to the normalized path; an
+/// entry like `./mvm/x` normalizes to `mvm/x` and is caught.
 fn check_reserved_prefix(clean: &Path, raw: &Path) -> Result<(), OciUnpackError> {
     if let Some(first) = clean.components().next()
         && let Component::Normal(c) = first

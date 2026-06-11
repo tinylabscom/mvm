@@ -4,7 +4,7 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 
-# Detach from the parent workspace — `crates/mvm-libkrun/fuzz` is
+# Detach from the parent workspace — this fuzz dir is
 # listed under `workspace.exclude` in the repo root Cargo.toml because
 # `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
 # (which injects sanitizer + linker flags). An empty `[workspace]`
@@ -28,14 +28,11 @@ path = ".."
 # would force libkrun + libkrunfw onto the fuzz runner.
 default-features = false
 
-# Plan 88 W6 — fuzz the host-side `SupervisorConfig` JSON parser.
+# Fuzz the host-side `SupervisorConfig` JSON parser.
 # `mvm-libkrun-supervisor`'s `main()` reads attacker-influenced JSON
 # on stdin (the calling mvmctl writes it, but the bytes traverse a
 # pipe boundary the supervisor must defend). Analog of
 # `fuzz_guest_request`: harness goal is "never panic on any input."
-# See `crates/mvm-libkrun/fuzz/fuzz_targets/fuzz_supervisor_config.rs`
-# for the harness body and ADR-055 §"New untrusted-input surfaces"
-# for the threat model.
 [[bin]]
 name = "fuzz_supervisor_config"
 path = "fuzz_targets/fuzz_supervisor_config.rs"
@@ -43,7 +40,7 @@ test = false
 doc = false
 bench = false
 
-# Plan 118 WS-1 1a — fuzz the `SupervisorAttachConfig` decoder, the only
+# Fuzz the `SupervisorAttachConfig` decoder, the only
 # attacker-reachable-post-spawn surface (the prelaunched supervisor reads it
 # off a same-uid control UDS). Goal: never panic on any input.
 [[bin]]

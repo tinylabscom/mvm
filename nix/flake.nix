@@ -32,19 +32,19 @@
   #   memory_mib = 256
   #
   # The `mkGuest` library is being ported from the previous iteration
-  # in a follow-up wave (Phase 1 W5+); it composes microvm.nix's
+  # in a follow-up wave; it composes microvm.nix's
   # NixOS module with mvm's security overlay (per-service uids,
   # seccomp tier, dm-verity, read-only `/etc`). The `lib` attribute
   # below is the placeholder that future user flakes will consume.
   #
-  # ── Why microvm.nix (ADR-013) ────────────────────────────────────────
+  # ── Why microvm.nix ──────────────────────────────────────────────────
   #
   # microvm.nix abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm,
   # kvmtool, and stratovirt as a NixOS module — so adding a hypervisor
   # is a config change here, not a kernel rewrite. Pinned by hash in
   # flake.lock; CI re-audits on every bump (`xtask audit-flake`).
   #
-  # Fallback (named in ADR-013): if a per-bump audit of microvm.nix
+  # Fallback: if a per-bump audit of microvm.nix
   # surfaces a security regression we can't accept, revert to the
   # previous iteration's hand-rolled `nix/` tree at `../mvm/nix/`.
   #
@@ -92,7 +92,7 @@
         # microVM images build only on Linux — no macOS/Darwin output.
         # Cross-builds from macOS need a Linux builder (linux-builder
         # via nix-darwin, or remote nix-daemon). Documented in
-        # `specs/runbooks/cross-platform-install.md` (Phase 5).
+        # `specs/runbooks/cross-platform-install.md`.
         "x86_64-linux"
         "aarch64-linux"
       ];

@@ -1,6 +1,6 @@
 //! `mvmctl audit posture` — security posture self-test.
 //!
-//! Read-only diagnostic that reports which plan-65 + plan-7a
+//! Read-only diagnostic that reports which host-hardening
 //! mitigations are active on the calling host. Operators run it
 //! to confirm their config without reading source; monitoring
 //! systems run it as a configuration-drift check.
@@ -21,7 +21,7 @@
 //! - **Overlay root** — `~/.mvm/overlays/`: exists? Mode 0700?
 //!   How many tenants?
 //! - **Secret store** — `~/.mvm/secrets/`: exists? Mode 0700?
-//! - **TLS minimum** — pinned to TLS 1.3 (plan 65 W7).
+//! - **TLS minimum** — pinned to TLS 1.3.
 //!
 //! ## What it does NOT do
 //!
@@ -405,8 +405,8 @@ fn check_secret_store(home: Option<&std::path::Path>) -> PostureCheck {
 }
 
 fn check_tls_minimum() -> PostureCheck {
-    // The constant is compile-time-pinned at TLS 1.3 (plan 65
-    // W7). This check is a "config did not regress" signal — the
+    // The constant is compile-time-pinned at TLS 1.3. This check is
+    // a "config did not regress" signal — the
     // unit test `w7_min_tls_version_is_pinned_at_1_3` would have
     // caught a regression at compile time, but the operator-
     // visible report mentioning it adds confidence.

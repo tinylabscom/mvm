@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// Builder VM name. Carried over from the W7.2 Lima rename
-/// (`mvm` → `mvm-builder`); ADR-013 / plan-60 retired Lima itself,
-/// but the name still tags any future Linux builder VM (the
-/// libkrun-as-Linux-builder follow-up in W7.x.2). The bridge
-/// name `br-mvm`, log filter `RUST_LOG=mvm`, path `/var/lib/mvm/`,
-/// OCI label `mvm`, and Apple Container guest hostname `mvm-dev`
-/// are deliberately *not* this constant — they exist on every host
-/// regardless of whether a builder VM is running.
+/// Builder VM name. Carried over from the Lima rename
+/// (`mvm` → `mvm-builder`); Lima itself is retired, but the name
+/// still tags any future Linux builder VM (the libkrun-as-Linux-builder
+/// follow-up). The bridge name `br-mvm`, log filter `RUST_LOG=mvm`,
+/// path `/var/lib/mvm/`, OCI label `mvm`, and Apple Container guest
+/// hostname `mvm-dev` are deliberately *not* this constant — they exist
+/// on every host regardless of whether a builder VM is running.
 pub const VM_NAME: &str = "mvm-builder";
 pub const API_SOCKET: &str = "/tmp/firecracker.socket";
 pub const TAP_DEV: &str = "tap0";

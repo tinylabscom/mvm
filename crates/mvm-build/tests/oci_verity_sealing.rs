@@ -11,7 +11,7 @@
 //!    Contributor environments without `cryptsetup` see a one-line
 //!    note rather than a false failure.
 //! 3. `which::which("mke2fs")` — the round-trip tests need to
-//!    produce a real ext4 first (via W1.3b's `materialize_to_ext4`),
+//!    produce a real ext4 first (via `materialize_to_ext4`),
 //!    then seal it. CI's Linux KVM lane has both binaries.
 
 #![cfg(target_os = "linux")]
@@ -124,14 +124,14 @@ fn seal_is_byte_deterministic_for_identical_rootfs_bytes() {
         return;
     }
 
-    // ADR-050 §"Caching" — byte-identical input must produce the
-    // same root hash and the same sidecar bytes. The per-digest
-    // verity cache depends on this invariant.
+    // Byte-identical input must produce the same root hash and the
+    // same sidecar bytes. The per-digest verity cache depends on this
+    // invariant.
     //
     // We deliberately build one ext4 and copy it (not call
     // `make_small_ext4()` twice). mke2fs `-d` is not guaranteed
     // to produce byte-identical output across two independent
-    // staging tempdirs — see the W1.3b test of the same name
+    // staging tempdirs — see the materialize test of the same name
     // for the readdir/dir_index explanation — so two separate
     // builds would fail the test's *precondition* (identical
     // rootfs bytes), masking what the test actually wants to
@@ -174,10 +174,9 @@ fn seal_is_byte_deterministic_for_identical_rootfs_bytes() {
 
 #[test]
 fn seal_followed_by_veritysetup_verify_returns_zero() {
-    // The runbook (`specs/runbooks/w3-verified-boot.md` Step 2)
-    // says the canonical post-condition for a Nix-built verity
-    // artifact is `veritysetup verify` returning 0. Our OCI-path
-    // sidecar must meet the same bar.
+    // The canonical post-condition for a Nix-built verity artifact is
+    // `veritysetup verify` returning 0. Our OCI-path sidecar must meet
+    // the same bar.
     if skip_if_no_veritysetup() || skip_if_no_mke2fs() {
         return;
     }
@@ -202,9 +201,8 @@ fn seal_followed_by_veritysetup_verify_returns_zero() {
 fn seal_detects_post_format_rootfs_tamper() {
     // If anyone flips bytes in the rootfs after sealing,
     // `veritysetup verify` against the same root hash must
-    // reject the artifact. This is the load-bearing R3 / claim 3
-    // property — the rootfs is sealed to the hash, not to a
-    // mutable filename.
+    // reject the artifact. This is the load-bearing claim 3 property
+    // — the rootfs is sealed to the hash, not to a mutable filename.
     if skip_if_no_veritysetup() || skip_if_no_mke2fs() {
         return;
     }

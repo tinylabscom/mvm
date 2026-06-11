@@ -42,12 +42,12 @@ pub const HELPER_ALLOWLIST: &[&str] = &[
     "mvm.hook",
     "mvm.addons.database",
     "mvm.addons.service",
-    // Plan 73 Followup D — wires the ADR-047 app-deps pipeline through
-    // the static decorator path. The runtime SDK helpers landed in
-    // `mvm_sdk::ctor::deps`; the decorator parser needs them in the
-    // allowlist so `@mvm.app(dependencies=mvm.python_deps("uv.lock"))`
-    // round-trips through `mvmctl compile <script>` into a launch.json
-    // the install pipeline (Followup B.2) can drive.
+    // Wires the app-deps pipeline through the static decorator path. The
+    // runtime SDK helpers live in `mvm_sdk::ctor::deps`; the decorator
+    // parser needs them in the allowlist so
+    // `@mvm.app(dependencies=mvm.python_deps("uv.lock"))` round-trips
+    // through `mvmctl compile <script>` into a launch.json the install
+    // pipeline can drive.
     "mvm.python_deps",
     "mvm.node_deps",
 ];
@@ -194,14 +194,14 @@ pub fn lower_to_workload(
     // surface until the follow-up wires them in.
     let _ = kwargs.remove("addons");
 
-    // Plan 73 Followup D — `dependencies=mvm.python_deps(...)` /
+    // `dependencies=mvm.python_deps(...)` /
     // `dependencies=mvm.node_deps(...)` lowering. The decorator path is
-    // the user-facing entry into the ADR-047 install pipeline: the
-    // emitted launch.json carries a `dependencies` field that the
-    // builder VM consumes (Followup B.2) to install hash-pinned deps
-    // into a sealed volume. Defaults to `Dependencies::None` (matches
-    // the imperative SDK's `mvm.no_deps()`) so workloads that don't
-    // declare deps keep working unchanged.
+    // the user-facing entry into the install pipeline: the emitted
+    // launch.json carries a `dependencies` field that the builder VM
+    // consumes to install hash-pinned deps into a sealed volume.
+    // Defaults to `Dependencies::None` (matches the imperative SDK's
+    // `mvm.no_deps()`) so workloads that don't declare deps keep working
+    // unchanged.
     let dependencies = match kwargs.remove("dependencies") {
         Some(v) => Some(helper_to_dependencies(v, path, decorator_line)?),
         None => Some(Dependencies::None),
@@ -494,10 +494,9 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
 }
 
 /// Lower `dependencies=mvm.python_deps(lockfile=..., tool=...)` /
-/// `dependencies=mvm.node_deps(...)` to [`Dependencies`]. Plan 73
-/// Followup D wires this into the static decorator path so the
-/// ADR-047 install pipeline has a user-facing entry that doesn't
-/// require the imperative SDK runtime.
+/// `dependencies=mvm.node_deps(...)` to [`Dependencies`]. Wires the
+/// install pipeline into the static decorator path so it has a
+/// user-facing entry that doesn't require the imperative SDK runtime.
 fn helper_to_dependencies(v: Value, path: &Path, line: usize) -> Result<Dependencies, ParseError> {
     let Value::Helper {
         name, mut kwargs, ..
@@ -638,7 +637,7 @@ fn helper_to_env_value(v: Value, path: &Path, line: usize) -> Result<EnvValue, P
                 }
             };
             let mount_var = pop_string_kwarg(&mut kwargs, "var");
-            // Plan 129 A1 — the reference declares HOW (auth_type) and WHERE
+            // The reference declares HOW (auth_type) and WHERE
             // (allowed_hosts) the secret is used on egress. `type` is required
             // (no sensible default); an empty `hosts` is caught at validation as
             // an unbound secret (claim 12), so it stays optional here.

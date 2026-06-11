@@ -1,5 +1,5 @@
 //! `NetworkProvider` — the provisioning + policy + teardown seam for one
-//! VM's network (plan 123 Phase A / ADR-064 / ADR-066).
+//! VM's network.
 //!
 //! This crate is the **low seam**: it owns the trait and the policy/registry
 //! types, nothing that needs the in-VM shell. The concrete TAP / bridge /
@@ -16,8 +16,7 @@
 //! What this crate does **not** yet own: the actual relocation of the
 //! firewall / L4 / L7 / packet-observer machinery out of `mvm-hostd` (those
 //! carry claims-10/12/13 witnesses and move under their own follow-ups), and
-//! the egress-proxy substitution/scan seams plan 129 hangs on. See plan 123
-//! Phase A tasks A1-step-2 / A3 / A4.
+//! the egress-proxy substitution/scan seams.
 
 pub mod enforcement;
 pub mod provider;
