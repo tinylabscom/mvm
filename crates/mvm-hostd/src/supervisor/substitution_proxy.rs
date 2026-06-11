@@ -282,6 +282,9 @@ pub struct SubstitutionService {
     /// terminator mints per-SNI leaves under. `None` ⇒ no TLS leg (Stage 1b
     /// `http`-only). Set from `EndpointConfig.tls_intermediate` at assemble.
     tls_intermediate: Option<Arc<mvm_core::crypto::egress_ca::VmIntermediate>>,
+    /// Per-destination redaction policy. Default = curated baseline (entropy +
+    /// names off); a profile opts a destination into entropy/name redaction.
+    redaction_policy: mvm_core::policy::RedactionPolicy,
 }
 
 impl SubstitutionService {
@@ -297,7 +300,16 @@ impl SubstitutionService {
             redactor: RedactingSubstitution::with_default_rules(),
             recorder: None,
             tls_intermediate: None,
+            redaction_policy: mvm_core::policy::RedactionPolicy::default(),
         }
+    }
+
+    /// Attach a per-destination redaction policy. Default leaves entropy + names
+    /// off everywhere (curated-only baseline); a policy opts specific
+    /// destinations into entropy/name redaction.
+    pub fn with_redaction_policy(mut self, policy: mvm_core::policy::RedactionPolicy) -> Self {
+        self.redaction_policy = policy;
+        self
     }
 
     /// Attach a chain-signed audit recorder; each substitution then emits a
@@ -648,6 +660,32 @@ impl SubstitutionService {
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        // Resolve the per-destination redaction action; clone so it outlives
+        // `req` (which `redact_outbound` then `prepare_request` consume).
+        let action = destination
+            .as_deref()
+            .map(|d| {
+                crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
+            })
+            .unwrap_or_default();
+        let redaction_active = !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
+            || !matches!(action.names, mvm_core::policy::NameMode::Off);
+        if redaction_active {
+            // Fail closed: a body we can't scan in cleartext is a silent bypass.
+            // A compressed body, or one over the scan cap, is refused before any
+            // forward leg runs.
+            let compressed = req
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"));
+            if compressed || req.body.len() as u64 > mvm_core::policy::DEFAULT_BODY_CAP_BYTES {
+                return WireResponse::Refused {
+                    message: "egress redaction enabled for destination but body is \
+                              compressed or over the scan cap; refusing (fail-closed)"
+                        .into(),
+                };
+            }
+        }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
         let carried_placeholder = req
@@ -659,7 +697,7 @@ impl SubstitutionService {
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
-        let (req, redaction_hits) = self.redact_outbound(req);
+        let (req, redaction_hits) = self.redact_outbound(req, &action);
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
@@ -700,18 +738,22 @@ impl SubstitutionService {
     /// placeholder is not secret-shaped); every other header value and the body
     /// are scrubbed. Returns the rewritten request plus the categories that
     /// fired, for the claim-13 audit. Plan 129 Phase E / ADR-067.
-    fn redact_outbound(&self, mut req: ProxyRequest) -> (ProxyRequest, RedactionHits) {
+    fn redact_outbound(
+        &self,
+        mut req: ProxyRequest,
+        action: &mvm_core::policy::RedactionAction,
+    ) -> (ProxyRequest, RedactionHits) {
         let mut hits = RedactionHits::default();
         for (_, value) in req.headers.iter_mut() {
             if find_placeholder(value).is_some() {
                 continue; // declared placeholder — substituted next, never masked.
             }
-            if let Some((masked, h)) = self.redactor.redact_bytes(value.as_bytes()) {
+            if let Some((masked, h)) = self.redactor.redact_bytes_for(value.as_bytes(), action) {
                 *value = String::from_utf8_lossy(&masked).into_owned();
                 hits.merge(h);
             }
         }
-        if let Some((masked, h)) = self.redactor.redact_bytes(&req.body) {
+        if let Some((masked, h)) = self.redactor.redact_bytes_for(&req.body, action) {
             req.body = masked;
             hits.merge(h);
         }
@@ -728,12 +770,18 @@ impl SubstitutionService {
         let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
             return;
         };
-        let mut categories: Vec<&str> = hits
+        let mut categories: Vec<String> = hits
             .secrets
             .iter()
             .chain(hits.pii.iter())
-            .copied()
+            .map(|s| s.to_string())
             .collect();
+        if hits.entropy > 0 {
+            categories.push("entropy".into());
+        }
+        if hits.names > 0 {
+            categories.push("name".into());
+        }
         categories.sort_unstable();
         categories.dedup();
         if let Err(e) = emit_secret_redacted(recorder, dest, &categories.join(",")).await {
@@ -1042,6 +1090,21 @@ mod server_tests {
         Arc<MockForwarder>,
         tempfile::TempDir,
     ) {
+        service_with_policy(value, hosts, None)
+    }
+
+    /// Like [`service_with`], but attaches `policy` (when `Some`) so a test can
+    /// exercise the destination-aware redaction / fail-closed gate.
+    fn service_with_policy(
+        value: &str,
+        hosts: &[&str],
+        policy: Option<mvm_core::policy::RedactionPolicy>,
+    ) -> (
+        Arc<SubstitutionService>,
+        String,
+        Arc<MockForwarder>,
+        tempfile::TempDir,
+    ) {
         let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path());
         store
@@ -1058,12 +1121,11 @@ mod server_tests {
         let forwarder = Arc::new(MockForwarder {
             seen: Mutex::new(None),
         });
-        let service = Arc::new(SubstitutionService::new(
-            Arc::new(reg),
-            resolver,
-            forwarder.clone(),
-        ));
-        (service, ph, forwarder, dir)
+        let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder.clone());
+        if let Some(policy) = policy {
+            service = service.with_redaction_policy(policy);
+        }
+        (Arc::new(service), ph, forwarder, dir)
     }
 
     /// End-to-end over a **real AF_VSOCK** connection (Linux vsock loopback,
@@ -1349,6 +1411,51 @@ mod server_tests {
 
         assert!(matches!(resp, WireResponse::Refused { .. }));
         // claim 12: an unbound destination never reaches the forward leg.
+        assert!(forwarder.seen.lock().unwrap().is_none());
+        server.abort();
+    }
+
+    /// Fail-closed: a `content-encoding`-bearing request to a destination opted
+    /// into entropy redaction can't be scanned in cleartext, so it's refused and
+    /// never forwarded — a body we can't read is a silent bypass.
+    #[tokio::test]
+    async fn compressed_body_to_redaction_destination_is_refused() {
+        use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
+        let policy = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![RedactionProfile {
+                host: "api.openai.com".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+        };
+        let (service, ph, forwarder, dir) =
+            service_with_policy("sk-live-zzz", &["api.openai.com"], Some(policy));
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![
+                ("content-encoding".into(), "gzip".into()),
+                ("authorization".into(), format!("Bearer {ph}")),
+            ],
+            body_b64: B64.encode(b"\x1f\x8b compressed bytes"),
+        };
+        write_json_frame(&mut client, &wire).await.unwrap();
+        let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+        assert!(
+            matches!(resp, WireResponse::Refused { .. }),
+            "compressed body must fail closed: {resp:?}"
+        );
+        // The unscannable request never reached the forward leg.
         assert!(forwarder.seen.lock().unwrap().is_none());
         server.abort();
     }
