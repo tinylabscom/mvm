@@ -919,3 +919,192 @@ mod tests {
         assert!(granted.permits(&Proto::Udp, ip("8.8.8.8"), 53));
     }
 }
+
+#[cfg(test)]
+mod property {
+    use super::*;
+    use crate::policy::dns_pin::{DnsPin, DnsPinRegistry};
+    use crate::policy::policies::L4RuleSpec;
+    use crate::policy::resolver::EffectivePolicy;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    const NOW: &str = "2026-06-11T00:00:00Z";
+
+    /// Deterministic xorshift64 — no rand dep at this layer.
+    struct Xs(u64);
+
+    impl Xs {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn random_v4(rng: &mut Xs) -> Ipv4Addr {
+        Ipv4Addr::from(u32::try_from(rng.next() & 0xFFFF_FFFF).unwrap())
+    }
+
+    /// One generated policy + pins. L4 rules use random v4 nets;
+    /// allow-list hosts get 1–3 pinned IPs each.
+    fn generate(rng: &mut Xs) -> (EffectivePolicy, DnsPinRegistry) {
+        let mut eff = EffectivePolicy::default();
+        let mut pins = DnsPinRegistry::new();
+        // ~1 in 16 policies exercise the open kill-switch.
+        if rng.below(16) == 0 {
+            eff.egress.mode = Some("open".to_string());
+            return (eff, pins);
+        }
+        for _ in 0..rng.below(4) {
+            let prefix = 8 + u8::try_from(rng.below(25)).unwrap();
+            let lo = u16::try_from(rng.below(1024)).unwrap();
+            let hi = lo.saturating_add(u16::try_from(rng.below(2048)).unwrap());
+            eff.network.l4.push(L4RuleSpec {
+                proto: if rng.below(2) == 0 { "tcp" } else { "udp" }.to_string(),
+                dst_cidr: format!("{}/{prefix}", random_v4(rng)),
+                port_lo: lo,
+                port_hi: hi,
+            });
+        }
+        for i in 0..rng.below(3) {
+            let host = format!("h{i}.example.test");
+            let ips: Vec<IpAddr> = (0..1 + rng.below(3))
+                .map(|_| IpAddr::V4(random_v4(rng)))
+                .collect();
+            pins.add(DnsPin::at(
+                &host,
+                ips,
+                "2026-06-10T00:00:00Z",
+                "2027-01-01T00:00:00Z",
+            ));
+            let port = u16::try_from(rng.below(9000)).unwrap();
+            eff.egress.allow_list.push((host, port));
+        }
+        (eff, pins)
+    }
+
+    /// Probes biased to decision edges: for every canonical rule,
+    /// an inside hit, a port-boundary miss, and a proto miss; plus
+    /// the fixed mandatory-deny set and pure-random probes.
+    fn probes(rng: &mut Xs, eg: &CanonicalEgress) -> Vec<(Proto, IpAddr, u16)> {
+        let mut out: Vec<(Proto, IpAddr, u16)> = vec![
+            (Proto::Tcp, "169.254.169.254".parse().unwrap(), 443),
+            (Proto::Tcp, "127.0.0.1".parse().unwrap(), 80),
+            (Proto::Udp, "100.64.0.1".parse().unwrap(), 53),
+            (Proto::Tcp, "::1".parse().unwrap(), 443),
+        ];
+        if let CanonicalEgress::Rules(rules) = eg {
+            for r in rules {
+                out.push((r.proto, r.net.network(), r.port_lo));
+                out.push((r.proto, r.net.network(), r.port_hi.wrapping_add(1)));
+                out.push((
+                    match r.proto {
+                        Proto::Tcp => Proto::Udp,
+                        Proto::Udp => Proto::Tcp,
+                    },
+                    r.net.network(),
+                    r.port_lo,
+                ));
+            }
+        }
+        for _ in 0..32 {
+            out.push((
+                if rng.below(2) == 0 {
+                    Proto::Tcp
+                } else {
+                    Proto::Udp
+                },
+                IpAddr::V4(random_v4(rng)),
+                u16::try_from(rng.below(65536)).unwrap(),
+            ));
+        }
+        out
+    }
+
+    /// The cross-projection consistency witness: for every
+    /// generated policy, the canonical (CIDR-keyed) and WASI
+    /// (hostname-keyed) projections either refuse identically or
+    /// decide identically on every probe — and no projection ever
+    /// admits a mandatory-deny address. Agreement between the two
+    /// independently-coded walks is the anti-drift guarantee the
+    /// seam exists to provide.
+    #[test]
+    fn cross_projection_consistency_property() {
+        let mut rng = Xs(0x184_0b5e55ed);
+        let mut policies_checked = 0u32;
+        let mut probes_checked = 0u32;
+        for _ in 0..512 {
+            let (eff, pins) = generate(&mut rng);
+            let canonical = canonicalize_effective(&eff, &pins, NOW);
+            let wasi = to_wasi_grants(&eff, &pins, NOW);
+            match (canonical, wasi) {
+                (Err(c), Err(w)) => {
+                    // Identical refusal ladder: same variant.
+                    assert_eq!(
+                        std::mem::discriminant(&c),
+                        std::mem::discriminant(&w),
+                        "refusal drift: canonical={c:?} wasi={w:?}"
+                    );
+                }
+                (Ok(eg), Ok(w)) => {
+                    policies_checked += 1;
+                    for (proto, addr, port) in probes(&mut rng, &eg) {
+                        probes_checked += 1;
+                        let c = eg.permits(&proto, addr, port);
+                        let ww = wasi_allows(&w, &proto, addr, port);
+                        assert_eq!(
+                            c, ww,
+                            "projection drift on {proto:?} {addr}:{port}\n eff={eff:?}"
+                        );
+                        if is_mandatory_deny(addr) {
+                            assert!(!c, "mandatory-deny admitted: {addr}");
+                        }
+                    }
+                }
+                (c, w) => panic!("one projection refused, the other admitted: {c:?} / {w:?}"),
+            }
+        }
+        // Generator sanity: the property must have exercised real
+        // grants, not 512 vacuous deny-alls.
+        assert!(
+            policies_checked > 200,
+            "only {policies_checked} policies admitted"
+        );
+        assert!(
+            probes_checked > 5_000,
+            "only {probes_checked} probes checked"
+        );
+    }
+
+    /// Clamp soundness over the same generator: the granted set
+    /// never admits a probe the resolved set denies.
+    #[test]
+    fn clamp_never_widens_property() {
+        let mut rng = Xs(0x184_c1a3b);
+        for _ in 0..256 {
+            let (req_eff, req_pins) = generate(&mut rng);
+            let (res_eff, res_pins) = generate(&mut rng);
+            let (Ok(requested), Ok(resolved)) = (
+                canonicalize_effective(&req_eff, &req_pins, NOW),
+                canonicalize_effective(&res_eff, &res_pins, NOW),
+            ) else {
+                continue;
+            };
+            let granted = clamp(&requested, &resolved);
+            for (proto, addr, port) in probes(&mut rng, &granted) {
+                if granted.permits(&proto, addr, port) {
+                    assert!(
+                        resolved.permits(&proto, addr, port),
+                        "clamp widened: {proto:?} {addr}:{port}"
+                    );
+                }
+            }
+        }
+    }
+}
