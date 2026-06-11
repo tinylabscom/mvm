@@ -34,8 +34,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let pool = ThinPoolImpl::new(PoolConfig::default(), backend);
 
     // Outcome of one `storage gc` attempt. Drives both the operator-
-    // facing printout and the audit `detail` field. Plan 37 §6 says
-    // every `--apply` attempt emits one audit record regardless of
+    // facing printout and the audit `detail` field. Every `--apply`
+    // attempt emits one audit record regardless of
     // outcome — pool-unavailable and empty-pool are no-op branches of
     // the same commit path, not free passes out of audit.
     enum Outcome {

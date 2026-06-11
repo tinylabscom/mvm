@@ -1,4 +1,4 @@
-//! Functional integration test for `mvm-seccomp-apply` (ADR-002 §W2.4).
+//! Functional integration test for `mvm-seccomp-apply`.
 //!
 //! The unit tests in `mvm-security::seccomp` cover tier *structure*
 //! (cumulative-subset, no duplicates, manifest roundtrip). They don't

@@ -51,19 +51,18 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/mvm/agent.json";
 const DEFAULT_BUSY_THRESHOLD: f64 = 0.1;
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 5;
 
-// SDK port Phase 10b / Plan 73 Followup E — baked-in lifecycle hook
-// paths. The Nix factory at `nix/lib/factories/mkFunctionService.nix`
-// always emits these scripts (no-op `:` body when the user declared
-// no commands for the phase). The agent only needs to know the
-// canonical path; missing-script fall-through is handled inside
-// `lifecycle_hooks` defensively.
+// Baked-in lifecycle hook paths. The Nix factory at
+// `nix/lib/factories/mkFunctionService.nix` always emits these
+// scripts (no-op `:` body when the user declared no commands for
+// the phase). The agent only needs to know the canonical path;
+// missing-script fall-through is handled inside `lifecycle_hooks`
+// defensively.
 const AFTER_START_HOOK: &str = "/etc/mvm/hooks/after_start.sh";
 const BEFORE_STOP_HOOK: &str = "/etc/mvm/hooks/before_stop.sh";
 
 /// Maximum time to wait for the after_start probe to exit 0 before
-/// the agent gives up. Mirrors the value Plan 73 Followup E §"Tasks"
-/// calls out (30s). On timeout, the pool stays NotReady and dispatch
-/// refuses fast.
+/// the agent gives up (30s). On timeout, the pool stays NotReady and
+/// dispatch refuses fast.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Sleep between readiness probe attempts. 200 ms balances fast
@@ -122,9 +121,9 @@ fn print_usage() {
 
 fn parse_config() -> AgentConfig {
     let (cfg, resolved_path) = parse_config_with_path();
-    // Plan 44 W3: stash the resolved config path so the SIGHUP
-    // handler's `apply_reload` re-reads the same file the operator
-    // launched against (handles `--config <path>` overrides).
+    // Stash the resolved config path so the SIGHUP handler's
+    // `apply_reload` re-reads the same file the operator launched
+    // against (handles `--config <path>` overrides).
     let _ = AGENT_CONFIG_PATH.set(resolved_path);
     cfg
 }
@@ -274,7 +273,7 @@ impl AgentState {
 }
 
 // ============================================================================
-// Boot readiness state (plan 76 Phase 2)
+// Boot readiness state
 // ============================================================================
 
 /// Per-subsystem readiness, surfaced through `ReadinessStatus` and
@@ -548,8 +547,8 @@ fn utc_now() -> String {
 /// Background monitoring loop — samples /proc/loadavg at the configured interval.
 ///
 /// Reads `HOT_BUSY_THRESHOLD_BITS` and `HOT_SAMPLE_INTERVAL_SECS`
-/// on every iteration so a SIGHUP-driven reload (plan 44 W3) picks
-/// up on the next sample without restarting the loop.
+/// on every iteration so a SIGHUP-driven reload picks up on the next
+/// sample without restarting the loop.
 fn monitoring_loop(state: Arc<Mutex<AgentState>>) {
     loop {
         let load = sample_load();
@@ -969,7 +968,7 @@ fn handle_proc_wait_streaming(
 /// `Exec` streaming arm — writes intermediate `ExecEvent` Stdout/Stderr
 /// frames to the connection and returns the terminal `Exit` or `TimedOut`
 /// for the dispatch loop to write last. Mirrors `handle_run_entrypoint` /
-/// `handle_proc_wait_streaming`. Plan 159 WS-5 E. (dev-shell only)
+/// `handle_proc_wait_streaming`. (dev-shell only)
 #[cfg(feature = "dev-shell")]
 fn do_exec_streaming(
     file: &mut std::fs::File,
@@ -997,11 +996,11 @@ fn read_wrapper_language() -> Option<String> {
 /// Stateless run-code v1: dispatch a fresh interpreter subprocess
 /// with the user-supplied source on its `-c` / `-e` arg. Refuses
 /// unknown languages with a wire-stable error string. Streams output
-/// via `do_exec_streaming` (Plan 159 WS-5 E).
+/// via `do_exec_streaming`.
 ///
-/// Plan-0010 Choice A v2 will route through the warm-process pool
-/// instead, providing stateful eval across calls. Wire shape stays
-/// identical — the dispatch flips inside this function.
+/// A future v2 will route through the warm-process pool instead,
+/// providing stateful eval across calls. Wire shape stays identical —
+/// the dispatch flips inside this function.
 #[cfg(feature = "dev-shell")]
 fn do_run_code(file: &mut std::fs::File, code: &str, timeout_secs: Option<u64>) -> GuestResponse {
     let lang = match read_wrapper_language() {
@@ -1070,7 +1069,7 @@ fn shell_quote_for_sh(s: &str) -> String {
 }
 
 // ============================================================================
-// RunEntrypoint handler — ADR-007 / plan 41 W2.
+// RunEntrypoint handler.
 //
 // Boot-time validates `/etc/mvm/entrypoint`, holds the resolved fd open in a
 // `OnceLock` for the agent's lifetime, and serializes per-VM concurrency
@@ -1091,24 +1090,24 @@ fn shell_quote_for_sh(s: &str) -> String {
 /// any TOCTOU between validation and spawn.
 static VALIDATED_ENTRYPOINT: OnceLock<Result<ValidatedEntrypoint, String>> = OnceLock::new();
 
-/// One in-flight `RunEntrypoint` per VM (M12) — applies to the cold
+/// One in-flight `RunEntrypoint` per VM — applies to the cold
 /// path only. When `WARM_POOL.is_some()`, this lock is bypassed; the
 /// new invariant is "one in-flight call per worker, ≤ `pool_size`
-/// concurrent" (plan 43). Concurrent callers under cold-tier still
+/// concurrent". Concurrent callers under cold-tier still
 /// get `EntrypointEvent::Error { kind: Busy }` immediately; warm-tier
 /// callers queue FIFO up to `max_queue_depth` and get `Busy` on
 /// overflow.
 static RUN_ENTRYPOINT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Warm-process worker pool, populated at boot from
-/// `/etc/mvm/runtime.json` (plan 43). `None` means cold-tier
-/// behavior — the existing M12 single-call path. `Some(_)` activates
+/// `/etc/mvm/runtime.json`. `None` means cold-tier
+/// behavior — the existing single-call path. `Some(_)` activates
 /// the warm-process branch in `handle_run_entrypoint` and the
 /// thread-per-connection accept-loop.
 static WARM_POOL: OnceLock<Option<Arc<WorkerPool>>> = OnceLock::new();
 
 // ============================================================================
-// Signal handling — plan 44.
+// Signal handling.
 //
 // On SIGTERM / SIGINT, the agent flips `SHUTDOWN_REQUESTED` (atomic
 // store, async-signal-safe). The accept loop polls the flag at
@@ -1140,8 +1139,8 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// asked twice — escalate to `_exit` and skip the drain.
 static SHUTDOWN_SIGNAL_COUNT: AtomicU8 = AtomicU8::new(0);
 
-/// Plan 44 W3 — set by `on_reload_signal` (SIGHUP). The accept
-/// loop polls this between iterations and, when set, re-reads
+/// Set by `on_reload_signal` (SIGHUP). The accept loop polls this
+/// between iterations and, when set, re-reads
 /// the config file and applies the hot-reloadable subset.
 /// Distinct from `SHUTDOWN_REQUESTED` so a reload doesn't terminate
 /// the agent.
@@ -1189,7 +1188,7 @@ unsafe extern "C" fn on_shutdown_signal(sig: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Release);
 }
 
-/// SIGHUP handler — plan 44 W3.
+/// SIGHUP handler.
 ///
 /// Flips `RELOAD_REQUESTED`. The accept loop polls it between
 /// iterations and, when set, calls `apply_reload` to re-read the
@@ -1204,18 +1203,17 @@ unsafe extern "C" fn on_reload_signal(_sig: libc::c_int) {
 
 /// Install handlers for SIGTERM and SIGINT. Best-effort: if
 /// `sigaction` fails for any reason, the agent logs and continues
-/// — graceful drain is a nice-to-have, not load-bearing (see
-/// `specs/plans/44-agent-signal-handling.md` §"Why deferring is
-/// safe"). On a microVM lifecycle the handler usually never fires
-/// anyway because the kernel teardown is abrupt; the handler
-/// matters when an operator manually `kill -TERM`s the agent or
-/// when in-place updates land later.
+/// — graceful drain is a nice-to-have, not load-bearing. On a
+/// microVM lifecycle the handler usually never fires anyway because
+/// the kernel teardown is abrupt; the handler matters when an
+/// operator manually `kill -TERM`s the agent or when in-place
+/// updates land later.
 ///
 /// `#[inline(never)]` is load-bearing for the symbol-contract
 /// gate (`scripts/check-prod-agent-no-exec.sh`) which asserts
 /// this symbol is present as positive evidence the handlers are
-/// wired in. Mirrors the W5 / plan 43 W7 pattern on
-/// `handle_run_entrypoint` and `dispatch_via_warm_pool`.
+/// wired in. Mirrors the same pattern on `handle_run_entrypoint`
+/// and `dispatch_via_warm_pool`.
 #[inline(never)]
 fn install_signal_handlers() {
     // SAFETY: zeroed sigaction is the documented "use defaults"
@@ -1241,8 +1239,8 @@ fn install_signal_handlers() {
             eprintln!("mvm-guest-agent: sigaction(SIGINT) failed: {err}");
         }
 
-        // SIGHUP handler — plan 44 W3. Separate sigaction because
-        // the dispositions differ: SIGHUP should NOT escalate on
+        // SIGHUP handler. Separate sigaction because the
+        // dispositions differ: SIGHUP should NOT escalate on
         // repeat (each delivery triggers a fresh reload).
         let mut sa_hup: libc::sigaction = std::mem::zeroed();
         sa_hup.sa_sigaction = on_reload_signal as *const () as usize;
@@ -1257,8 +1255,8 @@ fn install_signal_handlers() {
 
 /// Re-read the agent config file and apply the hot-reloadable
 /// subset to live atomics. Called from the accept loop when
-/// `RELOAD_REQUESTED` is set (plan 44 W3 — SIGHUP). Never
-/// terminates the agent; reload errors log and continue with the
+/// `RELOAD_REQUESTED` is set (SIGHUP). Never terminates the agent;
+/// reload errors log and continue with the
 /// prior values.
 ///
 /// ## Reload-safety review
@@ -1348,12 +1346,12 @@ fn apply_reload_to_atomics(new_cfg: &AgentConfig) {
 /// that benefits from a graceful shutdown is the warm-process
 /// pool (cold-tier `RunEntrypoint` calls hold no long-lived
 /// resources). Adding more drains here is the natural extension
-/// point if future plan additions (snapshot finalization,
-/// integration teardown) want orderly exit.
+/// point if future additions (snapshot finalization, integration
+/// teardown) want orderly exit.
 fn shutdown_subsystems(grace: Duration) {
     eprintln!("mvm-guest-agent: shutdown requested; draining for up to {grace:?}");
-    // SDK port Phase 10c / Plan 73 Followup E. Run the workload's
-    // baked `before_stop.sh` hook *before* tearing down the worker
+    // Run the workload's baked `before_stop.sh` hook *before*
+    // tearing down the worker
     // pool so the hook can still see live workers (e.g. to flush
     // application state through them). Best-effort: missing script /
     // non-zero exit / grace overrun all log + continue. SIGKILL on
@@ -1395,9 +1393,9 @@ fn run_before_stop_hook() {
 /// `VALIDATED_ENTRYPOINT`. On failure, log a single line — the agent stays
 /// up; only `RunEntrypoint` requests fail with `EntrypointInvalid`.
 ///
-/// Plan 76 Phase 2: also updates `AgentBootState.entrypoint` so
-/// `ReadinessStatus` reports `Ready` (or `Failed { message }`) and
-/// stamps `entrypoint_ready_ms` for cold-path timing.
+/// Also updates `AgentBootState.entrypoint` so `ReadinessStatus`
+/// reports `Ready` (or `Failed { message }`) and stamps
+/// `entrypoint_ready_ms` for cold-path timing.
 fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
     let result = match EntrypointPolicy::production().validate() {
         Ok(v) => {
@@ -1437,7 +1435,7 @@ fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
 }
 
 /// Read `/etc/mvm/runtime.json` and, if it carries `concurrency.kind
-/// = "warm_process"`, stand up the worker pool. Plan 43.
+/// = "warm_process"`, stand up the worker pool.
 ///
 /// Failure modes are deliberately fail-loud — mvmforge owns
 /// `runtime.json`, so a malformed file or rejected `in_process` mode
@@ -1448,8 +1446,8 @@ fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
 /// Missing `runtime.json` or absent `concurrency` → `Ok(None)`, the
 /// cold path stays in charge.
 ///
-/// Plan 76 Phase 2: runs in the boot-time background thread chained
-/// after `init_entrypoint_validation`. Updates
+/// Runs in the boot-time background thread chained after
+/// `init_entrypoint_validation`. Updates
 /// `AgentBootState.warm_pool` (`Disabled` for cold-tier images,
 /// `Starting` → `Ready` for warm-pool, `Failed` on entrypoint
 /// dependency failure). Process-exit-on-bad-config is preserved —
@@ -1472,8 +1470,8 @@ fn init_warm_pool(boot_state: &Arc<AgentBootState>) {
                     Some(Ok(entry)) => match entry.try_clone() {
                         Ok(cloned) => match WorkerPool::start(wp, Arc::new(cloned), Vec::new()) {
                             Ok(pool) => {
-                                // Plan 73 Followup E: run the baked
-                                // `after_start.sh` readiness probe before
+                                // Run the baked `after_start.sh`
+                                // readiness probe before
                                 // letting traffic in. Pool starts in
                                 // `NotReady`; `wait_for_ready` flips it
                                 // on success, leaves it `NotReady` on
@@ -1503,9 +1501,9 @@ fn init_warm_pool(boot_state: &Arc<AgentBootState>) {
                     _ => {
                         // Entrypoint validation failed; surface a
                         // matching warm-pool failure rather than
-                        // process-exit. Plan 76 Phase 2: keep the
-                        // control plane up so `ReadinessStatus`
-                        // can report both failures together.
+                        // process-exit. Keep the control plane up so
+                        // `ReadinessStatus` can report both failures
+                        // together.
                         boot_state.set_warm_pool(ComponentState::Failed {
                             message: "entrypoint validation failed".to_string(),
                         });
@@ -1523,8 +1521,7 @@ fn init_warm_pool(boot_state: &Arc<AgentBootState>) {
 }
 
 /// Run the baked `after_start.sh` readiness probe and gate the
-/// worker pool's traffic spigot on its success. SDK port Phase 10c /
-/// Plan 73 Followup E.
+/// worker pool's traffic spigot on its success.
 ///
 /// - On success (or absent script: workload declared no after_start
 ///   hook), the pool flips to ready and dispatch starts accepting
@@ -1555,9 +1552,9 @@ fn wait_for_after_start(pool: &Arc<WorkerPool>) {
 
 /// Scan `/etc/mvm/integrations.d/*.json`, populate
 /// `integration_state` with the discovered entries, and spawn the
-/// health-check loop iff at least one integration was loaded. Plan
-/// 76 Phase 3 — runs on its own background thread so a slow or
-/// malformed drop-in cannot delay the accept loop.
+/// health-check loop iff at least one integration was loaded. Runs
+/// on its own background thread so a slow or malformed drop-in
+/// cannot delay the accept loop.
 ///
 /// Transitions in `AgentBootState`:
 ///   `Starting` → `Ready`    (≥ 1 integration loaded; health loop spawned)
@@ -1565,9 +1562,9 @@ fn wait_for_after_start(pool: &Arc<WorkerPool>) {
 ///
 /// `Failed` is not currently produced — `load_dropin_dir` is
 /// best-effort per-file (a malformed JSON file is skipped with a
-/// stderr log; the rest still load). That matches Phase 3's
-/// "malformed integration drop-in does not kill control-plane
-/// readiness" acceptance criterion.
+/// stderr log; the rest still load). That upholds the invariant
+/// that a malformed integration drop-in does not kill control-plane
+/// readiness.
 fn init_integrations(
     boot_state: &Arc<AgentBootState>,
     integration_state: &Arc<Mutex<IntegrationState>>,
@@ -1595,7 +1592,7 @@ fn init_integrations(
 
 /// Scan `/etc/mvm/probes.d/*.json`, populate `probe_state` with the
 /// discovered entries, and spawn the probe loop iff at least one
-/// probe was loaded. Mirrors `init_integrations`. Plan 76 Phase 3.
+/// probe was loaded. Mirrors `init_integrations`.
 fn init_probes(boot_state: &Arc<AgentBootState>, probe_state: &Arc<Mutex<ProbeState>>) {
     boot_state.set_probes(ComponentState::Starting);
     let entries = probes::load_probe_dropin_dir(probes::PROBES_DROPIN_DIR);
@@ -1635,7 +1632,7 @@ fn make_call_tmpdir() -> std::io::Result<CallTmpdir> {
 
 /// RAII wrapper that removes the TMPDIR on drop. The cleanup runs from the
 /// agent — robust to wrapper crashes, kills, and any panic on the agent's
-/// own side. ADR-007 / plan 41 M14.
+/// own side.
 struct CallTmpdir {
     path: PathBuf,
 }
@@ -1666,15 +1663,14 @@ fn evt(e: EntrypointEvent) -> GuestResponse {
 /// `write_response` and returns the terminal event for the dispatcher to
 /// send through the existing `match` arm pattern.
 ///
-/// `#[inline(never)]` is load-bearing for the W5 symbol-contract gate.
-/// LTO inlines functions called from a single site (line ~1133), which
-/// would erase the `mvm_guest_agent::handle_run_entrypoint` symbol from
-/// `nm` output even though the handler is logically compiled in. The
-/// gate (`scripts/check-prod-agent-no-exec.sh`, ADR-007 §W5) requires
-/// the symbol to be present as positive evidence that the W2 handler
-/// is wired up. Without `inline(never)` the gate fails on every prod
-/// build. Cost: one extra call boundary in a slow-path RPC handler —
-/// imperceptible.
+/// `#[inline(never)]` is load-bearing for the symbol-contract gate.
+/// LTO inlines functions called from a single site, which would erase
+/// the `mvm_guest_agent::handle_run_entrypoint` symbol from `nm`
+/// output even though the handler is logically compiled in. The gate
+/// (`scripts/check-prod-agent-no-exec.sh`) requires the symbol to be
+/// present as positive evidence that the handler is wired up. Without
+/// `inline(never)` the gate fails on every prod build. Cost: one
+/// extra call boundary in a slow-path RPC handler — imperceptible.
 #[inline(never)]
 fn handle_run_entrypoint(
     file: &mut std::fs::File,
@@ -1682,8 +1678,8 @@ fn handle_run_entrypoint(
     timeout_secs: u64,
     env: Vec<(String, String)>,
 ) -> GuestResponse {
-    // Plan 43: when a warm-process pool is active, route through it
-    // instead of the cold-respawn path. The host wire is identical;
+    // When a warm-process pool is active, route through it instead
+    // of the cold-respawn path. The host wire is identical;
     // the pool's `dispatch` synthesizes the same `EntrypointEvent`
     // stream (Stdout / Stderr / Exit | Error) we'd produce below.
     if let Some(Some(pool)) = WARM_POOL.get() {
@@ -1803,8 +1799,8 @@ fn handle_run_entrypoint(
 }
 
 /// Emit each fd-3 control record as one `EntrypointEvent::Control`
-/// frame on the response stream. Phase 4b — the cold-path counterpart
-/// to phase 4c's wrapper updates. v1 emits all records after stdout
+/// frame on the response stream. The cold-path counterpart to the
+/// wrapper's own control emission. v1 emits all records after stdout
 /// and stderr; the host already accepts non-terminal events in any
 /// order before the terminal `Exit` / `Error`.
 fn emit_controls(file: &mut std::fs::File, records: Vec<mvm_guest::entrypoint::ControlRecord>) {
@@ -1819,16 +1815,16 @@ fn emit_controls(file: &mut std::fs::File, records: Vec<mvm_guest::entrypoint::C
     }
 }
 
-/// Plan 43: route a `RunEntrypoint` request through the warm-process
-/// worker pool. The pool's `dispatch` returns a single
+/// Route a `RunEntrypoint` request through the warm-process worker
+/// pool. The pool's `dispatch` returns a single
 /// `DispatchOutcome` per call (one buffered frame), which we
 /// translate back into the existing host-facing `EntrypointEvent`
 /// stream — same wire shape as the cold path so `mvmctl invoke` is
 /// unaffected.
 ///
-/// `#[inline(never)]` is load-bearing for the W7 symbol-contract
-/// gate (mirrors the `handle_run_entrypoint` symbol invariant from
-/// W5). The CI gate at `scripts/check-prod-agent-no-exec.sh`
+/// `#[inline(never)]` is load-bearing for the symbol-contract gate
+/// (mirrors the `handle_run_entrypoint` symbol invariant). The CI
+/// gate at `scripts/check-prod-agent-no-exec.sh`
 /// requires this symbol to be present on the same binary that
 /// ships, as positive evidence the warm-process substrate is
 /// wired in. Without `inline(never)` LTO would erase it from the
@@ -1871,8 +1867,8 @@ fn dispatch_via_warm_pool(
             kind: RunEntrypointError::InternalError,
             message: "warm-process pool has no live workers".into(),
         }),
-        // Plan 73 Followup E: after_start readiness probe has not yet
-        // succeeded — workload is still warming up. Surface as Busy
+        // after_start readiness probe has not yet succeeded —
+        // workload is still warming up. Surface as Busy
         // so the host's retry semantics apply (same as queue-full);
         // the message distinguishes the cause for operators.
         Err(DispatchError::NotReady) => evt(EntrypointEvent::Error {
@@ -1970,8 +1966,8 @@ fn handle_client(
     // SAFETY: fd comes from accept and is a valid file descriptor owned by this function.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
 
-    // ADR-053 / plan 74 W1 (hard cutover): every operational request
-    // must be preceded by at least one successful protocol_hello in this
+    // Hard cutover: every operational request must be preceded by at
+    // least one successful protocol_hello in this
     // session. A non-hello first request is treated as a protocol
     // violation and rejected with `ProtocolMismatch`; we do not maintain
     // a soft compatibility shim for pre-hello hosts.
@@ -2019,15 +2015,14 @@ fn handle_client(
     let active_profile = boot_state.profile;
     let boot_at = boot_state.boot_at;
 
-    // Plan 76 Phase 1: profile gate. Reject dev-only verbs in
-    // sealed-prod *before* the per-variant handler runs. The gate
-    // returns a typed `UnsupportedInProfile` response so an SDK
-    // can branch on capability without parsing message text — this
-    // sits at the protocol layer in addition to the per-handler
-    // policy checks (ADR-002 "Dispatcher allowlists are not enough
-    // by themselves") and the `#[cfg(feature = "dev-shell")]`
-    // compile-time symbol-absence gate for `do_exec` / `do_run_code`
-    // (ADR-002 §W4.3, claim 4).
+    // Profile gate. Reject dev-only verbs in sealed-prod *before*
+    // the per-variant handler runs. The gate returns a typed
+    // `UnsupportedInProfile` response so an SDK can branch on
+    // capability without parsing message text — this sits at the
+    // protocol layer in addition to the per-handler policy checks
+    // (dispatcher allowlists are not enough by themselves) and the
+    // `#[cfg(feature = "dev-shell")]` compile-time symbol-absence
+    // gate for `do_exec` / `do_run_code` (claim 4).
     if !req.allowed_in(active_profile) {
         let resp = GuestResponse::UnsupportedInProfile {
             profile: active_profile,
@@ -2137,8 +2132,8 @@ fn handle_client(
         GuestRequest::RunCode { code, timeout_secs } => {
             // Stateless v1: read /etc/mvm/wrapper.json to learn the
             // wrapper's language, then dispatch a fresh interpreter
-            // subprocess. v2 (Plan-0010 Choice A) will route through
-            // the warm-process pool's persistent wrapper for stateful
+            // subprocess. A future v2 will route through the
+            // warm-process pool's persistent wrapper for stateful
             // eval; wire shape stays identical.
             //
             // Code body is NOT logged (matches `mvmctl session
@@ -2159,8 +2154,8 @@ fn handle_client(
             timeout_secs,
             env,
         } => {
-            // Plan 76 Phase 2: distinguish "validation hasn't
-            // completed yet" (Starting → NotReady, transient) from
+            // Distinguish "validation hasn't completed yet"
+            // (Starting → NotReady, transient) from
             // "validation failed" (Failed → EntrypointInvalid,
             // terminal). Snapshot once so the decision is consistent
             // even if a concurrent background-thread update flips
@@ -2198,8 +2193,8 @@ fn handle_client(
 
         // PTY-over-vsock console — the single dev-only interactive path. The
         // relay lives behind `#[cfg(feature = "dev-shell")]` so its symbols are
-        // absent from a sealed production agent (Plan 165 WS-C, claim 15;
-        // mirrors the `do_exec` gate, ADR-002 §W4.3). The protocol profile gate
+        // absent from a sealed production agent (claim 15; mirrors the
+        // `do_exec` gate). The protocol profile gate
         // above already rejects these verbs in sealed-prod, but the compile-time
         // gate is the load-bearing guarantee — no console code is even linked.
         #[cfg(feature = "dev-shell")]
@@ -2294,8 +2289,8 @@ fn handle_client(
                 .to_string(),
         },
 
-        // ADR-007 / plan 41 W5 — report whether boot-time entrypoint
-        // validation succeeded. Used by `mvmctl doctor` against a
+        // Report whether boot-time entrypoint validation succeeded.
+        // Used by `mvmctl doctor` against a
         // running guest. Prod-safe — no inputs, no secrets in the
         // response (just a path + reason string).
         GuestRequest::EntrypointStatus => match VALIDATED_ENTRYPOINT.get() {
@@ -2309,8 +2304,8 @@ fn handle_client(
                 path: None,
                 detail: Some(msg.clone()),
             },
-            // Plan 76 Phase 2: with background init, `None` means
-            // validation is still running, not "never ran".
+            // With background init, `None` means validation is still
+            // running, not "never ran".
             None => GuestResponse::EntrypointStatusReport {
                 ok: false,
                 path: None,
@@ -2318,16 +2313,16 @@ fn handle_client(
             },
         },
 
-        // Plan 76 Phase 2: structured readiness snapshot. Cheap —
-        // a single mutex lock + struct copy. Designed to be the
+        // Structured readiness snapshot. Cheap — a single mutex
+        // lock + struct copy. Designed to be the
         // verb a host polls during `mvmctl wait <vm> --for ...`
         // without back-pressure on the rest of the agent.
         GuestRequest::ReadinessStatus => {
             GuestResponse::ReadinessStatusReport(boot_state.snapshot())
         }
 
-        // FS RPC verbs (W1 / A1). Production-safe surface backed
-        // by `mvm_guest::fs_rpc::handle_with_defaults`: every path
+        // FS RPC verbs. Production-safe surface backed by
+        // `mvm_guest::fs_rpc::handle_with_defaults`: every path
         // routes through `mvm_core::crypto::policy::PathPolicy` (deny
         // list + canonicalization), per-call caps gate read/write
         // sizes, and `FsResult::Error` carries a typed `kind` so
@@ -2398,11 +2393,10 @@ fn handle_client(
             }),
         ),
 
-        // Process control verbs (W1 / A2). Dev-only — the handler
-        // lives behind `#[cfg(feature = "dev-shell")]` so its
-        // symbols are stripped from prod builds (ADR-002 §W4.3 +
-        // ADR-007 §W5; the combined `prod-agent-runentry-contract`
-        // CI gate enforces it). Prod builds return a typed
+        // Process control verbs. Dev-only — the handler lives behind
+        // `#[cfg(feature = "dev-shell")]` so its symbols are stripped
+        // from prod builds (the `prod-agent-runentry-contract` CI
+        // gate enforces it). Prod builds return a typed
         // `UnsupportedInProduction` error so SDK callers can branch
         // on capability without parsing message text.
         GuestRequest::ProcStart {
@@ -2532,8 +2526,7 @@ fn handle_client(
             }
         }
 
-        // virtio-fs volume mount/unmount (plan 45 — renamed from
-        // share-mount per Path C). Production-safe; every
+        // virtio-fs volume mount/unmount. Production-safe; every
         // host-supplied path runs through
         // `mvm_core::crypto::policy::MountPathPolicy` before any
         // mount(2) syscall. Real handler lives in `mvm_guest::volume`.
@@ -2551,8 +2544,8 @@ fn handle_client(
         }
 
         // Substrate-side mirror of `mvmctl session set-timeout`. If
-        // the warm-process pool is active (plan 43 / tier-2 dispatch),
-        // the agent updates its idle-recycle threshold and a recycler
+        // the warm-process pool is active (tier-2 dispatch), the
+        // agent updates its idle-recycle threshold and a recycler
         // thread reaps individual workers idle past the new
         // timeout — keeping the VM up while pruning waste. If no pool
         // is active, the verb is a no-op acknowledged with
@@ -2582,8 +2575,8 @@ fn handle_client(
 
 /// Loopback host the port forwarder dials when proxying vsock → TCP.
 ///
-/// Pinning this to `127.0.0.1` is load-bearing for ADR-002 §W4.4: the agent
-/// must never accept TCP traffic from outside the guest. The forwarder only
+/// Pinning this to `127.0.0.1` is load-bearing: the agent must never
+/// accept TCP traffic from outside the guest. The forwarder only
 /// originates outbound TCP, but a future "double-ended" forwarder must reuse
 /// this constant rather than reach for `0.0.0.0` or a configurable host.
 const PORT_FORWARD_TCP_HOST: &str = "127.0.0.1";
@@ -2677,10 +2670,10 @@ fn run_port_forwarder(vsock_port: u32, tcp_port: u16) {
 fn main() {
     let cfg = parse_config();
 
-    // Plan 76 Phase 1: resolve the active vsock profile from the
-    // baked image config. The policy file lives on a dm-verity rootfs
-    // for sealed-prod images (ADR-002 §W3), so its `profile` field
-    // can't be widened at runtime — flipping it would break the
+    // Resolve the active vsock profile from the baked image config.
+    // The policy file lives on a dm-verity rootfs for sealed-prod
+    // images, so its `profile` field can't be widened at runtime —
+    // flipping it would break the
     // verity hash and the kernel panics in `mvm-verity-init` before
     // userspace. Absence of `/etc/mvm/security.json` is treated as an
     // unprovisioned dev image (`SecurityPolicy::dev_defaults`).
@@ -2696,8 +2689,8 @@ fn main() {
         cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
     );
 
-    // Plan 76 Phase 2: install signal handlers BEFORE vsock bind +
-    // background init. Same handlers fire whether we're mid-warmup
+    // Install signal handlers BEFORE vsock bind + background init.
+    // Same handlers fire whether we're mid-warmup
     // or steady-state; better to wire them up before any work that
     // might want clean teardown.
     install_signal_handlers();
@@ -2745,8 +2738,8 @@ fn main() {
     // Record boot time for startup grace period tracking.
     let boot_at = std::time::Instant::now();
 
-    // Plan 76 Phase 2: shared readiness state. Created AFTER vsock
-    // bind+listen so `mark_vsock_bound` stamps an accurate
+    // Shared readiness state. Created AFTER vsock bind+listen so
+    // `mark_vsock_bound` stamps an accurate
     // `vsock_bound_ms`. Cloned into every handler thread via
     // `Arc::clone` — the inner Mutex serialises the few writes
     // (`set_entrypoint`, `set_warm_pool`, …) without measurable
@@ -2762,8 +2755,8 @@ fn main() {
             .unwrap_or(0)
     );
 
-    // Plan 76 Phase 2: defer entrypoint validation + warm-pool
-    // startup to a background thread chained in dependency order
+    // Defer entrypoint validation + warm-pool startup to a
+    // background thread chained in dependency order
     // (warm pool reads `VALIDATED_ENTRYPOINT.get()`, so the sequence
     // must stay serial inside this one thread). The accept loop
     // below begins serving `Ping` / `ReadinessStatus` /
@@ -2782,13 +2775,13 @@ fn main() {
     let monitor_state = Arc::clone(&state);
     // Seed the hot-reloadable atomics from the boot-time config so
     // monitoring_loop picks up the same values it would have with
-    // the prior captured-by-value shape (plan 44 W3).
+    // the prior captured-by-value shape.
     HOT_BUSY_THRESHOLD_BITS.store(cfg.busy_threshold.to_bits(), Ordering::Release);
     HOT_SAMPLE_INTERVAL_SECS.store(cfg.sample_interval_secs, Ordering::Release);
     std::thread::spawn(move || monitoring_loop(monitor_state));
 
-    // Plan 76 Phase 3: defer integration drop-in scanning + health
-    // loop startup to a dedicated background thread. The scan
+    // Defer integration drop-in scanning + health loop startup to a
+    // dedicated background thread. The scan
     // itself is fast (single directory read), but moving it off the
     // bind-to-accept critical path also means a malformed drop-in
     // can't bubble a panic into the boot sequence.
@@ -2801,7 +2794,7 @@ fn main() {
         std::thread::spawn(move || init_integrations(&bs, &s));
     }
 
-    // Same shape for the probe drop-in scan + loop. Plan 76 Phase 3.
+    // Same shape for the probe drop-in scan + loop.
     let probe_state = Arc::new(Mutex::new(ProbeState { probes: Vec::new() }));
     {
         let bs = Arc::clone(&boot_state);
@@ -2809,7 +2802,7 @@ fn main() {
         std::thread::spawn(move || init_probes(&bs, &s));
     }
 
-    // Plan 129 — start the egress forward proxy (loopback FORWARD_PROXY_PORT).
+    // Start the egress forward proxy (loopback FORWARD_PROXY_PORT).
     // The workload's HTTP_PROXY (set by the host invoke path only when the VM
     // has a substitution endpoint) routes secret-bearing requests here; this
     // relays them over vsock to the host endpoint, which substitutes the real
@@ -2830,8 +2823,8 @@ fn main() {
         cfg.port
     );
 
-    // Plan 43: when warm-process is active, real concurrency from
-    // multiple host invokes lands in parallel — spawn a thread per
+    // When warm-process is active, real concurrency from multiple
+    // host invokes lands in parallel — spawn a thread per
     // accepted connection so they reach distinct workers. Cold-tier
     // images keep the single-threaded accept loop unchanged for
     // bit-identical behavior. `handle_client` already takes shared
@@ -2839,12 +2832,12 @@ fn main() {
     // is a safe addition; the new pool itself does its own slot
     // mutex / condvar bookkeeping.
     //
-    // Plan 44: poll `SHUTDOWN_REQUESTED` between accepts and after
-    // each `accept()` return (signals deliver `EINTR` so accept
+    // Poll `SHUTDOWN_REQUESTED` between accepts and after each
+    // `accept()` return (signals deliver `EINTR` so accept
     // returns < 0, which already triggers the bottom-of-loop check).
     // Once the flag flips, break out and drain via
     // `shutdown_subsystems`.
-    // Plan 76 Phase 2: `warm_active` is now re-evaluated per
+    // `warm_active` is now re-evaluated per
     // iteration. The background init thread populates `WARM_POOL`
     // some time after the accept loop starts, so a one-shot capture
     // at loop entry would mis-classify all subsequent connections
@@ -2854,7 +2847,7 @@ fn main() {
         if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
             break;
         }
-        // Plan 44 W3 — apply pending SIGHUP-driven config reload.
+        // Apply pending SIGHUP-driven config reload.
         // Compare-and-swap to false so a concurrent SIGHUP between
         // the load and the apply isn't lost (it'll re-set the flag
         // and we'll pick it up on the next iteration).
@@ -2878,8 +2871,8 @@ fn main() {
             // next iteration's compare_exchange.
             continue;
         }
-        // Plan 76 Phase 2: stamp first-accept timing once. Idempotent
-        // inside `AgentBootState` — subsequent calls are no-ops.
+        // Stamp first-accept timing once. Idempotent inside
+        // `AgentBootState` — subsequent calls are no-ops.
         boot_state.mark_first_accept();
         let warm_active = matches!(WARM_POOL.get(), Some(Some(_)));
         if warm_active {
@@ -2912,7 +2905,7 @@ mod tests {
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
 
-    // ─── Plan 44: signal handling unit tests ───────────────────────────
+    // ─── signal handling unit tests ───────────────────────────
     //
     // These exercise the handler in isolation by calling the
     // `extern "C"` function directly with a synthetic signo. We
@@ -2975,7 +2968,7 @@ mod tests {
         install_signal_handlers();
     }
 
-    // ─── Plan 44 W3: SIGHUP config reload ──────────────────────────────
+    // ─── SIGHUP config reload ──────────────────────────────
 
     fn reset_reload_state() {
         RELOAD_REQUESTED.store(false, Ordering::Release);
@@ -3132,8 +3125,8 @@ mod tests {
             integrations: vec![],
         }));
         let probe_state = Arc::new(Mutex::new(ProbeState { probes: vec![] }));
-        // Plan 76 Phase 2: handle_client now takes `&Arc<AgentBootState>`
-        // (carrying profile + boot_at + readiness) instead of a bare
+        // handle_client takes `&Arc<AgentBootState>` (carrying
+        // profile + boot_at + readiness) instead of a bare
         // boot_at + active_profile.
         let boot_state = Arc::new(AgentBootState::new(
             AgentProfile::Dev,
@@ -3178,8 +3171,8 @@ mod tests {
         handle.join().expect("handle_client thread");
     }
 
-    /// ADR-053 / plan 74 W1 hard-cutover regression: an operational
-    /// request sent as the *first* request in a session (no prior
+    /// Hard-cutover regression: an operational request sent as the
+    /// *first* request in a session (no prior
     /// `ProtocolHello`) must be rejected with `ProtocolMismatch`
     /// (`required_action: upgrade_host`) and the connection must be
     /// closed without dispatching the underlying operation.
@@ -3363,11 +3356,10 @@ mod tests {
         );
     }
 
-    /// W4.4 regression: the port forwarder's TCP connect target must remain
+    /// Regression: the port forwarder's TCP connect target must remain
     /// loopback. Anything else would let traffic exit the guest's network
-    /// namespace, defeating the "no host network from guest" claim in
-    /// ADR-002. If you ever need to make this configurable, update the ADR
-    /// and the threat model first.
+    /// namespace, defeating the "no host network from guest" claim. If you
+    /// ever need to make this configurable, update the threat model first.
     #[test]
     fn test_port_forward_target_is_loopback() {
         assert_eq!(PORT_FORWARD_TCP_HOST, "127.0.0.1");
@@ -3375,7 +3367,7 @@ mod tests {
         assert!(parsed.is_loopback(), "port-forward target must be loopback");
     }
 
-    // ─── Plan 73 Followup E — lifecycle-hook wiring tests ──────────────────
+    // ─── lifecycle-hook wiring tests ──────────────────
     //
     // The production agent points at `/etc/mvm/hooks/{after_start,
     // before_stop}.sh` baked by the Nix factory. The unit tests below
@@ -3416,11 +3408,10 @@ mod tests {
 
     #[test]
     fn run_shutdown_hook_via_lifecycle_api_writes_marker() {
-        // Mirrors plan 73 test gate §"a second workload whose
-        // before_stop.sh writes a marker file proves shutdown hooks
-        // fired on clean teardown." We can't reach the const path,
-        // but we can prove the underlying API the wrapper calls
-        // honors the contract.
+        // A workload whose before_stop.sh writes a marker file proves
+        // shutdown hooks fired on clean teardown. We can't reach the
+        // const path, but we can prove the underlying API the wrapper
+        // calls honors the contract.
         let tmp = tempfile::tempdir().expect("tempdir");
         let marker = tmp.path().join("stopped.marker");
         let body = format!(
@@ -3455,7 +3446,7 @@ mod tests {
 
     #[test]
     fn readiness_constants_match_plan_73() {
-        // Lock in the plan's tunables — guards against an accidental
+        // Lock in the readiness tunables — guards against an accidental
         // edit that would silently soften the readiness deadline.
         assert_eq!(READINESS_TIMEOUT, Duration::from_secs(30));
         assert_eq!(READINESS_INTERVAL, Duration::from_millis(200));
@@ -3465,7 +3456,7 @@ mod tests {
         assert_eq!(BEFORE_STOP_HOOK, "/etc/mvm/hooks/before_stop.sh");
     }
 
-    // ─── Plan 76 Phase 2 / Phase 3 — AgentBootState transitions ────
+    // ─── AgentBootState transitions ────
 
     fn fresh_boot_state() -> AgentBootState {
         AgentBootState::new(AgentProfile::SealedProd, std::time::Instant::now())
@@ -3515,7 +3506,7 @@ mod tests {
     #[test]
     fn set_integrations_starting_then_ready_stamps_timing() {
         let bs = fresh_boot_state();
-        // Phase 3 helpers go through Starting first; only that path
+        // The init helpers go through Starting first; only that path
         // should stamp the timing. A direct Disabled → Disabled
         // transition must NOT stamp.
         bs.set_integrations(ComponentState::Disabled);

@@ -1,7 +1,7 @@
 //! mvm-storage — `VolumeBackend` trait + `LocalBackend` impl.
 //!
-//! Per plan 45 §D5 (Path C), this crate ships **only** the trait and
-//! `LocalBackend`. `ObjectStoreBackend` and `EncryptedBackend<B>` live
+//! This crate ships **only** the trait and `LocalBackend`.
+//! `ObjectStoreBackend` and `EncryptedBackend<B>` live
 //! in mvmd — they wrap the same trait so callers don't see the
 //! difference.
 //!
@@ -28,7 +28,7 @@ pub mod provider;
 pub mod snapshot;
 
 // At-rest-encrypted `StorageProvider` — two arms, one `encrypted::EncryptedStorage`
-// type so callers never branch on platform (plan 123 B2):
+// type so callers never branch on platform:
 // - non-Linux: per-file AES-256-GCM seal (mvm-core volume sealer).
 // - Linux: block-level LUKS2 over a loop-backed image (`cryptsetup`).
 #[cfg(not(target_os = "linux"))]
@@ -68,7 +68,7 @@ use mvm_core::volume::{VolumeBackendConfig, VolumeError};
 /// impl lives).
 ///
 /// mvmd has its own `make_backend_for_bucket` that handles every
-/// variant — see mvmd Sprint 137 W2.
+/// variant.
 pub async fn make_backend(
     config: &VolumeBackendConfig,
 ) -> Result<Arc<dyn VolumeBackend>, VolumeError> {

@@ -1,41 +1,15 @@
 //! Wire types for the long-lived host VM's vsock dispatch channel.
 //!
-//! Plan 89 (`specs/plans/89-persistent-builder-vm.md`) introduced a
-//! boot-once-per-`mvmctl dev`-session dance: the host dispatched
-//! Nix-build jobs over vsock into a persistent libkrun VM. Plan 107
-//! A1 (`specs/plans/107-plan-100-w6-approach-a.md`) generalises that
-//! channel into a backend-agnostic dispatch surface — the same
-//! long-lived libkrun VM will serve both Nix builds (existing) and
-//! Firecracker workload spawns (W6's nested execution path, A2.2).
-//! Hence the rename `BuilderRequest`/`BuilderResponse` →
-//! [`HostVmRequest`]/[`HostVmResponse`] and the new
-//! `Workload*` variants stubbed below (payloads land in A2.2;
-//! the guest-side arm panics with `unimplemented!()` until then).
+//! The host dispatches Nix-build jobs over vsock into a persistent
+//! libkrun VM, boot-once-per-`mvmctl dev`-session. The channel is a
+//! backend-agnostic dispatch surface — the same long-lived libkrun VM
+//! serves both Nix builds and nested Firecracker workload spawns. The
+//! `Workload*` variants below are stubbed (the guest-side arm panics
+//! with `unimplemented!()` until their payloads are wired).
 //!
 //! The channel inherits the existing `AuthenticatedFrame` envelope
 //! (see [`mvm_core::security::AuthenticatedFrame`]) — no new key
 //! material is introduced.
-//!
-//! ## Scope of this module across PRs
-//!
-//! - **W2 part 1 (shipped):** wire types ([`HostVmRequest`],
-//!   [`HostVmResponse`], [`JobTimings`], [`BootTimingsWire`]),
-//!   serde derives with `#[serde(deny_unknown_fields)]`, unit tests
-//!   for serde roundtrip and unknown-field rejection, fuzz target.
-//! - **W2 part 2 (this PR):** [`BUILDER_DISPATCH_PORT`] reserved on
-//!   the libkrun builder VM, host-side reader helpers
-//!   [`read_host_vm_response`] / [`read_host_vm_response_from_socket`]
-//!   with explicit no-response handling
-//!   ([`HostVmResponseRead::EmptyEof`] / [`HostVmResponseRead::Timeout`])
-//!   so the legacy file-based result path remains the fallback while
-//!   the guest-side send code is unwired.
-//! - **W2 part 3 (next):** modify `mvm-host-vm-init` to send
-//!   [`HostVmResponse::Result`] on exit, wire the host's
-//!   single-shot path (`LibkrunBuilderVm::run_build`) to call
-//!   [`read_host_vm_response_from_socket`] before falling back to
-//!   `<job_dir>/result`. That PR exercises the cold-boot VM exiting
-//!   through the new code path end-to-end.
-//! - **W3 (after):** dispatch loop and persistent mode.
 //!
 //! ## Frame size cap
 //!
@@ -47,16 +21,11 @@
 //! [`crate::builder_vm::BuilderJob`] whose variants are tiny
 //! (`Flake { flake_ref: String, attr_path: String }` and
 //! `Install { spec_path: PathBuf }`, both fitting in a few hundred
-//! bytes). The Plan 89 security-scan amendment ([F8]) called for a
-//! dedicated `MAX_BUILDER_FRAME_BYTES = 16 MiB`; on inspection the
-//! existing 256 KiB cap already provides the property the finding
-//! wanted (reject `length_prefix > cap` before allocating), so this
-//! module inherits it rather than introduce a looser per-channel
-//! cap. A follow-up PR will fold this correction back into the plan.
-//! The wire-cap regression is still exercised explicitly by the
-//! fuzz seed in `crates/mvm-guest/fuzz/fuzz_targets/fuzz_builder_request.rs`.
-//!
-//! [F8]: ../../../specs/plans/89-persistent-builder-vm.md#W2
+//! bytes). The 256 KiB cap already provides the property we want
+//! (reject `length_prefix > cap` before allocating), so this channel
+//! inherits it rather than introduce a looser per-channel cap. The
+//! wire-cap regression is exercised explicitly by the fuzz seed in
+//! `crates/mvm-guest/fuzz/fuzz_targets/fuzz_builder_request.rs`.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -96,8 +65,6 @@ impl std::fmt::Display for JobId {
 /// VM. Mirrors [`JobId`]'s shape but lives in its own newtype so the
 /// dispatch loop can keep build jobs and workloads in separate
 /// tables without conflating identifiers.
-///
-/// Stubbed in Plan 107 A1; consumers are scaffolded in A2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkloadId(pub Uuid);
@@ -150,8 +117,7 @@ pub enum HostVmRequest {
     },
 
     /// Tell the guest's dispatch loop to exit cleanly. Triggered
-    /// by `mvmctl dev down` or the supervisor's idle timer
-    /// (Plan 89 §W5).
+    /// by `mvmctl dev down` or the supervisor's idle timer.
     ///
     /// Empty struct variant rather than unit so
     /// `#[serde(deny_unknown_fields)]` actually rejects extra
@@ -160,8 +126,8 @@ pub enum HostVmRequest {
     /// shape is identical (`{"kind":"shutdown"}`).
     Shutdown {},
 
-    /// Plan 107 W6 / A2.2 — start a workload microVM inside the
-    /// host VM. The guest's dispatch loop hands this to a
+    /// Start a workload microVM inside the host VM. The guest's
+    /// dispatch loop hands this to a
     /// `WorkloadVmm` backend (Firecracker today; the fields are
     /// generic microVM concepts, not Firecracker-shaped, so a
     /// second VMM is a pure addition — see
@@ -200,16 +166,15 @@ pub enum HostVmRequest {
         kernel_cmdline_extras: String,
     },
 
-    /// Plan 107 W6 / A2 — stop a running workload microVM. Stubbed
-    /// in A1; A2.2 wires the guest-side SIGTERM/wait/cleanup path.
+    /// Stop a running workload microVM. The guest-side
+    /// SIGTERM/wait/cleanup path is not yet wired.
     WorkloadStop {
         /// Echo of the matching [`HostVmRequest::WorkloadStart::workload_id`].
         workload_id: WorkloadId,
     },
 
-    /// Plan 107 W6 / A2 — query a workload microVM's lifecycle
-    /// status. Stubbed in A1; A2.2 wires the guest-side check
-    /// (process alive, vsock reachable, etc.).
+    /// Query a workload microVM's lifecycle status. The guest-side
+    /// check (process alive, vsock reachable, etc.) is not yet wired.
     WorkloadStatus {
         /// Echo of the matching [`HostVmRequest::WorkloadStart::workload_id`].
         workload_id: WorkloadId,
@@ -220,8 +185,8 @@ pub enum HostVmRequest {
 /// Every variant carries the originating `job_id` (except
 /// [`HostVmResponse::Bye`]) so the host can demux concurrent
 /// dispatches in V2+ — V1 serializes via the supervisor's dispatch
-/// mutex (Plan 89 §Concurrency), but the wire is shaped for the
-/// looser case so V2 doesn't break compatibility.
+/// mutex, but the wire is shaped for the looser case so V2 doesn't
+/// break compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostVmResponse {
@@ -279,36 +244,36 @@ pub enum HostVmResponse {
     /// something to enforce against.
     Bye {},
 
-    /// Plan 107 W6 / A2.2 — acknowledgement that a workload microVM
-    /// has been spawned inside the host VM.
+    /// Acknowledgement that a workload microVM has been spawned inside
+    /// the host VM.
     WorkloadStarted {
         /// Echo of the originating [`HostVmRequest::WorkloadStart::workload_id`].
         workload_id: WorkloadId,
         /// PID of the spawned VMM process *inside the host VM*. The
-        /// host tracks it for the A4 lifecycle (stop / status /
+        /// host tracks it for the workload lifecycle (stop / status /
         /// crash recovery).
         pid: u32,
     },
 
-    /// Plan 107 W6 / A2.2 — acknowledgement that a workload microVM
-    /// has shut down and its state dir was cleaned up.
+    /// Acknowledgement that a workload microVM has shut down and its
+    /// state dir was cleaned up.
     WorkloadStopped {
         /// Echo of the originating [`HostVmRequest::WorkloadStop::workload_id`].
         workload_id: WorkloadId,
     },
 
-    /// Plan 107 W6 / A2.2 — workload lifecycle status report.
+    /// Workload lifecycle status report.
     WorkloadStatusReport {
         /// Echo of the originating [`HostVmRequest::WorkloadStatus::workload_id`].
         workload_id: WorkloadId,
         /// One of `"running"`, `"stopped"`, `"not_found"`. A typed
         /// enum is deferred until the host actually consumes the
-        /// distinction (A4); the closed string set is asserted by
+        /// distinction; the closed string set is asserted by
         /// the guest-side emitter tests.
         status: String,
     },
 
-    /// Plan 107 W6 / A2.2 — a workload lifecycle operation failed.
+    /// A workload lifecycle operation failed.
     /// Fail-closed negative path: the guest always sends a typed
     /// frame (spawn error, state-dir collision, parse failure)
     /// rather than dropping the connection, so the host can
@@ -355,7 +320,7 @@ pub struct BootTimingsWire {
     pub nix_device_ready_ms: Option<u64>,
     pub nix_seeded_ms: Option<u64>,
     pub nix_mounted_ms: Option<u64>,
-    /// Plan 96: `/nix-path-registration` loaded into
+    /// `/nix-path-registration` loaded into
     /// `/nix/var/nix/db` so the in-VM `nix build` skips
     /// re-substituting seeded paths. `None` on subsequent boots
     /// where the marker is present and registration is skipped.
@@ -369,16 +334,15 @@ pub struct BootTimingsWire {
 }
 
 // ============================================================================
-// Host-side reader (W2 part 2)
+// Host-side reader
 // ============================================================================
 
 /// Outcome of trying to read a [`HostVmResponse`] from a builder
 /// VM's vsock dispatch socket. Modelled explicitly because the
 /// "guest exited without sending anything" case is a normal,
-/// non-error outcome during the W2 part 2 → W2 part 3 transition
-/// (the guest-side send code isn't wired yet, and old cached dev
-/// images will continue not to send for some time after part 3
-/// lands).
+/// non-error outcome while the guest-side send code is being wired:
+/// it isn't sending yet, and old cached dev images will continue not
+/// to send for some time after it lands.
 #[derive(Debug)]
 pub enum HostVmResponseRead {
     /// A complete, well-formed response arrived.
@@ -388,10 +352,10 @@ pub enum HostVmResponseRead {
     /// the legacy file-based result path.
     EmptyEof,
     /// The read timed out before a full frame arrived. Callers
-    /// should treat this the same as `EmptyEof` for the W2 part 2
-    /// timeline (the legacy file path is the authoritative source);
-    /// once part 3 lands and the guest reliably sends, a timeout
-    /// becomes a real signal worth surfacing.
+    /// should treat this the same as `EmptyEof` while the guest-side
+    /// send code is unwired (the legacy file path is the
+    /// authoritative source); once the guest reliably sends, a
+    /// timeout becomes a real signal worth surfacing.
     Timeout,
 }
 
@@ -401,12 +365,11 @@ pub enum HostVmResponseRead {
 ///
 /// The framing reader reuses [`mvm_guest::vsock::read_frame`],
 /// which enforces the same 256 KiB pre-deserialize cap
-/// [`HostVmResponse`] inherits — see this module's header docs
-/// for the F8 amendment correction.
+/// [`HostVmResponse`] inherits — see this module's header docs.
 ///
 /// `socket_path` is `<vm_state_dir>/vsock-<BUILDER_DISPATCH_PORT>.sock`
 /// — the file libkrun creates when the krun context is configured
-/// via `add_vsock_port(BUILDER_DISPATCH_PORT)` (Plan 89 W2 part 2).
+/// via `add_vsock_port(BUILDER_DISPATCH_PORT)`.
 pub fn read_host_vm_response_from_socket(
     socket_path: &std::path::Path,
     timeout: std::time::Duration,
@@ -459,11 +422,10 @@ pub fn read_host_vm_response(stream: &mut std::os::unix::net::UnixStream) -> Hos
 /// Write one framed [`HostVmResponse`] to a `UnixStream`. Mirror
 /// of [`read_host_vm_response`] — exists so unit tests of the
 /// reader can produce real wire bytes via the same framing
-/// `mvm-host-vm-init` will use in W2 part 3 (with the
-/// host-vs-builder-init split, the actual guest emit will hand-roll
-/// the JSON to keep builder-init's dep tree small). The pair-test
-/// using this writer + the reader is the regression we want to lock
-/// in now so the guest emit lands against a known-good host reader.
+/// `mvm-host-vm-init` uses (the actual guest emit hand-rolls the JSON
+/// to keep builder-init's dep tree small). The pair-test using this
+/// writer + the reader locks in the regression so the guest emit lands
+/// against a known-good host reader.
 pub fn write_host_vm_response(
     stream: &mut std::os::unix::net::UnixStream,
     response: &HostVmResponse,
@@ -562,7 +524,7 @@ mod tests {
 
     #[test]
     fn unit_like_variants_serialize_without_data_field() {
-        // Plan 89 W2: `Shutdown {}` and `Bye {}` are empty struct
+        // `Shutdown {}` and `Bye {}` are empty struct
         // variants (not unit) so deny_unknown_fields actually fires
         // on them. Make sure the wire shape stays identical to what
         // a true unit variant would have produced — single `kind`
@@ -585,8 +547,7 @@ mod tests {
         });
     }
 
-    // Plan 107 A2.2 — workload variant round-trips with the real
-    // spawn config payload.
+    // Workload variant round-trips with the real spawn config payload.
 
     fn sample_workload_start() -> HostVmRequest {
         HostVmRequest::WorkloadStart {
@@ -700,8 +661,8 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_rejects_extra_workload_start_field() {
-        // A *complete* A2.2 payload plus one extra field — exercises
-        // deny_unknown_fields specifically (not a missing-field
+        // A *complete* workload_start payload plus one extra field —
+        // exercises deny_unknown_fields specifically (not a missing-field
         // error). The fail-closed contract: a future host shipping a
         // new field against an old guest is rejected rather than
         // silently launching with the field dropped.
@@ -776,9 +737,9 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_rejects_extra_request_field() {
-        // Plan 89 §W2: deny_unknown_fields is the wire-version-safety
-        // tactic — an old guest seeing a new field on Run fails
-        // closed instead of silently dropping it.
+        // deny_unknown_fields is the wire-version-safety tactic — an
+        // old guest seeing a new field on Run fails closed instead of
+        // silently dropping it.
         let bad = serde_json::json!({
             "kind": "run",
             "job_id": "00000000-0000-0000-0000-000000000000",
@@ -870,10 +831,10 @@ mod tests {
 
     #[test]
     fn read_host_vm_response_roundtrips_through_unix_stream_pair() {
-        // W2 part 2 host-side wire: when the guest sends a
-        // HostVmResponse over the dispatch socket, the host
-        // reader should decode it byte-for-byte. Pair of
-        // UnixStreams stands in for the libkrun-managed socket.
+        // Host-side wire: when the guest sends a HostVmResponse over
+        // the dispatch socket, the host reader should decode it
+        // byte-for-byte. Pair of UnixStreams stands in for the
+        // libkrun-managed socket.
         use std::os::unix::net::UnixStream;
         let (mut a, mut b) = UnixStream::pair().expect("socketpair");
         let response = sample_result();
@@ -888,9 +849,9 @@ mod tests {
 
     #[test]
     fn read_host_vm_response_returns_empty_eof_on_clean_close() {
-        // The W2 part 2 → W2 part 3 transition expects this: the
-        // host opens a vsock conn, but no guest send code is wired
-        // yet, so the conn closes without bytes. Reader must signal
+        // The guest-send wiring transition expects this: the host
+        // opens a vsock conn, but no guest send code is wired yet,
+        // so the conn closes without bytes. Reader must signal
         // EmptyEof so the caller falls back to the legacy file
         // path instead of failing the build.
         use std::os::unix::net::UnixStream;
@@ -923,7 +884,7 @@ mod tests {
         // Guest writes a Result preceded by a StderrChunk over the
         // same conn; the reader picks up the first frame. This
         // documents that the reader reads ONE frame and stops —
-        // multi-frame streaming is a W3 concern (the persistent
+        // multi-frame streaming is a later concern (the persistent
         // dispatch loop reads many).
         use std::os::unix::net::UnixStream;
         let (mut a, mut b) = UnixStream::pair().expect("socketpair");
@@ -943,8 +904,8 @@ mod tests {
 
     #[test]
     fn frame_cap_blocks_adversarial_length_prefix() {
-        // Plan 89 W2 spec / security-scan F8: a malicious or
-        // corrupted client setting `length_prefix = u32::MAX` must
+        // A malicious or corrupted client setting
+        // `length_prefix = u32::MAX` must
         // be rejected BEFORE the host allocates that many bytes.
         // The framing reader in `mvm_guest::vsock::read_frame`
         // enforces this for every caller that uses the existing

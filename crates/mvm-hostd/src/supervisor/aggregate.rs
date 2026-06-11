@@ -1,9 +1,8 @@
 //! `Supervisor` — aggregate that owns every component slot plus the
 //! plan execution state machine, and drives the launch lifecycle.
 //!
-//! Wave 1.3 shipped the type with `Default::default()` returning a
-//! supervisor wired with every `Noop` slot. Wave 1.4 (this module's
-//! current state) adds the `Supervisor::launch(plan)` happy path:
+//! `Default::default()` returns a supervisor wired with every `Noop`
+//! slot. `Supervisor::launch(plan)` is the happy path:
 //!   1. verify the signed plan
 //!   2. transition Pending → Verified
 //!   3. ask the backend to launch
@@ -54,7 +53,7 @@ use crate::supervisor::tool_gate::{NoopToolGate, ToolGate};
 
 /// Clock abstraction. The supervisor reads the wall clock through
 /// this trait so tests can drive time deterministically; production
-/// uses [`SystemClock`]. Plan 37 Addendum G4 enforcement.
+/// uses [`SystemClock`]. Backs validity-window enforcement.
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
@@ -73,7 +72,7 @@ pub enum SupervisorError {
     #[error("plan signature/parse failed: {0}")]
     PlanVerify(String),
 
-    /// Plan 37 Addendum G4: the plan's validity window doesn't cover
+    /// The plan's validity window doesn't cover
     /// `now`, or its nonce was already seen for the signer that
     /// authored it.
     #[error("plan validity check failed: {0}")]
@@ -112,7 +111,7 @@ pub enum SupervisorError {
     #[error("policy violation: {0}")]
     PolicyViolation(String),
 
-    /// Plan 73 Followup A / ADR-047 claim 9: the plan pinned a deps
+    /// Claim 9: the plan pinned a deps
     /// volume but `verify_sealed_volume` re-derived a different hash
     /// from the on-disk content. The volume was tampered with after
     /// the plan was signed (or after the volume was sealed).
@@ -121,7 +120,7 @@ pub enum SupervisorError {
     )]
     DepsVolumeTampered { expected: String, actual: String },
 
-    /// Plan 73 Followup A: the on-disk `meta.json` parses cleanly but
+    /// The on-disk `meta.json` parses cleanly but
     /// its bytes don't hash to the plan's `manifest_sha256`. A
     /// belt-and-suspenders check against future hash-derivation
     /// drift — if a forger ever produces content that hashes to the
@@ -131,7 +130,7 @@ pub enum SupervisorError {
     )]
     DepsVolumeManifestMismatch { expected: String, actual: String },
 
-    /// Plan 73 Followup A: the plan pinned a deps volume but the
+    /// The plan pinned a deps volume but the
     /// resolved directory doesn't exist on disk (workload built on
     /// a different host, volume was GC'd, etc.). Fail closed — no
     /// silent recovery to a "best-effort" launch.
@@ -142,8 +141,8 @@ pub enum SupervisorError {
         source: VolumeError,
     },
 
-    /// Plan 165 WS-B B4: the plan's sealed image asserted it carries no
-    /// workload entrypoint. The SDK's B3 compile gate refuses to
+    /// The plan's sealed image asserted it carries no
+    /// workload entrypoint. The SDK's compile gate refuses to
     /// produce such an image; this admission-time refusal is defense in
     /// depth if one reaches the supervisor anyway.
     #[error("sealed image declares no entrypoint (entrypoint.absent)")]
@@ -162,13 +161,13 @@ pub struct Supervisor {
     /// Clock used for plan-validity-window checks. Defaults to
     /// `SystemClock`; tests inject a fixed clock.
     pub clock: Arc<dyn Clock>,
-    /// Per-signer nonce ledger for replay protection. Plan 37
-    /// Addendum G4. Held behind a `Mutex` because `launch` takes
+    /// Per-signer nonce ledger for replay protection. Held behind a
+    /// `Mutex` because `launch` takes
     /// `&mut self` but the store may eventually be shared across
     /// concurrent admission paths. `std::sync::Mutex` is sufficient:
     /// no `await` inside the locked region.
     pub nonce_store: Arc<Mutex<NonceStore>>,
-    /// False-positive circuit-breaker reporter (Plan 37 Addendum E1).
+    /// False-positive circuit-breaker reporter.
     /// `None` means the L7 egress chain runs without breakers — the
     /// fail-closed default for production until an operator opts in
     /// via [`Supervisor::with_circuit_breakers`]. When `Some`, every
@@ -176,8 +175,8 @@ pub struct Supervisor {
     /// in a [`CircuitBreaker`] that consults this reporter.
     pub circuit_breakers: Option<Arc<InspectorReporter>>,
 
-    /// Root directory the deps-volume admission gate (Plan 73
-    /// Followup A) walks to find `<volume_hash>/` directories.
+    /// Root directory the deps-volume admission gate walks to find
+    /// `<volume_hash>/` directories.
     /// `None` (the default) resolves to
     /// [`mvm_core::config::mvm_deps_volumes_dir`] at admit time;
     /// tests inject a tempdir.
@@ -194,7 +193,7 @@ pub struct Supervisor {
 
 impl Default for Supervisor {
     /// Default is the fail-closed configuration: every component
-    /// slot is `Noop`. Plan 37 §7B's invariant — "tenant code never
+    /// slot is `Noop`. The invariant — "tenant code never
     /// runs in Zone B unless every slot is owned by a real impl" —
     /// is encoded by the `*Error::NotWired` returns from each Noop.
     fn default() -> Self {
@@ -296,8 +295,8 @@ impl Supervisor {
     /// pass the supervisor's trusted-key set so a plan signed by an
     /// unknown party is refused before any other step runs.
     ///
-    /// Wave 2 wires the supervisor's component slots into the launch
-    /// path (apply egress policy, release secrets, etc.). Today's
+    /// A later pass wires the supervisor's component slots into the
+    /// launch path (apply egress policy, release secrets, etc.). Today's
     /// "happy path" is intentionally narrow: parse + verify + state
     /// walk + backend dispatch. The component slots are still all
     /// Noop by default, so a `Supervisor::default()` walking this
@@ -316,7 +315,7 @@ impl Supervisor {
         //
         // No audit emit on signature failure: we have no parsed
         // plan to bind to (`AuditEntry` is keyed on plan_id, which
-        // we do not know without trusting the payload). Wave 2 may
+        // we do not know without trusting the payload). A later pass may
         // add a separate `EnvelopeRejected` audit type that carries
         // only the envelope's signer_id and a rejection reason; for
         // now this path is logged via `tracing` only.
@@ -329,7 +328,7 @@ impl Supervisor {
             }
         };
 
-        // Step 1.5 (Plan 37 Addendum G4): time-window + nonce-replay
+        // Step 1.5: time-window + nonce-replay
         // check. Without this, a captured signed plan is replayable
         // indefinitely. Both checks must pass before the backend is
         // asked to do any work, so a replayed plan never reaches the
@@ -358,7 +357,7 @@ impl Supervisor {
             return Err(SupervisorError::from(e));
         }
 
-        // Step 1.6 (Plan 73 Followup A / ADR-047 claim 9): if the
+        // Step 1.6 (claim 9): if the
         // plan pinned an application-dependencies volume, re-derive
         // its hash from the on-disk content and compare. A tampered
         // volume (mutated content, forged SBOM, garbage in cve.json,
@@ -376,14 +375,14 @@ impl Supervisor {
             return Err(e);
         }
 
-        // Plan 165 WS-B B4: fail closed if a sealed image reached us with
-        // no declared entrypoint. The SDK's B3 compile gate refuses to
+        // Fail closed if a sealed image reached us with
+        // no declared entrypoint. The SDK's compile gate refuses to
         // produce such an image; this is the admission-time defense in
         // depth. The wire field defaults to true (skip-serialized), so
         // every legacy plan admits unchanged — the guard only fires when
         // a plan explicitly carries entrypoint_present == false.
         if !plan.image.entrypoint_present {
-            // NB: spec-mandated `plan.failed` (Plan 165 B4), NOT the
+            // NB: the audit event here is `plan.failed`, NOT the
             // `plan.rejected.*` shape the sibling admission rejects use — the
             // machine reason lives in the `entrypoint.absent` label. Don't
             // "consistency-fix" this to plan.rejected.entrypoint.
@@ -396,8 +395,8 @@ impl Supervisor {
         // nonce, and (if pinned) deps volume all check out. Emit the
         // success audit before any resource-allocating work so the
         // trail is preserved even if the backend fails next. Audit
-        // failure here fails the launch fail-closed (§22 / B17:
-        // audit emits before forward).
+        // failure here fails the launch fail-closed: audit emits
+        // before forward.
         let admitted_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
         if let Err(e) = self
             .emit_admission_audit_with_extras(&plan, "plan.admitted", "", admitted_extras)
@@ -451,8 +450,8 @@ impl Supervisor {
                 .await?;
             return Err(SupervisorError::from(e));
         }
-        // Install host-side default-deny *through the EgressEnforcer seam*
-        // (plan 123 A2.2): the supervisor enforces behind the trait instead of
+        // Install host-side default-deny *through the EgressEnforcer seam*:
+        // the supervisor enforces behind the trait instead of
         // calling the firewall directly. `SupervisorEgressEnforcer` delegates
         // to the same `install_default_deny`, so behaviour + the fail-closed
         // `NotWired` posture are unchanged.
@@ -479,7 +478,7 @@ impl Supervisor {
             return Err(SupervisorError::from(e));
         }
 
-        // Step 5: Verified → Launched → Running. Wave 2's real impl
+        // Step 5: Verified → Launched → Running. A later real impl
         // will block between Launched and Running waiting for the
         // guest agent's first ping; today the transition is immediate
         // because there's no real guest to wait for.
@@ -507,7 +506,6 @@ impl Supervisor {
     /// Re-derive the on-disk volume hash via
     /// `mvm_sdk::compile::deps_audit::verify_sealed_volume` and
     /// compare against the plan's pinned `DepsVolumeBinding`.
-    /// Plan 73 Followup A.
     ///
     /// Two checks:
     ///
@@ -594,9 +592,9 @@ impl Supervisor {
 
     /// Emit one admission-audit entry for `plan` with the given
     /// event name and an optional reason string in `extras["reason"]`.
-    /// Plan 37 Addendum B19. Every state-changing decision the
+    /// Every state-changing decision the
     /// supervisor makes about a plan should produce an audit entry —
-    /// no unaudited control-plane mutation (whitepaper §6 invariant).
+    /// no unaudited control-plane mutation.
     ///
     /// Non-fatal NotWired handling: if the supervisor's audit slot is
     /// `NoopAuditSigner` (the fail-closed default), we log a tracing
@@ -604,7 +602,7 @@ impl Supervisor {
     /// AuditSigner being wired *in production*; tests use
     /// `CapturingAuditSigner`. Any other audit error (Io, etc.)
     /// propagates as `SupervisorError::Audit` and fails the launch
-    /// per the §22 / B17 invariant "audit emits before forward".
+    /// per the invariant "audit emits before forward".
     async fn emit_admission_audit(
         &self,
         plan: &mvm_core::plan::ExecutionPlan,
@@ -616,8 +614,8 @@ impl Supervisor {
     }
 
     /// Variant of [`emit_admission_audit`] that carries caller-supplied
-    /// extra labels alongside the `reason` field. Plan 73 Followup A
-    /// uses this to pin the deps-volume `volume_hash` +
+    /// extra labels alongside the `reason` field. Used to pin the
+    /// deps-volume `volume_hash` +
     /// `manifest_sha256` into every `plan.admitted` / `plan.running`
     /// entry for a deps-bound workload, so `mvmctl audit verify`
     /// detects drift if either hash changes between runs.
@@ -659,7 +657,7 @@ impl Supervisor {
             return Err(SupervisorError::from(e));
         }
 
-        // Withdraw the host enforcement through the EgressEnforcer seam (A2.3),
+        // Withdraw the host enforcement through the EgressEnforcer seam,
         // symmetric with the enforce-on-launch path. The adapter delegates to
         // the same firewall.teardown.
         if let Some(spec) = self.installed_firewalls.remove(plan_id)
@@ -688,7 +686,7 @@ impl Supervisor {
     }
 
     fn teardown_firewall_for_plan(&mut self, plan_id: &PlanId) {
-        // Best-effort withdraw through the seam (A2.3).
+        // Best-effort withdraw through the seam.
         if let Some(spec) = self.installed_firewalls.remove(plan_id)
             && let Err(e) =
                 SupervisorEgressEnforcer::new(self.firewall.clone()).withdraw(&spec.vm_id)
@@ -698,10 +696,10 @@ impl Supervisor {
     }
 
     /// Wire the L7 egress proxy slot from a workload's
-    /// [`EgressPolicy`] + variant. Wave 2.6 differentiator:
+    /// [`EgressPolicy`] + variant:
     ///
     /// - Builds the inspector chain from `policy.allow_list` and the
-    ///   curated default rulesets, in Plan 37 §15's recommended order
+    ///   curated default rulesets, in the recommended order
     ///   (DestinationPolicy → SsrfGuard → SecretsScanner →
     ///   InjectionGuard → PiiRedactor).
     /// - **Refuses `Variant::Prod` ⊕ `policy.allow_plain_http = true`**
@@ -753,7 +751,7 @@ impl Supervisor {
         Ok(self)
     }
 
-    /// Wire the false-positive circuit breakers (Plan 37 Addendum E1).
+    /// Wire the false-positive circuit breakers.
     /// When set, every inspector built by [`Supervisor::with_l7_egress`]
     /// is wrapped in a [`CircuitBreaker`] that consults this reporter
     /// on each `inspect()` call and downgrades `Deny` → `Transform`
@@ -770,9 +768,8 @@ impl Supervisor {
     }
 
     /// Wire the tool gate slot from a workload's [`ToolPolicy`].
-    /// Wave 2.7 / Phase 1 — pure policy decision (allowlist
-    /// lookup); the vsock RPC layer that drives `check()` calls
-    /// from the workload lands in Wave 2.7b.
+    /// Pure policy decision (allowlist lookup); the vsock RPC layer
+    /// that drives `check()` calls from the workload lands later.
     ///
     /// An empty `ToolPolicy.allowed` is **not** treated as
     /// "anything goes" — it's a deliberate fail-closed deny-all
@@ -787,7 +784,7 @@ impl Supervisor {
 
 /// Build the `(key, value)` extras the supervisor stamps onto every
 /// admission audit entry (`plan.admitted` / `plan.running`) for a
-/// deps-bound workload. Plan 73 Followup A — `mvmctl audit verify`
+/// deps-bound workload. `mvmctl audit verify`
 /// reads these back to detect drift if either hash changes between
 /// the plan signing and the on-disk volume.
 ///
@@ -813,8 +810,8 @@ fn deps_volume_audit_extras(binding: Option<&DepsVolumeBinding>) -> Vec<(String,
 /// names in `EgressPolicy::disabled_inspectors`; [`validate_egress_policy_inspector_names`]
 /// uses this list to fail-loud on typos.
 ///
-/// **Order matches Plan 37 §15** (cheap/precise first, body
-/// inspectors last) — keep it that way if you add a name.
+/// Order is cheap/precise first, body inspectors last — keep it
+/// that way if you add a name.
 pub const KNOWN_INSPECTOR_NAMES: &[&str] = &[
     "destination_policy",
     "ssrf_guard",
@@ -849,13 +846,11 @@ pub enum EgressPolicyValidationError {
 /// `build_inspector_chain` itself stays lenient — it silently skips
 /// unknown names so in-process callers that own their config can
 /// extend the disabled list ahead of inspector additions. This
-/// function is the *admission-time* tightening: the W5 policy
+/// function is the *admission-time* tightening: the policy
 /// resolver in `mvm-cli` calls this to fail loud on typos
 /// (e.g. `["ssr_guard"]` would silently leave SSRF enforced; not
 /// catching that at admission means the operator thinks they
 /// disabled it).
-///
-/// Plan 60 Phase 3 Slice B follow-on.
 pub fn validate_egress_policy_inspector_names(
     policy: &EgressPolicy,
 ) -> Result<(), EgressPolicyValidationError> {
@@ -872,9 +867,8 @@ pub fn validate_egress_policy_inspector_names(
 }
 
 /// URL schemes accepted in [`mvm_core::policy::AuditPolicy::stream_destinations`].
-/// The supervisor's eventual audit-stream replicator (Plan 60 Phase 4
-/// follow-on after the mvm-hostd lift) will emit each entry to its
-/// matching backend; validating shape at admission means a typo
+/// The supervisor's eventual audit-stream replicator will emit each
+/// entry to its matching backend; validating shape at admission means a typo
 /// (`fil:///var/log/...` vs `file:///var/log/...`) fails the boot
 /// loudly instead of silently dropping audit emissions.
 pub const KNOWN_AUDIT_STREAM_SCHEMES: &[&str] = &["file://", "unix://", "https://", "http://"];
@@ -906,7 +900,7 @@ pub enum AuditPolicyValidationError {
 /// lift) is the consumer; this function is the *admission-time*
 /// shape gate so an operator who typo'd `htpps://` doesn't think
 /// they've configured TLS audit replication while the boot proceeds
-/// in silence. Plan 60 Phase 4 follow-on.
+/// in silence.
 pub fn validate_audit_policy_stream_destinations(
     policy: &mvm_core::policy::AuditPolicy,
 ) -> Result<(), AuditPolicyValidationError> {
@@ -926,7 +920,7 @@ pub fn validate_audit_policy_stream_destinations(
 }
 
 /// Build an [`InspectorChain`] from the workload's [`EgressPolicy`].
-/// Order matches Plan 37 §15: cheap/most-precise checks first, body
+/// Order is cheap/most-precise checks first, body
 /// inspectors last (so a destination-denied request never pays the
 /// cost of body scanning).
 ///
@@ -938,9 +932,9 @@ pub fn validate_audit_policy_stream_destinations(
 /// [`CircuitBreaker`] that shares the supplied
 /// [`InspectorReporter`]. The chain length is unchanged — wrappers
 /// preserve the wrapped inspector's `name()` so audit binding stays
-/// intact. (Plan 37 Addendum E1.)
+/// intact.
 ///
-/// Public so the plan-64 W5 resolver in `mvm-cli::policy_resolver`
+/// Public so the resolver in `mvm-cli::policy_resolver`
 /// can build the same canonical chain when it turns a parsed bundle
 /// into a `ResolvedSlots`. Keeping the order in one place avoids
 /// chain-shape drift between the in-process supervisor path and
@@ -984,13 +978,13 @@ pub fn build_inspector_chain(
 /// Same as [`build_inspector_chain`] but the PII inspector is
 /// constructed from a parsed [`mvm_core::policy::PiiPolicy`] (mode +
 /// category filter) instead of hardwired to defaults. Used by the
-/// plan-64 W5 resolver so a tenant bundle's `[pii]` section actually
+/// resolver so a tenant bundle's `[pii]` section actually
 /// drives runtime behavior (Mode::Detect / Redact / Block, scoped to
 /// a category subset).
 ///
 /// Returns the same canonical chain order as `build_inspector_chain`.
 /// The PII inspector is *skipped entirely* when `pii.mode =
-/// "disabled"` (Plan 37 §15.1's kill-switch for analytics workloads
+/// "disabled"` (the kill-switch for analytics workloads
 /// that scrub PII upstream) — same effect as adding `"pii_redactor"`
 /// to `disabled_inspectors`, but expressed through the more
 /// operator-natural `pii.mode` field.
@@ -1217,9 +1211,9 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
-            // G4 (plan 37 Addendum G4) replay-protection fields. The
+            // Replay-protection fields. The
             // supervisor's admission gate doesn't enforce these yet —
-            // that's a follow-up PR. Today they're populated so the
+            // that's a follow-up. Today they're populated so the
             // wire format compiles and signing roundtrips work.
             valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
             valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
@@ -1261,7 +1255,7 @@ mod tests {
         // Default to a clock inside the sample plan's window so
         // happy-path tests don't depend on the wall clock. Capture
         // audit entries by default so tests can assert admission
-        // audit (B19) without each test re-wiring the slot.
+        // audit without each test re-wiring the slot.
         Supervisor::new()
             .with_backend_launcher(b)
             .with_firewall_enforcer(Arc::new(MockFirewall::new()))
@@ -1492,7 +1486,7 @@ mod tests {
 
         let result = s.launch(&signed, &[("test", &vk)]).await;
 
-        // The install now flows through the EgressEnforcer seam (A2.2), so a
+        // The install now flows through the EgressEnforcer seam, so a
         // firewall failure surfaces as `Egress` — but the underlying
         // `install_default_deny` is still invoked (asserted below).
         assert!(matches!(result, Err(SupervisorError::EgressEnforcement(_))));
@@ -1529,7 +1523,7 @@ mod tests {
         assert_eq!(s.state.current(), PlanState::Pending);
     }
 
-    // ----- Plan 37 Addendum G4 enforcement -----
+    // ----- validity-window + nonce-replay enforcement -----
 
     #[tokio::test]
     async fn launch_rejects_expired_plan() {
@@ -1657,7 +1651,7 @@ mod tests {
         assert_eq!(backend.launches().len(), 2);
     }
 
-    // ----- Plan 37 Addendum B19 — admission audit -----
+    // ----- admission audit -----
 
     /// Convenience: collect just the `event` strings from captured
     /// audit entries, in emit order. Test assertions are clearer
@@ -1676,7 +1670,7 @@ mod tests {
         s.launch(&signed, &[("test", &vk)]).await.unwrap();
 
         assert_eq!(audit_events(&audit), vec!["plan.admitted", "plan.running"]);
-        // Each entry is bound to the plan id and image — §22 binding.
+        // Each entry is bound to the plan id and image.
         for entry in audit.entries() {
             assert_eq!(entry.plan_id, plan.plan_id);
             assert_eq!(entry.plan_version, plan.plan_version);
@@ -1726,7 +1720,7 @@ mod tests {
         );
     }
 
-    /// Plan 165 WS-B B4: a sealed image asserting no entrypoint is
+    /// A sealed image asserting no entrypoint is
     /// refused at admission with `EntrypointAbsent` and the plan lands
     /// in `Failed`.
     #[tokio::test]
@@ -1740,11 +1734,11 @@ mod tests {
         let err = s.launch(&signed, &[("test", &vk)]).await.unwrap_err();
         assert!(matches!(err, SupervisorError::EntrypointAbsent), "{err:?}");
         assert_eq!(s.state.current(), PlanState::Failed);
-        // The B4 guard fires before backend dispatch — no launch attempt.
+        // The guard fires before backend dispatch — no launch attempt.
         assert!(backend.launches().is_empty());
     }
 
-    /// Plan 165 WS-B B4: the refusal is on the claim-8 audit chain as a
+    /// The refusal is on the claim-8 audit chain as a
     /// `plan.failed` entry whose reason label is `entrypoint.absent`.
     #[tokio::test]
     async fn admission_emits_plan_failed_entrypoint_absent_audit_entry() {
@@ -1767,8 +1761,8 @@ mod tests {
         assert_eq!(entry.plan_id, plan.plan_id);
     }
 
-    /// Plan 165 WS-B B4: a normal plan (field defaulted to true) sails
-    /// past the B4 gate — it must NOT trip `EntrypointAbsent`.
+    /// A normal plan (field defaulted to true) sails
+    /// past the gate — it must NOT trip `EntrypointAbsent`.
     #[tokio::test]
     async fn admission_accepts_plan_with_entrypoint_present_default() {
         let plan = sample_plan();
@@ -1806,7 +1800,7 @@ mod tests {
         // Signature failures arrive before the plan is parsed, so
         // there's no plan_id to bind an audit entry to. Documented
         // behaviour: no admission audit on this path; tracing logs
-        // the rejection. Wave 2 may add an envelope-rejection audit
+        // the rejection. A later pass may add an envelope-rejection audit
         // type that carries only the signer_id.
         let plan = sample_plan();
         let (mut signed, _sk, vk) = sign_sample(&plan);
@@ -1822,8 +1816,8 @@ mod tests {
     #[tokio::test]
     async fn admission_audit_inherits_plan_audit_labels() {
         // The plan's `audit_labels` should be copied into every
-        // admission audit entry verbatim (§22 — the "what was the
-        // contract" record).
+        // admission audit entry verbatim — the "what was the
+        // contract" record.
         let mut plan = sample_plan();
         plan.audit_labels
             .insert("workflow".to_string(), "etl-9".to_string());
@@ -1844,7 +1838,7 @@ mod tests {
     #[tokio::test]
     async fn audit_signer_io_failure_fails_the_launch() {
         // A real audit signer reporting an Io error fails the
-        // launch — §22 / B17 invariant: audit emits before forward.
+        // launch — invariant: audit emits before forward.
         // No audit means no launch.
         struct FailingAudit;
         #[async_trait]
@@ -1870,7 +1864,7 @@ mod tests {
         assert!(backend.launches().is_empty());
     }
 
-    // ---- Wave 2.6: with_l7_egress builder + Variant::Prod gate ----
+    // ---- with_l7_egress builder + Variant::Prod gate ----
 
     use crate::supervisor::l7_proxy::{
         CapturingEgressAuditSink, DnsResolver, EgressAuditSink, NoopEgressAuditSink,
@@ -2220,7 +2214,7 @@ mod tests {
         }
     }
 
-    // ---- Wave 2.7: with_tool_gate builder ----
+    // ---- with_tool_gate builder ----
 
     #[tokio::test]
     async fn with_tool_gate_allows_listed_tool() {
@@ -2259,7 +2253,7 @@ mod tests {
         }
     }
 
-    // ---- Plan 37 Addendum E1 — circuit-breaker wiring ----
+    // ---- circuit-breaker wiring ----
 
     #[test]
     fn build_inspector_chain_without_breakers_has_raw_inspectors() {
@@ -2361,7 +2355,7 @@ mod tests {
         ));
     }
 
-    // ----- Plan 73 Followup A — deps-volume admission gate (claim 9) -----
+    // ----- deps-volume admission gate (claim 9) -----
     //
     // The supervisor's admission path verifies `plan.deps_volume`
     // against the on-disk sealed volume before admitting. These tests

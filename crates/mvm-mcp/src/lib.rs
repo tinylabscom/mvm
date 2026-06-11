@@ -7,7 +7,7 @@
 //! ## Features
 //!
 //! - `protocol-only` — JSON-RPC frames, tool schemas, `Dispatcher`
-//!   trait. No I/O. Consumed by mvmd (plan 33) for the hosted
+//!   trait. No I/O. Consumed by mvmd for the hosted
 //!   HTTP/SSE transport.
 //!
 //! - `stdio` (default) — adds the JSON-RPC stdio loop. Callers
@@ -17,10 +17,9 @@
 //!
 //! ## Threat model
 //!
-//! See `specs/adrs/003-local-mcp-server.md` for the full posture.
-//! Summary: the transport is host-local stdio. No new attacker
-//! surface beyond ADR-002 — code runs entirely inside the
-//! already-isolated microVM. The `env` parameter is allowlisted
+//! The transport is host-local stdio. No new attacker
+//! surface beyond the baseline microVM posture — code runs entirely
+//! inside the already-isolated microVM. The `env` parameter is allowlisted
 //! against the existing template registry; `code` is passed as a
 //! single argv element to the guest interpreter.
 

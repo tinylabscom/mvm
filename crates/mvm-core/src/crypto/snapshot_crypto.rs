@@ -1,11 +1,10 @@
 //! AES-256-GCM primitives for snapshot and volume encryption.
 //!
-//! Phase 2 of the migration (plan 60:1703) builds tenant-scoped
-//! encryption-at-rest on top of these primitives. The wire format is
-//! `[12-byte nonce][ciphertext + 16-byte tag]`; the API only takes
-//! and returns byte slices — file-bound wrappers are deferred to
-//! Phase 2 proper so they can sit on `mvm-storage::VolumeBackend`
-//! (Sprint 49 / plan 45) rather than re-deriving an earlier shape.
+//! Tenant-scoped encryption-at-rest builds on these primitives. The
+//! wire format is `[12-byte nonce][ciphertext + 16-byte tag]`; the API
+//! only takes and returns byte slices — file-bound wrappers are
+//! deferred so they can sit on `mvm-storage::VolumeBackend` rather than
+//! re-deriving an earlier shape.
 
 use crate::crypto::aead;
 use anyhow::Result;

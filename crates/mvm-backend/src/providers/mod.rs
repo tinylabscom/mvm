@@ -5,9 +5,9 @@
 //!
 //!   - [`apple_container`] — Apple Virtualization.framework (macOS only)
 //!
-//! libkrun FFI lives in its sibling crate `mvm-libkrun` (split out by
-//! plan 57 W1 so the `bindgen` + `libclang` build cost stays out of
-//! consumers that don't link libkrun).
+//! libkrun FFI lives in its sibling crate `mvm-libkrun` (split out so
+//! the `bindgen` + `libclang` build cost stays out of consumers that
+//! don't link libkrun).
 //!
 //! [`mvm-backend`](https://docs.rs/mvm-backend) consumes these modules
 //! to implement the `VmBackend` trait. End-user code should never
@@ -16,11 +16,10 @@
 //!
 //! # The naming question
 //!
-//! ADR-012 documents a separate, public-facing "Provider" concept
-//! (e.g. `linux`, `mlx`) that lives in mvmd. The two share a name
-//! but address different layers: this crate is *internal FFI*; ADR-012
-//! talks about *user-selectable execution targets*. The disambiguation
-//! note in ADR-012 carries the full story.
+//! There is a separate, public-facing "Provider" concept (e.g. `linux`,
+//! `mlx`) that lives in mvmd. The two share a name but address different
+//! layers: this crate is *internal FFI*; the public Provider concept is
+//! about *user-selectable execution targets*.
 
 // `apple_container` is unconditionally exposed; the module itself uses
 // `#[cfg(target_os = "macos")]` to gate the Virtualization.framework

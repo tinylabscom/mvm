@@ -47,12 +47,12 @@ pub struct Metrics {
     pub vm_start_duration_ms: AtomicU64,
     pub vsock_handshake_rtt_ms: AtomicU64,
 
-    // ── Dev/builder image verification (plan 36 §Layer 4 step 11) ───
+    // ── Dev/builder image verification ──────────────────────────────
     // One counter per outcome of the cosign-signed manifest +
     // SHA-256 verification pipeline at apple_container.rs::download_dev_image.
     // The duration gauge is the last observed wall-clock from
     // try_fetch_signed_manifest entry through verify_artifact_hash exit.
-    // mvmd plan 23 will read these via the prometheus exposition to alert
+    // mvmd reads these via the prometheus exposition to alert
     // on attack-shaped failure spikes (sig_invalid / digest_mismatch).
     pub dev_image_verify_ok: AtomicU64,
     pub dev_image_verify_sig_invalid: AtomicU64,
@@ -63,7 +63,7 @@ pub struct Metrics {
     pub dev_image_verify_network: AtomicU64,
     pub dev_image_verify_duration_ms: AtomicU64,
 
-    // ── Plan 60 Phase 4 audit counters (per-category) ───────────────
+    // ── Per-category audit counters ─────────────────────────────────
     // Incremented by `mvm_hostd::supervisor::Recorder` on every successful
     // emit. The 9 categories match `EventCategory::as_str()`; the
     // metric name is `mvm_audit_<category>_total`. Downstream
@@ -343,8 +343,8 @@ impl Metrics {
             "Last vsock auth handshake RTT in milliseconds",
         );
 
-        // Plan 36 §Layer 4 step 11: dev/builder image verification
-        // outcomes. One counter per outcome lets a Prometheus query
+        // Dev/builder image verification outcomes. One counter per
+        // outcome lets a Prometheus query
         // alert on attack-shaped failure spikes
         // (sig_invalid / digest_mismatch in particular).
         write_metric(
@@ -396,8 +396,8 @@ impl Metrics {
             "Last dev/builder image verification wall-clock in milliseconds",
         );
 
-        // Plan 60 Phase 4 — per-category audit counters. Names
-        // follow the `mvm_audit_<category>_total` pattern; the
+        // Per-category audit counters. Names follow the
+        // `mvm_audit_<category>_total` pattern; the
         // category names match `EventCategory::as_str()`.
         write_metric(
             &mut out,
@@ -522,8 +522,9 @@ pub struct MetricsSnapshot {
     #[serde(default)]
     pub dev_image_verify_duration_ms: u64,
 
-    // Plan 60 Phase 4 audit counters. All `#[serde(default)]` so a
-    // snapshot from a pre-Phase-4 binary still deserialises here.
+    // Per-category audit counters. All `#[serde(default)]` so a
+    // snapshot from an older binary that predates them still
+    // deserialises here.
     #[serde(default)]
     pub audit_cmd_total: u64,
     #[serde(default)]

@@ -1,4 +1,4 @@
-//! Plan 115 / ADR-065 — mvm's Linux binaries embedded in mvmctl.
+//! mvm's Linux binaries embedded in mvmctl.
 //!
 //! Three submodules:
 //!   - `manifest` — compile-time list of embedded binaries,

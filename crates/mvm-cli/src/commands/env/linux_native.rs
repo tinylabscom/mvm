@@ -10,16 +10,15 @@
 //! 3. Tell the user the host is ready.
 //! 4. Optionally spawn a fresh interactive shell (`--shell`).
 //!
-//! This replaces the Lima `dev_up`/`dev_down`/`dev_status` helpers
-//! that W7 slice 2 deleted — those existed to manage a separate
-//! Lima VM. Post-ADR-013, that VM is gone; the asset pipeline now
-//! runs directly on the host via the W8.B-relocated
+//! This replaces the deleted Lima `dev_up`/`dev_down`/`dev_status`
+//! helpers — those existed to manage a separate Lima VM. That VM is
+//! gone; the asset pipeline now runs directly on the host via the
 //! `mvm_backend::firecracker::*` functions.
 //!
 //! Apple Container hosts use `super::apple_container` instead; macOS
 //! Intel / pre-26 / no-KVM-Linux hosts fall through to a "no dev
 //! backend" error in `super::dev::run` — those need the
-//! libkrun builder VM (W7.x.2's deliverable).
+//! libkrun builder VM.
 
 use std::process::{Command, Stdio};
 

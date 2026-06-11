@@ -1,6 +1,5 @@
 //! Volume wire types — shared between mvm and mvmd.
 //!
-//! See [`specs/plans/45-filesystem-volumes.md`] for the design.
 //! All types here are pure data; behaviour (the `VolumeBackend` trait and
 //! its impls) lives in the `mvm-storage` crate.
 //!
@@ -8,15 +7,13 @@
 //!
 //! A volume is uniquely identified by `(org_id, workspace_id, name)`.
 //! Names are unique per workspace, can collide across workspaces, and
-//! receive distinct AEAD keys via HKDF-derived per-volume keys (see
-//! the encryption section of plan 45).
+//! receive distinct AEAD keys via HKDF-derived per-volume keys.
 //!
 //! ## Backends
 //!
 //! [`VolumeBackendConfig`] is the declarative shape of a backend. The
 //! mvm-storage crate ships `LocalBackend` only; mvmd ships
-//! `ObjectStoreBackend` (wrapping `opendal`) and `EncryptedBackend<B>`
-//! per Path C of plan 45.
+//! `ObjectStoreBackend` (wrapping `opendal`) and `EncryptedBackend<B>`.
 
 use std::path::PathBuf;
 
@@ -269,7 +266,7 @@ impl std::fmt::Display for SecretRef {
 
 /// Declarative backend shape. Behaviour lives in `mvm-storage`
 /// (LocalBackend) and mvmd-side crates (ObjectStoreBackend +
-/// EncryptedBackend) — see plan 45 §D5.
+/// EncryptedBackend).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VolumeBackendConfig {
@@ -297,8 +294,7 @@ impl VolumeBackendConfig {
     }
 
     /// Returns true if this backend can be mounted into a microVM via
-    /// virtio-fs in v1. (Object stores aren't mountable in v1; see
-    /// backlog item B3 in plan 45.)
+    /// virtio-fs in v1. (Object stores aren't mountable in v1.)
     pub fn is_mountable(&self) -> bool {
         matches!(self, Self::Local { .. })
     }
@@ -396,10 +392,9 @@ pub struct VolumeEntry {
 #[serde(rename_all = "kebab-case")]
 pub enum WrapAlgorithm {
     /// AES Key Wrap with Padding (NIST SP 800-38F / RFC 5649).
-    /// Implemented mvmd-side per plan 45 §D5 ("EncryptedBackend
-    /// lives in mvmd, not mvm"); `crate::crypto::key_rotation`'s
-    /// rewrap path returns `UnsupportedAlgorithm` when asked to
-    /// rewrap an `AesKwp` envelope.
+    /// Implemented mvmd-side (EncryptedBackend lives in mvmd, not
+    /// mvm); `crate::crypto::key_rotation`'s rewrap path returns
+    /// `UnsupportedAlgorithm` when asked to rewrap an `AesKwp` envelope.
     AesKwp,
 
     /// AES-256-GCM AEAD wrap (12-byte nonce || ciphertext || 16-byte
@@ -407,11 +402,11 @@ pub enum WrapAlgorithm {
     /// mvm-side rotation supports this variant out of the box —
     /// `rewrap_dek` decrypts under the old master and re-encrypts
     /// under the new master with a fresh nonce, preserving the
-    /// plaintext DEK. Plan 63 W1.
+    /// plaintext DEK.
     Aes256Gcm,
 }
 
-/// Plan 122 B2 — binds a wrapped DEK to the artifact it protects, so a DEK
+/// Binds a wrapped DEK to the artifact it protects, so a DEK
 /// can't be lifted onto a different volume than it was minted for.
 ///
 /// `content_hash` is the only field mvm populates today (the sha256 of the
@@ -457,8 +452,8 @@ pub struct WrappedKey {
 
     pub algorithm: WrapAlgorithm,
 
-    /// Plan 122 B2 — optional binding to the artifact this DEK protects.
-    /// `None` for pre-B2 / unbound keys (accepted, treated as "no binding
+    /// Optional binding to the artifact this DEK protects.
+    /// `None` for unbound keys (accepted, treated as "no binding
     /// to check").
     #[serde(default)]
     pub bound: Option<DekBinding>,
@@ -746,7 +741,7 @@ mod tests {
 
     #[test]
     fn wrapped_key_without_bound_field_deserializes_as_unbound() {
-        // Pre-B2 records carried no `bound` key; `#[serde(default)]` must
+        // Legacy records carried no `bound` key; `#[serde(default)]` must
         // load them as unbound rather than failing the deny_unknown_fields
         // envelope.
         let legacy = r#"{"master_key_version":1,"wrapped":[1,2,3],"algorithm":"aes256-gcm"}"#;

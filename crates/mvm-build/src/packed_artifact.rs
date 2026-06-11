@@ -1,4 +1,4 @@
-//! Plan 76 Phase 6 — portable signed `.mvm` artifacts.
+//! Portable signed `.mvm` artifacts.
 //!
 //! A `.mvm` file is a gzip-compressed tarball wrapping a sealed-prod
 //! microVM image. It contains:
@@ -21,14 +21,13 @@
 //! verifies the whole archive contents.
 //!
 //! **Why not OCI.** OCI is the registry-distribution format; this is
-//! the internal-sealed unit. Plan 76 §"OCI distribution as a
-//! compatibility layer" wants `.mvm` to remain the signed boundary and
-//! optionally wrap in OCI for transport. Keeping the verification path
+//! the internal-sealed unit. `.mvm` remains the signed boundary and
+//! optionally wraps in OCI for transport. Keeping the verification path
 //! single ensures sealed-prod policies aren't split between two
 //! formats.
 //!
-//! **Fail-closed properties** (plan 76 §"Artifact extraction is an
-//! attack surface"):
+//! **Fail-closed properties** (artifact extraction is an attack
+//! surface):
 //! - Tar path-traversal entries (`../`, absolute paths) are rejected
 //!   pre-extraction.
 //! - Symlinks and hardlinks are rejected outright — the archive is
@@ -63,8 +62,8 @@ use tar::{Archive, Builder, EntryType, Header};
 
 /// Current `.mvm` manifest format. A future format bump is a breaking
 /// change — old readers MUST refuse the new version, new readers MUST
-/// refuse unknown versions. Plan 76 §"Compatibility stance" §"Unknown
-/// artifact format versions should fail closed".
+/// refuse unknown versions: unknown artifact format versions fail
+/// closed.
 pub const MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// Hard cap on a single file inside the archive (2 GiB). Matches the
@@ -114,10 +113,10 @@ pub struct FileEntry {
 pub struct SecurityPosture {
     pub profile: ArtifactProfile,
     /// `true` when the rootfs is dm-verity-protected and the
-    /// kernel cmdline carries a `roothash=` parameter. Plan 27 W3.
+    /// kernel cmdline carries a `roothash=` parameter.
     pub verity_protected: bool,
     /// `true` when the agent enforces `require_auth = true` on the
-    /// vsock control socket. Plan 76 Phase 1.
+    /// vsock control socket.
     pub requires_auth: bool,
     /// `true` when the image config permits runtime volume mounts.
     /// `false` for the v1 SealedProd default (boot-declared volumes
@@ -153,7 +152,7 @@ pub struct Manifest {
     pub files: BTreeMap<String, FileEntry>,
     /// Pointer back to the build provenance — the mvm tenant +
     /// build invocation that produced this artifact. Free-form
-    /// today; reserved for ADR-051-style attestation linkage.
+    /// today; reserved for attestation linkage.
     pub build_provenance: Option<String>,
     /// Security claims the producer makes about this artifact.
     pub security: SecurityPosture,
@@ -567,8 +566,8 @@ fn read_manifest_and_signature<R: Read>(
 }
 
 /// Reject anything that isn't a regular file with a tar-traversal-
-/// safe path. Plan 76 §"Artifact extraction is an attack surface"
-/// lists the specific risks; this function gates each one.
+/// safe path. Artifact extraction is an attack surface; this function
+/// gates each of the specific risks.
 fn validate_entry_meta<R: Read>(entry: &tar::Entry<'_, R>) -> Result<(), ArtifactError> {
     let kind = entry.header().entry_type();
     if kind != EntryType::Regular && kind != EntryType::Continuous {

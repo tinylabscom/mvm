@@ -22,7 +22,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum AuditAction {
     /// Show the last N audit events (default: 20). Reads the legacy
     /// `~/.mvm/log/audit.jsonl` LocalAudit stream; pass `--chain` to
-    /// follow the plan-64 chain at `~/.mvm/audit/<tenant>.jsonl`.
+    /// follow the chain-signed log at `~/.mvm/audit/<tenant>.jsonl`.
     Tail {
         /// Number of lines to show
         #[arg(long, short = 'n', default_value = "20")]
@@ -30,16 +30,16 @@ pub(in crate::commands) enum AuditAction {
         /// Follow log output (poll every 500 ms until Ctrl-C)
         #[arg(long, short = 'f')]
         follow: bool,
-        /// Read the plan-64 chain (`~/.mvm/audit/<tenant>.jsonl`) instead
-        /// of the legacy LocalAudit log.
+        /// Read the chain-signed log (`~/.mvm/audit/<tenant>.jsonl`)
+        /// instead of the legacy LocalAudit log.
         #[arg(long)]
         chain: bool,
         /// Tenant whose chain to tail when `--chain` is set.
-        /// Defaults to `"local"` (one-host = one-tenant per ADR-002).
+        /// Defaults to `"local"` (one-host = one-tenant).
         #[arg(long, default_value = "local")]
         tenant: String,
     },
-    /// Verify the plan-64 audit chain. Returns nonzero exit on any
+    /// Verify the chain-signed audit log. Returns nonzero exit on any
     /// signature or chain-link failure.
     Verify {
         /// Tenant whose chain to verify. Defaults to `"local"`.
@@ -58,7 +58,7 @@ pub(in crate::commands) enum AuditAction {
         json: bool,
     },
     /// Run a read-only security-posture self-test. Reports the live
-    /// state of plan-65 + plan-7a mitigations on this host (host
+    /// state of the host's mitigations (host
     /// signer present, audit chain verifiable, allowlists populated,
     /// overlay root 0700, TLS minimum pinned, …) so an operator
     /// can confirm their config without reading source.
@@ -78,7 +78,7 @@ pub(in crate::commands) enum AuditAction {
     /// file + (optionally) the operator's host identity pubkey
     /// + (optionally) the operator's audit chain file.
     ///
-    /// Plan 60 Phase 7a Slice D. Each certificate carries an
+    /// Each certificate carries an
     /// Ed25519 signature over the destruction receipt fields; this
     /// command checks the signature and refuses tampered fields.
     /// When `--chain` is also supplied, cross-references each cert
@@ -145,7 +145,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Plan 60 Phase 7a Slice D — auditor-side verify-cert
+// auditor-side verify-cert
 // ─────────────────────────────────────────────────────────────────
 
 /// Axis-3 chain-cross-reference outcome per certificate.

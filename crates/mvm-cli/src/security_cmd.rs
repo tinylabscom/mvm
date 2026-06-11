@@ -120,7 +120,7 @@ fn collect_checks() -> Vec<PostureCheck> {
     // mvmctl version. A populated cache is the host-side fingerprint
     // that the cosign + SHA-256 verification pipeline has completed
     // at least once for this version (download_dev_image only writes
-    // the cache after every step succeeds). Plan 36 §Layer 4.
+    // the cache after every step succeeds).
     let version = env!("CARGO_PKG_VERSION");
     let prebuilt_dir = format!(
         "{}/dev/prebuilt/v{version}",

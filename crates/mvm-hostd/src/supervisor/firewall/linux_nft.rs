@@ -1,4 +1,4 @@
-//! Plan 60 Phase 3 Slice C — Linux nftables firewall rules.
+//! Linux nftables firewall rules.
 //!
 //! Generates a default-deny ruleset for a per-VM TAP interface
 //! and applies it via `nft -f -`. The ruleset blocks all egress

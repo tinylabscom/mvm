@@ -1,16 +1,13 @@
 //! mvm-plan — typed, signed `ExecutionPlan` contract for mvm workloads.
 //!
-//! Plan 37 §3.3 (CORNERSTONE) makes the `ExecutionPlan` the runtime
-//! contract every workload boots from: image + resources + every
-//! policy reference, signed with Ed25519, audit-bound to a stable
-//! `plan_id` so audit entries can refer back to the exact plan
-//! version a workload ran under.
+//! The `ExecutionPlan` is the runtime contract every workload boots
+//! from: image + resources + every policy reference, signed with
+//! Ed25519, audit-bound to a stable `plan_id` so audit entries can
+//! refer back to the exact plan version a workload ran under.
 //!
-//! Wave 1.1 of plan 37 lands the type itself + the signed envelope.
 //! Resolvers for the `*Ref` fields (PolicyRef, FsPolicyRef, etc.)
-//! are scaffolded as opaque newtypes here and filled in subsequent
-//! waves (Wave 2 wires the egress + tool-gate policies, Wave 3 the
-//! attestation requirement, etc.).
+//! are scaffolded as opaque newtypes here and filled in later: the
+//! egress + tool-gate policies, then the attestation requirement.
 //!
 //! Structure:
 //! - `execution_plan` — `ExecutionPlan`, `SCHEMA_VERSION`.
@@ -21,8 +18,8 @@
 //!   using ed25519_dalek directly. Reuses the `SignedPayload` shape
 //!   from `mvm-core::protocol::signing` so plan signatures fit the
 //!   existing audit + control-plane wire types.
-//! - `validity` — `check_window` + `NonceStore` for plan 37
-//!   Addendum G4 replay protection. Distinct from `signing`: the
+//! - `validity` — `check_window` + `NonceStore` for replay
+//!   protection. Distinct from `signing`: the
 //!   envelope check answers "is this signature valid for this plan",
 //!   the validity check answers "should we accept this otherwise-
 //!   valid plan now".

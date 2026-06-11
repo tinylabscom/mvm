@@ -1,4 +1,4 @@
-//! Plan 60 Phase 6 — error type for the attestation surface.
+//! Error type for the attestation surface.
 //!
 //! Kept in its own module so the header + provider stubs can share
 //! it without a circular dep, and so the CLI / supervisor can match

@@ -1,11 +1,11 @@
-//! Audit-signer subprocess wire protocol (Plan 104 §H-L1.2, §H-L5.1/5.2).
+//! Audit-signer subprocess wire protocol.
 //!
 //! `mvm-audit-signer` is the **sole writer** to `~/.mvm/audit/<tenant>.jsonl`
 //! and the **sole holder** of the audit chain-signing key. The supervisor
 //! routes typed audit entries to it over a per-VM UDS; the subprocess
 //! JCS-canonicalizes the entry, signs it, computes the new `prev_hash`,
-//! persists `chain_head` to a secondary location (Plan 104 §H-L5.2), and
-//! appends to the JSONL via an `O_APPEND`-only FD (§H-L5.1).
+//! persists `chain_head` to a secondary location, and appends to the
+//! JSONL via an `O_APPEND`-only FD.
 //!
 //! The wire envelope is intentionally different from `ServiceCall` —
 //! audit-signer is not a `ServiceHandler`-shaped multiplexer. It has one
@@ -39,25 +39,24 @@ pub enum AppendEntryRequest {
         /// Audit category (snake_case `EventCategory` variant name).
         category: String,
         /// Wall-clock timestamp in RFC 3339 form (the audit-signer also
-        /// records its own monotonic timestamp for clock-jump detection
-        /// per Plan 104 §H-L5.5).
+        /// records its own monotonic timestamp for clock-jump detection).
         ts: String,
         /// Workload identifier the entry is being recorded for.
         workload_id: String,
         /// Tenant identifier — selects which per-tenant chain the entry
         /// appends to.
         tenant_id: String,
-        /// Session identifier (rotates per Plan 104 §H-L4.3).
+        /// Session identifier (rotates per session).
         session_id: String,
-        /// Supervisor-assigned correlation id (Plan 104 §H-L4.6).
+        /// Supervisor-assigned correlation id.
         correlation_id: String,
         /// Typed per-category fields. The audit-signer validates against
         /// the category's schema and rejects out-of-spec values.
         fields: serde_json::Value,
     },
     /// Health probe — used by the supervisor's admission ceremony
-    /// (Plan 104 §H-L5.7) to confirm the audit-signer is up before
-    /// admitting the workload. Returns `Pong` on success.
+    /// to confirm the audit-signer is up before admitting the
+    /// workload. Returns `Pong` on success.
     Probe { request_id: String },
 }
 
@@ -88,14 +87,14 @@ pub enum AppendEntryResponse {
         /// SHA-256-or-equivalent hash of the JCS-canonical entry bytes,
         /// signed by the audit-signer's chain key. This is what the
         /// supervisor persists to the secondary chain-head location
-        /// (Plan 104 §H-L5.2) for anti-rollback.
+        /// for anti-rollback.
         chain_head: String,
         /// The hash of *this* entry (same value as `chain_head` after a
         /// successful append; named separately so future versions can
         /// decouple if the chain-head representation changes).
         entry_hash: String,
-        /// Signature algorithm — `SIG_ALG_ED25519` in v1 software path;
-        /// `SIG_ALG_ECDSA_P256` reserved for W8 HW-enclave path.
+        /// Signature algorithm — `SIG_ALG_ED25519` in the software path;
+        /// `SIG_ALG_ECDSA_P256` reserved for the HW-enclave path.
         sig_alg: u8,
     },
     Pong {
@@ -127,20 +126,19 @@ impl AppendEntryResponse {
 #[serde(rename_all = "snake_case")]
 pub enum AuditSignerErrorCode {
     /// Subprocess still loading the chain key / opening the JSONL file.
-    /// Admission ceremony's `Probe` returns this until ready (Plan 104
-    /// §H-L5.7).
+    /// Admission ceremony's `Probe` returns this until ready.
     NotReady,
     /// Request envelope didn't pass schema gate, OR `fields` violates
     /// the per-category schema, OR `category` is unknown.
     InvalidRequest,
     /// `fsync` on the JSONL after append failed. Surfaced as a
-    /// hard-fail; the supervisor must pause the workload (Plan 104
-    /// §H-L6.6). Append did **not** persist; supervisor should not
-    /// treat the entry as recorded.
+    /// hard-fail; the supervisor must pause the workload. Append did
+    /// **not** persist; supervisor should not treat the entry as
+    /// recorded.
     FsyncFailed,
     /// The chain-head check found drift between the in-memory head and
-    /// the secondary persistence location (Plan 104 §H-L5.2). A real
-    /// rollback attempt or a disk-corruption event. Supervisor must
+    /// the secondary persistence location. A real rollback attempt or a
+    /// disk-corruption event. Supervisor must
     /// pause the workload + halt admission until operator review.
     ChainDriftDetected,
     /// Catch-all. Never carries entry-content bytes in the message.

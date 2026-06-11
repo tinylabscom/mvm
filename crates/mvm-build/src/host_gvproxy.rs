@@ -1,7 +1,7 @@
 //! Host-side gvproxy lifecycle for the Vz backend.
 //!
-//! Plan 102 W6.A.5 — VzBackend is stateless (no per-VM in-memory
-//! ownership), so `gvproxy` must outlive `VzBackend::start`'s
+//! VzBackend is stateless (no per-VM in-memory ownership), so
+//! `gvproxy` must outlive `VzBackend::start`'s
 //! return. We can't use [`libkrun_sys::gvproxy::spawn`] directly:
 //! it returns a `GvproxyHandle` whose Drop SIGTERMs the child the
 //! moment the handle goes out of scope — perfect for the in-libkrun-

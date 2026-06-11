@@ -94,9 +94,9 @@ impl Drop for TapGuard {
     }
 }
 
-/// Plan 129 Stage 2 — RAII reaper for the per-VM substitution endpoint when it
-/// is spawned **before** boot (Approach A: the placeholders it mints must ride
-/// the boot cmdline). If a later boot step fails and returns before the endpoint
+/// RAII reaper for the per-VM substitution endpoint when it is spawned
+/// **before** boot (the placeholders it mints must ride the boot
+/// cmdline). If a later boot step fails and returns before the endpoint
 /// is fully wired, `Drop` reaps it so its decrypted-secret process can't outlive
 /// a failed launch. Defused once the VM is fully up (the normal `stop_vm` path
 /// then owns teardown, same as `FirecrackerGuard`/`TapGuard`).
@@ -133,7 +133,7 @@ impl Drop for EndpointGuard {
 /// Ensure we have a Linux execution environment.
 ///
 /// Today this is always a no-op: native Linux runs Firecracker directly,
-/// macOS runs libkrun, and the Lima fallback is gone (ADR-013).
+/// macOS runs libkrun, and the Lima fallback is gone.
 /// Kept as a function so callers stay well-formed; remove once every
 /// callsite is audited and the call itself can be dropped.
 fn require_linux_env() -> Result<()> {
@@ -158,7 +158,7 @@ pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
 
 /// Resolve the path to the per-VM serial console log file.
 ///
-/// Plan 74 W2 — the host-side netinit-audit emitter
+/// The host-side netinit-audit emitter
 /// (`netinit_audit::emit_for_vm`) reads this file after the
 /// agent is ready and parses the netinit Report from the
 /// captured `__MVM_NETINIT_REPORT__` line. The path follows the
@@ -329,7 +329,7 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         gateway = TAP_IP,
     );
 
-    // #746 — extract an FC-loadable ELF vmlinux if this kernel is a bzImage
+    // Extract an FC-loadable ELF vmlinux if this kernel is a bzImage
     // (no-op for an already-ELF kernel). Same as the flake path below.
     let kernel_path =
         mvm_build::fc_kernel::ensure_fc_loadable_kernel(std::path::Path::new(&kernel_path))
@@ -577,22 +577,22 @@ pub struct FlakeRunConfig {
     pub rootfs_path: String,
     /// Absolute path to the dm-verity sidecar (Merkle hash tree) inside
     /// the Lima VM. Present when the flake was built with
-    /// `verifiedBoot = true` (the production default per ADR-002 §W3).
+    /// `verifiedBoot = true` (the production default).
     /// Must be paired with `roothash`.
     pub verity_path: Option<String>,
     /// 64-char lowercase-hex root hash from `rootfs.roothash`. Baked
-    /// into the kernel cmdline as `dm-mod.create=`. ADR-002 §W3.2.
+    /// into the kernel cmdline as `dm-mod.create=`.
     pub roothash: Option<String>,
-    /// Plan 74 W1.4b — absolute path to the mvm runtime overlay
-    /// ext4 (ADR-051). When all three `runtime_overlay_*` fields
-    /// are `Some`, this drive is attached as `/dev/vdc` and
-    /// `mvm-verity-init` bind-mounts it at `/sysroot/mvm/runtime`.
+    /// Absolute path to the mvm runtime overlay ext4. When all three
+    /// `runtime_overlay_*` fields are `Some`, this drive is attached
+    /// as `/dev/vdc` and `mvm-verity-init` bind-mounts it at
+    /// `/sysroot/mvm/runtime`.
     pub runtime_overlay_path: Option<String>,
-    /// Plan 74 W1.4b — absolute path to the runtime overlay
-    /// verity sidecar (ADR-051); attached as `/dev/vdd`.
+    /// Absolute path to the runtime overlay verity sidecar; attached
+    /// as `/dev/vdd`.
     pub runtime_overlay_verity_path: Option<String>,
-    /// Plan 74 W1.4b — 64-char lowercase-hex root hash for the
-    /// overlay; baked into the cmdline as `mvm.runtime_roothash=`.
+    /// 64-char lowercase-hex root hash for the overlay; baked into
+    /// the cmdline as `mvm.runtime_roothash=`.
     pub runtime_overlay_roothash: Option<String>,
     /// Nix store revision hash.
     pub revision_hash: String,
@@ -691,7 +691,7 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     }
 
     // Provision the VM's bridge+TAP network + egress policy through the
-    // NetworkProvider seam (plan 123 A1 step 2). `provision` is transactional
+    // NetworkProvider seam. `provision` is transactional
     // — it drops the TAP itself if the policy apply fails — and the TapGuard
     // below re-arms to tear the TAP down if a *later* start step fails. Same
     // operations, same order, as the direct calls this replaces.
@@ -706,8 +706,8 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
     let mut tap_guard = TapGuard::new(slot);
 
-    // Plan 113 §Task 13 / ADR-064 — spawn `mvm-firecracker-bridge`
-    // alongside the Firecracker VM. The sidecar runs under
+    // Spawn `mvm-firecracker-bridge` alongside the Firecracker VM.
+    // The sidecar runs under
     // `mvm-jailer-lite` confinement (seccomp + Landlock), verifies the
     // operator-pinned passt SHA256, inherits both halves of a
     // socketpair from this process, and runs
@@ -728,8 +728,8 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     start_vm_firecracker(&abs_dir, &abs_socket)?;
     let mut fc_guard = FirecrackerGuard::new(&abs_dir);
 
-    // Plan 129 Stage 2 (Approach A) — spawn the substitution endpoint BEFORE
-    // configuring boot args, so the placeholders it mints land in
+    // Spawn the substitution endpoint BEFORE configuring boot args,
+    // so the placeholders it mints land in
     // `vm_substitution_env_path` and `configure_flake_microvm` can carry them on
     // the cmdline (`mvm.secret_env=`) into a sealed entrypoint. The endpoint
     // binds its listener now; the nft REDIRECT that feeds it is installed
@@ -758,11 +758,11 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     // Persist run info for `mvm status`
     write_vm_run_info(config, &abs_dir)?;
 
-    // Plan 113 §Task 13 — VM is healthy. Detach the bridge guard so
-    // its child outlives this stack frame; persist the bridge PID to
+    // VM is healthy. Detach the bridge guard so its child outlives
+    // this stack frame; persist the bridge PID to
     // `<abs_dir>/fc-bridge.pid` and spawn the watchdog thread that
-    // SIGTERMs the FC VM if the bridge dies (ADR-064 §Decision 6 —
-    // hard-fail bridge crash policy).
+    // SIGTERMs the FC VM if the bridge dies (hard-fail bridge crash
+    // policy).
     //
     // A failure here is non-fatal: the VM is already running. We log
     // and proceed; the guard remains attached, so the bridge will be
@@ -778,12 +778,12 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
         );
     }
 
-    // Plan 129 Task 5B — when the admitted plan carries secret bindings, stand
-    // up this VM's transparent egress moat now that the guest is healthy:
+    // When the admitted plan carries secret bindings, stand up this
+    // VM's transparent egress moat now that the guest is healthy:
     //   1. spawn the per-VM substitution endpoint with the terminator listener
-    //      bound on a per-slot host port (Task 4), and
+    //      bound on a per-slot host port, and
     //   2. install the nft TAP prerouting REDIRECT that steers the guest's
-    //      outbound :80 to that terminator (Task 5A).
+    //      outbound :80 to that terminator.
     // Fail closed: a secret-bearing workload must not keep running without its
     // substitution path, so any failure rolls the VM back. Linux-only (nft +
     // the FC path itself). The plan source is the same `plan.json` the bridge
@@ -839,8 +839,8 @@ pub fn restore_from_template_snapshot(
     config.validate()?;
     require_linux_env()?;
 
-    // ADR-007 / plan 41 W4 / M9: verify the integrity sidecar
-    // *before* doing anything else. A tampered snapshot must not cause
+    // Verify the integrity sidecar *before* doing anything else: a
+    // tampered snapshot must not cause
     // bridge ensure / TAP create / Firecracker spawn — none of those
     // should happen if we're going to refuse the bytes anyway. A
     // missing sidecar is a non-fatal warning unless
@@ -861,7 +861,7 @@ pub fn restore_from_template_snapshot(
     }
 
     // Provision the VM's bridge+TAP network + egress policy through the
-    // NetworkProvider seam (plan 123 A1 step 2). `provision` is transactional
+    // NetworkProvider seam. `provision` is transactional
     // — it drops the TAP itself if the policy apply fails — and the TapGuard
     // below re-arms to tear the TAP down if a *later* start step fails. Same
     // operations, same order, as the direct calls this replaces.
@@ -1152,7 +1152,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
 
-    // Plan 129 Task 5B — tear down this VM's egress substitution moat BEFORE the
+    // Tear down this VM's egress substitution moat BEFORE the
     // not-running early return. The endpoint is a live host process holding the
     // workload's DECRYPTED secrets and the nft REDIRECT table outlives the guest;
     // if an FC VM crashes/OOMs on its own, a later `stop_vm` must still reap the
@@ -1206,7 +1206,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     {
         // Reconstruct slot to find TAP name — scan for the index
         if let Some(idx) = read_slot_index(&abs_dir) {
-            // Tear down through the NetworkProvider seam (plan 123 A1 step 2):
+            // Tear down through the NetworkProvider seam:
             // best-effort drain of the iptables policy + TAP, symmetric with
             // the provision path.
             let handle = NetHandle {
@@ -1695,7 +1695,7 @@ pub fn create_dev_secrets_drive(abs_dir: &str, secret_files: &[DriveFile]) -> Re
 /// `verifiedBoot = true`. Returns `(Some(verity_path), Some(roothash))`
 /// when both files are present and the roothash decodes to a 64-char
 /// hex string; otherwise `(None, None)` so callers fall back to the
-/// unverified-boot path. ADR-002 §W3.
+/// unverified-boot path.
 pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
     use crate::base::shell::{run_in_vm, run_in_vm_stdout};
     use std::path::Path;
@@ -1726,7 +1726,7 @@ pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String
 /// `roothash`). When the three runtime-overlay fields are also
 /// present, the fragment includes the `mvm.runtime_*` knobs the
 /// init binary reads to set up the second dm-verity target and
-/// bind-mount it at `/sysroot/mvm/runtime` (ADR-051).
+/// bind-mount it at `/sysroot/mvm/runtime`.
 pub fn build_verity_cmdline_args(
     roothash: Option<&str>,
     overlay_roothash: Option<&str>,
@@ -1795,7 +1795,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         gw = BRIDGE_IP,
     );
 
-    // dm-verity boot path (ADR-002 §W3): when verity is on, the kernel
+    // dm-verity boot path: when verity is on, the kernel
     // mounts the verity initramfs first, which is `mvm-verity-init`
     // (PID 1) — that binary reads `mvm.roothash=…` from the cmdline,
     // builds the verity device-mapper target via raw ioctls, mounts
@@ -1821,8 +1821,8 @@ pub fn configure_flake_microvm_with_drives_dir(
                 .map(|p| format!("{}/rootfs.initrd", p.display()))
         })
         .filter(|p| std::path::Path::new(p).exists());
-    // The runtime overlay (ADR-051) only has a consumer when verity
-    // is on — `mvm-verity-init` is the PID 1 that reads
+    // The runtime overlay only has a consumer when verity is on —
+    // `mvm-verity-init` is the PID 1 that reads
     // `mvm.runtime_roothash=` and bind-mounts the overlay at
     // `/sysroot/mvm/runtime`. Outside the verity boot path there's
     // no init to mount the drives, so we'd just be reserving virtio
@@ -1857,7 +1857,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         format!("root=/dev/vda rw rootwait init=/init {base_args}")
     };
 
-    // Plan 129 Stage 2 — a fresh FC boot attaches no secrets drive, so the per-VM
+    // A fresh FC boot attaches no secrets drive, so the per-VM
     // egress intermediate cert reaches the sealed guest via the kernel cmdline.
     // `mvmctl up` staged it in `egress-intermediate.json`; `/init` decodes the
     // `mvm.egress_ca=` token into the guest trust bundle (cert only — the key
@@ -1866,8 +1866,8 @@ pub fn configure_flake_microvm_with_drives_dir(
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
-    // Plan 129 Stage 2 (Approach A) — the substitution endpoint spawned pre-boot
-    // minted the workload's placeholders and wrote them to
+    // The substitution endpoint spawned pre-boot minted the
+    // workload's placeholders and wrote them to
     // `vm_substitution_env_path`. Carry them on the cmdline (`mvm.secret_env=`)
     // so `/init` exports `$VAR=placeholder` into a sealed entrypoint (placeholders
     // only, never values). Absent ⇒ no secrets / no endpoint.
@@ -1876,7 +1876,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         None => boot_args,
     };
 
-    // #746 — FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
+    // FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
     // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
     // which FC rejects with "Invalid Elf magic number". Extract the embedded ELF
     // to a cached sibling once and boot from that. No-op for an already-ELF
@@ -1955,7 +1955,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         )?;
     }
 
-    // mvm runtime overlay (ADR-051): when the workload opted in,
+    // mvm runtime overlay: when the workload opted in,
     // attach the overlay ext4 + its verity sidecar as the third and
     // fourth virtio-blk drives. Order matters — Firecracker assigns
     // drive letters in API-call order, so this pair must follow
@@ -2272,11 +2272,12 @@ pub fn read_run_info() -> Option<RunInfo> {
 }
 
 // ============================================================================
-// Plan 113 §Task 13 — mvm-firecracker-bridge spawn + watchdog (Linux only)
+// mvm-firecracker-bridge spawn + watchdog (Linux only)
 //
-// Mirrors Vz's `AttachedDrainerGuard` shape (`crates/mvm-backend/src/vz.rs`
-// §Task 11) — Drop kills+waits the child on early return, `detach()`
-// hands ownership to the caller which records the PID in
+// Mirrors Vz's `AttachedDrainerGuard` shape
+// (`crates/mvm-backend/src/vz.rs`) — Drop kills+waits the child on
+// early return, `detach()` hands ownership to the caller which
+// records the PID in
 // `<state_dir>/fc-bridge.pid` and lets the watchdog thread inherit it.
 // The bridge is Linux-only so every helper is `#[cfg(target_os = "linux")]`;
 // non-Linux builds compile but never call into this path.
@@ -2285,7 +2286,7 @@ pub fn read_run_info() -> Option<RunInfo> {
 /// PID file the bridge watchdog writes inside `<abs_dir>`. Lives next
 /// to `fc.pid` so the watchdog (and a future `stop_vm` reaper) can find
 /// the bridge with the same `<abs_dir>` it already resolves for the
-/// FC VM itself. Plan 113 §Task 13.
+/// FC VM itself.
 #[cfg(target_os = "linux")]
 const FC_BRIDGE_PID_FILE_NAME: &str = "fc-bridge.pid";
 
@@ -2349,7 +2350,7 @@ fn passt_path_from_env_or_default() -> std::path::PathBuf {
 
 /// Resolve the `mvm-firecracker-bridge` binary path, checking three
 /// sources in order. Pure resolver — exercised directly from tests
-/// without touching `std::env`. Mirrors Task 11's
+/// without touching `std::env`. Mirrors the Vz
 /// `resolve_vz_drainer_path_inner` shape.
 #[cfg(target_os = "linux")]
 fn resolve_fc_bridge_path_inner(
@@ -2409,8 +2410,8 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Plan 129 Task 5B — stand up this VM's transparent egress substitution moat
-/// (endpoint + terminator + nft TAP REDIRECT) when the admitted plan carries
+/// Stand up this VM's transparent egress substitution moat (endpoint +
+/// terminator + nft TAP REDIRECT) when the admitted plan carries
 /// secret bindings. Called after the FC guest is healthy.
 ///
 /// The plan lives at `vm_state_dir(name)/plan.json` (the same file
@@ -2425,7 +2426,8 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
 ///
 /// The installed [`EgressRedirect`] is `persist`ed (not dropped): the VM keeps
 /// running after this returns, and `stop_vm` removes the nft table by name.
-/// Plan 129 — shared plan decode: `Some((secrets, tenant))` when the admitted
+///
+/// Shared plan decode: `Some((secrets, tenant))` when the admitted
 /// plan carries egress secrets, else `None` (legacy / non-admitted / no-secret
 /// boot — nothing to wire). A missing `plan.json` or an undecodable placeholder
 /// plan is the no-op path, not an error.
@@ -2468,8 +2470,8 @@ fn decode_plan_secrets(
     Ok(Some((secrets, redaction, tenant)))
 }
 
-/// Plan 129 Stage 2 (Approach A) — spawn the per-VM substitution endpoint
-/// **before** the guest boots, so the `(var → placeholder)` pairs it mints (and
+/// Spawn the per-VM substitution endpoint **before** the guest boots,
+/// so the `(var → placeholder)` pairs it mints (and
 /// writes to `vm_substitution_env_path`) are available when `boot_args` is built
 /// and can ride the cmdline (`mvm.secret_env=`) into a sealed entrypoint. Binds
 /// the terminator listener too; the nft REDIRECT that feeds it is installed
@@ -2509,7 +2511,7 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
     Ok(EndpointGuard::new(name))
 }
 
-/// Plan 129 — install the per-VM nft TAP REDIRECT (`:80`/`:443` → the terminator)
+/// Install the per-VM nft TAP REDIRECT (`:80`/`:443` → the terminator)
 /// **after** the guest boots (the TAP exists). No-op when the plan carries no
 /// egress secrets. Persists the table so it outlives this frame; `stop_vm`
 /// removes it by name.
@@ -2528,7 +2530,7 @@ fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
     Ok(())
 }
 
-/// Plan 129 Stage 2 — the `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
+/// The `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
 /// or `None` when the VM has no staged intermediate (no secrets / no https leg).
 /// Reads the **cert** from the per-VM `egress-intermediate.json` sidecar (the key
 /// is never put on the cmdline / in the guest). Best-effort: a malformed/missing
@@ -2542,8 +2544,8 @@ fn egress_ca_cmdline_token(vm_name: &str) -> Option<String> {
     mvm_core::vm_backend::encode_egress_ca_cmdline(cert)
 }
 
-/// Plan 129 Stage 2 (Approach A) — the `mvm.secret_env=<hex>` cmdline token for
-/// `vm_name`, or `None` when the VM has no secrets. Reads the `(var, placeholder)`
+/// The `mvm.secret_env=<hex>` cmdline token for `vm_name`, or `None`
+/// when the VM has no secrets. Reads the `(var, placeholder)`
 /// pairs the pre-boot substitution endpoint minted into `vm_substitution_env_path`
 /// (a JSON array of `[var, placeholder]`) and encodes them — **placeholders only**,
 /// never values (claim 13). Best-effort: a missing/malformed handshake yields
@@ -2555,10 +2557,10 @@ fn secret_env_cmdline_token(vm_name: &str) -> Option<String> {
     mvm_core::vm_backend::encode_secret_env_cmdline(&pairs)
 }
 
-/// Plan 129 Stage 2 — read the per-VM egress intermediate (`cert_pem` + `key_pem`)
+/// Read the per-VM egress intermediate (`cert_pem` + `key_pem`)
 /// `mvmctl up` persisted at `<state_dir>/egress-intermediate.json` (host-only,
 /// mode 0600). Returns `None` when absent (no https leg) — a missing file is the
-/// Stage 1b / no-secret path, not an error. The key is host-side material only;
+/// no-secret path, not an error. The key is host-side material only;
 /// it is handed to the terminator endpoint and never written to a guest drive.
 #[cfg(target_os = "linux")]
 fn read_egress_intermediate(state_dir: &std::path::Path) -> Result<Option<(String, String)>> {
@@ -2810,8 +2812,7 @@ fn write_fc_bridge_pid_file(path: &std::path::Path, pid: u32) -> Result<()> {
 /// guard, persist its PID under `<abs_dir>/fc-bridge.pid` (mode 0600),
 /// then spawn the watchdog thread that observes the child via
 /// `wait()`. On bridge death the watchdog SIGTERMs the FC VM via
-/// `<abs_dir>/fc.pid` (ADR-064 §Decision 6 — hard-fail bridge crash
-/// policy).
+/// `<abs_dir>/fc.pid` (hard-fail bridge crash policy).
 ///
 /// No-op when the guard is empty (legacy path with no admitted plan).
 #[cfg(target_os = "linux")]
@@ -2949,7 +2950,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Plan 74 W1.4b.3b.3 — verity cmdline + runtime-overlay attachment
+    // verity cmdline + runtime-overlay attachment
     // ------------------------------------------------------------------
 
     /// 64-char lowercase hex used wherever a roothash is needed.
@@ -3156,7 +3157,7 @@ mod tests {
 
     /// Verify the log-and-continue error policy works: when a cleanup
     /// operation returns Err, the enclosing function should NOT propagate it.
-    /// This tests the pattern used throughout the codebase (Sprint 16 Phase 1.2).
+    /// This tests the log-and-continue pattern used throughout the codebase.
     #[test]
     fn test_log_and_continue_pattern_does_not_propagate_errors() {
         use crate::base::shell_mock;
@@ -3368,7 +3369,7 @@ mod tests {
         );
     }
 
-    // ──── Verity (ADR-002 §W3) ────────────────────────────────────────
+    // ──── Verity ──────────────────────────────────────────────────────
     //
     // The host-side cmdline shape and DM-table construction now live
     // in `mvm-verity-init` (initramfs PID 1) — those are exercised by
@@ -3389,7 +3390,7 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────────────────────
-    // Plan 113 §Task 13 — mvm-firecracker-bridge spawn helpers
+    // mvm-firecracker-bridge spawn helpers
     // ───────────────────────────────────────────────────────────────
 
     #[test]

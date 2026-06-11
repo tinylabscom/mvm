@@ -15,11 +15,11 @@
 //!
 //! ## Security profile
 //!
-//! Tier 3 / claims unknown. The mock satisfies none of ADR-002's
-//! seven CI-enforced claims because it doesn't run a guest at all —
-//! there's no isolation, no rootfs, no vsock. A loud `--hypervisor
-//! mock` banner is expected (the CLI surfaces backend tier on
-//! every `up`).
+//! Tier 3 / claims unknown. The mock satisfies none of the
+//! seven CI-enforced security claims because it doesn't run a guest
+//! at all — there's no isolation, no rootfs, no vsock. A loud
+//! `--hypervisor mock` banner is expected (the CLI surfaces backend
+//! tier on every `up`).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -51,10 +51,10 @@ struct MockVm {
 /// backend (e.g. across an `AnyBackend::Mock(MockBackend)` enum copy)
 /// shares state. The `Default` impl returns an empty registry.
 ///
-/// `agents` holds one [`MockGuestAgent`] per VM. Plan 66 W1/W2 — the
-/// agent listens on `<vm_dir>/runtime/v.sock` so host-side `fs` and
-/// `proc` callers find a working endpoint at the same path
-/// Firecracker exposes for the real vsock UDS.
+/// `agents` holds one [`MockGuestAgent`] per VM — the agent listens
+/// on `<vm_dir>/runtime/v.sock` so host-side `fs` and `proc` callers
+/// find a working endpoint at the same path Firecracker exposes for
+/// the real vsock UDS.
 #[derive(Debug, Default, Clone)]
 pub struct MockBackend {
     state: std::sync::Arc<Mutex<HashMap<String, MockVm>>>,
@@ -76,8 +76,8 @@ impl MockBackend {
     /// `<mvm_data_dir>/mock-vms/<name>/` so it never collides with
     /// the Lima-era `~/microvm/vms/<name>` path that
     /// `resolve_running_vm_dir` expects for real Firecracker VMs.
-    /// Plan 65 W1: `pause.rs` and `resume.rs` read the snapshot
-    /// directory through here when `--hypervisor mock` is set.
+    /// `pause.rs` and `resume.rs` read the snapshot directory through
+    /// here when `--hypervisor mock` is set.
     pub fn vm_dir(name: &str) -> std::path::PathBuf {
         std::path::PathBuf::from(mvm_core::config::mvm_data_dir())
             .join("mock-vms")
@@ -114,14 +114,14 @@ impl VmBackend for MockBackend {
         if state.contains_key(&config.name) {
             bail!("mock: VM '{}' already running", config.name);
         }
-        // Plan 65 W1: create a host-side per-VM directory so the
-        // verbs that probe `<vm_dir>/...` paths (pause/resume's
-        // snapshot dir; future fs/proc/volume work) find something
-        // real. Best-effort — a failure here doesn't abort start
-        // because not every consumer needs the directory.
+        // Create a host-side per-VM directory so the verbs that probe
+        // `<vm_dir>/...` paths (pause/resume's snapshot dir; future
+        // fs/proc/volume work) find something real. Best-effort — a
+        // failure here doesn't abort start because not every consumer
+        // needs the directory.
         let vm_dir = Self::vm_dir(&config.name);
         let _ = std::fs::create_dir_all(&vm_dir);
-        // Plan 66 W1/W2: spawn the mock vsock guest-agent on
+        // Spawn the mock vsock guest-agent on
         // `<vm_dir>/runtime/v.sock`. Failure to start the agent is
         // *not* fatal — the audit-emit tests that don't touch
         // fs/proc still want the VM to come up. The fs/proc tests
@@ -169,7 +169,7 @@ impl VmBackend for MockBackend {
             .map_err(|_| anyhow::anyhow!("mock backend state mutex poisoned"))?;
         state.remove(&id.0);
         // Drop the agent (which joins its thread + removes the socket)
-        // and the on-disk VM dir. Plan 66 W1/W2.
+        // and the on-disk VM dir.
         if let Ok(mut agents) = self.agents.lock()
             && let Some(agent) = agents.remove(&id.0)
         {
@@ -298,7 +298,7 @@ impl VmBackend for MockBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // The mock satisfies none of ADR-002's seven claims because
+        // The mock satisfies none of the seven security claims because
         // it doesn't run a guest at all. Operators selecting it via
         // `--hypervisor mock` get a loud Tier-3 banner so they
         // can't accidentally land production traffic on it.

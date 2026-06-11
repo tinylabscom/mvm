@@ -1,7 +1,7 @@
 //! Periodic-tick driver for [`BalloonController`].
 //!
-//! Sprint 52 W1 shipped `BalloonController::tick` as a pure-logic
-//! decision function. Production callers want it called on a
+//! `BalloonController::tick` is a pure-logic decision function.
+//! Production callers want it called on a
 //! schedule against the live `VmBackend`. This module is the
 //! adapter: it queries the backend for running VMs, reads each
 //! one's `BalloonState`, hands the snapshot to the controller, and

@@ -1,7 +1,7 @@
 //! `mvmctl ops <sub>` — operational / observability commands.
 //!
-//! Plan 178 / ADR-077: `metrics`, `bench`, `config`, `mcp` collapse under
-//! one `ops` namespace. Leaf modules are unchanged.
+//! `metrics`, `bench`, `config`, `mcp` collapse under one `ops`
+//! namespace. Leaf modules are unchanged.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};

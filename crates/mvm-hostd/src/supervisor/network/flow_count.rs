@@ -1,4 +1,4 @@
-//! Plan 113 / ADR-064 — flow-count-metrics observer.
+//! Flow-count-metrics observer.
 //!
 //! Per-tenant flow counters surfaced via mvm-cli's existing
 //! --metrics-port Prometheus endpoint (mvm-cli/src/metrics_server.rs).
@@ -15,10 +15,10 @@
 //!
 //! The mvm-supervisor::gateway_bridge::FlowEvent does NOT carry a
 //! tenant string per event — the supervisor is single-VM single-tenant
-//! by construction (ADR-002 "one guest = one workload"). The tenant is
+//! by construction (one guest = one workload). The tenant is
 //! established at supervisor startup via BridgeConfig.plan.tenant; this
-//! observer reads MVM_TENANT once at Arc-construction time, which is
-//! one of the four canonical tenant sources from ADR-064 §Decision 9.
+//! observer reads MVM_TENANT once at Arc-construction time, one of the
+//! canonical tenant sources.
 
 use crate::supervisor::gateway_bridge::{FlowEvent, FlowEventKind};
 use crate::supervisor::network::{Observer, RequiredCapabilities};
@@ -98,7 +98,7 @@ impl FlowCountMetrics {
     }
 
     /// Per-VM scrape file the CLI's `/metrics` handler concatenates.
-    /// Lives under `~/.mvm/audit/` (mode 0700, ADR-002 §W1.5) because
+    /// Lives under `~/.mvm/audit/` (mode 0700) because
     /// the supervisor and the CLI run as the same user and share that
     /// directory already — no new socket or RPC is needed to cross
     /// the process boundary.
@@ -174,7 +174,7 @@ impl Observer for FlowCountMetrics {
                 let key = reason.as_str().to_string();
                 *g.entry(key).or_insert(0) += 1;
             }
-            // Plan 141 — observer faults are a packet-path kill, not a flow
+            // Observer faults are a packet-path kill, not a flow
             // lifecycle transition; this lifecycle-counting observer ignores
             // them (the chain records the fault separately).
             FlowEventKind::ObserverFault { .. } => {}

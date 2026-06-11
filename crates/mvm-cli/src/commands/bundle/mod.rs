@@ -1,7 +1,7 @@
 //! `mvmctl bundle` — content-addressed, publisher-signed
 //! `.mvmpkg` portable image archives.
 //!
-//! Sprint 52 W2: a bundle pairs `manifest.json` + `manifest.sig` +
+//! A bundle pairs `manifest.json` + `manifest.sig` +
 //! the artifact bytes inside one tar archive. The manifest declares
 //! a per-artifact SHA-256, an architecture, the publisher's
 //! `key_id`, and a workload label. The signature is detached
@@ -15,13 +15,12 @@
 //! sha256 re-check. See `mvm_core::plan::bundle` module rustdoc for the
 //! full rejection ladder.
 //!
-//! ## Scope (this commit)
+//! ## Scope
 //!
 //! `export` and `fetch` over local filesystem paths. HTTP fetch
 //! and supervisor admit-time re-verify (`ExecutionPlan::PlanArtifact`)
 //! are deferred follow-ups — both touch larger surfaces (a wire
-//! client and an `ExecutionPlan` schema bump respectively) that
-//! shouldn't sneak into the substrate-close-out commit.
+//! client and an `ExecutionPlan` schema bump respectively).
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
@@ -54,7 +53,6 @@ pub(in crate::commands) enum BundleAction {
     /// Verify and atomically install a `.mvmpkg` archive into the
     /// local bundle registry (`~/.mvm/bundles/<sha>/`). Once
     /// installed, `mvmctl up --manifest <sha>` launches from it.
-    /// Sprint 52 W2 registry-replacement substrate.
     Install(install::Args),
     /// Prune installed bundles from the registry. Either a specific
     /// `<SHA>` or `--all` to wipe everything. Emits

@@ -1,4 +1,4 @@
-//! ADR-0011 W-DEP: byte-format contract tests for `/etc/mvm/runtime.json`.
+//! Byte-format contract tests for `/etc/mvm/runtime.json`.
 //!
 //! mvm's Nix factories emit `/etc/mvm/runtime.json` at image
 //! build time. The mvm agent parses that file at boot via
@@ -14,10 +14,10 @@
 //! breaking case fails this test immediately — not silently at boot
 //! time on a shipped image.
 //!
-//! Closes the deferred W-DEP item from issue tinylabscom/mvm#20:
-//! the previous version of this file used a hand-rolled
+//! An earlier version of this file used a hand-rolled
 //! `MvmRuntimeConfigMirror` struct that had to be updated in lockstep
-//! with mvm by hand; now drift detection is automatic.
+//! with mvm by hand; pulling in the real upstream type makes drift
+//! detection automatic.
 
 use mvm_guest::runtime_config::{ConcurrencyConfig, InProcessMode, RuntimeConfig};
 

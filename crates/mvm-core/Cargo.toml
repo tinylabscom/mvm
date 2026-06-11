@@ -12,7 +12,7 @@ authors.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
-# Plan 104 §H-L3.6 / W1b.2b.3 — `protocol::signed_config` verifies
+# `protocol::signed_config` verifies
 # subprocess startup config envelopes via Ed25519. The verify path
 # is consumed by every subprocess crate at parse time; mvm-core is
 # the natural home since it already owns the wire-format types.
@@ -20,11 +20,11 @@ ed25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# Folded in with mvm-plan (plan 121 B1): `plan::bundle` reads/writes
+# Folded in with mvm-plan: `plan::bundle` reads/writes
 # tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
 tar = "0.4"
 thiserror = "1"
-# Optional (plan 126 B5): the only default-build async surface left is
+# Optional: the only default-build async surface left is
 # `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
 # `manifest-verify` (sigstore) pulls the rest. With both off, the default
 # `mvm-core` build is runtime-free.
@@ -36,13 +36,13 @@ uuid.workspace = true
 fs2.workspace = true
 regex = "1"
 tempfile.workspace = true
-# Plan 74 W2 — `mandatory_deny_ranges` parses a small set of
+# `mandatory_deny_ranges` parses a small set of
 # IPv4/IPv6 CIDRs (cloud metadata endpoint, link-local, CGNAT,
 # host loopback). Workspace-pinned (already used by
 # `mvm-supervisor::proxy::l4`).
 ipnet = { workspace = true }
 
-# Folded in with the former mvm-security crate (plan 121 B3): the
+# Folded in with the former mvm-security crate: the
 # `crypto` module's AEAD (aes-gcm), HMAC, OS keychain (keyring),
 # secret wrappers (secrecy/zeroize), and secret-token scanning
 # (aho-corasick). All sync. `rand` is promoted from dev-only because
@@ -58,24 +58,24 @@ rand.workspace = true
 # large sigstore OIDC/TUF/Rekor graph only under `manifest-verify`, so
 # the default mvm-core build stays async/runtime-free.
 sigstore = { version = "0.13", default-features = false, features = ["bundle", "sigstore-trust-root", "rustls-tls"], optional = true }
-# Plan 124 D1 — only under the `schema` feature (protocol-schema codegen);
+# Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
 schemars = { version = "0.8", optional = true }
-# Plan 129 Stage 2 (ADR-006) — the per-VM name-constrained egress CA lives in
+# The per-VM name-constrained egress CA lives in
 # `crypto::egress_ca`, gated behind `egress-ca` so the foundation crate's default
 # closure doesn't pull `rcgen`/`ring`/`yasna` for non-egress consumers. Sync, no
 # tokio (runtime-free invariant unaffected).
 rcgen = { workspace = true, optional = true }
 
-# `default` is empty: the default `mvm-core` build is runtime-free
-# (plan 126 B5 PR-2). The hostd IPC transport pulls tokio only behind
+# `default` is empty: the default `mvm-core` build is runtime-free.
+# The hostd IPC transport pulls tokio only behind
 # `hostd-transport`, which mvmd enables via the `mvmctl` facade
 # (`mvmctl/hostd-transport`); `manifest-verify` pulls it independently.
 # `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core
 # -e no-dev` carries no `tokio` so this can't silently regress.
 [features]
 default = []
-# Plan 129 Stage 2 (ADR-006): the per-VM name-constrained egress CA
+# The per-VM name-constrained egress CA
 # (`crypto::egress_ca`). Pulls `rcgen` (sync — ring/yasna, no tokio), so the
 # runtime-free default build is unaffected. Enabled by mvm-backend (cert
 # delivery) and mvm-hostd (the TLS terminator).
@@ -89,7 +89,7 @@ test-support = []
 # default closure carries no tokio. Pulls tokio's `io-util`.
 hostd-transport = ["dep:tokio", "tokio/io-util"]
 # Cosign-keyless manifest verification via sigstore (folded from
-# mvm-security, plan 121 B3). sigstore uses a blocking verifier backed
+# mvm-security). sigstore uses a blocking verifier backed
 # by a tokio runtime; enable the tokio features it needs (independent of
 # `hostd-transport` — `manifest-verify` alone must build).
 manifest-verify = [
@@ -104,12 +104,12 @@ manifest-verify = [
     "tokio/fs",
     "tokio/sync",
 ]
-# Hardware attestation provider stubs (plan 60 Phase 6) — each enables
+# Hardware attestation provider stubs — each enables
 # the corresponding `crypto::attestation::provider` impl.
 attestation-tpm2 = []
 attestation-sev-snp = []
 attestation-tdx = []
-# Plan 124 D1 — derive `schemars::JsonSchema` on the protocol types the
+# Derive `schemars::JsonSchema` on the protocol types the
 # host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
 # `mvm-guest`'s `emit_protocol_schema` bin can emit the protocol schema.
 # Off by default: the schema is a build-time codegen input, never linked
@@ -124,9 +124,9 @@ schema = ["dep:schemars"]
 rand.workspace = true
 # The `protocol` hostd-transport `#[tokio::test]`s need a runtime +
 # macros regardless of which non-dev features pull tokio. Dev-only, so
-# the `-e no-dev` runtime-free gate (plan 126 B5) ignores it.
+# the `-e no-dev` runtime-free gate ignores it.
 tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
-# Plan 129 Stage 2: the egress-CA tests parse minted certs (x509-parser) and
+# The egress-CA tests parse minted certs (x509-parser) and
 # assert nameConstraints enforcement through a real path verifier (rustls/webpki,
 # ring backend). Dev-only — the egress-ca module itself only needs rcgen.
 x509-parser = "0.16"

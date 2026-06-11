@@ -1,11 +1,12 @@
 //! `SupervisorEgressEnforcer` — adapts the supervisor's [`FirewallEnforcer`]
-//! to the low [`mvm_network::EgressEnforcer`] seam (plan 123 A2.1).
+//! to the low [`mvm_network::EgressEnforcer`] seam.
 //!
 //! Pure plumbing: it maps the seam's `EgressWiring` onto a [`FirewallSpec`]
 //! and delegates `enforce`→`install_default_deny`, `withdraw`→`teardown`,
 //! translating [`FirewallError`] into `EnforcementError` so the fail-closed
-//! `NotWired` posture survives the seam. A2.1 introduces this adapter *without
-//! changing any live call path*; A2.2 reroutes `Supervisor::launch` through it.
+//! `NotWired` posture survives the seam. This adapter exists without
+//! changing any live call path; `Supervisor::launch` is rerouted through it
+//! separately.
 
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ impl EgressEnforcer for SupervisorEgressEnforcer {
         _policy: &NetworkPolicy,
     ) -> Result<(), EnforcementError> {
         // The firewall installs a fixed default-deny on the TAP regardless of
-        // policy; the policy's allow-rules are the L4/L7 layer's job (A2.2+),
+        // policy; the policy's allow-rules are the L4/L7 layer's job,
         // so `_policy` is reserved on the seam, not silently dropped.
         let spec = FirewallSpec::new(&wiring.vm_id, &wiring.tap_iface, &wiring.proxy_iface);
         self.firewall

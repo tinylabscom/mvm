@@ -97,7 +97,7 @@ pub(in crate::commands) enum Mode {
     /// verbs. Refused by `compile` (use `mvmctl run`).
     Live,
     /// Plan transport — synthesize one ExecutionPlan per `Sandbox`
-    /// call. Refused by `compile` until Phase 7.
+    /// call. Not yet supported by `compile`.
     Plan,
     /// Record transport (default for `compile`) — capture `Sandbox`
     /// operations into a `RuntimeRecording` and lower to a Workload.
@@ -135,7 +135,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// (nixpkgs `importNpmLock`, which reads `package-lock.json` integrity
 /// hashes — the only hash-free path); pnpm/yarn need a precomputed FOD hash
 /// the host-side compile can't produce, so they route through the
-/// sealed-volume builder path (Plan 145 WS-A, not yet wired). Either gap is
+/// sealed-volume builder path (not yet wired). Either gap is
 /// silent today — the bundle just copies the source with no `node_modules` —
 /// so a missing dep only surfaces as a runtime import failure. Make it loud.
 fn warn_node_deps(workload: &Workload, manifest_dir: &Path) {
@@ -224,8 +224,8 @@ fn load_workload(args: &Args) -> Result<Workload> {
             match parse_python(&bytes, &path) {
                 Ok((workload, _manifest)) => Ok(workload),
                 Err(ParseError::NoDecoratedFunction { .. }) => {
-                    // Phase 7e — no `@mvm.app`, so the script is
-                    // record-mode. Auto-exec it on the host with
+                    // No `@mvm.app`, so the script is record-mode.
+                    // Auto-exec it on the host with
                     // `MVM_SDK_MODE=record` + `MVM_SDK_OUT_PATH`
                     // pointed at a tempfile; the SDK's atexit hook
                     // writes the recording there before the process
@@ -270,7 +270,7 @@ fn load_workload(args: &Args) -> Result<Workload> {
 
 /// Diagnostic the runtime-script + decorator-without-app paths share:
 /// they both bottom out in "auto-execution of Sandbox-shaped scripts
-/// is Phase 7e; for now, emit the recording manually and pass
+/// is not yet wired; for now, emit the recording manually and pass
 /// `--from-recording`."
 fn no_decorator_runtime_message(path: &Path) -> String {
     format!(

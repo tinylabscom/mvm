@@ -3,9 +3,9 @@
 //! Each variant carries only the information needed to diagnose the
 //! failure. Registry hostnames, repository names, and manifest media
 //! types are not secrets and appear in error messages verbatim.
-//! When private-registry auth lands (later W1 PR), credential
-//! material will be carried via [`secrecy::SecretString`] and the
-//! `Display` impl will redact — that path is gated by ADR-049 and the
+//! When private-registry auth lands, credential material will be
+//! carried via [`secrecy::SecretString`] and the `Display` impl will
+//! redact — that path is gated by the
 //! `xtask check-no-display-on-secret-types` lint, so this enum can
 //! stay plain until then.
 
@@ -44,8 +44,8 @@ pub enum OciError {
     Registry(String),
 
     /// A layer descriptor's declared size, or the streamed byte
-    /// count, exceeded the configured size cap. Plan 74 §Risks R10
-    /// — decompression-bomb / oversized-layer mitigation. The
+    /// count, exceeded the configured size cap. Decompression-bomb /
+    /// oversized-layer mitigation. The
     /// `declared` value is the size the manifest claimed; `cap` is
     /// the value configured on `LayerFetchOptions::max_size`.
     #[error("layer size {declared} bytes exceeds cap of {cap} bytes")]

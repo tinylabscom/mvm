@@ -73,7 +73,7 @@ pub struct LaunchEntrypoint {
 /// an extra Firecracker drive, then mounted at `guest_path` by a wrapper
 /// script before the user's command runs. When `read_only` is false
 /// (mode `:rw`), guest writes land in the ext4 image and are rsynced
-/// back to the host directory after the command exits — see ADR-002.
+/// back to the host directory after the command exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddDir {
     pub host_path: String,
@@ -401,12 +401,11 @@ pub fn transient_vm_name() -> String {
 
 /// Decide whether snapshot restore is safe for this request.
 ///
-/// v2 (issue #7) only enables it for the trivial case: a registered template
-/// (so the image has a snapshot at all), no `--add-dir` extras (so the drive
-/// layout matches the snapshot's recorded layout), and a backend that
-/// advertises snapshot support. Adding `--add-dir` would change the drive
-/// count and break the snapshot — that case is tracked separately in #7's
-/// "harder" branch and stays cold-boot for now.
+/// Only enabled for the trivial case: a registered template (so the image
+/// has a snapshot at all), no `--add-dir` extras (so the drive layout
+/// matches the snapshot's recorded layout), and a backend that advertises
+/// snapshot support. Adding `--add-dir` would change the drive count and
+/// break the snapshot — that case stays cold-boot for now.
 pub fn snapshot_eligible(
     image: &ImageSource,
     add_dirs: &[AddDir],
@@ -422,8 +421,8 @@ pub fn snapshot_eligible(
 /// Captured stdout/stderr/exit-code from a one-shot exec.
 ///
 /// `run_captured` returns this instead of streaming guest output to the
-/// CLI's terminal. The MCP server (plan 32 / Proposal A) consumes it
-/// to assemble a `tools/call` response.
+/// CLI's terminal. The MCP server consumes it to assemble a `tools/call`
+/// response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOutput {
     pub exit_code: i32,
@@ -557,20 +556,19 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
         backend.capabilities().snapshots,
     );
 
-    // Probe for the verity sidecar alongside the rootfs. ADR-002 §W3.2:
-    // production microVMs ship `rootfs.verity` + `rootfs.roothash` next
-    // to `rootfs.ext4`. Their absence is the dev-VM exemption from §W3.4.
-    // Files live inside the Lima VM, so we can't `Path::exists()` them
-    // from the host — shell out into the VM instead.
+    // Probe for the verity sidecar alongside the rootfs: production
+    // microVMs ship `rootfs.verity` + `rootfs.roothash` next to
+    // `rootfs.ext4`. Their absence is the dev-VM exemption. Files live
+    // inside the VM, so we can't `Path::exists()` them from the host —
+    // shell out into the VM instead.
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
-    // Plan 112 Phase 3c — template-restore VMs run without plan admission
-    // (this exec path predates plan-64). Leave tenant_id / plan_json /
-    // bundle_json at their None defaults (via `..Default::default()`) so
-    // the libkrun/Vz backends take the legacy `run_supervisor` dispatch.
-    // A future change to route template restores through admission would
-    // add an `admit_for_run` call here and a `populate_audit_substrate`
-    // invocation after the struct literal.
+    // Template-restore VMs run without plan admission. Leave tenant_id /
+    // plan_json / bundle_json at their None defaults (via
+    // `..Default::default()`) so the libkrun/Vz backends take the legacy
+    // `run_supervisor` dispatch. Routing template restores through
+    // admission would add an `admit_for_run` call here and a
+    // `populate_audit_substrate` invocation after the struct literal.
     let start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
@@ -651,7 +649,7 @@ fn run_inner(req: ExecRequest, capture: bool) -> Result<Either<i32, ExecOutput>>
 
     let _ = backend.stop(&VmId(vm_name.clone()));
 
-    // ADR-002: writable --add-dir uses rsync-back. With the VM stopped the
+    // Writable --add-dir uses rsync-back. With the VM stopped the
     // ext4 image is no longer in use, so we mount it host-side and rsync
     // its contents over the host directory before nuking the staging dir.
     // Failures here are warned but do not override the guest exit code.
@@ -759,10 +757,9 @@ fn run_in_guest(
 
     let transport = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit. exec.rs
-    // is a top-level module that can't reach the private
-    // `commands::shared` re-export, so inline the audit emit
-    // here. The detail format matches
+    // Inbound vsock RPC audit. exec.rs is a top-level module that can't
+    // reach the private `commands::shared` re-export, so inline the audit
+    // emit here. The detail format matches
     // `commands::shared::vsock::emit_vsock_rpc_audit`:
     // `scope=rpc,direction=in,kind=vsock,verb=<kebab-name>`.
     let verb = "exec";
@@ -828,13 +825,13 @@ fn run_in_guest(
 }
 
 // ---------------------------------------------------------------------------
-// Warm-VM session primitives (plan 32 / Proposal A.2 v2)
+// Warm-VM session primitives
 // ---------------------------------------------------------------------------
 //
 // `mvmctl exec` and `mvmctl mcp tools/call run` (cold) both go through
 // `run_inner` above — boot, run, tear down. The MCP `session=ID` path
-// (A.2) needs to keep the VM alive across many calls. The three
-// primitives below split that lifecycle apart so the dispatcher can:
+// needs to keep the VM alive across many calls. The three primitives
+// below split that lifecycle apart so the dispatcher can:
 //
 //   1. boot once   → SessionVm handle
 //   2. dispatch N  → ExecOutput per call
@@ -842,8 +839,7 @@ fn run_in_guest(
 //
 // They deliberately NOT support `--add-dir` (volumes, rsync-back,
 // staging dirs) — session VMs are meant for inference workloads
-// against a clean closure, not interactive file mounts. If a future
-// session use case needs writable mounts, that's a separate plan.
+// against a clean closure, not interactive file mounts.
 
 /// Handle to a long-running session microVM.
 ///
@@ -861,8 +857,8 @@ pub struct SessionVm {
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
 /// callers typically pass `"mcp-session-<short-id>"` so `mvmctl ls`
 /// shows which MCP session a VM belongs to.
-/// Plan 129 — the audit substrate an admitted plan contributes to a session VM
-/// so the backend spawns the substitution endpoint (the guest never holds a raw
+/// The audit substrate an admitted plan contributes to a session VM so the
+/// backend spawns the substitution endpoint (the guest never holds a raw
 /// secret). The caller (`invoke --from-workload-ir`) admits the workload's
 /// lowered secrets and hands these JSON-serialized fields back; `boot_session_vm`
 /// threads them into the `VmStartConfig`. Strings (not typed `mvm-plan` values)
@@ -902,12 +898,12 @@ pub fn boot_session_vm(
 
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
-    // Plan 112 Phase 3c — session VMs are short-lived MCP-driven boots that
-    // don't go through plan admission, so tenant_id / plan_json / bundle_json
-    // default to None (the libkrun supervisor stays on the legacy path). Plan
-    // 129 lifts that for a secret-declaring ephemeral `invoke`: when `admit`
-    // returns a substrate, the three fields below are populated and the backend
-    // spawns the per-VM substitution endpoint (the guest holds only placeholders).
+    // Session VMs are short-lived MCP-driven boots that don't go through plan
+    // admission, so tenant_id / plan_json / bundle_json default to None (the
+    // libkrun supervisor stays on the legacy path). A secret-declaring
+    // ephemeral `invoke` lifts that: when `admit` returns a substrate, the
+    // three fields below are populated and the backend spawns the per-VM
+    // substitution endpoint (the guest holds only placeholders).
     let mut start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
@@ -931,7 +927,7 @@ pub fn boot_session_vm(
         ..Default::default()
     };
 
-    // Plan 129 — admit the workload's lowered secrets (the closure runs
+    // Admit the workload's lowered secrets (the closure runs
     // synthesize→sign→verify with the now-known rootfs + vm_name) and thread the
     // signed plan into the config so `backend.start` spawns the substitution
     // endpoint. Force a cold boot when secrets are present: snapshot-restore
@@ -1003,9 +999,8 @@ pub fn dispatch_in_session(
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    // Plan 74 W2 — inbound vsock RPC audit. Mirrors run_in_guest's emit;
-    // was lost when this function migrated from send_request to
-    // send_exec_streaming.
+    // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
+    // this function migrated from send_request to send_exec_streaming.
     let verb = "exec";
     mvm_core::audit_emit!(
         NetworkPolicyAllow,
@@ -1059,8 +1054,8 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         // Re-pick the transport on each iteration: a Firecracker VM
         // that's still booting may not show up in
         // resolve_running_vm_dir until the daemon registers it.
-        // ADR-053 / plan 74 W1: "agent reachable" means it speaks the
-        // protocol, not just that the socket is open. We require a
+        // "agent reachable" means it speaks the protocol, not just that
+        // the socket is open. We require a
         // successful hello (with at least the `Ping` capability) before
         // reporting ready, since under hard cutover a pre-hello agent
         // would only answer `ProtocolMismatch` to the next request and

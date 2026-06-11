@@ -1,14 +1,13 @@
-//! Renderer for the generated `flake.nix` per ADR-0007.
+//! Renderer for the generated `flake.nix`.
 //!
 //! The flake declares an `mvm` guest-lib input (pinned, override-able), follows
 //! mvm's `nixpkgs`, and exposes `packages.<system>.default = mvm.lib.<system>.mkGuest { ... }`
 //! for both `x86_64-linux` and `aarch64-linux`. `mvm.workload` and
-//! `mvm.metadata` remain at their stable attribute paths from ADR-0006 §3.
+//! `mvm.metadata` remain at their stable attribute paths.
 //!
-//! For `entrypoint.kind == "function"` workloads (plan 0003 phase 4 /
-//! ADR-0009) the flake dispatches through
-//! `mvm.lib.<system>.mk<Lang>FunctionService` per ADR-0010 §3 (Option A,
-//! amended 2026-05-06). The factory returns
+//! For `entrypoint.kind == "function"` workloads the flake dispatches through
+//! `mvm.lib.<system>.mk<Lang>FunctionService`.
+//! The factory returns
 //! `{ extraFiles, servicePackages, service }`, which we merge into
 //! `mkGuest`. mvm does not ship local copies of the factories;
 //! the substrate (mvm) is the sole source of truth.
@@ -259,7 +258,7 @@ mod tests {
         assert!(s.contains("mvm.lib.${system}.mkGuest"));
         // Single canonical lowering: `entrypoint.command = [ bootScript ]`.
         // mk-guest.nix's multi-service entrypoint form is a recovery-shell
-        // stub (W5.2), so we never emit it; and never a top-level
+        // stub, so we never emit it; and never a top-level
         // `services`/`hostname` arg, which mkGuest rejects.
         assert!(s.contains("entrypoint.command = [ "));
         assert!(!s.contains("entrypoint.services"));
@@ -306,8 +305,8 @@ mod tests {
         w
     }
 
-    // Regression guard for the boot→ping panic (Plan 120 Task 4): a
-    // function workload's PID 1 must be the factory's idle bootCommand
+    // Regression guard for the boot→ping panic: a function workload's
+    // PID 1 must be the factory's idle bootCommand
     // (→ /etc/mvm/boot), with /etc/mvm/entrypoint left as the agent's
     // per-call marker via the factory's extraFiles. The old lowering
     // baked the idle script onto entrypoint.command, which extraFiles
@@ -392,9 +391,9 @@ mod tests {
 
     #[test]
     fn flake_threads_concurrency_through_factory_args() {
-        // ADR-0011 W-FACTORY: the warm-process concurrency block must
-        // reach the per-language factory via factoryArgs so the
-        // factory can emit it into /etc/mvm/runtime.json. The IR
+        // The warm-process concurrency block must reach the
+        // per-language factory via factoryArgs so the factory can
+        // emit it into /etc/mvm/runtime.json. The IR
         // skip-serializes `concurrency` when None, so the `or null`
         // fallback covers cold-tier workloads without breaking
         // determinism.

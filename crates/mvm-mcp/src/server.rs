@@ -3,8 +3,8 @@
 //! Per-line framed (one JSON object per line, `\n`-terminated). Reads
 //! from `stdin`, writes responses to `stdout`. **All non-protocol
 //! output must go to stderr** — a stray byte on stdout corrupts the
-//! wire. Cross-cutting "A: stdout-only-JSON-RPC discipline" enforces
-//! this via `init_stderr_tracing` below and a CI smoke test.
+//! wire. The stdout-only-JSON-RPC discipline is enforced via
+//! `init_stderr_tracing` below and a CI smoke test.
 
 use std::io::{BufRead, Write};
 
@@ -146,8 +146,8 @@ fn tools_call_response<D: Dispatcher>(
             .map_err(|e| JsonRpcError::invalid_params(format!("decoding `run` params: {e}")))?;
         dispatcher.run(run_params)
     } else {
-        // Plan 60 Phase 7 — typed-name registry tools (mvm.time_now,
-        // mvm.web_fetch, mvm.web_search, …). The dispatcher's
+        // Typed-name registry tools (mvm.time_now, mvm.web_fetch,
+        // mvm.web_search, …). The dispatcher's
         // `invoke_tool` decides; an unwired dispatcher's default impl
         // returns an `is_error: true` ToolResult naming the tool.
         dispatcher.invoke_tool(name, args)
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn tools_call_routes_unknown_tool_to_invoke_tool_default() {
-        // Plan 60 Phase 7: names other than `run` route through
+        // Names other than `run` route through
         // `Dispatcher::invoke_tool`. The MockDispatcher inherits the
         // default impl, which returns an `is_error: true` ToolResult
         // (NOT a JSON-RPC method-not-found). The MCP wire layer

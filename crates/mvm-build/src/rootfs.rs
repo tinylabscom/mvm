@@ -1,6 +1,6 @@
 //! Rootfs image materialization helpers.
 //!
-//! Plan 85 Phase B takes an OCI-unpacked directory tree and turns it
+//! Takes an OCI-unpacked directory tree and turns it
 //! into the `rootfs.ext4` disk image that the runtime can boot. The
 //! host side is deliberately small: it allocates the sparse output
 //! file, then asks the existing builder VM to run `mkfs.ext4`, mount
@@ -43,7 +43,7 @@ impl MaterializeExt4Input {
 /// Sizing and guest-copy options for [`materialize_ext4`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializeExt4Options {
-    /// Minimum sparse image size. Plan 85 sets this to 64 MiB.
+    /// Minimum sparse image size, defaulting to 64 MiB.
     pub min_image_size_bytes: u64,
     /// Numerator for the uncompressed-size multiplier. The default
     /// pair is 3/2, i.e. 1.5x.
@@ -100,7 +100,7 @@ pub enum RootfsError {
 
 /// Estimate the sparse image size for an OCI rootfs.
 ///
-/// Plan 85's Phase B rule is `sum(layer.uncompressed_size) * 1.5`
+/// The sizing rule is `sum(layer.uncompressed_size) * 1.5`
 /// with a 64 MiB floor. This function rounds up for odd byte counts
 /// and saturates on overflow so a maliciously large manifest fails at
 /// sparse-file allocation instead of wrapping small.

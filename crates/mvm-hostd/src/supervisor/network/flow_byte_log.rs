@@ -1,11 +1,11 @@
-//! Plan 141 / ADR-064 — append-only, length-prefixed flow-byte log.
+//! Append-only, length-prefixed flow-byte log.
 //!
 //! Record framing: `[u64 record_id LE][u32 len LE][len bytes payload]`.
 //! The writer is per-VM; rotation is size-bounded by the caller. The audit
 //! chain references records by `(file_name, record_id, sha256)` — payload
 //! bytes never enter the chain (keeps it small + lets the chain stay
-//! payload-free per Q8/claim 10). Files are mode 0600; the caller ensures
-//! the parent dir is 0700 (~/.mvm posture, ADR-002 §W1.5).
+//! payload-free, the claim 10 posture). Files are mode 0600; the caller
+//! ensures the parent dir is 0700 (~/.mvm posture).
 //!
 //! Encryption-at-rest is a deferred follow-up (own ADR); V1 is plaintext
 //! on a 0600 file under a 0700 dir.

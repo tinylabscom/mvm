@@ -19,14 +19,14 @@ path = "src/bin/mvm-guest-agent.rs"
 # Exec-shim that compiles a syscall allowlist into a BPF program via
 # seccompiler, applies it via prctl, and execve's into the wrapped
 # command. mkServiceBlock wraps every guest service launch with this
-# shim so per-service seccomp filters are the default. ADR-002 §W2.4.
+# shim so per-service seccomp filters are the default.
 [[bin]]
 name = "mvm-seccomp-apply"
 path = "src/bin/mvm-seccomp-apply.rs"
 
 # In-guest entrypoint runtime for function-call workloads (folded in
-# from the former mvm-runner crate — plan 121 A1). The library half
-# lives in `src/runner/`; this is the thin binary the nix factories
+# from the former mvm-runner crate). The library half lives in
+# `src/runner/`; this is the thin binary the nix factories
 # bake at `/usr/lib/mvm/wrappers/runner`.
 [[bin]]
 name = "mvm-runner"
@@ -37,12 +37,12 @@ path = "src/bin/mvm-runner.rs"
 # from /proc/cmdline, constructs the dm-verity device-mapper target
 # via raw ioctls, mounts it, and switch_roots to the real /init.
 # Bypasses Firecracker's auto-appended `root=/dev/vda` by owning the
-# boot pivot in userspace. ADR-002 §W3.
+# boot pivot in userspace.
 [[bin]]
 name = "mvm-verity-init"
 path = "src/bin/mvm-verity-init.rs"
 
-# Plan 74 W2 — guest-side network defense. Installs kernel blackhole
+# Guest-side network defense. Installs kernel blackhole
 # routes for `MANDATORY_DENY_RANGES` (cloud metadata, link-local,
 # CGNAT, host loopback) inside every microVM. Run as root from
 # `/init` BEFORE the agent is forked under setpriv, so the routes
@@ -54,14 +54,14 @@ name = "mvm-guest-netinit"
 path = "src/bin/mvm-guest-netinit.rs"
 
 # Test-only probe used by `tests/seccomp_apply.rs` to verify that
-# tier allowlists actually deny what they claim (ADR-002 §W2.4). Not
+# tier allowlists actually deny what they claim. Not
 # selected by `nix/packages/mvm-guest-agent.nix`, so it never ships
 # in the guest closure.
 [[bin]]
 name = "syscall-probe"
 path = "src/bin/syscall-probe.rs"
 
-# Test fixture for the warm-process worker pool (plan 43). Speaks the
+# Test fixture for the warm-process worker pool. Speaks the
 # `worker_protocol` framed multi-call loop on stdin/stdout. Behavior
 # selectable via `MVM_FAKE_RUNNER_BEHAVIOR` env var so tests can
 # exercise crash, recycle, slow, and malformed-frame paths against a
@@ -72,7 +72,7 @@ path = "tests/bin/fake_runner.rs"
 test = false
 doctest = false
 
-# Test fixture for `entrypoint::execute` (plan 41 W2 / ADR-007). A real
+# Test fixture for `entrypoint::execute`. A real
 # ELF binary used in place of `#!/bin/sh` wrappers in the runner
 # integration tests so the production `/proc/self/fd/<n>` argv[0]
 # contract is exercised end-to-end on Linux. Behaviour is encoded in a
@@ -84,7 +84,7 @@ path = "tests/bin/entrypoint_test_wrapper.rs"
 test = false
 doctest = false
 
-# Plan 124 D1 — emits the host↔guest RPC protocol JSON Schema. Gated by
+# Emits the host↔guest RPC protocol JSON Schema. Gated by
 # `required-features = ["schema"]` so it (and `schemars`) is excluded from
 # the default/prod build, exactly like mvm-libkrun-supervisor's
 # `libkrun-sys` gate. Run via `cargo run -p mvm-guest --features schema
@@ -98,11 +98,11 @@ doctest = false
 
 [features]
 dev-shell = []
-# Plan 124 D1 — derive `schemars::JsonSchema` on the host↔guest wire types
+# Derive `schemars::JsonSchema` on the host↔guest wire types
 # (`GuestRequest`/`GuestResponse` + their tree) so the `emit_protocol_schema`
 # bin can emit the protocol schema (the SDK-codegen SSOT). Off by default:
 # the schema is a build-time codegen input, never linked into the runtime
-# agent, so the lean-agent closure (Plan 124 A) stays schemars-free. Pulls
+# agent, so the lean-agent closure stays schemars-free. Pulls
 # `mvm-core/schema` for the shared `AgentProfile`/`BackpressureReason` types.
 schema = ["dep:schemars", "mvm-core/schema"]
 
@@ -118,14 +118,14 @@ libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Phase 10c — readiness/shutdown hook runner uses thiserror for
+# The readiness/shutdown hook runner uses thiserror for
 # typed error variants (ReadinessError, ShutdownError).
 thiserror = "1"
 tracing.workspace = true
-# Plan 74 W2 — the `netinit` module's `RouteInstaller` trait + types +
+# The `netinit` module's `RouteInstaller` trait + types +
 # install loop + tests are cross-platform; only `RawNetlinkInstaller`
-# itself is Linux-only (a synchronous AF_NETLINK socket via libc — Plan
-# 124 A3 dropped the async rtnetlink stack). ipnet stays in the main
+# itself is Linux-only (a synchronous AF_NETLINK socket via libc — no
+# async rtnetlink stack). ipnet stays in the main
 # deps so the cross-platform tests run on macOS dev hosts too.
 ipnet.workspace = true
 
@@ -135,7 +135,7 @@ ipnet.workspace = true
 #
 # `mvm-guest-netinit`'s `RawNetlinkInstaller` talks to AF_NETLINK
 # directly through `libc` (already a main dep) — no netlink crate, no
-# async runtime (Plan 124 A3). Nothing extra is needed here.
+# async runtime. Nothing extra is needed here.
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { workspace = true }
 

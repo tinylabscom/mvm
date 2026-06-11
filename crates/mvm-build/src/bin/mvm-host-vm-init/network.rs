@@ -1,4 +1,4 @@
-//! In-guest egress lockdown — Plan 73 Followup B.2.y / ADR-047.
+//! In-guest egress lockdown.
 //!
 //! Defense-in-depth on top of `mvm-egress-proxy`: even if a
 //! build step ignores `HTTP_PROXY` / `HTTPS_PROXY` env vars, its
@@ -10,8 +10,7 @@
 //! Called from `mvm-host-vm-init`'s boot sequence after the
 //! basic `setup_network()`. Failure is **fatal** — without the
 //! lockdown, the builder VM's egress allowlist is unenforced and
-//! ADR-002's Claim 9 transitive trust onto the builder VM has no
-//! defense layer.
+//! the transitive trust onto the builder VM has no defense layer.
 
 use std::process::Command;
 
@@ -86,8 +85,7 @@ pub fn install_egress_lockdown(runner: &dyn IptablesRunner, proxy_uid: u32) -> R
     Ok(())
 }
 
-/// Plan 89 W3 part 12 — re-install the egress lockdown from a
-/// known-good in-binary recipe.
+/// Re-install the egress lockdown from a known-good in-binary recipe.
 ///
 /// `install_egress_lockdown` runs once at boot. In the persistent
 /// builder VM jobs share the kernel's iptables state across
@@ -108,8 +106,7 @@ pub fn install_egress_lockdown(runner: &dyn IptablesRunner, proxy_uid: u32) -> R
 /// state the failure produced. Callers should treat the error as
 /// a hard signal that iptables is broken and refuse to run the
 /// dispatched job — that's safer than letting a possibly-too-
-/// permissive chain reach the build. See the F7 entry in the
-/// Plan 89 security-scan findings table.
+/// permissive chain reach the build.
 pub fn reapply_egress_lockdown(runner: &dyn IptablesRunner, proxy_uid: u32) -> Result<(), String> {
     runner.run(&["-F", "OUTPUT"])?;
     install_egress_lockdown(runner, proxy_uid)
@@ -216,8 +213,8 @@ mod tests {
         assert_ne!(PROXY_UID, 1900);
     }
 
-    /// Plan 89 W3 part 12 — re-apply emits one flush then the
-    /// three baseline rules, in that order. Catches the case
+    /// Re-apply emits one flush then the three baseline rules, in
+    /// that order. Catches the case
     /// where someone reorders to install-then-flush (which would
     /// wipe what they just installed).
     #[test]
@@ -241,8 +238,8 @@ mod tests {
         assert!(invocations[3].iter().any(|a| a == "DROP"));
     }
 
-    /// Plan 89 W3 part 12 — a flush failure short-circuits before
-    /// the re-install runs. The caller is supposed to fail closed
+    /// A flush failure short-circuits before the re-install runs.
+    /// The caller is supposed to fail closed
     /// on the returned Err; this test pins the "we don't continue
     /// past flush" guarantee.
     #[test]
@@ -257,8 +254,8 @@ mod tests {
         );
     }
 
-    /// Plan 89 W3 part 12 — if any of the install rules fails
-    /// after the flush, the chain ends up in a partial state.
+    /// If any of the install rules fails after the flush, the
+    /// chain ends up in a partial state.
     /// `reapply_egress_lockdown` surfaces the error so the
     /// dispatch loop can refuse the next job. We pin the
     /// invocation count so we know the partial state is exactly

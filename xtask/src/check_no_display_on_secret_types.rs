@@ -2,7 +2,7 @@
 //!
 //! Refuses any `#[derive(Debug)]` / `#[derive(Display)]` / `impl Display`
 //! on a Rust item (struct, enum) whose name matches secret-shaped
-//! patterns. This is plan 63 W2 — secret-carrying types should be
+//! patterns. Secret-carrying types should be
 //! wrapped in `secrecy::SecretBox<T>` so accidental logging at any
 //! `{:?}` / `{}` call site is a compile error.
 //!

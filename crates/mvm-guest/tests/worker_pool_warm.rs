@@ -1,4 +1,4 @@
-//! Integration tests for the warm-process worker pool (plan 43).
+//! Integration tests for the warm-process worker pool.
 //!
 //! Drives a real `WorkerPool` against the `fake-runner` test binary
 //! to exercise the recycling paths (call-count, wrapper crash) and
@@ -8,7 +8,7 @@
 //! recycling lives in the Linux-gated test below.
 //!
 //! These tests never touch `handle_run_entrypoint` or the cold-tier
-//! M12 lock; the cold path is unaffected.
+//! lock; the cold path is unaffected.
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -54,11 +54,11 @@ fn start_pool_with_behavior(cfg: WarmProcessConfig, behavior: Option<&str>) -> A
         .map(|b| vec![("MVM_FAKE_RUNNER_BEHAVIOR".to_string(), b.to_string())])
         .unwrap_or_default();
     let pool = WorkerPool::start(cfg, entry, env).expect("pool start");
-    // Plan 73 Followup E: the pool now starts in `NotReady` state.
-    // These integration tests don't exercise the readiness gate
-    // (covered separately in unit + integration tests for the probe
-    // itself); mark it ready immediately so the existing dispatch
-    // round-trips behave as they did pre-Followup-E.
+    // The pool now starts in `NotReady` state. These integration
+    // tests don't exercise the readiness gate (covered separately in
+    // unit + integration tests for the probe itself); mark it ready
+    // immediately so the existing dispatch round-trips behave as they
+    // did before the readiness gate existed.
     pool.mark_ready();
     pool
 }
@@ -113,7 +113,7 @@ fn warm_process_round_trip_pid_stable() {
 
 #[test]
 fn warm_process_emits_control_records_through_pool() {
-    // Phase 4c: a wrapper that emits one envelope-style control
+    // A wrapper that emits one envelope-style control
     // record per call should round-trip through the pool intact.
     // Stderr stays as opaque user output (containing the literal
     // `MVMFORGE_ENVELOPE:` token the fake runner writes there) —
@@ -406,7 +406,7 @@ fn queue_full_returns_error() {
     let _ = h2.join().expect("h2");
 }
 
-// ─── Plan 73 Followup E — readiness gate integration tests ───────────────────
+// ─── readiness gate integration tests ────────────────────────────────────────
 //
 // These tests build a real `WorkerPool` (against the fake-runner
 // fixture) but stand up a tempdir-scoped after_start.sh script
@@ -466,8 +466,8 @@ fn wait_for_ready_succeeds_against_passing_probe() {
 
 #[test]
 fn wait_for_ready_succeeds_after_initial_failures() {
-    // Probe fails twice then exits 0 — exact pattern from the plan's
-    // test gate ("after_start.sh exits 1 thrice then 0").
+    // Probe fails twice then exits 0 — after_start.sh exits 1 thrice
+    // then 0.
     let tmp = tempfile::tempdir().expect("tempdir");
     let counter = tmp.path().join("count");
     fs::write(&counter, "0").expect("seed counter");

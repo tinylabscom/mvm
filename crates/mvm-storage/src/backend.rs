@@ -11,7 +11,7 @@ use mvm_core::volume::{VolumeEntry, VolumeError, VolumePath};
 /// Storage backing for a volume.
 ///
 /// Implementations: `LocalBackend` (this crate), `ObjectStoreBackend`
-/// + `EncryptedBackend<B>` (mvmd-side, see plan 45 §D5).
+/// + `EncryptedBackend<B>` (mvmd-side).
 ///
 /// All operations are scoped to the volume the backend was constructed
 /// for — the trait does not take an `org_id`/`workspace_id`/`name`

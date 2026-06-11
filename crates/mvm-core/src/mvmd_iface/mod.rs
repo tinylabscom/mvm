@@ -14,18 +14,17 @@
 //! Validation and enforcement live in `mvm`. This module is data-only.
 //!
 //! Every type here uses `#[serde(deny_unknown_fields)]` so an unexpected
-//! field fails closed (ADR-002 §W4.1), matching the discipline on the
-//! host↔guest vsock protocol.
+//! field fails closed, matching the discipline on the host↔guest vsock
+//! protocol.
 //!
 //! ## Submodules
 //!
 //! - [`release`] — `ReleasePromotion` and related types for staged rollouts
-//!   driven by `mvmd` and executed by `mvm`'s supervisor
-//!   (plan-37 §11).
+//!   driven by `mvmd` and executed by `mvm`'s supervisor.
 //! - [`control_key`] — `ControlKey` (kid, role, expiry) used to sign
-//!   control-plane envelopes (plan-37 §12.1).
+//!   control-plane envelopes.
 //! - [`host_inventory`] — `HostInventory` (registration, capacity, state)
-//!   so `mvmd` can place workloads (plan-37 §17.1, mvmd ADR-0006).
+//!   so `mvmd` can place workloads.
 //!
 //! ## Scaffold status
 //!
@@ -33,8 +32,7 @@
 //! shape so `mvmd` can compile against them. Concrete behavior and
 //! richer fields land alongside the orchestration features that need
 //! them. The architectural invariant is that `mvm` itself never grows
-//! a server or daemon to *act* on these types — see plan
-//! `what-do-we-need-deep-dolphin` invariant #1.
+//! a server or daemon to *act* on these types.
 
 pub mod control_key;
 pub mod host_inventory;

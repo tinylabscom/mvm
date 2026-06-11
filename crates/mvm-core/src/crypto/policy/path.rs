@@ -1,4 +1,4 @@
-//! Path policy — Control 1 of the filesystem-volumes plan.
+//! Path policy.
 //!
 //! Single chokepoint for *every* host-supplied path that reaches the
 //! guest filesystem. New FS verbs (`FsRead`, `FsWrite`, …) and the
@@ -17,7 +17,7 @@
 //!    small handful of host-introspection paths (`/proc/1`,
 //!    `/proc/self`, `/sys/kernel/security`). These contain
 //!    high-sensitivity bytes a compromised host should not be able
-//!    to read out via the FS RPC even though uid 901 + W2's
+//!    to read out via the FS RPC even though uid 901 + the
 //!    bind-mounts already restrict write access.
 //! 4. **Optional allow-roots** — when set, a canonical path *must*
 //!    live under one of them. Empty means "anything not denied is
@@ -41,7 +41,7 @@
 //!   etc. Those are per-verb caps owned by the agent handler — the
 //!   policy returns a canonical path and a yes/no, nothing more.
 //! - It does not enforce per-uid or per-tenant scoping. The guest
-//!   agent already runs as uid 901 with W2 bounding sets; the
+//!   agent already runs as uid 901 with bounding sets; the
 //!   supervisor handles tenant isolation at a higher layer.
 
 use std::path::{Path, PathBuf};
@@ -114,9 +114,8 @@ impl CanonicalPath {
 
 /// Path policy with deny-prefixes and optional allow-roots.
 ///
-/// `default()` ships the conservative deny-list called for in the
-/// filesystem-volumes plan §"Phase A1 — FS RPC". Callers can layer
-/// additional deny-prefixes via `with_extra_deny`.
+/// `default()` ships the conservative deny-list for the FS RPC.
+/// Callers can layer additional deny-prefixes via `with_extra_deny`.
 pub struct PathPolicy {
     deny_prefixes: Vec<PathBuf>,
     allow_roots: Vec<PathBuf>,
@@ -224,8 +223,8 @@ impl PathPolicy {
 fn default_deny_prefixes() -> Vec<PathBuf> {
     vec![
         // Agent integration configs + per-service secrets.
-        // W2.1 bind-mounts make these read-only; this defense-in-
-        // depth blocks the FS RPC from leaking their *contents*.
+        // Bind-mounts make these read-only; this defense-in-depth
+        // blocks the FS RPC from leaking their *contents*.
         PathBuf::from("/etc/mvm"),
         PathBuf::from("/run/mvm-secrets"),
         // Host introspection: PID 1 (init namespace metadata),

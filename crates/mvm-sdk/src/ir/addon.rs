@@ -1,9 +1,9 @@
-//! Addon types for the workload IR (ADR-0018 / schema 0.2+).
+//! Addon types for the workload IR (schema 0.2+).
 //!
 //! An addon is a sha-attested, parameterized service definition another
 //! developer publishes. Consumers reference addons via `App.addons`; mvmd
 //! instantiates each addon-use as a separate microVM and bridges it to the
-//! consumer over the workload mesh (ADR-0020).
+//! consumer over the workload mesh.
 //!
 //! The shape here is the *consumer-side* IR slice. Author-side concerns
 //! (manifest schema `addon.toml`, registry API, lockfile) live in
@@ -29,16 +29,16 @@ pub struct AddonUse {
     pub name: String,
 
     /// Optional alias. When present, every env var the addon exports is
-    /// prefixed `<ALIAS_UPPER>_` verbatim (per ADR-0018). When absent,
+    /// prefixed `<ALIAS_UPPER>_` verbatim. When absent,
     /// exports use their bare names. Two `AddonUse`s with the same
     /// `name` must use distinct aliases (validated mvm-side).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
 
     /// Composition tier — currently only `Separate` (a separate
-    /// addon-microVM bridged via the mesh). `InVm` is reserved by
-    /// `specs/plans/0012-in-vm-addon-tier.md` and rejected by
-    /// `validate.rs` until that plan lands.
+    /// addon-microVM bridged via the mesh). `InVm` is reserved for the
+    /// future in-VM addon tier and rejected by `validate.rs` until it
+    /// lands.
     pub tier: AddonTier,
 
     /// Pointer to the addon's published artifact. Either a registry
@@ -58,11 +58,11 @@ pub struct AddonUse {
     /// `addon::resolve_and_validate` time).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
-    /// Hooks bundled by this addon (SDK port Phase 1a — IR field
-    /// reserved; consumers in Phase 10). The compiler concatenates each
-    /// addon's hook vecs in attachment order, then appends the
-    /// consuming app's own hooks. Empty `Hooks` is the default and is
-    /// skip-serialized so v0 addon-use entries stay byte-identical.
+    /// Hooks bundled by this addon (IR field reserved ahead of consumer
+    /// wiring). The compiler concatenates each addon's hook vecs in
+    /// attachment order, then appends the consuming app's own hooks.
+    /// Empty `Hooks` is the default and is skip-serialized so v0
+    /// addon-use entries stay byte-identical.
     #[serde(default, skip_serializing_if = "Hooks::is_empty")]
     pub hooks: Hooks,
 }
@@ -72,9 +72,8 @@ pub struct AddonUse {
 /// `Separate` is the v1 shape — the addon runs as its own microVM and
 /// the consumer reaches it over the mesh. `InVm` is reserved for the
 /// future in-VM addon tier where small Nix fragments compose directly
-/// into the consumer's `mkGuest` flake (see
-/// `specs/plans/0012-in-vm-addon-tier.md`); it is rejected by the
-/// validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that plan lands.
+/// into the consumer's `mkGuest` flake; it is rejected by the
+/// validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AddonTier {
@@ -98,8 +97,7 @@ pub enum AddonRef {
 }
 
 /// Threat-tier label on the *consumer* (App). Combines with the addon's
-/// `[security].trust_tier` to drive mvmd's SMT-affinity scheduler matrix
-/// per ADR-0018 §"Trust-tier labeling and SMT-affinity policy".
+/// `[security].trust_tier` to drive mvmd's SMT-affinity scheduler matrix.
 ///
 /// Defaults to `Untrusted` (most protective). Workloads that run only
 /// first-party reviewed code can opt into `Trusted` for finer packing.

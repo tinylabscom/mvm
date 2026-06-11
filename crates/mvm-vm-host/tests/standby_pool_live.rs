@@ -1,4 +1,4 @@
-//! Plan 118 WS-1 1b — live integration for the libkrun standby pool, driving the **real**
+//! Live integration for the libkrun standby pool, driving the **real**
 //! `LibkrunBackend::spawn_standby`/`claim_standby` through the `VmBackend` trait + the real
 //! `mvm-libkrun-supervisor` binary.
 //!
@@ -11,7 +11,7 @@
 //!    no bootable image.
 //! 2. `valid_attach_boots_and_agent_reachable` — `#[ignore]`: the full spawn→claim→boot
 //!    happy path needs a real default-microvm kernel/rootfs + in-guest agent. Run manually
-//!    on a libkrun-capable host (model on `examples/agent_ping` + the 1a prelaunch harness);
+//!    on a libkrun-capable host (model on `examples/agent_ping` + the prelaunch harness);
 //!    the refusal logic + spawn wiring are covered by the unit ladder + scenario 1.
 #![cfg(feature = "libkrun-live")]
 

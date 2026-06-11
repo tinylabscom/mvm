@@ -1,25 +1,23 @@
-//! Plan 60 Phase 7a — persistent per-tenant + per-workload overlay
-//! substrate.
+//! Persistent per-tenant + per-workload overlay substrate.
 //!
 //! The overlay is the workload's writable layer over the read-only
-//! verity'd rootfs (claim 3 of CLAUDE.md's security model). Phase
-//! 7a's goal is that rootfs rebuild/swap can happen underneath an
-//! unchanged overlay — `/workspace` survives the upgrade — while
+//! verity'd rootfs (claim 3 of CLAUDE.md's security model). The goal
+//! is that rootfs rebuild/swap can happen underneath an unchanged
+//! overlay — `/workspace` survives the upgrade — while
 //! overlay-erasure tooling walks the overlay tree, wipes each file,
 //! and emits a signed destruction certificate so a hosted-cloud
 //! operator can prove they erased a tenant's data.
 //!
-//! ## What this slice ships
+//! ## The substrate
 //!
-//! Slice A — the substrate. [`OverlayManager`] is the trait every
-//! consumer (install / rebuild / tenant-destroy / future LUKS impl)
-//! goes through; [`FsOverlayManager`] is the unencrypted
-//! file-backed default; [`NoopOverlayManager`] is the fail-closed
-//! placeholder. [`OverlayHandle`] is the opaque token returned by
-//! `create_overlay` / `open_overlay` — consumers don't reach into
-//! the filesystem layout directly.
+//! [`OverlayManager`] is the trait every consumer (install / rebuild
+//! / tenant-destroy / future LUKS impl) goes through; [`FsOverlayManager`]
+//! is the unencrypted file-backed default; [`NoopOverlayManager`] is
+//! the fail-closed placeholder. [`OverlayHandle`] is the opaque token
+//! returned by `create_overlay` / `open_overlay` — consumers don't
+//! reach into the filesystem layout directly.
 //!
-//! ## Slice A's security model
+//! ## Security model
 //!
 //! 1. **Per-tenant + per-workload isolation.** The overlay tree is
 //!    `<root>/<tenant>/<workload>/`. Both `tenant` and `workload`
@@ -35,28 +33,28 @@
 //! 4. **Quota enforcement.** [`FsOverlayManager`] tracks the
 //!    running byte-count via a single recursive walk at
 //!    `open_overlay` time. Writes that would exceed the operator's
-//!    quota return [`OverlayError::QuotaExceeded`]; the LUKS impl
-//!    (Slice B) enforces at the filesystem layer too.
+//!    quota return [`OverlayError::QuotaExceeded`]; the future LUKS
+//!    impl enforces at the filesystem layer too.
 //! 5. **Zero-fill on destroy.** `destroy_overlay` walks the tree,
 //!    overwrites every file with zeros (via O_RDWR + fsync), then
-//!    unlinks. For block-level guarantees, Slice B will additionally
-//!    revoke the LUKS keyslot — a key-destruction guarantee
-//!    independent of whether the disk hardware actually overwrote
-//!    the blocks.
+//!    unlinks. For block-level guarantees, the LUKS impl will
+//!    additionally revoke the LUKS keyslot — a key-destruction
+//!    guarantee independent of whether the disk hardware actually
+//!    overwrote the blocks.
 //!
-//! ## What this slice is NOT
+//! ## What this is NOT (yet)
 //!
-//! - Not encrypted. Slice B wires
+//! - Not encrypted. A LUKS-backed impl will wire
 //!   `mvm-security::keystore::KeyProvider` for per-overlay LUKS
 //!   keys.
-//! - Not mounted into VMs. Slice C teaches the firecracker /
-//!   cloud-hypervisor backends to attach the overlay as a virtio
-//!   block device.
-//! - No destruction certificate. Slice D signs the
-//!   [`DestructionReceipt`] under the host identity key and emits
-//!   it to the audit chain.
-//! - No rebuild swap. Slice E implements pause → swap rootfs →
-//!   resume with the overlay reattached.
+//! - Not mounted into VMs. The firecracker / cloud-hypervisor
+//!   backends will learn to attach the overlay as a virtio block
+//!   device.
+//! - No destruction certificate yet. Signing the
+//!   [`DestructionReceipt`] under the host identity key and emitting
+//!   it to the audit chain is wired below.
+//! - No rebuild swap. pause → swap rootfs → resume with the overlay
+//!   reattached is future work.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -75,13 +73,13 @@ pub const MAX_NAME_LEN: usize = 64;
 
 /// Default quota per overlay. 10 GiB matches the working budget
 /// for a development workload (~100 K source files + build cache);
-/// operators override per-tenant via the LUKS-volume size in
-/// Slice B.
+/// operators will override per-tenant via the LUKS-volume size once
+/// the LUKS-backed impl lands.
 pub const DEFAULT_QUOTA_BYTES: u64 = 10 * (1 << 30);
 
-/// Trait every overlay consumer goes through. Slice A ships
+/// Trait every overlay consumer goes through. Ships
 /// [`FsOverlayManager`] (plain filesystem) + [`NoopOverlayManager`]
-/// (fail-closed). Slice B adds a LUKS-backed impl that wires
+/// (fail-closed); a future LUKS-backed impl will wire
 /// `mvm-security::keystore::KeyProvider`.
 #[async_trait]
 pub trait OverlayManager: Send + Sync {
@@ -106,8 +104,8 @@ pub trait OverlayManager: Send + Sync {
 
     /// Destroy an overlay. Zeroes every file's bytes before unlink,
     /// then removes the directory. Returns a [`DestructionReceipt`]
-    /// recording the wipe (Slice D signs this under the host
-    /// identity key + emits to the audit chain). Idempotent —
+    /// recording the wipe (signed under the host identity key +
+    /// emitted to the audit chain). Idempotent —
     /// destroying a non-existent overlay returns a receipt with
     /// `files_wiped = 0`.
     async fn destroy_overlay(
@@ -127,10 +125,10 @@ pub trait OverlayManager: Send + Sync {
 pub struct OverlayHandle {
     pub tenant: String,
     pub workload: String,
-    /// Absolute path to the overlay's root directory. Slice B will
-    /// expose this as a block device path instead (the LUKS-decrypted
-    /// device-mapper node); callers shouldn't depend on the value
-    /// being a directory.
+    /// Absolute path to the overlay's root directory. The LUKS-backed
+    /// impl will expose this as a block device path instead (the
+    /// LUKS-decrypted device-mapper node); callers shouldn't depend
+    /// on the value being a directory.
     pub root: PathBuf,
     /// Running byte-count of the overlay, computed at open. Stale
     /// after the first write — callers that need a current
@@ -142,8 +140,8 @@ pub struct OverlayHandle {
     pub encrypted: bool,
 }
 
-/// Audit-grade record of a destruction operation. Slice D signs
-/// this under the host identity key — see
+/// Audit-grade record of a destruction operation. Signed under the
+/// host identity key — see
 /// [`sign_destruction_receipt`] / [`verify_destruction_receipt`]
 /// and the [`SignedDestructionReceipt`] envelope below.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -192,7 +190,7 @@ impl DestructionReceipt {
     }
 }
 
-/// Slice D — `DestructionReceipt` wrapped in an Ed25519 signature
+/// `DestructionReceipt` wrapped in an Ed25519 signature
 /// plus the signing key's identity (the host identity pubkey,
 /// base64-encoded). An operator who needs to prove a tenant's
 /// data was erased hands this envelope over: the auditor verifies
@@ -205,8 +203,8 @@ impl DestructionReceipt {
 /// The envelope serializes to JSON for operator-friendliness;
 /// `#[serde(deny_unknown_fields)]` keeps the wire pinned. The
 /// `signature` and `signer_pubkey` are URL-safe-no-pad base64
-/// (same encoding the plan-64 audit chain uses for envelope
-/// hashes + signatures).
+/// (same encoding the audit chain uses for envelope hashes +
+/// signatures).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedDestructionReceipt {
@@ -229,8 +227,7 @@ pub struct SignedDestructionReceipt {
 /// separately which key signed.
 ///
 /// Production callers pass `host_signer.signing` (the operator's
-/// host identity key, plan 64 W2). Tests inject a fresh ephemeral
-/// keypair.
+/// host identity key). Tests inject a fresh ephemeral keypair.
 /// Audit-chain cross-reference anchor for a signed destruction
 /// certificate. Returns the lowercase-hex SHA-256 digest of the
 /// canonical compact-JSON serialization of `signed`.
@@ -399,7 +396,7 @@ impl OverlayManager for NoopOverlayManager {
 
 /// Plain-filesystem overlay manager. Each overlay is a directory
 /// under `<root>/<tenant>/<workload>/`; mode 0700 throughout on
-/// Unix. No encryption yet (Slice B).
+/// Unix. No encryption yet.
 #[derive(Debug)]
 pub struct FsOverlayManager {
     root: PathBuf,
@@ -1044,7 +1041,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Slice D — SignedDestructionReceipt (sign + verify)
+    // SignedDestructionReceipt (sign + verify)
     // ──────────────────────────────────────────────────────────────
 
     use ed25519_dalek::SigningKey;

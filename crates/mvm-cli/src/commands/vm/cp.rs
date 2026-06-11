@@ -129,9 +129,9 @@ fn copy_host_to_guest(host: &Path, vm: &str, guest_path: &str, args: &Args) -> R
         create_parents: args.create_parents,
         follow_symlinks: false,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit. Emit
-    // before dispatch so a failure on the wire still leaves an
-    // audit trail of "host tried to write to this guest path".
+    // Inbound vsock RPC audit. Emit before dispatch so a failure
+    // on the wire still leaves an audit trail of "host tried to
+    // write to this guest path".
     super::shared::emit_vsock_rpc_audit(vm, &req);
     match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Write { bytes_written } => {
@@ -187,7 +187,7 @@ fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> R
         length: stat.size,
         follow_symlinks: true,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm, &req);
     match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Read { content, .. } => {
@@ -268,7 +268,7 @@ fn guest_exists(vm: &str, path: &str) -> Result<bool> {
         path: path.to_string(),
         follow_symlinks: false,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm, &req);
     match super::fs::fs_request(vm, req)? {
         FsResult::Stat(_) => Ok(true),
@@ -286,7 +286,7 @@ fn guest_stat(vm: &str, path: &str) -> Result<mvm_guest::vsock::FsStat> {
         path: path.to_string(),
         follow_symlinks: true,
     };
-    // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+    // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm, &req);
     match unwrap_fs(super::fs::fs_request(vm, req)?)? {
         FsResult::Stat(stat) => Ok(stat),

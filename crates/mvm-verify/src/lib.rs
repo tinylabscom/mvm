@@ -11,8 +11,7 @@
 //! in-memory `&str` and an Ed25519 public key, with no filesystem and
 //! no `mvm-*` dependencies, so the same logic runs in a browser tab
 //! (see `web/audit-verify/`) and lets anyone audit a downloaded log
-//! with no host and no trust in a server. The boundary rationale is
-//! ADR-070.
+//! with no host and no trust in a server.
 //!
 //! Byte-exactness: the signed payload is `serde_json::to_vec(entry)`.
 //! [`MirrorEntry`] reproduces `mvm_hostd::supervisor::audit::AuditEntry`'s

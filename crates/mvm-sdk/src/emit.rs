@@ -2,9 +2,9 @@ use crate::ir::Workload;
 
 use crate::error::EmitError;
 
-/// Emit the workload's canonical IR per the ADR-0002 subprocess
-/// contract. Honors `MVM_IR_OUT`: when set, writes to that path;
-/// when unset, writes to stdout.
+/// Emit the workload's canonical IR per the subprocess contract.
+/// Honors `MVM_IR_OUT`: when set, writes to that path; when unset,
+/// writes to stdout.
 pub fn emit(workload: &Workload) -> Result<(), EmitError> {
     let canonical = emit_json(workload)?;
     match std::env::var("MVM_IR_OUT") {
@@ -19,8 +19,8 @@ pub fn emit(workload: &Workload) -> Result<(), EmitError> {
 }
 
 /// Validate, canonicalize (RFC 8785), and return the canonical IR as a
-/// String. Use [`emit`] when you want the ADR-0002 subprocess
-/// behavior; this is the in-process variant for tests and embedding.
+/// String. Use [`emit`] when you want the subprocess behavior; this
+/// is the in-process variant for tests and embedding.
 pub fn emit_json(workload: &Workload) -> Result<String, EmitError> {
     if let Err(errors) = crate::ir::validate(workload) {
         return Err(EmitError::Validation(errors));

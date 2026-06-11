@@ -46,7 +46,7 @@ impl AppBuilder {
     }
 
     /// Add an entrypoint. Single-entrypoint apps call this once; multi-
-    /// function apps (per IR ADR-0014 Phase 2) call it multiple times
+    /// function apps call it multiple times
     /// with `Entrypoint::Function` variants whose `primary` flags are
     /// validator-checked downstream.
     pub fn entrypoint(mut self, ep: Entrypoint) -> Self {
@@ -110,7 +110,7 @@ impl AppBuilder {
             dependencies: self.dependencies,
             threat_tier: Default::default(),
             addons: vec![],
-            // SDK port Phase 1a — `hooks` is a four-phase struct
+            // `hooks` is a four-phase struct
             // of `Vec<HookCmd>` that defaults to all-empty (and
             // serializes as `{}` thanks to per-field
             // `skip_serializing_if = "Vec::is_empty"`). Builders

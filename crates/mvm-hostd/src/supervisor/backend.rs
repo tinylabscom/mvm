@@ -1,10 +1,9 @@
 //! Backend launcher slot — what the supervisor calls to actually
 //! start a VM once it's verified the plan.
 //!
-//! Plan 37 §3.1 specifies an open `BackendRegistry`; for Wave 1.4
-//! we just need an abstraction so `Supervisor::launch(plan)` can
-//! be tested without a real Firecracker. The registry + concrete
-//! `FirecrackerBackend` / `AppleContainerBackend` impls land in
+//! For now this is just an abstraction so `Supervisor::launch(plan)` can
+//! be tested without a real Firecracker. An open `BackendRegistry` plus
+//! concrete `FirecrackerBackend` / `AppleContainerBackend` impls land in
 //! a follow-up that lifts today's `mvm/src/vm/backend.rs`
 //! `AnyBackend` enum behind this trait.
 
@@ -64,7 +63,7 @@ pub trait BackendLauncher: Send + Sync {
     /// Issue the start request. Returns when the backend has
     /// accepted the request — not necessarily when the guest is
     /// ready. The supervisor's state machine separately transitions
-    /// `Launched -> Running` after the guest agent pings (Wave 2).
+    /// `Launched -> Running` after the guest agent pings.
     async fn launch(&self, plan: &ExecutionPlan) -> Result<(), BackendError>;
 
     /// Stop the workload identified by `plan_id`.

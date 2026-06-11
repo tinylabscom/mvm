@@ -19,14 +19,13 @@
 #
 # ── Why busybox-as-PID-1, not NixOS+systemd ──
 #
-# ADR-013 §"Boot-time budget" is the source of truth. The short
-# version: NixOS+systemd boots in 1-3 s; Alpine+OpenRC in 300-500 ms;
+# The short version: NixOS+systemd boots in 1-3 s; Alpine+OpenRC in 300-500 ms;
 # busybox-as-PID-1 with custom init approaches the upstream Firecracker
 # reference of ~125 ms. The 200ms cold-boot target on Firecracker
 # requires the busybox path. The previous iteration of mvm shipped
 # this exact strategy.
 #
-# microvm.nix is still pinned as a flake input (per ADR-013) for its
+# microvm.nix is still pinned as a flake input for its
 # hypervisor abstractions and kernel-config helpers, but we DO NOT
 # use its NixOS module — that's the systemd-heavy path we're
 # explicitly avoiding here.
@@ -101,7 +100,7 @@ in
 # PID 1 boot command, distinct from the `entrypoint`. When set, mkGuest
 # renders it to `/etc/mvm/boot` and `/init` sources THAT as PID 1 — while
 # `/etc/mvm/entrypoint` is left for the caller's `extraFiles` to own (it
-# is the guest agent's ADR-007 per-call marker). This separation exists
+# is the guest agent's per-call marker). This separation exists
 # because the two roles genuinely need different values for an
 # agent-dispatched function workload: PID 1 must idle (keep the VM
 # alive), while the agent's marker names the single-shot per-call wrapper.
@@ -123,16 +122,15 @@ let
   # accessible/sealed classification it happens to track.
   withDevShell = isDev;
 
-  # ── Guest agent build (W6.1.2) ─────────────────────────────────
+  # ── Guest agent build ──────────────────────────────────────────
   #
   # Real Rust binary built from the workspace at `mvmSrc` via
-  # `nix/packages/mvm-guest-agent.nix`. Replaces the W6.1.1 sh-stub
-  # that previously lived inline here. The W7.x.2 libkrun
+  # `nix/packages/mvm-guest-agent.nix`. The libkrun
   # builder VM is what makes this buildable on hosts without native
   # Linux Nix.
   #
   # The `dev-shell` Cargo feature gates the `do_exec` RPC handler
-  # (ADR-002 §W4.3 / `prod-agent-no-exec` CI gate). We tie it to
+  # (the `prod-agent-no-exec` CI gate). We tie it to
   # `isDev` here so the same `mkGuest` call:
   #
   #   - Dev image (`entrypoint.shell = ...`, or `dev = true`)
@@ -176,7 +174,7 @@ let
   #                   dev = true  → uid 0 (root shell;
   #                                  apt install / mount work)
   #                   dev = false → uid 1000 (rootless workload;
-  #                                  defense in depth — ADR-002 W2.1)
+  #                                  defense in depth)
   #
   # Override either via `uids = { agent = N; entrypoint = M; }` —
   # e.g. `entrypoint = 1000` forces a rootless dev shell, or
@@ -192,8 +190,7 @@ let
   };
 
   # GID == UID by convention. /etc/group entries below mirror this.
-  # Phase 6 (W2.1) introduces per-service derived gids; for the
-  # Phase 1 W6.1 slice we keep it simple.
+  # Per-service derived gids come later; for now we keep it simple.
   agentUid = resolvedUids.agent;
   entrypointUid = resolvedUids.entrypoint;
 
@@ -209,15 +206,14 @@ let
   # Nix store path to util-linux's setpriv is baked in at build
   # time and shipped in the rootfs's `/nix/store` closure.
   #
-  # The flag set matches ADR-002 W2.3 (--reuid + --regid +
-  # --clear-groups + --no-new-privs). uid==0 short-circuits to
-  # the bare command — no point setpriv-ing to root.
+  # The flag set is --reuid + --regid + --clear-groups + --no-new-privs.
+  # uid==0 short-circuits to the bare command — no point setpriv-ing
+  # to root.
   setprivWrap = uid: cmd:
     if uid == 0 then cmd
     else
-      # No exec: PID 1 runs the workload as a child so /init can capture $?
-      # (Plan 152 WS-A). Persistent services exec `sleep infinity` inside
-      # and never return.
+      # No exec: PID 1 runs the workload as a child so /init can capture $?.
+      # Persistent services exec `sleep infinity` inside and never return.
       "${pkgs.util-linux}/bin/setpriv "
       + "--reuid=${toString uid} --regid=${toString uid} "
       + "--clear-groups --no-new-privs -- ${cmd}";
@@ -228,7 +224,7 @@ let
     else if entrypointKind == "command" then
       renderCommand entrypoint.command
     else
-      "/bin/sh -i";  # services fallthrough; W5.2 wires the supervisor
+      "/bin/sh -i";  # services fallthrough; the supervisor isn't wired yet
 
   # The full /etc/mvm/entrypoint body. For shell + command forms,
   # setpriv-wrap as appropriate. For services (still stubbed),
@@ -248,7 +244,7 @@ let
   # utility used here. Boot-time-critical path so kept terse and
   # readable. No bashisms, no externalities beyond busybox applets.
   #
-  # Supervision pattern (W6.1):
+  # Supervision pattern:
   #   1. Stage filesystem (proc/sys/dev + tmpfs).
   #   2. Fork the guest agent in background under setpriv→agent uid.
   #   3. Re-attach stdio (dev variant).
@@ -258,7 +254,7 @@ let
   # by default in production (see uids resolution above).
   initScript = pkgs.writeScript "mvm-init" ''
     #!/bin/sh
-    # mvm /init — busybox PID 1 (plan 60 / ADR-013).
+    # mvm /init — busybox PID 1.
 
     # Stage 1 — kernel pseudofs. Required before anything else
     # can read /proc/self or write to /dev/console.
@@ -270,7 +266,7 @@ let
     # interactive `dev` console session (mvm-guest::console). devtmpfs gives
     # /dev/ptmx the node but not the /dev/pts slave fs, so without this
     # openpty() fails ("openpty() failed") and the interactive dev shell
-    # can't open even from a real terminal (Plan 162). Harmless for sealed
+    # can't open even from a real terminal. Harmless for sealed
     # workload guests (they never openpty); 0620,gid=5 is the standard
     # tty-group layout. Best-effort (`|| true`): a kernel without
     # CONFIG_DEVPTS_* falls back to the current non-interactive behavior
@@ -293,7 +289,7 @@ let
     [ -e /dev/stderr ] || /bin/busybox ln -s /proc/self/fd/2 /dev/stderr
 
     # Stage 2 — runtime tmpfs. /tmp + /run are RAM so the rootfs
-    # stays read-only-leaning; volumes (Phase 2) attach to fixed
+    # stays read-only-leaning; volumes attach to fixed
     # mountpoints instead.
     /bin/busybox mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
     /bin/busybox mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
@@ -313,7 +309,7 @@ let
     # Stage 2.27 — bring up the loopback interface. The kernel creates `lo`
     # administratively DOWN; nothing else in this init ups it, so `127.0.0.1`
     # has no route and ANY guest-internal loopback service is unreachable
-    # (`connect()` → ENETUNREACH) — the Plan 129 egress forward proxy on
+    # (`connect()` → ENETUNREACH) — the egress forward proxy on
     # 127.0.0.1:18080, the in-guest addon-dns resolver, and any local service a
     # workload binds. Must run before the agent (which binds the forward proxy)
     # and before netinit. `ip` first (canonical), `ifconfig` fallback — both are
@@ -365,14 +361,14 @@ let
       done
     fi
 
-    # Stage 2.45 — Plan 74 W2 — guest-side network defense.
+    # Stage 2.45 — guest-side network defense.
     # Install kernel blackhole routes for `MANDATORY_DENY_RANGES`
     # (cloud metadata, link-local, CGNAT, host loopback) BEFORE
     # any workload code runs. We're still uid 0 here — the agent
     # fork below drops to uid 901, which doesn't have
     # CAP_NET_ADMIN, so the install has to happen here. Mirrors
     # the agent-bin resolution: prefer /mvm/runtime/netinit (from
-    # the W1.4b runtime overlay) over the baked-in copy in
+    # the runtime overlay) over the baked-in copy in
     # /usr/local/bin.
     #
     # Output of mvm-guest-netinit is a single JSON line that the
@@ -398,7 +394,7 @@ let
       "$MVM_NETINIT_BIN" || echo "mvm-init: netinit exited nonzero; continuing without guest-side defense"
     fi
 
-    # Stage 2.46 — Plan 129 Stage 2 — trust the per-VM egress CA (https
+    # Stage 2.46 — trust the per-VM egress CA (https
     # substitution). A fresh FC boot attaches no secrets drive, so the host
     # delivers the per-VM name-constrained intermediate CERT on the kernel
     # cmdline as `mvm.egress_ca=<hex(PEM)>` (cert only — the key stays host-side
@@ -407,7 +403,7 @@ let
     # bundle = baked roots + this cert, so a workload trusts host-terminated
     # bound-host TLS. The export reaches the entrypoint (setpriv preserves env).
     #
-    # Honest caveat (ADR-006): Python `ssl` and older Node do NOT enforce X.509
+    # Honest caveat: Python `ssl` and older Node do NOT enforce X.509
     # nameConstraints client-side, so this trust is a courtesy — the real egress
     # boundary is the host-side allow-list check (claim 12), not this cert.
     #
@@ -435,7 +431,7 @@ let
       echo "mvm-init: installed per-VM egress CA (https substitution trust)"
     fi
 
-    # Stage 2.47 — Plan 129 Stage 2 — inject the per-run secret PLACEHOLDER env.
+    # Stage 2.47 — inject the per-run secret PLACEHOLDER env.
     # The host minted the workload's placeholders BEFORE boot (so they can ride
     # the cmdline — a fresh FC boot has no secrets drive) and passed them as
     # `mvm.secret_env=<hex(VAR=placeholder\n…)>`. NEVER a value — only the opaque
@@ -488,7 +484,7 @@ let
     #      resolv.conf points at 127.0.0.1.
     #   3. Write a new resolv.conf into /run/mvm and bind-mount it
     #      over /etc/resolv.conf. Single-file bind-mounts survive the
-    #      read-only /etc bind that ADR-002 W2.2 will eventually land
+    #      read-only /etc bind that will eventually land
     #      so this works on both dev and hardened images.
     #   4. Fork mvm-addon-dns under setpriv to the agent uid with
     #      CAP_NET_BIND_SERVICE preserved via ambient + inheritable
@@ -540,11 +536,11 @@ let
     # fails to start, the entrypoint still runs and the lack of
     # agent shows up in `mvmctl status`.
     #
-    # Plan 74 W1.4b (ADR-051) — when the mvm runtime overlay is
+    # When the mvm runtime overlay is
     # attached, `mvm-verity-init` bind-mounts it at /mvm/runtime
     # before switch_root, so /mvm/runtime/agent is the canonical
     # binary location. Prefer it over the baked-in copy at
-    # /usr/local/bin/mvm-guest-agent (which a future PR drops
+    # /usr/local/bin/mvm-guest-agent (which a future change drops
     # entirely once every backend attaches the overlay). Both
     # paths are exec-tested so a half-attached overlay (directory
     # present, agent missing) still falls through to the baked-in
@@ -579,28 +575,28 @@ let
     # is the host-side gate).
     if [ -e /etc/mvm/variant ] && [ "$(/bin/busybox cat /etc/mvm/variant)" = "dev" ]; then
       exec </dev/console >/dev/console 2>&1
-      # Plan 162: the dev VM is long-lived, so PID 1 idles here instead of
+      # The dev VM is long-lived, so PID 1 idles here instead of
       # running the /etc/mvm/entrypoint `/bin/sh` on /dev/console. The guest
       # agent (forked above) serves the interactive shell over vsock — it
       # openpty()s and forks its OWN `/bin/sh -i` (mvm-guest::console),
       # independent of PID 1 — so PID 1 doesn't need to be a shell at all.
       # Running `/bin/sh` on /dev/console here is fatal on Vz: its serial
       # console is input-less, the read hits EOF, the shell exits, PID 1
-      # dies, and the VM powers off ~5 s after boot (the Plan 120 symptom).
+      # dies, and the VM powers off ~5 s after boot.
       # On libkrun this just swaps a blocking console read for an explicit
       # idle — same "stay alive", no change to the agent shell path. A
       # busybox-portable loop avoids depending on `sleep infinity`.
       while :; do /bin/busybox sleep 2147483647; done
     fi
 
-    # Stage 4.5 — Plan 74 W1.4b (ADR-051) — mvm runtime overlay env.
+    # Stage 4.5 — mvm runtime overlay env.
     # When the overlay is mounted (verity boot path), surface its
     # presence + SDK-library paths to the entrypoint via env
     # variables. Per-language path vars (PYTHONPATH, NODE_PATH)
     # are prepended so they take precedence over a user's existing
     # value; an empty existing value leaves no trailing colon.
     # Setting these unconditionally on the overlay-mounted path
-    # gives a stable contract for SDK addons (ADR-049 vsock hooks)
+    # gives a stable contract for SDK addons (vsock hooks)
     # without per-image opt-in. The dev/legacy path (no overlay)
     # leaves the env untouched so existing flakes keep their
     # current behaviour.
@@ -624,7 +620,7 @@ let
     [ -e /etc/mvm/boot ] && MVM_BOOT=/etc/mvm/boot
     # Run the workload as a child (setprivWrap no longer execs) so PID 1
     # can capture its exit code. Persistent services exec `sleep infinity`
-    # inside and never return here. Plan 152 WS-A.
+    # inside and never return here.
     . "$MVM_BOOT"
     MVM_CODE=$?
     # Report the exit code to the host (best-effort), then power off —
@@ -676,20 +672,17 @@ let
 
   nameFile = pkgs.writeText "mvm-name" "${name}\n";
 
-  # ── mvm-guest-agent — production Rust binary (W6.1.2)
+  # ── mvm-guest-agent — production Rust binary
   #
   # Built by `nix/packages/mvm-guest-agent.nix` from the workspace
-  # source at `mvmSrc`. The W6.1.1 sh-stub that previously lived here
-  # was a placeholder used while the cross-compile infrastructure
-  # was being staged; the W7.x.2 libkrun builder VM made the
-  # real build host-Nix-free, which unblocked this swap.
+  # source at `mvmSrc`. The libkrun builder VM makes the
+  # real build host-Nix-free.
   #
   # The binary is the same one the workspace's
   # `crates/mvm-guest/src/bin/mvm-guest-agent.rs` Cargo target builds
   # — vsock RPC handler, worker-pool dispatcher, integration manifest
-  # consumer, system metrics surface. ADR-002 §W4 documents the
-  # attack surface; ADR-002 §W4.3 documents the `dev-shell` feature
-  # gate that toggles `do_exec` between dev and prod images.
+  # consumer, system metrics surface. The `dev-shell` feature gate
+  # toggles `do_exec` between dev and prod images.
   agentBinary = "${guestAgentPkg}/bin/mvm-guest-agent";
 
   # `mvm-seccomp-apply` ships alongside the agent (same Cargo
@@ -698,13 +691,13 @@ let
   # seccomp filter before handing control to the workload.
   seccompApplyBinary = "${guestAgentPkg}/bin/mvm-seccomp-apply";
 
-  # `mvm-verity-init` is the PID 1 of the verity initramfs (ADR-002
-  # §W3). Baked into the verity-initrd cpio.gz, not into the rootfs
+  # `mvm-verity-init` is the PID 1 of the verity initramfs.
+  # Baked into the verity-initrd cpio.gz, not into the rootfs
   # directly — wired here as a passthru export so the initramfs
   # builder can reach it without duplicating the agent derivation.
   verityInitBinary = "${guestAgentPkg}/bin/mvm-verity-init";
 
-  # Plan 74 W2 — guest-side network defense. `mvm-guest-netinit`
+  # Guest-side network defense. `mvm-guest-netinit`
   # installs kernel blackhole routes for `MANDATORY_DENY_RANGES`
   # (cloud metadata, link-local, CGNAT, host loopback) inside the
   # guest at boot. Run as root from `/init` BEFORE the agent forks
@@ -732,7 +725,7 @@ let
   #   { "absolute/path" = "/nix/store/.../bin/foo"; }
   #     → shorthand for `{ source = <that string>; }`.
   #
-  # Binary-source variants exist so Plan 72's builder-vm flake can
+  # Binary-source variants exist so the builder-vm flake can
   # install `mvm-host-vm-init` at `/sbin/mvm-host-vm-init` without
   # inlining its bytes as a string (`writeText` is text-only).
   extraFilePopulation = lib.concatMapStringsSep "\n"
@@ -776,7 +769,7 @@ let
   # /init script touches resolves through /bin/* symlinks pointing
   # at /bin/busybox.
   #
-  # Phase 6 layers the security overlay (per-service uids,
+  # A later layer adds the security overlay (per-service uids,
   # read-only /etc bind-mount, dm-verity) on top of this base.
   rootfsTree = pkgs.runCommand "mvm-rootfs-tree-${name}" { } ''
     set -e
@@ -784,7 +777,7 @@ let
 
     # Standard FHS dirs the kernel + init expect. `/nix-store`,
     # `/job`, `/out`, `/work`, `/mvm-bins` are mount points the libkrun
-    # builder VM (Plan 72 W3 / ADR-065) needs pre-created — rootfs boots
+    # builder VM needs pre-created — rootfs boots
     # `ro` so `mvm-host-vm-init` can't `mkdir` them at runtime. `/mnt`,
     # `/data` are the user-volume mount roots (MountPathPolicy allow-roots,
     # alongside `/work`) — `/init` mounts `--volume` shares here and can't
@@ -793,7 +786,7 @@ let
     chmod 1777 "$out/tmp"
     chmod 0755 "$out/run"
 
-    # Plan 74 W1.4b — the mvm runtime overlay (ADR-051) is
+    # The mvm runtime overlay is
     # bind-mounted at /mvm/runtime by `mvm-verity-init` before
     # switch_root. The directory must exist in the rootfs so the
     # bind-mount has a target. Mode 0755 (owner root); the overlay
@@ -801,7 +794,7 @@ let
     # written by the guest regardless. Outside the verity-boot
     # path (dev-mode VMs that don't run `mvm-verity-init`) the
     # directory is empty — /init below falls back to the baked-in
-    # agent. `/mvm/` is reserved (admission-time check in W1.4b.3d
+    # agent. `/mvm/` is reserved (an admission-time check
     # rejects OCI images that carry content under this path).
     mkdir -p "$out/mvm/runtime"
     chmod 0755 "$out/mvm"
@@ -824,7 +817,7 @@ let
 
     # mvm metadata. The PID 1 boot command is the load-bearing file —
     # /init sources it. Mode 0500 so non-root processes in the guest
-    # can't read or replace it (W2.2 makes /etc read-only as well).
+    # can't read or replace it (a later layer makes /etc read-only as well).
     # When `bootCommand` is set it lands at /etc/mvm/boot and the caller's
     # extraFiles owns /etc/mvm/entrypoint (the agent marker); otherwise
     # the rendered entrypoint is both. `_bootContract` is forced here so
@@ -845,9 +838,8 @@ let
 
     # /etc/passwd + /etc/group provision root (mandatory for PID 1)
     # plus the agent + entrypoint uids resolved at build time.
-    # Per ADR-002 W2.2 (Phase 6) these become read-only via bind-
-    # mount once the security overlay lands; for W6.1 they're
-    # plain mode 0644.
+    # These become read-only via bind-mount once the security
+    # overlay lands; for now they're plain mode 0644.
     #
     # When entrypoint uid happens to be 0 (dev-mode default), the
     # entry collapses to the root row — guarded against the
@@ -895,7 +887,7 @@ let
 
     # mvm-guest-agent — installed under /usr/local/bin so /init can
     # exec it. Mode 0555 so the agent can't rewrite itself; ownership
-    # is the build-time user (Nix sandbox has no root) — Phase 6 W2.2
+    # is the build-time user (Nix sandbox has no root) — a later layer
     # binds /etc + /usr read-only at boot to make this load-bearing.
     #
     # mkdir before the cp: when `packages = []` the directory-creation
@@ -907,7 +899,7 @@ let
     cp ${agentBinary} "$out/usr/local/bin/mvm-guest-agent"
     chmod 0555 "$out/usr/local/bin/mvm-guest-agent"
 
-    # Plan 74 W2 — guest-side network defense. Same mode as the
+    # Guest-side network defense. Same mode as the
     # agent (0555: read+exec, not writable). /init runs this as
     # uid 0 BEFORE forking the agent under setpriv, so the routes
     # exist before any workload code can attempt egress. The
@@ -941,7 +933,7 @@ let
     # `/lib/modules/<kver>/` in the rootfs, modprobe has nothing to
     # load and the agent fails to open AF_VSOCK. Copy only the vsock
     # transport closure instead of the full kernel module tree; the
-    # full tree is hundreds of MB and #110's contract keeps rootfs
+    # full tree is hundreds of MB and the rootfs-size contract keeps
     # growth below 10 MB.
     #
     # nixpkgs splits the aarch64-linux kernel into two derivations:
@@ -1015,15 +1007,15 @@ let
                 "$src" \
                 "$out/lib/modules/$kver" \
                 "vmw_vsock_virtio_transport"
-              # Stage 0 (`bootstrap_builder_vm_image_via_dev_image_stage0`,
-              # Plan 77 W3) boots this rootfs and mounts `/work`, `/out`,
+              # Stage 0 (`bootstrap_builder_vm_image_via_dev_image_stage0`)
+              # boots this rootfs and mounts `/work`, `/out`,
               # `/job` as virtio-fs. nixpkgs ships `CONFIG_VIRTIO_FS=m`
               # and `CONFIG_FUSE_FS=m`, so without the module closure
               # `mount -t virtiofs` fails with ENODEV and the VM powers
               # down before `mvm-host-vm-init` can finalize `/job/result`.
-              # #333 trimmed the closure to vsock-only because that's all
-              # the workload microVM path needed; Stage 0's reuse of this
-              # rootfs landed later and depends on virtio-fs.
+              # An earlier change trimmed the closure to vsock-only because
+              # that's all the workload microVM path needed; Stage 0's reuse
+              # of this rootfs landed later and depends on virtio-fs.
               copy_module_closure \
                 "$src" \
                 "$out/lib/modules/$kver" \
@@ -1085,15 +1077,15 @@ let
     accessible = isDev;
     sealed = isSealed;
     entrypointKind = entrypointKind;
-    # Plan 165 WS-B/WS-C: true iff the agent is built with the `dev-shell`
+    # True iff the agent is built with the `dev-shell`
     # Cargo feature — which gates BOTH `do_exec` AND the PTY-over-vsock
-    # interactive console (ADR-002 §W4.3, claim 15). `withDevShell == true`
+    # interactive console (claim 15). `withDevShell == true`
     # means a dev image whose console is wired; `false` is a sealed prod
     # agent with no interactive surface. mvmctl / admission gates read this
     # to refuse interactive access to a sealed image.
     withDevShell = withDevShell;
     initSystem = "busybox";
-    # ADR-013 §"Per-backend boot budgets" — single 300ms floor across
+    # Single 300ms boot-budget floor across
     # every backend. Custom /init + trimmed kernel + direct vmlinux
     # boot are the levers that keep us under it. A backend that can't
     # hit the floor is a backend we drop.
@@ -1108,17 +1100,17 @@ let
       entrypoint = entrypointUid;
     };
     rootlessEntrypoint = entrypointUid != 0;
-    # Agent binary kind: "real" since W6.1.2 swapped in the cross-
-    # compiled Rust binary. The previous "stub" value flagged the
-    # W6.1.1 placeholder sh script. `mvmctl status` reads this;
+    # Agent binary kind: "real" — the cross-compiled Rust binary.
+    # The previous "stub" value flagged a placeholder sh script.
+    # `mvmctl status` reads this;
     # production deployments should refuse to boot a "stub" image.
     agentBinary = "real";
-    # Plan 74 W1.4b (ADR-051) — the rootfs carries a `/mvm/runtime`
+    # The rootfs carries a `/mvm/runtime`
     # bind-mount target and the /init script prefers the overlay
     # agent at `/mvm/runtime/agent` over the baked-in
     # `/usr/local/bin/mvm-guest-agent`. Admission-time gates can
     # refuse to boot a workload whose rootfs is not overlay-aware
-    # (e.g. an old cached template predating W1.4b.3c).
+    # (e.g. an old cached template predating overlay support).
     overlayAware = true;
   };
 in
@@ -1131,7 +1123,7 @@ rootfsImage.overrideAttrs (old: {
     # the runtime — no NixOS evaluation needed.
     inherit hypervisor;
     resources = { inherit vcpus memory_mib; };
-    # W6.1.2: expose the side-binaries from the guest-agent build so
+    # Expose the side-binaries from the guest-agent build so
     # downstream derivations (verity-initrd, per-service launch line
     # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
     # `mvm-verity-init` without re-running the cargo build.

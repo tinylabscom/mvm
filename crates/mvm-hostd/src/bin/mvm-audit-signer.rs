@@ -1,20 +1,20 @@
 //! `mvm-audit-signer` binary — the audit chain-signer subprocess entry
-//! point (Plan 104 §H-L1.2, ADR-061 §"Decision").
+//! point.
 //!
-//! Spawn contract (W1b.1; W1b.2 + W8 close the deferred items):
+//! Spawn contract (some steps still deferred, noted inline):
 //!
-//! 1. Supervisor cosign-verifies this binary at spawn (§H-L3.1 — W1b.2).
+//! 1. Supervisor cosign-verifies this binary at spawn (deferred).
 //! 2. Supervisor spawns under workload-specific cgroup + PID/mount
-//!    namespace + seccomp + setpriv (§H-L1.4 etc. — W1b.2).
+//!    namespace + seccomp + setpriv (deferred).
 //! 3. Supervisor writes a JSON `SubprocessConfig` to stdin, then closes
-//!    stdin. W1b.1 parses unsigned; W1b.2 signed-envelope per §H-L3.6.
-//! 4. Process loads or generates the chain-signing key (W1b.1
-//!    software path), opens the JSONL with `O_APPEND` only (§H-L5.1),
-//!    and recovers the chain head from the JSONL tail.
+//!    stdin. Parsed unsigned today; a signed envelope wraps it later.
+//! 4. Process loads or generates the chain-signing key (software path),
+//!    opens the JSONL with `O_APPEND` only, and recovers the chain head
+//!    from the JSONL tail.
 //! 5. Process binds a UDS at `cfg.uds_path` and enters the dispatch
 //!    loop.
 //! 6. Process exits when the supervisor dies (parent-death signal —
-//!    W1b.2).
+//!    deferred).
 
 use std::io::Read;
 use std::sync::Arc;

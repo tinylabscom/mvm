@@ -1,4 +1,4 @@
-//! `emit_protocol_schema` (Plan 124 D1) — emit the host↔guest RPC
+//! `emit_protocol_schema` — emit the host↔guest RPC
 //! protocol JSON Schema to stdout: `GuestRequest` (the verbs the host
 //! sends the agent) + `GuestResponse` (what the agent returns). This is
 //! the single source of truth the SDK RPC-client codegen consumes, the
@@ -6,7 +6,7 @@
 //!
 //! Built only under `--features schema` (`required-features` in
 //! `Cargo.toml`), so `schemars` never enters the default / prod agent
-//! closure — the lean-agent invariant (Plan 124 A) holds.
+//! closure — the lean-agent invariant holds.
 
 use schemars::JsonSchema;
 

@@ -1,16 +1,16 @@
-//! QEMU **workload** runtime backend (Plan 166 Phase 2 / ADR-072).
+//! QEMU **workload** runtime backend.
 //!
-//! The dev/test counterpart to the Plan 166 QEMU *builder* (`mvm-build`'s
+//! The dev/test counterpart to the QEMU *builder* (`mvm-build`'s
 //! `qemu_builder`): this boots a user **workload** microVM via
 //! `qemu-system-<arch>` so a workload can run for dev/test on a host
 //! without `/dev/kvm` (TCG fallback) or where Firecracker isn't wanted.
-//! **Firecracker stays the sole production runtime** (ADR-001/072);
-//! QEMU is opt-in (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and
-//! `auto_select` never picks it.
+//! **Firecracker stays the sole production runtime**; QEMU is opt-in
+//! (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and `auto_select` never
+//! picks it.
 //!
-//! ## Tier (ADR-072)
+//! ## Tier
 //!
-//! Dev tier only, outside the ADR-002 claims. `AnyBackend::tier()` reports
+//! Dev tier only, outside the security claims. `AnyBackend::tier()` reports
 //! the **best-case** Tier 2 (KVM-accelerated, comparable to the
 //! microvm.nix/qemu classification); when `/dev/kvm` is absent the boot
 //! runs under TCG software emulation and `start` emits a loud Tier-3
@@ -56,7 +56,7 @@ const PID_FILE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the host AF_VSOCK↔UNIX bridge gets to bind its listening UNIX
 /// socket before `start` returns. The socket existing means the agent
 /// client has somewhere to connect; the guest agent coming up is raced by
-/// the client's own retry, exactly as under libkrun (#582).
+/// the client's own retry, exactly as under libkrun.
 const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM→SIGKILL grace on `stop`.
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -109,7 +109,7 @@ impl VmBackend for QemuBackend {
 
         // Same admission gate + runtime-meta record as the libkrun path so
         // `mvmctl console`'s accessible/sealed gate (claim 15) and the
-        // overlay-aware contract (ADR-051) hold on QEMU-launched VMs too.
+        // overlay-aware contract hold on QEMU-launched VMs too.
         let rootfs = Path::new(&config.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
@@ -117,7 +117,7 @@ impl VmBackend for QemuBackend {
 
         let kvm = kvm_available();
         if !kvm {
-            // Task 2.2 — loud Tier-3 banner, mirroring the Docker fallback.
+            // Loud Tier-3 banner, mirroring the Docker fallback.
             ui::warn(&format!(
                 "QEMU workload '{}' is running UNACCELERATED (TCG — no /dev/kvm). \
                  This is a Tier-3 dev/test fallback: slow, and unaudited vs ADR-002. \
@@ -235,8 +235,8 @@ impl VmBackend for QemuBackend {
             return Err(e);
         }
 
-        // Plan 129 — when the admitted plan carries secret bindings, spawn the
-        // per-VM substitution endpoint moat so the guest's egress can resolve
+        // When the admitted plan carries secret bindings, spawn the per-VM
+        // substitution endpoint moat so the guest's egress can resolve
         // placeholders host-side (the guest never holds the real secret). Fail
         // closed: a secret-bearing workload whose endpoint can't come up is
         // rolled back rather than run with its secrets unavailable.
@@ -252,7 +252,7 @@ impl VmBackend for QemuBackend {
                         mvm_core::plan::redaction_from_signed_json(plan_json).unwrap_or_default();
                     // QEMU is slirp (no host TAP) — no transparent terminator
                     // to install, so `terminator_listen: None`. The vsock
-                    // substitution channel alone is unchanged from before 5B.
+                    // substitution channel alone is unchanged.
                     if let Err(e) = spawn_substitution_endpoint(
                         &config.name,
                         &state_dir,
@@ -297,8 +297,8 @@ impl VmBackend for QemuBackend {
         }
         let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
 
-        // Plan 129 — reap the substitution endpoint moat (if this VM had one)
-        // so its decrypted secrets don't outlive the guest.
+        // Reap the substitution endpoint moat (if this VM had one) so its
+        // decrypted secrets don't outlive the guest.
         reap_substitution_endpoint(&state_dir, &id.0);
 
         let pid_path = state_dir.join(QEMU_PID_FILE);
@@ -481,7 +481,7 @@ fn host_arch() -> &'static str {
 /// virtio-blk/net/vsock + ext4 built-in and boots a workload rootfs
 /// (`root=/dev/vda init=/init`) just fine — the Linux analog of
 /// libkrunfw's bundled kernel. Production uses a workload kernel via
-/// Firecracker; QEMU is dev/test only (ADR-072).
+/// Firecracker; QEMU is dev/test only.
 fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
     if let Some(k) = config.kernel_path.as_deref() {
         let p = PathBuf::from(k);

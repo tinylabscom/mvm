@@ -1,5 +1,4 @@
-//! Plan 97 §"Phase C seam design" — hypervisor-agnostic builder-VM
-//! orchestration helper.
+//! Hypervisor-agnostic builder-VM orchestration helper.
 //!
 //! [`BuilderVmRuntime`] is the shared orchestration body that both
 //! the libkrun and Vz builder paths route through. It owns the
@@ -54,7 +53,7 @@ pub const MVM_BUILDER_VM_TIMEOUT_SECS_ENV: &str = "MVM_BUILDER_VM_TIMEOUT_SECS";
 /// build script runs `nix-collect-garbage --delete-older-than 14d`.
 /// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB
 /// sparse cap [`DEFAULT_NIX_STORE_MIB`](crate::libkrun_builder::DEFAULT_NIX_STORE_MIB)).
-/// Override: [`MVM_BUILDER_STORE_GC_GIB_ENV`]. #630
+/// Override: [`MVM_BUILDER_STORE_GC_GIB_ENV`].
 ///
 /// Lives here (always compiled) rather than in `libkrun_builder`
 /// (feature-gated `builder-vm`) because `render_flake_cmd_sh` reads it
@@ -66,13 +65,13 @@ pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
 /// Env var that overrides [`DEFAULT_BUILDER_STORE_GC_GIB`]. Plain
 /// integer GiB; a missing/garbage/zero value falls back to the
 /// default (this is a best-effort space cap, not a correctness gate —
-/// a typo must not disable the just-built-closure-preserving GC). #630
+/// a typo must not disable the just-built-closure-preserving GC).
 pub const MVM_BUILDER_STORE_GC_GIB_ENV: &str = "MVM_BUILDER_STORE_GC_GIB";
 
 /// Resolve the builder-store GC cap, in KiB, for substitution into the
 /// in-guest build script's `du -k` comparison. Reads
 /// [`MVM_BUILDER_STORE_GC_GIB_ENV`]; an unset, non-integer, or zero
-/// value falls back to [`DEFAULT_BUILDER_STORE_GC_GIB`]. #630
+/// value falls back to [`DEFAULT_BUILDER_STORE_GC_GIB`].
 pub fn builder_store_gc_cap_kib() -> u64 {
     let gib = std::env::var(MVM_BUILDER_STORE_GC_GIB_ENV)
         .ok()
@@ -83,10 +82,10 @@ pub fn builder_store_gc_cap_kib() -> u64 {
 }
 
 /// Per-job dir filename mvm-host-vm-init detects to dispatch
-/// through the application-dependency install pipeline (Plan 73
-/// Followup B.2). Migrated from `libkrun_builder.rs` because the
-/// install spec staging is a hypervisor-agnostic concern that
-/// both the libkrun and Vz builder paths need.
+/// through the application-dependency install pipeline. Migrated
+/// from `libkrun_builder.rs` because the install spec staging is a
+/// hypervisor-agnostic concern that both the libkrun and Vz builder
+/// paths need.
 pub const INSTALL_SPEC_FILENAME: &str = "install_spec.json";
 
 /// Hypervisor-agnostic orchestration helper. Holds a reference to
@@ -128,12 +127,12 @@ impl<'a> BuilderVmRuntime<'a> {
 /// - [`BuilderJob::Install`] → copies the caller's install-spec JSON
 ///   to `<job_dir>/install_spec.json`. mvm-host-vm-init detects the
 ///   filename and dispatches the application-dep install pipeline
-///   (Plan 73 Followup B.2) instead of `cmd.sh`.
+///   instead of `cmd.sh`.
 ///
 /// Hypervisor-agnostic — the staging produces files in a virtio-fs
 /// share; libkrun and Vz both bind-mount the same host dir, so the
 /// helper doesn't need to know which VMM is on the other end.
-/// Migrated from `libkrun_builder.rs` in Plan 97 Phase C PR-B-migrate.
+/// Migrated from `libkrun_builder.rs`.
 pub fn stage_job_dir(
     job_dir: &Path,
     job: &BuilderJob,
@@ -152,10 +151,9 @@ pub fn stage_job_dir(
         BuilderJob::Install { spec_path } => {
             // Copy the caller's spec into the per-job dir so the
             // virtio-fs share carries it into the guest at
-            // `/job/install_spec.json`. `mvm-host-vm-init`
-            // (Plan 73 Followup B.2) detects that filename and
-            // dispatches through the install pipeline instead of
-            // running cmd.sh.
+            // `/job/install_spec.json`. `mvm-host-vm-init` detects
+            // that filename and dispatches through the install
+            // pipeline instead of running cmd.sh.
             let dst = job_dir.join(INSTALL_SPEC_FILENAME);
             std::fs::copy(spec_path, &dst).map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!(
@@ -168,8 +166,8 @@ pub fn stage_job_dir(
         }
     };
 
-    // Plan 120 / ADR-046 source-checkout invariant: when the caller
-    // stages a local user flake (`mvm_local_override = Some`), the
+    // Source-checkout invariant: when the caller stages a local user
+    // flake (`mvm_local_override = Some`), the
     // workspace — not the user flake — is mounted at `/work`, and we
     // copy the user flake into the job dir so it rides the existing
     // `/job` virtio-fs share. The build then resolves `mvm` from the
@@ -343,13 +341,12 @@ fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> 
             String::new(),
         )
     };
-    // #630: resolved on the host, baked as a literal into the script so
+    // Resolved on the host, baked as a literal into the script so
     // the in-guest `du` comparison needs no env plumbing through the VM.
     let gc_cap_kib = builder_store_gc_cap_kib();
     format!(
         r#"#!/bin/sh
-# mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime (Plan 97
-# Phase C migration; was Plan 72 W4's stage_job_dir).
+# mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime.
 # Runs inside the builder VM under `/bin/sh -eu`. The host wires
 # /work (workspace), /out (artifact dir), /job (this dir) as
 # virtio-fs shares; /nix is a persistent virtio-blk overlay
@@ -397,12 +394,12 @@ cores = 0
 auto-optimise-store = true
 substituters = https://cache.nixos.org/
 trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
-# Plan 72 W0's flake convention: workspace-path env var so
-# flakes that reference the workspace root don't depend on
-# relative-path resolution against the store-copied flake dir.
+# Flake convention: workspace-path env var so flakes that reference
+# the workspace root don't depend on relative-path resolution
+# against the store-copied flake dir.
 export MVM_WORKSPACE_PATH=/work
-# Plan 115 / ADR-065: host-vm binaries extracted from the mvmctl
-# embedded payload and mounted read-only at /mvm-bins. The builder-vm
+# Host-vm binaries extracted from the mvmctl embedded payload and
+# mounted read-only at /mvm-bins. The builder-vm
 # flake reads this to install the correct cross-compiled binaries into
 # the rootfs without a separate nix build.
 export MVM_HOST_BIN_DIR=/mvm-bins
@@ -465,7 +462,7 @@ fi
 chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 [ -f /out/vmlinux ] && chmod 0644 /out/vmlinux 2>/dev/null || true
 
-# W6.2 — emit the mvm-meta.json sidecar next to the rootfs. The runtime
+# Emit the mvm-meta.json sidecar next to the rootfs. The runtime
 # admission path refuses to boot a rootfs without it (it certifies the
 # overlay-aware contract), and the host has no nix, so we eval the
 # flake's `passthru.mvm` (the GuestSidecar) here in the guest.
@@ -485,7 +482,7 @@ else
     rm -f /out/mvm-meta.json
 fi
 
-# Bound the persistent /nix store (#630): GC stale closures once it grows
+# Bound the persistent /nix store: GC stale closures once it grows
 # past the cap. `--delete-older-than 14d` keeps the just-built closure
 # (recent) so rebuilds stay warm; only old-revision garbage is freed.
 # Best-effort and POST-build so it can never fail the build or lose output.
@@ -514,16 +511,15 @@ pub fn shell_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Parsed `<job_dir>/result` written by `mvm-host-vm-init` (Plan 72
-/// W3). Shape matches the JSON `mvm-host-vm-init::linux::write_result`
-/// emits. The guest PID 1 writes this on every code path that reaches
+/// Parsed `<job_dir>/result` written by `mvm-host-vm-init`. Shape
+/// matches the JSON `mvm-host-vm-init::linux::write_result` emits.
+/// The guest PID 1 writes this on every code path that reaches
 /// `power_off`; the host-side helper reads it to learn the guest's
 /// exit code and the cmd.sh stderr-tail ringbuffer for diagnostics.
 ///
 /// Hypervisor-agnostic: the file lives in the `/job` virtio-fs share,
 /// which both libkrun and Vz attach identically. Migrated from
-/// `libkrun_builder.rs` in Plan 97 Phase C (second migration after
-/// `stage_job_dir`).
+/// `libkrun_builder.rs`.
 #[derive(Debug, Deserialize)]
 pub struct JobResult {
     pub exit_code: i32,
@@ -606,7 +602,7 @@ pub fn finalize_flake_job(
         let derivation_tail = read_last_bytes_of(&stderr_log, 4 * 1024)
             .unwrap_or_else(|_| String::from("<nix-stderr.log not present on host>"));
 
-        // #640 — a dangling/GC'd store path makes every `dev up` fail identically
+        // A dangling/GC'd store path makes every `dev up` fail identically
         // (the user re-runs and "loops"). Detect that exact nix signature and
         // return the one-line recovery instead of the opaque build error.
         if let Some(line) = crate::builder_vm::dangling_store_path_line(&derivation_tail)
@@ -673,7 +669,7 @@ fn extract_nix_store_hash(store_path: &str) -> Option<&str> {
 /// Parsed shape of `<artifact_out>/result.json` — the install report
 /// `mvm-host-vm-init::install::InstallReport::to_json` emits. Field
 /// set kept in sync with the writer; an additive change to the writer
-/// (B.2.x egress allowlist diagnostics, for example) needs a matching
+/// (egress allowlist diagnostics, for example) needs a matching
 /// `#[serde(default)]` field here.
 #[derive(Debug, Deserialize)]
 pub struct InstallResultReport {
@@ -685,8 +681,8 @@ pub struct InstallResultReport {
     pub failure_reason: Option<String>,
 }
 
-/// Finalize an install job (Plan 73 Followup B.2): validate the
-/// install report `mvm-host-vm-init` wrote to
+/// Finalize an install job: validate the install report
+/// `mvm-host-vm-init` wrote to
 /// `<artifact_out>/result.json`, fail closed on
 /// `installer_exit_code != 0`, and return
 /// [`BuilderArtifacts::InstallVolume`] pointing at the directory.
@@ -766,14 +762,11 @@ pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, Bui
 /// `_file: std::fs::File` is **load-bearing** — it's the sidecar lock
 /// handle; dropping the guard releases the lock. Callers must keep the
 /// guard alive until the supervisor exits and all artifact reads are
-/// done. The seam design in Plan 97 §"Phase C seam design" calls this
-/// out explicitly because an underscore-prefixed field reads as inert;
-/// it isn't.
+/// done. Called out explicitly because an underscore-prefixed field
+/// reads as inert; it isn't.
 ///
 /// Hypervisor-agnostic: both libkrun and Vz attach the same image
-/// path as a virtio-blk device. Migrated from `libkrun_builder.rs` in
-/// Plan 97 Phase C PR-B-migrate (fourth migration after
-/// `finalize_flake_job` / `finalize_install_job`).
+/// path as a virtio-blk device. Migrated from `libkrun_builder.rs`.
 #[derive(Debug)]
 pub struct NixStoreImageLock {
     path: PathBuf,
@@ -1023,10 +1016,9 @@ pub fn acquire_nix_store_image_lock_named(
 ///
 /// Hypervisor-agnostic: the message references the per-VM state
 /// directory, which both libkrun and Vz expose under the same name.
-/// Migrated from `libkrun_builder.rs` in Plan 97 Phase C PR-B-migrate
-/// (fifth migration after `NixStoreImageLock`). The libkrun path
-/// produced this exact error from two call sites; lifting it removes
-/// the drift risk if one site changes wording but not the other.
+/// Migrated from `libkrun_builder.rs`. The libkrun path produced this
+/// exact error from two call sites; lifting it removes the drift risk
+/// if one site changes wording but not the other.
 pub fn supervisor_exit_error(exit_code: i32, vm_state_dir: &Path) -> BuilderVmError {
     BuilderVmError::NixBuildFailed(format!(
         "supervisor exited with non-zero status ({exit_code}); \
@@ -1037,7 +1029,7 @@ pub fn supervisor_exit_error(exit_code: i32, vm_state_dir: &Path) -> BuilderVmEr
 
 /// Format the [`BuilderVmError`] returned when the guest's cmd.sh
 /// exited non-zero. `stderr_tail` is the 20-line ringbuffer
-/// `mvm-host-vm-init` captured from cmd.sh's stderr (Plan 72 W3) —
+/// `mvm-host-vm-init` captured from cmd.sh's stderr —
 /// surfaced as-is so the operator sees the last few lines without
 /// having to read the `/job/result` JSON or chase the full log.
 ///
@@ -1059,9 +1051,9 @@ pub fn shell_job_exit_error(exit_code: i32, stderr_tail: &str) -> BuilderVmError
 ///
 /// Both backends (libkrun + Vz) thread the returned [`Duration`] into
 /// their per-VM-run timer so a stuck guest doesn't pin a Cargo job
-/// indefinitely. Migrated from `libkrun_builder.rs` in Plan 97 Phase C
-/// PR-B-migrate (sixth migration). The env var name is intentionally
-/// hypervisor-agnostic; the policy is the same on both paths.
+/// indefinitely. Migrated from `libkrun_builder.rs`. The env var name
+/// is intentionally hypervisor-agnostic; the policy is the same on
+/// both paths.
 ///
 /// Rejects zero so a typo (`MVM_BUILDER_VM_TIMEOUT_SECS=0`) doesn't
 /// silently disable the timeout. Operators that want "no limit" should
@@ -1210,8 +1202,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Tests migrated from libkrun_builder.rs alongside finalize_*
-    // (Plan 97 Phase C PR-B-migrate commit 4).
+    // Tests migrated from libkrun_builder.rs alongside finalize_*.
     // -----------------------------------------------------------------
 
     #[test]
@@ -1488,8 +1479,8 @@ mod tests {
 
     // -----------------------------------------------------------------
     // Tests migrated from libkrun_builder.rs alongside NixStoreImageLock
-    // and acquire_nix_store_image_lock (Plan 97 Phase C PR-B-migrate
-    // commit 5). The new signature takes the cache dir as a &Path arg,
+    // and acquire_nix_store_image_lock. The new signature takes the
+    // cache dir as a &Path arg,
     // so the XDG_CACHE_HOME env hack from the old tests is gone — each
     // test passes a fresh TempDir path directly and runs without
     // process-wide env mutation.
@@ -1723,9 +1714,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // supervisor_exit_error + shell_job_exit_error — Plan 97 Phase C
-    // PR-B-migrate (fifth migration: stderr-tail capture / build failure
-    // formatting).
+    // supervisor_exit_error + shell_job_exit_error — stderr-tail
+    // capture / build failure formatting.
     // -----------------------------------------------------------------
 
     #[test]
@@ -1773,8 +1763,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // builder_vm_timeout — Plan 97 Phase C PR-B-migrate (sixth and
-    // final pre-VzBuilderVm migration). Reads
+    // builder_vm_timeout — reads
     // MVM_BUILDER_VM_TIMEOUT_SECS from the process env; mutation is
     // serialised through TIMEOUT_ENV_LOCK so concurrent test threads
     // don't observe each other's writes.
@@ -1859,7 +1848,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Builder persistent /nix store auto-GC (#630). The cap is resolved
+    // Builder persistent /nix store auto-GC. The cap is resolved
     // on the host and baked into the rendered cmd.sh; env mutation is
     // serialised through GC_ENV_LOCK like the timeout tests above.
     // -----------------------------------------------------------------

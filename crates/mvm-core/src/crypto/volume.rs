@@ -5,13 +5,13 @@
 //! loopback / device-mapper dependency, and an mvm volume is small
 //! app-deps content rather than a block device — so on non-Linux we seal
 //! each file in place with the same chunked AES-256-GCM the snapshot
-//! pipeline uses ([`crate::crypto::snapshot_encryption`], which since plan
-//! 122 A1 funnels through [`crate::crypto::aead`]). Reusing that path buys
-//! the atomic in-place rename, large-file chunking, and `MVSE`-magic probe
-//! for free instead of re-deriving a whole-file sealer here.
+//! pipeline uses ([`crate::crypto::snapshot_encryption`], which funnels
+//! through [`crate::crypto::aead`]). Reusing that path buys the atomic
+//! in-place rename, large-file chunking, and `MVSE`-magic probe for free
+//! instead of re-deriving a whole-file sealer here.
 //!
-//! Which arm runs — LUKS2 or this — is plan 123's `StorageProvider`
-//! decision; this module is only the macOS/non-Linux half.
+//! Which arm runs — LUKS2 or this — is the `StorageProvider` decision;
+//! this module is only the macOS/non-Linux half.
 //!
 //! Compiled out on Linux: the LUKS2 path owns that target.
 #![cfg(not(target_os = "linux"))]

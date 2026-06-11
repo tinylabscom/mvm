@@ -1,8 +1,8 @@
 //! `mvmctl build <sub>` — build-time commands.
 //!
-//! Plan 178 / ADR-077 (D1): the image build plus `compile`/`validate`/
-//! `kernel` collapse under one `build` namespace. `build image` is the
-//! former top-level `build`. Leaf modules are unchanged.
+//! The image build plus `compile`/`validate`/`kernel` collapse under
+//! one `build` namespace. `build image` is the former top-level
+//! `build`. Leaf modules are unchanged.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};

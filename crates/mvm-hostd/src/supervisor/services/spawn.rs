@@ -1,5 +1,4 @@
-//! Subprocess spawn lifecycle for the four broker subprocesses
-//! (Plan 104 W1b.2b.1).
+//! Subprocess spawn lifecycle for the four broker subprocesses.
 //!
 //! `SubprocessSpawner` is the trait; `ProcessSpawner` is the production
 //! `tokio::process::Command`-based impl. `SubprocessHandle` is what the
@@ -10,20 +9,18 @@
 //! Restart-with-backoff lives in [`RestartSupervisor`] (this module).
 //! UDS-connect readiness probing lives in [`probe::wait_for_uds`].
 //!
-//! Deferred to W1b.2b.{2,3,4}:
-//! - Cosign-verify the binary at spawn (§H-L3.1, W1b.2b.2)
-//! - TOCTOU-resistant verify-then-`fexecve` (§H-L3.2, W1b.2b.2)
-//! - Sign the config envelope before writing to subprocess stdin
-//!   (§H-L3.6, W1b.2b.3)
+//! Deferred:
+//! - Cosign-verify the binary at spawn.
+//! - TOCTOU-resistant verify-then-`fexecve`.
+//! - Sign the config envelope before writing to subprocess stdin.
 //! - Per-spawn ephemeral subprocess response signing wrapping the
-//!   proxies (§H-L4.2, W1b.2b.4)
-//! - Per-workload cgroup + namespace + seccomp + resource caps
-//!   (§H-L1.4 / §H-L3.3 / §H-L3.9, all W1b.2c)
+//!   proxies.
+//! - Per-workload cgroup + namespace + seccomp + resource caps.
 //!
-//! The seam this PR carves: spawn / supervise / restart of arbitrary
+//! The seam this module carves: spawn / supervise / restart of arbitrary
 //! subprocess binaries that consume JSON config on stdin and listen on
-//! a UDS path. W1b.2b.2 wraps the spawn call site with cosign verify.
-//! W1b.2c wraps further with cgroup setup + seccomp install.
+//! a UDS path. A later pass wraps the spawn call site with cosign verify;
+//! another wraps further with cgroup setup + seccomp install.
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -86,8 +83,8 @@ pub enum SpawnError {
         crashes: u32,
         budget: u32,
     },
-    /// Pre-spawn integrity check refused the binary (Plan 104 §H-L3.1).
-    /// Wraps the typed [`IntegrityError`] so callers can branch on the
+    /// Pre-spawn integrity check refused the binary. Wraps the typed
+    /// [`IntegrityError`] so callers can branch on the
     /// specific refusal (tamper / unknown signer / missing sidecar /
     /// unsupported alg / malformed sidecar).
     #[error("integrity check refused {binary}: {source}")]
@@ -132,10 +129,10 @@ impl SubprocessHandle {
         };
         // tokio's Child::kill sends SIGKILL on Unix. Prefer SIGTERM so the
         // subprocess has a chance to flush + exit cleanly; if it doesn't
-        // exit within a short window, escalate. For W1b.2b.1 we keep
-        // the simpler kill path; the SIGTERM-then-SIGKILL escalation
+        // exit within a short window, escalate. For now we keep the
+        // simpler kill path; the SIGTERM-then-SIGKILL escalation
         // lands when we have a configurable shutdown deadline (likely
-        // alongside the lifecycle audit emissions in W1b.2b.4).
+        // alongside the lifecycle audit emissions).
         if let Err(e) = child.start_kill() {
             warn!(error = %e, binary = %self.binary.display(), "start_kill failed; proceeding to wait");
         }
@@ -159,7 +156,7 @@ impl SubprocessHandle {
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
     /// Path to the subprocess binary (e.g. `target/debug/mvm-broker`).
-    /// W1b.2b.2 will reject this path unless cosign-verify against the
+    /// A later pass will reject this path unless cosign-verify against the
     /// pinned release key succeeds before the spawn.
     pub binary: PathBuf,
     /// Per-VM UDS path the subprocess will bind. The spawner does NOT
@@ -168,14 +165,14 @@ pub struct SpawnRequest {
     /// subprocess accepts a connection.
     pub uds_path: PathBuf,
     /// JSON-serialised `SubprocessConfig` (from each subprocess's
-    /// `config::SubprocessConfig`). W1b.2b.3 will wrap this in a
-    /// signed envelope per §H-L3.6.
+    /// `config::SubprocessConfig`). A later pass will wrap this in a
+    /// signed envelope.
     pub config_json: Vec<u8>,
     /// Maximum time the spawner waits for the subprocess to bind its
     /// UDS before declaring `ReadinessTimeout`.
     pub readiness_deadline: Duration,
     /// Maximum time the spawner polls before each connect attempt.
-    /// W1b.2b.1 uses a fixed 25ms sleep; the field is here so W1b.2b.4
+    /// Currently a fixed 25ms sleep; the field is here so a later pass
     /// can wire a metric-driven adaptive backoff without API churn.
     pub probe_interval: Duration,
 }
@@ -205,18 +202,18 @@ pub trait SubprocessSpawner: Send + Sync + 'static {
 }
 
 /// Production spawner — `tokio::process::Command` + parent-death attach
-/// (Linux only — macOS impl deferred to W1b.2b.{4,c} once we settle on
-/// the kqueue-watcher-vs-PID-watchdog choice).
+/// (Linux only — macOS impl deferred until we settle on the
+/// kqueue-watcher-vs-PID-watchdog choice).
 ///
 /// An optional [`IntegrityChecker`] runs *before* `Command::spawn`. If
 /// the check fails, the subprocess is never started; the supervisor
 /// surfaces [`SpawnError::IntegrityCheckFailed`] with the typed
-/// [`IntegrityError`] for audit emission (W1b.2b.5).
+/// [`IntegrityError`] for audit emission.
 ///
-/// **TOCTOU window still open** between verify-time and exec-time
-/// (Plan 104 §H-L3.2). Closing it requires Linux `fexecve` (or macOS
-/// `posix_spawn`-with-fd) — that lands in a follow-on PR
-/// (W1b.2b.2.5 or alongside the W1b.2c cgroup/seccomp plumbing).
+/// **TOCTOU window still open** between verify-time and exec-time.
+/// Closing it requires Linux `fexecve` (or macOS `posix_spawn`-with-fd)
+/// — that lands in a follow-on, possibly alongside the cgroup/seccomp
+/// plumbing.
 #[derive(Default, Clone)]
 pub struct ProcessSpawner {
     integrity_checker: Option<Arc<dyn IntegrityChecker>>,
@@ -240,8 +237,8 @@ impl ProcessSpawner {
         }
     }
 
-    /// Attach a pre-spawn integrity check. The W1b.2b.5 admission
-    /// ceremony wires the production
+    /// Attach a pre-spawn integrity check. The admission ceremony wires
+    /// the production
     /// [`crate::supervisor::services::binary_integrity::SignedBinaryChecker`] here.
     pub fn with_integrity_checker(checker: Arc<dyn IntegrityChecker>) -> Self {
         Self {
@@ -259,13 +256,13 @@ impl SubprocessSpawner for ProcessSpawner {
             "ProcessSpawner spawning subprocess"
         );
 
-        // Pre-spawn integrity check (Plan 104 §H-L3.1). Refuse to
-        // even Command::spawn if the verify fails.
+        // Pre-spawn integrity check. Refuse to even Command::spawn if
+        // the verify fails.
         //
         // TOCTOU window: an attacker who swaps the binary between this
         // verify call and the `Command::new` exec below wins. Closing
         // the window requires fexecve on Linux / posix_spawn-with-fd
-        // on macOS — see follow-on per §H-L3.2.
+        // on macOS — see follow-on.
         if let Some(checker) = &self.integrity_checker {
             checker
                 .verify(&request.binary)
@@ -291,8 +288,7 @@ impl SubprocessSpawner for ProcessSpawner {
             // PR_SET_PDEATHSIG(SIGTERM): when the parent (us) dies, the
             // kernel sends SIGTERM to the subprocess. Set in the
             // pre_exec hook so the signal is armed before the subprocess
-            // starts executing its main(). Plan 104 §H-L1 subprocess
-            // lifecycle.
+            // starts executing its main().
             //
             // SAFETY: pre_exec runs in the forked child between fork and
             // execve. Only async-signal-safe calls allowed — `prctl` is
@@ -356,7 +352,7 @@ impl SubprocessSpawner for ProcessSpawner {
 /// `restart_budget` total restarts. On budget exhaustion returns
 /// [`SpawnError::RestartBudgetExhausted`] and refuses further spawns —
 /// the caller (supervisor's lifecycle code) is expected to translate
-/// that into a workload pause + audit event per Plan 104 §H-L1.
+/// that into a workload pause + audit event.
 pub struct RestartSupervisor<S: SubprocessSpawner> {
     spawner: S,
     backoff: Vec<Duration>,

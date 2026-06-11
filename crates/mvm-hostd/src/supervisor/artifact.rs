@@ -1,10 +1,10 @@
-//! Artifact collector slot. Wave 3 — captures runtime artifacts.
+//! Artifact collector slot — captures runtime artifacts.
 //!
-//! Plan 37 §21: post-run, the supervisor sweeps the workload's
+//! Post-run, the supervisor sweeps the workload's
 //! `artifact_policy.capture_paths` (typically `/artifacts` mounted
 //! via virtiofs) and persists the contents to a per-tenant store.
-//! Retention is governed by `artifact_policy.retention_days`. Wave
-//! 1.3 lands the trait surface; Wave 3 wires the real impl.
+//! Retention is governed by `artifact_policy.retention_days`. This
+//! module lands the trait surface; the real impl is wired separately.
 //!
 //! ## Three states
 //!
@@ -18,8 +18,8 @@
 //!   returns `NotImplemented` (distinct from `NotWired`) so
 //!   operators can tell "no bundle" from "bundle present, consumer
 //!   pending".
-//! - **The real impl (mvm-hostd Wave 3)** — actually sweeps, encrypts,
-//!   persists. Not in this crate yet.
+//! - **The real impl** — actually sweeps, encrypts, persists. Not in
+//!   this crate yet.
 
 use async_trait::async_trait;
 use mvm_core::plan::PlanId;
@@ -47,7 +47,7 @@ pub enum ArtifactError {
 #[async_trait]
 pub trait ArtifactCollector: Send + Sync {
     /// Sweep the workload's capture paths and persist the contents
-    /// keyed by `plan_id`. Wave 3's real impl streams via virtiofs
+    /// keyed by `plan_id`. The real impl streams via virtiofs
     /// and writes to the tenant's encrypted artifact store.
     async fn collect(&self, plan_id: &PlanId) -> Result<(), ArtifactError>;
 }

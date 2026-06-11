@@ -1,6 +1,6 @@
 //! `EncryptedStorage` — the non-Linux at-rest `StorageProvider` arm.
 //!
-//! Wraps plan 122's per-file AES-256-GCM volume sealer
+//! Wraps the per-file AES-256-GCM volume sealer
 //! ([`mvm_core::crypto::volume`]): a volume is plaintext only *while
 //! attached*; detach seals every file in place, so at rest the backing dir
 //! is ciphertext, and a flipped byte fails the GCM tag on the next open.
@@ -13,7 +13,7 @@
 //! (`#![cfg(not(target_os = "linux"))]`).
 //!
 //! The per-volume DEK's binding to the artifact content-hash + signed plan +
-//! audit head (plan 122 B2, `WrappedKey.bound`) is verified at the admit
+//! audit head (`WrappedKey.bound`) is verified at the admit
 //! gate *before* the volume is unlocked — not here. This arm only performs
 //! the at-rest seal/open with a DEK it's already been handed.
 #![cfg(not(target_os = "linux"))]

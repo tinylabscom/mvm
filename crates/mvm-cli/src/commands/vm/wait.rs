@@ -1,8 +1,8 @@
 //! `mvmctl wait` + `mvmctl boot-report` — host-side readiness UX
-//! built on plan 76 Phase 2's `GuestRequest::ReadinessStatus`.
+//! built on `GuestRequest::ReadinessStatus`.
 //!
 //! Both commands share a `fetch_readiness` helper that drives the
-//! plan 74 W1 protocol-hello prelude with
+//! protocol-hello prelude with
 //! `GuestCapability::Readiness` and dispatches a single
 //! `ReadinessStatus` request through `mvm::vsock_transport` (so
 //! Firecracker, libkrun, Apple Container, and Docker backends all

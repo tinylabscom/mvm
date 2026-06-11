@@ -12,7 +12,7 @@ use mvm_core::config::fc_version;
 use mvm_core::platform::{self, Platform};
 use mvm_core::vm_backend::ClaimStatus;
 
-/// Audience-scoped filter for `mvmctl doctor` (plan 74 W5).
+/// Audience-scoped filter for `mvmctl doctor`.
 ///
 /// `--workflow <name>` narrows the report (and the exit-code
 /// blocking set) to checks whose `category` is relevant for the
@@ -21,10 +21,9 @@ use mvm_core::vm_backend::ClaimStatus;
 /// category therefore implies a deliberate decision about which
 /// workflows it applies to.
 ///
-/// The default (no `--workflow` flag) is unchanged from
-/// pre-plan-74: every check runs and every failure blocks. The
-/// flag is additive — operators relying on the existing behavior
-/// see no change.
+/// The default (no `--workflow` flag) runs every check and every
+/// failure blocks. The flag is additive — operators relying on the
+/// existing behavior see no change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum DoctorWorkflow {
@@ -122,7 +121,7 @@ fn builder_tool_skipped(name: &'static str, category: &'static str) -> Check {
     }
 }
 
-/// JSON-serializable view of a backend's ADR-002 security profile,
+/// JSON-serializable view of a backend's security profile,
 /// surfaced under `security_posture` in `mvmctl doctor --json`.
 #[derive(Debug, Serialize)]
 struct SecurityPostureReport {
@@ -148,7 +147,7 @@ struct SecurityPostureReport {
 #[derive(Debug, Serialize)]
 struct DoctorReport {
     /// Workflow scope this report was filtered for, or `None` for
-    /// the default "all checks" mode (plan 74 W5).
+    /// the default "all checks" mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     workflow: Option<&'static str>,
     checks: Vec<Check>,
@@ -159,16 +158,16 @@ struct DoctorReport {
     /// Ordered by `BTreeMap`'s natural backend-name order so JSON
     /// output is deterministic.
     balloon_support: BTreeMap<String, bool>,
-    /// Per-backend warm-start tier + the Linux fast-resume substrate probe
-    /// (plan 123 Phase C). Surfaces the honest capability matrix — Firecracker
-    /// live-memory, Vz save/restore, libkrun disk-only — so a user can predict
-    /// which backend resumes from RAM vs. reboots from disk.
+    /// Per-backend warm-start tier + the Linux fast-resume substrate probe.
+    /// Surfaces the honest capability matrix — Firecracker live-memory, Vz
+    /// save/restore, libkrun disk-only — so a user can predict which backend
+    /// resumes from RAM vs. reboots from disk.
     warm_start: WarmStartReport,
     all_ok: bool,
 }
 
 /// Per-backend warm-start capability + Linux fast-resume substrate, surfaced
-/// under `warm_start` in `mvmctl doctor --json` (plan 123 C4).
+/// under `warm_start` in `mvmctl doctor --json`.
 #[derive(Debug, Serialize)]
 struct WarmStartReport {
     /// Backend name → warm-start tier label (`SnapshotCapability::label`).
@@ -178,7 +177,7 @@ struct WarmStartReport {
     /// `null` off Linux — the substrate backs Firecracker's live-memory path,
     /// which only runs on KVM; macOS reports per-backend tiers but N/A here.
     substrate: Option<WarmStartSubstrate>,
-    /// Plan 118 WS-1 1b — backend name → `supports_standby_pool()`. The standby pool
+    /// Backend name → `supports_standby_pool()`. The standby pool
     /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;
     /// only libkrun implements it today.
     standby_pool: BTreeMap<String, bool>,
@@ -187,7 +186,7 @@ struct WarmStartReport {
     standby_pool_idle: Option<usize>,
 }
 
-/// Linux fast-resume substrate probe (plan 123 C2): the kernel pieces the
+/// Linux fast-resume substrate probe: the kernel pieces the
 /// Firecracker UFFD/NBD/hugepages resume recipe needs.
 #[derive(Debug, Serialize)]
 struct WarmStartSubstrate {
@@ -199,7 +198,7 @@ struct WarmStartSubstrate {
     hugetlb_reserved: bool,
 }
 
-/// Plan 93 Phase 3 — surface the last Stage 0 builder-VM bootstrap
+/// Surface the last Stage 0 builder-VM bootstrap
 /// outcome (and its source-fingerprint prefix, carried in the audit
 /// detail) so "why did Stage 0 fire / when did it last run?" is
 /// answerable without grep-ing the audit log. Informational: a stale or
@@ -229,7 +228,7 @@ fn stage0_status_check() -> Check {
     }
 }
 
-/// Surface the builder VM store's on-disk presence + size (#640). Host-side we
+/// Surface the builder VM store's on-disk presence + size. Host-side we
 /// can't verify nix-store integrity (that needs booting the VM), so this is
 /// informational: present/absent + size, with the `cache repair` recovery path
 /// noted. `ok` is always true — an absent store just means a cold first build,
@@ -255,8 +254,8 @@ fn builder_store_check() -> Check {
     }
 }
 
-/// One-line summary of a dry-run convergence report for `doctor`
-/// (Plan 170 WS-A). Pure so it's testable without touching the registry.
+/// One-line summary of a dry-run convergence report for `doctor`.
+/// Pure so it's testable without touching the registry.
 fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
     let n = report.reconciled_count();
     if n == 0 {
@@ -266,7 +265,7 @@ fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String
     }
 }
 
-/// Surface registry/runtime drift (Plan 170 WS-A / ADR-074) without
+/// Surface registry/runtime drift without
 /// healing it: a dry-run convergence pass, reported as `clean` or a
 /// count. Informational — drift self-heals at the next state-touching
 /// command, so `ok` is always true.
@@ -355,7 +354,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
         builder_tool_skipped("nix store size", "disk")
     });
 
-    // ── Security posture (plan 40 folded `mvmctl security` here) ──
+    // ── Security posture (folded in from the old `mvmctl security`) ──
     checks.push(security_audit_log_check());
     checks.push(security_host_fde_check());
     checks.push(security_data_dir_mode_check());
@@ -368,16 +367,16 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_snapshot_dirs_check());
     checks.push(security_signing_check());
 
-    // ── Active backend security posture (ADR-002 / plan 53) ──────
+    // ── Active backend security posture ──────
     let security_posture = collect_security_posture();
 
     // ── Balloon capability per backend ────────────────────────────
     let balloon_support = collect_balloon_support();
 
-    // ── Warm-start capability per backend (plan 123 Phase C) ───────
+    // ── Warm-start capability per backend ───────
     let warm_start = collect_warm_start_support();
 
-    // ── Workflow filter (plan 74 W5) ──────────────────────────────
+    // ── Workflow filter ──────────────────────────────
     // When `--workflow <name>` is set, drop checks whose category
     // is not in the workflow's relevant set. The filter is applied
     // before `all_ok` so an irrelevant failure (e.g. missing
@@ -511,7 +510,7 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
     }
 }
 
-// ── Warm-start capability (plan 123 Phase C) ──────────────────────
+// ── Warm-start capability ──────────────────────
 
 /// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
 /// probe the fast-resume substrate. Surfaced so a user knows which backend
@@ -528,7 +527,7 @@ fn collect_warm_start_support() -> WarmStartReport {
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
         standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
-    // Best-effort live idle count (Plan 118 WS-1 1b). A missing pool dir reads as 0.
+    // Best-effort live idle count. A missing pool dir reads as 0.
     let standby_pool_idle = mvm_backend::standby_pool::SupervisorStandbyPool::open()
         .and_then(|p| p.list())
         .ok()
@@ -609,7 +608,7 @@ fn render_warm_start_support(r: &WarmStartReport) {
         None => ui::status_line("  substrate (Linux fast-resume)", "N/A (Linux-only)"),
     }
 
-    // Plan 118 WS-1 1b — the standby pool (pre-pay spawn latency), a separate axis from
+    // The standby pool (pre-pay spawn latency), a separate axis from
     // the snapshot tiers above. Only libkrun implements it today.
     let pool_title = "Standby pool (per backend)";
     println!("\n{}", pool_title);
@@ -629,7 +628,7 @@ fn render_warm_start_support(r: &WarmStartReport) {
     );
 }
 
-// ── Active backend security posture (ADR-002 / plan 53) ──────
+// ── Active backend security posture ──────
 
 /// Build the [`SecurityPostureReport`] for the backend that `mvmctl run`
 /// would auto-select on this host. Pure data — no I/O beyond reading
@@ -793,19 +792,19 @@ fn platform_description(plat: Platform) -> String {
     }
 }
 
-/// Plan 105 W1 / Plan 100 W3 — surface nested-KVM availability on
-/// Linux. Required for the Plan 100 W6 dispatch flip (libkrun
-/// builder VM → nested Firecracker workload). Linux-only: macOS and
-/// Windows hosts get a clean "n/a" line so the doctor output isn't
-/// noisy on the platforms the question doesn't apply to.
+/// Surface nested-KVM availability on Linux. Required for the
+/// dispatch flip from a libkrun builder VM to a nested Firecracker
+/// workload. Linux-only: macOS and Windows hosts get a clean "n/a"
+/// line so the doctor output isn't noisy on the platforms the
+/// question doesn't apply to.
 ///
 /// Two states matter to operators:
 ///   1. `MVM_LINUX_BUILDER_VM` is unset → informational only (this
 ///      is the default today; nested-KVM either ready or a future
 ///      enablement step).
 ///   2. `MVM_LINUX_BUILDER_VM=1` is set → the operator has opted in;
-///      nested-KVM missing is now a hard "fix this before Plan 100
-///      W6 ships" error.
+///      nested-KVM missing is now a hard "fix this before the nested
+///      dispatch ships" error.
 fn nested_kvm_check(plat: Platform) -> Check {
     if !matches!(plat, Platform::LinuxNative) {
         return Check {
@@ -904,8 +903,8 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
 
     // macOS host: /dev/kvm doesn't exist anywhere in the stack — the
     // backend is Apple Container / libkrun driven by
-    // Hypervisor.framework. Plan-60 / ADR-013 retired Lima; reporting
-    // KVM as missing on macOS is a pre-Plan-60 artifact.
+    // Hypervisor.framework. Lima is gone; reporting KVM as missing on
+    // macOS would be a stale artifact from that era.
     Check {
         name: "kvm",
         category: "platform",
@@ -941,7 +940,7 @@ fn apple_container_check(plat: Platform) -> Check {
     }
 }
 
-/// Apple Virtualization.framework probe. Plan 97 / ADR-056.
+/// Apple Virtualization.framework probe.
 ///
 /// Vz is built into macOS 13+; nothing to install at the framework
 /// layer. The supervisor *binary* (`mvm-vz-supervisor`) is a separate
@@ -982,7 +981,7 @@ fn vz_check(plat: Platform) -> Check {
         };
     };
 
-    // Sub-probes — Plan 97 §13: entitlement check + MDM-policy probe.
+    // Sub-probes: entitlement check + MDM-policy probe.
     // Each surfaces a brief tag in the info string; `ok` drops to false
     // if either probe affirmatively reports the supervisor cannot run.
     let entitlement = vz_entitlement_probe(&path);
@@ -1085,7 +1084,7 @@ fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
 }
 
 /// Probe whether the supervisor binary carries the
-/// `com.apple.security.virtualization` entitlement. Plan 97 §13.
+/// `com.apple.security.virtualization` entitlement.
 ///
 /// Returns:
 /// - `Some(true)`  — the entitlement is present (binary will be
@@ -1135,7 +1134,7 @@ struct VzProbeResult {
 }
 
 /// Run the supervisor with `--probe` to learn whether VZ is actually
-/// usable on this host (Plan 97 §13 MDM-policy detection). The Swift
+/// usable on this host (MDM-policy detection). The Swift
 /// side calls `VZVirtualMachine.isSupported`, which returns false
 /// under MDM virtualization lockdown, on unsupported hardware, and on
 /// macOS <11.
@@ -1162,14 +1161,13 @@ fn parse_vz_probe_output(stdout: &[u8]) -> Option<VzProbeResult> {
     serde_json::from_slice::<VzProbeResult>(stdout).ok()
 }
 
-/// Userspace network-gateway host-side availability — Plan 87 W5 +
-/// Plan 88 W4. Probes `$PATH` for the gateway binary the host's
-/// libkrun build defaults to: `passt` on Linux, `gvproxy` on macOS
-/// (passt does not build on macOS — see ADR-055 §"Cross-platform
-/// backends"). Surfaces the version when present and emits a
-/// **failing** check when missing — Plan 102 W6.A removed TSI, so
-/// the host needs a gateway binary to run any libkrun-backed VM
-/// (no-bypass invariant, ADR-058).
+/// Userspace network-gateway host-side availability. Probes `$PATH`
+/// for the gateway binary the host's libkrun build defaults to:
+/// `passt` on Linux, `gvproxy` on macOS (passt does not build on
+/// macOS). Surfaces the version when present and emits a
+/// **failing** check when missing — there is no TSI bypass, so the
+/// host needs a gateway binary to run any libkrun-backed VM
+/// (no-bypass invariant).
 ///
 /// Skipped on Windows (no native libkrun port either; the whole
 /// libkrun + virtio-net stack is macOS / Linux).
@@ -1200,8 +1198,8 @@ fn network_backend_check(plat: Platform) -> Check {
 /// Shared probe body for the per-OS userspace gateway. Returns a
 /// `Check` row with the version (when the binary supports
 /// `--version`) or the install hint (when missing). Missing now
-/// fails the check — Plan 102 W6.A removed the TSI escape hatch,
-/// so a libkrun host without a gateway can't boot any VM.
+/// fails the check — there is no TSI escape hatch, so a libkrun
+/// host without a gateway can't boot any VM.
 #[cfg(target_family = "unix")]
 fn gateway_check(
     name: &'static str,
@@ -1244,7 +1242,7 @@ fn gateway_check(
         None => Check {
             name,
             category: "platform",
-            ok: false, // Plan 102 W6.A: no TSI escape; gateway is mandatory.
+            ok: false, // No TSI escape; the gateway is mandatory.
             info: format!(
                 "not available ({install_hint}) — required for libkrun \
                  virtio-net; TSI escape hatch was removed in Plan 102 W6.A \
@@ -1265,7 +1263,7 @@ fn network_backend_check(_plat: Platform) -> Check {
     }
 }
 
-/// libkrun availability — plan 53 §"Plan E". Probes the host for the
+/// libkrun availability. Probes the host for the
 /// libkrun shared library at the standard install paths. `ok: true`
 /// regardless of presence (libkrun is optional); the `info` field
 /// surfaces the install hint when missing so users see exactly what
@@ -1296,8 +1294,8 @@ fn libkrun_check(plat: Platform) -> Check {
     }
 }
 
-/// Plan 98 — surface which builder-VM backend the selection layer
-/// resolves to on this host, plus the override source if any.
+/// Surface which builder-VM backend the selection layer resolves to
+/// on this host, plus the override source if any.
 ///
 /// `mvm_build::builder_backend_select` enforces priority
 /// `--builder` flag > `MVM_BUILDER_BACKEND` env > platform default
@@ -1329,11 +1327,11 @@ fn builder_backend_check(plat: Platform) -> Check {
         Some(_) => format!("override via --builder / ${MVM_BUILDER_BACKEND_ENV}"),
         None => format!("auto-detected (default: {})", auto.name()),
     };
-    // Plan 105 W1 — surface the Linux-only rollout signal alongside
-    // the backend selection. The env doesn't change *which* backend
-    // wins (libkrun stays the Linux default); it changes how the
-    // workload path will dispatch once Plan 100 W6 lands. Operators
-    // who set it should see it acknowledged in `doctor` output.
+    // Surface the Linux-only rollout signal alongside the backend
+    // selection. The env doesn't change *which* backend wins (libkrun
+    // stays the Linux default); it changes how the workload path will
+    // dispatch once nested Firecracker lands. Operators who set it
+    // should see it acknowledged in `doctor` output.
     if linux_builder_vm_requested() {
         source = format!("{source}; ${MVM_LINUX_BUILDER_VM_ENV}=1 (Plan 100 W6 opt-in)");
     }
@@ -1354,7 +1352,7 @@ fn builder_backend_check(plat: Platform) -> Check {
             }
         }
         BuilderBackendChoice::Qemu => {
-            // Plan 166 / ADR-072 — Linux dev/builder backend. KVM-accelerated
+            // Linux dev/builder backend. KVM-accelerated
             // where /dev/kvm is present, TCG fallback otherwise.
             if which::which("qemu-system-x86_64").is_ok()
                 || which::which("qemu-system-aarch64").is_ok()
@@ -1714,7 +1712,7 @@ fn nix_store_size_check() -> Check {
     }
 }
 
-// ── Security posture (folded in from `mvmctl security` per plan 40) ─────
+// ── Security posture (folded in from the old `mvmctl security`) ─────
 
 fn security_audit_log_check() -> Check {
     let path = mvm_core::audit::default_audit_log();
@@ -1731,7 +1729,7 @@ fn security_audit_log_check() -> Check {
     }
 }
 
-/// Host full-disk-encryption check — plan 45 §"Encryption at rest".
+/// Host full-disk-encryption check for encryption at rest.
 ///
 /// `LocalBackend` volumes rely on host FDE for at-rest protection (we
 /// deliberately don't roll our own per-volume crypto on dev boxes).
@@ -1741,14 +1739,13 @@ fn security_audit_log_check() -> Check {
 /// LUKS before relying on local volumes for sensitive data.
 ///
 /// On mvmd workers the analogous check is **enforced** (refuses
-/// `LocalVirtiofs` bucket creation when FDE is absent). That lives
-/// in mvmd Sprint 137 W6.
+/// `LocalVirtiofs` bucket creation when FDE is absent).
 fn security_host_fde_check() -> Check {
     let detection = detect_host_fde_status();
     Check {
         name: "host FDE (volumes at-rest)",
         category: "security",
-        ok: true, // warn-only on dev box per plan 45 §D5
+        ok: true, // warn-only on a dev box
         info: detection.info,
     }
 }
@@ -1963,7 +1960,7 @@ fn parse_macos_diskutil_encryption_status(
     ))
 }
 
-/// `~/.mvm` should be mode 0700 (ADR-002 §W1.5). The XDG share directory
+/// `~/.mvm` should be mode 0700. The XDG share directory
 /// (`mvm_share_dir`) lands at the OS default mode (0755 on macOS Tahoe);
 /// the data dir (`mvm_data_dir`) is the one the security model owns.
 fn security_data_dir_mode_check() -> Check {
@@ -2004,7 +2001,7 @@ fn security_data_dir_mode_check() -> Check {
     }
 }
 
-/// Dev VM vsock proxy socket should be mode 0700 (ADR-002 §W1.2).
+/// Dev VM vsock proxy socket should be mode 0700.
 fn security_proxy_socket_mode_check() -> Check {
     let path = format!(
         "{}/vms/mvm-dev/vsock.sock",
@@ -2049,7 +2046,7 @@ fn security_proxy_socket_mode_check() -> Check {
 }
 
 /// Cached pre-built dev image presence (informational; absence triggers
-/// hash-verified download per ADR-002 §W5.1).
+/// a hash-verified download).
 fn security_dev_image_check() -> Check {
     let version = env!("CARGO_PKG_VERSION");
     let prebuilt_dir = format!("{}/prebuilt/v{version}", mvm_core::config::mvm_share_dir());
@@ -2068,7 +2065,7 @@ fn security_dev_image_check() -> Check {
     }
 }
 
-/// `deny.toml` at the workspace root (ADR-002 §W5.2 supply-chain policy).
+/// `deny.toml` at the workspace root (supply-chain policy).
 fn security_deny_config_check() -> Check {
     let cwd = std::env::current_dir().ok();
     let found = cwd.as_deref().and_then(|start| {
@@ -2107,12 +2104,12 @@ fn security_default_network_check() -> Check {
     }
 }
 
-/// ADR-002 claim 10: *no untrusted workload reaches the network unless
-/// explicitly admitted by policy.* Sprint 52 W3 flipped
-/// `NetworkPolicy::default()` from `unrestricted()` to `deny_all()` so
-/// the safe posture is the one workloads get without opting in. This
-/// check makes the runtime default visible in `mvmctl doctor` so the
-/// claim is observably enforced rather than implicit in the codepath.
+/// Claim 10: *no untrusted workload reaches the network unless
+/// explicitly admitted by policy.* `NetworkPolicy::default()` is
+/// `deny_all()` rather than `unrestricted()`, so the safe posture is
+/// the one workloads get without opting in. This check makes the
+/// runtime default visible in `mvmctl doctor` so the claim is
+/// observably enforced rather than implicit in the codepath.
 ///
 /// Pure read of the policy default — no I/O, no platform branching.
 /// A future regression that flipped the default back to `unrestricted`
@@ -2139,7 +2136,7 @@ fn security_network_policy_default_check() -> Check {
     }
 }
 
-/// `~/.mvm/snapshot.key` should be mode 0600 (ADR-007 §W4 / M9).
+/// `~/.mvm/snapshot.key` should be mode 0600.
 ///
 /// Absence is informational — the file is created lazily on first
 /// snapshot seal. Existence with looser perms is a security finding:
@@ -2199,8 +2196,8 @@ fn security_snapshot_key_check() -> Check {
     }
 }
 
-/// All template snapshot directories should be mode 0700 (ADR-007
-/// §W4 / M9). Walks `~/.mvm/templates/*/artifacts/*/snapshot/`,
+/// All template snapshot directories should be mode 0700.
+/// Walks `~/.mvm/templates/*/artifacts/*/snapshot/`,
 /// reports the first looser-perm directory found (or "all OK" /
 /// "none built yet" otherwise).
 fn security_snapshot_dirs_check() -> Check {
@@ -2480,7 +2477,7 @@ mod tests {
         let c = vz_check(Platform::MacOS);
         // Either "available" (macOS 13+) or "not available" (macOS 11–12)
         // — the variant depends on the contributor host's version.
-        // We deliberately do NOT assert `c.ok` here: under the Plan 97 §13
+        // We deliberately do NOT assert `c.ok` here: under the
         // sub-probes, `ok` flips to false when codesign reports a missing
         // entitlement or the supervisor probe affirmatively says VZ is not
         // supported. Both are legitimate signals for a real CI host where
@@ -2747,7 +2744,7 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
-        // The honest per-backend warm-start matrix (plan 123 Phase C).
+        // The honest per-backend warm-start matrix.
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
@@ -2758,7 +2755,7 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // Plan 118 WS-1 1b — only libkrun implements the standby pool today; the rest
+        // Only libkrun implements the standby pool today; the rest
         // report honest `false` and must not be silently dropped.
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
         assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
@@ -2846,8 +2843,8 @@ mod tests {
         assert!(json.contains("\"all_ok\":true"));
         assert!(json.contains("\"security_posture\""));
         assert!(json.contains("\"tier\""));
-        // Plan 74 W5: default (no --workflow) omits the field
-        // entirely thanks to `#[serde(skip_serializing_if = …)]`.
+        // Default (no --workflow) omits the field entirely thanks to
+        // `#[serde(skip_serializing_if = …)]`.
         assert!(
             !json.contains("\"workflow\""),
             "default report must not serialize the workflow field; got: {json}"
@@ -3095,7 +3092,7 @@ mod tests {
 
     #[test]
     fn security_network_policy_default_check_reports_claim_10_holding() {
-        // Sprint 52 W3 invariant: `NetworkPolicy::default()` returns
+        // Invariant: `NetworkPolicy::default()` returns
         // `deny_all`. If a future regression flips it back to
         // `unrestricted`, this check fails loudly in doctor — pinning
         // claim 10 against silent drift.
@@ -3226,7 +3223,7 @@ mod tests {
         );
     }
 
-    // ---------------- Workflow scoping (plan 74 W5) ----------------
+    // ---------------- Workflow scoping ----------------
 
     #[test]
     fn workflow_cli_run_includes_all_categories() {
@@ -3339,7 +3336,7 @@ mod tests {
         assert!(all_ok_filtered);
     }
 
-    // ── Plan 98 §0.3 — builder-backend check format on Linux ──
+    // ── builder-backend check format on Linux ──
     //
     // The selection layer's `auto_detect_default()` queries the real
     // host platform (not the `Platform` enum passed to the check). On
@@ -3431,7 +3428,7 @@ mod tests {
         );
     }
 
-    // ── Plan 105 W1 — nested-kvm check + MVM_LINUX_BUILDER_VM line ──
+    // ── nested-kvm check + MVM_LINUX_BUILDER_VM line ──
 
     #[test]
     fn nested_kvm_check_macos_reports_na() {

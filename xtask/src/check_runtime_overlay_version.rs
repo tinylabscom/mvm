@@ -1,6 +1,6 @@
 //! `xtask check-runtime-overlay-version`
 //!
-//! Plan 124 C1 / ADR-051. The verity-sealed `/mvm/runtime` overlay is
+//! The verity-sealed `/mvm/runtime` overlay is
 //! pinned to a single version, and the host-side resolver
 //! (`mvm_build::runtime_overlay`) **fails closed on a version mismatch**
 //! (`RuntimeOverlayError::VersionMismatch`): it picks the overlay whose

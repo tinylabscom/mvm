@@ -1,10 +1,10 @@
-//! Plan 141 / ADR-064 — per-observer `on_packet` latency. Exposed as a
+//! Per-observer `on_packet` latency. Exposed as a
 //! Prometheus summary (`_sum` + `_count`) per (observer, vm, direction)
 //! via a per-VM scrape file the CLI `/metrics` handler concatenates
 //! (`~/.mvm/audit/metrics-<vm>-observer-latency.prom`). Mirrors the
 //! cross-process surface `flow_count.rs` uses: the supervisor and CLI run
-//! as the same user and share `~/.mvm/audit/` (mode 0700, ADR-002 §W1.5),
-//! so the filesystem is the boundary — no new socket, no new RPC.
+//! as the same user and share `~/.mvm/audit/` (mode 0700), so the
+//! filesystem is the boundary — no new socket, no new RPC.
 
 use crate::supervisor::audit::FlowDirection;
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ type Bucket = (u64, u64);
 pub struct ObserverLatency {
     vm: String,
     // Reserved for a future per-tenant label; `vm` is the scrape key today
-    // (one guest = one tenant, ADR-002), so we don't emit `tenant` yet.
+    // (one guest = one tenant), so we don't emit `tenant` yet.
     #[allow(dead_code)]
     tenant: String,
     buckets: Mutex<BTreeMap<(&'static str, &'static str), Bucket>>,

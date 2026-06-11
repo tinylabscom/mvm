@@ -1,6 +1,6 @@
 //! `mvmctl validate` — run `nix flake check` to validate a flake before
-//! building. Plan 40: renamed from `mvmctl flake check`. Flat verb (no
-//! subcommand layer) since `check` was the only action.
+//! building. Flat verb (no subcommand layer) since `check` is the only
+//! action.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;

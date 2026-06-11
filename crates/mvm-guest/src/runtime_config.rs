@@ -1,6 +1,5 @@
 //! Boot-time parse of `/etc/mvm/runtime.json` — function-entrypoint
-//! workload metadata produced by mvmforge at image-build time
-//! (cross-repo ADR-0011, plan 43).
+//! workload metadata produced by mvmforge at image-build time.
 //!
 //! Two config files live under `/etc/mvm/`, owned by different
 //! producers:
@@ -13,13 +12,12 @@
 //! The two are kept separate because they have independent schemas
 //! and release cadences. mvmforge writes `runtime.json` into the
 //! rootfs via `mkGuest extraFiles`, owned root mode 0644, and the
-//! verity initramfs (W3) prevents post-boot tampering.
+//! verity initramfs prevents post-boot tampering.
 //!
 //! The agent reads this file once at boot. When `concurrency.kind =
 //! "warm_process"` is present, it stands up a worker pool (see
 //! `worker_pool` module). When the file or `concurrency` is absent,
-//! the cold path (plan 41 W2) handles `RunEntrypoint` exactly as
-//! before.
+//! the cold path handles `RunEntrypoint` exactly as before.
 //!
 //! Malformed JSON or a rejected `in_process` mode is fail-loud: the
 //! agent exits non-zero at boot. mvmforge owns the file; a broken
@@ -48,8 +46,8 @@ pub struct RuntimeConfig {
     pub format: String,
     pub source_path: String,
     /// When absent, the agent serves `RunEntrypoint` via the cold
-    /// path (plan 41 W2). When set to `WarmProcess`, the agent
-    /// stands up a worker pool at boot.
+    /// path. When set to `WarmProcess`, the agent stands up a worker
+    /// pool at boot.
     #[serde(default)]
     pub concurrency: Option<ConcurrencyConfig>,
 }
@@ -62,7 +60,7 @@ pub enum ConcurrencyConfig {
     WarmProcess(WarmProcessConfig),
 }
 
-/// Warm-process tier knobs. mvmforge ADR-0011 §3.
+/// Warm-process tier knobs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarmProcessConfig {
@@ -81,7 +79,7 @@ pub struct WarmProcessConfig {
     /// FIFO queue cap when all workers are busy. Default = 2 *
     /// pool_size. Overflow returns `EntrypointEvent::Error { kind:
     /// Busy }` to the host — same envelope the cold path returns on
-    /// M12 contention.
+    /// contention.
     #[serde(default)]
     pub max_queue_depth: Option<usize>,
 }

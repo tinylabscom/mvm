@@ -1,12 +1,12 @@
-//! `mvmctl artifact` — plan 76 Phase 6 + plan 134 Phase E.
+//! `mvmctl artifact`.
 //!
 //! Two distinct groups of operations share this command:
 //!
-//! **Packed-artifact operations** (plan 76):
+//! **Packed-artifact operations**:
 //!   `pack` / `verify` / `inspect` — operate on `.mvm` signed archive files
 //!   produced by `mvm_build::packed_artifact`.
 //!
-//! **Artifact-model operations** (plan 134 Phase E):
+//! **Artifact-model operations**:
 //!   `model-inspect` / `model-validate` / `model-config` / `model-build` —
 //!   operate on `ArtifactManifest` directories under `~/.mvm/artifacts/<id>/`,
 //!   using the typed model from `mvm_backend::artifacts`. Named with a
@@ -55,7 +55,7 @@ pub(in crate::commands) enum Cmd {
     /// operator decides whether to trust the producer. For trust
     /// checks use `mvmctl artifact verify`.
     Inspect(InspectArgs),
-    // ── Artifact-model commands (plan 134 §Phase E) ───────────────────────────
+    // ── Artifact-model commands ───────────────────────────
     /// Print the build-level ArtifactManifest for an artifact directory.
     ///
     /// Reads `~/.mvm/artifacts/<id>/manifest.json` and pretty-prints it.
@@ -72,8 +72,8 @@ pub(in crate::commands) enum Cmd {
     ModelValidate(ModelValidateArgs),
     /// Write the backend-specific config for an artifact directory.
     ///
-    /// Currently only `--backend firecracker` is implemented (plan 134
-    /// slice 1). Writes `firecracker.json` next to the artifact files
+    /// Currently only `--backend firecracker` is implemented. Writes
+    /// `firecracker.json` next to the artifact files
     /// and prints the path.
     #[command(name = "model-config")]
     ModelConfig(ModelConfigArgs),
@@ -131,7 +131,7 @@ pub(in crate::commands) struct PackArgs {
     #[arg(long, default_value_t = false)]
     pub allows_egress: bool,
     /// Build provenance pointer to surface in the manifest. Free-
-    /// form today; reserved for ADR-051 attestation linkage.
+    /// form today; reserved for attestation linkage.
     #[arg(long)]
     pub build_provenance: Option<String>,
 }
@@ -279,9 +279,9 @@ fn run_inspect(args: InspectArgs) -> Result<()> {
 }
 
 fn run_pack(args: PackArgs) -> Result<()> {
-    // Reuse Plan 64's host signer so packed artifacts share the
-    // operator's trust root with the audit chain. A future PR can
-    // wire `--key <path>` for offline signing keys.
+    // Reuse the host signer so packed artifacts share the operator's
+    // trust root with the audit chain. A future change can wire
+    // `--key <path>` for offline signing keys.
     let signer = host_signer::load_or_init().context("load host signer")?;
 
     let target_arch: GuestArch = args
@@ -353,7 +353,7 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
     }
 }
 
-// ── artifact-model handlers (plan 134 §Phase E) ───────────────────────────────
+// ── artifact-model handlers ───────────────────────────────
 
 /// Resolve an artifact id to its directory under `~/.mvm/artifacts/<id>/`.
 ///
@@ -533,8 +533,9 @@ fn manifest_to_artifact(
             format: m.rootfs.format,
             hash: m.rootfs.hash.clone(),
             size_bytes: m.rootfs.size,
-            // Manifests written by the builder use read_only=true (ADR-002 W3).
-            // The manifest doesn't store this flag explicitly (it's a build-time
+            // Manifests written by the builder use read_only=true (the rootfs
+            // is dm-verity sealed). The manifest doesn't store this flag
+            // explicitly (it's a build-time
             // policy), so default to true; callers that need writable overlays
             // should use the MicrovmArtifact directly.
             read_only: true,

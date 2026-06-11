@@ -1,20 +1,18 @@
-//! `ServiceHandler` trait + call-context types (Plan 104 W1a foundation
-//! slice).
+//! `ServiceHandler` trait + call-context types.
 //!
 //! Handlers live inside the per-service subprocess (`mvm-broker` for
 //! `host.time.v1` / `host.cost.v1` / `host.audit.v1` / `broker.v1`;
-//! ADR-062 dropped the secrets dispatcher). The trait is defined in
+//! there is no secrets dispatcher). The trait is defined in
 //! `mvm-core` so each subprocess can implement it without depending on
 //! the others' runtime crates. The supervisor's UDS proxies invoke
 //! handlers across the process boundary via the
 //! [`crate::protocol::broker::ServiceCall`] envelope; in-process
-//! composition (Plan 104 §A5) uses [`ServiceCallCtx::invoke`] for
-//! handler-to-handler calls inside the same subprocess.
+//! composition uses [`ServiceCallCtx::invoke`] for handler-to-handler
+//! calls inside the same subprocess.
 //!
-//! See ADR-061 §"Decision" + ADR-062 for the three-subprocess
-//! architecture this trait carves the seam for, and Plan 104
-//! §"Capability gating" for which gates run on the supervisor side vs
-//! in the handler subprocess.
+//! The three-subprocess architecture this trait carves the seam for,
+//! and which capability gates run on the supervisor side vs in the
+//! handler subprocess, are part of the broker design.
 
 use std::time::Duration;
 
@@ -25,8 +23,8 @@ use crate::protocol::broker::{
 
 /// Per-call context the supervisor hands to the handler.
 ///
-/// Fields are populated by the supervisor *before* forwarding (gates 1–4
-/// in Plan 104 §"Capability gating"). The handler must treat them as
+/// Fields are populated by the supervisor *before* forwarding (the
+/// supervisor-side capability gates). The handler must treat them as
 /// authoritative; nothing the workload supplied is here.
 #[derive(Debug, Clone)]
 pub struct ServiceCallCtx {
@@ -36,21 +34,20 @@ pub struct ServiceCallCtx {
     /// Tenant identifier the workload belongs to. Used by cross-VM
     /// handlers (`host.cost.v1::tenant`) to scope mvmd queries.
     pub tenant_id: String,
-    /// Supervisor-assigned correlation id (H-L4.6 / G4).
+    /// Supervisor-assigned correlation id.
     pub correlation_id: CorrelationId,
     /// Workload session identifier (minted at admission, rotates per
-    /// H-L4.3). Audit chain entries carry this so post-hoc forensics
+    /// session). Audit chain entries carry this so post-hoc forensics
     /// can correlate calls within a session.
     pub session_id: String,
     /// Workload's `AgentProfile`. Handlers may decline certain verbs
     /// outside specific profiles (e.g. `BuilderOnly`).
     pub profile: AgentProfile,
-    /// Current composition depth (Plan 104 §A5; cap 3). Zero for direct
+    /// Current composition depth (cap 3). Zero for direct
     /// guest-originated calls; incremented per `invoke` hop.
     pub composition_depth: u8,
-    /// Current composition width (Plan 104 §H-L6.5; cap 5). Resets per
-    /// top-level call; incremented per sub-invocation by the same
-    /// composing handler.
+    /// Current composition width (cap 5). Resets per top-level call;
+    /// incremented per sub-invocation by the same composing handler.
     pub composition_width: u8,
 }
 
@@ -59,7 +56,7 @@ pub struct ServiceCallCtx {
 /// `Ok` carries the typed response payload (will be folded into a
 /// `ServiceResponse::Ok` envelope by the broker substrate). `Err`
 /// carries a typed error code + a message — the message MUST NOT
-/// embed payload-derived data (Plan 104 §S9 redaction discipline).
+/// embed payload-derived data (redaction discipline).
 pub type ServiceDispatchResult = Result<serde_json::Value, ServiceError>;
 
 /// A typed handler error.
@@ -80,7 +77,7 @@ impl ServiceError {
 
     /// Shorthand for the common `NotImplemented` case (used by handlers
     /// shipping partial verb sets, e.g. `host.cost.v1::tenant` before
-    /// W4b lands).
+    /// the cross-VM tenant verb lands).
     pub fn not_implemented(verb: impl AsRef<str>) -> Self {
         Self::new(
             ServiceErrorCode::NotImplemented,
@@ -118,7 +115,7 @@ pub trait ServiceHandler: Send + Sync + 'static {
 
     /// Per-call audit durability. `PerCall` blocks the response on
     /// audit fsync; `Batched(window)` enqueues synchronously and
-    /// fsyncs on the background flusher (Plan 104 §S22).
+    /// fsyncs on the background flusher.
     fn audit_durability(&self) -> AuditDurability;
 
     /// Maximum response size in bytes. Default 64 KiB. Larger →
@@ -127,17 +124,17 @@ pub trait ServiceHandler: Send + Sync + 'static {
         64 * 1024
     }
 
-    /// Per-handler idempotency contract (Plan 104 §C3).
+    /// Per-handler idempotency contract.
     fn idempotency(&self) -> Idempotency;
 
-    /// Per-handler call timeout (Plan 104 §C4). Beyond this →
+    /// Per-handler call timeout. Beyond this →
     /// `ServiceErrorCode::Timeout`.
     fn call_timeout(&self) -> Duration;
 
     /// Dispatch one call. Implementations receive the supervisor's
     /// `ServiceCallCtx`, the verb name, and the typed payload (the
     /// handler is expected to call its own `parse_payload` on
-    /// `payload` — gate 5 of Plan 104 §"Capability gating").
+    /// `payload` — the in-handler payload-parse gate).
     ///
     /// The returned future is boxed so the trait stays object-safe;
     /// concrete subprocess crates `tokio::spawn` it.
@@ -148,10 +145,10 @@ pub trait ServiceHandler: Send + Sync + 'static {
         payload: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ServiceDispatchResult> + Send + 'a>>;
 
-    /// Services this handler composes with (Plan 104 §A5). A CI lint
-    /// (`xtask check-handler-composition` — Plan 104 W6) verifies the
-    /// declared list matches actual `ctx.invoke(…)` call sites.
-    /// Default empty (no composition).
+    /// Services this handler composes with. A CI lint
+    /// (`xtask check-handler-composition`) verifies the declared list
+    /// matches actual `ctx.invoke(…)` call sites. Default empty (no
+    /// composition).
     fn composes_with(&self) -> &[ServiceId] {
         &[]
     }
@@ -211,6 +208,6 @@ mod tests {
         assert!(e.message.contains("tenant"));
     }
 
-    // `dispatch` is exercised end-to-end by the supervisor proxy crate
-    // (lands in W1b); the W1a test here is just the trait shape.
+    // `dispatch` is exercised end-to-end by the supervisor proxy crate;
+    // the test here is just the trait shape.
 }

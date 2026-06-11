@@ -114,7 +114,7 @@ fn rejects_reserved_source_kinds() {
 
 #[test]
 fn admits_secret_ref_with_a_binding() {
-    // Plan 129 A2 — a SecretRef that declares allowed_hosts is admitted (the
+    // A SecretRef that declares allowed_hosts is admitted (the
     // SecretsNotImplemented gate is gone).
     let mut w = base_workload();
     w.apps[0].env.insert(
@@ -135,7 +135,7 @@ fn admits_secret_ref_with_a_binding() {
 
 #[test]
 fn rejects_unbound_secret_ref() {
-    // claim 12 — a secret with no allowed_hosts is unbound; refuse it.
+    // A secret with no allowed_hosts is unbound; refuse it.
     let mut w = base_workload();
     let env = match &mut w.apps[0].entrypoints[0] {
         Entrypoint::Command { env, .. } => env,
@@ -317,7 +317,7 @@ fn function_workload_with_bridge_network_validates() {
 #[test]
 fn command_workload_with_host_network_still_validates() {
     // The host-mode rejection is scoped to function-call workloads.
-    // ADR-0009's deny-default invariant is function-specific; existing
+    // The deny-default invariant is function-specific; existing
     // command-style workloads keep their current network surface.
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
@@ -642,7 +642,7 @@ fn collects_multiple_errors() {
     assert!(errs.iter().any(|e| e.code == ErrorCode::EmptyApps));
 }
 
-// ---------- ADR-0011 warm-process concurrency validation ----------
+// ---------- warm-process concurrency validation ----------
 
 fn warm_process_app(cfg: WarmProcessConfig) -> App {
     let mut app = function_app();

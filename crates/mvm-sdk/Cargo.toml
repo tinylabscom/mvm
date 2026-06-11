@@ -12,12 +12,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
 
-# Phase 7 — runtime record mode encodes `Sandbox.files.write` bytes
+# Runtime record mode encodes `Sandbox.files.write` bytes
 # as base64 in the recording JSON so the lowering can re-emit them
 # as a `before_start` shell hook.
 base64 = { workspace = true }
 
-# Addon module deps (SDK port Phase 1b).
+# Addon module deps.
 flate2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
@@ -28,7 +28,7 @@ toml = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-nix = { workspace = true }
 
-# Compile pipeline deps (SDK port Phase 2a + 2b).
+# Compile pipeline deps.
 globset = { workspace = true }
 tempfile = { workspace = true }
 tree-sitter-python = { workspace = true }
@@ -39,15 +39,15 @@ tree-sitter-typescript = { workspace = true }
 name = "emit_addon_schema"
 path = "src/bin/emit_addon_schema.rs"
 
-# Workload IR JSON-schema emitter — folded in with mvm-ir (plan 121 A3).
+# Workload IR JSON-schema emitter.
 [[bin]]
 name = "emit_workload_schema"
 path = "src/bin/emit_schema.rs"
 
 [dev-dependencies]
-# IR↔guest-parser contract test (runtime_json_contract) folded in with
-# mvm-ir (plan 121 A3): asserts the IR's emitted runtime.json shapes
-# match mvm-guest's runtime_config parser.
+# IR↔guest-parser contract test (runtime_json_contract): asserts the
+# IR's emitted runtime.json shapes match mvm-guest's runtime_config
+# parser.
 mvm-guest = { workspace = true }
 
 [lints]

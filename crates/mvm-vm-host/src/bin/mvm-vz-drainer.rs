@@ -1,8 +1,8 @@
-//! Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary.
+//! Per-VM Vz drainer binary.
 //!
-//! Closes Plan 112's "Vz carve-out": binds the
+//! Closes the Vz flow-audit carve-out: binds the
 //! `events_ingest_socket_path` (Swift `mvm-vz-supervisor`'s NDJSON
-//! `FlowEventWire` output socket per PR #487 commit 6), reads
+//! `FlowEventWire` output socket), reads
 //! NDJSON lines, and threads the events through the same
 //! chain-signing audit pipeline that `mvm-libkrun-supervisor` uses
 //! for the libkrun path.
@@ -14,7 +14,7 @@
 //! this binary does not pull tokio as a direct dep — the
 //! `mvm-supervisor` crate already carries it transitively.
 //!
-//! Spawned by `mvm-backend::vz::start()` (Task 11) between the host
+//! Spawned by `mvm-backend::vz::start()` between the host
 //! gvproxy `spawn_detached` step and the Vz VM boot. The parent owns
 //! an `AttachedDrainerGuard` that kills this process on early
 //! return / panic / VM teardown.
@@ -35,7 +35,7 @@
 //!
 //! ## Capability profile
 //!
-//! ADR-064 §Decision 8 — Vz leaves report `payload_tap: false`. The
+//! Vz leaves report `payload_tap: false`. The
 //! Swift bridge emits flow-open / flow-close events but does not
 //! tap packet bytes; observers requiring `payload_tap` capability
 //! refuse at `Pipeline::observe` time with
@@ -59,9 +59,8 @@ use mvm_hostd::supervisor::gateway_bridge::{
 use mvm_hostd::supervisor::network::{ObserverAllowlist, ProviderCapabilities, from_admitted};
 use serde::Deserialize;
 
-/// Stdin JSON contract. Producer is `mvm-backend::vz::start()`
-/// (Plan 113 §Task 11). All paths are absolute and
-/// already-canonicalised by the parent.
+/// Stdin JSON contract. Producer is `mvm-backend::vz::start()`.
+/// All paths are absolute and already-canonicalised by the parent.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DrainerConfig {
@@ -161,15 +160,14 @@ fn run() -> Result<()> {
     let signing_key = SigningKey::from_bytes(&key_array);
 
     // `FileAuditSigner` wraps the per-tenant cross-process flock
-    // (Plan 102 W6.A commit 2) so concurrent supervisors for the
-    // same tenant serialise their chain-signing writes safely.
+    // so concurrent supervisors for the same tenant serialise their
+    // chain-signing writes safely.
     let file_signer = FileAuditSigner::open(signing_key, &cfg.audit_dir)
         .with_context(|| format!("open FileAuditSigner at {}", cfg.audit_dir.display()))?;
     let signer: Arc<dyn AuditSigner> = Arc::new(file_signer);
 
-    // Plan 113 §Task 4 — observer chain from admitted plan + host
-    // allowlist. ADR-064 §Decision 8: Vz leaves report
-    // `payload_tap: false`. Observers that require payload tap
+    // Observer chain from admitted plan + host allowlist. Vz leaves
+    // report `payload_tap: false`. Observers that require payload tap
     // refuse via `BuildError::CapabilityMismatch` at the
     // `from_admitted` call below.
     let leaf_caps = ProviderCapabilities {

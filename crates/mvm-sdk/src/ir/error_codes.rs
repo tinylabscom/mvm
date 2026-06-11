@@ -42,12 +42,12 @@ pub enum ErrorCode {
     InvalidConcurrencyMaxRssMb,
     UnsupportedConcurrencyInProcessMode,
     UnsupportedConcurrencyForLanguage,
-    // Addon error codes (ADR-0018). Mvmforge-side codes are the
+    // Addon error codes. Mvmforge-side codes are the
     // compile-time-checkable rules (validate.rs + addon::resolve_and_validate
     // + sigstore-keyless verification); mvmd-side codes (ROOTHASH_MISMATCH,
     // EGRESS_VIOLATION, QUOTA_EXCEEDED, TENANT_NAMESPACE_DENIED,
     // SECCOMP_PROFILE_DENIED) are emitted at instance-start time but
-    // registered here per ADR-0004 (single source of truth for error codes).
+    // registered here so this enum stays the single source of truth for error codes.
     AddonLockfileMissing,
     AddonLockfileSignatureInvalid,
     AddonShaMismatch,
@@ -229,8 +229,8 @@ mod tests {
 
     // The upstream `all_codes_match_registry` test cross-checked the
     // enum against `schema/error-codes.json` at the mvmforge repo
-    // root. That registry hasn't been ported into the mvm tree yet
-    // (it's a separate plan-60 follow-up). When it lands, restore the
-    // test here. Until then, `every_variant_has_stable_string` above
-    // is the local consistency check.
+    // root. That registry hasn't been ported into the mvm tree yet.
+    // When it lands, restore the test here. Until then,
+    // `every_variant_has_stable_string` above is the local
+    // consistency check.
 }

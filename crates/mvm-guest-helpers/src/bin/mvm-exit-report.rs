@@ -2,8 +2,8 @@
 //! host over AF_VSOCK (CID=host, WORKLOAD_EXIT_PORT) and writes the exit
 //! code as a 4-byte little-endian i32, then exits. Called by mkGuest's
 //! `/init` after a one-shot workload finishes, before `poweroff -f`.
-//! Plan 152 WS-A. Linux-only (AF_VSOCK); a no-op stub off Linux so the
-//! workspace builds on macOS dev hosts.
+//! Linux-only (AF_VSOCK); a no-op stub off Linux so the workspace builds
+//! on macOS dev hosts.
 
 use std::process::ExitCode;
 
@@ -30,7 +30,7 @@ fn report(code: i32) -> std::io::Result<()> {
     use std::net::TcpStream;
     use std::os::fd::FromRawFd;
 
-    // Must match mvm_guest::vsock::WORKLOAD_EXIT_PORT (Plan 152 WS-A).
+    // Must match mvm_guest::vsock::WORKLOAD_EXIT_PORT.
     // mvm-guest is not a dep of this crate — keep in sync manually.
     const WORKLOAD_EXIT_PORT: u32 = 5251;
     const VMADDR_CID_HOST: u32 = 2;
@@ -65,7 +65,7 @@ fn report(code: i32) -> std::io::Result<()> {
     // Wait (bounded) for the host's ack so /init doesn't poweroff until
     // the supervisor has durably written workload.exit (avoids the
     // start_enter->exit() race). Best-effort: a timeout/EOF is fine — we
-    // return Ok and /init powers off regardless. Plan 152 WS-A.
+    // return Ok and /init powers off regardless.
     // Only wait for the ack if we could arm a timeout — otherwise skip
     // the read entirely so the guest can never block before poweroff.
     use std::io::Read as _;

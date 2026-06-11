@@ -1,7 +1,7 @@
 //! `mvmctl invoke --no-vm` — dev shortcut.
 //!
-//! Plan 60 Phase 5 Slice E1b. Runs the workload's wrapper script
-//! directly on the host (no VM boot, no vsock, no Nix). Exercises
+//! Runs the workload's wrapper script directly on the host (no VM
+//! boot, no vsock, no Nix). Exercises
 //! the full SDK wire contract end-to-end:
 //!
 //! 1. Encoded `[args, kwargs]` arrives on mvmctl's stdin.

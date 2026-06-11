@@ -1,13 +1,13 @@
 //! `mvm.web_fetch` — single-URL HTTPS fetch through a per-tenant
 //! host allowlist.
 //!
-//! Plan 60 Phase 7. The agent passes a URL; the supervisor:
+//! The agent passes a URL; the supervisor:
 //!
 //! 1. Parses the URL — rejects anything that isn't a syntactically
 //!    valid RFC-3986 absolute reference with an explicit host.
 //! 2. Requires `https://` — `http://`, `file://`, `ftp://`, and any
 //!    other scheme fail closed. Plain-HTTP fetches would side-step
-//!    every cert pin and proxy guarantee the rest of plan 60 lays
+//!    every cert pin and proxy guarantee the rest of the tool lays
 //!    down.
 //! 3. Checks the host against the tool's allowlist — an empty
 //!    allowlist means *nothing is fetchable* (fail-closed default;
@@ -17,7 +17,7 @@
 //!    without live network IO. The default fetcher is
 //!    [`NoopHttpFetcher`], which always returns
 //!    [`FetchError::Unwired`]; a reqwest-backed impl lands in a
-//!    follow-up slice (Phase 7 plan: "host-mediated tools table").
+//!    follow-up slice.
 //!
 //! ## Why bodies come back base64
 //!
@@ -110,15 +110,14 @@ impl HttpFetcher for NoopHttpFetcher {
 }
 
 /// Production [`HttpFetcher`] backed by [`reqwest::Client`]. The
-/// client is built **per call** so the SSRF pre-resolve (plan 65
-/// W2) can pin reqwest to the validated IP set for that one host
-/// plus that one fetch — closing the DNS-rebinding window between
-/// our check and reqwest's connect.
+/// client is built **per call** so the SSRF pre-resolve can pin
+/// reqwest to the validated IP set for that one host plus that one
+/// fetch — closing the DNS-rebinding window between our check and
+/// reqwest's connect.
 ///
 /// Body reads use [`reqwest::Response::chunk`] in a manual loop
-/// so `max_bytes` is enforced incrementally (plan 65 W3) — a
-/// server that lies about Content-Length cannot exhaust
-/// supervisor memory.
+/// so `max_bytes` is enforced incrementally — a server that lies
+/// about Content-Length cannot exhaust supervisor memory.
 ///
 /// HTTPS-only is enforced upstream in [`WebFetchTool::invoke`];
 /// the fetcher trusts its caller did that and does not re-check.
@@ -126,15 +125,15 @@ impl HttpFetcher for NoopHttpFetcher {
 /// (default 30 s) caps the round-trip wall-clock for both
 /// connect and read phases.
 ///
-/// ## Hardening (plan 65)
+/// ## Hardening
 ///
-/// - **W1 — no auto-redirect**: each per-call client is built
+/// - **No auto-redirect**: each per-call client is built
 ///   with `reqwest::redirect::Policy::none()`. An allowlisted
 ///   upstream that responds 3xx surfaces the status code +
 ///   headers verbatim; the agent must re-call with the new URL,
 ///   which re-runs the per-host allowlist check in
 ///   [`WebFetchTool::invoke`].
-/// - **W2 — SSRF / DNS-rebinding defense**: before each fetch,
+/// - **SSRF / DNS-rebinding defense**: before each fetch,
 ///   the host is resolved via [`tokio::net::lookup_host`] and
 ///   every returned IP is classified through
 ///   [`SsrfGuard::classify`]. Any private / loopback /
@@ -144,7 +143,7 @@ impl HttpFetcher for NoopHttpFetcher {
 ///   re-resolve to a different IP. The pre-resolve filter +
 ///   pinned resolver are two independent layers — defense in
 ///   depth.
-/// - **W3 — exact body cap**: the chunk loop refuses *before* a
+/// - **Exact body cap**: the chunk loop refuses *before* a
 ///   chunk that would overflow `max_bytes` lands in the
 ///   accumulator. The accumulated body is exactly `≤ max_bytes`
 ///   on every successful return; a `BodyTooLarge` indicates the
@@ -152,13 +151,13 @@ impl HttpFetcher for NoopHttpFetcher {
 #[derive(Debug)]
 pub struct ReqwestHttpFetcher {
     timeout_secs: u64,
-    /// When `false`, skip the W2 pre-resolve + SSRF filter +
-    /// pinned resolver. Test seam only — production callers use
+    /// When `false`, skip the pre-resolve + SSRF filter + pinned
+    /// resolver. Test seam only — production callers use
     /// [`Self::new`] / [`Self::with_timeout_secs`] which set this
-    /// to `true`. The escape hatch exists so the W1/W3 tests
-    /// (which talk to a `127.0.0.1` one-shot server) can exercise
-    /// the redirect-policy + body-cap codepaths without tripping
-    /// the SSRF guard on loopback.
+    /// to `true`. The escape hatch exists so the redirect-policy +
+    /// body-cap tests (which talk to a `127.0.0.1` one-shot server)
+    /// can exercise those codepaths without tripping the SSRF guard
+    /// on loopback.
     enforce_ssrf: bool,
 }
 
@@ -192,10 +191,10 @@ impl ReqwestHttpFetcher {
     /// Test seam — build a fetcher with the SSRF guard disabled.
     ///
     /// Production callers MUST NOT use this; the loopback /
-    /// private-IP rejection is load-bearing for the security
-    /// posture documented in plan 65. The function is `pub` only so
-    /// integration tests under `crates/mvm-supervisor/tests/` can
-    /// exercise the W1/W3 hardening against loopback fixtures
+    /// private-IP rejection is load-bearing for the tool's security
+    /// posture. The function is `pub` only so integration tests
+    /// under `crates/mvm-supervisor/tests/` can exercise the
+    /// redirect-policy + body-cap hardening against loopback fixtures
     /// (`#[cfg(test)]` items in the library are invisible to
     /// integration tests; the architecture.yml invariant scan
     /// forbids binding TCP listeners in production source files
@@ -222,7 +221,7 @@ impl ReqwestHttpFetcher {
         host: &str,
         safe_addresses: Vec<SocketAddr>,
     ) -> Result<reqwest::Client, FetchError> {
-        // Plan 65 W7 — pin TLS to 1.3 minimum. Matches the
+        // Pin TLS to 1.3 minimum. Matches the
         // shared `http_hardening::hardened_client_builder` so
         // every reqwest-using surface in mvm-supervisor refuses
         // downgrade to TLS 1.2.
@@ -241,8 +240,8 @@ impl ReqwestHttpFetcher {
     }
 }
 
-/// Plan 65 W2 — reqwest DNS resolver pinned to a pre-validated
-/// IP set for one host. Returns the pinned addresses verbatim
+/// Reqwest DNS resolver pinned to a pre-validated IP set for one
+/// host. Returns the pinned addresses verbatim
 /// when asked for the matching host name; returns an empty
 /// iterator for anything else (which causes reqwest to fail
 /// the connection with "no addresses"). Combined with W1's
@@ -267,7 +266,7 @@ impl Resolve for PinnedDnsResolver {
 #[async_trait]
 impl HttpFetcher for ReqwestHttpFetcher {
     async fn fetch(&self, url: &Url, max_bytes: u64) -> Result<FetchedResponse, FetchError> {
-        // Plan 65 W2 — pre-resolve the host, run every returned
+        // Pre-resolve the host, run every returned
         // IP through `SsrfGuard::classify`, and refuse if any
         // resolve to a private / loopback / link-local /
         // multicast / metadata IP. The validated IPs are pinned
@@ -324,7 +323,7 @@ impl HttpFetcher for ReqwestHttpFetcher {
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
-        // Streaming accumulator (plan 65 W3 — exact body cap).
+        // Streaming accumulator — exact body cap.
         //
         // The chunk-overflow check runs **before** the chunk
         // lands in the accumulator. The accumulated body is
@@ -587,8 +586,6 @@ mod tests {
 
     #[tokio::test]
     async fn denies_unallowlisted_host() {
-        // Exit-test target per plan 60 Phase 7 §"Exit tests":
-        // `crate::supervisor::tools::web_fetch::tests::denies_unallowlisted_host`.
         let tool = WebFetchTool::with_allowlist(["api.allowed.example".to_string()]);
         let err = tool
             .invoke(serde_json::json!({ "url": "https://evil.example/x" }))
@@ -650,8 +647,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_https_scheme() {
-        // Plain HTTP would side-step every TLS pin the rest of plan
-        // 60 lays down.
+        // Plain HTTP would side-step every TLS pin the rest of the
+        // tool lays down.
         let tool = WebFetchTool::with_allowlist(["api.allowed.example".to_string()]);
         let err = tool
             .invoke(serde_json::json!({ "url": "http://api.allowed.example/" }))
@@ -674,9 +671,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unknown_field() {
-        // ADR-002 §W4.1 — host-boundary types use
-        // `deny_unknown_fields` so a stale client that adds an
-        // unknown param doesn't silently lose it.
+        // Host-boundary types use `deny_unknown_fields` so a stale
+        // client that adds an unknown param doesn't silently lose it.
         let tool = WebFetchTool::fail_closed();
         let err = tool
             .invoke(serde_json::json!({
@@ -866,9 +862,9 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 65 hardening — W1 (no auto-redirect) + W3 (exact body cap)
+    // Hardening — no auto-redirect + exact body cap
     //
-    // Live-listener tests for W1 + W3 boot a one-shot HTTP/1.1 server
+    // Live-listener tests for those two boot a one-shot HTTP/1.1 server
     // on 127.0.0.1 and exercise the real reqwest client. They live in
     // `crates/mvm-supervisor/tests/web_fetch_loopback.rs` — the
     // architecture.yml invariant scan forbids binding TCP listeners
@@ -877,7 +873,7 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 65 W2 — SSRF guard rejects private / loopback / metadata
+    // SSRF guard rejects private / loopback / metadata
     //
     // These tests use the SSRF-enabled production constructor
     // (`new()`) and point the fetcher at IP literals known to be
@@ -938,14 +934,14 @@ mod tests {
     #[tokio::test]
     async fn ssrf_guard_skipped_when_test_seam_used() {
         // Compile + behavior pin: the test seam disables the guard
-        // so the W1/W3 tests above can talk to 127.0.0.1. If a
-        // future refactor flips the default to "always SSRF
-        // regardless of flag", this test catches it.
+        // so the redirect-policy + body-cap tests above can talk to
+        // 127.0.0.1. If a future refactor flips the default to
+        // "always SSRF regardless of flag", this test catches it.
         let fetcher = ReqwestHttpFetcher::test_unsafe_no_ssrf(30);
         // We don't actually fetch — just observe that constructing
         // a fetcher with the seam and then hitting loopback wouldn't
-        // trigger SsrfGuard. Confirmed implicitly by the W1/W3
-        // tests above succeeding.
+        // trigger SsrfGuard. Confirmed implicitly by the
+        // redirect-policy + body-cap tests above succeeding.
         assert!(!fetcher.enforce_ssrf);
     }
 }

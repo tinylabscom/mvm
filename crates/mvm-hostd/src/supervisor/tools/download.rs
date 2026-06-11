@@ -1,8 +1,8 @@
 //! `mvm.download` — host staging-area → agent read.
 //!
-//! Plan 60 Phase 7. The agent supplies a relative path; the
-//! supervisor validates, reads from the configured staging area,
-//! and returns the bytes as URL-safe-no-pad base64 (same shape
+//! The agent supplies a relative path; the supervisor validates,
+//! reads from the configured staging area, and returns the bytes as
+//! URL-safe-no-pad base64 (same shape
 //! `mvm.web_fetch` uses, so callers parse one envelope for both
 //! tools).
 //!

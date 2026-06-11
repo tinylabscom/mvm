@@ -1,13 +1,13 @@
 //! `InjectionGuard` — detect prompt-injection signals in outbound bodies.
 //!
-//! Plan 37 §15 (Wave 2.4). The original framing — "model-output →
-//! tool-arg untainting" — describes a full taint-tracking pipeline
-//! that requires LLM-provider integration (knowing which bytes came
-//! from which response) and tool-gate plumbing (knowing which
-//! arguments were derived from tainted bytes). That pipeline lands
-//! over Wave 2.7+ (`ToolGate` vsock RPC + provider plumbing).
+//! The original framing — "model-output → tool-arg untainting" —
+//! describes a full taint-tracking pipeline that requires
+//! LLM-provider integration (knowing which bytes came from which
+//! response) and tool-gate plumbing (knowing which arguments were
+//! derived from tainted bytes). That pipeline lands later
+//! (`ToolGate` vsock RPC + provider plumbing).
 //!
-//! This wave ships the **pattern-based first cut** that doesn't
+//! This module ships the **pattern-based first cut** that doesn't
 //! depend on either: scan outbound bodies for known
 //! prompt-injection signals (control tokens, jailbreak phrases,
 //! steganographic Unicode) and surface them to the audit signer.
@@ -57,14 +57,14 @@
 //!   These have effectively zero legitimate use in tool-call
 //!   arguments; presence is itself suspicious.
 //!
-//! Out of scope for this wave (called out so reviewers can push
-//! back if needed):
+//! Out of scope here (called out so reviewers can push back if
+//! needed):
 //!
 //! - True taint propagation (which bytes came from which response).
-//!   That's the Wave 2.7 tool-gate work plus a provider-side hook.
+//!   That's the tool-gate work plus a provider-side hook.
 //! - Semantic detection of "this looks like an injection" via a
 //!   small classifier model. Plug-in point exists (just another
-//!   `Inspector` impl in the chain), out of scope for this wave.
+//!   `Inspector` impl in the chain), out of scope for now.
 //! - Decoded steganography (e.g., decoding tag characters back to
 //!   ASCII to recover the smuggled instruction). We surface the
 //!   *presence* of the suspicious bytes; decoding what they meant

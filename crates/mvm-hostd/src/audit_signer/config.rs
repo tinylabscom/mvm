@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Config the supervisor hands to a `mvm-audit-signer` subprocess at spawn.
 ///
-/// W1b.1 parses unsigned; W1b.2's §H-L3.6 wrapper closes the
-/// signed-envelope gap.
+/// Parsed unsigned today; a signed-envelope wrapper closes that gap later.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SubprocessConfig {
@@ -18,16 +17,15 @@ pub struct SubprocessConfig {
     pub uds_path: PathBuf,
     /// Path to the per-tenant audit chain JSONL file. The supervisor
     /// creates the parent dir at mode 0700 with the dir-immutable flag
-    /// (chattr +a / UF_APPEND) before spawning — that's the W1b.2
-    /// boundary; W1b.1 just trusts the path.
+    /// (chattr +a / UF_APPEND) before spawning; this subprocess just
+    /// trusts the path.
     pub audit_jsonl_path: PathBuf,
-    /// Path to the secondary chain-head persistence file (Plan 104
-    /// §H-L5.2 / §H-L8). The audit-signer writes the latest `chain_head`
-    /// here after every successful append; supervisor's verify path
-    /// can cross-check.
+    /// Path to the secondary chain-head persistence file. The audit-signer
+    /// writes the latest `chain_head` here after every successful append;
+    /// supervisor's verify path can cross-check.
     pub chain_head_secondary_path: PathBuf,
-    /// Path to a pre-existing chain-signing key file (W1b.1 software
-    /// path; W8 replaces with enclave handle).
+    /// Path to a pre-existing chain-signing key file (software path; a
+    /// hardware enclave handle replaces it later).
     /// If absent, the subprocess generates a fresh in-memory key at boot.
     #[serde(default)]
     pub software_chain_key_path: Option<PathBuf>,

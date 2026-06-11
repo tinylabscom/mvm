@@ -11,10 +11,10 @@ authors.workspace = true
 # Architectural invariant #1 (.github/workflows/architecture.yml, category 10):
 # this crate IS per-VM substrate — one supervisor process per guest VM. Its Rust
 # listeners are legitimate per-VM substrate servers, not orchestration
-# control-plane servers. Plan 152 WS-A added the first such listener: the
+# control-plane servers. The first such listener: the
 # `mvm-libkrun-supervisor` binds the host side of the `listen=false`
 # workload-exit control vsock port (`<vm_state_dir>/vsock-5251.sock`) to capture
-# a one-shot workload's exit code before poweroff. WS-B's Vz supervisor hosts the
+# a one-shot workload's exit code before poweroff. The Vz supervisor hosts the
 # same family — its per-port vsock proxy (`<socket_dir>/vsock-<port>.sock`)
 # splices host agent-RPC into the guest's VZVirtioSocketDevice.
 [package.metadata.mvm.architecture]
@@ -38,8 +38,8 @@ path = "src/bin/mvm-vz-drainer.rs"
 name = "mvm-firecracker-bridge"
 path = "src/bin/mvm-firecracker-bridge.rs"
 
-# Rust-native Vz supervisor (Plan 152 WS-B) — the objc2 reimplementation of
-# the (removed) Swift supervisor. macOS-only at runtime; the bin self-gates
+# Rust-native Vz supervisor — the objc2 reimplementation of the (removed)
+# Swift supervisor. macOS-only at runtime; the bin self-gates
 # to a stub main() on other targets so non-macOS workspace builds stay green.
 # The Virtualization.framework objc2 stack lives in the macOS target table
 # below and the lib's cfg(target_os="macos") `vz_objc` module.
@@ -60,7 +60,7 @@ mvm-build = { workspace = true }
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow = { workspace = true }
-# Plan 118 WS-1 1a — prelaunch attach verify: G4 validity window (`check_window`
+# Prelaunch attach verify: G4 validity window (`check_window`
 # takes `chrono::DateTime<Utc>`) + typed `AttachVerifyError`.
 chrono = { workspace = true }
 thiserror = "1"
@@ -78,7 +78,7 @@ tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "net",
 
 # Apple Virtualization.framework objc2 stack — macOS-only, already in the
 # workspace lock (mvm-backend's apple_container path carries the same set, so
-# no new third-party dependency). Plan 152 WS-B §"Dependency wash".
+# no new third-party dependency).
 [target.'cfg(target_os = "macos")'.dependencies]
 # vsock proxy: dup() the guest connection fd → AsyncFd splice.
 libc = { workspace = true }
@@ -136,7 +136,7 @@ libkrun-sys = { workspace = true }
 mvm-hostd = { workspace = true }
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
-# Plan 118 WS-1 1b standby_pool_live test — drive the real LibkrunBackend
+# standby_pool_live test — drive the real LibkrunBackend
 # spawn_standby/claim_standby through the trait (already a normal dep).
 mvm-backend = { workspace = true }
 # Standby liveness/reap (kill(pid,0)/SIGTERM) in the live test.

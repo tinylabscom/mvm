@@ -138,8 +138,8 @@ pub struct RuntimeVolume {
     /// field existed keeps its persistent-volume meaning.
     #[serde(default)]
     pub kind: mvm_core::vm_backend::VmVolumeKind,
-    /// `:enc` — route a disk volume through in-guest encryption
-    /// (Plan 101). Fails closed at launch until that lands.
+    /// `:enc` — route a disk volume through in-guest encryption.
+    /// Fails closed at launch until that lands.
     #[serde(default)]
     pub encrypted: bool,
 }
@@ -816,8 +816,8 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
 /// rsync its contents over a host directory.
 ///
 /// Used by `mvmctl exec --add-dir HOST:GUEST:rw` to deliver guest-side
-/// writes back to the host once the transient microVM has stopped (see
-/// ADR-002). Uses `--delete` so the guest's view of the directory is the
+/// writes back to the host once the transient microVM has stopped.
+/// Uses `--delete` so the guest's view of the directory is the
 /// source of truth at sync time — added/modified files are copied over,
 /// files removed inside the guest are removed from the host, and
 /// permissions are preserved with `-aH` (archive + hardlinks).

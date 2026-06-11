@@ -29,7 +29,7 @@ path = ".."
 [dependencies.mvm-core]
 path = "../../mvm-core"
 
-# Plan 89 W2 — `fuzz_builder_request` covers the
+# `fuzz_builder_request` covers the
 # `HostVmRequest`/`HostVmResponse` payloads in
 # `mvm-build::builder_protocol`. mvm-build depends on mvm-guest, so
 # this is fine direction-wise; the fuzz crate is already detached
@@ -67,7 +67,7 @@ test = false
 doc = false
 bench = false
 
-# Plan 89 W2 — persistent builder VM dispatch wire.
+# Persistent builder VM dispatch wire.
 [[bin]]
 name = "fuzz_builder_request"
 path = "fuzz_targets/fuzz_builder_request.rs"

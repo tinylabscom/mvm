@@ -1,4 +1,4 @@
-//! Plan 74 W2 — guest-side network defense.
+//! Guest-side network defense.
 //!
 //! Installs kernel **blackhole routes** for every IPv4 entry in
 //! [`mvm_core::network_policy::MANDATORY_DENY_RANGES`] inside the
@@ -15,15 +15,15 @@
 //! Kernel-side blackhole routes are universal — every Linux kernel
 //! supports `RTN_BLACKHOLE` since 2.0, no userspace tool required.
 //! We talk directly to the kernel over a synchronous `AF_NETLINK`
-//! socket (Plan 124 A3); the only dependency is a Linux kernel.
+//! socket; the only dependency is a Linux kernel.
 //!
 //! ## Why this is defense-in-depth, not the sole defense
 //!
 //! A workload that gains root inside the guest can `ip route del`
 //! the blackhole routes (CAP_NET_ADMIN inside the guest's netns).
 //! That's why this layer pairs with host-side enforcement (mvm
-//! iptables on Linux-direct; mvmd nftables on fleet) — see
-//! mvmd ADR 0022 §"Why layered". The guest-side floor catches:
+//! iptables on Linux-direct; mvmd nftables on fleet). The
+//! guest-side floor catches:
 //!
 //! - the macOS Apple Container path where mvm has no host firewall;
 //! - the legitimate uid-0 dev workload that doesn't actively try to
@@ -151,8 +151,8 @@ pub struct Report {
     /// Loopback ranges (`127.0.0.0/8`) are intentionally **not**
     /// blackholed inside the guest: a blackhole route is
     /// interface-agnostic, so it would also kill the guest's own `lo`
-    /// — breaking the Plan 129 forward proxy on `127.0.0.1` and any
-    /// local service. The host-loopback-via-bridge threat
+    /// — breaking the forward proxy on `127.0.0.1` and any local
+    /// service. The host-loopback-via-bridge threat
     /// `MANDATORY_DENY_RANGES` guards against is enforced host-side
     /// (the L4 / nft egress enforcers on the bridge), which still
     /// carry the full range list. Reported so the skip is observable,
@@ -184,7 +184,7 @@ impl Report {
 /// `MockInstaller` without a real `AF_NETLINK` socket. Production
 /// uses [`RawNetlinkInstaller`].
 ///
-/// Synchronous (Plan 124 A3): the previous `rtnetlink`-backed impl was
+/// Synchronous: the previous `rtnetlink`-backed impl was
 /// `async`, which forced `#[async_trait]` here and dragged `tokio` into
 /// the guest closure for a one-shot, fire-and-wait netlink exchange that
 /// never needed a runtime. The raw installer does a blocking
@@ -247,7 +247,7 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
         }
         // Never blackhole the guest's own loopback. A blackhole route matches
         // by destination regardless of interface, so blackholing 127.0.0.0/8
-        // kills guest-internal loopback (the Plan 129 forward proxy on
+        // kills guest-internal loopback (the forward proxy on
         // 127.0.0.1:18080, and any local service) — not just host loopback
         // reached via a misconfigured bridge. That host-side threat is the
         // host bridge / L4 enforcer's job; they still carry the full
@@ -275,7 +275,7 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
 
 /// Netlink `RTM_NEWROUTE` wire encoding for blackhole routes.
 ///
-/// Plan 124 A3 replaced the async `rtnetlink` crate (which dragged
+/// We replaced the async `rtnetlink` crate (which dragged
 /// `tokio` and `async-trait` into the guest closure) with a hand-rolled
 /// message over a synchronous `AF_NETLINK` socket. The message is ~36
 /// bytes of stable kernel UAPI; building it needs no dependency. The
@@ -386,7 +386,7 @@ mod linux {
 
     /// Production [`RouteInstaller`] that talks to the kernel directly
     /// over a `NETLINK_ROUTE` socket — synchronous `sendto`/`recv`, no
-    /// runtime (Plan 124 A3). Requires CAP_NET_ADMIN in the current
+    /// runtime. Requires CAP_NET_ADMIN in the current
     /// user namespace; the binary runs as root from `/init` BEFORE the
     /// agent setpriv's down to uid 901.
     ///
@@ -613,7 +613,7 @@ mod tests {
     fn install_skips_loopback_so_guest_internal_loopback_survives() {
         // A guest must not blackhole its own loopback: a blackhole route for
         // 127.0.0.0/8 is interface-agnostic and kills guest-internal loopback,
-        // including the Plan 129 forward proxy on 127.0.0.1. The host-loopback
+        // including the forward proxy on 127.0.0.1. The host-loopback
         // threat stays handled host-side with the full range list.
         let mock = MockInstaller::new();
         let report = install_mandatory_deny(&mock);
@@ -767,7 +767,7 @@ mod tests {
     }
 
     /// We duplicate the netlink constants from `<linux/rtnetlink.h>`
-    /// rather than depend on a netlink crate (Plan 124 A3 dep budget).
+    /// rather than depend on a netlink crate (dep budget).
     /// This Linux-only test pins each one to `libc`'s value so a typo
     /// can't reach the kernel — it runs on CI, where libc exposes the
     /// real UAPI numbers. (macOS dev hosts skip it; libc has no netlink.)

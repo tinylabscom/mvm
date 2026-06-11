@@ -142,7 +142,7 @@ pub fn tap_destroy(slot: &VmSlot) -> Result<()> {
 /// Apply iptables-based network policy for a VM slot.
 ///
 /// Must be called after `tap_create()`. Always installs the
-/// plan-74 W2 mandatory-deny rules (cloud metadata, link-local,
+/// mandatory-deny rules (cloud metadata, link-local,
 /// CGNAT, loopback) regardless of policy — even an
 /// `unrestricted` workload cannot reach `169.254.169.254` after
 /// this runs. The per-policy script (if any) is appended first
@@ -164,7 +164,7 @@ pub fn apply_network_policy(
     }
 
     // Mandatory-deny rules. Emitted LAST so they land at the
-    // top of FORWARD (highest priority). Plan 74 W2 §item 4.
+    // top of FORWARD (highest priority).
     combined.push_str(&mvm_core::network_policy::mandatory_deny_iptables_script(
         BRIDGE_DEV,
         &slot.guest_ip,
@@ -192,7 +192,7 @@ pub fn cleanup_network_policy(slot: &VmSlot) -> Result<()> {
         ip = slot.guest_ip,
     );
 
-    // Plan 74 W2 §item 4 — drain any mandatory-deny rules added
+    // Drain any mandatory-deny rules added
     // by `apply_network_policy`. Symmetric with the apply path
     // so a stop/start cycle doesn't accumulate stale entries.
     script.push_str(

@@ -1,6 +1,6 @@
 //! Sanitized error envelope emitted on stderr when the runtime fails.
 //!
-//! ADR-0009 invariant: prod wrappers must catch all top-level
+//! Invariant: prod wrappers must catch all top-level
 //! exceptions and emit a structured envelope (`{kind, error_id,
 //! message}`) — no traceback, no file paths, no local var values, no
 //! payload contents. Full debug detail (when wanted) goes to a separate
@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Closed taxonomy of error kinds the SDK caller may receive.
 /// Matches the failure modes the runtime can surface; expanding the
-/// enum is a wire-shape change reviewed against ADR-0009.
+/// enum is a wire-shape change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {

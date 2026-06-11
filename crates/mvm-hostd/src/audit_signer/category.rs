@@ -1,4 +1,4 @@
-//! Audit category allow-list (Plan 104 §H-L1.2, ADR-062).
+//! Audit category allow-list.
 //!
 //! The wire envelope carries `category` as an opaque snake_case string —
 //! the audit-signer doesn't pull in `mvm-supervisor`'s enum, but it does
@@ -18,7 +18,7 @@ pub const ALLOWED_CATEGORIES: &[&str] = &[
     "key",
     "host",
     "audit",
-    // ADR-062 — workload-emitted via `host.audit.v1` in `mvm-broker`.
+    // Workload-emitted via `host.audit.v1` in `mvm-broker`.
     "workload_audit",
 ];
 

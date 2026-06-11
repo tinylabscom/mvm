@@ -1,4 +1,4 @@
-//! Plan 107 A3 — in-host-VM vsock forwarder (the nesting hop).
+//! In-host-VM vsock forwarder (the nesting hop).
 //!
 //! The outer host can't reach a workload microVM's vsock directly:
 //! the workload's Firecracker runs *inside* this host VM and exposes
@@ -33,8 +33,7 @@
 //! handshake is hand-parsed, the CONNECT line hand-rolled. The
 //! cross-platform core ([`handle_forward_conn`] and helpers) is
 //! exercised by `cargo test` on every host against a fake `v.sock`
-//! server — no VM required; only the AF_VSOCK listener (A3.b) is
-//! Linux-only.
+//! server — no VM required; only the AF_VSOCK listener is Linux-only.
 
 #![cfg(unix)]
 
@@ -49,12 +48,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// registered at host-VM launch alongside the dispatch port (21471).
 pub const WORKLOAD_FORWARD_PORT: u32 = 21472;
 
-/// Plan 107 A3.4 — max concurrent forwarded vsock streams. A bounded
-/// cap so a misbehaving outer host can't exhaust the host VM's
-/// threads / fds by opening unbounded hop connections; the listener
-/// fails closed (drops the new connection) at the cap. When Plan 102
-/// W6.A.5's bridge guardrails land, the forwarder can defer to those;
-/// until then this is the bound.
+/// Max concurrent forwarded vsock streams. A bounded cap so a
+/// misbehaving outer host can't exhaust the host VM's threads / fds by
+/// opening unbounded hop connections; the listener fails closed (drops
+/// the new connection) at the cap.
 pub const MAX_CONCURRENT_FORWARDS: usize = 64;
 
 /// Upper bound on the inbound handshake body. A handshake is just
@@ -64,8 +61,8 @@ const MAX_HANDSHAKE_BYTES: usize = 256;
 /// Upper bound on a single CONNECT response line from Firecracker.
 const MAX_CONNECT_LINE_BYTES: usize = 64;
 
-/// Plan 107 A3.4 — bounds concurrent forwarded streams. The listener
-/// calls [`ConnectionLimiter::try_acquire`] per accepted connection:
+/// Bounds concurrent forwarded streams. The listener calls
+/// [`ConnectionLimiter::try_acquire`] per accepted connection:
 /// it returns a [`ConnectionPermit`] (which decrements the live count
 /// on drop, i.e. when the handler thread ends) or `None` at capacity,
 /// so the listener can fail closed instead of spawning unboundedly.
@@ -250,7 +247,7 @@ pub fn handle_forward_conn(mut inbound: UnixStream, base: &Path) -> io::Result<(
 
 /// Encode the multiplex handshake the way [`read_handshake`] parses
 /// it: a u32-BE length prefix + `"<workload_id> <port>"`. Exposed so
-/// the host-side `NestingHopTransport` (A3.c) and the tests share one
+/// the host-side `NestingHopTransport` and the tests share one
 /// definition of the wire shape.
 pub fn encode_handshake(workload_id: &str, port: u32) -> Vec<u8> {
     let body = format!("{workload_id} {port}");
@@ -418,7 +415,7 @@ mod tests {
         assert!(res.is_err(), "path-traversal workload_id must fail closed");
     }
 
-    // ── A3.4 guardrail: bounded concurrency ──────────────────────
+    // ── guardrail: bounded concurrency ──────────────────────────
 
     #[test]
     fn connection_limiter_caps_concurrency_and_releases_on_drop() {
@@ -462,7 +459,7 @@ mod tests {
         assert_eq!(limiter.active_count(), 0, "all permits released");
     }
 
-    // ── A3.5 framing/tamper/oversize ─────────────────────────────
+    // ── framing/tamper/oversize ──────────────────────────────────
 
     #[test]
     fn read_handshake_rejects_oversized_length_prefix() {
@@ -485,7 +482,7 @@ mod tests {
 
     #[test]
     fn handle_forward_conn_is_bit_equivalent_for_binary_payload() {
-        // A3.3 parity: bytes through the hop are identical to direct —
+        // Parity: bytes through the hop are identical to direct —
         // including NULs and bytes that look like frame boundaries.
         use std::io::Read;
         use std::os::unix::net::UnixListener;

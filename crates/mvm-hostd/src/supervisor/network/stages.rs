@@ -1,13 +1,12 @@
-//! Plan 129 egress-proxy seams (plan 123 Phase A / A3): two pluggable stages
-//! on the per-packet egress path. **No-op by default** — Plan 129 supplies the
-//! real handlers later. These are designed to run *inside*
-//! `run_packet_pipeline` (the claim-10 egress chokepoint every guest byte
-//! transits), so they are never a bypass.
+//! Egress-proxy seams: two pluggable stages on the per-packet egress path.
+//! **No-op by default** — the real handlers plug in later. These are designed
+//! to run *inside* `run_packet_pipeline` (the claim-10 egress chokepoint every
+//! guest byte transits), so they are never a bypass.
 //!
-//! A3.1 (this) introduces the seam: the traits + no-op defaults. A3.2 wires
-//! them into the pipeline runner + the gateway bridge (substitution maps to the
-//! existing `Verdict::Modify` rebuild path; a scan `Drop` maps to the same
-//! fail-closed kill the observers use).
+//! The seam is the traits + no-op defaults; the pipeline runner + the gateway
+//! bridge wire them in (substitution maps to the existing `Verdict::Modify`
+//! rebuild path; a scan `Drop` maps to the same fail-closed kill the observers
+//! use).
 
 use std::sync::Arc;
 
@@ -32,8 +31,8 @@ pub enum ScanOutcome {
     Drop { by: &'static str },
 }
 
-/// Rewrites outbound L4 payload bytes when a secret binding applies (Plan 129
-/// substitution). The default is pass-through.
+/// Rewrites outbound L4 payload bytes when a secret binding applies
+/// (substitution). The default is pass-through.
 pub trait SubstitutionStage: Send + Sync {
     /// Stable identifier for audit / metrics.
     fn name(&self) -> &'static str;
@@ -45,8 +44,8 @@ pub trait SubstitutionStage: Send + Sync {
     }
 }
 
-/// Observes the outbound payload and may request a drop (Plan 129 leak-scan).
-/// The default observes nothing and always passes.
+/// Observes the outbound payload and may request a drop (leak-scan). The
+/// default observes nothing and always passes.
 pub trait ScanStage: Send + Sync {
     /// Stable identifier for audit / metrics.
     fn name(&self) -> &'static str;
@@ -65,8 +64,8 @@ impl SubstitutionStage for NoopSubstitution {
     }
 }
 
-/// Plan 129 Phase E — the egress secret/PII redactor. A `SubstitutionStage`
-/// (the `Verdict::Modify` rebuild path), **not** a scan/drop: an *undeclared*
+/// The egress secret/PII redactor. A `SubstitutionStage` (the
+/// `Verdict::Modify` rebuild path), **not** a scan/drop: an *undeclared*
 /// secret-shaped or PII run on outbound bytes is masked in place (replaced with
 /// [`REDACTION_MASK`]) and the request continues, rather than dropping the whole
 /// flow. This is the backstop for the no-secret-on-the-guest invariant when a
@@ -129,7 +128,7 @@ impl RedactingSubstitution {
     /// chokepoints — the packet-level gateway bridge (`substitute`, libkrun/FC)
     /// and the request-level substitution endpoint (`substitution_proxy`,
     /// QEMU + any backend that routes egress through the per-VM endpoint) — so
-    /// the two scrub identically with no drift. Plan 129 Phase E / ADR-067.
+    /// the two scrub identically with no drift.
     pub fn redact_bytes(&self, payload: &[u8]) -> Option<(Vec<u8>, RedactionHits)> {
         let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
         let (after_pii, pii) = self.pii.redact(&after_secrets);
@@ -273,8 +272,8 @@ impl ScanStage for NoopScan {
     }
 }
 
-/// DNS sink-hole scan (plan 123 A4): inspects outbound UDP/53 queries and drops
-/// any whose queried host is outside the tenant allow-list. A dropped query is
+/// DNS sink-hole scan: inspects outbound UDP/53 queries and drops any whose
+/// queried host is outside the tenant allow-list. A dropped query is
 /// sink-holed — the guest's resolver gets no answer — and, because the drop runs
 /// inside `run_packet_pipeline`, the kill is recorded on the chain-signed flow
 /// audit (the claim-10 egress chokepoint, so never a bypass).
@@ -362,8 +361,8 @@ fn dns_query_qname(payload: &[u8]) -> Option<String> {
 }
 
 /// Host-side enforcement of the mandatory-deny egress ranges (link-local,
-/// cloud-metadata `169.254.169.254`, …) as a `ScanStage` (plan 123 A2 /
-/// claim 10). Drops any **egress** packet whose L3 destination is in
+/// cloud-metadata `169.254.169.254`, …) as a `ScanStage` (claim 10). Drops
+/// any **egress** packet whose L3 destination is in
 /// `mvm_core::network_policy::mandatory_deny_ranges()`, at the gateway-bridge
 /// chokepoint every guest byte transits.
 ///
@@ -394,8 +393,8 @@ impl ScanStage for MandatoryDenyEgressScan {
 }
 
 /// Drops any egress packet whose L4 payload contains a substitution
-/// placeholder — the host-owned [`PLACEHOLDER_PREFIX`] namespace (Plan 129 /
-/// ADR-067 §1 leak backstop). The legitimate substitution path routes
+/// placeholder — the host-owned [`PLACEHOLDER_PREFIX`] namespace (leak
+/// backstop). The legitimate substitution path routes
 /// placeholders to the host-local endpoint, never out the raw egress wire, so a
 /// placeholder seen here is a guest trying to smuggle the token out a side
 /// channel. It can't smuggle a *value* (it never held one); this stops the
@@ -404,7 +403,7 @@ impl ScanStage for MandatoryDenyEgressScan {
 ///
 /// Baseline detector: a single reserved-prefix scan, no false positives on
 /// normal traffic (the namespace is ours). The broader secret-shaped/PII/
-/// entropy detector set over `core::redact` is the larger Phase E1 follow-up.
+/// entropy detector set over `core::redact` is the larger follow-up.
 pub struct PlaceholderLeakScan;
 
 impl ScanStage for PlaceholderLeakScan {
@@ -426,8 +425,8 @@ impl ScanStage for PlaceholderLeakScan {
     }
 }
 
-/// Enforces a resolved [`NetworkPolicy`] on the egress packet path (plan 123 A2
-/// / claim 10): the L4 allow-list backstop. `unrestricted` passes everything;
+/// Enforces a resolved [`NetworkPolicy`] on the egress packet path (claim 10):
+/// the L4 allow-list backstop. `unrestricted` passes everything;
 /// an allow-list (including `deny_all`, the empty list) passes only packets
 /// whose `dst ip:port` matches an **IP-literal** rule and drops the rest —
 /// fail-closed.
@@ -514,8 +513,8 @@ impl ScanStage for ScanChain {
 }
 
 /// Enforces the policy bundle's L4 [`L4Policy`] (proto + dst CIDR + port range)
-/// on the egress packet path (plan 123 Slice 3 / claim 10), reusing the
-/// supervisor's tested `L4Policy::evaluate` (first-match-wins, default-deny).
+/// on the egress packet path (claim 10), reusing the supervisor's tested
+/// `L4Policy::evaluate` (first-match-wins, default-deny).
 ///
 /// This is the per-tenant filter the bundle actually carries
 /// (`mvm_core::policy::NetworkPolicy.l4`). Its rules are CIDRs, so they match a
@@ -562,8 +561,8 @@ impl ScanStage for L4PolicyScan {
 /// per-tenant egress filters under the always-on host-side mandatory-deny:
 ///
 /// - `MandatoryDenyEgressScan` — always (link-local + cloud metadata).
-/// - `PlaceholderLeakScan` — always (Plan 129 / ADR-067 §1): drops any egress
-///   carrying a substitution placeholder out the raw wire. Always-on because
+/// - `PlaceholderLeakScan` — always: drops any egress carrying a substitution
+///   placeholder out the raw wire. Always-on because
 ///   the placeholder namespace is host-reserved and the scan is a cheap
 ///   single-prefix check — a workload that never uses secrets never trips it.
 /// - `L4PolicyScan(l4)` — when the bundle resolved an L4 policy (CIDR/port).
@@ -616,7 +615,7 @@ mod tests {
             flow_id: "vm-egress",
         };
         // No binding applies → no rewrite; scan never drops. This is the
-        // claim-10-safe default posture before Plan 129 plugs in real handlers.
+        // claim-10-safe default posture before real handlers plug in.
         assert_eq!(NoopSubstitution.substitute(&ctx, &pkt), None);
         assert_eq!(NoopScan.scan(&ctx, &pkt), ScanOutcome::Pass);
     }
@@ -754,8 +753,8 @@ mod tests {
 
     #[test]
     fn placeholder_leak_drops_egress_carrying_a_placeholder() {
-        // ADR-067 §1 backstop: a placeholder smuggled out the raw egress path
-        // (not the host-local substitution endpoint) is dropped.
+        // Backstop: a placeholder smuggled out the raw egress path (not the
+        // host-local substitution endpoint) is dropped.
         let payload = b"POST /x HTTP/1.1\r\nAuthorization: Bearer mvm-secret-deadbeef\r\n\r\n";
         assert_eq!(
             PlaceholderLeakScan.scan(&egress_ctx(), &tcp_egress(payload)),
@@ -823,8 +822,8 @@ mod tests {
 
     #[test]
     fn dns_sinkhole_drops_a_denied_lookup() {
-        // A4: a DNS query (UDP/53) for a host outside the allow-list is dropped
-        // at the egress chokepoint — sink-holed — instead of being resolved.
+        // A DNS query (UDP/53) for a host outside the allow-list is dropped at
+        // the egress chokepoint — sink-holed — instead of being resolved.
         let query = dns_query("tracker.evil.example");
         let pkt = dns_packet(&query);
         let scan = DnsSinkholeScan::new(vec!["corp.internal".to_string()]);

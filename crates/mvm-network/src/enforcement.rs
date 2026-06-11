@@ -1,6 +1,5 @@
 //! `EgressEnforcer` — the low seam the host-side egress enforcement (the
-//! mvm-hostd supervisor's nftables default-deny, and later L4/L7) sits behind
-//! (plan 123 Phase A, task A2).
+//! mvm-hostd supervisor's nftables default-deny, and later L4/L7) sits behind.
 //!
 //! This crate stays low (it depends only on `mvm-core` / `mvm-sdk`), so the
 //! actual enforcement — `nft` shell-out, the L4 gate, the L7 proxy — can't
@@ -62,7 +61,7 @@ pub trait EgressEnforcer: Send + Sync {
     /// Install host-side default-deny enforcement scoped to `wiring`. `policy`
     /// is the admitted egress policy (its `Default` is `deny_all()`); the
     /// firewall layer installs a fixed default-deny regardless, so the
-    /// policy's allow-rules are the L4/L7 layer's job (A2.2+) — `policy` is
+    /// policy's allow-rules are the L4/L7 layer's job — `policy` is
     /// threaded now so that widening doesn't change the signature.
     fn enforce(
         &self,

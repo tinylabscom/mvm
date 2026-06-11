@@ -1,9 +1,9 @@
-//! JCS canonicalization for the audit-entry bytes-to-sign (Plan 104 §S28).
+//! JCS canonicalization for the audit-entry bytes-to-sign.
 //!
 //! Each entry's signed bytes are the JCS-canonical form of a
 //! `CanonicalEntry` struct — a stable schema that includes everything
-//! needed to verify the entry standalone (Plan 104 §C7 self-contained
-//! requirement) without consulting the supervisor's session state.
+//! needed to verify the entry standalone, without consulting the
+//! supervisor's session state.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,14 +19,14 @@ use serde::{Deserialize, Serialize};
 pub struct CanonicalEntry {
     /// Audit category (snake_case `EventCategory` variant name).
     pub category: String,
-    /// Supervisor-assigned correlation id (Plan 104 §H-L4.6).
+    /// Supervisor-assigned correlation id.
     pub correlation_id: String,
     /// Typed per-category fields.
     pub fields: serde_json::Value,
     /// Hex hash of the previous chain entry. The genesis entry's
     /// `prev_hash` is the all-zeros 64-char hex string.
     pub prev_hash: String,
-    /// Workload's session id (rotates per §H-L4.3).
+    /// Workload's session id (rotates per session).
     pub session_id: String,
     /// Tenant identifier.
     pub tenant_id: String,

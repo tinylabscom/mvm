@@ -20,7 +20,7 @@ libfuzzer-sys = "0.4"
 [dependencies.mvm-hostd]
 path = ".."
 
-# Plan 141 / ADR-064 — fuzz the gateway packet parser + payload rebuilder.
+# Fuzz the gateway packet parser + payload rebuilder.
 # `packet::parse` runs on every frame the guest puts on the wire (the
 # first real parse on that path); `rebuild_with_payload` re-serializes
 # observer-modified frames. Both sit on the untrusted-guest-bytes surface

@@ -27,7 +27,7 @@ pub struct MvmConfig {
     /// Maximum wall-clock seconds `mvmctl up` waits for every guest
     /// integration's readiness probe to flip to `Active` before giving
     /// up and leaving `InstanceReadiness` at `ServicesStarting {
-    /// pending }` (ADR-053 §3 / plan 74 W2). VMs with no integrations
+    /// pending }`. VMs with no integrations
     /// transition to `ServicesReady` immediately; this only matters
     /// for VMs that declare `after_start.sh` health hooks.
     ///
@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(cfg.default_memory_mib, 512);
         assert!(cfg.log_format.is_none());
         assert!(cfg.metrics_port.is_none());
-        // ADR-053 §3 / plan 74 W2 default: 30 s services-health wait.
+        // Default: 30 s services-health wait.
         assert_eq!(cfg.services_health_timeout_secs, 30);
     }
 

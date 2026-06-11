@@ -1,4 +1,4 @@
-// Plan-60 W7+W8 split:
+// Backend/substrate split:
 //
 //   * Every concrete `VmBackend` impl + the FC support modules
 //     (apple_container, libkrun, firecracker, microvm,
@@ -21,8 +21,8 @@ pub mod volume_registry;
 
 // Substrate re-exports — preserve the `mvm::vm::{cow,
 // runtime_meta}::*` paths. These have external consumers (mvmd's
-// `mvmctl::runtime` surface and the W6.2 console gate) so the
-// re-exports stay even after W8.B.3 migrated in-tree consumers.
+// `mvmctl::runtime` surface and the console gate) so the
+// re-exports stay even after in-tree consumers migrated.
 pub use mvm_backend::base::{cow, runtime_meta};
 
 /// Crate-wide test serialization for tests that mutate

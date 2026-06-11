@@ -23,9 +23,9 @@ pub struct App {
     pub source: Source,
     pub image: Image,
     /// One or more entrypoints. v0 single-function workloads have a
-    /// one-element list; multi-function apps (ADR-0014 Phase 2) have
-    /// multiple `Entrypoint::Function` entries with exactly one
-    /// marked `primary = true`. Command-style entrypoints are always
+    /// one-element list; multi-function apps have multiple
+    /// `Entrypoint::Function` entries with exactly one marked
+    /// `primary = true`. Command-style entrypoints are always
     /// a single-element list.
     pub entrypoints: Vec<Entrypoint>,
     #[serde(default)]
@@ -35,7 +35,7 @@ pub struct App {
     #[serde(default)]
     pub network: Option<Network>,
     pub resources: Resources,
-    /// Dependency declaration (plan-0008 / ADR-0009).
+    /// Dependency declaration.
     ///
     /// Function-entrypoint workloads must declare this explicitly —
     /// either point at a hash-pinned lockfile or assert
@@ -49,7 +49,7 @@ pub struct App {
     pub dependencies: Option<Dependencies>,
     /// Threat tier of the consumer (this app). Combined with the
     /// `[security].trust_tier` of each addon to drive mvmd's
-    /// SMT-affinity scheduler matrix per ADR-0018. Defaults to
+    /// SMT-affinity scheduler matrix. Defaults to
     /// `Untrusted` (most protective). Workloads that run only
     /// first-party reviewed code can opt into `Trusted` for finer
     /// packing in mvmd's scheduler. **Skip-serialized when default
@@ -57,11 +57,10 @@ pub struct App {
     /// the default is the maximally-protective value.
     #[serde(default, skip_serializing_if = "ThreatTier::is_default")]
     pub threat_tier: ThreatTier,
-    /// Composable addon-uses (ADR-0018). Each entry pulls a
-    /// sha-attested addon from the registry (or a local-path during
-    /// development); mvmd instantiates each addon-use as a separate
-    /// microVM and bridges it to this app over the workload mesh
-    /// (ADR-0020).
+    /// Composable addon-uses. Each entry pulls a sha-attested addon
+    /// from the registry (or a local-path during development); mvmd
+    /// instantiates each addon-use as a separate microVM and bridges
+    /// it to this app over the workload mesh.
     ///
     /// Empty list (or absent field) = no addons; preserves the v0
     /// behavior. Each entry is validated against the lockfile by
@@ -69,9 +68,8 @@ pub struct App {
     /// hermetic boundary preserved).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addons: Vec<AddonUse>,
-    /// Lifecycle hooks (SDK port Phase 1a — IR field reserved; consumers
-    /// in Phase 10). Each phase is a `Vec<HookCmd>`; the compiler unions
-    /// addon hooks (in attachment order) before the app's hooks.
+    /// Lifecycle hooks. Each phase is a `Vec<HookCmd>`; the compiler
+    /// unions addon hooks (in attachment order) before the app's hooks.
     /// `Hooks::is_empty()` skip-serializes the field so v0 IR
     /// documents that don't carry `hooks` remain byte-identical.
     #[serde(default, skip_serializing_if = "Hooks::is_empty")]
@@ -83,8 +81,8 @@ impl App {
     /// substrate dispatches when `mvmctl invoke <id>` is called with
     /// no `--fn` selector. For single-entrypoint apps (the v0 shape
     /// and the most common case) this is the sole entry. For multi-
-    /// function apps (ADR-0014 Phase 2) this is the entry with
-    /// `primary: true`. Validator-side rules guarantee exactly one
+    /// function apps this is the entry with `primary: true`.
+    /// Validator-side rules guarantee exactly one
     /// such entry exists; this helper falls back to the first
     /// entrypoint to keep panic-free behavior on un-validated IR.
     pub fn primary_entrypoint(&self) -> &Entrypoint {
@@ -95,13 +93,13 @@ impl App {
             .expect("App must have at least one entrypoint (validate() rejects empty)")
     }
 
-    /// B1 (Plan 165 WS-B): true iff this app declares a workload command —
-    /// a `Command` argv or a `Function` dispatch target. The IR cannot
-    /// represent "no declared entrypoint" (validate() rejects empty
+    /// True iff this app declares a workload command — a `Command`
+    /// argv or a `Function` dispatch target. The IR cannot represent
+    /// "no declared entrypoint" (validate() rejects empty
     /// `entrypoints`), so for any validated SDK app this is true; the
-    /// predicate is the single named signal the compile gate (B3) reads
-    /// instead of re-deriving "is there a command?" inline. The admission
-    /// gate (B4) enforces the same property one layer down, via the
+    /// predicate is the single named signal the compile gate reads
+    /// instead of re-deriving "is there a command?" inline. The
+    /// admission gate enforces the same property one layer down, via the
     /// `SignedImageRef.entrypoint_present` wire field (a different crate —
     /// no shared symbol crosses the boundary). An idle image
     /// (`["sleep","infinity"]`) IS a declared command, so it is unaffected.
@@ -110,7 +108,7 @@ impl App {
     }
 }
 
-/// Per-app dependency declaration. ADR-0009 / plan-0008.
+/// Per-app dependency declaration.
 ///
 /// The host validates the lockfile exists in the bundled source
 /// tree and that it's pinned (every entry carries hashes the
@@ -189,11 +187,11 @@ pub enum Image {
     OciBase { reference: String, digest: String },
 }
 
-/// How the wrapper inside the microVM is dispatched. ADR-0009.
+/// How the wrapper inside the microVM is dispatched.
 ///
 /// `Command` is the legacy shape: an explicit argv that runs once at
-/// boot. `Function` is the function-call shape introduced by plan 0003:
-/// a long-running language wrapper baked into the image dispatches a
+/// boot. `Function` is the function-call shape: a long-running
+/// language wrapper baked into the image dispatches a
 /// named function whose return value is encoded back to the caller per
 /// the declared serialization format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -208,8 +206,8 @@ pub enum Entrypoint {
         #[serde(default)]
         env: BTreeMap<String, EnvValue>,
     },
-    /// Function-call entrypoint (plan 0003 / ADR-0009): a baked
-    /// per-language wrapper at `/etc/mvm/entrypoint` reads stdin,
+    /// Function-call entrypoint: a baked per-language wrapper at
+    /// `/etc/mvm/entrypoint` reads stdin,
     /// dispatches `module:function` per the declared `format`, writes
     /// the return on stdout. The host SDK calls
     /// `mvmctl invoke <workload> --stdin <encoded>` to invoke.
@@ -226,15 +224,15 @@ pub enum Entrypoint {
         /// dispatches to when compiling this entrypoint. Open string
         /// validated mvm-side; current allowlist is in
         /// `validate.rs::SUPPORTED_LANGUAGES`. Adding a language is
-        /// a one-PR change in mvm — no IR schema bump. Per
-        /// ADR-0010 §4. SDKs set this from their own language at
+        /// a one-PR change in mvm — no IR schema bump. SDKs set this
+        /// from their own language at
         /// registration time (`"python"` for the Python SDK,
         /// `"node"` for the TypeScript SDK); users can override
         /// for cross-language manifest authoring (e.g. authoring a
         /// Python workload from the TypeScript SDK).
         ///
-        /// Replaces the closed-enum `runtime: Runtime` field shipped
-        /// in PR #7. Pre-1.0 schema bump.
+        /// Replaces the earlier closed-enum `runtime: Runtime` field.
+        /// Pre-1.0 schema bump.
         language: String,
         /// Module identifier (e.g. Python dotted path
         /// `pkg.subpkg.mod`, TypeScript module path `./src/mod`).
@@ -242,8 +240,8 @@ pub enum Entrypoint {
         /// Function identifier within the module.
         function: String,
         /// Serialization format for stdin args + stdout return.
-        /// Closed enum: `Json` or `Msgpack` (plan 0003 invariant —
-        /// code-executing serializer formats are forbidden).
+        /// Closed enum: `Json` or `Msgpack` (code-executing serializer
+        /// formats are forbidden).
         format: Format,
         #[serde(default = "default_working_dir")]
         working_dir: String,
@@ -254,7 +252,6 @@ pub enum Entrypoint {
         /// per-call payloads at the wrapper once the upstream-mvm
         /// factory wires it. Shape: a strict subset of JSON Schema
         /// (object/array/string/integer/number/boolean/null/enum/oneOf).
-        /// Plan-0009 / ADR-0009 §Decision §Cross-cutting.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args_schema: Option<JsonSchemaShape>,
         /// JSON Schema for the return value. Same shape constraints as
@@ -264,33 +261,32 @@ pub enum Entrypoint {
         /// Extra modules to bundle beyond what the host's reachability
         /// walker discovers from the entry module. Use for dynamic
         /// imports, plugin loaders, and other paths the static AST walk
-        /// can't follow (plan-0007 §Phase 2). Each entry is a module
+        /// can't follow. Each entry is a module
         /// identifier resolved relative to `working_dir` per the
         /// language's import rules.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extra_imports: Vec<String>,
         /// Marks this entry as the workload's default function — the
         /// one `mvmctl invoke <id>` (no `--fn` selector) dispatches
-        /// to. Multi-function apps (ADR-0014 Phase 2) require exactly
-        /// one entrypoint to be primary; single-function apps mark
+        /// to. Multi-function apps require exactly one entrypoint to
+        /// be primary; single-function apps mark
         /// their sole entrypoint primary by convention.
         #[serde(default)]
         primary: bool,
-        /// Opt-in concurrency model for this entrypoint (ADR-0011).
+        /// Opt-in concurrency model for this entrypoint.
         ///
         /// When `None`, the function runs under the cold model: a fresh
         /// wrapper process per invocation. When `Some(WarmProcess(...))`,
         /// mvm bakes a long-running wrapper that handles many
         /// sequential calls without respawning, dispatched via mvm's
         /// warm-process worker pool. Warm-process is opt-in because
-        /// state can leak across calls; ADR-0011 §Decision documents
-        /// the safety/perf tradeoff.
+        /// state can leak across calls.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         concurrency: Option<Concurrency>,
     },
 }
 
-/// Concurrency model for a function-entrypoint (ADR-0011).
+/// Concurrency model for a function-entrypoint.
 ///
 /// Open enum tagged on `kind` so future tiers (`InProcessConcurrent`,
 /// `Pool`, …) can be added without breaking existing IR. Today the
@@ -301,11 +297,11 @@ pub enum Entrypoint {
 pub enum Concurrency {
     /// Warm-process tier: wrapper stays alive across calls, recycled
     /// on call-count or RSS thresholds. Cold safety guarantees no
-    /// longer hold — see ADR-0011 §Decision §Safety.
+    /// longer hold.
     WarmProcess(WarmProcessConfig),
 }
 
-/// Tuning knobs for the warm-process tier (ADR-0011 §Decision).
+/// Tuning knobs for the warm-process tier.
 ///
 /// Validated mvm-side: `pool_size ∈ [1,64]`,
 /// `max_calls_per_worker >= 100`, `max_rss_mb <= app.resources.memory_mb`,
@@ -314,8 +310,8 @@ pub enum Concurrency {
 #[serde(deny_unknown_fields)]
 pub struct WarmProcessConfig {
     /// Recycle a worker after this many dispatches. Bounds memory
-    /// growth from per-call interpreter state. Lower bound 100 per
-    /// ADR-0011 — anything smaller cancels the warm-tier benefit.
+    /// growth from per-call interpreter state. Lower bound 100 —
+    /// anything smaller cancels the warm-tier benefit.
     pub max_calls_per_worker: u64,
     /// Recycle a worker if its RSS exceeds this (MiB). Must not
     /// exceed `app.resources.memory_mb`.
@@ -333,9 +329,9 @@ pub struct WarmProcessConfig {
     pub max_queue_depth: Option<usize>,
 }
 
-/// In-worker dispatch model. Per ADR-0011, only `Serial` is
-/// implemented in v0.2; `Concurrent` (multiple in-flight calls per
-/// worker via async) is rejected at parse time.
+/// In-worker dispatch model. Only `Serial` is implemented in v0.2;
+/// `Concurrent` (multiple in-flight calls per worker via async) is
+/// rejected at parse time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InProcessMode {
@@ -372,8 +368,8 @@ impl schemars::JsonSchema for JsonSchemaShape {
 }
 
 /// Serialization format for function-entrypoint stdin / stdout.
-/// ADR-0009 invariant: closed enum — adding a variant is a wire
-/// change reviewed against the no-code-execution rule.
+/// Closed enum — adding a variant is a wire change reviewed against
+/// the no-code-execution rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
@@ -408,8 +404,7 @@ pub enum EnvValue {
 pub struct SecretRef {
     pub name: String,
     pub mount: SecretMount,
-    /// How the keyholder uses the secret on egress (signer vs injector) — Plan
-    /// 129 / ADR-067 §4.
+    /// How the keyholder uses the secret on egress (signer vs injector).
     pub auth_type: AuthType,
     /// The hosts the substituted credential may reach — the claim-12 binding.
     /// Supports `*.` subdomain wildcards (see [`host_matches`]). An empty list
@@ -419,7 +414,7 @@ pub struct SecretRef {
 
 /// How a secret authenticates an outbound request, so the keyholder picks the
 /// right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer);
-/// `Bearer`/`Basic` are *injected* credentials. Plan 129 / ADR-067 §4.
+/// `Bearer`/`Basic` are *injected* credentials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthType {
@@ -477,7 +472,7 @@ pub enum MountSource {
     /// provider's own schema — the IR doesn't interpret it, so new sources
     /// plug in without a core-enum edit. An unregistered provider is
     /// rejected at resolve time (`MountError::UnknownFsProvider`), never
-    /// silently defaulted. See plan 123 B4 / `mvm_storage::mount_provider`.
+    /// silently defaulted. See `mvm_storage::mount_provider`.
     External {
         provider: String,
         config: serde_json::Value,
@@ -497,8 +492,8 @@ pub struct Network {
     pub mode: NetworkMode,
     #[serde(default)]
     pub ports: Vec<PortForward>,
-    /// Granular egress allowlist (plan-0004 §Phase 5). Each entry
-    /// names a `host:port` pair the guest may dial. Wildcard hosts
+    /// Granular egress allowlist. Each entry names a `host:port`
+    /// pair the guest may dial. Wildcard hosts
     /// (`*`, `0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`) are rejected with
     /// `E_NETWORK_WILDCARD`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -509,7 +504,7 @@ pub struct Network {
     /// id pattern.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<String>,
-    /// DNS posture (plan-0004 §Phase 5). `Some(None_)` = no resolver;
+    /// DNS posture. `Some(None_)` = no resolver;
     /// `Some(System)` = inherit substrate default; `Some(Resolver)` =
     /// pin a single host:port resolver. Default (None) means
     /// "unspecified — substrate picks based on `mode`".
@@ -561,7 +556,7 @@ pub enum NetworkMode {
     /// provider's own schema; the IR doesn't interpret it, so a mesh plugs
     /// in without a core-enum edit. The guest's `netinit` reads a `Custom`
     /// config off the config-device. mvm builds none of the mesh logic — the
-    /// impl is mvmd's; this is only the seam. See plan 123 A5.
+    /// impl is mvmd's; this is only the seam.
     Custom {
         provider: String,
         config: serde_json::Value,
@@ -662,7 +657,7 @@ mod tests {
 
     #[test]
     fn secret_ref_carries_auth_type_and_hosts_never_bytes() {
-        // Plan 129 A1: the reference says HOW the secret is used (auth_type, so
+        // The reference says HOW the secret is used (auth_type, so
         // the keyholder picks signer vs injector) and WHERE it may go
         // (allowed_hosts — the claim-12 binding). Still no bytes.
         let r: SecretRef = serde_json::from_str(

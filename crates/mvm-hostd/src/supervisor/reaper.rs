@@ -1,29 +1,28 @@
-//! TTL reaper — Wave 1, Control 5 of the filesystem-volumes plan.
+//! TTL reaper.
 //!
 //! Walks the persistent VM name registry on a tick, finds records
 //! whose `expires_at` has elapsed, fires a teardown callback, and
 //! deregisters them. Designed pure-logic-first so it's testable
 //! without a real clock or a real Firecracker — the default daemon
-//! adapter (Wave 3) wraps it in a thread with system-clock and a
+//! adapter wraps it in a thread with system-clock and a
 //! real backend `down` call.
 //!
 //! Jitter is applied to the *interval* between ticks, not the
-//! per-record expiry: G6 in the plan calls for ±10 s jitter so an
-//! external observer cannot use TTL expiry as a precise timing
-//! oracle. Per-record expiry stays exact.
+//! per-record expiry: ±10 s jitter so an external observer cannot use
+//! TTL expiry as a precise timing oracle. Per-record expiry stays exact.
 //!
-//! ## Consumer note (Plan 170)
+//! ## Consumer note
 //!
 //! The opt-in idle-sleep extension below (`with_idle_sleep` /
-//! `IdleConfig` / `IdleSlept`, Plan 170 WS-B) is an **unconsumed
-//! primitive**: nothing in this repo constructs a `Reaper` outside tests
-//! (ADR-074 — the local `mvmctl` path is daemon-free), and mvmd does *not*
-//! depend on this crate — it implements idle / host-memory-pressure / wake
-//! natively in its own model (`mvmd-agent/host_pressure.rs`,
+//! `IdleConfig` / `IdleSlept`) is an **unconsumed primitive**: nothing
+//! in this repo constructs a `Reaper` outside tests (the local `mvmctl`
+//! path is daemon-free), and mvmd does *not* depend on this crate — it
+//! implements idle / host-memory-pressure / wake natively in its own
+//! model (`mvmd-agent/host_pressure.rs`,
 //! `mvmd-coordinator/{idle,wake,wake_on_demand}.rs`). The TTL path is the
 //! load-bearing part; the idle hook is retained as additive,
 //! behavior-preserving infrastructure should a resident consumer ever want
-//! it. See `specs/plans/170-…` "Density ownership correction".
+//! it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -58,7 +57,7 @@ pub enum ReapOutcome {
     /// registry record is *kept* so the next tick retries.
     TeardownFailed { name: String, error: String },
     /// VM was idle past its idle-timeout and got slept (sleep callback
-    /// invoked, registry record kept with `paused = true`). Plan 170 WS-B.
+    /// invoked, registry record kept with `paused = true`).
     IdleSlept { name: String },
     /// VM was idle, but the sleep callback returned an error. The record
     /// is left running (not paused) so the next tick retries.
@@ -73,7 +72,7 @@ pub type TeardownFn = Box<dyn Fn(&str, &VmRegistration) -> Result<(), String> + 
 
 /// Callback invoked when a VM has been idle past its idle-timeout and the
 /// reaper is about to put it to sleep (drain/pause — the *trigger*, not a
-/// new sleep mechanism: see Plan 170 WS-B). The implementation performs the
+/// new sleep mechanism). The implementation performs the
 /// backend-appropriate sleep (drain+snapshot for snapshot-capable backends,
 /// clean stop with data disk + TAP retained for libkrun/apple-container).
 /// Returning `Err` leaves the VM running so the next tick retries; the
@@ -92,7 +91,7 @@ pub const IDLE_TIMEOUT_ENV: &str = "MVM_IDLE_TIMEOUT";
 
 /// Idle-sleep configuration the reaper consults per tick. Held as
 /// `Option` on [`Reaper`] so the default (TTL-only) path is byte-for-byte
-/// the pre-WS-B behavior — mvmd and any other consumer that builds a
+/// the pre-idle behavior — mvmd and any other consumer that builds a
 /// `Reaper::new(...)` without opting in see no change.
 pub struct IdleConfig {
     /// Backend-appropriate sleep callback (see [`SleepFn`]).
@@ -152,7 +151,7 @@ impl Reaper {
         }
     }
 
-    /// Opt into activity-driven idle-sleep (Plan 170 WS-B). Without this
+    /// Opt into activity-driven idle-sleep. Without this
     /// the reaper is TTL-only, exactly as before. Builder-style so the
     /// existing `Reaper::new(path, teardown)` call sites are unchanged.
     pub fn with_idle_sleep(mut self, sleep: SleepFn, default_timeout: Option<Duration>) -> Self {
@@ -195,7 +194,7 @@ impl Reaper {
 /// and left in place; an **elapsed** TTL hard-reaps (teardown + deregister)
 /// as it always has; otherwise, when idle-sleep is configured, an idle VM
 /// past its (per-VM or global) timeout is *slept* (sleep callback + flip
-/// `paused = true`, record kept) so WS-C's wake can bring it back. TTL
+/// `paused = true`, record kept) so a later wake can bring it back. TTL
 /// wins over idle — a VM whose TTL has elapsed is reaped, not slept.
 fn sweep(
     registry: &mut VmNameRegistry,
@@ -282,7 +281,7 @@ pub fn jittered_interval<R: Rng>(rng: &mut R, base: Duration, jitter: Duration) 
 }
 
 /// A teardown callback that just deregisters (does not call any
-/// backend). Used by integration tests and as the wave-1 default; the
+/// backend). Used by integration tests and as the default; the
 /// real backend-aware teardown lands when `Supervisor::launch` does.
 pub fn deregister_only_teardown() -> TeardownFn {
     Box::new(|_name: &str, _reg: &VmRegistration| Ok(()))
@@ -480,7 +479,7 @@ mod tests {
         assert!(reaper.tick(Utc::now()).is_empty());
     }
 
-    // -------- Idle-sleep (Plan 170 WS-B) --------
+    // -------- Idle-sleep --------
 
     /// One registration with controllable activity/auto-resume/paused/tag.
     fn idle_registry(

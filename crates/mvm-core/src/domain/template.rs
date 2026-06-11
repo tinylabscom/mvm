@@ -65,8 +65,8 @@ pub struct TemplateSpec {
     pub created_at: String,
     pub updated_at: String,
     /// Default network policy applied when `mvmctl up` / `mvmctl exec`
-    /// don't override it on the CLI. ADR-004 §"Decisions" 6 / plan 32.
-    /// Lets templates ship with their intended posture baked in
+    /// don't override it on the CLI. Lets templates ship with their
+    /// intended posture baked in
     /// (e.g. `claude-code-vm` defaults to the `agent` preset) so
     /// operators don't have to remember `--network-preset agent` per
     /// invocation. Backward-compat: existing `template.json` files
@@ -163,11 +163,10 @@ pub struct TemplateRevision {
     /// accessible image); `"prod"` (or absent) = `BuildMode::Prod`
     /// (sealed image, no `do_exec`). Recorded on the revision so a
     /// subsequent rebuild round-trips the same posture without the
-    /// user having to re-pass `--dev`/`--prod`. Plan-60 W6.2.3
-    /// follow-up.
+    /// user having to re-pass `--dev`/`--prod`.
     ///
-    /// Optional + `default` so pre-W6.2.3 on-disk revisions parse
-    /// without a migration. Missing on read is treated as
+    /// Optional + `default` so older on-disk revisions that predate
+    /// the field parse without a migration. Missing on read is treated as
     /// `BuildMode::Prod` at the consumer site (the same default
     /// `BuildModeFlags::resolve()` picks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,7 +177,7 @@ impl TemplateRevision {
     /// Composite cache key from the two dimensions that define a unique build
     /// output: flake.lock content and Nix profile.
     ///
-    /// Plan 38 dropped the historical `role` component: role is a fleet
+    /// The historical `role` component was dropped: role is a fleet
     /// concept (mvmd's territory) and role-shaped flake variants live behind
     /// `profile` (`packages.<system>.gateway` vs `packages.<system>.worker`)
     /// or `passthru` inside the flake itself. The struct's `role` field is
@@ -238,7 +237,7 @@ mod tests {
 
     #[test]
     fn role_does_not_affect_cache_key() {
-        // Plan 38: role was dropped from the cache key. Two revisions
+        // role was dropped from the cache key. Two revisions
         // that differ only in `role` (same flake.lock + profile) hash
         // to the same key — they refer to the same build output.
         let a = make_revision("lock1", "minimal", "worker");
@@ -289,7 +288,7 @@ mod tests {
 
     #[test]
     fn missing_build_mode_deserializes_as_none() {
-        // Pre-W6.2.3 on-disk revision.json files don't carry the
+        // Older on-disk revision.json files don't carry the
         // `build_mode` field. Parsing must succeed and yield `None`
         // (consumers treat that as `BuildMode::Prod`, matching the
         // default `BuildModeFlags::resolve()`).
@@ -393,7 +392,7 @@ mod tests {
 
     #[test]
     fn template_spec_default_network_policy_omitted_for_back_compat() {
-        // Pre-plan-32 template.json files don't have the field; they
+        // Older template.json files don't have the field; they
         // must still parse (Option<…> defaults to None) and round-trip
         // without spuriously emitting `"default_network_policy":null`.
         let json_pre_plan_32 = r#"{

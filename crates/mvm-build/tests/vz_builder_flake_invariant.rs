@@ -1,9 +1,8 @@
-//! Plan 98 §2.11 — VzBuilderVm must not pull a prebuilt builder
-//! VM image from the network.
+//! VzBuilderVm must not pull a prebuilt builder VM image from the
+//! network.
 //!
-//! ADR-046 §"Source-checkout builds never depend on mvm-published
-//! artifacts" — when `mvmctl` runs from a source checkout, every VM
-//! image is built locally from the in-repo flakes. The Vz builder
+//! When `mvmctl` runs from a source checkout, every VM image is built
+//! locally from the in-repo flakes. The Vz builder
 //! must honour this invariant as strictly as the libkrun builder
 //! does: no `reqwest::get`, no `https://github.com/.../releases/`,
 //! no "fall back to a prebuilt if the local cache is empty" backdoor.

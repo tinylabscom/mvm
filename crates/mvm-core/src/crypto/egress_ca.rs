@@ -1,4 +1,4 @@
-//! Plan 129 Stage 2 (ADR-006) — the per-VM **name-constrained** egress CA.
+//! The per-VM **name-constrained** egress CA.
 //!
 //! Transparent `https` substitution terminates TLS at the host for **bound
 //! hosts only**. To do that without the rejected blanket-MITM, each VM gets a
@@ -11,7 +11,7 @@
 //! 0400) → per-VM **intermediate** (`CA:TRUE, pathlen:0`, name-constrained) →
 //! per-SNI **leaf**.
 //!
-//! **Honest boundary (ADR-006 §rationale):** Python `ssl` and older Node do not
+//! **Honest boundary:** Python `ssl` and older Node do not
 //! enforce X.509 `nameConstraints` client-side, so the in-guest cert constraint
 //! is defense-in-depth, NOT the egress control. The real boundary stays the
 //! host-side allow-list check in `prepare_request` (claim 12). The constraint

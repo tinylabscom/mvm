@@ -6,8 +6,8 @@ use secrecy::SecretBox;
 /// Returned bytes are wrapped in [`SecretBox`] so the key material is
 /// zeroized on drop and cannot be accidentally logged — the
 /// xtask `check-no-display-on-secret-types` lint enforces no `Debug`
-/// or `Display` on the box's contents (plan 63 W2). Callers consume
-/// the bytes via `.expose_secret()`.
+/// or `Display` on the box's contents. Callers consume the bytes via
+/// `.expose_secret()`.
 pub trait KeyProvider: Send + Sync {
     /// Get the data encryption key for a tenant.
     /// Returns 32 bytes (256-bit key for AES-256-XTS which uses 512-bit key internally).

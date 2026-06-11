@@ -1,4 +1,4 @@
-//! Rust-native Vz supervisor (Plan 152 WS-B) — one process per Vz guest.
+//! Rust-native Vz supervisor — one process per Vz guest.
 //!
 //! Reads a [`mvm_build::vz::SupervisorConfig`] JSON document on stdin (the same
 //! contract the Swift `mvm-vz-supervisor` consumed), builds the
@@ -13,7 +13,7 @@
 //! build still links the bin without pulling the Apple frameworks.
 //!
 //! Spawned by `mvm_backend::vz` via `resolve_supervisor_path()`. This is the
-//! production VZ path — the Swift supervisor is deleted (Plan 152 WS-B). A
+//! production VZ path — the Swift supervisor is deleted. A
 //! boot/vsock/control/save-restore correctness gate lives at
 //! `crates/mvm-build/tests/vz_supervisor_parity.rs`.
 
@@ -61,7 +61,7 @@ fn exe_has_virtualization_entitlement(exe: &std::path::Path) -> bool {
 /// Best-effort: a signing failure logs and proceeds so the real entitlement
 /// error from `start()` is what surfaces.
 ///
-/// Serialized by a file lock: the warm pool (Plan 118) prelaunches several
+/// Serialized by a file lock: the warm pool prelaunches several
 /// supervisors at once, and `codesign --force` rewrites the *shared* binary in
 /// place — concurrent writes/execs of a half-rewritten Mach-O yield `ETXTBSY`
 /// or "invalid signature". The lock makes exactly one launcher sign; the rest

@@ -1,4 +1,4 @@
-//! Plan 113 / ADR-064 §Decision 9 — 4-level tenant value precedence.
+//! 4-level tenant value precedence.
 //!
 //! Resolution order, lowest precedence first:
 //!   1. Built-in default `"local"`
@@ -6,10 +6,10 @@
 //!   3. `MVM_TENANT` env var (non-empty)
 //!   4. `--tenant` CLI flag
 //!
-//! Identity / `mvmctl auth` is the subject of a separate ADR + plan
-//! (Plan M); this resolver only handles the tenant *value* — a string
-//! label for the audit chain file — not identity / authentication /
-//! credential storage.
+//! Identity / `mvmctl auth` is the subject of separate design work;
+//! this resolver only handles the tenant *value* — a string label for
+//! the audit chain file — not identity / authentication / credential
+//! storage.
 
 #[derive(serde::Deserialize, Default)]
 struct ConfigFile {

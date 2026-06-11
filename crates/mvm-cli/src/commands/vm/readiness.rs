@@ -1,5 +1,4 @@
-//! Shared host-side readiness milestone emission (ADR-053 §3 /
-//! plan 74 W2).
+//! Shared host-side readiness milestone emission.
 //!
 //! Every `mvmctl` subcommand that observes a VM-lifecycle milestone
 //! the user might want to see in `mvmctl ls/ps --json` ends up here.
@@ -86,8 +85,8 @@ fn classify_services_snapshot(reports: &[IntegrationStateReport]) -> ServicesHea
 }
 
 /// Query guest integration status via the standard `mvm::vsock_transport`
-/// abstraction. Performs the ADR-053 / plan 74 W1 hello prelude on
-/// each connection so the agent dispatches the operational request.
+/// abstraction. Performs the hello prelude on each connection so the
+/// agent dispatches the operational request.
 fn query_services_via_transport(vm_name: &str) -> anyhow::Result<Vec<IntegrationStateReport>> {
     let transport: Box<dyn VsockTransport> = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(GUEST_AGENT_PORT)?;
@@ -119,13 +118,11 @@ fn query_services_via_transport(vm_name: &str) -> anyhow::Result<Vec<Integration
 ///   immediately (the mock backend exercises this in
 ///   `mvm_backend::mock_guest_agent::dispatch`).
 ///
-/// # Future: `Degraded` (ADR-053 §3)
+/// # Future: `Degraded`
 ///
 /// Detecting `Degraded { unhealthy }` requires polling *after*
-/// `ServicesReady`. Three follow-up paths are possible — see the
-/// "Plan: `Degraded` follow-up" section of the W2-services-health
-/// PR body. None of them are wired here; once `ServicesReady` fires,
-/// this function returns.
+/// `ServicesReady`. None of those follow-up paths are wired here;
+/// once `ServicesReady` fires, this function returns.
 pub(super) fn wait_for_services_ready(vm_name: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     let poll_interval = Duration::from_secs(1);
@@ -174,9 +171,8 @@ pub(super) fn wait_for_services_ready(vm_name: &str, timeout: Duration) {
     }
 }
 
-/// Post-`ServicesReady` integration-health watcher (ADR-053 §3 /
-/// plan 74 W2 → "Degraded follow-up"). The `mvmctl up` foreground
-/// Ctrl+C wait loop ticks this monitor every ~10 s so a service
+/// Post-`ServicesReady` integration-health watcher. The `mvmctl up`
+/// foreground Ctrl+C wait loop ticks this monitor every ~10 s so a service
 /// that flips `Active` → `Error` *after* boot transitions readiness
 /// to `Degraded { unhealthy }` instead of stranding the VM at
 /// `ServicesReady` in the registry.
@@ -300,7 +296,7 @@ mod tests {
         assert_eq!(snap.pending, vec!["api", "postgres", "queue", "worker"]);
     }
 
-    // ---------------- Post-ready Degraded mapping (Plan 74 W2 §Degraded) ----------------
+    // ---------------- Post-ready Degraded mapping ----------------
     //
     // The post-ready watcher uses the **same** snapshot shape as
     // the boot-time wait — only the readiness mapping diverges.

@@ -1,15 +1,14 @@
 //! UDS server loop — accepts `ServiceCall` envelopes from the supervisor
 //! proxy, dispatches via [`Registry`], writes back the [`ServiceResponse`].
 //!
-//! W1a ships the UDS server only; vsock 5300 wiring lands in W1b (the
+//! Currently the UDS server only; vsock 5300 wiring is separate (the
 //! supervisor sets up the backend-specific listener and hands an FD; this
 //! crate consumes the FD via [`serve_on_listener`]).
 //!
 //! Frame format: 4-byte big-endian length prefix + JSON `ServiceCall`.
 //! Response: 4-byte big-endian length prefix + JSON `ServiceResponse`.
-//! The max-frame-bytes gate (Plan 104 §"Capability gating" gate 1) is
-//! enforced *before* the parse so a malformed length prefix cannot
-//! provoke an unbounded allocation.
+//! The max-frame-bytes gate is enforced *before* the parse so a malformed
+//! length prefix cannot provoke an unbounded allocation.
 
 use std::sync::Arc;
 
@@ -24,7 +23,7 @@ use tracing::{debug, info, warn};
 use crate::broker::registry::Registry;
 
 /// Accept loop. Each accepted UDS connection runs to completion in its
-/// own `tokio::spawn`; one connection per supervisor-proxy call in W1a.
+/// own `tokio::spawn`; one connection per supervisor-proxy call.
 pub async fn serve(
     listener: UnixListener,
     registry: Arc<Registry>,
@@ -57,8 +56,8 @@ pub async fn serve(
 
 /// Variant of [`serve`] for tests + cases where the caller already has a
 /// `UnixListener` (e.g., from a tempdir-bound test fixture). The
-/// supervisor's spawn path will call this in W1b once it sets up the
-/// listener at the per-VM UDS path from `SubprocessConfig::uds_path`.
+/// supervisor's spawn path calls this once it sets up the listener at
+/// the per-VM UDS path from `SubprocessConfig::uds_path`.
 pub async fn serve_on_listener(
     listener: UnixListener,
     registry: Arc<Registry>,
@@ -84,8 +83,8 @@ async fn handle_connection(
         "mvm-broker received call"
     );
 
-    // W1a stub ctx: profile = Dev (default), composition counters = 0.
-    // W1b will populate from the supervisor-side enriched envelope.
+    // Stub ctx: profile = Dev (default), composition counters = 0.
+    // The supervisor-side enriched envelope will populate these.
     let ctx = ServiceCallCtx {
         workload_id: workload_id.clone(),
         tenant_id: tenant_id.clone(),
@@ -120,11 +119,10 @@ async fn handle_connection(
 }
 
 /// Read a length-prefixed JSON frame. Enforces the max-frame-bytes cap
-/// before allocating the body buffer (Plan 104 §"Capability gating"
-/// gate 1).
-// Length-prefixed JSON framing lives in `crate::framing` (plan 126 B5;
-// was `mvm_core::framing`); these wrappers keep the broker error context
-// on the shared transport. The cap-before-alloc gate is enforced there.
+/// before allocating the body buffer.
+// Length-prefixed JSON framing lives in `crate::framing`; these wrappers
+// keep the broker error context on the shared transport. The
+// cap-before-alloc gate is enforced there.
 pub async fn read_frame<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
     max_frame_bytes: usize,

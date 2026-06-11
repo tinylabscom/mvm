@@ -16,7 +16,7 @@ where
     }
 }
 
-/// Function-call entrypoint (plan 0003 / ADR-0009). Defaults to
+/// Function-call entrypoint. Defaults to
 /// `format = json`, `working_dir = /app`, `primary = false`. Use
 /// [`EntrypointExt`] chained setters to override.
 pub fn entrypoint_function(
@@ -55,7 +55,7 @@ pub trait EntrypointExt: Sized {
     /// constructed via `serde_json::json!({...}).as_object().cloned()`).
     ///
     /// The host's `mvm emit` step will auto-derive args/return
-    /// schemas from the entry source per ADR-0016 when these fields
+    /// schemas from the entry source when these fields
     /// are unset; explicit values supplied via these setters always
     /// win. SDK-layer byte-identity tests that hit corpus fixtures
     /// expecting auto-derived shapes need to set these explicitly,

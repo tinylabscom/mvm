@@ -82,7 +82,7 @@ pub trait NetworkProvider: Send + Sync {
     /// iptables inside `provision`, and the libkrun gvproxy/passt provider (L3)
     /// relies on the supervisor's in-process gateway-bridge `FlowPolicy`
     /// chokepoint. A provider returns `Some(..)` only when it drives a distinct
-    /// [`EgressEnforcer`] object (plan 123 A2's `SupervisorEgressEnforcer`).
+    /// [`EgressEnforcer`] object (the `SupervisorEgressEnforcer`).
     fn egress_enforcer(&self) -> Option<&dyn EgressEnforcer> {
         None
     }

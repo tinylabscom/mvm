@@ -1,5 +1,4 @@
-//! Install-spec parsing for the application-deps install pipeline
-//! (Plan 73 Followup B.2, ADR-047).
+//! Install-spec parsing for the application-deps install pipeline.
 //!
 //! The host stages a JSON spec at `/job/install_spec.json` and
 //! `mvm-host-vm-init`, at PID 1, parses it and dispatches the
@@ -21,8 +20,8 @@
 //! }
 //! ```
 //!
-//! Hand-rolled parser rather than pulling `serde_json` in: the
-//! Plan 72 W3 size budget caps the init binary at ≤ 1.5 MiB on
+//! Hand-rolled parser rather than pulling `serde_json` in: the init
+//! binary's size budget caps it at ≤ 1.5 MiB on
 //! aarch64-linux. The shape is closed (four fields, two enums) and
 //! the parser sees ~zero churn — adding `serde_json` for one
 //! load-bearing read isn't worth ~150 KiB of binary growth.
@@ -50,8 +49,7 @@ impl Language {
 /// Audit-gate strictness. Mirrors `mvm_build::app_deps::GateLevel`.
 /// The builder VM honors this when running the SBOM + CVE side
 /// pipeline (it doesn't fail the install on missing optional
-/// gates today; ADR-047 §"Lifecycle gates" formalizes the strict
-/// mode in a follow-on slice).
+/// gates today; strict mode is formalized in a follow-on slice).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateLevel {
     Dev,

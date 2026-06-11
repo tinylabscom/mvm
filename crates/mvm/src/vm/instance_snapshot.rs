@@ -1,8 +1,8 @@
-//! Instance-snapshot store — A4 of the filesystem-volumes plan.
+//! Instance-snapshot store.
 //!
 //! `mvmctl pause <vm>` quiesces the running VM, asks Firecracker
-//! for a snapshot, seals the bytes with the W4 HMAC envelope (now
-//! including a monotonic per-instance epoch — G5), and stops the
+//! for a snapshot, seals the bytes with the HMAC envelope (now
+//! including a monotonic per-instance epoch), and stops the
 //! VM. `mvmctl resume <vm>` verifies the envelope, asks Firecracker
 //! to load the snapshot, then re-establishes vsock auth via
 //! `PostRestore`. This module owns the disk layout + seal/verify
@@ -22,14 +22,14 @@
 //! ```
 //!
 //! The directory itself is mode `0700` (consistent with the
-//! existing `~/.mvm` discipline from W1.5). All snapshot files are
+//! existing `~/.mvm` discipline). All snapshot files are
 //! mode `0600` so a co-tenant on the same host can't read another
 //! sandbox's memory image even if `~/.mvm/instances/` were ever
 //! made world-readable by mistake.
 //!
 //! # What this module does NOT do (yet)
 //!
-//! - AES-GCM encryption of `mem.bin` (decision 2 / Sprint plan).
+//! - AES-GCM encryption of `mem.bin`.
 //!   The HMAC envelope guarantees integrity; confidentiality
 //!   currently rests on the file mode + `~/.mvm` directory perms.
 //!   The natural seam to add it is in `seal_instance_snapshot` /
@@ -51,7 +51,7 @@ use mvm_core::crypto::snapshot_hmac::{
 use secrecy::ExposeSecret;
 
 /// Tenant id used for snapshot encryption in mvm's single-host
-/// posture. Mirrors ADR-002's "one guest = one workload" framing —
+/// posture. Mirrors the "one guest = one workload" framing —
 /// every snapshot belongs to the local tenant. mvmd's multi-tenant
 /// path uses a different code path that takes a `tenant_id`
 /// explicitly.
@@ -129,9 +129,9 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
     tighten_snapshot_file_modes(&dir)?;
 
     // Encrypt vmstate + mem in place under the tenant DEK if one is
-    // available. Plan 63 W5: the HMAC envelope below then covers
-    // the ciphertext, so any tamper attempt fails the seal check
-    // before AEAD decryption is even attempted on resume.
+    // available. The HMAC envelope below then covers the ciphertext,
+    // so any tamper attempt fails the seal check before AEAD
+    // decryption is even attempted on resume.
     encrypt_artifacts_if_keyed(&dir)
         .with_context(|| format!("encrypting snapshot artifacts at {}", dir.display()))?;
 
@@ -212,7 +212,7 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
 }
 
 // ============================================================================
-// Post-restore signal (Plan 123 Phase C — the host-side sender)
+// Post-restore signal — the host-side sender
 // ============================================================================
 
 /// Outcome of signaling `PostRestore` to a resumed guest.
@@ -232,9 +232,9 @@ pub struct PostRestoreOutcome {
 /// the config/secrets drives and restarts services. Backend-agnostic — the
 /// production impl ([`VsockPostRestoreSignal`]) routes through the same
 /// `vsock_transport::for_vm` dispatcher every other host→agent RPC uses;
-/// tests inject a mock. This is the seam Plan 123 Phase C needed: the guest
-/// has handled `GuestRequest::PostRestore` all along, but nothing on the host
-/// sent it after a snapshot restore.
+/// tests inject a mock. This is the missing seam: the guest has handled
+/// `GuestRequest::PostRestore` all along, but nothing on the host sent it
+/// after a snapshot restore.
 pub trait PostRestoreSignal {
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome>;
 }
@@ -294,15 +294,14 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
 
 /// Encrypt `vmstate.bin` and `mem.bin` in place under the tenant
 /// DEK, when one is available. No-op when no DEK is configured —
-/// the resulting snapshot stays unencrypted, HMAC-only (Phase 1 /
-/// pre-W5 shape).
+/// the resulting snapshot stays unencrypted, HMAC-only.
 fn encrypt_artifacts_if_keyed(dir: &Path) -> Result<()> {
     let provider = snapshot_key_provider();
     let Ok(dek) = provider.get_data_key(SNAPSHOT_TENANT_ID) else {
         // No tenant DEK configured — leave artifacts unencrypted.
         // Operators who want at-rest encryption configure a key
         // via `mvmctl secret put` or the MVM_TENANT_KEY_LOCAL env
-        // var (W3).
+        // var.
         return Ok(());
     };
     let key_bytes = dek.expose_secret();
@@ -369,8 +368,7 @@ fn decrypt_artifacts_if_encrypted(dir: &Path) -> Result<()> {
                 // No-op — operator opted in to the migration escape.
             }
             (false, None) => {
-                // Pre-W5 / Phase 1 shape: unencrypted artifact, no
-                // DEK configured. Resume normally.
+                // Unencrypted artifact, no DEK configured. Resume normally.
             }
         }
     }
@@ -814,7 +812,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 63 W5 — encryption integration
+    // Encryption integration
     // ──────────────────────────────────────────────────────────────
 
     /// 32-byte tenant DEK, hex-encoded, suitable for the env-var
@@ -935,8 +933,8 @@ mod tests {
         unsafe { std::env::remove_var("MVM_TENANT_KEY_LOCAL") };
         pause_and_seal("vm-mix", &canned()).unwrap();
 
-        // Now configure a key and try to resume. Plan 63 W5: refuse
-        // because the snapshot was sealed before the DEK was
+        // Now configure a key and try to resume. Refuse because the
+        // snapshot was sealed before the DEK was
         // provisioned (downgrade vs v1 leftover indistinguishable
         // at this layer).
         let _k = TenantKeyGuard::set(TEST_DEK_HEX);
@@ -955,8 +953,8 @@ mod tests {
     #[test]
     fn verify_and_resume_v1_unencrypted_bypass_via_env() {
         // The one-time v1 → v2 migration escape: operator opts in
-        // via MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1 to resume a pre-W5
-        // snapshot under a key-configured tenant.
+        // via MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1 to resume a legacy
+        // unencrypted snapshot under a key-configured tenant.
         let _g = DataDirGuard::new();
         unsafe { std::env::remove_var("MVM_TENANT_KEY_LOCAL") };
         pause_and_seal("vm-mig", &canned()).unwrap();
@@ -994,7 +992,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 123 Phase C — post-restore signal orchestration
+    // Post-restore signal orchestration
     // ──────────────────────────────────────────────────────────────
 
     /// Mock `PostRestoreSignal` returning a canned result, so the

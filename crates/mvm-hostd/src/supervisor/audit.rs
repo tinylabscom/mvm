@@ -1,10 +1,10 @@
-//! Audit signer slot. Wave 3 — chain-signed audit stream.
+//! Audit signer slot — chain-signed audit stream.
 //!
-//! Plan 37 §22: the supervisor signs each audit entry into the
-//! previous entry's hash, producing a tamper-evident chain. Per
+//! The supervisor signs each audit entry into the previous entry's
+//! hash, producing a tamper-evident chain. Per
 //! `mvm-policy::AuditPolicy`, entries can also be replicated to
-//! per-tenant streams. Wave 1.3 ships the trait surface; Wave 3
-//! wires the real chain-signing impl.
+//! per-tenant streams. This module ships the trait surface; the real
+//! chain-signing impl is wired separately.
 
 use std::sync::Mutex;
 
@@ -15,21 +15,21 @@ use mvm_core::policy::{PolicyBundle, PolicyId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// One audit-stream entry. Plan 37 §22's "audit binding" — every
-/// entry references the plan, the policy bundle, and the image
-/// that were in force when the event happened. A runbook can
-/// answer "what was the runtime contract at the moment of incident?"
-/// in O(1) by reading any one entry, without re-deriving from logs.
+/// One audit-stream entry — the "audit binding": every entry
+/// references the plan, the policy bundle, and the image that were
+/// in force when the event happened. A runbook can answer "what was
+/// the runtime contract at the moment of incident?" in O(1) by
+/// reading any one entry, without re-deriving from logs.
 ///
 /// `bundle_id` + `bundle_version` are `Option`-typed because audit
-/// entries can be emitted before policy resolution lands (Wave 2)
-/// or in degraded modes where no bundle is available (e.g. `--dev`
+/// entries can be emitted before policy resolution lands or in
+/// degraded modes where no bundle is available (e.g. `--dev`
 /// override). When present they carry the same `(id, version)`
 /// shape the bundle itself does.
 ///
-/// Wave 3's `AuditSigner` real impl wraps this struct in a
-/// chain-signed envelope (each entry's signature includes the
-/// previous entry's hash, producing a tamper-evident stream).
+/// The real `AuditSigner` impl wraps this struct in a chain-signed
+/// envelope (each entry's signature includes the previous entry's
+/// hash, producing a tamper-evident stream).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditEntry {
@@ -62,7 +62,7 @@ pub struct AuditEntry {
 
 impl AuditEntry {
     /// Construct an audit entry bound to a plan + (optional) bundle.
-    /// Plan `audit_labels` are merged into the entry's labels;
+    /// The plan's `audit_labels` are merged into the entry's labels;
     /// per-event extras override on collision.
     pub fn for_plan(
         plan: &ExecutionPlan,
@@ -86,11 +86,9 @@ impl AuditEntry {
         }
     }
 
-    /// Construct a chain entry for a `FlowOpened` event ([Plan 102
-    /// W6.A](../../specs/plans/103-w6a-implementation-tracker.md) /
-    /// [ADR-058](../../specs/adrs/058-claim-10-bytes-leaving-trust-boundary.md)
-    /// claim 10 leg 2). The gateway bridge calls this on the first
-    /// byte per direction of a new flow.
+    /// Construct a chain entry for a `FlowOpened` event (claim 10
+    /// leg 2: bytes leaving the trust boundary). The gateway bridge
+    /// calls this on the first byte per direction of a new flow.
     pub fn flow_opened(
         plan: &ExecutionPlan,
         bundle: Option<&PolicyBundle>,
@@ -132,8 +130,8 @@ impl AuditEntry {
     }
 
     /// Construct a chain entry recording that a host-allowlisted observer
-    /// forced a fail-closed flow kill (Plan 141 / ADR-064 Q8). `reason` is
-    /// one of `drop` / `modify_over_mtu` / `modify_unserializable`. The
+    /// forced a fail-closed flow kill. `reason` is one of `drop` /
+    /// `modify_over_mtu` / `modify_unserializable`. The
     /// entry attributes the `observer` so an operator can answer "which
     /// observer killed this flow and why?" from the signed chain alone.
     pub fn flow_observer_fault(
@@ -168,15 +166,13 @@ pub const FLOW_CLOSED_EVENT: &str = "gateway.flow_closed";
 
 /// Canonical `event` string for a `FlowObserverFault` chain entry —
 /// emitted when a host-allowlisted observer's `Modify`/`Drop` forced a
-/// fail-closed flow kill (Plan 141 / ADR-064 Q8).
+/// fail-closed flow kill.
 pub const FLOW_OBSERVER_FAULT_EVENT: &str = "gateway.flow_observer_fault";
 
 /// Per-direction flow label for [`AuditEntry::flow_opened`] /
 /// [`AuditEntry::flow_closed`]. Egress = guest → internet,
 /// Ingress = internet → guest. North-south only — east-west
-/// microVM ↔ microVM lateral flows are out of W6 scope
-/// ([ADR-058](../../specs/adrs/058-claim-10-bytes-leaving-trust-boundary.md)
-/// out-of-scope list, deferred to W11).
+/// microVM ↔ microVM lateral flows are out of scope here, deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowDirection {
@@ -196,14 +192,13 @@ impl FlowDirection {
     }
 }
 
-/// Close discriminator for [`AuditEntry::flow_closed`]. Plan 102
-/// W6.A commit 3.
+/// Close discriminator for [`AuditEntry::flow_closed`].
 ///
 /// `Eof` is the steady-state happy path (TCP FIN, UDP timeout,
 /// DGRAM peer closed). `BridgeError` covers bridge-task panic
 /// catch / I/O error / drop guard. `PolicyDropped` is the
-/// `FlowPolicy` hook returning `FlowAction::Drop` — substrate
-/// for Plan 74 enforcement to plug in. `Shutdown` covers graceful
+/// `FlowPolicy` hook returning `FlowAction::Drop` — the substrate
+/// enforcement plugs into. `Shutdown` covers graceful
 /// supervisor teardown (Vz Swift bridge cancellation, libkrun
 /// `exit()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,10 +233,10 @@ pub enum AuditError {
 
 #[async_trait]
 pub trait AuditSigner: Send + Sync {
-    /// Sign and persist one entry. Wave 3's chain-signing impl
-    /// computes `prev_hash` from the previous entry, derives the
-    /// current entry's signature, and writes both to the audit
-    /// stream destination(s).
+    /// Sign and persist one entry. The chain-signing impl computes
+    /// `prev_hash` from the previous entry, derives the current
+    /// entry's signature, and writes both to the audit stream
+    /// destination(s).
     async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError>;
 }
 
@@ -259,7 +254,7 @@ impl AuditSigner for NoopAuditSigner {
 /// - unit tests assert the supervisor emitted the expected entries
 /// - dev mode without persistent storage
 ///
-/// Wave 3's chain-signing real impl will replace this for production,
+/// The chain-signing real impl will replace this for production,
 /// but keep this around for `cargo test` and `mvmctl --dev`.
 pub struct CapturingAuditSigner {
     entries: Mutex<Vec<AuditEntry>>,
@@ -359,7 +354,7 @@ mod tests {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
-            // G4 (plan 37 Addendum G4) replay-protection fields.
+            // G4 replay-protection fields.
             valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
             valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
             nonce: Nonce::from_bytes([0xab; 16]),
@@ -450,7 +445,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Plan 102 W6.A commit 3 — gateway flow event types + helpers.
+    // Gateway flow event types + helpers.
     // -----------------------------------------------------------------
 
     #[test]
@@ -473,7 +468,7 @@ mod tests {
     #[test]
     fn flow_close_reason_wire_strings_pinned() {
         // Same contract as flow_direction. Four reasons cover the
-        // close discriminators the bridge can emit in W6.A:
+        // close discriminators the bridge can emit:
         // Eof (steady-state), BridgeError (drop guard), PolicyDropped
         // (FlowPolicy hook returns Drop), Shutdown (graceful teardown).
         let cases = [

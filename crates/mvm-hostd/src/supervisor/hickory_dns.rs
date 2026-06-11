@@ -1,5 +1,4 @@
-//! Plan 60 Phase 3 Slice B — pure-Rust DNS resolver backed by
-//! `hickory-resolver`.
+//! Pure-Rust DNS resolver backed by `hickory-resolver`.
 //!
 //! Alternative to [`crate::supervisor::l7_proxy::TokioDnsResolver`] (which calls
 //! the host libc's `getaddrinfo`). Use this when operators want:
@@ -27,8 +26,7 @@
 //!   policy decides whether the flow to those IPs is allowed.
 //! - **No DNS interception** of guest queries. The guest's `/etc/resolv.conf`
 //!   gets pointed at the supervisor's DNS endpoint by the per-VM
-//!   netns wiring (Phase 3 Slice C / mvm-hostd lift); this module
-//!   provides the resolver the endpoint uses.
+//!   netns wiring; this module provides the resolver the endpoint uses.
 
 use std::net::IpAddr;
 use std::sync::Arc;

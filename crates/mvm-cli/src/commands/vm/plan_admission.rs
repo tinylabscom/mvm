@@ -1,40 +1,38 @@
-//! Plan 64 W3 — plan-admission pipeline used by `mvmctl up`.
+//! Plan-admission pipeline used by `mvmctl up`.
 //!
-//! Threads W1's `synthesize_plan` + W2's `host_signer` into the
+//! Threads `synthesize_plan` + `host_signer` into the
 //! supervisor-equivalent admission flow:
 //!
 //! ```text
 //! cmd_run(args)
-//!   ↓ synthesize_plan(args)        [W1]
-//!   ↓ load_or_init_host_signer()    [W2]
+//!   ↓ synthesize_plan(args)
+//!   ↓ load_or_init_host_signer()
 //!   ↓ sign_plan(plan, signer)
 //!   ↓ verify_plan(signed, trusted) — catches signing-time bugs
-//!   ↓ check_window(plan, now)      — Plan-37 G4 validity window
-//!   ↓ nonce_store.check_and_insert  — Plan-37 G4 replay protection
+//!   ↓ check_window(plan, now)      — G4 validity window
+//!   ↓ nonce_store.check_and_insert  — G4 replay protection
 //!   ↓ return AdmittedPlan { plan, plan_id, signer_id, signed }
 //!   ↓ caller invokes backend.start() as before
 //! ```
 //!
-//! What this module does NOT do (intentional scope reduction from
-//! plan 64 W3's original framing):
+//! What this module does NOT do (intentional scope reduction):
 //!
 //! - **Drive `Supervisor::launch`.** The supervisor's backend
 //!   dispatch slot expects a `BackendLauncher` trait impl that
 //!   wraps today's `AnyBackend::start()`; landing that wrapper
 //!   means refactoring three call sites in 1084 lines of `up.rs`
 //!   (the main path, the MVM_DIRECT_BOOT branch, and the `--watch`
-//!   path). That refactor stays in plan 64's W3 scope but lands
-//!   in a follow-up PR. **This module is the substrate that makes
-//!   the eventual supervisor refactor a one-line change** —
-//!   `admit_for_run` produces the `SignedExecutionPlan` the
-//!   supervisor needs.
+//!   path). That refactor lands in a follow-up. **This module is
+//!   the substrate that makes the eventual supervisor refactor a
+//!   one-line change** — `admit_for_run` produces the
+//!   `SignedExecutionPlan` the supervisor needs.
 //!
-//! - **Emit audit lines.** W4 wires `FileAuditSigner` onto the
-//!   `AdmittedPlan`'s `plan_id`; this module is silent on audit.
+//! - **Emit audit lines.** A later step wires `FileAuditSigner` onto
+//!   the `AdmittedPlan`'s `plan_id`; this module is silent on audit.
 //!
-//! - **Resolve component slots.** W5 maps `PolicyRef → concrete
-//!   EgressProxy/ToolGate/...`. This module returns the plan with
-//!   refs unresolved.
+//! - **Resolve component slots.** A later step maps `PolicyRef →
+//!   concrete EgressProxy/ToolGate/...`. This module returns the
+//!   plan with refs unresolved.
 //!
 //! ## Test seam
 //!
@@ -94,7 +92,7 @@ impl Default for InMemoryNonceLedger {
 }
 
 /// Result of a successful admission. Carries everything the caller
-/// needs to hand to the backend (the plan + its id), to W4's audit
+/// needs to hand to the backend (the plan + its id), to the audit
 /// chain (the plan again, for `AuditEntry::for_plan`), and — for
 /// downstream consumers that want the canonical envelope — the
 /// `SignedExecutionPlan` itself.
@@ -156,7 +154,7 @@ pub fn admit_for_run(
     // being an outcome.
     let plan = synthesize_plan(input).context("synthesizing plan")?;
 
-    // Load or generate the host signer. W2's load_or_init refuses
+    // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
     let signer = match host_signer_keys_dir {
         Some(dir) => super::host_signer::load_or_init_at(dir)?,
@@ -174,7 +172,7 @@ pub fn admit_for_run(
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
     // can only fire if the host's clock changed during signing or if
-    // someone overrode the validity window in W1's defaults.
+    // someone overrode the validity window in synthesis defaults.
     let now = clock.now();
     check_window(&verified, now).map_err(|e| match e {
         PlanValidityError::NotYetValid { .. } | PlanValidityError::Expired { .. } => {
@@ -194,7 +192,7 @@ pub fn admit_for_run(
             .context("replay protection check")?;
     }
 
-    // ADR-002 claim 9 — bundle re-verify at admit time. Only fires
+    // Claim 9 — bundle re-verify at admit time. Only fires
     // when the plan pinned a bundle; missing context with a pinned
     // plan is operator misconfiguration (mvmctl up wasn't wired
     // with a resolver/trust store), so we refuse rather than skip
@@ -218,8 +216,8 @@ pub fn admit_for_run(
     })
 }
 
-/// Plan 112 Phase 3c — soft caps on the JSON envelope sizes flowing
-/// through `VmStartConfig` → `SupervisorConfig` over the supervisor's
+/// Soft caps on the JSON envelope sizes flowing through
+/// `VmStartConfig` → `SupervisorConfig` over the supervisor's
 /// stdin pipe. Adversarial envelopes are a DoS vector (memory pressure
 /// on the supervisor + pipe-buffer pressure on the producer). 1 MiB /
 /// 4 MiB are generous for legitimate plans / bundles and tight enough
@@ -227,8 +225,8 @@ pub fn admit_for_run(
 const PLAN_JSON_MAX_BYTES: usize = 1024 * 1024;
 const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// Plan 112 Phase 3c — populate the three `VmStartConfig` audit-substrate
-/// fields (`tenant_id`, `plan_json`, `bundle_json`) from the admitted
+/// Populate the three `VmStartConfig` audit-substrate fields
+/// (`tenant_id`, `plan_json`, `bundle_json`) from the admitted
 /// plan. Call after the `VmStartConfig` is built and before
 /// `backend.start()`; the libkrun/Vz backends read these to wire
 /// `SupervisorConfig.{tenant_id, audit_dir, gateway_audit_socket,
@@ -237,8 +235,8 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// JSON-encoded so `mvm-core` carries no typed dep on `mvm-plan`. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
-/// trusting any decoded field — see ADR-041 §"Verification at admission"
-/// and `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
+/// trusting any decoded field — see
+/// `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
 ///
 /// **Do not log the resulting `plan_json` / `bundle_json` values.**
 /// The signed envelope may contain secret bindings, environment
@@ -268,7 +266,7 @@ pub fn populate_audit_substrate(
     // (`admitted.plan.bundle`, a `PlanArtifact` — content-addressed
     // kernel/rootfs, verified separately at admit time via `verify_plan_bundle`).
     // Feeding the pin here was a conflation the supervisor's PolicyBundle decode
-    // would reject. `None` until a policy-bundle source is wired (Slice 3 (b)).
+    // would reject. `None` until a policy-bundle source is wired.
     cfg.bundle_json = match policy_bundle {
         Some(bundle) => {
             let bj = serde_json::to_string(bundle)
@@ -287,14 +285,13 @@ pub fn populate_audit_substrate(
     Ok(())
 }
 
-/// Plan 113 §Task 13 — atomically write `body` to `path` at mode 0600 on
-/// Unix hosts.
+/// Atomically write `body` to `path` at mode 0600 on Unix hosts.
 ///
 /// The Firecracker bridge sidecar reads `plan.json` + `bundle.json` from
 /// the per-VM state dir at spawn time. Those files carry the signed
 /// `ExecutionPlan` envelope and the (optional) bundle pin, which may
-/// resolve through `secrets` / policy refs to credentials per ADR-049 /
-/// Plan 104. They sit at the same trust tier as the host signer key
+/// resolve through `secrets` / policy refs to credentials. They sit at
+/// the same trust tier as the host signer key
 /// (mode 0600); `std::fs::write` would default to 0644 minus umask which
 /// on most contributor hosts is 0644 or 0664 — world-readable. Use
 /// `OpenOptionsExt::mode(0o600)` + tmp-and-rename so a concurrent
@@ -333,9 +330,9 @@ pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<(
     Ok(())
 }
 
-/// Plan 113 §Task 13 — stash the signed plan envelope + (optional)
-/// bundle pin in the per-VM state dir so the Firecracker bridge
-/// sidecar can read them at spawn time.
+/// Stash the signed plan envelope + (optional) bundle pin in the
+/// per-VM state dir so the Firecracker bridge sidecar can read them
+/// at spawn time.
 ///
 /// Called from every `up.rs` producer site immediately after
 /// `populate_audit_substrate`, before `backend.start()`. No-op when
@@ -363,8 +360,8 @@ pub(crate) fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -
     Ok(())
 }
 
-/// Tier A.1 admission enforcement: every volume about to be attached
-/// must be named in the verified `ExecutionPlan.shares`, with matching
+/// Admission enforcement: every volume about to be attached must be
+/// named in the verified `ExecutionPlan.shares`, with matching
 /// host path, guest path, kind, ro/rw, and encryption.
 ///
 /// On the local `mvmctl up`/`dev` path the CLI builds both the signed
@@ -450,8 +447,8 @@ mod tests {
         }
     }
 
-    /// Tier A.1 / claim 1: a volume that the signed plan didn't admit —
-    /// or that mismatches the admitted ro/rw — is refused before launch.
+    /// Claim 1: a volume that the signed plan didn't admit — or that
+    /// mismatches the admitted ro/rw — is refused before launch.
     #[test]
     fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
@@ -580,7 +577,7 @@ mod tests {
             None,
         )
         .unwrap();
-        // The signed field is what W4's audit signer will hash;
+        // The signed field is what the audit signer will hash;
         // proving it round-trips here closes the contract.
         let signer = super::super::host_signer::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
@@ -630,7 +627,7 @@ mod tests {
         assert_ne!(a1.plan.nonce, a2.plan.nonce);
     }
 
-    // ── ADR-002 claim 9: admit-time bundle re-verify ─────────────
+    // ── Claim 9: admit-time bundle re-verify ─────────────────────
     //
     // Tests exercise the boundary between `synthesize_plan`'s
     // `bundle_pin` (the input) and `admit_for_run`'s
@@ -876,7 +873,7 @@ mod tests {
 
     #[test]
     fn bundle_json_carries_a_policy_bundle_not_the_artifact_pin() {
-        // Slice 3 (a) de-conflation: bundle_json is the tenant PolicyBundle the
+        // De-conflation: bundle_json is the tenant PolicyBundle the
         // supervisor's L4 gate + observers consume — sourced from the
         // policy_bundle arg, NOT from `admitted.plan.bundle` (the .mvmpkg
         // PlanArtifact pin, a different bundle verified separately).
@@ -922,7 +919,7 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────────────────────
-    // Plan 113 §Task 13 — write_secret_file + stash_plan_for_bridge
+    // write_secret_file + stash_plan_for_bridge
     // ───────────────────────────────────────────────────────────────
 
     #[test]

@@ -80,7 +80,7 @@ pub fn parse_port_specs(specs: &[String]) -> Result<Vec<mvm::config::PortMapping
 /// - `host:/guest:ro|rw`       — dir share, explicit mode
 /// - `host:/guest:SIZE`        — persistent ext4 disk image (virtio-blk)
 /// - `host:/guest:SIZE:ro|rw`  — disk, explicit mode
-/// - `…:enc`                   — disk only: mark for encryption (Plan 101)
+/// - `…:enc`                   — disk only: mark for encryption
 ///
 /// Disambiguation is positional: the token right after the guest mount
 /// is the SIZE iff it isn't a `ro`/`rw`/`enc` keyword; its presence is
@@ -106,8 +106,8 @@ pub enum VolumeSpec {
         guest: String,
         size: String,
         read_only: bool,
-        /// `:enc` — route through in-guest encryption (Plan 101). Fails
-        /// closed at launch until that lands; never silently plaintext.
+        /// `:enc` — route through in-guest encryption. Fails closed at
+        /// launch until that lands; never silently plaintext.
         encrypted: bool,
     },
 }
@@ -426,11 +426,11 @@ fn validate_host_path(host: &str, expect_dir: bool) -> Result<String> {
 /// shared choke point for both `mvmctl up`/`run` and `mvmctl dev`.
 ///
 /// Enforces, in order:
-/// - **Encryption fail-closed (§8 / Plan 101):** a `:enc` disk is
-///   refused with a clear error — never silently stored as plaintext.
-/// - **Reserved guest mount (§7):** the guest path can't shadow a
-///   runtime mount or the secrets/config drives.
-/// - **Host-path safety (§7):** the host path is canonicalized (symlinks
+/// - **Encryption fail-closed:** a `:enc` disk is refused with a clear
+///   error — never silently stored as plaintext.
+/// - **Reserved guest mount:** the guest path can't shadow a runtime
+///   mount or the secrets/config drives.
+/// - **Host-path safety:** the host path is canonicalized (symlinks
 ///   resolved), checked against a protected-directory deny-list, and the
 ///   **resolved** path is pinned back onto the volume (TOCTOU-safe).
 pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {

@@ -25,15 +25,14 @@ toml = "0.8"
 [dependencies.mvm-vm-host]
 path = ".."
 
-# Plan 113 §Task 15 — fuzz the host-side `BridgeConfigJson` JSON
-# parser. The bridge binary reads attacker-influenced bytes on stdin
-# (Task 13's `FirecrackerBackend` writes them, but the bytes traverse
-# a pipe boundary the bridge must defend before installing Landlock +
-# seccomp). Analog of `fuzz_supervisor_config` and `fuzz_guest_request`;
-# harness goal is "never panic on any input." See
+# Fuzz the host-side `BridgeConfigJson` JSON parser. The bridge binary
+# reads attacker-influenced bytes on stdin (`FirecrackerBackend` writes
+# them, but the bytes traverse a pipe boundary the bridge must defend
+# before installing Landlock + seccomp). Analog of
+# `fuzz_supervisor_config` and `fuzz_guest_request`; harness goal is
+# "never panic on any input." See
 # `crates/mvm-firecracker-bridge/fuzz/fuzz_targets/fuzz_bridge_config_json.rs`
-# for the harness body and ADR-064 §"Trust model" for the trust
-# boundary.
+# for the harness body.
 [[bin]]
 name = "fuzz_bridge_config_json"
 path = "fuzz_targets/fuzz_bridge_config_json.rs"
@@ -41,8 +40,8 @@ test = false
 doc = false
 bench = false
 
-# Plan 113 §Task 15 — fuzz the operator-curated `passt-hashes.toml`
-# parser. The bridge reads this file BEFORE installing confinement, so
+# Fuzz the operator-curated `passt-hashes.toml` parser. The bridge
+# reads this file BEFORE installing confinement, so
 # a panic here surfaces as a hard process death before the FlowEvent
 # pipeline is up. `#[serde(deny_unknown_fields)]` is asserted by the
 # unit tests; this target is the no-panic complement.

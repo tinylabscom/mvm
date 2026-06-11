@@ -1,5 +1,4 @@
-//! Host-side resolver for the mvm runtime overlay disk
-//! (ADR-051).
+//! Host-side resolver for the mvm runtime overlay disk.
 //!
 //! Every microVM mvm boots — Nix-built rootfs and OCI-pulled
 //! rootfs alike — attaches a second virtio-blk device carrying
@@ -25,32 +24,31 @@
 //! The VERSION file is what the resolver checks against the
 //! caller's `expected_version`. Mismatched versions are an
 //! admission-time error (the agent's vsock protocol is
-//! versioned per ADR-002 §W4.1; a stale overlay paired with a
+//! versioned; a stale overlay paired with a
 //! newer host would silently misbehave).
 //!
 //! ## Two ways to land an artifact in the cache
 //!
 //! 1. **Build from the flake.** [`build_overlay_with_nix`]
 //!    shells out to `nix build` against
-//!    `<workspace>/nix/images/runtime-overlay/` (W1.4b.2's flake)
+//!    `<workspace>/nix/images/runtime-overlay/`
 //!    and returns paths into the nix store. Linux-only — `nix`
 //!    is unavailable on the macOS host per CLAUDE.md's "Host
 //!    Nix is never used by mvmctl" rule, so the function gates
 //!    on `target_os = "linux"`. The macOS path runs through the
-//!    libkrun builder VM (W1.4b.3b's wiring).
-//! 2. **Download from a release.** W1.4b.4 wires the
-//!    artifact-acquisition path (similar to how
-//!    `download_dev_image` works for the dev VM image).
+//!    libkrun builder VM.
+//! 2. **Download from a release.** The artifact-acquisition path
+//!    works similarly to how `download_dev_image` works for the
+//!    dev VM image.
 //!
-//! ## Out of scope (this PR)
+//! ## Out of scope
 //!
-//! - **Attaching** the overlay to a microVM at boot. W1.4b.3b
-//!   lands the backend + `mvm-verity-init` extensions.
-//! - **Routing macOS calls** through the libkrun builder VM.
-//!   W1.4b.3b also wires this (same VM the builder-vm flake
-//!   runs in today).
+//! - **Attaching** the overlay to a microVM at boot — the backend
+//!   + `mvm-verity-init` extensions land separately.
+//! - **Routing macOS calls** through the libkrun builder VM
+//!   (same VM the builder-vm flake runs in today).
 //! - **`mkGuest` refactor** to drop the agent / shim / runner
-//!   from per-image closures. W1.4b.3c.
+//!   from per-image closures.
 //!
 //! The resolver and the build-spec construction are pure file
 //! I/O + string parsing; only [`build_overlay_with_nix`] gates
@@ -98,9 +96,9 @@ pub enum RuntimeOverlayError {
     #[error("runtime overlay VERSION file invalid: {reason}")]
     InvalidVersionFile { reason: String },
 
-    /// `nix build` exited non-zero or couldn't be spawned. Plan
-    /// 74 W1.4b.3a — the orchestrator that drives `nix build`
-    /// against the runtime-overlay flake. Includes the upstream
+    /// `nix build` exited non-zero or couldn't be spawned by the
+    /// orchestrator that drives `nix build` against the
+    /// runtime-overlay flake. Includes the upstream
     /// stderr so failures are debuggable without re-running with
     /// `--verbose`.
     #[error("nix build failed: {reason}")]
@@ -108,7 +106,7 @@ pub enum RuntimeOverlayError {
 
     /// The runtime-overlay operation is unsupported on this
     /// host. `nix build` runs Linux-only; macOS callers route
-    /// through the libkrun builder VM (W1.4b.3b's wiring).
+    /// through the libkrun builder VM.
     #[error("host does not support {operation}: {reason}")]
     HostUnsupported {
         operation: &'static str,
@@ -122,9 +120,8 @@ pub enum RuntimeOverlayError {
     /// `curl` exited non-zero (or couldn't be spawned) while
     /// fetching one of the release artifacts. Carries the URL
     /// and the upstream stderr so a failed download is debuggable
-    /// without re-running with `--verbose`. Plan 74 W1.4b.4 —
-    /// the download path mirrors the existing
-    /// `download_builder_vm_image` shape (ADR-002 §W5.1).
+    /// without re-running with `--verbose`. The download path
+    /// mirrors the existing `download_builder_vm_image` shape.
     #[error("download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 
@@ -145,7 +142,7 @@ pub enum RuntimeOverlayError {
     /// The fetched `checksums-sha256.txt` file didn't carry an
     /// entry for one of the artifacts we need. Refusing to
     /// download an artifact whose checksum we can't pre-commit
-    /// is the W5.1 fail-closed contract.
+    /// is the fail-closed integrity contract.
     #[error("checksum manifest at {checksums_url} did not list an entry for {name}")]
     ChecksumMissing { name: String, checksums_url: String },
 }
@@ -236,9 +233,8 @@ impl RuntimeOverlayResolver {
     ///
     /// Returns an [`RuntimeOverlayArtifact`] on success. Fails
     /// closed on every other path — no partial / degraded
-    /// fallback. Plan 74 §Risks R13: the agent must come from a
-    /// trusted overlay or the W3 verity claim is silently
-    /// weakened.
+    /// fallback: the agent must come from a trusted overlay or the
+    /// verified-boot claim is silently weakened.
     pub fn resolve(&self, arch: GuestArch) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
         let layout = self.layout(arch);
         check_exists(
@@ -343,7 +339,7 @@ fn read_and_validate_roothash(path: &Path) -> Result<String, RuntimeOverlayError
 }
 
 // =================================================================
-// Build orchestrator (W1.4b.3a)
+// Build orchestrator
 // =================================================================
 
 /// Spec for `nix build` of the runtime-overlay flake at
@@ -449,7 +445,7 @@ impl OverlayBuildSpec {
 /// CLAUDE.md forbids host nix on macOS, and even if the binary
 /// is installed it can't cross-compile to `aarch64-linux` /
 /// `x86_64-linux` without a remote builder. Non-Linux callers
-/// get `HostUnsupported`; W1.4b.3b routes those calls through
+/// get `HostUnsupported`; those calls route through
 /// the libkrun builder VM.
 ///
 /// On success the function:
@@ -537,7 +533,7 @@ fn validate_built_artifact(
 }
 
 // =================================================================
-// Cache-install step (W1.4b.3b.1)
+// Cache-install step
 // =================================================================
 
 /// Options for [`install_overlay_into_cache`].
@@ -708,10 +704,10 @@ fn set_cache_perms(_p: &Path) -> Result<(), RuntimeOverlayError> {
 }
 
 // ============================================================================
-// Plan 74 W1.4b — download the published runtime overlay (consumer side)
+// Download the published runtime overlay (consumer side)
 // ============================================================================
 
-/// Default GitHub Releases base URL the W1.4b release pipeline
+/// Default GitHub Releases base URL the release pipeline
 /// (`runtime-overlay-image` job in `.github/workflows/release.yml`)
 /// uploads to. Override via the `MVM_OVERLAY_BASE_URL` env var for
 /// hermetic tests or a private mirror — the env path doesn't accept
@@ -719,7 +715,7 @@ fn set_cache_perms(_p: &Path) -> Result<(), RuntimeOverlayError> {
 /// so the test can pin to a `file://...` fixture dir.
 const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/download";
 
-/// Documented escape hatch from ADR-002 §W5.1 — bypass the SHA-256
+/// Documented escape hatch — bypass the SHA-256
 /// integrity check when an emergency rotation requires it. Never set
 /// in CI. Matches the env var name used by `download_dev_image` and
 /// `download_builder_vm_image` so the operator runbook covers all
@@ -774,7 +770,7 @@ pub fn release_base_url(version: &str) -> String {
 /// install into `cache_root` under the canonical layout
 /// `<cache_root>/runtime-overlay/<version>/<arch>/`.
 ///
-/// Mirrors the W5.1 pattern of `download_dev_image` /
+/// Mirrors the integrity pattern of `download_dev_image` /
 /// `download_builder_vm_image`: fetch the checksums file first;
 /// reject downloads whose hash isn't pre-committed there; honor
 /// `MVM_SKIP_HASH_VERIFY=1` only as a documented emergency
@@ -792,8 +788,8 @@ pub fn download_runtime_overlay(
     let checksums_url = format!("{base}/{}", names.checksums);
 
     // Step 1: fetch the checksum manifest before touching the
-    // artifacts. ADR-002 §W5.1 — the manifest is the trust anchor
-    // even before signed manifests catch up; fetching it first
+    // artifacts. The manifest is the trust anchor even before
+    // signed manifests catch up; fetching it first
     // means a missing manifest aborts before we waste bandwidth
     // on the (potentially large) ext4.
     let expected = fetch_expected_hashes(
@@ -899,7 +895,7 @@ fn parse_checksums_manifest(body: &str) -> std::collections::HashMap<String, Str
 /// Stream `path` through SHA-256 and compare to `expected`. On
 /// mismatch, delete the file (so retry can't pick up tainted
 /// bytes) and return a `ChecksumMismatch`. Honors
-/// `MVM_SKIP_HASH_VERIFY=1` per ADR-002 §W5.1.
+/// `MVM_SKIP_HASH_VERIFY=1`.
 fn verify_file_sha256(
     path: &Path,
     name: &str,
@@ -1299,7 +1295,7 @@ mod tests {
     }
 
     // =================================================================
-    // Build-spec tests (W1.4b.3a)
+    // Build-spec tests
     // =================================================================
 
     #[test]
@@ -1430,7 +1426,7 @@ mod tests {
     }
 
     // =================================================================
-    // install_overlay_into_cache tests (W1.4b.3b.1)
+    // install_overlay_into_cache tests
     // =================================================================
 
     /// Build a "source" artifact in a tempdir whose layout
@@ -1508,8 +1504,8 @@ mod tests {
     #[test]
     fn install_returns_artifact_resolvable_by_runtime_overlay_resolver() {
         // End-to-end: install → resolve must succeed. Closes the
-        // producer → cache → consumer loop in a unit test (real
-        // build pipeline is W1.4b.3a's Linux integration test).
+        // producer → cache → consumer loop in a unit test (the real
+        // build pipeline has its own Linux integration test).
         let (_keep, source) = make_source_artifact("0.14.0", GuestArch::X86_64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
 
@@ -1737,7 +1733,7 @@ mod tests {
     }
 
     // ====================================================================
-    // Plan 74 W1.4b.4 — download_runtime_overlay tests
+    // download_runtime_overlay tests
     // ====================================================================
 
     /// Per-arch release filenames must match the names the
@@ -1999,7 +1995,7 @@ short  bar.ext4
 
     /// A tampered artifact whose sha doesn't match the manifest
     /// must be rejected, the bad file deleted, and the cache left
-    /// unchanged. This is the W5.1 fail-closed contract.
+    /// unchanged. This is the fail-closed integrity contract.
     #[test]
     fn download_runtime_overlay_rejects_checksum_mismatch() {
         let _g = env_test_mutex().lock().unwrap();
@@ -2058,7 +2054,7 @@ short  bar.ext4
     }
 
     /// A checksums manifest missing one of the wanted entries
-    /// aborts before any artifact is fetched. ADR-002 §W5.1.
+    /// aborts before any artifact is fetched.
     #[test]
     fn download_runtime_overlay_rejects_missing_checksum_entry() {
         let _g = env_test_mutex().lock().unwrap();

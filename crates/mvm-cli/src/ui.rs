@@ -60,8 +60,8 @@ pub fn format_timed(label: &str, elapsed: std::time::Duration) -> String {
 }
 
 /// Print a completed timed step: `[mvm] <label> … <secs>s`. Used for
-/// Stage 0 per-step progress (Plan 93 Phase 3) so the user's perceived
-/// speed matches the actual per-step wall-clock.
+/// Stage 0 per-step progress so the user's perceived speed matches the
+/// actual per-step wall-clock.
 pub fn timed_step(label: &str, elapsed: std::time::Duration) {
     info(&format_timed(label, elapsed));
 }

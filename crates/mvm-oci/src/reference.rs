@@ -16,9 +16,9 @@
 //! - `ghcr.io/foo/bar:v1@sha256:…` — tag *and* digest. Both are
 //!   preserved; production-profile admission uses the digest.
 //!
-//! Production-profile admission (plan 74 W1.6) rejects references
-//! that resolve to a tag *without* a digest — that's the
-//! mutable-tag-rejection rule from ADR-048 §"OCI ingest".
+//! Production-profile admission rejects references that resolve to a
+//! tag *without* a digest — the mutable-tag-rejection rule for OCI
+//! ingest.
 
 use crate::OciError;
 use std::fmt;
@@ -57,8 +57,8 @@ pub struct ImageReference {
 }
 
 impl ImageReference {
-    /// True when the reference pins a content digest. Plan 74 W1.6
-    /// production profile only admits digest-pinned references.
+    /// True when the reference pins a content digest. The production
+    /// profile only admits digest-pinned references.
     pub fn is_digest_pinned(&self) -> bool {
         self.digest.is_some()
     }

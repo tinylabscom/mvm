@@ -43,7 +43,7 @@ pub const VMINITD_VSOCK_PORT: u32 = 1024;
 /// Must stay in lockstep with `mvm_guest::vsock::GUEST_AGENT_PORT`.
 /// Duplicated here to avoid pulling `mvm-guest` into this client's
 /// dependency surface. See the canonical doc comment for why this
-/// lives at 5252 (>1023, so the agent can bind it under W4.5's
+/// lives at 5252 (>1023, so the agent can bind it under its
 /// reduced capability set).
 pub const GUEST_AGENT_VSOCK_PORT: u32 = 5252;
 
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(VMINITD_VSOCK_PORT, 1024);
         assert_eq!(GUEST_AGENT_VSOCK_PORT, 5252);
         // Sanity: must stay above the privileged-port gate so the
-        // agent (uid 901, no caps) can bind. ADR-002 §W4.5.
+        // agent (uid 901, no caps) can bind.
         const _: () = assert!(GUEST_AGENT_VSOCK_PORT > 1023);
     }
 }

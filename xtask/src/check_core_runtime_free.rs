@@ -1,7 +1,7 @@
 //! `xtask check-core-runtime-free`
 //!
 //! Assert that `mvm-core`'s **default** feature closure pulls no async
-//! runtime (plan 126 B5). This is deliberately *not* part of
+//! runtime. This is deliberately *not* part of
 //! `check-forbidden-deps`: that check is lockfile-name-based, and `tokio`
 //! is legitimately in `Cargo.lock` (mvm-hostd, mvm, and the gated
 //! `mvm-core/hostd-transport` + `manifest-verify` features all pull it).

@@ -1,7 +1,7 @@
-//! Plan 152 WS-B gate — Rust-native `mvm-vz-supervisor` correctness.
+//! Rust-native `mvm-vz-supervisor` correctness.
 //!
-//! Originally a Swift-vs-Rust parity gate; the Swift supervisor was removed in
-//! the WS-B finalization (it self-deadlocked on async VZ control ops — its
+//! Originally a Swift-vs-Rust parity gate; the Swift supervisor was removed
+//! (it self-deadlocked on async VZ control ops — its
 //! `synchronousVZCall` blocked the VM's serial dispatch queue awaiting a
 //! completion dispatched to that same queue). The Rust-native objc2 supervisor
 //! replaces it, so this gate now asserts the **Rust** supervisor is correct on
@@ -54,9 +54,9 @@ const VSOCK_PORT: &str = "MVM_VZ_PARITY_VSOCK_PORT";
 /// mean. Without it the vsock round-trip parity test skips.
 const VSOCK_REQUEST: &str = "MVM_VZ_PARITY_VSOCK_REQUEST";
 
-/// Default workload kernel cmdline (ADR-056 §"Kernel-cmdline lockdown"). The
-/// backend constructs this; we mirror it so the gate boots the same shape the
-/// real launch path does.
+/// Default workload kernel cmdline (kernel-cmdline lockdown). The backend
+/// constructs this; we mirror it so the gate boots the same shape the real
+/// launch path does.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
 /// Override for [`DEFAULT_CMDLINE`]. The committed default boots the dev `/init`,
@@ -111,9 +111,9 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
                 .into_owned(),
         ),
         startup_mode: Default::default(),
-        // Audit substrate (Plan 152 WS-B slice 8): absent for the parity
-        // fixture — the gate exercises the no-network boot path, not the
-        // flow-audited bridge. `has_audit_substrate()` stays false.
+        // Audit substrate: absent for the parity fixture — the gate exercises
+        // the no-network boot path, not the flow-audited bridge.
+        // `has_audit_substrate()` stays false.
         tenant_id: None,
         plan: None,
         bundle: None,
@@ -401,10 +401,9 @@ struct SaveRestoreOutcome {
 
 /// Save/restore parity: boot one supervisor, `SAVE` a snapshot, stop it, then
 /// spawn a fresh supervisor in `Restore` mode against that snapshot and check it
-/// reaches running. Contract per ADR-056 / `vz.rs`: `SAVE <path>` is a control
-/// verb that also writes a `<path>.machine-id` sidecar; RESTORE is a *startup
-/// mode*, not a verb. Staged ahead of the Rust snapshot slice → all-negative for
-/// it until that lands, so the parity assertion reports the gap. The phases use
+/// reaches running. Contract (see `vz.rs`): `SAVE <path>` is a control verb that
+/// also writes a `<path>.machine-id` sidecar; RESTORE is a *startup mode*, not a
+/// verb. The phases use
 /// separate `boot/` and `restore/` state subdirs so their sockets/pid files
 /// don't collide; the snapshot lives in the shared parent.
 fn probe_save_restore(
@@ -644,8 +643,8 @@ fn vsock_roundtrip_rust_correct() {
     );
 }
 
-/// Rust control-verb correctness. (Swift was removed in the WS-B finalization;
-/// its control socket self-deadlocked on async VZ ops — `synchronousVZCall`
+/// Rust control-verb correctness. (Swift was removed; its control socket
+/// self-deadlocked on async VZ ops — `synchronousVZCall`
 /// blocked the VM's serial queue awaiting a completion dispatched to that same
 /// queue. The Rust serial-queue→tokio bridge fixes it.) Set
 /// `MVM_VZ_PARITY_CMDLINE` to a long-lived guest so the VM stays up across the
@@ -673,8 +672,8 @@ fn control_verbs_rust_correct() {
     );
 }
 
-/// Rust save/restore correctness (Plan 152 WS-B slice 6). Needs
-/// `MVM_VZ_PARITY_CMDLINE` set to a long-lived guest (macOS 14+).
+/// Rust save/restore correctness. Needs `MVM_VZ_PARITY_CMDLINE` set to a
+/// long-lived guest (macOS 14+).
 #[test]
 fn save_restore_rust_correct() {
     let Some((rust, kernel, rootfs)) = live_env() else {

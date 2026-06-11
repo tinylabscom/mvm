@@ -1,4 +1,4 @@
-//! Filesystem RPC handler — A1 of the filesystem-volumes plan.
+//! Filesystem RPC handler.
 //!
 //! Translates a `GuestRequest` FS verb into an `FsResult`. Routes
 //! every host-supplied path through `mvm_core::crypto::policy::PathPolicy`
@@ -8,9 +8,9 @@
 //!
 //! # Production-safe
 //!
-//! Unlike `Exec` (dev-only, ADR-002 §W4.3), every FS verb here is
+//! Unlike `Exec` (dev-only), every FS verb here is
 //! prod-safe. The agent runs as uid 901 with `--bounding-set=-all
-//! --no-new-privs`; W2.1 bind-mounts `/etc/{passwd,group,nsswitch.conf}`
+//! --no-new-privs`; `/etc/{passwd,group,nsswitch.conf}` are bind-mounted
 //! read-only, and `mvm_core::crypto::policy::PathPolicy` denies
 //! `/etc/mvm/*` and `/run/mvm-secrets/*` even when canonicalization
 //! resolves a guest-side symlink into them.
@@ -18,7 +18,7 @@
 //! # What this module does NOT do (yet)
 //!
 //! - Streaming (FsUploadStream / FsDownloadStream / FsWatch). Those
-//!   land in W2 and use a dedicated vsock port, separate from this
+//!   land later and use a dedicated vsock port, separate from this
 //!   single-shot RPC dispatch.
 //! - Inotify-based watches.
 //! - Per-VM rate-limiting of FS calls (Layer 3 of the DoS model).

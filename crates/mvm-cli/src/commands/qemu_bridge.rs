@@ -1,4 +1,4 @@
-//! Internal `mvmctl __qemu-vsock-bridge` subcommand (Plan 166 Phase 2).
+//! Internal `mvmctl __qemu-vsock-bridge` subcommand.
 //!
 //! Hidden helper spawned (detached) by the QEMU workload backend
 //! (`mvm_backend::qemu`). QEMU's virtio-vsock speaks real AF_VSOCK, but

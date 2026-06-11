@@ -1,12 +1,12 @@
-//! Passt-backed virtio-net supervisor (Plan 87 W2 / ADR-055).
+//! Passt-backed virtio-net supervisor.
 //!
 //! `passt` is a userspace network gateway that translates between
 //! virtio-net frames the libkrun guest writes to a unixstream socket
 //! and AF_INET sockets on the host. Together with libkrun's
-//! `krun_add_net_unixstream` (W1, exposed via
+//! `krun_add_net_unixstream` (exposed via
 //! [`crate::sys::Context::add_net_unixstream_fd`]) it replaces
 //! libkrun's TSI mode, which breaks on the HTTP patterns nix relies
-//! on for substituter / source fetches (Plan 86 §"Problem").
+//! on for substituter / source fetches.
 //!
 //! Boot sequence:
 //!
@@ -88,7 +88,7 @@ impl std::error::Error for PasstError {}
 
 /// Suggested install command for the current host platform.
 /// Surfaced both in `PasstError::NotInstalled` and by `mvmctl
-/// doctor` (Plan 87 W5).
+/// doctor`.
 pub fn install_hint() -> &'static str {
     if cfg!(target_os = "macos") {
         "Install with: brew install passt"
@@ -149,8 +149,8 @@ impl PasstHandle {
             .expect("PasstHandle::into_socket called twice")
     }
 
-    /// Plan 102 W6.A.5 — take ownership of the parent socket
-    /// *without* consuming the handle. The PasstHandle keeps the
+    /// Take ownership of the parent socket *without* consuming the
+    /// handle. The PasstHandle keeps the
     /// child alive (Drop on the handle still SIGTERMs the child),
     /// so the bridge thread can splice the returned fd ↔ libkrun's
     /// inner half for the guest's lifetime.
@@ -401,8 +401,8 @@ mod tests {
         );
     }
 
-    /// Plan 102 W6.A.5 — `take_socket` returns the parent fd
-    /// without consuming the handle, so the child stays alive
+    /// `take_socket` returns the parent fd without consuming the
+    /// handle, so the child stays alive
     /// (its SIGTERM-on-Drop continues to fire). A second call
     /// returns `None`.
     #[test]

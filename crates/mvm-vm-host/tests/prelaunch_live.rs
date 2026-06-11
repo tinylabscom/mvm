@@ -1,4 +1,4 @@
-//! Plan 118 WS-1 1a — process-level integration for the prelaunched supervisor.
+//! Process-level integration for the prelaunched supervisor.
 //!
 //! Gated behind `libkrun-live` because spawning `mvm-libkrun-supervisor`
 //! requires the `libkrun-sys` feature (FFI link to libkrun). Two scenarios:
@@ -137,6 +137,6 @@ fn valid_attach_boots_and_agent_reachable() {
     // a SupervisorAttachConfig whose `plan` is a freshly-signed admitted envelope
     // (sign with the same on-disk host key the base points at) + a real rootfs.
     // Assert the agent answers a ping. Left as an explicit manual harness — the
-    // refusal path above + the Task 3 unit ladder cover the security logic.
+    // refusal path above + the unit ladder cover the security logic.
     unimplemented!("manual live-boot harness — see module docs");
 }

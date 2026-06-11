@@ -1,7 +1,7 @@
 //! Reflink (copy-on-write) file cloning primitives.
 //!
-//! Plan 53 / Sprint 47 / Plan D: APFS Copy-on-Write for Apple Container
-//! templates. Cloning a 1 GiB ext4 rootfs via `clonefile(2)` on macOS
+//! APFS Copy-on-Write for Apple Container templates. Cloning a 1 GiB
+//! ext4 rootfs via `clonefile(2)` on macOS
 //! takes ~constant time regardless of file size, since APFS only writes
 //! new metadata and shares the underlying blocks until either side writes.
 //! The same shape works on Linux via the `FICLONE` ioctl on btrfs/xfs/
@@ -9,9 +9,8 @@
 //! `EOPNOTSUPP` (the Linux-on-Lima default), so the caller falls back to
 //! a regular byte copy.
 //!
-//! See ADR-002 §"Trust layers" for the security context (the cloned ext4
-//! is the L3 rootfs; per-instance writes diverge into the clone's blocks
-//! and never touch the template) and plan 53 §"Plan D" for the design.
+//! The cloned ext4 is the L3 rootfs; per-instance writes diverge into
+//! the clone's blocks and never touch the template.
 
 use std::io;
 use std::path::Path;
@@ -20,9 +19,9 @@ use anyhow::{Context, Result};
 
 /// Reflink-clone a rootfs file for per-instance use.
 ///
-/// Plan 53 Plan D: when starting a VM from a template (or any time
-/// concurrent instances need their own writable rootfs), call this
-/// instead of pointing the hypervisor at the source directly. The
+/// When starting a VM from a template (or any time concurrent
+/// instances need their own writable rootfs), call this instead of
+/// pointing the hypervisor at the source directly. The
 /// clone shares blocks with the source until either side writes, so
 /// on APFS / btrfs / xfs the operation is O(1) wall-clock regardless
 /// of rootfs size. On filesystems without reflink support (ext4 in

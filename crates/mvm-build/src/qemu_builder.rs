@@ -1,10 +1,10 @@
-//! QEMU builder backend (Plan 166 / ADR-072) — the **Linux** dev/builder VMM.
+//! QEMU builder backend — the **Linux** dev/builder VMM.
 //!
 //! QEMU is the portable, apt-installable Linux builder substrate: it uses
 //! `/dev/kvm` when present (fast) and TCG software emulation otherwise (slow,
 //! but works anywhere — CI runners, nested VMs, containers). On macOS the
 //! built-in equivalent is Vz; QEMU is Linux-only. Firecracker remains the
-//! production runtime (ADR-001/072).
+//! production runtime.
 //!
 //! Stage 0 reuses the same nix-tarball seed + `stage0-init` as the libkrun
 //! path (selected by the `mvm.backend=qemu` kernel cmdline marker), but boots
@@ -12,8 +12,8 @@
 //! carry the modular virtio/ext4 drivers) mount the seed as an **ext4** root,
 //! the shares are ext4 block disks, and networking is QEMU user-mode (slirp)
 //! configured statically by `stage0-init` — no libkrun, no libkrunfw, no
-//! custom kernel, no passt. Proven end-to-end on x86_64 (Plan 166 Phase 1:
-//! the builder kernel compiled + `vmlinux` landed in `/out`).
+//! custom kernel, no passt. Proven end-to-end on x86_64 (the builder kernel
+//! compiled + `vmlinux` landed in `/out`).
 //!
 //! Host-side packing/extraction uses `mkfs.ext4 -d` + `debugfs rdump` rather
 //! than loop mounts, so the builder runs as a normal user in the `kvm` group —
@@ -41,7 +41,7 @@ impl BuilderVm for QemuBuilderVm {
         job: &BuilderJob,
         mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
-        // Steady-state builds (Plan 166 Task 1.5). The real impl lives in
+        // Steady-state builds. The real impl lives in
         // `run_build_qemu` behind the `builder-vm` feature (it reaches into
         // `libkrun_builder`'s cache/image helpers, which link `libkrun-sys`).
         // `qemu_builder` itself is ungated so it compiles everywhere; the
@@ -137,7 +137,7 @@ fn run_stage0_qemu(
     pack_ext4(artifact_out, &vdc, OUT_IMG_BYTES)?;
     pack_ext4(host_bin_dir, &vdd, 256 * 1024 * 1024)?;
 
-    // 2. Launch QEMU (the Plan 166 validated recipe), serial → console.log.
+    // 2. Launch QEMU (the validated recipe), serial → console.log.
     let append =
         format!("console=ttyS0 root=/dev/vda rw init={entry_path} mvm.backend=qemu panic=-1");
     let mut cmd = Command::new("timeout");
@@ -397,7 +397,7 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 }
 
 // ───────────────────────────────────────────────────────────────────
-// Task 1.5 — steady-state QEMU builds (`run_build`).
+// Steady-state QEMU builds (`run_build`).
 //
 // Stage 0 boots the stock distro kernel + initramfs to *produce* the
 // builder image. `run_build` boots the image Stage 0 emitted — the mvm
@@ -420,8 +420,8 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 // byte-identical regardless of which VMM ran the build.
 
 /// Guest RAM (MiB) + vCPUs for a QEMU steady-state build. Mirror the
-/// values Plan 166 Phase 1 proved on the x86_64 box for Stage 0 — same
-/// build class on the same hardware. The `memory-backend-memfd` is lazily
+/// values proven on the x86_64 box for Stage 0 — same build class on the
+/// same hardware. The `memory-backend-memfd` is lazily
 /// backed, so the figure is a ceiling, not a reservation.
 #[cfg(feature = "builder-vm")]
 const QEMU_BUILD_MEMORY_MIB: u32 = 8192;
@@ -829,9 +829,8 @@ fn wait_for_socket(sock: &Path, timeout: std::time::Duration) -> Result<(), Stri
 /// `root=/dev/vda ro init=…` are preserved from the image verbatim — the
 /// guest mounts the rootfs **read-only** (matching libkrun's proven
 /// contract), so the shared cached image stays pristine across builds.
-/// (Plan 166 Task 1.5 sketched `rw`; `ro` is the proven guest contract
-/// and protects the cache, so we keep it — the guest writes only to the
-/// `/dev/vdb` overlay, the virtio-fs shares, and tmpfs.)
+/// (`ro` is the proven guest contract and protects the cache — the guest
+/// writes only to the `/dev/vdb` overlay, the virtio-fs shares, and tmpfs.)
 ///
 /// Idempotent: running it on its own output is a no-op.
 #[cfg(any(feature = "builder-vm", test))]

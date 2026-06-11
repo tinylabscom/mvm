@@ -1,9 +1,9 @@
-//! Auditing-grade metering API. Plan 46.
+//! Auditing-grade metering API.
 //!
 //! mvm/mvmd is multi-tenant; downstream operators want to attribute
 //! resource consumption per-tenant for cost or capacity planning.
-//! The motivating requirement (cross-repo plan §W1.3) is **metering
-//! for auditing**, not pricing. The data must be tamper-evident:
+//! The motivating requirement is **metering for auditing**, not
+//! pricing. The data must be tamper-evident:
 //! signed and chained into the audit log so a host operator cannot
 //! retroactively delete or modify resource consumption records.
 //!
@@ -18,10 +18,9 @@
 //! # Three-axis decomposition
 //!
 //! Established sandbox-runtime platforms typically decompose their
-//! metering on three axes — CPU, memory, and storage. Plan 46
-//! mirrors that, with a
-//! cold/hot storage split that aligns with the dm-thin pool layout
-//! from Plan 47:
+//! metering on three axes — CPU, memory, and storage. This mirrors
+//! that, with a cold/hot storage split that aligns with the dm-thin
+//! pool layout:
 //!
 //! - `cpu_ns` — CPU nanoseconds.
 //! - `mem_byte_seconds` — Memory bytes × seconds resident.
@@ -42,7 +41,7 @@ use std::time::SystemTime;
 pub struct MeteringSample {
     pub instance_id: String,
     pub tenant_id: String,
-    /// Tag values inherited from `InstanceState::tags` (mvm 87fbf29).
+    /// Tag values inherited from `InstanceState::tags`.
     /// Empty map for un-tagged instances. Roll-up keying uses the
     /// full tag set so per-(tenant, tag-set) attribution works.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

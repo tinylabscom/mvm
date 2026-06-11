@@ -1,4 +1,4 @@
-//! `mvmctl attest` subcommand handlers — plan 60 Phase 6.
+//! `mvmctl attest` subcommand handlers.
 //!
 //! Two verbs:
 //!
@@ -25,9 +25,9 @@
 //!
 //! ## Why an explicit boot-measurement placeholder
 //!
-//! Plan 60 §"Attestation everywhere" tier 3 (boot attestation via
-//! dm-verity root hash) is sequenced *after* tier 4 (runtime identity)
-//! in the current implementation order — the identity-key plumbing
+//! Boot attestation (via dm-verity root hash) is sequenced *after*
+//! runtime identity in the current implementation order — the
+//! identity-key plumbing
 //! has to exist before there's anywhere to put the boot hash. v0 fills
 //! `boot_measurement` with a deterministic placeholder string
 //! (`PLACEHOLDER_BOOT_MEASUREMENT`) and warns the operator that the
@@ -48,8 +48,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
-/// Placeholder boot measurement until plan 60 tier 3 wires in the
-/// dm-verity root hash. SHA-256-shaped (64 hex chars) so downstream
+/// Placeholder boot measurement until the dm-verity root hash is
+/// wired in. SHA-256-shaped (64 hex chars) so downstream
 /// verifiers see a well-formed value and can detect-and-warn against
 /// it the same way they would a stale measurement.
 pub const PLACEHOLDER_BOOT_MEASUREMENT: &str =

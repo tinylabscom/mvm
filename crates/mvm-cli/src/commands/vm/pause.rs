@@ -1,9 +1,9 @@
 //! `mvmctl pause <vm>` / `mvmctl resume <vm>` — instance snapshot
-//! lifecycle. W1 / A4 of the filesystem-volumes plan.
+//! lifecycle.
 //!
 //! `pause` quiesces the running VM, asks Firecracker to write
 //! `vmstate.bin` + `mem.bin` to `~/.mvm/instances/<vm>/snapshot/`,
-//! seals the W4 HMAC envelope (now epoch-bound — G5), and flips
+//! seals the epoch-bound HMAC envelope, and flips
 //! `paused = true` in the persistent VM-name registry.
 //!
 //! `resume` verifies the envelope (refusing replayed older
@@ -38,9 +38,8 @@ pub(in crate::commands) struct PauseArgs {
     /// Hypervisor to drive the snapshot through. Defaults to
     /// `firecracker`. `--hypervisor mock` swaps the FirecrackerIO
     /// snapshot transport for `CannedIO` (writes deterministic
-    /// stub bytes to vmstate.bin + mem.bin), letting plan 65's
-    /// live tests exercise `WorkloadSleep` without a real
-    /// Firecracker socket.
+    /// stub bytes to vmstate.bin + mem.bin), letting the live tests
+    /// exercise `WorkloadSleep` without a real Firecracker socket.
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
 }
@@ -63,7 +62,7 @@ fn is_vz_vm(name: &str) -> bool {
 }
 
 /// Pick the `SnapshotIO` impl matching the hypervisor selector.
-/// Plan 65 W2: `mock` swaps in `CannedIO` for hermetic
+/// `mock` swaps in `CannedIO` for hermetic
 /// `WorkloadSleep` / `WorkloadWake` audit-emit coverage; every
 /// other selector uses `FirecrackerIO` against the running VM's
 /// UDS socket.
@@ -153,8 +152,8 @@ pub(in crate::commands) fn run_resume(
     // requires the user to have already started a fresh VM
     // shell that's waiting for the snapshot load (Firecracker's
     // restore-into-empty-VMM workflow). The substrate is
-    // ready; the launcher integration is a follow-up. Plan 65
-    // W2: `--hypervisor mock` swaps in `CannedIO` so the
+    // ready; the launcher integration is a follow-up.
+    // `--hypervisor mock` swaps in `CannedIO` so the
     // verify-resume path can land its `WorkloadWake` audit emit
     // without a live Firecracker socket.
     let io = snapshot_io_for(&args.hypervisor, &args.name)?;
@@ -169,12 +168,12 @@ pub(in crate::commands) fn run_resume(
     if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(&args.name, false);
         // A resume is activity — refresh idle tracking so the freshly woken
-        // VM isn't immediately re-slept by the idle reaper (Plan 170 WS-B).
+        // VM isn't immediately re-slept by the idle reaper.
         let _ = registry.touch_last_active(&args.name, mvm_core::time::utc_now());
         let _ = registry.save(&registry_path);
     }
 
-    // Plan 123 Phase C — the host-side PostRestore sender. Resuming vCPUs is
+    // The host-side PostRestore sender. Resuming vCPUs is
     // not enough: the guest agent must remount the config/secrets drives and
     // restart services (it maps PostRestore → SIGUSR1 → PID 1). The `mock`
     // hypervisor has no guest agent, so skip it there.

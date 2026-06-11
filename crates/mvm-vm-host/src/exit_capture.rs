@@ -1,4 +1,4 @@
-//! Supervisor-side workload exit-code capture (Plan 152 WS-A).
+//! Supervisor-side workload exit-code capture.
 //!
 //! Binds nothing itself — the caller passes a bound `UnixListener` for
 //! the control vsock port. Reads the guest's 4-byte LE i32 and persists
@@ -25,7 +25,7 @@ pub fn capture_once(listener: &UnixListener, vm_state_dir: &Path) -> std::io::Re
     // Ack AFTER the file is durably written: the guest waits for this
     // before powering off, so the supervisor's start_enter->exit() can't
     // race the file write. Best-effort — a failed ack just means the
-    // guest times out and powers off (file already written). Plan 152 WS-A.
+    // guest times out and powers off (file already written).
     use std::io::Write as _;
     let _ = stream.write_all(&[1u8]);
     let _ = stream.flush();

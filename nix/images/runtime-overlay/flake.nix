@@ -3,17 +3,16 @@
 
   # ── Why this flake exists ─────────────────────────────────────────
   #
-  # ADR-051 (`specs/adrs/051-mvm-runtime-overlay-disk.md`) introduces
-  # a second virtio-blk device that every mvm microVM attaches at
+  # Every mvm microVM attaches a second virtio-blk device at
   # boot — Nix-built rootfs and OCI-pulled rootfs alike. The
   # overlay carries the in-VM binaries mvm controls (the guest
   # agent, the per-service seccomp shim, the function-workload
-  # runner, and — plan 74 W2 — `mvm-guest-netinit` which installs
+  # runner, and `mvm-guest-netinit` which installs
   # kernel blackhole routes for `MANDATORY_DENY_RANGES` so OCI-
   # imported workloads get Layer 1 network defense too) plus a
-  # placeholder for the per-language SDK runtime libraries that
-  # ADR-049's vsock substitution depends on (the libraries
-  # themselves land in plan 74 W4; this flake reserves the
+  # placeholder for the per-language SDK runtime libraries the
+  # vsock substitution depends on (the libraries
+  # themselves land later; this flake reserves the
   # directory layout today so the boot path is stable).
   #
   # The flake produces, per supported system, a `$out/` containing:
@@ -26,8 +25,8 @@
   #                       mvm-verity-init reads from the kernel
   #                       cmdline as `mvm.runtime_roothash=<hex>`.
   #   VERSION           — semver of the producing mvmctl. The
-  #                       resolver (`mvm_build::runtime_overlay`,
-  #                       plan 74 W1.4b.1) refuses to attach an
+  #                       resolver (`mvm_build::runtime_overlay`)
+  #                       refuses to attach an
   #                       overlay whose VERSION disagrees with the
   #                       running mvmctl's version.
   #
@@ -49,10 +48,9 @@
   #    runner / shim — *not* per user-supplied rootfs. The verity
   #    roothash is content-addressable, so two identical overlays
   #    cache-hit cleanly.
-  # 2. Per ADR-051's `mkGuest` refactor (W1.4b.3), the per-image
-  #    closure stops carrying `mvm-guest-agent`, `mvm-seccomp-apply`,
-  #    `mvm-runner`. Those binaries live here. Net effect: every
-  #    Nix-built image shrinks by ~10-15 MB.
+  # 2. The per-image closure stops carrying `mvm-guest-agent`,
+  #    `mvm-seccomp-apply`, `mvm-runner`. Those binaries live here.
+  #    Net effect: every Nix-built image shrinks by ~10-15 MB.
   #
   # ── Why this flake doesn't pull in microvm.nix ─────────────────
   #
@@ -67,21 +65,21 @@
   #
   # Two builds of this flake against the same workspace state
   # must produce byte-identical `overlay.ext4` + `overlay.verity`
-  # + identical `overlay.roothash`. ADR-051's per-version cache
+  # + identical `overlay.roothash`. The per-version cache
   # depends on this property. We pin every source of mkfs.ext4
   # randomness (UUID, hash_seed, SOURCE_DATE_EPOCH) and every
   # source of veritysetup randomness (salt, data block size, hash
   # algo). Nix's sandbox covers the rest (timestamps,
   # parallelism-induced ordering).
   #
-  # ── Cryptsetup version pin (issue #223) ────────────────────────
+  # ── Cryptsetup version pin ─────────────────────────────────────
   #
-  # The W3 verity build pins `cryptsetup` via the same nixpkgs
-  # commit. The OCI-pull path's seal_with_verity (W1.4a) inherits
+  # The verity build pins `cryptsetup` via the same nixpkgs
+  # commit. The OCI-pull path's seal_with_verity inherits
   # whatever cryptsetup is on `$PATH` in the builder VM. This
-  # flake stays consistent with the W3 derivation by routing
-  # through the same `nixpkgs.cryptsetup` attribute. Issue #223
-  # tracks tightening this to an explicit version override.
+  # flake stays consistent with the verity derivation by routing
+  # through the same `nixpkgs.cryptsetup` attribute. Tightening
+  # this to an explicit version override is still open.
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -117,7 +115,7 @@
       # file disagrees with the running mvmctl. Bumping the
       # workspace version requires bumping this string too — keep
       # the two in lock-step or `mvmctl up` admission fails.
-      # `xtask check-runtime-overlay-version` (a CI gate, Plan 124 C1)
+      # `xtask check-runtime-overlay-version` (a CI gate)
       # asserts this match so the pin can't silently go stale.
       overlayVersion = "0.16.1";
 
@@ -139,15 +137,15 @@
           lib = pkgs.lib;
           mvmSrc = workspace;
           # No dev-shell — the overlay ships the production agent.
-          # ADR-002 §W4.3's `prod-agent-no-exec` CI gate asserts
+          # The `prod-agent-no-exec` CI gate asserts
           # `mvm_guest_agent::do_exec` is absent from this binary.
           withDevShell = false;
         };
 
-      # mvm-runner — the function-workload entrypoint runner
-      # (plan 60 Phase 5 Slice C). Folded into mvm-guest as a [[bin]]
-      # (plan 121 A1), so we select just that binary out of the
-      # mvm-guest package; workspace Cargo.lock drives the closure.
+      # mvm-runner — the function-workload entrypoint runner.
+      # Folded into mvm-guest as a [[bin]], so we select just that
+      # binary out of the mvm-guest package; workspace Cargo.lock
+      # drives the closure.
       mvmRunnerFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -176,8 +174,8 @@
       #   sha256).
       #
       # The unit tests
-      # `defaults_match_mvm_verity_init_constants` (W1.4a) and
-      # `defaults_are_deterministic_and_pinned` (W1.3b) enforce
+      # `defaults_match_mvm_verity_init_constants` and
+      # `defaults_are_deterministic_and_pinned` enforce
       # the Rust-side constants; this comment is the cross-stack
       # contract. If you bump either side, bump both.
       overlayUuid = "00000000-0000-0000-0000-00000000beef";
@@ -187,7 +185,7 @@
       overlayVerityHashAlgorithm = "sha256";
       overlayVerityHashBlockSize = 4096;
 
-      # ADR-050 / issue #223 — keep the Nix-built verity baseline on
+      # Keep the Nix-built verity baseline on
       # the exact same cryptsetup release as the builder VM's OCI-pull
       # path. A nixpkgs bump must not silently change `veritysetup`
       # output bytes; bump version + hash here and in
@@ -205,10 +203,9 @@
           };
         });
 
-      # Target overlay size: 32 MiB. ADR-051 §"Open questions" pins
-      # a hard cap of 32 MiB for the overlay budget; today's
-      # contents fit in well under that, but using the cap as the
-      # nominal size leaves headroom for the W4 SDK runtime
+      # Target overlay size: 32 MiB — a hard cap for the overlay
+      # budget. Today's contents fit well under that, but using the
+      # cap as the nominal size leaves headroom for the SDK runtime
       # libraries without re-allocating the ext4 each release.
       overlaySizeBytes = 32 * 1024 * 1024;
 
@@ -247,9 +244,9 @@
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner          "$staging/runner"
 
-            # SDK runtime library placeholders. plan 74 W4 fills
-            # these with the pyo3 / napi-rs hook libraries that
-            # ADR-049's vsock substitution depends on. Today they
+            # SDK runtime library placeholders. Later these get
+            # filled with the pyo3 / napi-rs hook libraries the
+            # vsock substitution depends on. Today they
             # exist so the boot path stabilizes and downstream
             # code (PYTHONPATH/NODE_PATH injection in the service
             # supervisor) can reference fixed mount points.

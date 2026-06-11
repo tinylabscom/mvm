@@ -1,6 +1,6 @@
 //! Early-userspace verity-init (PID 1 in the verity initramfs).
 //!
-//! ADR-002 §W3 — runs from a tiny initramfs baked by `mkGuest` when
+//! Runs from a tiny initramfs baked by `mkGuest` when
 //! `verifiedBoot = true`. The kernel-cmdline `dm-mod.create=` path
 //! doesn't work for our microVM hypervisors because Firecracker
 //! (and Apple VZ) auto-append `root=/dev/vda ro` to the cmdline on
@@ -18,19 +18,17 @@
 //!   mvm.hash=<dev-path>            defaults to /dev/vdb
 //!
 //!   mvm.runtime_roothash=<64-hex>  optional; mvm runtime overlay
-//!                                  dm-verity root hash (ADR-051,
-//!                                  plan 74 W1.4b.3b.2). When present
+//!                                  dm-verity root hash. When present
 //!                                  the init runs a second dm-verity
 //!                                  setup and bind-mounts the result
 //!                                  read-only at /sysroot/mvm/runtime.
 //!                                  Absent: legacy boot path — no
 //!                                  overlay attached, /mvm/runtime
 //!                                  empty in the guest. The backend
-//!                                  wiring (W1.4b.3b.3) starts threading
-//!                                  this arg through; existing Nix-built
-//!                                  images that haven't been refactored
-//!                                  for the overlay (W1.4b.3c) continue
-//!                                  to boot unchanged.
+//!                                  wiring threads this arg through;
+//!                                  existing Nix-built images that
+//!                                  haven't been refactored for the
+//!                                  overlay continue to boot unchanged.
 //!   mvm.runtime_data=<dev-path>    defaults to /dev/vdc
 //!   mvm.runtime_hash=<dev-path>    defaults to /dev/vdd
 //!
@@ -472,20 +470,19 @@ mod linux {
         do_mount(&root_dm, "/sysroot", "ext4", libc::MS_RDONLY, "")?;
         msg("mvm-verity-init: /sysroot mounted (verity-protected)");
 
-        // ── 5b. Plan 74 W1.4b.3b.2 — mvm runtime overlay disk
-        //    (ADR-051). When the backend has threaded
-        //    `mvm.runtime_roothash=` through the cmdline, set
-        //    up the second dm-verity target and mount it RO at
+        // ── 5b. mvm runtime overlay disk. When the backend has
+        //    threaded `mvm.runtime_roothash=` through the cmdline,
+        //    set up the second dm-verity target and mount it RO at
         //    /sysroot/mvm/runtime. The target path MUST exist
-        //    in the rootfs (W1.4b.3c's mkGuest refactor creates
-        //    it as an empty dir); a missing dir surfaces as a
-        //    mount-time EACCES that's actionable.
+        //    in the rootfs (the mkGuest refactor creates it as an
+        //    empty dir); a missing dir surfaces as a mount-time
+        //    EACCES that's actionable.
         //
         //    Absent `mvm.runtime_roothash=` → legacy boot path,
         //    no overlay attached, /mvm/runtime stays empty in
-        //    the guest. Existing Nix-built images boot
-        //    unchanged through this branch until W1.4b.3b.3
-        //    starts populating the cmdline arg.
+        //    the guest. Existing Nix-built images boot unchanged
+        //    through this branch until the backend starts
+        //    populating the cmdline arg.
         if let Some(rt) = cfg.runtime.as_ref() {
             setup_verity_target(fd, "runtime", &rt.data_dev, &rt.hash_dev, &rt.roothash)?;
             let runtime_dm = resolved_dm_device("runtime", 1)?;

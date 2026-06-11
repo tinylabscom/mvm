@@ -1,6 +1,6 @@
 //! Plan execution state machine.
 //!
-//! Plan 37 §7B specifies the transitions:
+//! The transitions:
 //!
 //! ```text
 //! Pending  ──verified──▶  Verified
@@ -12,8 +12,7 @@
 //!
 //! Plus error paths from any state to `Failed { from }`. Every
 //! transition is logged as an audit entry once `AuditSigner` is
-//! wired (Wave 3); here we return the error and let the caller
-//! decide.
+//! wired; here we return the error and let the caller decide.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -51,8 +50,8 @@ pub enum StateTransitionError {
 /// Tracks one workload's lifecycle. The state machine is a thin
 /// contract — the transitions are the rule set; the work each
 /// transition does (verify image, launch backend, capture artifacts,
-/// etc.) lives in `Supervisor::launch` (Wave 1.4) and pulls each
-/// component slot in turn.
+/// etc.) lives in `Supervisor::launch` and pulls each component slot
+/// in turn.
 #[derive(Debug, Clone)]
 pub struct PlanStateMachine {
     state: PlanState,

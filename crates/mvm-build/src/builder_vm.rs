@@ -1,10 +1,9 @@
 //! Linux builder VM bootstrap (libkrun-backed).
 //!
-//! Implements the contract documented in ADR-013 §"Linux builder via
-//! libkrun (no Lima)": on hosts that can't `nix build` Linux
-//! derivations natively (macOS, Windows-via-WSL2, or Linux without the
-//! project builder boundary), `mvmctl build` bootstraps a small Linux builder microVM from
-//! a pinned OCI image, runs `nix build` inside it, and extracts the
+//! On hosts that can't `nix build` Linux derivations natively (macOS,
+//! Windows-via-WSL2, or Linux without the project builder boundary),
+//! `mvmctl build` bootstraps a small Linux builder microVM from a
+//! pinned OCI image, runs `nix build` inside it, and extracts the
 //! resulting rootfs back to the host.
 //!
 //! ## Status
@@ -12,20 +11,17 @@
 //! **Scaffolding.** The contract types and the 6-step flow are
 //! locked; the actual bootstrap (OCI pull + sandbox spawn + bind-mount
 //! wiring + artifact extraction) lands in a follow-up wave. Today
-//! every method returns [`BuilderVmError::NotYetImplemented`] with a
-//! pointer to the ADR section. Callers can wire the dispatch and
-//! cover the error path in tests; the data-plane fills in
-//! incrementally.
+//! every method returns [`BuilderVmError::NotYetImplemented`].
+//! Callers can wire the dispatch and cover the error path in tests;
+//! the data-plane fills in incrementally.
 //!
 //! ## Trust boundary
 //!
 //! The builder VM lives in a different trust zone than runtime VMs.
 //! It pulls from network, runs arbitrary Nix derivations, and bind-
-//! mounts the host's `/nix/store` for cache reuse. ADR-013's
-//! "non-goal: OCI" applies to the **runtime** path; OCI is
-//! deliberately *acceptable* for the builder. See
-//! ADR-013 §"Linux builder via libkrun (no Lima)" for the
-//! rationale.
+//! mounts the host's `/nix/store` for cache reuse. The runtime path's
+//! "no OCI" non-goal does not apply to the builder: OCI is
+//! deliberately acceptable here.
 
 use std::path::{Path, PathBuf};
 
@@ -50,10 +46,10 @@ pub const BUILDER_OCI_IMAGE: &str = "docker.io/nixos/nix:2.24.10";
 pub const BUILDER_OCI_DIGEST_SHA256: &str = "";
 
 /// Cache directory for the pulled builder image, relative to the
-/// user's cache root. Matches ADR-013 §"Linux builder…" step 2.
+/// user's cache root.
 pub const BUILDER_IMAGE_CACHE_SUBDIR: &str = "builder-image";
 
-/// Mount layout for a builder sandbox. ADR-013 step 3.
+/// Mount layout for a builder sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderMounts {
     /// User's flake source. Bind-mounted read-only at `/work`.
@@ -65,16 +61,16 @@ pub struct BuilderMounts {
     pub host_nix_store: Option<PathBuf>,
     /// Writable artifact extraction directory. Bind-mounted at
     /// `/out`; the builder writes the rootfs + metadata sidecar
-    /// here. ADR-013 step 5 extracts from this path back to the
-    /// host's per-build artifact directory.
+    /// here. Extraction copies from this path back to the host's
+    /// per-build artifact directory.
     pub artifact_out: PathBuf,
-    /// Plan 115 / ADR-065: dir containing the mvm host-vm binaries
-    /// extracted from mvmctl's embedded payload, mounted read-only at
-    /// `/mvm-bins` inside the builder VM and exposed via
+    /// Dir containing the mvm host-vm binaries extracted from
+    /// mvmctl's embedded payload, mounted read-only at `/mvm-bins`
+    /// inside the builder VM and exposed via
     /// `MVM_HOST_BIN_DIR=/mvm-bins` to the flake's `cmd.sh`.
     pub host_bin_dir: PathBuf,
-    /// Plan 120 / ADR-046 source-checkout invariant. When `Some`, the
-    /// build runs in "local-mvm override" mode: `flake_src` (mounted at
+    /// Source-checkout invariant. When `Some`, the build runs in
+    /// "local-mvm override" mode: `flake_src` (mounted at
     /// `/work`) is the **mvm workspace**, this user flake is staged into
     /// the job dir, and `cmd.sh` builds it with `--override-input mvm
     /// path:/work/nix` so the workload resolves `mvm` from the in-repo
@@ -85,20 +81,19 @@ pub struct BuilderMounts {
 
 /// What the builder is asked to produce.
 ///
-/// Plan 73 Followup B.2.0 generalised this from a single nix-build
-/// shape into an enum so the same trait can dispatch both the
-/// existing flake builds (`Flake`) and the application-dependency
-/// install pipeline (`Install`) that Followup B.2 will wire. Each
+/// An enum so the same trait can dispatch both flake builds (`Flake`)
+/// and the application-dependency install pipeline (`Install`). Each
 /// variant pairs 1:1 with a [`BuilderArtifacts`] variant — see the
 /// per-variant docs there for the expected outputs.
 ///
-/// This is plumbing only: the `Install` variant is reserved here so
-/// B.2 can land behavior changes against a stable shape, and today
-/// every backend errors with [`BuilderVmError::NotYetImplemented`]
-/// when it sees an `Install` job.
+/// The `Install` variant is plumbing only: it's reserved here so the
+/// install pipeline can land behavior changes against a stable shape,
+/// and today every backend errors with
+/// [`BuilderVmError::NotYetImplemented`] when it sees an `Install`
+/// job.
 ///
-/// `Serialize`/`Deserialize` + `#[serde(deny_unknown_fields)]` were
-/// added by Plan 89 W2 so `BuilderJob` can ride inside
+/// `Serialize`/`Deserialize` + `#[serde(deny_unknown_fields)]` let
+/// `BuilderJob` ride inside
 /// [`crate::builder_protocol::HostVmRequest::Run`] over the
 /// vsock-framed dispatch channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,22 +113,20 @@ pub enum BuilderJob {
         attr_path: String,
     },
 
-    /// Application-dependency install pipeline (ADR-047, Followup
-    /// B.2). The builder VM reads a serialised install spec from
-    /// `spec_path` (lockfile + source-root + ecosystem + gate),
-    /// runs the corresponding package manager (`uv pip install
-    /// --no-deps`, `pnpm install --frozen-lockfile`, …) inside the
-    /// VM, seals the resulting volume with SBOM + fetch log + CVE +
-    /// attestations, and emits a `result.json` next to the volume.
+    /// Application-dependency install pipeline. The builder VM reads a
+    /// serialised install spec from `spec_path` (lockfile +
+    /// source-root + ecosystem + gate), runs the corresponding package
+    /// manager (`uv pip install --no-deps`, `pnpm install
+    /// --frozen-lockfile`, …) inside the VM, seals the resulting volume
+    /// with SBOM + fetch log + CVE + attestations, and emits a
+    /// `result.json` next to the volume.
     ///
     /// **Today every backend errors with
     /// [`BuilderVmError::NotYetImplemented`] for this variant.**
-    /// Plan 73 Followup B.2 wires the libkrun backend; the
-    /// libkrun backend never gets this variant.
     Install {
         /// Absolute host path to the install-spec JSON the builder
-        /// VM reads at start-up. Followup B.2 defines the shape;
-        /// today the orchestrator does not produce one.
+        /// VM reads at start-up. Today the orchestrator does not
+        /// produce one.
         spec_path: PathBuf,
     },
 }
@@ -163,17 +156,16 @@ pub enum BuilderArtifacts {
         /// `flake.lock` SHA-256, recorded for cache tracking.
         lock_hash: Option<String>,
         /// `passthru.mvm.accessible` — wires through to
-        /// `runtime_meta.accessible`, populating the W6.2 console
-        /// gate. `None` means the flake didn't surface the field;
-        /// callers default to `true` for backward compatibility
-        /// (W6.2's same default).
+        /// `runtime_meta.accessible`, populating the console gate.
+        /// `None` means the flake didn't surface the field; callers
+        /// default to `true` for backward compatibility (matching the
+        /// console gate's own default).
         accessible: Option<bool>,
     },
 
     /// Output of a [`BuilderJob::Install`] run — a sealed deps
     /// volume on the host filesystem plus a structured result
-    /// document. Followup B.2 will fill this in; today no backend
-    /// constructs this variant.
+    /// document. Today no backend constructs this variant.
     InstallVolume {
         /// Directory the builder VM sealed the application-deps
         /// volume into (content + SBOM + fetch log + CVE scan +
@@ -183,15 +175,14 @@ pub enum BuilderArtifacts {
         volume_dir: PathBuf,
         /// JSON sidecar emitted by `mvm-host-vm-init` next to the
         /// volume describing the install outcome (exit code,
-        /// installer stderr tail, timings). Shape pinned by
-        /// Followup B.2.
+        /// installer stderr tail, timings).
         result_json_path: PathBuf,
     },
 }
 
 /// Filename for the sidecar manifest written next to a built
 /// rootfs. Mirrors `passthru.mvm` from `mkGuest` so the runtime
-/// path can populate `runtime_meta` (W6.2) without re-running
+/// path can populate `runtime_meta` without re-running
 /// `nix eval`. Living next to the rootfs keeps the sidecar
 /// atomic with the artifact — a stale sidecar on the filesystem
 /// without a matching rootfs is impossible.
@@ -209,37 +200,36 @@ pub const SIDECAR_FILENAME: &str = "mvm-meta.json";
 pub struct GuestSidecar {
     /// Name from `mkGuest { name = …; }`.
     pub name: String,
-    /// Whether `mvmctl console` may attach. Drives the W6.2 gate.
+    /// Whether `mvmctl console` may attach. Drives the console gate.
     pub accessible: bool,
     /// Inverse of `accessible` — sealed images refuse exec/console.
     pub sealed: bool,
     /// Form of the entrypoint declaration: "shell", "command", or
     /// "services". Information; not load-bearing for runtime gates.
     pub entrypoint_kind: String,
-    /// Init system in use; "busybox" today (W5.1).
+    /// Init system in use; "busybox" today.
     pub init_system: String,
-    /// Per-backend boot floor in milliseconds (ADR-013 §"Per-backend
-    /// boot budgets"). Used by perf gates to flag regressions.
+    /// Per-backend boot floor in milliseconds. Used by perf gates to
+    /// flag regressions.
     pub expected_boot_ms: u32,
-    /// Agent binary kind: "stub" (W6.1.1 placeholder) or "real"
-    /// (W6.1.2 cross-compiled Rust). Production policies should
-    /// require "real".
+    /// Agent binary kind: "stub" (placeholder) or "real"
+    /// (cross-compiled Rust). Production policies should require
+    /// "real".
     pub agent_binary: String,
     /// Whether the entrypoint runs as a non-root uid.
     pub rootless_entrypoint: bool,
     /// Active hypervisor declaration.
     pub hypervisor: String,
-    /// Plan 74 W2 / ADR-051 — whether the rootfs carries the
-    /// `/mvm/runtime` bind-mount target and a mkGuest `/init` that
-    /// prefers the overlay-resident agent/seccomp-apply/netinit.
+    /// Whether the rootfs carries the `/mvm/runtime` bind-mount target
+    /// and a mkGuest `/init` that prefers the overlay-resident
+    /// agent/seccomp-apply/netinit.
     ///
-    /// Set by mkGuest's `passthru.mvm.overlayAware = true` since
-    /// W1.4b.3c. Sidecars written *before* the field existed
-    /// deserialize as `false` (via `serde(default)`), which the
-    /// [`admit_overlay_aware`] gate refuses — pre-W1.4b cached
-    /// templates have no `/mvm/runtime` mount point, so attaching
-    /// the overlay disk to them would either fail or silently
-    /// degrade.
+    /// Set by mkGuest's `passthru.mvm.overlayAware = true`. Sidecars
+    /// written *before* the field existed deserialize as `false` (via
+    /// `serde(default)`), which the [`admit_overlay_aware`] gate
+    /// refuses — those older cached templates have no `/mvm/runtime`
+    /// mount point, so attaching the overlay disk to them would either
+    /// fail or silently degrade.
     #[serde(default)]
     pub overlay_aware: bool,
 }
@@ -253,7 +243,7 @@ impl GuestSidecar {
 
     /// Write the sidecar JSON to `dir/mvm-meta.json`. Creates the
     /// directory if missing. Errors propagate — sidecar writes are
-    /// load-bearing for the W6.2 gate, unlike `runtime_meta::write`
+    /// load-bearing for the console gate, unlike `runtime_meta::write`
     /// which is best-effort.
     pub fn write_to_dir(&self, dir: &Path) -> Result<PathBuf, std::io::Error> {
         std::fs::create_dir_all(dir)?;
@@ -265,16 +255,16 @@ impl GuestSidecar {
     }
 
     /// Whether the rootfs is overlay-aware (carries `/mvm/runtime` +
-    /// uses mkGuest's overlay-preferring `/init`). Plan 74 W2
-    /// admission gate consults this; see [`admit_overlay_aware`].
+    /// uses mkGuest's overlay-preferring `/init`). The admission gate
+    /// consults this; see [`admit_overlay_aware`].
     pub fn is_overlay_aware(&self) -> bool {
         self.overlay_aware
     }
 
     /// Read the sidecar from a directory. Returns `Ok(None)` if the
-    /// sidecar doesn't exist (pre-W7.x.1 build artifacts; runtime
-    /// path falls through to the W6.2 default-accessible behavior).
-    /// Errors only on malformed JSON.
+    /// sidecar doesn't exist (older build artifacts; runtime path
+    /// falls through to the default-accessible behavior). Errors only
+    /// on malformed JSON.
     pub fn read_from_dir(dir: &Path) -> Result<Option<Self>, anyhow::Error> {
         let path = Self::path_in(dir);
         let body = match std::fs::read_to_string(&path) {
@@ -293,9 +283,9 @@ impl GuestSidecar {
 /// lets call sites be wired against the future API and lets tests
 /// cover the error path.
 pub trait BuilderVm {
-    /// Steps 2-5 (ADR-013): pull the OCI image (if not cached),
-    /// spawn a sandbox with the given mounts, run `nix build` for
-    /// the job, and extract artifacts to `mounts.artifact_out`.
+    /// Pull the OCI image (if not cached), spawn a sandbox with the
+    /// given mounts, run `nix build` for the job, and extract
+    /// artifacts to `mounts.artifact_out`.
     /// Idempotent w.r.t. the image cache; not idempotent w.r.t. the
     /// artifact dir (caller cleans up).
     ///
@@ -310,21 +300,20 @@ pub trait BuilderVm {
         mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError>;
 
-    /// Stage 0 bootstrap (Plan 91 / ADR-068). Boot a self-contained
-    /// `RootDir` guest whose `entry_path` init reads `workspace_dir`
-    /// (mounted `/work`), installs Nix, builds the steady-state builder
-    /// VM kernel + `rootfs.ext4` into `artifact_out` (mounted `/out`)
-    /// using the embedded host-vm binaries from `host_bin_dir` (mounted
+    /// Stage 0 bootstrap. Boot a self-contained `RootDir` guest whose
+    /// `entry_path` init reads `workspace_dir` (mounted `/work`),
+    /// installs Nix, builds the steady-state builder VM kernel +
+    /// `rootfs.ext4` into `artifact_out` (mounted `/out`) using the
+    /// embedded host-vm binaries from `host_bin_dir` (mounted
     /// `/mvm-bins`), then powers off cleanly. On `Ok`, the caller
     /// validates + promotes the artifacts; this only asserts the
     /// supervisor exited 0.
     ///
     /// Lives on the trait — rather than as a libkrun-inherent method —
     /// so the orchestration dispatches Stage 0 through `&dyn BuilderVm`,
-    /// the same seam `run_build` uses. The default impl is a *fail-closed
-    /// gap*: Stage 0 is implemented for the libkrun backend only today.
-    /// Vz and Firecracker Stage 0 are tracked in ADR-068 §"Backend gaps"
-    /// — a backend without an impl returns a clear error rather than
+    /// the same seam `run_build` uses. The default impl is a fail-closed
+    /// gap: Stage 0 is implemented for the libkrun backend only today.
+    /// A backend without an impl returns a clear error rather than
     /// silently doing nothing.
     fn run_stage0(
         &self,
@@ -377,9 +366,9 @@ pub enum BuilderVmError {
     #[error("libkrun not available: {0}")]
     LibkrunUnavailable(String),
 
-    /// Plan 100 W1 / Plan 105 — a host VMM the operator explicitly
-    /// asked for isn't available on this platform. Carries the
-    /// requested label (e.g. `"linux-builder-vm"`, `"vz"`) and an
+    /// A host VMM the operator explicitly asked for isn't available on
+    /// this platform. Carries the requested label (e.g.
+    /// `"linux-builder-vm"`, `"vz"`) and an
     /// actionable hint pointing at the kernel-module parameter,
     /// platform-version gap, or install step the operator needs.
     #[error("{requested} is not available on this host: {reason}")]
@@ -403,7 +392,7 @@ pub enum BuilderVmError {
 
     /// The persistent builder Nix store has a dangling/GC'd path — every build
     /// re-evals to the same missing path and fails identically, so `dev up`
-    /// appears to "loop" (#640). Distinguished from a generic build failure so
+    /// appears to "loop". Distinguished from a generic build failure so
     /// the user gets the one-line recovery instead of an opaque nix error.
     #[error(
         "the builder VM's Nix store has a dangling/garbage-collected path — \
@@ -425,8 +414,8 @@ pub enum BuilderVmError {
     #[error("extracting artifacts from builder sandbox: {0}")]
     ExtractionFailed(String),
 
-    /// Plan 77 W6 — kernel-panic detected on the supervisor's console
-    /// log. `Child::wait()` would otherwise block forever (libkrun's
+    /// Kernel-panic detected on the supervisor's console log.
+    /// `Child::wait()` would otherwise block forever (libkrun's
     /// `krun_start_enter` doesn't notice a panicked guest), so a
     /// host-side watcher kills the supervisor and surfaces the
     /// captured banner line for diagnosis.
@@ -445,14 +434,14 @@ pub enum BuilderVmError {
 }
 
 /// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear
-/// to recover a degraded builder store (#640). Lives here (ungated) so the build
+/// to recover a degraded builder store. Lives here (ungated) so the build
 /// error path can name the recovery dir; the `builder-vm`-gated builder modules
 /// delegate to this for a single source of truth.
 pub fn builder_vm_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm")
 }
 
-/// Detect nix's dangling-store-path signature in a build's stderr (#640): a
+/// Detect nix's dangling-store-path signature in a build's stderr: a
 /// `/nix/store/...` path the build references was garbage-collected, so the eval
 /// fails with `error: path '/nix/store/<hash>...' does not exist`. Matched
 /// precisely — a quoted `/nix/store/` path **and** "does not exist" on the same
@@ -467,7 +456,7 @@ pub fn dangling_store_path_line(stderr: &str) -> Option<&str> {
     })
 }
 
-/// Outcome of a builder-store repair (#640).
+/// Outcome of a builder-store repair.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BuilderStoreRepair {
     /// The builder-VM cache dir that was (or would be) cleared.
@@ -480,7 +469,7 @@ pub struct BuilderStoreRepair {
     pub dry_run: bool,
 }
 
-/// Recover a degraded builder Nix store (#640) by removing the builder-VM cache
+/// Recover a degraded builder Nix store by removing the builder-VM cache
 /// dir so the next `dev up` / `build` cold-rebuilds it clean — the documented
 /// `rm -rf ~/.cache/mvm/builder-vm` recovery as a first-class operation. The
 /// whole dir goes (store image + per-VM dirs + job dirs): the store image is the
@@ -550,23 +539,22 @@ impl BuilderVm for StubBuilderVm {
 // ============================================================================
 // VmBackendForBuilder — hypervisor-agnostic seam for the builder-VM helper.
 //
-// Plan 97 §"Phase C seam design". This trait is the smaller-than-VmBackend
-// surface that a future `BuilderVmRuntime` helper builds on top of:
-// today `LibkrunBuilderVm` does both the substrate orchestration (cmd.sh
-// emission, /job/result parsing, panic detection, NixStoreImageLock,
-// stderr-tail capture) and the hypervisor-specific spawn/wait. Lifting
-// the substrate out behind this trait lets a future `VzBuilderVm`
-// reuse ~850 lines of orchestration code with only a Vz-side mount
-// glue (~600 lines).
+// The smaller-than-VmBackend surface that a future `BuilderVmRuntime`
+// helper builds on top of: today `LibkrunBuilderVm` does both the
+// substrate orchestration (cmd.sh emission, /job/result parsing, panic
+// detection, NixStoreImageLock, stderr-tail capture) and the
+// hypervisor-specific spawn/wait. Lifting the substrate out behind this
+// trait lets a future `VzBuilderVm` reuse ~850 lines of orchestration
+// code with only a Vz-side mount glue (~600 lines).
 //
-// This commit lands the trait + supporting types only — no impls yet.
-// Subsequent slices wire it for libkrun (port LibkrunBuilderVm) and
+// Today the trait + supporting types exist with no impls yet;
+// subsequent slices wire it for libkrun (port LibkrunBuilderVm) and
 // Vz (new VzBuilderVm).
 // ============================================================================
 
 /// Per-run configuration the builder helper passes to the underlying
 /// hypervisor. Hypervisor-agnostic — both libkrun and Vz consume it
-/// identically. Plan 97 Phase C seam design §1.
+/// identically.
 ///
 /// Resources (`vcpus`, `memory_mib`) are caller-supplied; the
 /// backend's resource-cap check enforces a host-side ceiling.
@@ -601,8 +589,8 @@ pub struct BuilderVmRunConfig {
 /// `VZVirtioFileSystemDeviceConfiguration` (Vz).
 ///
 /// Builder mode is the *only* path that attaches virtio-fs shares
-/// today; workload microVMs default to zero shares per Plan 97
-/// §"Host-path mounts" and refuse unauthorised shares.
+/// today; workload microVMs default to zero shares and refuse
+/// unauthorised shares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderVmMount {
     /// Symbolic mount tag the guest uses in `mount -t virtiofs <tag>
@@ -636,15 +624,15 @@ pub struct BuilderVmExitInfo {
     /// guest exit — kernel panic, SIGKILL, etc.).
     pub exit_code: Option<i32>,
     /// First matched line of a kernel-panic banner if the host-side
-    /// console-log watcher caught one. None on a clean run. Plan 77
-    /// W6's panic-detector contract — `Child::wait()` cannot detect
-    /// a panicked libkrun guest, so the watcher tails the console
-    /// log and kills the supervisor when it sees the banner.
+    /// console-log watcher caught one. None on a clean run.
+    /// `Child::wait()` cannot detect a panicked libkrun guest, so the
+    /// watcher tails the console log and kills the supervisor when it
+    /// sees the banner.
     pub panic_line: Option<String>,
 }
 
 /// Hypervisor-agnostic primitive that a `BuilderVmRuntime` helper
-/// builds on top of. Plan 97 §"Phase C seam design".
+/// builds on top of.
 ///
 /// Both `LibkrunBuilderVm` (today, via the libkrun supervisor) and
 /// the future `VzBuilderVm` (via the `mvm-vz-supervisor`) implement
@@ -668,9 +656,8 @@ pub struct BuilderVmExitInfo {
 ///
 /// - `LibkrunBuilderBackend` — `mvm-build/src/libkrun_builder.rs`,
 ///   wraps `spawn_supervisor_and_wait` + `wait_with_panic_detector`.
-///   Lands in the next slice (PR-B).
 /// - `VzBuilderBackend` — wraps `VzBackend::run_attached` with
-///   builder-side virtio-fs share configuration. Lands in PR-C.
+///   builder-side virtio-fs share configuration.
 pub trait VmBackendForBuilder: Send + Sync {
     /// Spawn the supervisor for a builder run, attach the given
     /// virtio-fs shares + extra virtio-blk disks, and block until
@@ -693,7 +680,7 @@ pub trait VmBackendForBuilder: Send + Sync {
     /// helper tails this in real time. Returning a path that
     /// doesn't yet exist is fine — the supervisor creates it ~100 ms
     /// after spawn, and the watcher's poll loop retries
-    /// `File::open()` until the file appears (Plan 77 W6).
+    /// `File::open()` until the file appears.
     fn console_log_path(&self, vm_state_dir: &Path) -> PathBuf;
 }
 
@@ -712,7 +699,7 @@ mod vm_backend_for_builder_tests {
     /// returns a programmable `BuilderVmExitInfo`. Exists in this
     /// module rather than as a workspace-level fixture so the trait
     /// is exercised at the point of definition. A future
-    /// `BuilderVmRuntime` test suite (PR-B) can move this into a
+    /// `BuilderVmRuntime` test suite can move this into a
     /// `pub(crate)` helper if reused.
     #[derive(Default)]
     struct MockBackend {
@@ -845,8 +832,8 @@ mod vm_backend_for_builder_tests {
 
     #[test]
     fn mock_works_through_dyn_trait_object() {
-        // The helper (PR-B) holds `&dyn VmBackendForBuilder`, so the
-        // trait must be object-safe. This compiles only if it is.
+        // The helper holds `&dyn VmBackendForBuilder`, so the trait
+        // must be object-safe. This compiles only if it is.
         let backend: Box<dyn VmBackendForBuilder> = Box::new(MockBackend::default());
         let info = backend
             .run_attached_with_mounts(&fixture_config(), &[], &[], Duration::from_secs(1))
@@ -874,7 +861,7 @@ fn shell_quote(input: &str) -> String {
 /// already-built flake/attr and write it to
 /// `<build_dir>/mvm-meta.json` so the consumer in
 /// `mvm::vm::runtime_meta::from_sidecar` can populate
-/// `accessible` for the W6.2 console gate.
+/// `accessible` for the console gate.
 ///
 /// Failure modes (all log+continue, never fail the build):
 /// - Flake doesn't surface `passthru.mvm` (older mkGuest, third-
@@ -884,7 +871,7 @@ fn shell_quote(input: &str) -> String {
 ///   mkGuest and our wire type): parse error → log warning
 /// - Disk write fails: log warning
 ///
-/// The consumer side (W6.2) defaults `accessible: true` when the
+/// The consumer side defaults `accessible: true` when the
 /// sidecar is missing, so a logged warning here is the only
 /// user-visible signal — the build still succeeds.
 ///
@@ -930,19 +917,19 @@ pub fn emit_sidecar_via_passthru_query(
     }
 }
 
-/// Plan 74 W2 / ADR-051 admission gate — refuse to start a VM whose
-/// rootfs is not overlay-aware.
+/// Admission gate — refuse to start a VM whose rootfs is not
+/// overlay-aware.
 ///
 /// Reads `mvm-meta.json` from `rootfs_dir` and inspects
 /// `overlay_aware`. The rootfs is overlay-aware when the sidecar
 /// exists and reports `overlay_aware: true`. Anything else fails:
 ///
 /// - **Sidecar missing** → refuse. Either the build pipeline that
-///   produced the rootfs predates the sidecar emit (W6.2), or the
+///   produced the rootfs predates the sidecar emit, or the
 ///   sidecar was deleted out from under us. Either way, attaching
 ///   a runtime overlay to an unknown rootfs is unsafe.
 /// - **Sidecar present, `overlay_aware: false`** → refuse. This is
-///   the pre-W1.4b cached-template case: the rootfs has no
+///   the older cached-template case: the rootfs has no
 ///   `/mvm/runtime` mount point, so the overlay disk has nowhere
 ///   to land. mkGuest's `/init` would either fail or silently
 ///   degrade to the baked-in agent path.
@@ -982,7 +969,7 @@ mod tests {
 
     #[test]
     fn dangling_store_line_matches_the_nix_gc_signature() {
-        // The exact #640 signature (single-quoted /nix/store path + does not exist).
+        // The exact dangling-store signature (single-quoted /nix/store path + does not exist).
         let stderr = "building...\n\
              error: path '/nix/store/0ccnxa25whszw7mgbgyzdm4nqc0zwnm8-source/flake.nix' does not exist\n\
              error: build of '/nix/store/abc.drv' failed\n";
@@ -1100,9 +1087,9 @@ mod tests {
 
     #[test]
     fn stub_returns_not_yet_implemented_for_install_job() {
-        // The B.2.0 plumbing reserves the Install variant; until B.2
-        // wires behavior, every backend (including the stub) must
-        // surface NotYetImplemented for it.
+        // The Install variant is reserved plumbing; until its behavior
+        // is wired, every backend (including the stub) must surface
+        // NotYetImplemented for it.
         let stub = StubBuilderVm;
         let job = BuilderJob::Install {
             spec_path: PathBuf::from("/tmp/spec.json"),
@@ -1126,10 +1113,10 @@ mod tests {
 
     #[test]
     fn run_stage0_default_is_a_documented_backend_gap() {
-        // ADR-068: backends without a Stage 0 impl (Stub, and Vz until a
-        // future slice) inherit the trait default — a fail-closed error
-        // that names the gap and the recovery path, never a silent no-op
-        // or a todo!() panic.
+        // Backends without a Stage 0 impl (Stub, and Vz until a future
+        // slice) inherit the trait default — a fail-closed error that
+        // names the gap and the recovery path, never a silent no-op or
+        // a todo!() panic.
         let stub = StubBuilderVm;
         let err = stub
             .run_stage0(
@@ -1218,7 +1205,7 @@ mod tests {
 
     #[test]
     fn sidecar_missing_overlay_aware_field_deserializes_as_false() {
-        // Pre-W1.4b sidecars on disk don't carry `overlayAware`.
+        // Older sidecars on disk don't carry `overlayAware`.
         // `#[serde(default)]` must read them as `false` so the
         // admission gate refuses them rather than silently
         // boot-attempting a non-overlay-aware rootfs.
@@ -1263,9 +1250,8 @@ mod tests {
     #[test]
     fn admit_overlay_aware_refuses_pre_w14b_sidecar() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Write a sidecar with overlay_aware=false (mirrors a
-        // pre-W1.4b cached template or a sidecar that lost the
-        // field).
+        // Write a sidecar with overlay_aware=false (mirrors an older
+        // cached template or a sidecar that lost the field).
         let mut stale = fixture_sidecar();
         stale.overlay_aware = false;
         stale.write_to_dir(tmp.path()).expect("write stale");
@@ -1299,7 +1285,7 @@ mod tests {
         assert!(body.contains("\"expectedBootMs\""), "got: {body}");
         assert!(body.contains("\"agentBinary\""), "got: {body}");
         assert!(body.contains("\"rootlessEntrypoint\""), "got: {body}");
-        // The accessible field is the W6.2 wire — check it's present.
+        // The accessible field is the console-gate wire — check it's present.
         assert!(body.contains("\"accessible\""), "got: {body}");
     }
 }

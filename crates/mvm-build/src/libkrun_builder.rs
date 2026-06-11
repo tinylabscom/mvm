@@ -1,9 +1,8 @@
 //! Libkrun-backed builder VM.
 //!
-//! Plan 72 ADR-046 chose libkrun-direct (on macOS Apple Silicon /
-//! Intel) and Firecracker (on Linux) as the replacement for the
-//! libkrun-backed builder VM. This module is the libkrun half;
-//! W1 → W4 of the migration shipped the launcher end-to-end.
+//! libkrun-direct (on macOS Apple Silicon / Intel) and Firecracker
+//! (on Linux) replaced the older builder VM. This module is the
+//! libkrun half.
 //!
 //! ## What `LibkrunBuilderVm` does
 //!
@@ -19,8 +18,8 @@
 //!    PATH).
 //! 4. Read the builder VM image from
 //!    `~/.cache/mvm/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
-//!    cmdline.txt + manifest.json, the shape Plan 72 W2's flake
-//!    emits. Populated by Plan 72 W5's `bootstrap_builder_vm_image`
+//!    cmdline.txt + manifest.json, the shape the builder-vm flake
+//!    emits. Populated by `bootstrap_builder_vm_image`
 //!    (`mvm-cli::commands::env::apple_container`).
 //! 5. Allocate / reuse the persistent `/nix-store-<arch>.img`
 //!    sparse virtio-blk image (64 GiB cap by default; idempotent
@@ -41,10 +40,10 @@
 //!
 //! ## Feature gate
 //!
-//! Gated behind `builder-vm`. Default-off until
-//! Plan 72 W5.B / W5.C cutover flips `ensure_dev_image` to dispatch
-//! through `LibkrunBuilderVm`. Library consumers that don't need
-//! the libkrun builder build with `default-features = false`.
+//! Gated behind `builder-vm`. Default-off until the cutover flips
+//! `ensure_dev_image` to dispatch through `LibkrunBuilderVm`.
+//! Library consumers that don't need the libkrun builder build with
+//! `default-features = false`.
 //!
 //! ## Not the runtime backend
 //!
@@ -68,16 +67,11 @@ use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
     BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig, VmBackendForBuilder,
 };
-// Plan 97 Phase C migration — these items previously lived in this
-// file; they migrated to `builder_vm_runtime` so the future
-// VzBuilderVm path can reuse the same logic without duplicating it.
-// `INSTALL_SPEC_FILENAME` and `shell_single_quote_escape` are
-// imported only inside the test module below; the production path
-// here uses `stage_job_dir` (commit 2), `read_job_result` (commit 3),
-// `finalize_flake_job` / `finalize_install_job` (commit 4),
-// `NixStoreImageLock` / `acquire_nix_store_image_lock` (commit 5),
-// `supervisor_exit_error` / `shell_job_exit_error` (commit 6), and
-// `builder_vm_timeout` (commit 7 — last pre-VzBuilderVm migration).
+// These items previously lived in this file; they migrated to
+// `builder_vm_runtime` so the future VzBuilderVm path can reuse the
+// same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
+// `shell_single_quote_escape` are imported only inside the test
+// module below.
 use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
     builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result,
@@ -89,8 +83,8 @@ use crate::builder_vm_runtime::{
 /// sweet spot on M-series Macs without saturating the host.
 pub const DEFAULT_VCPUS: u8 = 4;
 
-/// Default RAM in MiB. Originally 8 GiB (Plan 72 W5.D bullet 9 —
-/// in-VM nix builds peak ~5-6 GiB). Raised to 16 GiB for headroom
+/// Default RAM in MiB. Originally 8 GiB (in-VM nix builds peak
+/// ~5-6 GiB). Raised to 16 GiB for headroom
 /// when several derivations' build working sets overlap. Before the
 /// persistent-store cutover this also had to cover a 14 GiB in-RAM
 /// `/nix` tmpfs; the Stage 0 store now lives on a virtio-blk ext4 disk
@@ -107,7 +101,7 @@ pub const DEFAULT_NIX_STORE_MIB: u32 = 65536;
 /// Builder persistent /nix store auto-GC threshold (GiB of *used* space).
 /// When the in-guest store exceeds this after a build, the build script runs
 /// `nix-collect-garbage --delete-older-than 14d`. Override: MVM_BUILDER_STORE_GC_GIB.
-/// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB sparse cap). #630
+/// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB sparse cap).
 ///
 /// Canonical definition lives in `builder_vm_runtime` (always compiled;
 /// `render_flake_cmd_sh` bakes the resolved cap into the in-guest script).
@@ -115,36 +109,33 @@ pub const DEFAULT_NIX_STORE_MIB: u32 = 65536;
 pub use crate::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, builder_store_gc_cap_kib};
 
 /// Where the workspace gets mounted inside the builder VM
-/// (read-only virtio-fs). Plan 72 W4 wires this.
+/// (read-only virtio-fs).
 pub const GUEST_WORK_DIR: &str = "/work";
 
 /// Where artifacts get extracted inside the builder VM (read-write
-/// virtio-fs). Plan 72 W4 wires this.
+/// virtio-fs).
 pub const GUEST_OUT_DIR: &str = "/out";
 
 /// Where the persistent Nix store lives inside the builder VM. The
-/// `mvm-host-vm-init` PID-1 (Plan 72 W3) bind-mounts the virtio-blk
-/// device at this path before exec-ing the build script.
+/// `mvm-host-vm-init` PID-1 bind-mounts the virtio-blk device at
+/// this path before exec-ing the build script.
 pub const GUEST_NIX_DIR: &str = "/nix";
 
 /// Where the per-build job spec lives inside the builder VM. The
 /// host stages `cmd.sh`, `env`, and the eventual `result` file
-/// under this path (read-write virtio-fs). Plan 72 W4 wires this.
+/// under this path (read-write virtio-fs).
 pub const GUEST_JOB_DIR: &str = "/job";
 
 /// Caller-visible networking-backend preference. Read from
 /// the `MVM_NETWORKING` env var at every VM-launch site.
 ///
-/// Plan 87 introduced `Passt` (virtio-net via the userspace passt
-/// gateway). Plan 88 added `Gvproxy` for macOS, where passt does not
-/// build (`vmsplice`/namespace primitives are Linux-only — see
-/// ADR-055 §"Cross-platform backends").
+/// `Passt` is virtio-net via the userspace passt gateway. `Gvproxy`
+/// is for macOS, where passt does not build (`vmsplice`/namespace
+/// primitives are Linux-only).
 ///
-/// Plan 102 W6.A removed the historical `Tsi` variant — TSI
-/// bypasses virtio-net entirely, which violates the claim-10
-/// no-bypass invariant ([ADR-058](../../specs/adrs/058-claim-10-bytes-leaving-trust-boundary.md)).
-/// Every builder VM now gets a real virtio-net device through one
-/// of the two gateways.
+/// There is no `Tsi` variant: TSI bypasses virtio-net entirely,
+/// which violates the claim-10 no-bypass invariant. Every builder VM
+/// gets a real virtio-net device through one of the two gateways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkingPreference {
     /// virtio-net via passt. Linux-only. Requires libkrun-sys + the
@@ -161,7 +152,7 @@ pub enum NetworkingPreference {
 /// Apply the resolved [`NetworkingPreference`] to a [`KrunContext`].
 /// Dispatches `with_passt` or `with_gvproxy`. Each gateway uses
 /// `<vm_state_dir>` for its log/socket scratch space. There is no
-/// no-gateway path — claim-10 no-bypass (Plan 102 W6.A).
+/// no-gateway path — claim-10 no-bypass.
 fn apply_networking_mode(
     krun: KrunContext,
     vm_state_dir: &std::path::Path,
@@ -182,8 +173,7 @@ fn apply_networking_mode(
 /// macOS → [`Gvproxy`](NetworkingPreference::Gvproxy) because passt
 /// does not build there (the Homebrew formula refuses with "Linux is
 /// required for this software"); everything else (Linux today) →
-/// [`Passt`](NetworkingPreference::Passt). See ADR-055
-/// §"Cross-platform backends" for the rationale.
+/// [`Passt`](NetworkingPreference::Passt).
 pub fn default_networking_mode() -> NetworkingPreference {
     if cfg!(target_os = "macos") {
         NetworkingPreference::Gvproxy
@@ -197,11 +187,9 @@ pub fn default_networking_mode() -> NetworkingPreference {
 /// per-OS default and emits a warning so a typo is visible without
 /// aborting.
 ///
-/// Plan 87 W5 / PR3 flipped the default away from TSI; Plan 88
-/// added the per-OS dispatch (macOS → gvproxy, Linux → passt).
-/// Plan 102 W6.A removed TSI entirely — it bypassed virtio-net
-/// (no host fd to splice), which violates the claim-10 no-bypass
-/// invariant ([ADR-058](../../specs/adrs/058-claim-10-bytes-leaving-trust-boundary.md)).
+/// Per-OS dispatch is macOS → gvproxy, Linux → passt. TSI was
+/// removed entirely — it bypassed virtio-net (no host fd to splice),
+/// which violates the claim-10 no-bypass invariant.
 /// `MVM_NETWORKING=tsi` is no longer accepted; the value is
 /// treated as unknown and falls back to the per-OS gateway
 /// default with a warning. Pin a specific gateway across OS via
@@ -298,9 +286,9 @@ pub struct BuilderExtraDisk {
 ///
 /// This is intentionally narrower than [`BuilderJob`]: it is for
 /// in-tree infrastructure commands that need the Linux builder
-/// boundary but do not produce Nix build artifacts. Plan 85 Phase B
-/// uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs into a
-/// writable virtio-blk image.
+/// boundary but do not produce Nix build artifacts. The OCI image
+/// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
+/// into a writable virtio-blk image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderShellJob {
     pub work_dir: PathBuf,
@@ -380,7 +368,7 @@ impl LibkrunBuilderVm {
     ///
     /// Private impl behind `<Self as BuilderVm>::run_stage0`, which
     /// adapts the backend-agnostic `(root_dir, entry)` trait signature
-    /// to libkrun's `BuilderVmImage`. ADR-068.
+    /// to libkrun's `BuilderVmImage`.
     fn run_stage0_impl(
         &self,
         image: BuilderVmImage,
@@ -399,7 +387,7 @@ impl LibkrunBuilderVm {
         }
         // The builder-vm flake installs the pre-cross-compiled host-vm
         // binaries from this dir rather than building them with the guest's
-        // nix (ADR-065); the Stage 0 nix build aborts without it.
+        // nix; the Stage 0 nix build aborts without it.
         if !host_bin_dir.is_dir() {
             return Err(BuilderVmError::ExtractionFailed(format!(
                 "Stage 0 host_bin_dir must be an existing directory: {}",
@@ -454,7 +442,7 @@ impl LibkrunBuilderVm {
             // guest, so it enumerates as /dev/vda. Attached for the production
             // persistent-store path; `stage0-init` currently copies the seed
             // closure into a tmpfs `/nix` (overlay-over-virtiofs writes fail in
-            // libkrun), so the disk is a plan-160 follow-up, not yet formatted.
+            // libkrun), so the disk is a follow-up, not yet formatted.
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
@@ -479,9 +467,9 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
-            // are always hard-fail; they don't model long-running
-            // user workloads where a restart policy would apply.
+            // Builder VMs are always hard-fail; they don't model
+            // long-running user workloads where a restart policy would
+            // apply.
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
@@ -586,16 +574,16 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
-            // are always hard-fail; they don't model long-running
-            // user workloads where a restart policy would apply.
+            // Builder VMs are always hard-fail; they don't model
+            // long-running user workloads where a restart policy would
+            // apply.
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
-        // Plan 89 W2 part 4: spawn the vsock response listener
-        // BEFORE the supervisor so it can connect as soon as libkrun
-        // creates the dispatch socket. Drained after the supervisor
-        // exits — see `log_vsock_response_outcome` for the
-        // cross-validation contract.
+        // Spawn the vsock response listener BEFORE the supervisor so
+        // it can connect as soon as libkrun creates the dispatch
+        // socket. Drained after the supervisor exits — see
+        // `log_vsock_response_outcome` for the cross-validation
+        // contract.
         let vsock_rx = spawn_vsock_response_listener(&vm_state_dir);
         let exit_code =
             spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
@@ -625,8 +613,7 @@ impl LibkrunBuilderVm {
     /// failures inside `libkrun_sys::sys` otherwise), and
     /// uncreatable artifact dirs.
     ///
-    /// Public-in-crate so unit tests can exercise it without
-    /// triggering the W1 not-shipped trip-wire below.
+    /// Public-in-crate so unit tests can exercise it directly.
     pub(crate) fn validate_mounts(&self, mounts: &BuilderMounts) -> Result<(), BuilderVmError> {
         // Reject non-UTF-8 paths first — libkrun's C API takes
         // `*const c_char` and we want the error message pinned to
@@ -692,9 +679,8 @@ impl LibkrunBuilderVm {
                 }
             }
             BuilderJob::Install { spec_path } => {
-                // The install pipeline ships in Plan 73 Followup B.2;
-                // validate the file exists so a future caller's
-                // typo surfaces here rather than as an opaque
+                // Validate the file exists so a caller's typo
+                // surfaces here rather than as an opaque
                 // NotYetImplemented mid-pipeline.
                 if !spec_path.is_file() {
                     return Err(BuilderVmError::ExtractionFailed(format!(
@@ -756,7 +742,7 @@ pub(crate) fn ensure_utf8_path(p: &std::path::Path, field: &str) -> Result<(), B
 }
 
 impl BuilderVm for LibkrunBuilderVm {
-    /// ADR-068: adapt the backend-agnostic `(root_dir, entry)` Stage 0
+    /// Adapt the backend-agnostic `(root_dir, entry)` Stage 0
     /// contract to libkrun's `BuilderVmImage::RootDir` and run it.
     fn run_stage0(
         &self,
@@ -796,7 +782,7 @@ impl BuilderVm for LibkrunBuilderVm {
         let supervisor_path = resolve_supervisor_path()?;
 
         // 4. Find or initialise the builder VM image (kernel +
-        //    rootfs.ext4 + canonical cmdline) the W2 flake
+        //    rootfs.ext4 + canonical cmdline) the builder-vm flake
         //    produces. Stage 0 callers can provide a bootstrap
         //    image so a fresh source checkout can build the builder
         //    image cache without first downloading it.
@@ -817,8 +803,8 @@ impl BuilderVm for LibkrunBuilderVm {
 
         // 6. Stage the per-build job dir. Flake jobs get
         //    `cmd.sh`; install jobs get `install_spec.json`.
-        //    `mvm-host-vm-init` (Plan 72 W3 + Plan 73 Followup
-        //    B.2) dispatches based on which file it sees.
+        //    `mvm-host-vm-init` dispatches based on which file it
+        //    sees.
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
         stage_job_dir(
@@ -873,10 +859,10 @@ impl BuilderVm for LibkrunBuilderVm {
             .add_virtio_fs("work", path_to_str(&mounts.flake_src, "flake_src")?)
             .add_virtio_fs("out", path_to_str(&mounts.artifact_out, "artifact_out")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
-            // Plan 115 / ADR-065: mount the extracted host-vm binaries
-            // at /mvm-bins inside the builder VM (read-only). The cmd.sh
-            // sees MVM_HOST_BIN_DIR=/mvm-bins so the flake can reference
-            // the correct pre-compiled binaries without a host nix build.
+            // Mount the extracted host-vm binaries at /mvm-bins inside
+            // the builder VM (read-only). The cmd.sh sees
+            // MVM_HOST_BIN_DIR=/mvm-bins so the flake can reference the
+            // correct pre-compiled binaries without a host nix build.
             .add_virtio_fs(
                 "mvm-bins",
                 path_to_str(&mounts.host_bin_dir, "host_bin_dir")?,
@@ -902,15 +888,15 @@ impl BuilderVm for LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
-            // are always hard-fail; they don't model long-running
-            // user workloads where a restart policy would apply.
+            // Builder VMs are always hard-fail; they don't model
+            // long-running user workloads where a restart policy would
+            // apply.
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
-        // Plan 89 W2 part 4: same dispatch-listener wiring as
-        // `run_shell_script`. Drained after the supervisor exits
-        // (or right before bailing on supervisor failure) so the
-        // background thread always gets a chance to log.
+        // Same dispatch-listener wiring as `run_shell_script`.
+        // Drained after the supervisor exits (or right before bailing
+        // on supervisor failure) so the background thread always gets
+        // a chance to log.
         let vsock_rx = spawn_vsock_response_listener(&vm_state_dir);
         let exit_code =
             spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
@@ -921,9 +907,9 @@ impl BuilderVm for LibkrunBuilderVm {
         // The flake / install finalize paths don't return a
         // structured exit_code from the file before they branch on
         // variant-specific shapes (Flake reads `/job/result`,
-        // Install reads `/out/result.json`). For W2 part 4 we log
-        // without the file cross-validation in this site to keep
-        // the change minimal; W3 wires per-variant cross-validation.
+        // Install reads `/out/result.json`). We log without the file
+        // cross-validation here; per-variant cross-validation is not
+        // wired at this site.
         log_vsock_response_outcome(vsock_rx, None);
 
         // 9. Per-variant result parsing + artifact validation.
@@ -939,15 +925,15 @@ impl BuilderVm for LibkrunBuilderVm {
     }
 
     fn cleanup(&self) -> Result<(), BuilderVmError> {
-        // Plan 72 W6 hygiene: prune old job dirs under
-        // `~/.cache/mvm/builder-vm/jobs/` past N days. No-op
-        // until W6 picks the retention policy.
+        // Hygiene: prune old job dirs under
+        // `~/.cache/mvm/builder-vm/jobs/` past N days. No-op until a
+        // retention policy is picked.
         Ok(())
     }
 }
 
 // ─────────────────────────────────────────────────────────────────
-// LibkrunBuilderBackend — Plan 97 Phase C, first refactor slice.
+// LibkrunBuilderBackend
 //
 // This is the hypervisor-agnostic seam's libkrun-flavored impl.
 // Wraps `spawn_supervisor_in_background` + `wait_with_panic_detector_until`
@@ -966,19 +952,19 @@ impl BuilderVm for LibkrunBuilderVm {
 // avoids widening those helpers' visibility for a single new caller.
 // ─────────────────────────────────────────────────────────────────
 
-/// Plan 97 §"Phase C seam design" — libkrun-flavored impl of the
-/// hypervisor-agnostic [`VmBackendForBuilder`] primitive trait.
+/// libkrun-flavored impl of the hypervisor-agnostic
+/// [`VmBackendForBuilder`] primitive trait.
 ///
 /// Holds the resolved supervisor binary path and the cached
 /// builder VM image (kernel + rootfs + cmdline). Construction
 /// eagerly resolves both so a missing prerequisite surfaces at
 /// `new()`-time rather than mid-build.
 ///
-/// `LibkrunBuilderVm::run_build` does not yet use this — the
-/// follow-up slice (PR-B-2) introduces `BuilderVmRuntime` and
-/// flips the migration. Today it exists so PR-C (`VzBuilderVm`)
-/// has a worked example of how to wrap a hypervisor-specific
-/// supervisor behind the seam.
+/// `LibkrunBuilderVm::run_build` does not yet use this — a
+/// follow-up slice introduces `BuilderVmRuntime` and flips the
+/// migration. Today it exists so the `VzBuilderVm` work has a
+/// worked example of how to wrap a hypervisor-specific supervisor
+/// behind the seam.
 pub struct LibkrunBuilderBackend {
     supervisor_path: PathBuf,
     image: BuilderVmImage,
@@ -1059,8 +1045,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // every share is RW from the guest's perspective. The
             // `BuilderVmMount::read_only` flag is currently ignored
             // on this backend; Vz's impl will honour it via
-            // VZSharedDirectory's `readOnly:` parameter (Plan 97
-            // §"Host-path mounts").
+            // VZSharedDirectory's `readOnly:` parameter.
             krun = krun.add_virtio_fs(
                 mount.tag.clone(),
                 path_to_str(&mount.host_path, "mount_host_path")?,
@@ -1082,9 +1067,9 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
-            // are always hard-fail; they don't model long-running
-            // user workloads where a restart policy would apply.
+            // Builder VMs are always hard-fail; they don't model
+            // long-running user workloads where a restart policy would
+            // apply.
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
@@ -1093,7 +1078,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         // uses, but we surface the panic line via the seam's exit
         // info instead of an Err so the future BuilderVmRuntime
         // helper can decide whether the job's expectations were
-        // met (Plan 77 W6 §"Concurrent panic detector").
+        // met.
         match wait_with_panic_detector_until(
             &mut child,
             Some(&console_log),
@@ -1134,7 +1119,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
 /// Resolved builder VM image. One of two boot shapes:
 ///
 /// - **Rootfs**: kernel + rootfs.ext4 + cmdline. The steady-state
-///   builder VM path produced by the W2 flake.
+///   builder VM path produced by the builder-vm flake.
 /// - **RootDir**: host directory + guest entrypoint. The Stage 0
 ///   bootstrap path. libkrun's bundled kernel boots transparently;
 ///   no host-built kernel involved.
@@ -1209,7 +1194,7 @@ fn krun_context_for_image(
 
 /// Host architecture tag used as a cache-key segment for
 /// per-arch builder VM images. `aarch64` on Apple Silicon /
-/// ARM Linux, `x86_64` everywhere else. Plan 72 W2's flake
+/// ARM Linux, `x86_64` everywhere else. The builder-vm flake
 /// emits both per release.
 pub(crate) fn host_arch_tag() -> &'static str {
     if cfg!(target_arch = "aarch64") {
@@ -1239,11 +1224,10 @@ pub(crate) fn stage0_nix_store_image_name() -> String {
 }
 
 /// Find the builder VM image (kernel + rootfs + cmdline) in
-/// the host cache. The W2 flake's `packages.<system>.default`
+/// the host cache. The builder-vm flake's `packages.<system>.default`
 /// produces exactly the `vmlinux` / `rootfs.ext4` / `cmdline.txt`
-/// files this loads. Plan 72 W5 cutover wires the build-or-
-/// download step that populates this cache; today it errors
-/// when missing with an actionable hint.
+/// files this loads. The build-or-download step populates this
+/// cache; today it errors when missing with an actionable hint.
 pub(crate) fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
     let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
     let kernel_path = arch_dir.join("vmlinux");
@@ -1294,16 +1278,16 @@ pub(crate) fn unique_job_id() -> String {
     format!("{now:013}-{pid}")
 }
 
-// `INSTALL_SPEC_FILENAME` moved to `crate::builder_vm_runtime` in
-// Plan 97 Phase C PR-B-migrate; the `use` at the top of this file
-// pulls it back in for the existing callers.
+// `INSTALL_SPEC_FILENAME` moved to `crate::builder_vm_runtime`; the
+// `use` at the top of this file pulls it back in for the existing
+// callers.
 
 // `stage_job_dir`, `shell_single_quote_escape`, `read_job_result`,
 // `JobResult`, `INSTALL_RESULT_FILENAME`, `read_last_bytes_of`,
 // `finalize_flake_job`, `read_revision_hash`, `extract_nix_store_hash`,
 // `finalize_install_job`, and `InstallResultReport` all live in
 // `crate::builder_vm_runtime` so the future VzBuilderVm path can reuse
-// them. Plan 97 Phase C PR-B-migrate commits 2-4.
+// them.
 
 fn stage_shell_job_dir(job_dir: &Path, script: &str) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(job_dir).map_err(|e| {
@@ -1357,9 +1341,9 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
 /// per libkrun's `start_enter` semantics; non-zero if the
 /// supervisor errored before or during the guest run).
 ///
-/// Plan 89 W3 part 4 — spawn the supervisor with the given
-/// `cfg` piped to its stdin, return the live `Child` *without*
-/// waiting on it. Persistent-VM callers
+/// Spawn the supervisor with the given `cfg` piped to its stdin,
+/// return the live `Child` *without* waiting on it. Persistent-VM
+/// callers
 /// ([`LibkrunPersistentHostVm::start`]) consume the child via
 /// [`PersistentVmHandle`]; the single-shot
 /// [`spawn_supervisor_and_wait`] calls this then runs the wait
@@ -1433,8 +1417,8 @@ fn spawn_supervisor_and_wait(
     let mut child = spawn_supervisor_in_background(supervisor_path, cfg)?;
 
     let timeout = builder_vm_timeout()?;
-    // Plan 77 W6 — concurrent kernel-panic detector. The libkrun
-    // supervisor blocks in `krun_start_enter` until the VM cleanly
+    // Concurrent kernel-panic detector. The libkrun supervisor
+    // blocks in `krun_start_enter` until the VM cleanly
     // exits; a kernel panic at PID 1 doesn't trigger a clean exit, so
     // a plain `child.wait()` would hang indefinitely. We tail the VM's
     // console log for the kernel's stable panic banner and kill the
@@ -1481,11 +1465,11 @@ fn spawn_supervisor_and_wait(
     }
 }
 
-/// Plan 89 W2 part 4 — spawn a background thread that reads the
+/// Spawn a background thread that reads the
 /// `HostVmResponse::Result` frame `mvm-host-vm-init` sends over
 /// AF_VSOCK port [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`]
-/// right before reboot (W2 part 3). Returns a `Receiver` the caller
-/// drains after the supervisor exits via [`log_vsock_response_outcome`].
+/// right before reboot. Returns a `Receiver` the caller drains
+/// after the supervisor exits via [`log_vsock_response_outcome`].
 ///
 /// The thread starts BEFORE the supervisor so it can connect as
 /// soon as libkrun creates `<vm_state_dir>/vsock-21471.sock` —
@@ -1495,9 +1479,9 @@ fn spawn_supervisor_and_wait(
 /// read deadline so an unresponsive guest doesn't leak the thread
 /// indefinitely.
 ///
-/// Pre-W2-part-3 cached dev images won't send a response at all;
-/// the legacy `<job_dir>/result` file path remains authoritative
-/// for the build's exit code. This helper's job is purely
+/// Older cached dev images won't send a response at all; the legacy
+/// `<job_dir>/result` file path remains authoritative for the
+/// build's exit code. This helper's job is purely
 /// observational: log what arrives, warn on mismatch against the
 /// file, never gate the build on the vsock outcome.
 #[cfg(feature = "builder-vm")]
@@ -1548,7 +1532,7 @@ pub fn spawn_vsock_response_listener(
 /// bounded wait and log the outcome. If `file_exit_code` is `Some`,
 /// cross-validate against the vsock-reported exit code and warn on
 /// mismatch (but never propagate as an error — the file is the
-/// authoritative source until W3 reverses the polarity).
+/// authoritative source for now).
 ///
 /// The 5-second `recv_timeout` past supervisor exit is enough for
 /// the read-deadline-bounded thread to deliver any in-flight
@@ -1609,7 +1593,7 @@ pub fn log_vsock_response_outcome(
     }
 }
 
-/// Plan 77 W6 — outcome of [`wait_with_panic_detector`]. `KernelPanic`
+/// Outcome of [`wait_with_panic_detector`]. `KernelPanic`
 /// short-circuits the normal exit-code path with the captured banner
 /// line so the caller can map it to [`BuilderVmError::SeedKernelPanic`]
 /// without a separate side channel.
@@ -1867,17 +1851,17 @@ fn path_to_str<'a>(p: &'a Path, field: &str) -> Result<&'a str, BuilderVmError> 
 }
 
 // ============================================================
-// Plan 89 W3 part 4 — LibkrunPersistentHostVm
+// LibkrunPersistentHostVm
 // ============================================================
 
 /// Filename of the marker the host stages under `<job_dir>/` to
-/// tell `mvm-host-vm-init` to enter its dispatch loop (W3 part 3)
-/// instead of running the single-shot `cmd.sh` / `install_spec`
-/// flow. Same key as the path the guest checks.
+/// tell `mvm-host-vm-init` to enter its dispatch loop instead of
+/// running the single-shot `cmd.sh` / `install_spec` flow. Same key
+/// as the path the guest checks.
 pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 
-/// Plan 89 W3 part 4 — spawn the long-lived builder VM that
-/// `mvm-host-vm-init`'s W3 part 3 dispatch loop runs inside.
+/// Spawn the long-lived builder VM that `mvm-host-vm-init`'s
+/// dispatch loop runs inside.
 ///
 /// Mirrors the config surface of [`LibkrunBuilderVm`] but
 /// produces a different shape of dispatch: instead of running a
@@ -1887,15 +1871,13 @@ pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 /// AF_VSOCK port [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`].
 ///
 /// The caller pairs this with a `PersistentBuilderSupervisor`
-/// (W3 part 1) constructed against
-/// [`PersistentVmHandle::dispatch_socket_path`].
+/// constructed against [`PersistentVmHandle::dispatch_socket_path`].
 ///
-/// ## What's *not* in this PR
+/// ## Not yet wired
 ///
-/// - `mvmctl dev up` integration (W3 part 5) is what actually
-///   constructs one of these against the dev session's lifecycle.
-/// - Per-job namespace isolation inside the dispatch loop (W3
-///   part 8 — security amendments F2/F7).
+/// - `mvmctl dev up` integration is what actually constructs one of
+///   these against the dev session's lifecycle.
+/// - Per-job namespace isolation inside the dispatch loop.
 #[cfg(feature = "builder-vm")]
 #[derive(Debug, Clone)]
 pub struct LibkrunPersistentHostVm {
@@ -1903,8 +1885,8 @@ pub struct LibkrunPersistentHostVm {
     memory_mib: u32,
     nix_store_mib: u32,
     image_override: Option<BuilderVmImage>,
-    /// Host directory bound at `/work` in the guest. Plan 89 §"Workspace
-    /// mount strategy" — bound at VM start, not per-dispatch.
+    /// Host directory bound at `/work` in the guest. Bound at VM
+    /// start, not per-dispatch.
     workspace_root: PathBuf,
 }
 
@@ -1948,8 +1930,8 @@ impl LibkrunPersistentHostVm {
     }
 
     /// Spawn the supervisor + libkrun VM in the background and
-    /// return a handle whose `dispatch_socket_path` the W3 part 1
-    /// supervisor connects to. The returned `Child` is alive
+    /// return a handle whose `dispatch_socket_path` the supervisor
+    /// connects to. The returned `Child` is alive
     /// until either the guest dispatch loop processes a
     /// `HostVmRequest::Shutdown` (clean exit) or the caller
     /// invokes [`PersistentVmHandle::kill`].
@@ -1974,11 +1956,10 @@ impl LibkrunPersistentHostVm {
             None => ensure_builder_vm_image()?,
         };
         // Acquire the cross-process flock on the nix-store image
-        // for the persistent VM's lifetime. Issue #371 mitigation:
-        // concurrent `mvmctl deps install` while a dev session's
-        // persistent VM is up would otherwise corrupt the shared
-        // ext4. Held inside the handle; released on drop / kill /
-        // wait_for_shutdown.
+        // for the persistent VM's lifetime. Concurrent
+        // `mvmctl deps install` while a dev session's persistent VM
+        // is up would otherwise corrupt the shared ext4. Held inside
+        // the handle; released on drop / kill / wait_for_shutdown.
         let nix_store_lock = acquire_nix_store_image_lock(
             &builder_vm_cache_dir(),
             host_arch_tag(),
@@ -2012,12 +1993,11 @@ impl LibkrunPersistentHostVm {
             .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
             .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT)
-            // Plan 107 A3 — the workload-vsock nesting hop. The
-            // in-host-VM forwarder listens here; the outer host reaches
-            // a workload's Firecracker vsock via
-            // `<vm_state_dir>/vsock-21472.sock`. libkrun registers
-            // vsock ports at launch, so this must be added up front
-            // even though workloads start later (A4).
+            // The workload-vsock nesting hop. The in-host-VM forwarder
+            // listens here; the outer host reaches a workload's
+            // Firecracker vsock via `<vm_state_dir>/vsock-21472.sock`.
+            // libkrun registers vsock ports at launch, so this must be
+            // added up front even though workloads start later.
             .add_vsock_port(mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT);
 
         krun = apply_networking_mode(krun, &vm_state_dir)?;
@@ -2033,9 +2013,9 @@ impl LibkrunPersistentHostVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Plan 113 §Task 14 / ADR-064 §Decision 6 — builder VMs
-            // are always hard-fail; they don't model long-running
-            // user workloads where a restart policy would apply.
+            // Builder VMs are always hard-fail; they don't model
+            // long-running user workloads where a restart policy would
+            // apply.
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
@@ -2052,8 +2032,8 @@ impl LibkrunPersistentHostVm {
 }
 
 /// Stage `<job_dir>/<DISPATCH_SOCK_MARKER>` so the in-guest
-/// `mvm-host-vm-init` enters its W3 part 3 dispatch loop instead
-/// of the single-shot cmd.sh / install_spec flow. The marker
+/// `mvm-host-vm-init` enters its dispatch loop instead of the
+/// single-shot cmd.sh / install_spec flow. The marker
 /// body is intentionally empty — its mere existence is the
 /// signal.
 #[cfg(feature = "builder-vm")]
@@ -2100,7 +2080,7 @@ pub struct PersistentVmHandle {
 impl PersistentVmHandle {
     /// Path libkrun uses for the per-VM state (vsock sockets,
     /// console log, PID file). Pass this to
-    /// `dispatch_socket_path` when constructing the W3 part 1
+    /// `dispatch_socket_path` when constructing the
     /// `PersistentBuilderSupervisor`.
     pub fn vm_state_dir(&self) -> &Path {
         &self.vm_state_dir
@@ -2108,8 +2088,8 @@ impl PersistentVmHandle {
 
     /// Host-side path of the libkrun-managed Unix socket that
     /// proxies to AF_VSOCK [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`]
-    /// inside the guest. The W3 part 1
-    /// `PersistentBuilderSupervisor::new` takes this directly.
+    /// inside the guest. `PersistentBuilderSupervisor::new` takes
+    /// this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
         self.vm_state_dir
             .join(mvm_core::config::vsock_socket_filename(
@@ -2199,10 +2179,10 @@ mod tests {
     fn defaults_match_plan_72_w1() {
         let vm = LibkrunBuilderVm::default();
         assert_eq!(vm.vcpus, 4);
-        // Plan 72 W5.D bullet 9: 4 → 8 GiB (in-VM nix builds peak
-        // ~5-6 GiB; OOM at lower default). Later raised to 16 GiB for
-        // overlapping build working sets. Hardcoded so a regression on
-        // either side fails fast.
+        // 4 → 8 GiB (in-VM nix builds peak ~5-6 GiB; OOM at lower
+        // default). Later raised to 16 GiB for overlapping build
+        // working sets. Hardcoded so a regression on either side
+        // fails fast.
         assert_eq!(vm.memory_mib, 16384);
         assert_eq!(vm.nix_store_mib, 65536);
     }
@@ -2213,7 +2193,7 @@ mod tests {
         // SAFETY: tests guarded by ENV_LOCK; env mutation in test
         // process is fine when serialized.
         unsafe {
-            // Plan 88: default is per-OS — macOS → Gvproxy, others → Passt.
+            // Default is per-OS — macOS → Gvproxy, others → Passt.
             std::env::remove_var("MVM_NETWORKING");
             assert_eq!(resolve_networking_mode(), default_networking_mode());
 
@@ -2247,8 +2227,8 @@ mod tests {
 
     #[test]
     fn tsi_no_longer_resolvable() {
-        // Plan 102 W6.A removed TSI. `MVM_NETWORKING=tsi` (any case)
-        // must NOT resolve to a TSI mode — it falls back to the
+        // TSI was removed. `MVM_NETWORKING=tsi` (any case) must NOT
+        // resolve to a TSI mode — it falls back to the
         // per-OS gateway default with a warning. This guards the
         // claim-10 no-bypass invariant at the env-var surface.
         let _guard = ENV_LOCK.lock().unwrap();
@@ -2384,8 +2364,8 @@ mod tests {
     #[test]
     fn validate_job_rejects_install_with_missing_spec() {
         // The Install variant validates that spec_path actually
-        // exists — Followup B.2 will read it inside the VM, so the
-        // host needs the file present before dispatch.
+        // exists — the spec is read inside the VM, so the host needs
+        // the file present before dispatch.
         let job = BuilderJob::Install {
             spec_path: PathBuf::from("/definitely/does/not/exist.json"),
         };
@@ -2403,8 +2383,8 @@ mod tests {
     #[test]
     fn validate_job_accepts_install_with_existing_spec() {
         // Smoke-test the happy path of Install validation. We
-        // don't construct a real spec — the parsing arrives in
-        // B.2. We only check that a real file passes.
+        // don't construct a real spec — the parsing happens later.
+        // We only check that a real file passes.
         let scratch = TempDir::new().unwrap();
         let spec_path = scratch.path().join("spec.json");
         std::fs::write(&spec_path, b"{}").unwrap();
@@ -2414,9 +2394,9 @@ mod tests {
 
     #[test]
     fn run_build_surfaces_environment_gaps_for_install_variant() {
-        // Plan 73 Followup B.2 wires the Install variant — passing
-        // input validation no longer trips NotYetImplemented. Two
-        // host shapes can hit this code path:
+        // The Install variant is wired — passing input validation no
+        // longer trips NotYetImplemented. Two host shapes can hit
+        // this code path:
         //
         // - CI runner without libkrun: `run_build` short-circuits at
         //   the supervisor-binary lookup with `LibkrunUnavailable`
@@ -2455,8 +2435,8 @@ mod tests {
 
     #[test]
     fn stage_job_dir_install_copies_spec_into_job_dir() {
-        // Plan 73 Followup B.2: install jobs stage
-        // `<job_dir>/install_spec.json` rather than `cmd.sh`. The
+        // Install jobs stage `<job_dir>/install_spec.json` rather
+        // than `cmd.sh`. The
         // guest's `mvm-host-vm-init` probes for that filename and
         // dispatches through the install pipeline.
         let scratch = TempDir::new().unwrap();
@@ -2477,8 +2457,7 @@ mod tests {
     }
 
     // `finalize_install_job_*` test coverage migrated to
-    // `builder_vm_runtime` alongside the function itself. Plan 97
-    // Phase C PR-B-migrate commit 4.
+    // `builder_vm_runtime` alongside the function itself.
 
     #[test]
     fn run_build_fails_validation_before_reaching_libkrun() {
@@ -2515,7 +2494,7 @@ mod tests {
         //   - mvm-libkrun-supervisor missing → LibkrunUnavailable
         //   - flake.nix missing inside the (empty) stub mount, on
         //     a host where libkrun + cache + supervisor are all
-        //     present (post-Plan-72-W5 contributor host) →
+        //     present (fully-bootstrapped contributor host) →
         //     NixBuildFailed
         // All four are legitimate "environment gap" surfaces. The
         // fourth is what `mvmctl dev up` reports to operators with
@@ -2574,8 +2553,8 @@ mod tests {
 
     #[test]
     fn stage_job_dir_override_stages_user_flake_and_overrides_mvm() {
-        // Plan 120 / ADR-046: source-checkout override mode stages the user
-        // flake into the job dir and pins `mvm` to the local checkout
+        // Source-checkout override mode stages the user flake into
+        // the job dir and pins `mvm` to the local checkout
         // mounted at /work, so the workload builds against in-repo nix
         // rather than GitHub.
         let scratch = TempDir::new().unwrap();
@@ -2652,7 +2631,7 @@ mod tests {
 
     #[test]
     fn host_arch_tag_is_one_of_two_known_values() {
-        // Plan 72 W2's flake outputs aarch64-linux and
+        // The builder-vm flake outputs aarch64-linux and
         // x86_64-linux only; the cache-key segment must match
         // one of those.
         let tag = host_arch_tag();
@@ -2679,7 +2658,6 @@ mod tests {
     // `finalize_flake_job_*`, `read_last_bytes_of_*`,
     // `acquire_nix_store_image_lock_*` test coverage migrated to
     // `builder_vm_runtime` alongside the functions themselves.
-    // Plan 97 Phase C PR-B-migrate commits 3-5.
 
     #[test]
     fn ensure_builder_vm_image_requires_cmdline_txt() {
@@ -2714,7 +2692,7 @@ mod tests {
     }
 
     // `builder_vm_timeout_*` tests migrated to `builder_vm_runtime`
-    // alongside the function. Plan 97 Phase C PR-B-migrate commit 7.
+    // alongside the function.
 
     #[test]
     fn unique_job_id_includes_pid_and_timestamp() {
@@ -2739,7 +2717,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Plan 77 W6 — kernel-panic detector.
+    // kernel-panic detector.
     //
     // `find_panic_line_in` is a pure scanner — tested directly. The
     // `wait_with_panic_detector` integration tests spawn `sleep` as a
@@ -2958,7 +2936,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------
-    // Plan 89 W3 part 4 — LibkrunPersistentHostVm
+    // LibkrunPersistentHostVm
     // -----------------------------------------------------------
 
     #[test]
@@ -3050,7 +3028,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Plan 89 W2 part 4 — vsock response listener
+    // vsock response listener
     // ---------------------------------------------------------------
     //
     // Live in `crates/mvm-build/tests/vsock_response_listener.rs`
@@ -3061,7 +3039,7 @@ mod tests {
     // for test scaffolding belong.
 
     // ---------------------------------------------------------------
-    // Plan 97 §"Phase C seam design" — LibkrunBuilderBackend impl
+    // LibkrunBuilderBackend impl
     //
     // Construction-shape tests only. Exercising `run_attached_with_mounts`
     // requires libkrun + the builder image + an actual supervisor

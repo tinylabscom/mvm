@@ -27,9 +27,9 @@
 //!    bytes. *Mismatch → reject.*
 //! 4. For each artifact, re-hash its bytes and compare against the
 //!    SHA-256 declared in the signed manifest. *Mismatch → reject.*
-//! 5. dm-verity (ADR-002 §W3) gives independent per-block integrity
-//!    inside the rootfs at boot — the bundle layer covers tamper
-//!    detection at extract time.
+//! 5. dm-verity gives independent per-block integrity inside the
+//!    rootfs at boot — the bundle layer covers tamper detection at
+//!    extract time.
 //!
 //! ## What lives in the bundle archive
 //!
@@ -40,7 +40,7 @@
 //! └── artifacts/
 //!     ├── vmlinux         # kernel
 //!     ├── rootfs.ext4     # root filesystem
-//!     ├── rootfs.verity   # optional dm-verity sidecar (W3)
+//!     ├── rootfs.verity   # optional dm-verity sidecar
 //!     ├── fc_base_config.json
 //!     └── initrd          # optional NixOS stage-1
 //! ```
@@ -66,9 +66,9 @@ use thiserror::Error;
 /// Verifiers fail closed on a future bump rather than silently
 /// dropping fields they don't know about.
 ///
-/// Bumped 1 → 2 in Sprint 52 W2 residual C when `BundleManifest`
-/// gained the optional `resources: Option<BundleResources>`
-/// field. Older verifiers `#[serde(deny_unknown_fields)]` would
+/// Bumped 1 → 2 when `BundleManifest` gained the optional
+/// `resources: Option<BundleResources>` field. Older verifiers
+/// `#[serde(deny_unknown_fields)]` would
 /// refuse v2 bundles on the field alone, but the version sniff
 /// runs first and surfaces a clear `UnsupportedSchema` error.
 /// Newer verifiers reading a v1 bundle accept the missing field
@@ -129,7 +129,7 @@ pub enum ArtifactRole {
     Kernel,
     /// Root filesystem block image (ext4 or squashfs).
     Rootfs,
-    /// dm-verity Merkle-hash sidecar paired with `Rootfs`. ADR-002 §W3.
+    /// dm-verity Merkle-hash sidecar paired with `Rootfs`.
     VerityHashSidecar,
     /// Firecracker base VM config JSON.
     FirecrackerBaseConfig,
@@ -177,7 +177,7 @@ pub struct BundleResources {
 }
 
 /// dm-verity binding for the rootfs. Present when the workload was
-/// built with `verifiedBoot = true` (ADR-002 §W3).
+/// built with `verifiedBoot = true`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerityInfo {
@@ -239,8 +239,8 @@ pub struct BundleManifest {
     /// build time. `Some(...)` in v2+ bundles; `None` for v1
     /// bundles (handled via `#[serde(default)]`). The template
     /// loader uses these to set defaults when `mvmctl up` doesn't
-    /// pass `--cpus` / `--memory` explicitly. ADR-002 claim 9
-    /// re-verify still re-hashes the field as part of the manifest.
+    /// pass `--cpus` / `--memory` explicitly. The claim-9 re-verify
+    /// still re-hashes the field as part of the manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<BundleResources>,
 }

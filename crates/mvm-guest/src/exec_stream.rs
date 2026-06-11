@@ -4,7 +4,7 @@
 //! (`do_exec_streaming`); this core is closure-driven so it is unit-
 //! testable without a vsock `File`. Mirrors `process_rpc::spawn_drain` +
 //! the `handle_proc_wait` sleep-poll loop (the in-repo streaming idiom —
-//! mvm-guest has no `libc::poll` usage). Plan 159 WS-5 E.
+//! mvm-guest has no `libc::poll` usage).
 #![cfg(feature = "dev-shell")]
 
 use crate::vsock::ExecEvent;

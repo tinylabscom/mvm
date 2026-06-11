@@ -1,8 +1,5 @@
 //! `L7EgressProxy` — the real `EgressProxy` impl that wires the
-//! inspector chain (Waves 2.1–2.5) into outbound HTTP traffic.
-//!
-//! Plan 37 §15 (Wave 2.6 / Phase 1). See
-//! `specs/plans/79-wave-2.6-l7-egress-proxy.md` for the full design.
+//! inspector chain into outbound HTTP traffic.
 //!
 //! ## Phase 1 scope (this module)
 //!
@@ -20,7 +17,7 @@
 //! - TCP listener loop in [`L7EgressProxy::serve`].
 //! - Audit emission via [`AuditSigner`] for every request.
 //!
-//! ## Out of scope (Wave 2.6.5)
+//! ## Out of scope (later)
 //!
 //! - TLS MITM (Phase 2).
 //! - HTTP/2 / HTTP/3, connection pooling, bandwidth caps.
@@ -123,8 +120,8 @@ pub trait EgressAuditSink: Send + Sync {
     async fn record(&self, fields: &AuditFields) -> Result<(), AuditError>;
 }
 
-/// In-memory sink for tests + dev mode. Wave 3's chain-signing
-/// production sink will replace this in non-dev paths.
+/// In-memory sink for tests + dev mode. A chain-signing production
+/// sink will replace this in non-dev paths.
 pub struct CapturingEgressAuditSink {
     entries: std::sync::Mutex<Vec<AuditFields>>,
 }
@@ -176,7 +173,7 @@ impl EgressAuditSink for NoopEgressAuditSink {
 }
 
 /// Parsed `CONNECT host:port HTTP/1.x` request line. Phase 1 only
-/// handles CONNECT; plain-HTTP request parsing lands in 2.6.5.
+/// handles CONNECT; plain-HTTP request parsing lands later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectRequest {
     pub host: String,
@@ -563,7 +560,7 @@ async fn write_200_established(client: &mut TcpStream) -> std::io::Result<()> {
 /// reqwest / etc. surface the reason to the workload.
 ///
 /// The reason is whatever the inspector returned; it never echoes
-/// matched body bytes (Wave 2.2/2.5 already enforce that), but we
+/// matched body bytes (the inspectors already enforce that), but we
 /// sanitise newlines defensively to avoid header injection.
 async fn write_403(client: &mut TcpStream, reason: &str) -> std::io::Result<()> {
     let safe = reason.replace(['\r', '\n'], " ");
@@ -611,16 +608,16 @@ async fn write_status(client: &mut TcpStream, status: u16, msg: &str) -> std::io
 #[async_trait]
 impl EgressProxy for L7EgressProxy {
     async fn inspect(&self, host: &str, path: &str) -> Result<EgressDecision, EgressError> {
-        // Wave 1's `EgressProxy` trait predates the (host, port,
-        // body) shape. Until Wave 2.7's trait widening, this method
+        // The original `EgressProxy` trait predates the (host, port,
+        // body) shape. Until the trait widening, this method
         // delegates to `evaluate` with port=443 (the HTTPS default
         // — the host-only signature is never going to be the
         // primary callsite anyway) and an empty body. Real proxy
         // traffic uses `evaluate` directly via the `serve` loop.
         let result = self.evaluate(host, 443, Vec::new()).await?;
         // The path arg from the legacy trait is informational; we
-        // record it on the side but it doesn't affect the chain in
-        // Wave 2.6 since no inspector reads it.
+        // record it on the side but it doesn't affect the chain
+        // since no inspector reads it.
         let _ = path;
         Ok(result.decision)
     }
@@ -824,8 +821,8 @@ mod tests {
         let resolver = MockResolver::returns(IpAddr::V4(Ipv4Addr::new(104, 18, 32, 10)));
         let proxy = proxy_with(full_chain(), resolver);
         // The legacy 2-arg `inspect(host, path)` should delegate
-        // through `evaluate` cleanly. Used by Wave 1 callers until
-        // 2.7 widens the trait.
+        // through `evaluate` cleanly. Used by older callers until
+        // the trait is widened.
         let r: &dyn EgressProxy = &proxy;
         let dec = r
             .inspect("api.openai.com", "/v1/chat")
@@ -919,8 +916,8 @@ mod tests {
         // accepts it via rsplit_once(':') which keeps the brackets
         // in the host slot — downstream IP parsing in `evaluate`
         // would then fail since `[::1]` isn't a valid IpAddr. Document
-        // the limitation explicitly via this test until 2.6.5 adds
-        // proper bracket-stripping.
+        // the limitation explicitly via this test until proper
+        // bracket-stripping is added.
         let req = parse_connect(b"CONNECT [::1]:443 HTTP/1.1\r\n").unwrap();
         assert_eq!(req.host, "[::1]");
         assert_eq!(req.port, 443);

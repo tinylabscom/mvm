@@ -1,9 +1,9 @@
 //! `mvm.upload` — agent → host staging-area write.
 //!
-//! Plan 60 Phase 7. The agent posts a base64-encoded payload + a
-//! relative path; the supervisor decodes, validates the path, and
-//! writes to the configured staging area (see [`super::staging`]
-//! for the security model + path validator).
+//! The agent posts a base64-encoded payload + a relative path; the
+//! supervisor decodes, validates the path, and writes to the
+//! configured staging area (see [`super::staging`] for the security
+//! model + path validator).
 //!
 //! ## Wire shape
 //!

@@ -1,4 +1,4 @@
-//! Plan 60 Phase 4 — `cmd.*` audit envelope around the CLI dispatch.
+//! `cmd.*` audit envelope around the CLI dispatch.
 //!
 //! Wraps `commands::run()`'s top-level match so every `mvmctl <verb>`
 //! invocation produces two chain-signed entries:
@@ -7,7 +7,7 @@
 //! - `cmd.<verb>.completed` / `cmd.<verb>.failed` — fired after.
 //!
 //! These complement (don't replace) the per-command `LocalAuditKind`
-//! emissions and the plan 64 `plan.*` chain. Read-only commands
+//! emissions and the `plan.*` chain. Read-only commands
 //! (`ls`, `logs`, `audit tail`) didn't previously emit anything; with
 //! this wrap, every invocation has at least one audit footprint.
 //!
@@ -19,7 +19,7 @@
 //! without cmd-level audit. Audit emits themselves are also
 //! best-effort — a chain-signer failure does NOT fail the command,
 //! same posture as `mvm_cli::commands::vm::audit_chain::AuditEmitter`
-//! and the secret command's plan 60 Phase 4 wiring.
+//! and the secret command's audit wiring.
 //!
 //! ## Why a separate module
 //!
@@ -133,8 +133,8 @@ fn emit_unbound(recorder: &Recorder, event: String, extras: Vec<(String, String)
 
 impl Commands {
     /// Whether this command reads or mutates VM lifecycle state and so
-    /// warrants the cheap reconcile-on-entry convergence pass (Plan 170
-    /// WS-A / ADR-074). Read-only, VM-agnostic commands (`doctor`, `ls`
+    /// warrants the cheap reconcile-on-entry convergence pass.
+    /// Read-only, VM-agnostic commands (`doctor`, `ls`
     /// of caches, build/compile, config, …) skip it. `reconcile` itself
     /// is excluded — it *is* the convergence pass, run with its own opts.
     pub(super) fn touches_vm_state(&self) -> bool {

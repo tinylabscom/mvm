@@ -39,7 +39,7 @@ fn check_linux_package_manager() -> Result<()> {
     Ok(())
 }
 
-/// WSL2 bootstrap path (plan 53 §"Plan I.4"). On Windows, mvm runs
+/// WSL2 bootstrap path. On Windows, mvm runs
 /// inside a WSL2 distro — the Windows-side `mvmctl.exe` is a launcher
 /// that ensures WSL2 is configured and the Linux-side `mvmctl` is
 /// installed inside the chosen distro.
@@ -110,8 +110,8 @@ pub fn check_homebrew() -> Result<()> {
     Ok(())
 }
 
-/// Print an informational hint about libkrun availability (plan 53
-/// §"Plan E"). libkrun is optional — when it's available, `mvmctl run`
+/// Print an informational hint about libkrun availability.
+/// libkrun is optional — when it's available, `mvmctl run`
 /// can use it as a Tier 2 backend on supported libkrun hosts: Linux
 /// with KVM and macOS Apple Silicon. This function does *not* attempt
 /// to install libkrun automatically since it lives in the host's

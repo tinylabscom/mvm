@@ -1,4 +1,4 @@
-//! `ExecutionPlan` — the cornerstone type of plan 37 §3.3.
+//! `ExecutionPlan` — the cornerstone workload-launch type.
 //!
 //! Every workload mvm runs is launched from one of these. The plan
 //! is signed by mvmd (or a developer key in dev mode) and the
@@ -23,17 +23,15 @@ use crate::plan::types::{
 /// fields — the schema_version field is consulted before any
 /// per-field deserialisation.
 ///
-/// Bumped 1 → 2 in plan 37 Addendum G4 with the addition of
-/// `valid_from` / `valid_until` / `nonce`. Older verifiers will
-/// reject v2 plans with `UnsupportedSchema`; this is the correct
-/// fail-closed behavior — they can't enforce the validity window
-/// they don't understand.
+/// Bumped 1 → 2 with the addition of `valid_from` / `valid_until` /
+/// `nonce`. Older verifiers will reject v2 plans with
+/// `UnsupportedSchema`; this is the correct fail-closed behavior —
+/// they can't enforce the validity window they don't understand.
 ///
-/// Bumped 2 → 3 in Sprint 52 W2 follow-on with the addition of
-/// `bundle: Option<PlanArtifact>` — the supervisor's admit path
-/// re-verifies the pinned bundle archive before backend dispatch
-/// (ADR-002 claim 9 fully load-bearing at launch, not just at
-/// fetch). Older verifiers will reject v3 plans with
+/// Bumped 2 → 3 with the addition of `bundle: Option<PlanArtifact>` —
+/// the supervisor's admit path re-verifies the pinned bundle archive
+/// before backend dispatch (claim 9 fully load-bearing at launch, not
+/// just at fetch). Older verifiers will reject v3 plans with
 /// `UnsupportedSchema` because they don't know how to re-verify
 /// the binding.
 ///
@@ -51,10 +49,9 @@ pub const SCHEMA_VERSION: u32 = 5;
 
 /// Typed contract for one workload's execution.
 ///
-/// Plan 37 §3.3. The fields here are the rubric — `enforce_*`
-/// in `mvm/src/enforce.rs` (Wave 1.5) walks the plan
-/// field-by-field and rejects any plan that doesn't satisfy
-/// the corresponding §5 row.
+/// The fields here are the rubric — `enforce_*` in `mvm/src/enforce.rs`
+/// walks the plan field-by-field and rejects any plan that doesn't
+/// satisfy the corresponding enforcement row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
@@ -75,11 +72,11 @@ pub struct ExecutionPlan {
     pub workload: WorkloadId,
 
     /// Which backend / runtime profile this workload runs on.
-    /// Resolved by `BackendRegistry` (plan 37 §3.1).
+    /// Resolved by `BackendRegistry`.
     pub runtime_profile: RuntimeProfileRef,
 
     /// Signed image to boot. SHA-256 + cosign bundle reference;
-    /// resolved by `mvm-security::image_verify` (plan 36).
+    /// resolved by `mvm-security::image_verify`.
     pub image: SignedImageRef,
 
     pub resources: Resources,
@@ -90,20 +87,19 @@ pub struct ExecutionPlan {
     /// enforce for this boot.
     pub admission_profile: AdmissionProfile,
 
-    /// Network policy reference. Wave 2 wires this to
-    /// `mvm-policy::EgressPolicy` (L7 + PII rules) via the
-    /// supervisor's `EgressProxy`.
+    /// Network policy reference. Wired to `mvm-policy::EgressPolicy`
+    /// (L7 + PII rules) via the supervisor's `EgressProxy`.
     pub network_policy: PolicyRef,
 
-    /// Filesystem policy reference. Resolved per Wave 2.
+    /// Filesystem policy reference.
     pub fs_policy: FsPolicyRef,
 
     pub secrets: Vec<SecretBinding>,
 
-    /// L7 egress + PII rules. Wave 2 differentiator. The same kind
-    /// of `PolicyRef` as `network_policy` so the resolver is shared,
-    /// but kept separate here so an audit entry can show "egress
-    /// allowed, pii redacted" as orthogonal facts.
+    /// L7 egress + PII rules. The same kind of `PolicyRef` as
+    /// `network_policy` so the resolver is shared, but kept separate
+    /// here so an audit entry can show "egress allowed, pii redacted"
+    /// as orthogonal facts.
     pub egress_policy: PolicyRef,
 
     /// Per-destination egress redaction policy. Rides inline in the signed plan
@@ -114,7 +110,7 @@ pub struct ExecutionPlan {
     pub redaction: crate::policy::RedactionPolicy,
 
     /// Tool-call policy (which tools the model is allowed to invoke
-    /// over the supervisor's vsock RPC). Wave 2.
+    /// over the supervisor's vsock RPC).
     pub tool_policy: PolicyRef,
 
     pub artifact_policy: ArtifactPolicy,
@@ -134,19 +130,19 @@ pub struct ExecutionPlan {
     pub post_run: PostRunLifecycle,
 
     /// Plan validity window — start. The supervisor refuses to admit
-    /// a plan before `valid_from`. Plan 37 Addendum G4.
+    /// a plan before `valid_from`.
     pub valid_from: DateTime<Utc>,
 
     /// Plan validity window — end. The supervisor refuses to admit
-    /// a plan at or after `valid_until`. Plan 37 Addendum G4. Without
-    /// this bound, signed plans are forever-valid and replayable.
+    /// a plan at or after `valid_until`. Without this bound, signed
+    /// plans are forever-valid and replayable.
     pub valid_until: DateTime<Utc>,
 
     /// Per-plan nonce for replay protection. The supervisor maintains
     /// a seen-nonce ledger keyed by signer; an admission attempt with
     /// a previously-seen nonce for the same signer is refused. The
     /// ledger self-prunes once `valid_until` passes for a stored
-    /// nonce. Plan 37 Addendum G4.
+    /// nonce.
     pub nonce: Nonce,
 
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
@@ -155,13 +151,10 @@ pub struct ExecutionPlan {
     /// resolved archive bytes, then compares the resulting
     /// `bundle_sha256` + `manifest_sig` + `key_id` against the
     /// pinned values here. Any mismatch refuses the admission —
-    /// ADR-002 claim 9 is load-bearing at launch, not just at
-    /// fetch.
+    /// claim 9 is load-bearing at launch, not just at fetch.
     ///
     /// `None` (the default) means the plan is not pinned to a
     /// bundle; the admit path skips the bundle re-verify step.
-    /// Sprint 52 W2 follow-on shipped this field; populating it
-    /// from CLI synthesis is the next step, after this substrate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PlanArtifact>,
 
@@ -170,12 +163,10 @@ pub struct ExecutionPlan {
     /// the supervisor's admit path re-runs `verify_sealed_volume`
     /// against `~/.mvm/volumes/deps/<volume_hash>/`, then compares
     /// the derived volume hash + manifest sha against the pinned
-    /// values here. Any mismatch refuses admission — ADR-047
-    /// security claim 9.
+    /// values here. Any mismatch refuses admission (claim 9).
     ///
-    /// `None` (the default during migration; see ADR-047 §"Migration")
-    /// means the plan has no deps volume; the admit path skips this
-    /// step. Plan 73 Followup A.
+    /// `None` (the default) means the plan has no deps volume; the
+    /// admit path skips this step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deps_volume: Option<DepsVolumeBinding>,
 
@@ -184,8 +175,8 @@ pub struct ExecutionPlan {
     /// mount. Empty for the common no-volume case. The admit path
     /// asserts the launch config's volumes are a subset of this list
     /// (claim 1 / claim 8) and emits it to the chain-signed audit log;
-    /// the Vz supervisor's future per-attach gate (Plan 97 Phase D)
-    /// reads it to refuse any share the plan didn't name.
+    /// the Vz supervisor's future per-attach gate reads it to refuse
+    /// any share the plan didn't name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShareGrant>,
 }

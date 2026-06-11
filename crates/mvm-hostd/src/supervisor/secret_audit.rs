@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §4 + claim 13 — chain-signed audit for egress secrets.
+//! Chain-signed audit for egress secrets (claim 13).
 //!
 //! Two events, both in the `Secret` category, both carrying **metadata only** —
 //! the secret name, the destination, the auth-type — and **never the value**.
@@ -47,7 +47,7 @@ pub async fn emit_secret_substituted(
 
 /// Emit `secret.redacted { destination, categories }` — the egress redactor
 /// masked an *undeclared* secret-shaped / PII run out of an outbound request
-/// before forwarding (Plan 129 Phase E). `categories` is the comma-joined set
+/// before forwarding. `categories` is the comma-joined set
 /// of rule names that fired (e.g. `openai-key,email`); the matched bytes are
 /// never recorded (claim 13).
 pub async fn emit_secret_redacted(
@@ -68,7 +68,7 @@ pub async fn emit_secret_redacted(
 }
 
 /// Emit `secret.placeholder_dropped { destination }` — a placeholder smuggled
-/// onto the raw egress wire was dropped (the E1 backstop). Metadata only.
+/// onto the raw egress wire was dropped. Metadata only.
 pub async fn emit_secret_placeholder_dropped(
     recorder: &Recorder,
     destination: &str,

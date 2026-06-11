@@ -1,10 +1,10 @@
 //! Shared backing store for `mvm.upload` + `mvm.download`.
 //!
-//! Plan 60 Phase 7. Both tools operate on a bounded **staging area** —
-//! a host-side directory the supervisor owns + the workload's guest
-//! can mount or read via a controlled channel. Phase 7a's persistent
-//! overlay will eventually displace this with a per-tenant
-//! ext4-on-luks layer; until then a plain on-disk directory under
+//! Both tools operate on a bounded **staging area** — a host-side
+//! directory the supervisor owns + the workload's guest can mount
+//! or read via a controlled channel. A persistent overlay will
+//! eventually displace this with a per-tenant ext4-on-luks layer;
+//! until then a plain on-disk directory under
 //! `~/.mvm/tool-staging/<tenant>/` is enough to demonstrate the
 //! agent surface end-to-end.
 //!
@@ -45,7 +45,7 @@
 //!
 //! ## What this module is NOT
 //!
-//! - Not a persistent overlay — that's Phase 7a's job. Files
+//! - Not a persistent overlay — that comes later. Files
 //!   written here survive across MCP server restarts (the host
 //!   directory is durable) but they aren't atomic / aren't
 //!   encrypted / aren't volume-mounted into the workload.
@@ -66,8 +66,8 @@ use thiserror::Error;
 pub const MAX_ALLOWED_BYTES: u64 = 256 * (1 << 20);
 
 /// Default per-call cap when the caller doesn't specify. 16 MiB
-/// matches the same per-call working budget the rest of Phase 7
-/// uses (web_fetch's `MAX_ALLOWED_BYTES`).
+/// matches the same per-call working budget the rest of the tool
+/// surface uses (web_fetch's `MAX_ALLOWED_BYTES`).
 pub const DEFAULT_MAX_BYTES: u64 = 16 * (1 << 20);
 
 /// Maximum path-string length, bytes. Defends against PATH_MAX

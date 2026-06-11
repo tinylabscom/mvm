@@ -1,9 +1,9 @@
 //! `SecretsScanner` — block outbound requests carrying secrets.
 //!
-//! Plan 37 §15 second-line defence (Wave 2.2). The destination
-//! allowlist (`DestinationPolicy`, Wave 2.1) refuses traffic to
-//! unauthorised hosts; this inspector refuses traffic to *authorised*
-//! hosts when the body looks like it's smuggling out a credential.
+//! Second-line defence. The destination allowlist
+//! (`DestinationPolicy`) refuses traffic to unauthorised hosts; this
+//! inspector refuses traffic to *authorised* hosts when the body
+//! looks like it's smuggling out a credential.
 //!
 //! Threat shape addressed:
 //! - LLM agent reads `~/.aws/credentials` (or a `.env` file the
@@ -33,9 +33,9 @@
 //!   instead of O(n_rules × body_len).
 //! - Patterns are compiled once at construction and amortised across
 //!   every inspect() call.
-//! - No body-length cap here — that belongs in the proxy layer
-//!   (Wave 2.6), which will refuse oversized requests outright.
-//!   This inspector trusts the proxy to hand it bounded bytes.
+//! - No body-length cap here — that belongs in the proxy layer,
+//!   which will refuse oversized requests outright. This inspector
+//!   trusts the proxy to hand it bounded bytes.
 
 use async_trait::async_trait;
 use regex::bytes::{Regex, RegexSet};
@@ -166,10 +166,9 @@ impl SecretsScanner {
 
     /// Replace every secret-pattern match in `body` with
     /// `mask`, returning the redacted bytes + the rule names that fired
-    /// (stable order). Plan 129 Phase E mask-and-continue: an undeclared
-    /// secret-shaped blob on egress is scrubbed in place rather than
-    /// dropping the request. `(body.to_vec(), [])` unchanged when nothing
-    /// matches.
+    /// (stable order). Mask-and-continue: an undeclared secret-shaped
+    /// blob on egress is scrubbed in place rather than dropping the
+    /// request. `(body.to_vec(), [])` unchanged when nothing matches.
     pub fn redact(&self, body: &[u8], mask: &[u8]) -> (Vec<u8>, Vec<&'static str>) {
         let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
         if candidate_indices.is_empty() {

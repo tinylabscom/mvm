@@ -1,5 +1,5 @@
-//! Plan 107 A2.2 / A2.3 — spawn a workload microVM *inside* the
-//! host VM on `WorkloadStart` dispatch.
+//! Spawn a workload microVM *inside* the host VM on `WorkloadStart`
+//! dispatch.
 //!
 //! ## No VMM lock-in
 //!
@@ -15,7 +15,7 @@
 //! ## No serde
 //!
 //! Same rationale as [`crate::dispatch_response`] /
-//! [`crate::builder_request`]: the Plan 72 §W3 ≤ 1.5 MiB budget
+//! [`crate::builder_request`]: the ≤ 1.5 MiB rootfs budget
 //! keeps `serde_json` out of the production rootfs, so
 //! [`FirecrackerVmm::render_config`] hand-rolls the Firecracker
 //! `--config-file` JSON. The `render_config_is_valid_json` test
@@ -30,12 +30,12 @@ use std::process::Command;
 /// Canonical base dir (inside the host VM) for per-workload state.
 /// The host passes this as `WorkloadStart.vsock_socket_dir` in
 /// production; the id-only `WorkloadStop` / `WorkloadStatus`
-/// requests key off it (they carry no base). A4 formalises the
-/// host→guest contract; A2 treats this const as the convention.
+/// requests key off it (they carry no base). Treated as the
+/// host→guest convention until the contract is formalised.
 pub const WORKLOAD_STATE_BASE: &str = "/var/lib/mvm/workloads";
 
 /// Path the Firecracker binary is baked at by the builder-vm flake
-/// (Plan 107 A2.1 — `nix/images/builder-vm/flake.nix`).
+/// (`nix/images/builder-vm/flake.nix`).
 pub const FIRECRACKER_BIN: &str = "/usr/bin/firecracker";
 
 /// Base kernel cmdline every Firecracker workload boots with;
@@ -126,15 +126,15 @@ impl WorkloadVmm for FirecrackerVmm {
         // tries to bind its API socket at a default (privileged) path
         // and dies with EACCES before booting the guest. We never use
         // the API — lifecycle is the config-file boot + SIGTERM
-        // (`stop_workload`), not API calls. A4 can add `--api-sock`
-        // (mutually exclusive with `--no-api`) if it needs live
-        // control.
+        // (`stop_workload`), not API calls. A later revision can add
+        // `--api-sock` (mutually exclusive with `--no-api`) if it needs
+        // live control.
         cmd.arg("--no-api").arg("--config-file").arg(config_path);
         cmd
     }
 }
 
-/// Per-workload state dir (Plan 107 A2.3):
+/// Per-workload state dir:
 /// `<base>/<workload_id>/` holding `config.json`, `fc.pid`,
 /// `fc.stdout.log`, `fc.stderr.log`, and the `v.sock` vsock UDS.
 ///
@@ -459,24 +459,23 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }
 
-    /// Plan 107 A2.4 — live nested-KVM smoke (runner-direct variant).
+    /// Live nested-KVM smoke (runner-direct variant).
     ///
     /// Boots a **real** Firecracker workload microVM through the
     /// production [`start_workload`] + [`FirecrackerVmm`] path and
     /// asserts the kernel actually executed, then tears it down via
-    /// [`stop_workload`]. This validates the A2.2/A2.3 spawn path
-    /// end-to-end against a live VMM.
+    /// [`stop_workload`]. This validates the spawn path end-to-end
+    /// against a live VMM.
     ///
     /// **Scope:** the runner (or a container) stands in for the host
     /// VM, so Firecracker uses the runner's `/dev/kvm` directly (L1)
     /// — no nested KVM required, which is why it runs on a stock GHA
     /// `ubuntu-latest`. The genuine libkrun-host-VM *nesting* (L2,
     /// the no-`ptrace` trust uplift) is out of scope here and is
-    /// validated by Plan 107 A4.5's live-KVM smoke on a nested-KVM
-    /// runner.
+    /// validated by a separate live-KVM smoke on a nested-KVM runner.
     ///
     /// Inert unless `MVM_FC_BOOT_SMOKE=1` is set (so the normal
-    /// `cargo test --workspace` lane skips it). The A2.4 CI lane
+    /// `cargo test --workspace` lane skips it). The CI lane
     /// installs `firecracker` at [`FIRECRACKER_BIN`], grants
     /// `/dev/kvm`, builds a workload kernel + rootfs, points
     /// `MVM_FC_SMOKE_KERNEL` / `MVM_FC_SMOKE_ROOTFS` at them, and

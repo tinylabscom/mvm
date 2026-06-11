@@ -15,15 +15,13 @@
 //!   `-lkrun` linking. [`start`] and [`stop`] dispatch through
 //!   [`sys::Context`] into real libkrun calls.
 //!
-//! Plan 57 W1 wires the bindings; W2 adds the macOS codesigning
-//! entitlement; W3 validates an end-to-end boot. This crate stays
-//! narrowly focused on the FFI; backend dispatch and lifecycle live in
-//! `mvm-backend` and `mvm-cli`.
+//! This crate stays narrowly focused on the FFI; backend dispatch and
+//! lifecycle live in `mvm-backend` and `mvm-cli`.
 
 use std::path::Path;
-// Plan 102 W6.A.5 — `BridgeFds` carries OwnedFds; the
-// bridge-inserting configure path needs AsRawFd/FromRawFd to feed
-// libkrun's raw-fd API and to wrap socketpair(2) results.
+// `BridgeFds` carries OwnedFds; the bridge-inserting configure path
+// needs AsRawFd/FromRawFd to feed libkrun's raw-fd API and to wrap
+// socketpair(2) results.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -38,15 +36,14 @@ pub use mvm_core::kernel_format::KernelFormat;
 #[cfg(feature = "libkrun-sys")]
 pub use sys::{BundledKernel, LogLevel, extract_bundled_kernel, init_log, set_log_level};
 
-// Plan 87 / ADR-055 — passt-backed virtio-net. The supervisor owns the
-// passt child process and exposes the socket fd `KrunContext::Passt`
-// consumes. Only Linux / macOS — Windows has neither libkrun nor
-// passt. Tests are gated on a host-side passt install probe.
+// passt-backed virtio-net. The supervisor owns the passt child process
+// and exposes the socket fd `KrunContext::Passt` consumes. Only Linux /
+// macOS — Windows has neither libkrun nor passt. Tests are gated on a
+// host-side passt install probe.
 #[cfg(target_family = "unix")]
 pub mod passt;
 
-// Plan 88 / ADR-055 cross-platform amendment — gvproxy-backed
-// virtio-net. The macOS counterpart to passt; both modules share the
+// gvproxy-backed virtio-net. The macOS counterpart to passt; both modules share the
 // same shape (spawn child, hand its socket to libkrun, kill on Drop)
 // but gvproxy uses libkrun's `krun_add_net_unixgram` (path-based)
 // where passt uses `krun_add_net_unixstream` (fd-passed). Same unix
@@ -54,7 +51,7 @@ pub mod passt;
 #[cfg(target_family = "unix")]
 pub mod gvproxy;
 
-// Plan 118 WS-1 1b — sync length-prefixed JSON framing for the supervisor control
+// Sync length-prefixed JSON framing for the supervisor control
 // channels. Colocated with the `Supervisor*Config` wire types it frames so both the
 // `mvm-backend` writer (`claim_standby`) and the supervisor-bin reader reach it without
 // a dependency cycle (`mvm-backend` can't depend on `mvm-hostd`).
@@ -203,7 +200,7 @@ pub struct KrunDisk {
 /// type. libkrun wraps the `virtiofsd` daemon internally — callers
 /// declare the share here and libkrun handles the daemon lifecycle.
 ///
-/// Plan 72 W4 uses three of these per builder VM invocation:
+/// The builder VM uses three of these per invocation:
 ///
 /// - `tag = "work"`  → workspace bind (read-only at the guest mount)
 /// - `tag = "out"`   → artifact dir (read-write)
@@ -228,9 +225,8 @@ pub struct KrunVirtioFs {
 /// Configuration for a libkrun guest VM.
 ///
 /// Pure data — no I/O until [`start`] / [`start_enter`] consume it.
-/// Field shape is stable across the W1 → W3 transition; the FFI calls
-/// that consume each field live in [`sys`] under the `libkrun-sys`
-/// feature.
+/// The FFI calls that consume each field live in [`sys`] under the
+/// `libkrun-sys` feature.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KrunContext {
     pub name: String,
@@ -268,7 +264,7 @@ pub struct KrunContext {
     /// Vsock ports the HOST (supervisor) listens on; the guest connects.
     /// Registered with `add_vsock_port2(listen=false)` so libkrun
     /// proxies guest-initiated connects to the supervisor's unix socket.
-    /// Disjoint from [`Self::vsock_ports`]. Plan 152 WS-A.
+    /// Disjoint from [`Self::vsock_ports`].
     #[serde(default)]
     pub host_listen_ports: Vec<u32>,
     /// Additional virtio-blk devices, appearing as `/dev/vdb`,
@@ -276,9 +272,9 @@ pub struct KrunContext {
     /// dev-VM builder VM uses one entry for the Nix-store overlay
     /// disk (`MVM_NIX_STORE_DISK`).
     pub extra_disks: Vec<KrunDisk>,
-    /// virtio-fs shares the host exports into the guest. Plan 72
-    /// W4's builder VM declares three of these (`work` / `out` /
-    /// `job`); the runtime backend doesn't use any today.
+    /// virtio-fs shares the host exports into the guest. The builder VM
+    /// declares three of these (`work` / `out` / `job`); the runtime
+    /// backend doesn't use any today.
     /// libkrun manages the in-process `virtiofsd` daemon for each
     /// entry. See [`KrunVirtioFs`] for the per-share contract.
     #[serde(default)]
@@ -286,8 +282,8 @@ pub struct KrunContext {
     /// When `Some`, libkrun routes the guest's hvc0 console to this
     /// host path (a regular file, FIFO, or device). When `None`, the
     /// console writes inherit the calling process's stdout (the
-    /// default for an interactive smoke test). Plan 57 W3 uses this
-    /// to capture early-boot kernel output for diagnosis.
+    /// default for an interactive smoke test). Used to capture
+    /// early-boot kernel output for diagnosis.
     pub console_output_path: Option<String>,
     /// Directory on the host where the per-vsock-port Unix socket
     /// files live. libkrun proxies between each guest-side
@@ -298,11 +294,11 @@ pub struct KrunContext {
     /// opening the unix socket. When `None`, [`vsock_socket_path`]
     /// falls back to `/tmp/mvm-libkrun-<name>-vsock-<port>.sock`
     /// — fine for the spike smoke binary, but real consumers
-    /// (Plan 57 W4 supervisor, Plan 72 builder-VM launcher) should
-    /// always set a stable per-VM dir under `~/.mvm/vms/<name>/`
-    /// so cross-process clients can find it.
+    /// (the supervisor, the builder-VM launcher) should always set a
+    /// stable per-VM dir under `~/.mvm/vms/<name>/` so cross-process
+    /// clients can find it.
     pub vsock_socket_dir: Option<String>,
-    /// Plan 87 — networking backend for the guest. `Tsi` (default)
+    /// Networking backend for the guest. `Tsi` (default)
     /// uses libkrun's built-in syscall-hijack TSI mode; `Passt`
     /// attaches a virtio-net device backed by a unixstream socket
     /// the caller has handed off to a passt child process. See
@@ -311,7 +307,7 @@ pub struct KrunContext {
     pub networking: NetworkingMode,
 }
 
-/// Libkrun networking backend. Plan 87 / ADR-055.
+/// Libkrun networking backend.
 ///
 /// `Tsi` is libkrun's default — AF_INET syscall hijacking, no
 /// virtio-net device in the guest, no DHCP. Works for trivial HTTP
@@ -347,14 +343,13 @@ pub enum NetworkingMode {
         /// co-located. The supervisor creates it if absent.
         scratch_dir: String,
     },
-    /// virtio-net via gvproxy — Plan 88. The supervisor spawns a
+    /// virtio-net via gvproxy. The supervisor spawns a
     /// gvproxy child inside `run_supervisor`, points libkrun's
     /// `krun_add_net_unixgram` at the listener socket gvproxy
     /// creates, and reaps gvproxy on guest exit. Same model as
     /// `Passt` but unixgram-flavored: libkrun connects to a path
     /// on disk rather than receiving a pre-opened socket fd. This
-    /// is the canonical macOS backend (passt is Linux-only — see
-    /// ADR-055 §"Cross-platform backends").
+    /// is the canonical macOS backend (passt is Linux-only).
     Gvproxy {
         /// MAC address for the guest's eth0. Same shape as the
         /// `Passt` variant.
@@ -505,7 +500,7 @@ impl KrunContext {
     /// Switch the guest to gvproxy-backed virtio-net. Same shape as
     /// [`Self::with_passt`] but uses libkrun's unixgram backend; the
     /// supervisor spawns gvproxy with `--listen-vfkit <socket>` and
-    /// hands the socket path to `krun_add_net_unixgram`. Plan 88.
+    /// hands the socket path to `krun_add_net_unixgram`.
     pub fn with_gvproxy(mut self, mac: [u8; 6], scratch_dir: impl Into<String>) -> Self {
         self.networking = NetworkingMode::Gvproxy {
             mac,
@@ -516,7 +511,7 @@ impl KrunContext {
 
     /// Switch the guest to passt-backed virtio-net. The supervisor
     /// process owns the passt child; we just declare the intent and
-    /// the destination for passt's log file. Plan 87.
+    /// the destination for passt's log file.
     pub fn with_passt(mut self, mac: [u8; 6], scratch_dir: impl Into<String>) -> Self {
         self.networking = NetworkingMode::Passt {
             mac,
@@ -565,7 +560,7 @@ impl KrunContext {
     /// the supervisor binds the unix listener at
     /// `<vsock_socket_dir>/vsock-<port>.sock` and libkrun proxies
     /// guest connects to it. The supervisor must bind that listener
-    /// BEFORE `start_enter`. Plan 152 WS-A.
+    /// BEFORE `start_enter`.
     pub fn add_host_listen_port(mut self, port: u32) -> Self {
         self.host_listen_ports.push(port);
         self
@@ -588,8 +583,8 @@ impl KrunContext {
     }
 
     /// Declare a virtio-fs share. The guest mounts it via
-    /// `mount -t virtiofs <tag> <target>`. Plan 72 W4's builder
-    /// VM uses this for `/work`, `/out`, `/job`.
+    /// `mount -t virtiofs <tag> <target>`. The builder VM uses this
+    /// for `/work`, `/out`, `/job`.
     pub fn add_virtio_fs(mut self, tag: impl Into<String>, host_path: impl Into<String>) -> Self {
         self.virtio_fs_mounts.push(KrunVirtioFs {
             tag: tag.into(),
@@ -618,15 +613,13 @@ impl KrunContext {
 
 /// Start a libkrun guest from `ctx`.
 ///
-/// **Plan 57 W1 scope.** With the `libkrun-sys` feature enabled, this
-/// allocates a libkrun configuration context, applies CPU/memory,
-/// kernel, rootfs, and vsock-port configuration through the FFI, then
-/// frees the context and returns `Ok(())`. It does **not** call
-/// `krun_start_enter` (which blocks until the guest exits) — the
-/// blocking-thread lifecycle and state-tracking work is W3 + W4 of
-/// plan 57. Today the call exists so consumers can exercise the
-/// wrapper end-to-end on a host with libkrun installed; the W3 PR
-/// upgrades it to actually boot.
+/// With the `libkrun-sys` feature enabled, this allocates a libkrun
+/// configuration context, applies CPU/memory, kernel, rootfs, and
+/// vsock-port configuration through the FFI, then frees the context
+/// and returns `Ok(())`. It does **not** call `krun_start_enter`
+/// (which blocks until the guest exits) — that's [`start_enter`].
+/// The call exists so consumers can exercise the wrapper end-to-end
+/// on a host with libkrun installed.
 ///
 /// Without the feature, returns [`Error::NotYetWired`].
 pub fn start(ctx: &KrunContext) -> Result<(), Error> {
@@ -649,12 +642,12 @@ pub fn start(ctx: &KrunContext) -> Result<(), Error> {
 }
 
 /// Apply every `KrunContext` field to a freshly-allocated libkrun
-/// configuration context. Shared between [`start`] (W1: configure +
-/// drop) and [`start_enter`] (W3: configure + boot).
+/// configuration context. Shared between [`start`] (configure + drop)
+/// and [`start_enter`] (configure + boot).
 ///
-/// Plan 87 split this into `configure_pre_net` (everything except
-/// networking) + a per-caller networking decision. `configure` itself
-/// is the TSI-only path used by the spike/smoke binaries; real
+/// Split into `configure_pre_net` (everything except networking) + a
+/// per-caller networking decision. `configure` itself is the TSI-only
+/// path used by the spike/smoke binaries; real
 /// consumers go through `run_supervisor`, which owns a passt child
 /// process for the libkrun lifetime via `configure_with_passt`.
 #[cfg(feature = "libkrun-sys")]
@@ -672,8 +665,8 @@ fn configure(ctx: &KrunContext) -> Result<sys::Context, Error> {
     Ok(krun)
 }
 
-/// Plan 88 — owning handle to whichever userspace network gateway
-/// the supervisor spawned for this guest. Lives for the libkrun
+/// Owning handle to whichever userspace network gateway the supervisor
+/// spawned for this guest. Lives for the libkrun
 /// process lifetime so the gateway is reaped when the guest exits.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 pub enum GatewayHandle {
@@ -685,8 +678,8 @@ pub enum GatewayHandle {
     Gvproxy(gvproxy::GvproxyHandle),
 }
 
-/// Plan 87 W1+W2 / Plan 88 W1+W2 — configure() variant that owns the
-/// network-gateway child process for the lifetime of the returned
+/// configure() variant that owns the network-gateway child process
+/// for the lifetime of the returned
 /// context. Used by [`run_supervisor`] when
 /// `NetworkingMode::{Passt, Gvproxy}` is set. The handle Drop's after
 /// libkrun finishes consuming the socket and the guest exits.
@@ -735,7 +728,7 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
 }
 
 // ============================================================================
-// Plan 102 W6.A.5 — bridge-inserting configure + run_supervisor_with_bridge
+// bridge-inserting configure + run_supervisor_with_bridge
 // ============================================================================
 
 /// Endpoint fds the gateway audit bridge needs to splice between
@@ -786,16 +779,15 @@ pub enum BridgeFds {
     },
 }
 
-/// Plan 102 W6.A.5 — bridge-inserting variant of
-/// [`configure_with_gateway`]. Spawns passt / gvproxy, then
+/// Bridge-inserting variant of [`configure_with_gateway`]. Spawns
+/// passt / gvproxy, then
 /// interposes a supervisor-owned socket pair (`Passt`) or listener
 /// path (`LibkrunGvproxy`) between libkrun and the gateway so the
 /// gateway audit bridge can splice every byte through itself.
 ///
 /// Refuses [`NetworkingMode::Tsi`] — TSI bypasses virtio-net
-/// entirely and violates the claim-10 no-bypass invariant (see
-/// ADR-058). Callers that need TSI must use the legacy
-/// [`run_supervisor`] entry point.
+/// entirely and violates the claim-10 no-bypass invariant. Callers
+/// that need TSI must use the legacy [`run_supervisor`] entry point.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 fn configure_with_gateway_for_bridge(
     ctx: &KrunContext,
@@ -918,8 +910,8 @@ fn bridge_socketpair_stream() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((a, b))
 }
 
-/// Plan 102 W6.A.5 — supervisor entry point that runs the per-VM
-/// gateway audit bridge. Mirrors [`run_supervisor`] but interposes
+/// Supervisor entry point that runs the per-VM gateway audit bridge.
+/// Mirrors [`run_supervisor`] but interposes
 /// the bridge between libkrun and the userspace network gateway,
 /// then hands the resulting `BridgeFds` to a caller-supplied
 /// factory closure (which builds and spawns the bridge thread).
@@ -1000,8 +992,8 @@ where
     krun.start_enter()
 }
 
-/// Plan 87 — every part of `configure` that doesn't touch the
-/// networking backend. Shared between the plain `configure` path
+/// Every part of `configure` that doesn't touch the networking
+/// backend. Shared between the plain `configure` path
 /// (TSI-only) and `configure_with_passt`.
 #[cfg(feature = "libkrun-sys")]
 fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
@@ -1076,7 +1068,7 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         let socket = ctx.vsock_socket_path(port);
         // listen=false: the host (supervisor) binds the listener; do NOT
         // pre-unlink — the supervisor created it. libkrun proxies guest
-        // connects on `port` to that socket. Plan 152 WS-A.
+        // connects on `port` to that socket.
         krun.add_vsock_port2(port, &socket, /* listen = */ false)?;
     }
     if let Some(console_path) = &ctx.console_output_path {
@@ -1147,15 +1139,15 @@ fn start_via_ffi(ctx: &KrunContext) -> Result<(), Error> {
 
 /// Boot a libkrun guest from `ctx` and block until it exits.
 ///
-/// **Plan 57 W3 spike entry point.** Configures libkrun the same way
-/// [`start`] does, then calls `krun_start_enter`. libkrun's
+/// Configures libkrun the same way [`start`] does, then calls
+/// `krun_start_enter`. libkrun's
 /// `start_enter` calls `exit()` on the calling process with the
 /// guest's exit code when the guest powers off cleanly, so this
 /// function does not return on success — its return type is
 /// [`std::convert::Infallible`] in the `Ok` arm.
 ///
 /// Use cases:
-/// - the W3 smoke binary (`crates/mvm-libkrun/examples/libkrun-smoke.rs`)
+/// - the smoke binary (`crates/mvm-libkrun/examples/libkrun-smoke.rs`)
 ///   that validates a real Nix-built kernel + ext4 rootfs boots on
 ///   macOS Apple Silicon;
 /// - one-shot guest invocations where the caller wants the process
@@ -1163,8 +1155,8 @@ fn start_via_ffi(ctx: &KrunContext) -> Result<(), Error> {
 ///
 /// **Not yet suitable** for `LibkrunBackend::start()` — that consumer
 /// needs the surrounding mvmctl process to keep running after the VM
-/// boots. The blocking-thread + per-VM registry lifecycle is W4 of
-/// plan 57.
+/// boots, which the blocking-thread + per-VM registry lifecycle
+/// provides instead.
 ///
 /// Without the `libkrun-sys` feature, returns [`Error::NotYetWired`].
 pub fn start_enter(ctx: &KrunContext) -> Result<std::convert::Infallible, Error> {
@@ -1258,10 +1250,9 @@ fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error> {
 /// Bridge crash policy — what the libkrun supervisor does when the
 /// in-process bridge thread panics or its child dies.
 ///
-/// ADR-064 §Decision 6 / Plan 113 — bridge crash policy is hard-fail
-/// in this plan; restart variants ship in a future plan with their
-/// own ADR. The enum + serde field reservation lives here so that
-/// future addition is a schema extension, not a migration: old
+/// Bridge crash policy is hard-fail today; restart variants are a
+/// future addition. The enum + serde field reservation lives here so
+/// that addition is a schema extension, not a migration: old
 /// configs continue to deserialize (the field is `#[serde(default)]`
 /// to `HardFail`), and old supervisors reading new configs that name
 /// a future variant fail closed at deserialize time with a clear
@@ -1305,16 +1296,16 @@ pub struct SupervisorConfig {
     /// absent.
     pub vm_state_dir: String,
     /// File name inside `vm_state_dir` to receive the supervisor's
-    /// PID. Defaults to `"libkrun.pid"` when `None`. Plan 72's
-    /// builder VM uses a different name (`builder.pid`) so the user
-    /// dev VM and the builder can coexist in the same directory tree.
+    /// PID. Defaults to `"libkrun.pid"` when `None`. The builder VM
+    /// uses a different name (`builder.pid`) so the user dev VM and
+    /// the builder can coexist in the same directory tree.
     pub pid_file_name: Option<String>,
 
-    // --- Plan 102 W6.A commit 6: gateway audit substrate ---------------
+    // --- gateway audit substrate ---------------
     //
     // The bridge ([`mvm_hostd::supervisor::gateway_bridge`]) needs these to
     // construct a per-VM `BridgeConfig`. `#[serde(default)]` keeps
-    // pre-W6.A JSON callers parseable; admission validation
+    // older JSON callers parseable; admission validation
     // ([`SupervisorConfig::validate_audit_substrate`]) refuses
     // configs that don't supply them when the gateway substrate
     // is active.
@@ -1343,7 +1334,7 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub signing_key_path: Option<std::path::PathBuf>,
 
-    // --- Plan 102 W6.A.5: plan + bundle for bridge construction -----
+    // --- plan + bundle for bridge construction -----
     //
     // The bridge ([`mvm_hostd::supervisor::gateway_bridge::BridgeConfig`])
     // needs `Arc<ExecutionPlan>` + `Option<Arc<PolicyBundle>>` to
@@ -1367,12 +1358,12 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub bundle: Option<serde_json::Value>,
 
-    // --- ADR-064 §Decision 6 — bridge crash policy reservation ----------
+    // --- bridge crash policy reservation ----------
     //
     // Field reservation only — `BridgeRestartPolicy` carries the
-    // `HardFail` variant today. Future restart variants ship in a
-    // future plan + ADR; reserving the field now means that
-    // extension is a schema addition (new variant) instead of a
+    // `HardFail` variant today. Future restart variants are a later
+    // addition; reserving the field now means that extension is a
+    // schema addition (new variant) instead of a
     // migration. Existing JSON without this key deserializes
     // unchanged thanks to `#[serde(default)]`.
     /// Bridge crash policy — see [`BridgeRestartPolicy`]. Defaults
@@ -1394,12 +1385,10 @@ impl SupervisorConfig {
             .join(self.pid_file_name.as_deref().unwrap_or("libkrun.pid"))
     }
 
-    /// Plan 102 W6.A commit 6 — admission validation for the
-    /// gateway audit substrate. Refuses configurations that would
-    /// leave the bridge unable to emit audit events into the
-    /// per-tenant chain. Mandatory before any bridge spawn; the
-    /// bridge entry point (commit 6.5 / commit 7 wire-up) calls
-    /// this first.
+    /// Admission validation for the gateway audit substrate. Refuses
+    /// configurations that would leave the bridge unable to emit
+    /// audit events into the per-tenant chain. Mandatory before any
+    /// bridge spawn; the bridge entry point calls this first.
     ///
     /// Fields checked:
     /// - `tenant_id`: must be set and non-empty (used as chain
@@ -1463,8 +1452,8 @@ impl SupervisorConfig {
 }
 
 /// Workload-**independent** supervisor config — everything a prelaunched
-/// standby (Plan 118 WS-1 1a) sets up before it knows which workload it will
-/// run. Carries no rootfs and no plan; those arrive in the
+/// standby sets up before it knows which workload it will run. Carries
+/// no rootfs and no plan; those arrive in the
 /// [`SupervisorAttachConfig`] over the control UDS. `krun.rootfs_path` MUST be
 /// `None` — [`SupervisorConfig::from_base_and_attach`] rejects a base that
 /// already carries one (it would shadow the workload rootfs).
@@ -1680,8 +1669,8 @@ fn home_mvm_keys_dir() -> std::path::PathBuf {
     home.join(".mvm").join("keys")
 }
 
-/// Errors returned by [`SupervisorConfig::validate_audit_substrate`].
-/// Plan 102 W6.A claim-10 no-bypass admission check.
+/// Errors returned by [`SupervisorConfig::validate_audit_substrate`]
+/// — the claim-10 no-bypass admission check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditSubstrateError {
     /// A required field is missing. The supervisor refuses to
@@ -1736,8 +1725,8 @@ impl std::error::Error for AuditSubstrateError {}
 
 /// Run a libkrun guest under a long-lived supervisor process.
 ///
-/// **Plan 57 W4 entry point.** Each call owns exactly one libkrun
-/// guest for the lifetime of the calling process. Steps:
+/// Each call owns exactly one libkrun guest for the lifetime of the
+/// calling process. Steps:
 ///
 /// 1. Create `vm_state_dir` if absent.
 /// 2. Write the calling process's PID to `<vm_state_dir>/<pid_file_name>`.
@@ -1769,8 +1758,8 @@ pub fn run_supervisor(cfg: &SupervisorConfig) -> Result<std::convert::Infallible
         });
     }
 
-    // Plan 87 W3: when NetworkingMode::Passt is set, the supervisor
-    // owns the passt child process. `_passt_handle` lives until the
+    // When NetworkingMode::Passt is set, the supervisor owns the passt
+    // child process. `_passt_handle` lives until the
     // end of this function; libkrun's `start_enter` calls `exit()`
     // on the success path, so the handle's Drop runs as part of
     // process teardown when the guest powers off. On error paths
@@ -1791,10 +1780,10 @@ pub fn run_supervisor_unavailable() -> Error {
 
 /// Stop a running libkrun guest by name.
 ///
-/// **Plan 57 W1 scope.** The blocking-thread + registry lifecycle that
-/// would let us find and signal a running VM is W4 of plan 57. Today
-/// this returns [`Error::NotYetWired`] regardless of feature — there
-/// is no running state to stop yet.
+/// The blocking-thread + registry lifecycle that would let us find and
+/// signal a running VM is not wired yet. Today this returns
+/// [`Error::NotYetWired`] regardless of feature — there is no running
+/// state to stop yet.
 pub fn stop(name: &str) -> Result<(), Error> {
     if !is_available() {
         return Err(Error::NotInstalled {
@@ -1945,11 +1934,10 @@ mod tests {
         assert_eq!(entry.envp, vec!["PATH=/bin:/usr/local/bin".to_string()]);
     }
 
-    /// Plan 57 W3.3: the per-VM `vsock_socket_dir` overrides the
-    /// `/tmp` fallback. Real consumers (W4 supervisor, Plan 72
-    /// builder-VM launcher) always supply a dir under
-    /// `~/.mvm/vms/<name>/` so cross-process clients can find it
-    /// without scanning `/tmp`.
+    /// The per-VM `vsock_socket_dir` overrides the `/tmp` fallback.
+    /// Real consumers (the supervisor, the builder-VM launcher) always
+    /// supply a dir under `~/.mvm/vms/<name>/` so cross-process clients
+    /// can find it without scanning `/tmp`.
     #[test]
     fn vsock_socket_path_falls_back_to_tmp_when_no_dir_set() {
         let ctx = KrunContext::new("vm-1", "/k", "/r");
@@ -1987,9 +1975,9 @@ mod tests {
         assert!(b.file_name().unwrap().to_string_lossy().contains("5253"));
     }
 
-    /// Plan 72 W4 needs three virtio-fs shares per builder VM
-    /// invocation (`work`, `out`, `job`). Builder method appends
-    /// in the order called; serde roundtrips preserve order.
+    /// The builder VM needs three virtio-fs shares per invocation
+    /// (`work`, `out`, `job`). Builder method appends in the order
+    /// called; serde roundtrips preserve order.
     #[test]
     fn add_virtio_fs_appends_in_order() {
         let ctx = KrunContext::new("vm-1", "/k", "/r")
@@ -2026,7 +2014,7 @@ mod tests {
     }
 
     /// Roundtrip with virtio-fs entries populated — the JSON shape
-    /// the Plan 72 W4 supervisor pipe will carry.
+    /// the supervisor pipe carries.
     #[test]
     fn virtio_fs_mounts_roundtrip_through_json() {
         let ctx = KrunContext::new("vm-1", "/k", "/r")
@@ -2041,7 +2029,7 @@ mod tests {
 
     /// `add_host_listen_port` populates `host_listen_ports`, not
     /// `vsock_ports`. The two sets are disjoint and registered with
-    /// opposite `listen` flags in `configure`. Plan 152 WS-A.
+    /// opposite `listen` flags in `configure`.
     #[test]
     fn control_listen_port_is_registered_listen_false() {
         let ctx = KrunContext::new("vm-1", "/k", "/r")
@@ -2086,8 +2074,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Plan 102 W6.A commit 6 — SupervisorConfig audit-substrate
-    // validation. Claim-10 no-bypass admission check.
+    // SupervisorConfig audit-substrate validation. Claim-10 no-bypass
+    // admission check.
     // -----------------------------------------------------------------
 
     fn well_formed_supervisor_config() -> SupervisorConfig {
@@ -2213,10 +2201,10 @@ mod tests {
 
     #[test]
     fn supervisor_config_serde_omits_audit_substrate_fields_when_none() {
-        // Backward-compat: pre-W6.A SupervisorConfig JSON without
-        // the new audit fields must still deserialize. Synthesise
-        // a pre-W6.A config by serialising a full SupervisorConfig
-        // with all audit fields None, then parsing it back.
+        // Backward-compat: older SupervisorConfig JSON without the
+        // audit fields must still deserialize. Synthesise such a config
+        // by serialising a full SupervisorConfig with all audit fields
+        // None, then parsing it back.
         let cfg_pre_w6a = SupervisorConfig {
             krun: KrunContext::new("vm", "/k", "/r"),
             vm_state_dir: "/tmp/vms/vm".to_string(),
@@ -2243,7 +2231,7 @@ mod tests {
         assert!(parsed.validate_audit_substrate().is_err());
     }
 
-    // Plan 102 W6.A.5 — `plan` + `bundle` fields on SupervisorConfig.
+    // `plan` + `bundle` fields on SupervisorConfig.
     // Tests pin: (1) back-compat from JSON omitting both fields, (2)
     // serde roundtrip with both fields populated, (3) the validate_*
     // gate doesn't require them (validation covers paths only — the
@@ -2251,7 +2239,7 @@ mod tests {
 
     #[test]
     fn supervisor_config_parses_pre_w6a5_json_missing_plan_and_bundle() {
-        // A pre-W6.A.5 caller would have omitted both new fields.
+        // An older caller would have omitted both new fields.
         let json = r#"{
             "krun": {
                 "name": "vm",
@@ -2312,16 +2300,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Plan 113 §Task 14 / ADR-064 §Decision 6 — bridge_restart_policy
-    // field reservation. Today only `HardFail` exists; the tests pin
-    // the schema-extension contract so future restart variants can be
-    // added without breaking old configs and without silently
-    // accepting unknown variant names on old supervisors.
+    // bridge_restart_policy field reservation. Today only `HardFail`
+    // exists; the tests pin the schema-extension contract so future
+    // restart variants can be added without breaking old configs and
+    // without silently accepting unknown variant names on old
+    // supervisors.
     // -----------------------------------------------------------------
 
     #[test]
     fn supervisor_config_default_bridge_restart_policy_is_hard_fail() {
-        // Pre-Plan-113 JSON omits `bridge_restart_policy`; the
+        // Older JSON omits `bridge_restart_policy`; the
         // `#[serde(default)]` annotation must promote that to
         // `HardFail` so existing configs deserialize unchanged.
         let json = r#"{
@@ -2373,8 +2361,8 @@ mod tests {
 
     #[test]
     fn supervisor_config_rejects_unknown_bridge_restart_policy_variant() {
-        // ADR-064 §Decision 6 — old supervisors handed a config that
-        // names a future variant they don't implement must fail
+        // Old supervisors handed a config that names a future variant
+        // they don't implement must fail
         // closed at deserialize time. serde rejects unknown unit-
         // variant names on `#[derive(Deserialize)]` enums by default,
         // which is the schema-migration guarantee this test pins.
@@ -2415,7 +2403,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Plan 102 W6.A.5 — bridge-inserting configure + BridgeFds.
+    // bridge-inserting configure + BridgeFds.
     // The configure_with_gateway_for_bridge tests below are gated on
     // both `libkrun-sys` (needs the FFI bindings to compile) and
     // unix (the gateway types are unix-family only).

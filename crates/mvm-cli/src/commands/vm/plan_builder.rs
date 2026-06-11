@@ -1,4 +1,4 @@
-//! Plan 64 W1 — `ExecutionPlan` synthesis from `mvmctl up` CLI args.
+//! `ExecutionPlan` synthesis from `mvmctl up` CLI args.
 //!
 //! Turns the surface-level CLI shape (flake ref, name, cpus, memory,
 //! volumes, ports, secrets, etc.) into a typed `mvm_core::plan::ExecutionPlan`
@@ -12,11 +12,11 @@
 //!
 //! ## What does NOT live here
 //!
-//! - **Signing.** That's W2's `signer` module — `synthesize_plan`
+//! - **Signing.** The `signer` module owns it — `synthesize_plan`
 //!   builds the unsigned plan; the caller signs.
-//! - **Backend dispatch.** W3 wires the supervisor to `BackendLauncher`;
+//! - **Backend dispatch.** The supervisor wires `BackendLauncher`;
 //!   this module is plan-shape-only, no I/O.
-//! - **Policy resolution.** W5's `policy_resolver` turns the plan's
+//! - **Policy resolution.** The `policy_resolver` turns the plan's
 //!   `PolicyRef` fields into concrete supervisor components.
 //!
 //! ## Field source map (plan field → CLI input)
@@ -30,7 +30,7 @@
 //! | `runtime_profile` | hypervisor flag mapped to a profile name |
 //! | `image` | computed lazily from rootfs SHA-256 (filled by caller after build) |
 //! | `resources` | `--cpus`, `--memory`, `--ttl` |
-//! | `*_policy` / `fs_policy` | `"local-default"` (W5 resolver maps to Noops) |
+//! | `*_policy` / `fs_policy` | `"local-default"` (resolver maps to Noops) |
 //! | `valid_from`/`valid_until` | now + 10 min window |
 //! | `nonce` | fresh 128 bits from `OsRng` per invocation |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
@@ -46,12 +46,12 @@ use mvm_core::plan::{
 use rand::RngCore;
 use std::collections::BTreeMap;
 
-/// Default tenant for single-host runs. ADR-002's "one guest = one
+/// Default tenant for single-host runs. The "one guest = one
 /// workload" model means the tenant boundary is the host itself unless
 /// mvmd's multi-tenant control plane is wired in.
 pub const DEFAULT_TENANT: &str = "local";
 
-/// Default policy name resolved by W5's policy_resolver to a Noop
+/// Default policy name resolved by the policy_resolver to a Noop
 /// component-slot set. Production deployments override via the
 /// supervisor's policy bundle.
 pub const DEFAULT_POLICY_REF: &str = "local-default";
@@ -128,18 +128,17 @@ pub struct SynthesisInput<'a> {
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
     /// set, the synthesised plan carries the pin and the supervisor's
     /// admit path re-verifies the archive against this triple before
-    /// backend dispatch. Sprint 52 W2 follow-on substrate — populating
-    /// it from `mvmctl up` flags is the next step.
+    /// backend dispatch. Populating it from `mvmctl up` flags is the
+    /// next step.
     pub bundle_pin: Option<mvm_core::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
     /// `mvm_sdk::compile::deps_audit::seal_volume`. Populated by
-    /// `mvmctl up`'s deps-install path (Plan 73 Followup B.3) when
-    /// the workload declares `App.dependencies = Dependencies::Python
-    /// | Dependencies::Node`; absent when `Dependencies::None` /
-    /// no `--from-workload-ir` flag is set. The supervisor's admit
-    /// path re-runs `verify_sealed_volume` against the pinned
-    /// `volume_hash` + `manifest_sha256` before backend dispatch
-    /// (ADR-047 security claim 9).
+    /// `mvmctl up`'s deps-install path when the workload declares
+    /// `App.dependencies = Dependencies::Python | Dependencies::Node`;
+    /// absent when `Dependencies::None` / no `--from-workload-ir` flag
+    /// is set. The supervisor's admit path re-runs
+    /// `verify_sealed_volume` against the pinned `volume_hash` +
+    /// `manifest_sha256` before backend dispatch (security claim 9).
     pub deps_volume: Option<DepsVolumeBinding>,
     /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`) to bake
     /// into the signed plan + audit log (claim 1 / claim 8). Empty for
@@ -208,10 +207,10 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         name: input.image_name.to_string(),
         sha256: input.image_sha256.to_string(),
         cosign_bundle: input.image_cosign_bundle.map(str::to_string),
-        // Plan 165 WS-B B4: the CLI only ever synthesizes plans for
-        // images that carry an entrypoint (the SDK's B3 compile gate
-        // refuses to produce one without). The supervisor's admission
-        // gate rejects entrypoint_present == false as defense in depth.
+        // The CLI only ever synthesizes plans for images that carry an
+        // entrypoint (the SDK's compile gate refuses to produce one
+        // without). The supervisor's admission gate rejects
+        // entrypoint_present == false as defense in depth.
         entrypoint_present: true,
     };
 
@@ -250,10 +249,10 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         valid_until: now + Duration::minutes(VALIDITY_WINDOW_MINUTES),
         nonce,
         bundle: input.bundle_pin.clone(),
-        // Plan 73 Followup B.3: populated by the caller when an
-        // `mvmctl up --from-workload-ir <path>` invocation drove
-        // `install_app_deps` to a sealed volume. `None` preserves
-        // claim 8 (the supervisor's deps-volume gate is skipped).
+        // Populated by the caller when an `mvmctl up --from-workload-ir
+        // <path>` invocation drove `install_app_deps` to a sealed
+        // volume. `None` preserves claim 8 (the supervisor's
+        // deps-volume gate is skipped).
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
     })
@@ -593,19 +592,18 @@ mod tests {
     fn without_deps_volume_plan_carries_none() {
         // Claim-8 preservation guard: when the caller doesn't pin a
         // deps volume, the plan carries `deps_volume = None` and the
-        // supervisor's admission path skips the gate (Followup A).
+        // supervisor's admission path skips the gate.
         let plan = synthesize_plan(&input("myvm")).unwrap();
         assert!(plan.deps_volume.is_none());
     }
 
     #[test]
     fn with_deps_volume_plan_carries_binding_verbatim() {
-        // Followup B.3 path: `mvmctl up`'s install pipeline yielded
-        // an `InstallResult`; the caller turns it into a
-        // `DepsVolumeBinding` and threads it through synthesis. The
-        // plan field must round-trip the volume + manifest hashes
-        // verbatim so the supervisor's verifier (Followup A) re-derives
-        // them against the on-disk volume.
+        // `mvmctl up`'s install pipeline yielded an `InstallResult`;
+        // the caller turns it into a `DepsVolumeBinding` and threads it
+        // through synthesis. The plan field must round-trip the volume
+        // + manifest hashes verbatim so the supervisor's verifier
+        // re-derives them against the on-disk volume.
         let volume_hash = "a".repeat(64);
         let manifest_sha256 = "b".repeat(64);
         let binding = DepsVolumeBinding::new(&volume_hash, &manifest_sha256).expect("binding");

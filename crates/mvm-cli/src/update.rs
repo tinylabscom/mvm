@@ -44,7 +44,7 @@ fn detect_target() -> Result<&'static str> {
 /// Base URL for the GitHub releases query.
 ///
 /// Defaults to `https://api.github.com`. `MVM_UPDATE_API_URL` overrides
-/// for hermetic tests (plan 69) — the env-var supplies the bare host
+/// for hermetic tests — the env-var supplies the bare host
 /// (e.g. `http://127.0.0.1:8080`) and the existing path suffix
 /// `/repos/<repo>/releases/latest` is appended. The override path
 /// emits a warning so the bypass is visible in stderr.
@@ -201,11 +201,11 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// release's `kernel-<arch>-checksums-sha256.txt`, and write it to
 /// `dest`. The `--source download` arm of `mvmctl kernel build`.
 ///
-/// Keyed by the mvmctl release tag (ADR-046 §"Amendment: kernel
-/// acquisition"): a given mvmctl can only ever fetch the kernel that
-/// shipped with it — never a substitute for an in-tree config edit (a
-/// source checkout compiles instead). `MVM_SKIP_HASH_VERIFY` is the
-/// documented emergency escape (W5.1) — never set it in CI.
+/// Keyed by the mvmctl release tag: a given mvmctl can only ever fetch
+/// the kernel that shipped with it — never a substitute for an in-tree
+/// config edit (a source checkout compiles instead).
+/// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape — never
+/// set it in CI.
 ///
 /// Gated to `builder-vm`: the only callers (`mvmctl kernel build`'s
 /// download arm + the `dev up --kernel-source` bootstrap) live behind
@@ -643,7 +643,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::io::Write;
 
-    // --- Phase 2: smoke test ---
+    // --- smoke test ---
 
     #[cfg(unix)]
     #[test]
@@ -682,7 +682,7 @@ mod tests {
         assert!(err_msg.contains("New binary failed smoke test; restored previous version."));
     }
 
-    // --- Phase 3: signature verification ---
+    // --- signature verification ---
 
     #[test]
     fn test_verify_signature_skipped_when_cosign_absent() {
@@ -715,7 +715,7 @@ mod tests {
         let _ = "skip_verify=true prevents any cosign invocation";
     }
 
-    // --- Phase 2: checksum verification ---
+    // --- checksum verification ---
 
     fn sha256_of(data: &[u8]) -> String {
         let digest: [u8; 32] = Sha256::digest(data).into();

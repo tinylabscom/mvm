@@ -1,13 +1,13 @@
-//! Software-fallback in-memory keystore (W1b.1).
+//! Software-fallback in-memory keystore.
 //!
 //! Holds an Ed25519 signing key + its public form. Generated at
-//! subprocess boot via `OsRng` (or loaded from a file when the W1b.1
+//! subprocess boot via `OsRng` (or loaded from a file when the
 //! `software_key_path` config is set for dev workflows). Wrapped in
 //! `zeroize::Zeroizing` so a drop wipes the key bytes from memory.
 //!
-//! W8 replaces this module with `enclave.rs` — same `Keystore` API,
-//! the inner sign call delegates to Apple Secure Enclave (P-256) on
-//! macOS or `tpm2-tss` (Ed25519 or P-256 depending on TPM) on Linux.
+//! A future enclave-backed module will expose the same `Keystore` API
+//! with the inner sign call delegating to Apple Secure Enclave (P-256)
+//! on macOS or `tpm2-tss` (Ed25519 or P-256 depending on TPM) on Linux.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ impl Keystore {
         }
     }
 
-    /// Load a key from a 32-byte file (W1b.1 dev workflows only; tests
+    /// Load a key from a 32-byte file (dev workflows only; tests
     /// use it to assert deterministic signatures). Refuses any file
     /// whose contents aren't exactly 32 bytes.
     pub fn load_from_file(path: &Path) -> Result<Self> {
@@ -64,8 +64,8 @@ impl Keystore {
 
     /// Sign opaque bytes. Returns the raw signature + `SIG_ALG_ED25519`.
     /// The caller is responsible for the canonical form of `bytes`
-    /// (Plan 104 §S28 JCS for credentials, ExecutionPlan's own
-    /// canonical form for plans).
+    /// (JCS for credentials, ExecutionPlan's own canonical form for
+    /// plans).
     pub fn sign(&self, bytes: &[u8]) -> SignResult {
         let signature = self.signing_key.sign(bytes);
         SignResult {
@@ -90,13 +90,13 @@ pub struct SignResult {
 
 /// Lazy wrapper that lets `server.rs` carry a `Keystore` behind an
 /// `Arc<dyn ...>` boundary without forcing the trait surface yet.
-/// (The W8 enclave path will define a `KeystoreProvider` trait that
+/// (A future enclave path will define a `KeystoreProvider` trait that
 /// both this software path and the enclave path implement.)
 pub type SharedKeystore = Arc<Keystore>;
 
-/// Map an `anyhow::Error` to a typed [`HostSignerErrorCode`]. W1b.1 is
-/// permissive (everything → `InternalError`); W8's enclave path can
-/// extend this with `EnclaveError` mapping.
+/// Map an `anyhow::Error` to a typed [`HostSignerErrorCode`]. The
+/// software path is permissive (everything → `InternalError`); a
+/// future enclave path can extend this with `EnclaveError` mapping.
 pub fn classify_error(_err: &anyhow::Error) -> HostSignerErrorCode {
     HostSignerErrorCode::InternalError
 }

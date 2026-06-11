@@ -1,5 +1,5 @@
-//! Plan 89 W3 part 1 — host-side scaffold for the persistent
-//! builder VM's dispatch supervisor.
+//! Host-side scaffold for the persistent builder VM's dispatch
+//! supervisor.
 //!
 //! [`PersistentBuilderSupervisor`] owns the host end of the
 //! dispatch socket libkrun creates at
@@ -14,24 +14,9 @@
 //! followed by a terminating
 //! [`crate::builder_protocol::HostVmResponse::Result`].
 //!
-//! ## Scope of this PR (W3 part 1)
-//!
-//! - **In:** the supervisor type, its connect/submit/shutdown
-//!   surface, serialized V1 dispatch (one in-flight job per
-//!   supervisor via a tokio-free `Mutex`), the typed
-//!   [`PersistentBuilderError`] variants, integration tests
-//!   driving the wire end-to-end via `UnixListener::pair`-style
-//!   mocks in `crates/mvm-build/tests/persistent_builder_supervisor.rs`.
-//! - **Out:** spawning the actual libkrun VM
-//!   ([`crate::libkrun_builder::LibkrunPersistentHostVm`] lands
-//!   in W3 part 2 alongside builder-init's dispatch-loop emit);
-//!   `mvmctl dev up` auto-start of the supervisor (W3 part 3);
-//!   per-job namespace isolation (W3 part 4); per-dispatch audit
-//!   entries (W3 part 5).
-//!
 //! ## Why serialize V1
 //!
-//! Per Plan 89 §Concurrency, V1 is one in-flight dispatch per
+//! V1 is one in-flight dispatch per
 //! supervisor. The dispatch mutex guards the socket so two
 //! concurrent submits don't interleave their `HostVmRequest` /
 //! `HostVmResponse` frames on the same connection. V2+ parallel
@@ -50,7 +35,7 @@ use crate::builder_protocol::{
 };
 use crate::builder_vm::BuilderJob;
 
-/// Plan 89 W3 part 14 — host-side hook the persistent dispatch
+/// Host-side hook the persistent dispatch
 /// supervisor calls at the boundaries of each dispatched job so a
 /// production adapter can extend the chain-signed audit log
 /// (`~/.mvm/audit/<tenant>.jsonl`) without `mvm-build` depending
@@ -71,8 +56,7 @@ use crate::builder_vm::BuilderJob;
 ///   below ships as a `#[cfg(any(test, feature = "test-fakes"))]`
 ///   util.
 ///
-/// The three methods correspond to the three event kinds Plan 89
-/// security-scan F5 calls out:
+/// The three methods correspond to three event kinds:
 ///
 /// - [`Self::dispatched`] — fires after the supervisor writes
 ///   the `HostVmRequest::Run` frame and before it starts
@@ -142,10 +126,10 @@ pub struct DispatchOutcome {
     pub job_timings: JobTimings,
 }
 
-/// Plan 107 A4 — the spawn config for a nested workload microVM,
+/// The spawn config for a nested workload microVM,
 /// the host-side input to [`HostVmRequest::WorkloadStart`]. All
 /// paths are resolved *inside the host VM* (see the protocol doc);
-/// A4's backend branch stages the artifacts into a host-VM share and
+/// the backend branch stages the artifacts into a host-VM share and
 /// fills these with the guest-visible paths.
 #[derive(Debug, Clone)]
 pub struct WorkloadStartParams {
@@ -157,7 +141,7 @@ pub struct WorkloadStartParams {
     pub kernel_cmdline_extras: String,
 }
 
-/// Plan 107 A4 — outcome of a successful `WorkloadStart` dispatch:
+/// Outcome of a successful `WorkloadStart` dispatch:
 /// the host-minted id the guest echoed and the spawned VMM pid
 /// (inside the host VM) the host tracks for lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +193,7 @@ pub enum PersistentBuilderError {
     #[error("dispatch mutex poisoned — caller must restart the supervisor")]
     MutexPoisoned,
 
-    /// Plan 107 A4 — the guest returned [`HostVmResponse::WorkloadFailed`]
+    /// The guest returned [`HostVmResponse::WorkloadFailed`]
     /// for a workload lifecycle request (spawn / stop). Carries the
     /// guest's failure reason.
     #[error("workload {workload_id} failed in host VM: {error}")]
@@ -218,7 +202,7 @@ pub enum PersistentBuilderError {
         error: String,
     },
 
-    /// Plan 107 A4 — the guest answered a workload request with a
+    /// The guest answered a workload request with a
     /// frame of the wrong kind (e.g. a `WorkloadStopped` for a
     /// `WorkloadStart`). A protocol violation — the dispatch loop is
     /// corrupted or out of sync.
@@ -234,17 +218,16 @@ pub enum PersistentBuilderError {
 /// `socket_path` is `<vm_state_dir>/vsock-<BUILDER_DISPATCH_PORT>.sock`
 /// — the libkrun-managed Unix socket that proxies to AF_VSOCK port
 /// [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`] inside the
-/// guest. The owner of the persistent VM (W3 part 2 will spawn it
-/// from `LibkrunPersistentHostVm`) constructs this supervisor
-/// once the VM is up, then hands the result to whatever submits
-/// jobs (W3 part 3 wires `mvmctl build` to it from inside a dev
+/// guest. The owner of the persistent VM (`LibkrunPersistentHostVm`)
+/// constructs this supervisor once the VM is up, then hands the
+/// result to whatever submits jobs (`mvmctl build` from inside a dev
 /// session).
 pub struct PersistentBuilderSupervisor {
     socket_path: PathBuf,
     dispatch_mutex: Mutex<()>,
     frame_read_timeout: Duration,
     dispatch_timeout: Duration,
-    /// Plan 89 W3 part 14 — optional audit sink. `None` means
+    /// Optional audit sink. `None` means
     /// the supervisor doesn't emit chain entries (matches the
     /// dev-only `mvmctl persistent-builder` verb, which doesn't
     /// run under an ExecutionPlan). `Some(_)` means every
@@ -270,7 +253,7 @@ impl PersistentBuilderSupervisor {
         }
     }
 
-    /// Plan 89 W3 part 14 — wire a [`BuilderAuditSink`] in so the
+    /// Wire a [`BuilderAuditSink`] in so the
     /// supervisor emits `builder.job.dispatched` /
     /// `builder.job.completed` / `builder.job.failed` events on
     /// the chain-signed audit log around each dispatch round.
@@ -327,8 +310,7 @@ impl PersistentBuilderSupervisor {
             job_dir_relpath,
         };
 
-        // Plan 89 W3 part 14 — emit `dispatched` before the round
-        // begins. Reasons:
+        // Emit `dispatched` before the round begins. Reasons:
         //
         // 1. If the dispatch round itself errors, the host still
         //    records that a job was attempted (and the matching
@@ -357,7 +339,7 @@ impl PersistentBuilderSupervisor {
         }
     }
 
-    /// Plan 107 A4 — dispatch a [`HostVmRequest::WorkloadStart`] to
+    /// Dispatch a [`HostVmRequest::WorkloadStart`] to
     /// the host VM, which spawns the workload microVM (Firecracker)
     /// inside itself. Mints a fresh [`WorkloadId`], returns the
     /// echoed id + spawned VMM pid on success, or
@@ -401,7 +383,7 @@ impl PersistentBuilderSupervisor {
         }
     }
 
-    /// Plan 107 A4 — dispatch a [`HostVmRequest::WorkloadStop`] and
+    /// Dispatch a [`HostVmRequest::WorkloadStop`] and
     /// confirm the guest tore the workload down.
     pub fn submit_workload_stop(
         &self,
@@ -424,7 +406,7 @@ impl PersistentBuilderSupervisor {
         }
     }
 
-    /// Plan 107 A4 — dispatch a [`HostVmRequest::WorkloadStatus`].
+    /// Dispatch a [`HostVmRequest::WorkloadStatus`].
     /// Returns the guest's status string (`"running"` / `"stopped"`
     /// / `"not_found"`).
     pub fn submit_workload_status(
@@ -562,10 +544,10 @@ impl PersistentBuilderSupervisor {
                 | Some(HostVmResponse::WorkloadStopped { .. })
                 | Some(HostVmResponse::WorkloadStatusReport { .. })
                 | Some(HostVmResponse::WorkloadFailed { .. }) => {
-                    // Plan 107 A2: workload responses on the build-job
-                    // dispatch path are a protocol violation. Workload
+                    // Workload responses on the build-job dispatch
+                    // path are a protocol violation. Workload
                     // lifecycle responses flow on a dedicated channel
-                    // (A3 vsock-proxy hop), not this build-dispatch
+                    // (a vsock-proxy hop), not this build-dispatch
                     // conn. Treat as premature EOF — the host can't
                     // recover from a wire mismatch.
                     return Err(PersistentBuilderError::PrematureEof {
@@ -632,7 +614,7 @@ pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
 }
 
 // ============================================================
-// Plan 89 W3 part 7 — session record + PersistentBuilderVm
+// session record + PersistentBuilderVm
 // ============================================================
 //
 // `mvmctl persistent-builder start` writes the session record at
@@ -821,8 +803,8 @@ fn extract_nix_store_hash(store_path: &str) -> Option<&str> {
 ///    unchanged.
 ///
 /// Install variant (`BuilderJob::Install`) returns
-/// `BuilderVmError::NotYetImplemented` — Plan 73's sealed-volume
-/// invariants vs persistent-mode are W3 follow-up work.
+/// `BuilderVmError::NotYetImplemented` — reconciling the sealed-volume
+/// invariants with persistent-mode is follow-up work.
 #[cfg(feature = "builder-vm")]
 pub struct PersistentBuilderVm {
     session: SessionRecord,
@@ -844,7 +826,7 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
     ) -> Result<crate::builder_vm::BuilderArtifacts, crate::builder_vm::BuilderVmError> {
         use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderVmError};
 
-        // Plan 89 W3 part 8 — Install variant routes through the
+        // Install variant routes through the
         // same dispatch wire but stages the install spec instead
         // of a cmd.sh, and the guest's run_install_job_at writes
         // sealed-volume sidecars (result.json + content/ + sbom +
@@ -920,7 +902,7 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
 
 #[cfg(feature = "builder-vm")]
 impl PersistentBuilderVm {
-    /// Plan 89 W3 part 8 — `BuilderJob::Install` arm of
+    /// `BuilderJob::Install` arm of
     /// [`BuilderVm::run_build`]. Copies the host-side install spec
     /// into a per-dispatch dir under `<session.job_dir>/<job_id>/`,
     /// submits a `BuilderJob::Install` with the in-guest path, then
@@ -968,8 +950,7 @@ impl PersistentBuilderVm {
         // The guest wrote result.json + sealed-volume sidecars into
         // <session.job_dir>/<job_id>/out/. Copy the whole dir into
         // mounts.artifact_out so the downstream finalize_install_job
-        // (Plan 73 Followup B.2) reads from the canonical path the
-        // single-shot caller hands it.
+        // reads from the canonical path the single-shot caller hands it.
         let dispatch_out_dir = artifact_dir_for(&self.session.job_dir, &job_id);
         std::fs::create_dir_all(&mounts.artifact_out).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
@@ -1069,7 +1050,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------
-    // Plan 89 W3 part 7 — session record + PersistentBuilderVm
+    // session record + PersistentBuilderVm
     // -----------------------------------------------------------
 
     #[test]
@@ -1202,7 +1183,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------
-    // Plan 89 W3 part 8 — install dispatch helpers
+    // install dispatch helpers
     // -----------------------------------------------------------
 
     #[cfg(feature = "builder-vm")]

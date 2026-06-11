@@ -91,7 +91,7 @@ fn handle_connection(mut stream: TcpStream) {
 /// Concatenate per-VM Prometheus scrape files written by supervisor-side
 /// observers (e.g. `FlowCountMetrics::write_scrape_file`) onto the global
 /// metrics output. The supervisor and CLI run as the same user and share
-/// `~/.mvm/audit/` (mode 0700, ADR-002 §W1.5), so the filesystem is the
+/// `~/.mvm/audit/` (mode 0700), so the filesystem is the
 /// cross-process surface — no new RPC, no new socket. File-name contract:
 /// `metrics-<vm>-flow-count.prom`.
 ///
@@ -137,7 +137,7 @@ fn append_per_vm_scrape_files_from(out: &mut String, dir: &std::path::Path) {
             Some(n) => n,
             None => continue,
         };
-        // Plan 141 — discover ALL supervisor-written scrape files, not just
+        // Discover ALL supervisor-written scrape files, not just
         // flow-count. New per-observer-latency files
         // (`metrics-<vm>-observer-latency.prom`) are picked up automatically.
         if !name.starts_with("metrics-") || !name.ends_with(".prom") {
@@ -234,7 +234,7 @@ mod tests {
             "mvm_flow_opened_total{tenant=\"b\"} 9\n",
         )
         .unwrap();
-        // Plan 141 — any `metrics-*.prom` is now discovered, including the
+        // Any `metrics-*.prom` is now discovered, including the
         // new per-observer-latency files.
         std::fs::write(
             audit.join("metrics-vm-d-observer-latency.prom"),

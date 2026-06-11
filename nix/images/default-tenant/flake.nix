@@ -1,14 +1,13 @@
 {
   description = "mvm bundled default microVM image (Plan 158) — dev + prod (verity-sealed) variants";
 
-  # Plan 158 Task 1. Both variants build-validated (aarch64-linux) via
+  # Both variants build-validated (aarch64-linux) via
   # nix-in-docker on the authoring host: `default`/`prod` emits
   # {vmlinux, rootfs.ext4, rootfs.verity, rootfs.roothash, mvm-meta.json} with a
   # valid 64-hex verity roothash and a `sealed:true, accessible:false,
   # overlayAware:true, rootlessEntrypoint:true` sidecar; `dev` emits
   # {vmlinux, rootfs.ext4, mvm-meta.json} with `sealed:false, accessible:true`.
   # The x86_64-linux build + the actual VM boot run in CI / on a runtime host.
-  # See specs/plans/158-restore-default-microvm-image.md.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     microvm = {

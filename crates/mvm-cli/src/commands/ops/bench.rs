@@ -1,16 +1,16 @@
 //! `mvmctl bench microvm-launch` — measure cold runtime-microvm launch
-//! latency (Plan 93 Phase 2 Lever 0).
+//! latency.
 //!
-//! Everything else in Phase 2 (kernel cmdline trim, handshake
-//! pipelining, the warm pool) is judged against this harness — "without
-//! measurement we'll optimise the wrong thing." The measurement
+//! Every other launch optimisation (kernel cmdline trim, handshake
+//! pipelining, the warm pool) is judged against this harness — without
+//! measurement we'd optimise the wrong thing. The measurement
 //! substrate here — per-iteration host wall-clock timing, N-run
 //! statistics, a versioned JSON report, and baseline regression-gating
 //! — is pure and fully unit-tested via a mock [`LaunchProbe`].
 //!
 //! The live libkrun probe (the only part that needs a real backend) is
-//! the one piece not exercised by unit tests; it is a tracked follow-up
-//! (see `specs/plans/93-fast-secure-dev-path-followups.md`). When wired
+//! the one piece not exercised by unit tests; it is a tracked
+//! follow-up. When wired
 //! it MUST drive `admit_plan_for_boot` so the harness measures the real
 //! signed-plan boot, never a bypass — otherwise we'd benchmark a
 //! configuration that can never ship.
@@ -100,8 +100,8 @@ pub struct IterationTiming {
 /// PID file first appears; `connected` is the first successful vsock
 /// connect to the guest agent; `ready` is when the guest reports the
 /// control plane Ready.
-// Task 5 (live probe wiring) will construct BootMarks from the real
-// instants captured during the boot sequence.
+// Live probe wiring will construct BootMarks from the real instants
+// captured during the boot sequence.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootMarks {
@@ -115,7 +115,7 @@ impl BootMarks {
     /// Collapse the marks into the four reported spans. All arithmetic
     /// is `Instant`-difference so it can never go negative for marks
     /// captured in order. Takes `self` by value (`BootMarks` is `Copy`).
-    // Task 5 (live probe wiring) is the first non-test caller.
+    // Live probe wiring is the first non-test caller.
     #[allow(dead_code)]
     pub fn to_timing(self) -> IterationTiming {
         let ms = |a: std::time::Instant, b: std::time::Instant| {

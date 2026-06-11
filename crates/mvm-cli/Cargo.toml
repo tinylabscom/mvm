@@ -18,15 +18,15 @@ mvm-backend = { workspace = true, default-features = false }
 mvm-mcp.workspace = true
 mvm-oci.workspace = true
 mvm-hostd.workspace = true
-# SDK port Phase 2c — `mvmctl compile` reads the Workload IR
-# (mvm_sdk::ir) and routes it through the compile pipeline.
+# `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
+# through the compile pipeline.
 mvm-sdk.workspace = true
 anyhow.workspace = true
 # Real ext4 inode lookup for the Stage 0 post-build check (replaces the
 # old raw-byte substring scan over rootfs.ext4).
 ext4-view.workspace = true
-# Plan 60 Phase 7a Slice D — `mvmctl audit verify-cert` decodes
-# base64 destruction-cert signatures + pubkeys.
+# `mvmctl audit verify-cert` decodes base64 destruction-cert
+# signatures + pubkeys.
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
@@ -73,10 +73,10 @@ hex.workspace = true
 libc.workspace = true
 
 [features]
-# Plan 72 W5.B cutover: `builder-vm` is now default so `mvmctl dev up`
-# prefers the libkrun-backed builder VM with a persistent /nix store.
-# Runtime gating via `libkrun_sys::is_available()` still falls back cleanly
-# when libkrun isn't installed on the host.
+# `builder-vm` is default so `mvmctl dev up` prefers the libkrun-backed
+# builder VM with a persistent /nix store. Runtime gating via
+# `libkrun_sys::is_available()` still falls back cleanly when libkrun
+# isn't installed on the host.
 default = ["builder-vm"]
 contributor-bootstrap = [
     "mvm/contributor-bootstrap",
@@ -84,14 +84,14 @@ contributor-bootstrap = [
     "mvm-backend/contributor-bootstrap",
 ]
 builder-vm = ["mvm-build/builder-vm"]
-# Plan 86 / Plan 72 W5.D bullet 10: extract libkrunfw's bundled
+# Extract libkrunfw's bundled
 # TSI-patched kernel at runtime so Stage 0 boots a kernel where
 # libkrun's AF_INET-over-vsock (TSI) path actually works. The feature
 # is opt-in because normal CI and library consumers should not require
 # libkrun headers. Builds that run the native libkrun path can enable it
 # on hosts where libkrunfw is installed.
 libkrun-sys = ["libkrun-sys/libkrun-sys"]
-# Plan 93 PR-10a: opt-in lane for the `bench microvm-launch` live probe
+# Opt-in lane for the `bench microvm-launch` live probe
 # test + its boot orchestration. Off by default so `cargo test
 # --workspace` on stock CI stays VM-free (hosted macOS runners lack
 # Hypervisor.framework nested virt for a libkrun guest). Enabled on a dev
@@ -100,7 +100,7 @@ libkrun-sys = ["libkrun-sys/libkrun-sys"]
 # Pure test/codegate marker — mvm-cli spawns the supervisor as a
 # subprocess and does not link libkrun itself.
 libkrun-live = []
-# Plan 77 W4: structural enforcement of the "no prebuilt builder VM artifact
+# Structural enforcement of the "no prebuilt builder VM artifact
 # until release" invariant (see AGENTS.md / CLAUDE.md). When off — the default
 # for every contributor build — `download_builder_vm_image` and its helpers
 # are entirely cfg'd out, so a cache miss with no in-repo flake hard-errors

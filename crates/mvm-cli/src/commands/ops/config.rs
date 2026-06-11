@@ -64,8 +64,8 @@ fn config_set(key: &str, value: &str) -> Result<()> {
     mvm_core::user_config::set_key(&mut cfg, key, value)?;
     mvm_core::user_config::save(&cfg, None)?;
     println!("Set {} = {}", key, value);
-    // Plan 60 Phase 4 / Plan 37 §6 — every mutation of the user config
-    // file is audit-worthy. The value is included in `detail` because
+    // Every mutation of the user config file is audit-worthy. The value
+    // is included in `detail` because
     // configs hold operationally-significant settings (default backend,
     // network policy, etc.) and the audit chain is the only after-the-
     // fact record of what changed.

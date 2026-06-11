@@ -21,13 +21,12 @@
 # (overlay before mount, vsock before socket(), iptables before rule
 # install). Each `=m` is a silent-failure surface. Flipping everything
 # we need to `=y` makes modprobe a no-op and deletes the module tree.
-# Plan 92 records the decision and the five ways the module contract
-# broke during validation.
+# Five distinct ways the module contract broke during validation drove
+# this decision.
 #
-# Why no TSI patches: Plan 87 / 88 / ADR-055 moved builder-VM
-# networking to passt (Linux) / gvproxy (macOS) over virtio-net. The
-# TSI syscall-hijack path is gone from every VM. Plan 92 dropped the
-# vendored 22-file patch series.
+# Why no TSI patches: builder-VM networking moved to passt (Linux) /
+# gvproxy (macOS) over virtio-net. The TSI syscall-hijack path is gone
+# from every VM, and the vendored 22-file patch series was dropped.
 #
 # Tradeoff — first build compiles from source: because the `.config` is
 # novel, `cache.nixos.org` has no substitute, so a fresh machine
@@ -57,8 +56,8 @@ let
     "PCI" "PCI_MSI"
 
     # filesystems. OVERLAY_FS stays in base: the guest agent lands on
-    # an ADR-051 overlay. FUSE_FS is builder-only (it backs virtio-fs).
-    # dm-verity (Plan 25 W3 / Claim 3 — verified boot) is a
+    # an overlay. FUSE_FS is builder-only (it backs virtio-fs).
+    # dm-verity (Claim 3 — verified boot) is a
     # *workload-only* delta, not base: the builder boots `root=/dev/vda
     # ro` with no roothash and never opens a dm device (its veritysetup
     # only runs `format` in userspace). `mkWorkloadKernel` adds it.
@@ -91,8 +90,8 @@ let
   # it enables every SoC family upstream supports. We boot only under
   # libkrun (Apple Silicon virt) or Firecracker (Linux KVM virt), never
   # real SoC hardware, so the disables are aggressive. These apply to
-  # workload and builder kernels alike. Plan 95 §W3 — additions derived
-  # empirically from `nix build .#…-kernel-configfile`.
+  # workload and builder kernels alike. Additions derived empirically
+  # from `nix build .#…-kernel-configfile`.
   baseDisables = [
     "MODULES"        # everything built-in; no /lib/modules tree
     "MODULE_SIG"     # NOP without MODULES; explicit

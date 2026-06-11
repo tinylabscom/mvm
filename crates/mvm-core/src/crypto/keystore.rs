@@ -1,4 +1,4 @@
-//! Tenant key provisioning for the Phase 2 encryption-at-rest path.
+//! Tenant key provisioning for the encryption-at-rest path.
 //!
 //! `KeyProvider` is the trait every encryption-at-rest caller
 //! consumes; three impls layer from dev-friendly to ops-friendly:
@@ -12,7 +12,7 @@
 //! - [`KeyringProvider`] reads a hex-encoded key from the
 //!   OS-native keystore (macOS Keychain, Linux Secret Service,
 //!   Windows Credential Manager). Lives at service=`"mvm"`,
-//!   user=`<tenant_id>`. Plan 63 W3.
+//!   user=`<tenant_id>`.
 //!
 //! [`default_provider`] auto-detects the providers available on the
 //! current host and tries them in strength order for each tenant:
@@ -155,7 +155,7 @@ pub struct KeyringProvider;
 
 impl KeyringProvider {
     /// Open the keyring entry for a given tenant. Used by both
-    /// `get_data_key` here and by W4's `mvmctl secret` CLI.
+    /// `get_data_key` here and by the `mvmctl secret` CLI.
     pub fn entry(tenant_id: &str) -> Result<keyring::Entry> {
         validate_shell_id(tenant_id)
             .with_context(|| format!("Invalid tenant_id for keyring lookup: {tenant_id:?}"))?;
@@ -409,7 +409,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // FileKeyProvider (W3)
+    // FileKeyProvider
     // ──────────────────────────────────────────────────────────────
 
     fn write_key_file(dir: &Path, tenant: &str, bytes: &[u8], mode: u32) -> PathBuf {
@@ -507,7 +507,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // KeyringProvider (W3)
+    // KeyringProvider
     //
     // The keyring crate's behaviour depends on a backend being
     // reachable (macOS Keychain / Linux Secret Service via D-Bus /
@@ -537,7 +537,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // default_provider + has_key (W3)
+    // default_provider + has_key
     // ──────────────────────────────────────────────────────────────
 
     #[test]

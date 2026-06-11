@@ -21,7 +21,7 @@
 //! binary, loop devices, and root, so the full lifecycle test is gated behind
 //! `MVM_LIVE_LUKS=1`; the non-gated test covers the fail-closed path that runs
 //! on any host. The DEK's binding to the artifact hash + signed plan + audit
-//! head (plan 122 B2) is verified at the admit gate before unlock, not here.
+//! head is verified at the admit gate before unlock, not here.
 #![cfg(target_os = "linux")]
 
 use std::io::Write;

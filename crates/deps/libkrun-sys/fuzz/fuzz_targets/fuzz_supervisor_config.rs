@@ -1,5 +1,4 @@
-// Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" — fuzz the
-// host-side `SupervisorConfig` JSON parser.
+// Fuzz the host-side `SupervisorConfig` JSON parser.
 //
 // `mvm-libkrun-supervisor`'s `main()` reads a `SupervisorConfig`
 // document on stdin before any libkrun call. The bytes come from a
@@ -13,8 +12,8 @@
 // `serde_json::Error` is the expected outcome for malformed bytes.
 //
 // `KrunContext` (the inner field) carries the `NetworkingMode` enum
-// that Plan 88 extended to `{Tsi, Passt {..}, Gvproxy {..}}` — so
-// this target also covers the new gvproxy variant's tag parser.
+// `{Tsi, Passt {..}, Gvproxy {..}}` — so this target also covers the
+// gvproxy variant's tag parser.
 
 #![no_main]
 

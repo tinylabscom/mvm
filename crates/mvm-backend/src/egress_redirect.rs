@@ -1,4 +1,4 @@
-//! Plan 129 — per-VM transparent egress redirect for the Firecracker TAP path.
+//! Per-VM transparent egress redirect for the Firecracker TAP path.
 //! Installs an nft `nat prerouting` REDIRECT scoped to the guest's TAP
 //! interface so the guest's outbound HTTP (:80) is steered to the host-side
 //! substitution terminator (recoverable via SO_ORIGINAL_DST). iifname-scoping
@@ -47,9 +47,9 @@ fn redirect_table_name(vm: &str) -> String {
     format!("mvm_egress_{sanitized}")
 }
 
-/// Guest destination ports steered to the terminator. `:80` is the Stage 1b
-/// cleartext path; `:443` is the Stage 2 TLS-termination path — the terminator
-/// recovers which one via `SO_ORIGINAL_DST` and branches accordingly.
+/// Guest destination ports steered to the terminator. `:80` is the cleartext
+/// path; `:443` is the TLS-termination path — the terminator recovers which one
+/// via `SO_ORIGINAL_DST` and branches accordingly.
 pub const REDIRECTED_DPORTS: [u16; 2] = [80, 443];
 
 /// The pure, unit-tested core: exact argv tokens for one redirect rule matching
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn install_redirects_both_80_and_443_to_the_terminator() {
-        // Stage 2: the terminator handles both cleartext (:80) and TLS (:443);
+        // The terminator handles both cleartext (:80) and TLS (:443);
         // the redirect must steer BOTH guest ports to the same terminator port
         // (SO_ORIGINAL_DST recovers which one it was). Assert the per-port rule
         // argv for each — the pure core the side-effecting install emits.

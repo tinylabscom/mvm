@@ -422,9 +422,8 @@ async fn layer_fetch_round_trip_manifest_to_layers_to_blob() {
         .register_blob("library/multi", LAYER_MEDIA, &layer_bytes_a)
         .await;
 
-    // Construct a manifest pointing at layer A only (single-layer
-    // round trip is the W1.2 boundary; multi-layer fan-out lands
-    // in W1.3 with the unpack orchestrator).
+    // Construct a manifest pointing at layer A only; multi-layer
+    // fan-out is exercised separately with the unpack orchestrator.
     let (manifest_bytes, expected_digest_a) = minimal_image_manifest(&layer_bytes_a, LAYER_MEDIA);
     reg.register_manifest_with_digest_path("library/multi", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;

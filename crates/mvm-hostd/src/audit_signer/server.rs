@@ -137,8 +137,8 @@ fn format_code_message(code: AuditSignerErrorCode) -> String {
     }
 }
 
-// Length-prefixed JSON framing lives in `crate::framing` (plan 126 B5;
-// was `mvm_core::framing`); these wrappers keep the audit-signer error
+// Length-prefixed JSON framing lives in `crate::framing` (was
+// `mvm_core::framing`); these wrappers keep the audit-signer error
 // context on the shared transport. The cap-before-alloc gate is enforced
 // there.
 async fn read_frame<T: serde::de::DeserializeOwned>(

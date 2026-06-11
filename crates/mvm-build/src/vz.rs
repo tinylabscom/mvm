@@ -1,11 +1,10 @@
-//! Plan 97 Phase B foundation — type-safe interface to
-//! `mvm-vz-supervisor`.
+//! Type-safe interface to `mvm-vz-supervisor`.
 //!
 //! The Vz backend (`mvm-backend::VzBackend`) constructs a
 //! [`SupervisorConfig`], serializes it to JSON, and pipes it to the
 //! Rust-native `mvm-vz-supervisor` binary on stdin, which decodes it
-//! with strict deny-unknown-fields semantics — ADR-002 claim 5 rests
-//! on that decoder rejecting malformed input (fuzzed in security.yml).
+//! with strict deny-unknown-fields semantics — claim 5 (vsock framing
+//! fuzzed) rests on that decoder rejecting malformed input.
 //!
 //! Pure data + path resolution. No FFI, no Vz framework binding. This
 //! crate compiles on every host the workspace targets, including Linux
@@ -22,8 +21,8 @@ use std::path::PathBuf;
 ///
 /// The schema **must** stay in lockstep with the Rust `SupervisorConfig`
 /// decoder — both sides apply deny-unknown-fields. Adding a field
-/// requires landing both edits in the same PR (and the Phase A
-/// equivalence fuzz corpus catches drift in CI).
+/// requires landing both edits together (the equivalence fuzz corpus
+/// catches drift in CI).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorConfig {
@@ -47,34 +46,32 @@ pub struct SupervisorConfig {
     /// that every share here was admitted by the signed `ExecutionPlan`
     /// (claim 1 / claim 8) lives **host-side** in the admission gate
     /// (`mvm-cli` `plan_admission::enforce_admitted_shares`, run before
-    /// the supervisor is spawned). This Swift supervisor does not yet
-    /// receive the plan, so it relays the host-provided shares verbatim;
-    /// an in-supervisor re-check is a deferred defense-in-depth follow-up
-    /// (Plan 97 Phase D) — do NOT describe it here as if it already
-    /// refuses unnamed shares.
+    /// the supervisor is spawned). This supervisor does not yet receive
+    /// the plan, so it relays the host-provided shares verbatim; an
+    /// in-supervisor re-check is a deferred defense-in-depth follow-up
+    /// — do NOT describe it here as if it already refuses unnamed shares.
     pub virtio_fs: Vec<VirtioFsShare>,
     pub vsock: VsockConfig,
     /// Capture-only console output. Workload microVMs always set this;
-    /// dev-mode PTY console goes via `vsock` ports 20000+ instead
-    /// (Plan 97 Security §9).
+    /// dev-mode PTY console goes via `vsock` ports 20000+ instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub console_output_path: Option<String>,
     /// Network attachment. `None` boots a no-network guest — useful
     /// for unit tests and the very smallest smoke configurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
-    /// Memory balloon (Plan 97 §"Memory balloon floor"). When `None`,
-    /// the supervisor omits the balloon device entirely.
+    /// Memory balloon. When `None`, the supervisor omits the balloon
+    /// device entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balloon: Option<BalloonConfig>,
-    /// Plan 97 Phase E — unix-domain control socket the supervisor
+    /// Unix-domain control socket the supervisor
     /// binds (`SOCK_STREAM`, mode 0700) to accept PAUSE / RESUME /
     /// BALLOON / SAVE / STATUS commands from the host. `None` opts
     /// out — the supervisor runs without a control channel and
     /// pause/resume/balloon/snapshot verbs on `VzBackend` short-circuit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_socket_path: Option<String>,
-    /// Plan 97 Phase E follow-up — supervisor startup mode.
+    /// Supervisor startup mode.
     /// Defaults to [`StartupMode::Boot`] (kernel + cmdline + start),
     /// which preserves the original boot path. [`StartupMode::Restore`]
     /// asks the supervisor to call
@@ -85,11 +82,11 @@ pub struct SupervisorConfig {
     #[serde(default, skip_serializing_if = "StartupMode::is_default")]
     pub startup_mode: StartupMode,
 
-    // ── Audit substrate (Plan 152 WS-B slice 8 — flow-audited networking) ──
-    // The Rust-native Vz supervisor runs the Plan 141 gateway bridge in-process
+    // ── Audit substrate (flow-audited networking) ──
+    // The Rust-native Vz supervisor runs the gateway bridge in-process
     // (payload_tap), so it needs the same admitted-plan + signing inputs the
     // libkrun supervisor's config carries. All optional + omitted-when-absent so
-    // pre-slice-8 configs (and the dev/builder VM, which has no audit substrate)
+    // configs without it (and the dev/builder VM, which has no audit substrate)
     // round-trip unchanged. When present, the supervisor splices the guest NIC
     // through the bridge to gvproxy and chain-signs every flow event.
     /// Owning tenant id (audit chain partition key).
@@ -114,15 +111,14 @@ pub struct SupervisorConfig {
 
 /// How the supervisor brings the VM up.
 ///
-/// Plan 97 Phase E §"RESTORE supervisor startup mode". The Swift
-/// supervisor branches on this tagged enum: [`Boot`] is the original
+/// The supervisor branches on this tagged enum: [`Boot`] is the original
 /// kernel-and-cmdline path; [`Restore`] loads the VM state from a
 /// previously saved snapshot blob (macOS 14+).
 ///
 /// Default is [`Boot`] so old JSON corpora without this field keep
-/// the original behaviour, which lets the Phase E fuzz corpus stay
-/// valid and lets every caller that doesn't care about restore
-/// (almost everyone) skip the field.
+/// the original behaviour, which keeps the fuzz corpus valid and lets
+/// every caller that doesn't care about restore (almost everyone) skip
+/// the field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StartupMode {
@@ -187,8 +183,8 @@ impl SupervisorConfig {
     }
 
     /// True when the config carries a full audit substrate — the trigger for
-    /// the in-process flow-audited gvproxy bridge (Plan 152 WS-B slice 8).
-    /// Without it (dev / builder VMs) the supervisor direct-attaches gvproxy.
+    /// the in-process flow-audited gvproxy bridge. Without it (dev / builder
+    /// VMs) the supervisor direct-attaches gvproxy.
     pub fn has_audit_substrate(&self) -> bool {
         self.plan.is_some()
             && self.tenant_id.is_some()
@@ -204,9 +200,9 @@ pub struct KernelConfig {
     /// Path to an uncompressed `vmlinux` (Vz `VZLinuxBootLoader` boots
     /// only uncompressed kernels).
     pub path: String,
-    /// Kernel command line. Plan 97 Security §7 — workload mode
-    /// requires the host to pre-filter this against the admitted
-    /// ExecutionPlan's allow-list before this struct is constructed.
+    /// Kernel command line. Workload mode requires the host to
+    /// pre-filter this against the admitted ExecutionPlan's allow-list
+    /// before this struct is constructed.
     pub cmdline: String,
     /// Optional initial ramdisk path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,10 +212,9 @@ pub struct KernelConfig {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceConfig {
-    /// vCPU count. Plan 97 Security §8 — supervisor refuses values
-    /// above the admitted plan's cap. Host enforces; the Swift
-    /// supervisor relays without further checking (defense in depth
-    /// arrives in a follow-up).
+    /// vCPU count. The supervisor refuses values above the admitted
+    /// plan's cap. Host enforces; the supervisor relays without further
+    /// checking (defense in depth arrives in a follow-up).
     pub cpu_count: u32,
     /// Guest memory in MiB.
     pub memory_mib: u64,
@@ -231,8 +226,7 @@ pub struct DiskConfig {
     /// Stable identifier used in logs / audit. Not user-visible inside
     /// the guest.
     pub id: String,
-    /// Host path to the disk image (raw ext4, sparse-allocated, per
-    /// Plan 97 §"Disk image format").
+    /// Host path to the disk image (raw ext4, sparse-allocated).
     pub path: String,
     pub read_only: bool,
 }
@@ -250,9 +244,9 @@ pub struct VirtioFsShare {
     /// `VZSharedDirectory(readOnly:)`, so a `true` here is enforced
     /// by Vz itself — the guest can't remount it rw.
     ///
-    /// Required (no default) so Plan 97 §"Volumes and host-path
-    /// mounts" admission decisions are explicit rather than
-    /// inheriting the per-language default. The builder VM mounts
+    /// Required (no default) so host-path-mount admission decisions
+    /// are explicit rather than inheriting the per-language default.
+    /// The builder VM mounts
     /// `/work` and `/job` read-only and `/out` read-write; workload
     /// microVMs default to no shares at all and so don't usually
     /// touch this field.
@@ -274,7 +268,7 @@ pub struct VsockConfig {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NetworkConfig {
-    /// gvproxy-backed virtio-net. ADR-055 §"Cross-platform backends".
+    /// gvproxy-backed virtio-net (the macOS userspace gateway).
     Gvproxy {
         /// Path to gvproxy's `--listen-vfkit` SOCK_DGRAM unix socket.
         socket_path: String,
@@ -288,10 +282,8 @@ pub enum NetworkConfig {
         /// entries for the Rust supervisor's signer task to drain
         /// into the claim-8 chain.
         ///
-        /// `None` keeps pre-W6.A configs parseable; the Vz Swift
-        /// bridge only emits when this is set. Plan 102 W6.A
-        /// commit 7 (full Swift implementation lands in W6.A.5
-        /// where it can be compile-verified on macOS).
+        /// `None` keeps older configs parseable; the Vz bridge only
+        /// emits when this is set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         events_ingest_socket_path: Option<String>,
     },
@@ -302,8 +294,7 @@ pub enum NetworkConfig {
 pub struct BalloonConfig {
     pub enabled: bool,
     /// Minimum memory the balloon controller is allowed to reclaim
-    /// the guest down to (host-side enforcement). Plan 97
-    /// §"Memory balloon floor".
+    /// the guest down to (host-side enforcement).
     pub floor_mib: u64,
 }
 
@@ -363,10 +354,9 @@ impl MacAddress {
 /// [`supervisor_binary_path`] for the contract.
 pub const INSTALLED_BIN_DIRNAME: &str = ".mvm/bin";
 
-/// Filename prefix of the version-pinned supervisor binary. Plan 97
-/// §"Build, distribution, versioning" — the host launches
-/// `~/.mvm/bin/mvm-vz-supervisor-<mvmctl_version>` and refuses to run
-/// against a mismatched version.
+/// Filename prefix of the version-pinned supervisor binary. The host
+/// launches `~/.mvm/bin/mvm-vz-supervisor-<mvmctl_version>` and refuses
+/// to run against a mismatched version.
 pub const SUPERVISOR_BIN_PREFIX: &str = "mvm-vz-supervisor-";
 
 /// Resolve the release-installed supervisor path for the given mvmctl
@@ -618,11 +608,10 @@ mod tests {
         );
     }
 
-    /// Plan 102 W6.A commit 7 — `events_ingest_socket_path` is the
-    /// new field the Vz Swift bridge connects to when emitting
-    /// `FlowEventWire` NDJSON for the Rust supervisor's signer
-    /// task. Skipped on serialize when `None` so pre-W6.A JSON
-    /// stays clean; deserializes cleanly when present.
+    /// `events_ingest_socket_path` is the field the Vz bridge connects
+    /// to when emitting `FlowEventWire` NDJSON for the Rust supervisor's
+    /// signer task. Skipped on serialize when `None` so older JSON stays
+    /// clean; deserializes cleanly when present.
     #[test]
     fn gvproxy_events_ingest_socket_path_roundtrips_when_set() {
         let cfg = NetworkConfig::Gvproxy {
@@ -647,7 +636,7 @@ mod tests {
         }
     }
 
-    /// Backward-compat: pre-W6.A JSON without the new field still
+    /// Backward-compat: older JSON without the new field still
     /// parses cleanly (the bridge just doesn't emit until the
     /// field is set).
     #[test]

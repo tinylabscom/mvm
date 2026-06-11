@@ -8,8 +8,7 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch
 /// mvmctl was compiled for == the arch it runs on, so the downloaded binaries
 /// match the host. (Was hardcoded `"aarch64"` — wrong on x86_64: `dev up`
-/// fetched the aarch64 firecracker on an x86_64 host → "Exec format error".
-/// Plan 166 Task 3.1.)
+/// fetched the aarch64 firecracker on an x86_64 host → "Exec format error".)
 pub const ARCH: &str = std::env::consts::ARCH;
 
 /// Normalize Firecracker version strings to a canonical form (e.g., "Firecracker v1.14.1" -> "v1.14.1").
@@ -100,7 +99,7 @@ pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
 /// Create `~/.mvm` (or whatever `mvm_data_dir()` resolves to) with
 /// mode `0700` and return its path. Idempotent: if the dir already
 /// exists with looser perms, chmod it to `0700` so a host that was
-/// created before ADR-002 W1.5 still gets locked down on the next
+/// created before this lockdown still gets locked down on the next
 /// `dev up`.
 ///
 /// `~/.mvm` holds the dev VM's GC root, the host-backed Nix store
@@ -202,9 +201,9 @@ pub fn mvm_config_dir() -> String {
 ///      works on macOS where systemd-style `XDG_RUNTIME_DIR` is rare)
 ///
 /// Holds short-lived state like the session table at
-/// `<runtime>/sessions/<id>.json`. By contract per ADR-002 §W1.5 the
-/// dir is mode 0700; entries within it are 0600 unless the writer
-/// explicitly relaxes them.
+/// `<runtime>/sessions/<id>.json`. By contract the dir is mode 0700;
+/// entries within it are 0600 unless the writer explicitly relaxes
+/// them.
 pub fn mvm_runtime_dir() -> String {
     if let Ok(d) = std::env::var("MVM_RUNTIME_DIR")
         && !d.is_empty()
@@ -276,9 +275,9 @@ pub fn mvm_share_dir() -> String {
 ///   1. `MVM_DEPS_VOLUMES_DIR` env var (test override)
 ///   2. `<mvm_data_dir()>/volumes/deps`
 ///
-/// The supervisor's admission gate (ADR-047 security claim 9 /
-/// Plan 73 Followup A) reads this dir; `mvmctl build` (Followup B)
-/// writes to it.
+/// The supervisor's admission gate (security claim 9 — every
+/// application-dep volume is hash-locked and audited) reads this
+/// dir; `mvmctl build` writes to it.
 pub fn mvm_deps_volumes_dir() -> String {
     if let Ok(d) = std::env::var("MVM_DEPS_VOLUMES_DIR")
         && !d.is_empty()
@@ -312,8 +311,7 @@ pub fn mvm_volumes_env() -> Vec<String> {
 /// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
 /// volume. The caller is responsible for verifying the directory
 /// exists and matches its sealed manifest — see
-/// `mvm_sdk::compile::deps_audit::verify_sealed_volume`. Plan 73
-/// Followup A.
+/// `mvm_sdk::compile::deps_audit::verify_sealed_volume`.
 pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }
@@ -327,8 +325,8 @@ pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
 // below: a single source of truth for the layout, and `MVM_DATA_DIR` is
 // honored everywhere. The inline `$HOME/.mvm/vms/...` derivations these
 // replace duplicated the convention — which let the libkrun vsock socket
-// name drift between two resolvers (the #582 regression) — and silently
-// ignored `MVM_DATA_DIR`, so parallel sessions collided despite setting it.
+// name drift between two resolvers — and silently ignored `MVM_DATA_DIR`,
+// so parallel sessions collided despite setting it.
 
 /// Per-VM state directory: `<mvm_data_dir>/vms/<name>/`. Holds the
 /// libkrun pid file, console log, vsock listener socket(s), runtime
@@ -339,7 +337,7 @@ pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// `<mvm_data_dir>/pool/` — the supervisor standby pool root (Plan 118 WS-1 1b).
+/// `<mvm_data_dir>/pool/` — the supervisor standby pool root.
 /// Each idle standby gets a `pool/<id>/` subdir holding its control UDS +
 /// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_DATA_DIR`
 /// surfaces as an error rather than silently writing entitled processes' state to
@@ -366,7 +364,7 @@ pub fn vsock_socket_filename(port: u32) -> String {
 /// connects directly with no port handshake. This + [`vsock_socket_filename`]
 /// are the single source of truth for the convention — every host-side
 /// resolver (the console transport, the dev-VM connect path) must use them
-/// so they cannot drift, which is exactly what broke in #582.
+/// so they cannot drift.
 pub fn vm_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
     vm_state_dir(name).join(vsock_socket_filename(port))
 }
@@ -383,7 +381,7 @@ pub fn vm_vsock_proxy_socket(name: &str) -> std::path::PathBuf {
 /// `<vm_state_dir>/vsock-<port>.sock` directly), the Vz `VsockProxy`
 /// listens inside this subdir. Single source of truth for the subdir so
 /// `mvm-backend`'s supervisor config and the host-side `VzTransport`
-/// can't drift (the #582 lesson, applied to Vz).
+/// can't drift.
 pub fn vm_vz_vsock_dir(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("vsock")
 }
@@ -406,7 +404,7 @@ pub fn vm_console_log(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("console.log")
 }
 
-/// Plan 129 — per-VM JSON file of `(guest var, placeholder)` pairs the
+/// Per-VM JSON file of `(guest var, placeholder)` pairs the
 /// substitution endpoint minted at boot. The backend writes it; the invoke
 /// path reads it to inject `HTTP_PROXY` + the placeholder env vars into the
 /// workload. Holds opaque placeholders only — never secret values.
@@ -448,7 +446,7 @@ pub fn mvm_secrets_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_data_dir()).join("secrets")
 }
 
-/// Plan 129 Stage 2 — the long-lived host egress CA's home:
+/// The long-lived host egress CA's home:
 /// `<mvm_data_dir>/egress-ca/` (holds `ca.crt` + `ca.key`, key mode 0400).
 /// The per-VM name-constrained intermediates the transparent `https`
 /// terminator uses are minted under this CA; see `crypto::egress_ca`.
@@ -470,7 +468,7 @@ pub fn is_production_mode() -> bool {
 /// commands can opt into the dev experience. If `MVM_PRODUCTION` is also set,
 /// production wins (fail-safe — never silently relax the prod tier). Note:
 /// interactivity still requires a host TTY (the console bridges raw-mode
-/// stdin) — this marks intent, it does not conjure a terminal. Plan 162.
+/// stdin) — this marks intent, it does not conjure a terminal.
 pub fn is_dev_mode() -> bool {
     !is_production_mode()
         && std::env::var("MVM_ENV")
@@ -746,8 +744,8 @@ mod tests {
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
     }
 
-    /// ADR-002 W1.5: `ensure_data_dir` / `ensure_cache_dir` create
-    /// their directories with mode 0700, AND chmod existing dirs
+    /// `ensure_data_dir` / `ensure_cache_dir` create their
+    /// directories with mode 0700, AND chmod existing dirs
     /// with looser perms down to 0700 — that's the upgrade path
     /// for hosts created before this change landed.
     #[cfg(unix)]
@@ -824,7 +822,7 @@ mod tests {
         );
         // The dev-VM connect resolver (mvm-backend) and the console transport
         // (mvm) both build the libkrun socket as state-dir + shared filename,
-        // so they cannot drift again (#582).
+        // so they cannot drift again.
         assert_eq!(
             vm_state_dir("foo").join(vsock_socket_filename(5252)),
             vm_vsock_port_socket("foo", 5252)

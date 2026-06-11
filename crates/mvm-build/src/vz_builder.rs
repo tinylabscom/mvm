@@ -1,7 +1,7 @@
 //! Apple Virtualization.framework (Vz) backend for the builder VM,
 //! parallel to [`libkrun_builder::LibkrunBuilderBackend`].
 //!
-//! Plan 97 Phase C, second `VmBackendForBuilder` impl. Owns the
+//! Second `VmBackendForBuilder` impl. Owns the
 //! Vz-specific spawn (`mvm-vz-supervisor` binary with
 //! [`crate::vz::SupervisorConfig`] JSON on stdin) and surfaces the
 //! resulting [`BuilderVmExitInfo`] back to the seam.
@@ -10,18 +10,16 @@
 //!
 //! This module is the **trait impl only**. The high-level
 //! `VzBuilderVm` driver that wraps `BuilderVmRuntime` around this
-//! backend (mirroring `LibkrunBuilderVm`) lands in a follow-up slice.
-//! Today the impl exists so the next slice has a worked example of
-//! the seam against a second hypervisor.
+//! backend (mirroring `LibkrunBuilderVm`) lands in a follow-up.
 //!
 //! ## Why no panic detector
 //!
-//! Plan 77 W6's panic detector exists for libkrun because
+//! The libkrun panic detector exists because
 //! `krun_start_enter` blocks indefinitely on a panicked guest —
 //! `Child::wait()` never returns, so a host-side console-log watcher
 //! has to kill the supervisor. The Vz Swift supervisor uses
 //! `VZVirtualMachine.start()` instead and exits cleanly when the guest
-//! powers off or panics (Plan 97 Phase A's `main.swift` contract: 0
+//! powers off or panics (`main.swift` contract: 0
 //! clean / 1 guest error / 2 config parse / 3 supervisor startup).
 //! So the Vz path can rely on `Child::wait()` plus a wall-clock
 //! timeout — no console-log polling needed.
@@ -270,7 +268,7 @@ fn build_vz_supervisor_config(
     let mut disks = vec![crate::vz::DiskConfig {
         id: "rootfs".to_string(),
         path: rootfs,
-        // Rootfs is RO at boot (matches the W3 verified-boot model
+        // Rootfs is RO at boot (matches the verified-boot model
         // + every other backend's posture). Writes go to overlays
         // / extra disks.
         read_only: true,
@@ -321,8 +319,7 @@ fn build_vz_supervisor_config(
         console_output_path: Some(console_log),
         // gvproxy gives a cold `nix build` egress to fetch nixpkgs.
         // `None` keeps the offline / cached-derivation path (the
-        // caller passes `None` to opt out). Plan 88 §"Cross-platform
-        // backends".
+        // caller passes `None` to opt out).
         //
         // events_ingest_socket_path stays None on purpose: the builder
         // VM is a TRUSTED dev-tier build VM whose only egress is
@@ -367,7 +364,7 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io::Result<Opt
         Ok((_child, status)) => {
             let _ = join.join();
             // The supervisor's exit code matches the guest's exit
-            // per Plan 97 Phase A's main.swift contract. None for
+            // per the main.swift contract. None for
             // signal-terminated supervisors (rare but possible
             // under SIGKILL).
             Ok(status?.code())
@@ -430,8 +427,8 @@ fn path_to_string(p: &Path, field: &str) -> Result<String, BuilderVmError> {
 // dispatch through the seam, then finalize per job variant. The
 // shared bits (NixStoreImageLock, stage_job_dir, finalize_flake_job,
 // finalize_install_job, builder_vm_timeout, supervisor_exit_error)
-// all live in `builder_vm_runtime` from the Phase C PR-B migrations
-// (#434–#439); this driver is just the Vz-specific glue.
+// all live in `builder_vm_runtime`; this driver is just the
+// Vz-specific glue.
 // ─────────────────────────────────────────────────────────────────
 
 /// Default vCPU count for Vz builder VM runs. Same value as
@@ -455,11 +452,11 @@ pub const VZ_BUILDER_DEFAULT_NIX_STORE_MIB: u32 = crate::libkrun_builder::DEFAUL
 /// Vz parallel of [`libkrun_builder::LibkrunBuilderVm`]. Implements
 /// [`BuilderVm::run_build`] against the [`VzBuilderBackend`] seam,
 /// sharing every bit of substrate orchestration with the libkrun
-/// driver via the helpers migrated in PR-B (#434–#439).
+/// driver via the shared `builder_vm_runtime` helpers.
 ///
 /// Field shape mirrors `LibkrunBuilderVm` so a caller switching
-/// backends at the env-var level (Plan 97 §"Builder runtime
-/// selection") finds the same knobs. `supervisor_path_override`
+/// backends at the env-var level finds the same knobs.
+/// `supervisor_path_override`
 /// is Vz-only — useful in tests + the `MVM_VZ_SUPERVISOR_PATH`
 /// override path.
 #[derive(Debug, Clone, Default)]
@@ -720,7 +717,7 @@ impl BuilderVm for VzBuilderVm {
         //    `KernelConfig`. `vsock_ports` is empty for one-shot
         //    flake / install jobs (the guest communicates results
         //    via the `/job` virtio-fs share, not vsock); the
-        //    dispatch port (Plan 89 W2) is a persistent-VM concern
+        //    dispatch port is a persistent-VM concern
         //    that lives on the long-lived `LibkrunPersistentHostVm`
         //    path and doesn't apply here.
         let (kernel_path, kernel_cmdline) = match &image {
@@ -768,8 +765,8 @@ impl BuilderVm for VzBuilderVm {
                 host_path: job_dir.clone(),
                 read_only: false,
             },
-            // Plan 115 / ADR-065: mount the extracted host-vm binaries
-            // at /mvm-bins inside the builder VM (read-only). The cmd.sh
+            // Mount the extracted host-vm binaries at /mvm-bins inside
+            // the builder VM (read-only). The cmd.sh
             // sees MVM_HOST_BIN_DIR=/mvm-bins so the flake can reference
             // the correct pre-compiled binaries.
             BuilderVmMount {
@@ -808,7 +805,7 @@ impl BuilderVm for VzBuilderVm {
         // 14. Branch on the exit info. The Vz supervisor exits 0
         //     for clean guest power-off, 1 for guest error, 2 for
         //     config parse error, 3 for supervisor startup error
-        //     (per Plan 97 Phase A's `main.swift`). Anything
+        //     (per the supervisor's `main.swift` contract). Anything
         //     non-zero is fatal; the panic_line arm is defensive —
         //     today the Vz seam never sets it because the supervisor
         //     exits cleanly even on guest kernel panic, but if a
@@ -843,9 +840,8 @@ impl BuilderVm for VzBuilderVm {
         //     in `artifact_out`; `finalize_install_job` reads
         //     `<artifact_out>/result.json` + validates the sealed
         //     volume sidecars. Both functions live in
-        //     `builder_vm_runtime` (PRs #436/#437) so the Vz path
-        //     reuses the libkrun-equivalent finalize logic
-        //     verbatim.
+        //     `builder_vm_runtime` so the Vz path reuses the
+        //     libkrun-equivalent finalize logic verbatim.
         let artifacts = match job {
             BuilderJob::Flake { .. } => finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id),
             BuilderJob::Install { .. } => finalize_install_job(&mounts.artifact_out),
@@ -949,7 +945,7 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 }
 
 // ──────────────────────────────────────────────────────────────────
-// VzPersistentBuilderVm — Plan 98 Slice 2A.
+// VzPersistentBuilderVm
 // ──────────────────────────────────────────────────────────────────
 //
 // Parallel of [`libkrun_builder::LibkrunPersistentHostVm`]. Same
@@ -957,15 +953,14 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 // host-side [`crate::persistent_builder::PersistentBuilderSupervisor`]
 // → in-guest `mvm-host-vm-init` runs cmd.sh / install_spec.json →
 // `HostVmResponse::Result` back over the same vsock), only the host
-// VMM differs. Locked decision §5 of Plan 98: keep the drivers
-// parallel rather than collapse them behind a trait — mirrors the
-// one-shot pattern shipped by Plan 97 Phase C.
+// VMM differs. The drivers are kept parallel rather than collapsed
+// behind a trait — mirrors the one-shot pattern.
 //
 // State-dir layout is shared with libkrun under
 // `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix
 // (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-vz-*`
-// for Vz). The Stage 0 reaper is prefix-agnostic (Plan 99 PR-1) so
-// both backends participate in cleanup without code changes.
+// for Vz). The Stage 0 reaper is prefix-agnostic so both backends
+// participate in cleanup without code changes.
 
 /// Persistent-VM parallel of [`VzBuilderVm`]. Boots a long-lived
 /// builder guest and returns a handle pointing at the dispatch
@@ -973,8 +968,8 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 /// across multiple `mvmctl build` / `mvmctl up --prod` invocations.
 ///
 /// The supervisor / vsock dispatch protocol is identical to libkrun's
-/// (Plan 89 W2 wire types; `crate::builder_protocol`); only the host
-/// VMM and supervisor binary differ.
+/// (`crate::builder_protocol` wire types); only the host VMM and
+/// supervisor binary differ.
 #[derive(Debug, Clone)]
 pub struct VzPersistentBuilderVm {
     vcpus: u8,
@@ -982,8 +977,8 @@ pub struct VzPersistentBuilderVm {
     nix_store_mib: u32,
     image_override: Option<BuilderVmImage>,
     supervisor_path_override: Option<PathBuf>,
-    /// Host directory bound at `/work` in the guest. Plan 89 §"Workspace
-    /// mount strategy" — bound at VM start, not per-dispatch.
+    /// Host directory bound at `/work` in the guest. Bound at VM
+    /// start, not per-dispatch.
     workspace_root: PathBuf,
 }
 
@@ -991,7 +986,7 @@ impl VzPersistentBuilderVm {
     /// Construct a persistent Vz builder rooted at `workspace_root`.
     /// Defaults match the one-shot [`VzBuilderVm`] (which itself
     /// inherits libkrun's defaults) so resource ceilings stay
-    /// parallel across backends — see Plan 98 §2.10.
+    /// parallel across backends.
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             vcpus: VZ_BUILDER_DEFAULT_VCPUS,
@@ -1045,8 +1040,7 @@ impl VzPersistentBuilderVm {
     /// `crate::vz::SupervisorConfig` build → `mvm-vz-supervisor` spawn.
     /// The nix-store flock is held inside the returned handle for
     /// the VM's lifetime so a concurrent `mvmctl up --prod` Install
-    /// dispatch on the same host can't corrupt the shared ext4
-    /// (Plan 89 §"Concurrent install gating").
+    /// dispatch on the same host can't corrupt the shared ext4.
     pub fn start(&self) -> Result<VzPersistentVmHandle, BuilderVmError> {
         if !mvm_core::platform::current().has_vz() {
             return Err(BuilderVmError::ExtractionFailed(
@@ -1094,11 +1088,11 @@ impl VzPersistentBuilderVm {
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
         stage_persistent_vz_job_dir(&job_dir)?;
 
-        // §2.3: name-prefix isolation under the shared cache root.
+        // Name-prefix isolation under the shared cache root.
         // libkrun uses `mvm-persistent-builder-vm-{session}`; Vz uses
         // `mvm-persistent-builder-vz-{session}`. The Stage 0 reaper
-        // (Plan 99 PR-1, `apple_container.rs:3292`) is prefix-agnostic
-        // so both participate in cleanup without code changes (§2.C2).
+        // (`apple_container.rs`) is prefix-agnostic so both participate
+        // in cleanup without code changes.
         let vm_name = format!("mvm-persistent-builder-vz-{session_id}");
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
@@ -1132,10 +1126,10 @@ impl VzPersistentBuilderVm {
 }
 
 /// Stage `<job_dir>/<DISPATCH_SOCK_MARKER>` so the in-guest
-/// `mvm-host-vm-init` enters the W3 part 3 dispatch loop instead of
-/// the single-shot cmd.sh / install_spec flow. The marker body is
+/// `mvm-host-vm-init` enters the dispatch loop instead of the
+/// single-shot cmd.sh / install_spec flow. The marker body is
 /// intentionally empty — its mere presence is the signal. Same shape
-/// libkrun's `stage_persistent_job_dir` uses (Plan 89 W3 part 2).
+/// libkrun's `stage_persistent_job_dir` uses.
 fn stage_persistent_vz_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(job_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
@@ -1229,8 +1223,8 @@ fn build_vz_persistent_supervisor_config(
             },
         ],
         virtio_fs: vec![
-            // `/work` is the workspace bind. Bound at VM start (not
-            // per-dispatch) per Plan 89 §"Workspace mount strategy".
+            // `/work` is the workspace bind. Bound at VM start, not
+            // per-dispatch.
             crate::vz::VirtioFsShare {
                 tag: "work".to_string(),
                 host_path: work,
@@ -1353,8 +1347,7 @@ impl VzPersistentVmHandle {
     /// Host-side path of the Vz-supervisor-managed Unix socket that
     /// proxies to AF_VSOCK
     /// [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`] inside the
-    /// guest. The W3 part 1 `PersistentBuilderSupervisor::new` takes
-    /// this directly.
+    /// guest. `PersistentBuilderSupervisor::new` takes this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
         self.vm_state_dir
             .join("vsock")
@@ -1491,8 +1484,8 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_wires_gvproxy_without_flow_audit() {
-        // Slice 2C — passing a gvproxy info turns on virtio-net so a
-        // cold `nix build` can fetch nixpkgs. The builder VM is a
+        // Passing a gvproxy info turns on virtio-net so a cold
+        // `nix build` can fetch nixpkgs. The builder VM is a
         // TRUSTED dev-tier build VM (only egress is fetching nixpkgs),
         // NOT a claim-10 workload, so events_ingest_socket_path stays
         // None: plain gvproxy, no flow-audit drainer.
@@ -1565,9 +1558,8 @@ mod tests {
         assert_eq!(cfg.disks[1].id, "nix-store");
         assert!(!cfg.disks[1].read_only);
 
-        // virtio_fs preserves order + read_only — Plan 97 §"Host-path
-        // mounts" reads-only-by-default for /work and /job; /out is
-        // the only writable share.
+        // virtio_fs preserves order + read_only — read-only by default
+        // for /work and /job; /out is the only writable share.
         assert_eq!(cfg.virtio_fs.len(), 2);
         assert_eq!(cfg.virtio_fs[0].tag, "work");
         assert!(cfg.virtio_fs[0].read_only);
@@ -1576,7 +1568,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // VzBuilderVm driver tests — Plan 97 Phase C high-level driver
+    // VzBuilderVm driver tests — high-level driver
     // ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -1771,7 +1763,7 @@ mod tests {
         //     (`supervisor_exit_error`; the libkrun builder image's
         //      kernel won't direct-boot under Vz, so on a fully-
         //      configured dev box we trip this branch instead)
-        // Any of those is a valid pre-Phase-C-cutover state.
+        // Any of those is a valid pre-cutover state.
         let scratch = tempfile::TempDir::new().unwrap();
         let flake = scratch.path().join("flake");
         std::fs::create_dir(&flake).unwrap();
@@ -1887,7 +1879,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // VzPersistentBuilderVm — Plan 98 Slice 2A.
+    // VzPersistentBuilderVm
     // ──────────────────────────────────────────────────────────────
 
     fn persistent_workspace() -> tempfile::TempDir {
@@ -2013,8 +2005,8 @@ mod tests {
         // builder_backend_select); gvproxy is wired into the one-shot
         // run_build path instead. See build_vz_persistent_supervisor_config.
         assert!(cfg.network.is_none());
-        // Boot startup; persistent Vz doesn't restore from a saved
-        // snapshot (that's Phase E territory).
+        // Boot startup; persistent Vz doesn't yet restore from a saved
+        // snapshot.
         assert!(matches!(cfg.startup_mode, crate::vz::StartupMode::Boot));
     }
 

@@ -1,6 +1,6 @@
 //! Vz (Apple Virtualization.framework) backend for mvm.
 //!
-//! Plan 97 / ADR-056. Tier 2 microVM backend for macOS 13+ that runs
+//! Tier 2 microVM backend for macOS 13+ that runs
 //! the workload directly on the host (no nested Firecracker, no
 //! libkrun in the path). Lifecycle delegates to a per-VM
 //! Rust-native `mvm-vz-supervisor` (the objc2 `[[bin]]` in
@@ -9,7 +9,7 @@
 //!
 //! ## Why opt-in only
 //!
-//! Per Plan 97 §"Phase D" and the user constraint: `auto_select()`
+//! `auto_select()`
 //! stays unchanged on macOS — libkrun remains the macOS default,
 //! Firecracker remains the Linux default. Vz is selected only via
 //! `MVM_BACKEND=vz` or `--backend vz` (the `from_hypervisor("vz")`
@@ -28,8 +28,7 @@
 //!   [`STOP_TIMEOUT`].
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/vz.pid`.
-//! - `logs` tails `<vm_state_dir>/console.log` (capture-only console
-//!   per Plan 97 Security §9).
+//! - `logs` tails `<vm_state_dir>/console.log` (capture-only console).
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::vm_backend::{
@@ -54,7 +53,7 @@ use std::time::{Duration, Instant};
 /// and `start` bails before spawning anything.
 pub struct VzBackend;
 
-/// Plan 102 W6.A.5 — tear-down guard for host-side gvproxy in the
+/// Tear-down guard for host-side gvproxy in the
 /// attached-VM path (`VzBackend::run_attached`). Ensures gvproxy is
 /// stopped even on panic / early return between spawn and the
 /// supervisor's exit. The detached `start()` path doesn't need this:
@@ -75,9 +74,9 @@ impl Drop for AttachedGvproxyGuard {
     }
 }
 
-/// Plan 113 §Task 11 — tear-down guard for the per-VM `mvm-vz-drainer`
+/// Tear-down guard for the per-VM `mvm-vz-drainer`
 /// sidecar that bridges Swift's NDJSON `FlowEventWire` socket into the
-/// chain-signed audit pipeline (ADR-064 §Decision 8). Mirrors
+/// chain-signed audit pipeline. Mirrors
 /// `AttachedGvproxyGuard`'s shape: kills + reaps the child on `Drop` so
 /// the drainer dies on early return / panic from `VzBackend::start`
 /// between drainer spawn and the Vz supervisor's PID-file write.
@@ -129,7 +128,7 @@ impl Drop for AttachedDrainerGuard {
 /// the same `~/.mvm/vms/<name>/` tree if a host happens to use both.
 const PID_FILE_NAME: &str = "vz.pid";
 
-/// Plan 113 §Task 11 — PID file the `mvm-vz-drainer` sibling writes
+/// PID file the `mvm-vz-drainer` sibling writes
 /// after a successful boot. Lives next to `vz.pid` so `VzBackend::stop`
 /// can reap the drainer the same way it reaps the supervisor.
 const DRAINER_PID_FILE_NAME: &str = "vz-drainer.pid";
@@ -159,10 +158,9 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Default kernel cmdline for Vz-launched guests. Matches the libkrun
 /// path: `console=hvc0` for the virtio-console attachment, ext4 rootfs
-/// at `/dev/vda`. The host-side cmdline allow-list (Plan 97 Security
-/// §7 — to be wired in a follow-up that integrates with
-/// `mvm_hostd::supervisor::admit_for_run`) will gate any tokens beyond this
-/// default for workload microVMs.
+/// at `/dev/vda`. The host-side cmdline allow-list (to be wired in a
+/// follow-up that integrates with `mvm_hostd::supervisor::admit_for_run`)
+/// will gate any tokens beyond this default for workload microVMs.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
 impl VmBackend for VzBackend {
@@ -172,9 +170,9 @@ impl VmBackend for VzBackend {
 
     fn capabilities(&self) -> VmCapabilities {
         VmCapabilities {
-            // Plan 97 Phase E — supervisor exposes a control socket
-            // for PAUSE / RESUME / BALLOON / SAVE; the corresponding
-            // VmBackend verbs route through `vz_control::send_command`.
+            // Supervisor exposes a control socket for PAUSE / RESUME /
+            // BALLOON / SAVE; the corresponding VmBackend verbs route
+            // through `vz_control::send_command`.
             pause_resume: true,
             // Snapshot save lands via SAVE on macOS 14+; restore is
             // a follow-up that requires a different supervisor
@@ -195,7 +193,7 @@ impl VmBackend for VzBackend {
 
     fn snapshot_capability(&self) -> SnapshotCapability {
         // Vz is the macOS live-memory path: coarse `saveMachineState` /
-        // `restoreMachineState` (plan 123 C3), keyed off the same macOS
+        // `restoreMachineState`, keyed off the same macOS
         // version gate as the `snapshots` flag so older hosts report
         // honestly rather than degrade silently.
         if macos_supports_vz_snapshots() {
@@ -231,21 +229,20 @@ impl VmBackend for VzBackend {
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
         crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
-        // Plan 102 W6.A.5 — spawn host-side gvproxy so the Swift
-        // supervisor has something to connect to. VzBackend is
-        // stateless; the child is detached (PID file under state
-        // dir lets `stop()` find it later).
+        // Spawn host-side gvproxy so the Swift supervisor has something
+        // to connect to. VzBackend is stateless; the child is detached
+        // (PID file under state dir lets `stop()` find it later).
         let gvproxy_info = host_gvproxy::spawn_detached(&state_dir)
             .map_err(|e| anyhow!("spawn host-side gvproxy for Vz VM '{}': {e}", config.name))?;
 
         // Vz config build. The `?` propagates allowlist failures from
         // `audit_substrate::compute_audit_substrate` (unsafe tenant_id
-        // / vm_name) — see Plan 112 Phase 3c.
+        // / vm_name).
         let cfg = build_supervisor_config(config, kernel, &state_dir, &gvproxy_info)?;
 
-        // Plan 113 §Task 11 / ADR-064 — spawn the `mvm-vz-drainer`
-        // sibling between gvproxy and the Vz VM boot. Closes Plan 112's
-        // Vz carve-out: the drainer binds `events_ingest_socket_path`,
+        // Spawn the `mvm-vz-drainer` sibling between gvproxy and the Vz
+        // VM boot. Closes the Vz audit carve-out: the drainer binds
+        // `events_ingest_socket_path`,
         // reads Swift's NDJSON `FlowEventWire` stream, and chain-signs
         // entries into `~/.mvm/audit/<tenant>.jsonl` via
         // `mvm-supervisor::gateway_bridge`. The guard kills the drainer
@@ -339,7 +336,7 @@ impl VmBackend for VzBackend {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Plan 113 §Task 11 — Vz supervisor booted cleanly. Detach the
+        // Vz supervisor booted cleanly. Detach the
         // drainer so it survives `start()`'s stack frame; record its
         // PID for `stop()` to reap. A failure here is non-fatal: the
         // VM is already running. We log + leave the drainer attached;
@@ -406,8 +403,8 @@ impl VmBackend for VzBackend {
 
         let _ = std::fs::remove_file(&pid_path);
 
-        // Plan 102 W6.A.5 — tear down the host-side gvproxy
-        // spawned by `start()`. Best-effort: the supervisor stop
+        // Tear down the host-side gvproxy spawned by `start()`.
+        // Best-effort: the supervisor stop
         // already succeeded; a stuck gvproxy is a leak but not a
         // correctness issue (the listener socket is per-VM and the
         // PID file would be unlinked by the next start).
@@ -419,9 +416,9 @@ impl VmBackend for VzBackend {
             );
         }
 
-        // Plan 113 §Task 11 — reap the `mvm-vz-drainer` sibling that
-        // `start()` spawned and detached. Same SIGTERM → poll → SIGKILL
-        // ladder as the supervisor; best-effort because some VMs have
+        // Reap the `mvm-vz-drainer` sibling that `start()` spawned and
+        // detached. Same SIGTERM → poll → SIGKILL ladder as the
+        // supervisor; best-effort because some VMs have
         // no drainer (legacy callers without `plan_json`).
         reap_drainer(&vm_state_dir(&id.0));
 
@@ -456,12 +453,11 @@ impl VmBackend for VzBackend {
     }
 
     fn balloon_set_target(&self, id: &VmId, target_inflate_mib: u32) -> Result<()> {
-        // Plan 97 Phase E + §"Memory balloon floor". The host-side
-        // floor enforcement (refuse to shrink the guest below a
-        // configured minimum) happens on the Rust side here — the
-        // supervisor's BALLOON verb is a pure setter. The plan's
-        // floor of 128 MiB is the conservative default; consumers
-        // that want a different floor pass it via VmStartConfig
+        // Host-side floor enforcement (refuse to shrink the guest below
+        // a configured minimum) happens on the Rust side here — the
+        // supervisor's BALLOON verb is a pure setter. The 128 MiB floor
+        // is the conservative default; consumers that want a different
+        // floor pass it via VmStartConfig
         // (follow-up: thread plan.memory_floor through).
         const FLOOR_MIB: u32 = 128;
         if target_inflate_mib > 0 && target_inflate_mib < FLOOR_MIB {
@@ -527,8 +523,8 @@ impl VmBackend for VzBackend {
     }
 
     fn logs(&self, id: &VmId, lines: u32, _hypervisor: bool) -> Result<String> {
-        // Capture-only console at `<vm_state_dir>/console.log` (Plan 97
-        // Security §9). `hypervisor=true` would mean "supervisor's own
+        // Capture-only console at `<vm_state_dir>/console.log`.
+        // `hypervisor=true` would mean "supervisor's own
         // logs", which today is empty — the supervisor inherits stderr
         // from the parent `mvmctl`, so its logs are already on the
         // user's terminal. Surface the console capture in both cases.
@@ -567,12 +563,11 @@ impl VmBackend for VzBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Plan 97 §"Can we still make all nine ADR-002 security
-        // claims?". 7-claim table here covers claims 1–7 (8 and 9 live
+        // 7-claim table here covers claims 1–7 (8 and 9 live
         // outside `BackendSecurityProfile`).
         BackendSecurityProfile {
             claims: [
-                ClaimStatus::Holds, // 1 — host-fs isolation via Vz (ro rootfs attach) + host-side admission gate (enforce_admitted_shares); in-supervisor share re-check is deferred (Plan 97 Phase D)
+                ClaimStatus::Holds, // 1 — host-fs isolation via Vz (ro rootfs attach) + host-side admission gate (enforce_admitted_shares); in-supervisor share re-check is deferred
                 ClaimStatus::Holds, // 2 — uid-0 protections same as FC (guest-side)
                 ClaimStatus::DoesNotHold, // 3 — verified-boot pipeline targets FC today
                 ClaimStatus::Holds, // 4 — guest agent has no do_exec in prod
@@ -594,14 +589,14 @@ impl VmBackend for VzBackend {
 }
 
 impl VzBackend {
-    /// Plan 97 Phase C primitive — run a Linux guest under Vz
+    /// Run a Linux guest under Vz
     /// **attached to the calling process**: spawn the supervisor in
     /// the foreground, pipe its JSON config on stdin, inherit
     /// stdout/stderr so the guest's console output streams to the
     /// terminal, and block until the supervisor exits. Returns the
     /// supervisor's exit status translated into [`VmExitStatus`].
     ///
-    /// Foundation for a future `VzBuilderVm` (Plan 97 §"Phase C"):
+    /// Foundation for a future `VzBuilderVm`:
     /// the builder VM wraps this primitive with virtio-fs
     /// `/work`/`/out`/`/job` shares + `BuilderJob` orchestration +
     /// artifact extraction. Those layers live in `mvm-build` and are
@@ -612,7 +607,7 @@ impl VzBackend {
     /// lifetime — CI batch jobs, `mvmctl exec`-style verbs, and the
     /// builder-VM run loop. Stop semantics are SIGINT/SIGTERM to the
     /// caller; the supervisor's signal handler forwards to
-    /// `VZVirtualMachine.requestStop()` (Plan 97 Phase A).
+    /// `VZVirtualMachine.requestStop()`.
     pub fn run_attached(&self, config: &VmStartConfig) -> Result<VmExitStatus> {
         if !mvm_core::platform::current().has_vz() {
             bail!(
@@ -629,8 +624,8 @@ impl VzBackend {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create per-VM state dir {}: {e}", state_dir.display()))?;
 
-        // Plan 102 W6.A.5 — attached path also needs the
-        // host-side gvproxy. `run_attached` ties gvproxy's
+        // Attached path also needs the host-side gvproxy.
+        // `run_attached` ties gvproxy's
         // lifetime to its own caller stack: the wait-on-exit
         // below blocks until the supervisor process ends, then
         // we tear down gvproxy on the way out (best-effort
@@ -672,8 +667,8 @@ impl VzBackend {
             .map_err(|e| anyhow!("pipe SupervisorConfig to supervisor stdin: {e}"))?;
 
         // Block until the supervisor exits. Its exit code is the
-        // guest's exit code per Plan 97 Phase A's `main.swift`
-        // contract (0 clean / 1 guest error / 2 config parse error
+        // guest's exit code per the `main.swift` contract
+        // (0 clean / 1 guest error / 2 config parse error
         // / 3 supervisor startup error).
         let status = child
             .wait()
@@ -686,7 +681,7 @@ impl VzBackend {
         })
     }
 
-    /// Plan 97 Phase E — snapshot save. Asks the supervisor to write
+    /// Snapshot save. Asks the supervisor to write
     /// the running VM's state to `snapshot_path`, using Vz's
     /// `saveMachineStateTo` API on macOS 14+. The supervisor returns
     /// `ERR SAVE requires macOS 14+` on older hosts; this method
@@ -709,7 +704,7 @@ impl VzBackend {
         vz_control::send_command(&sock, &format!("SAVE {}", abs.display())).map(|_| ())
     }
 
-    /// Plan 97 Phase E — snapshot restore. Boots a new supervisor in
+    /// Snapshot restore. Boots a new supervisor in
     /// `StartupMode::Restore` so it calls
     /// `VZVirtualMachine.restoreMachineState(from:)` + `resume()`
     /// instead of `start()` (macOS 14+ only).
@@ -1081,7 +1076,7 @@ fn persist_supervisor_config(path: &Path, json: &str) -> Result<()> {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-/// Plan 97 Phase E gate: snapshot save/restore lands in macOS 14
+/// Snapshot save/restore lands in macOS 14
 /// (`VZVirtualMachine.saveMachineStateTo` / `restoreMachineStateFrom`).
 /// Reported as the *backend* capability rather than the live host's
 /// — false on non-macOS / pre-14 hosts so callers downgrade
@@ -1120,7 +1115,7 @@ fn vm_state_dir(name: &str) -> PathBuf {
     mvm_core::config::vm_state_dir(name)
 }
 
-/// Plan 102 W6.A.5 — per-VM Vz events-ingest socket path. The Swift
+/// Per-VM Vz events-ingest socket path. The Swift
 /// bridge (once written) connects here, sends the
 /// `MVM_VZ_BRIDGE_V1\n` handshake, and writes NDJSON `FlowEventWire`
 /// entries. The Rust supervisor's signer task drains them into the
@@ -1158,24 +1153,15 @@ fn gateway_audit_socket_path(vm_name: &str) -> String {
 /// consumes on stdin. Maps the backend-agnostic `VmStartConfig` to
 /// the Vz-specific JSON shape.
 ///
-/// Phase B first-cut wiring — only the fields needed to boot a
+/// First-cut wiring — only the fields needed to boot a
 /// dev-shell image are mapped. gvproxy networking, the runtime
 /// overlay, dm-verity sidecar, and port forwarding all land in
 /// follow-up slices when their host-side plumbing is in place.
 ///
-/// Plan 112 Phase 3c — pre-flight: when the producer threaded an
-/// AdmittedPlan in (`VmStartConfig.tenant_id` Some), run the
-/// DNS-label allowlist through `audit_substrate::compute_audit_substrate`
-/// so an unsafe tenant/vm_name fails fast before Swift spawn. The
-/// **Vz consumer side** for the audit chain (a Rust drainer that
-/// binds `events_ingest_socket_path` and emits to the chain) is a
-/// follow-up plan after Phase 3c — until then, the substrate's
-/// path values are computed but not threaded into
-/// `vz::SupervisorConfig` (which would also require lockstep Swift
-/// the Rust `SupervisorConfig` decoder updates per the schema deny-unknown-fields
-/// contract). The Swift bridge already writes flow events to
-/// `events_ingest_socket_path` (PR #487 commit 7); the drainer
-/// closes the loop.
+/// Pre-flight: when the producer threaded an AdmittedPlan in
+/// (`VmStartConfig.tenant_id` Some), run the DNS-label allowlist through
+/// `audit_substrate::compute_audit_substrate` so an unsafe tenant/vm_name
+/// fails fast before Swift spawn.
 /// Append the `mvm.uvols=` cmdline param so the dev VM's
 /// `mvm-host-vm-init` mounts user volumes at their guest paths. No-op
 /// (returns the default cmdline unchanged) when there are no volumes.
@@ -1195,11 +1181,11 @@ fn build_supervisor_config(
     state_dir: &Path,
     gvproxy: &host_gvproxy::HostGvproxyInfo,
 ) -> Result<vz::SupervisorConfig> {
-    // Plan 112 Phase 3c — resolve the audit substrate (paths + tenant
-    // validation). Plan 152 WS-B slice 8 threads it into the Rust-native
-    // supervisor's config so it runs the in-process flow-audited gvproxy bridge
-    // (payload_tap). When the producer threaded an AdmittedPlan in (`tenant_id`
-    // Some), the substrate carries the resolved paths; otherwise it's all-None
+    // Resolve the audit substrate (paths + tenant validation). It's
+    // threaded into the Rust-native supervisor's config so it runs the
+    // in-process flow-audited gvproxy bridge (payload_tap). When the
+    // producer threaded an AdmittedPlan in (`tenant_id` Some), the
+    // substrate carries the resolved paths; otherwise it's all-None
     // and the supervisor direct-attaches gvproxy.
     let substrate =
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?;
@@ -1226,7 +1212,7 @@ fn build_supervisor_config(
     let mut disks = vec![vz::DiskConfig {
         id: "rootfs".into(),
         path: config.rootfs_path.clone(),
-        // Rootfs is RO at boot under the W3 verified-boot model; even
+        // Rootfs is RO at boot under the verified-boot model; even
         // when verity isn't on, libkrun and Firecracker mount it
         // read-only and rely on an overlay for writes. Mirror that
         // for Vz.
@@ -1278,8 +1264,8 @@ fn build_supervisor_config(
             socket_dir: vsock_dir,
         },
         console_output_path: Some(console_log),
-        // Plan 102 W6.A.5 — gvproxy backend with claim-10 audit
-        // bridge ingest hookup. `socket_path` is where the Swift
+        // gvproxy backend with claim-10 audit bridge ingest hookup.
+        // `socket_path` is where the Swift
         // supervisor connects gvproxy; `events_ingest_socket_path`
         // is where the (future) Swift bridge writes NDJSON
         // FlowEventWire entries for the Rust supervisor's signer
@@ -1308,7 +1294,7 @@ fn build_supervisor_config(
             enabled: true,
             floor_mib: 128,
         }),
-        // Plan 97 Phase E — bind the control socket so pause / resume /
+        // Bind the control socket so pause / resume /
         // balloon adjustment / snapshot SAVE work via
         // `<vm_state_dir>/control.sock`. `vz_control::control_socket_path`
         // is the canonical path resolver both sides agree on.
@@ -1321,9 +1307,9 @@ fn build_supervisor_config(
         // boot path; the restore path constructs its own config in
         // `build_restore_supervisor_config` below.
         startup_mode: vz::StartupMode::Boot,
-        // Audit substrate (Plan 152 WS-B slice 8) — threaded from the admitted
-        // plan so the Rust supervisor runs the in-process flow-audited gvproxy
-        // bridge. All-None for an un-admitted (dev / builder) start → direct
+        // Audit substrate — threaded from the admitted plan so the Rust
+        // supervisor runs the in-process flow-audited gvproxy bridge.
+        // All-None for an un-admitted (dev / builder) start → direct
         // gvproxy attach.
         tenant_id: substrate.tenant_id,
         plan,
@@ -1410,7 +1396,7 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
     manifest_dir.parent()?.parent().map(Path::to_path_buf)
 }
 
-/// Plan 113 §Task 11 — spawn the `mvm-vz-drainer` sibling. Returns an
+/// Spawn the `mvm-vz-drainer` sibling. Returns an
 /// [`AttachedDrainerGuard`] still holding the `Child`; the caller
 /// either lets the guard fall out of scope on early-return to kill the
 /// drainer, or calls [`AttachedDrainerGuard::detach`] after the Vz
@@ -1419,8 +1405,8 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
 /// Gate: when `config.plan_json` is `None`, the legacy path (no
 /// admission, no audit substrate) is taken and an empty guard is
 /// returned. When `plan_json` is `Some` but `tenant_id` is `None`,
-/// that's a wire-level inconsistency (Plan 112 Phase 3c invariant —
-/// substrate paths can't be computed without a tenant), so we log a
+/// that's a wire-level inconsistency (substrate paths can't be computed
+/// without a tenant), so we log a
 /// warning and skip the drainer rather than launch it with partial
 /// information.
 fn spawn_vz_drainer(config: &VmStartConfig) -> Result<AttachedDrainerGuard> {
@@ -1484,7 +1470,7 @@ fn spawn_vz_drainer(config: &VmStartConfig) -> Result<AttachedDrainerGuard> {
     Ok(AttachedDrainerGuard { child: Some(child) })
 }
 
-/// Plan 113 §Task 11 — once the Vz supervisor's PID file appears, take
+/// Once the Vz supervisor's PID file appears, take
 /// the drainer `Child` out of its guard, persist its PID under
 /// `<state_dir>/vz-drainer.pid` (mode 0600), then drop the handle so
 /// the OS keeps the process alive. From that point [`reap_drainer`] is
@@ -1530,7 +1516,7 @@ fn write_drainer_pid_file(path: &Path, pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// Plan 113 §Task 11 — reap the `mvm-vz-drainer` sibling spawned by
+/// Reap the `mvm-vz-drainer` sibling spawned by
 /// `start()`. Best-effort: a missing PID file means the VM either had
 /// no drainer (legacy callers without `plan_json`) or the drainer
 /// already exited; in either case `stop()` proceeds. SIGTERM → poll →
@@ -1563,7 +1549,7 @@ fn reap_drainer(state_dir: &Path) {
     let _ = std::fs::remove_file(&pid_path);
 }
 
-/// Plan 113 §Task 11 — resolve the `mvm-vz-drainer` binary path,
+/// Resolve the `mvm-vz-drainer` binary path,
 /// checking three sources in order, mirroring `resolve_supervisor_path`:
 ///
 /// 1. `MVM_VZ_DRAINER_PATH` — explicit override for tests +
@@ -1588,7 +1574,7 @@ fn resolve_vz_drainer_path() -> Result<PathBuf> {
 }
 
 /// Pure resolver — exercised directly from tests without touching
-/// `std::env`. Mirrors the Task 7 refactor pattern (`scrape_file_path_for`)
+/// `std::env` (mirrors `scrape_file_path_for`)
 /// so unit tests don't race on process-wide env state.
 fn resolve_vz_drainer_path_inner(
     env_override: Option<&Path>,
@@ -1676,8 +1662,8 @@ mod tests {
             !caps.tap_networking,
             "Vz uses file-handle attachments via gvproxy"
         );
-        // Plan 97 Phase E — control socket exposes PAUSE / RESUME /
-        // BALLOON; the trait verbs route through it.
+        // Control socket exposes PAUSE / RESUME / BALLOON; the trait
+        // verbs route through it.
         assert!(caps.pause_resume);
         assert!(caps.balloon);
         // snapshots is feature-detected on macOS 14+; on a
@@ -1749,7 +1735,7 @@ mod tests {
     fn balloon_set_target_refuses_below_floor() {
         // 0 (deflate fully) is allowed; any positive value below the
         // 128 MiB floor must be rejected before the control-socket
-        // dial — Plan 97 §"Memory balloon floor".
+        // dial.
         let backend = VzBackend;
         let id = VmId("any".into());
         let err = backend
@@ -1839,10 +1825,10 @@ mod tests {
         cfg.plan_json = Some("{}".into());
         cfg.tenant_id = Some("local".into());
         let state_dir = Path::new("/tmp/vz-smoke-state");
-        // Plan 102 W6.A.5 — build_supervisor_config now takes
-        // HostGvproxyInfo (the host-side gvproxy lifecycle's
-        // socket + PID, populated into NetworkConfig::Gvproxy).
-        // Test passes a stub — actual gvproxy isn't spawned here.
+        // build_supervisor_config takes HostGvproxyInfo (the host-side
+        // gvproxy lifecycle's socket + PID, populated into
+        // NetworkConfig::Gvproxy). Test passes a stub — actual gvproxy
+        // isn't spawned here.
         let gvproxy_info = host_gvproxy::HostGvproxyInfo {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
@@ -1861,10 +1847,10 @@ mod tests {
         assert_eq!(built.vsock.ports, vec![mvm_guest::vsock::GUEST_AGENT_PORT]);
         assert_eq!(built.pid_file_name.as_deref(), Some(PID_FILE_NAME));
         // Console capture goes to a file under state_dir; never `None`
-        // — capture-only is the workload contract (Plan 97 Security §9).
+        // — capture-only is the workload contract.
         assert!(built.console_output_path.is_some());
-        // Plan 102 W6.A.5 — network field is now populated with the
-        // gvproxy socket + MAC + events_ingest path.
+        // Network field is populated with the gvproxy socket + MAC +
+        // events_ingest path.
         match built.network {
             Some(vz::NetworkConfig::Gvproxy {
                 socket_path,
@@ -2015,7 +2001,7 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_refuses_unsafe_tenant() {
-        // Plan 112 Phase 3c — defense-in-depth: an unsafe tenant_id
+        // Defense-in-depth: an unsafe tenant_id
         // (DNS-label allowlist violation) is refused inside
         // build_supervisor_config before any Swift spawn or file
         // touch. Same posture as libkrun's

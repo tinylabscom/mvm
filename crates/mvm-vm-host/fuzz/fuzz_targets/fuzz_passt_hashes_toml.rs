@@ -1,5 +1,4 @@
-// Plan 113 §Task 15 / ADR-064 — fuzz the operator-curated
-// `~/.mvm/passt-hashes.toml` parser.
+// Fuzz the operator-curated `~/.mvm/passt-hashes.toml` parser.
 //
 // `verify_passt_hash` (`crates/mvm-firecracker-bridge/src/parse.rs`)
 // reads this file BEFORE installing `mvm-jailer-lite` confinement so

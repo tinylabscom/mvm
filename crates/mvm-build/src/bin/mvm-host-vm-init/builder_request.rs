@@ -1,6 +1,5 @@
-//! Plan 89 W3 part 2 — hand-rolled parser for `HostVmRequest`
-//! JSON, the wire-format the persistent builder VM's dispatch loop
-//! reads off vsock.
+//! Hand-rolled parser for `HostVmRequest` JSON, the wire-format the
+//! persistent builder VM's dispatch loop reads off vsock.
 //!
 //! Mirror of `mvm_build::builder_protocol::HostVmRequest` on the
 //! host side. Cross-platform on purpose — the parser sees coverage
@@ -11,8 +10,8 @@
 //! ## Why hand-roll
 //!
 //! Same rationale as [`crate::install_spec`] and
-//! [`crate::dispatch_response`]: the Plan 72 §W3 size budget caps
-//! the static-linked init at ≤ 1.5 MiB, so we don't pull
+//! [`crate::dispatch_response`]: the size budget caps the
+//! static-linked init at ≤ 1.5 MiB, so we don't pull
 //! `serde_json` for the handful of wire shapes the dispatch loop
 //! reads. The wire shape is closed (two variants, three optional
 //! field clusters) and the
@@ -75,9 +74,9 @@ pub enum HostVmRequest {
         job_dir_relpath: String,
     },
     Shutdown,
-    /// Plan 107 W6 / A2.2 — start a workload microVM inside the host
-    /// VM. Carries the spawn config the `WorkloadVmm` backend
-    /// (Firecracker today) needs. Fields mirror
+    /// Start a workload microVM inside the host VM. Carries the spawn
+    /// config the `WorkloadVmm` backend (Firecracker today) needs.
+    /// Fields mirror
     /// `mvm_build::builder_protocol::HostVmRequest::WorkloadStart`.
     WorkloadStart {
         workload_id: String,
@@ -88,11 +87,11 @@ pub enum HostVmRequest {
         memory_mib: u32,
         kernel_cmdline_extras: String,
     },
-    /// Plan 107 W6 / A2.2 — stop a running workload microVM.
+    /// Stop a running workload microVM.
     WorkloadStop {
         workload_id: String,
     },
-    /// Plan 107 W6 / A2.2 — query a workload microVM's status.
+    /// Query a workload microVM's status.
     WorkloadStatus {
         workload_id: String,
     },

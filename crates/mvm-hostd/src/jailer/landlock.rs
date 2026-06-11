@@ -1,4 +1,4 @@
-//! ADR-064 — Landlock filesystem ruleset (ABI v2, Linux 5.19+).
+//! Landlock filesystem ruleset (ABI v2, Linux 5.19+).
 //!
 //! ABI v2 is the floor because it's the first to expose the
 //! file-execute permission split, which the `mvm-firecracker-bridge`

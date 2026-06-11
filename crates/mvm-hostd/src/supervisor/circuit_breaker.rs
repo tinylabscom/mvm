@@ -1,4 +1,4 @@
-//! Circuit breakers for the inspector chain — Plan 37 Addendum E1.
+//! Circuit breakers for the inspector chain.
 //!
 //! A poorly-tuned PII regex blocking every prompt is a self-inflicted
 //! fleet outage. Operators need a fast escape hatch that doesn't
@@ -31,7 +31,7 @@
 //!   produces `Transform { note }` continues to do so — the breaker
 //!   layer is invisible to non-deny verdicts.
 //!
-//! ## Wave-1 scope
+//! ## Initial scope
 //!
 //! Ships:
 //! 1. `CircuitBreakerConfig` — threshold / window / optional
@@ -50,13 +50,13 @@
 //! Deferred:
 //! - **CLI surface** (`mvmctl detector report-fp`,
 //!   `mvmctl detector status`, `mvmctl detector reset`). Needs the
-//!   supervisor's local control-plane API (Plan 37 §25, Wave 5).
-//!   Today the reporter is a Rust-API surface only.
+//!   supervisor's local control-plane API. Today the reporter is a
+//!   Rust-API surface only.
 //! - **Persistence across supervisor restart.** The reporter is
 //!   in-memory; restart clears state. Operators who want stickier
 //!   trips can rebuild from the audit stream (every breaker trip
-//!   would emit one `EgressInspectorBreakerTripped` entry — Wave 2.7
-//!   audit work).
+//!   would emit one `EgressInspectorBreakerTripped` entry once the
+//!   audit binding lands).
 //! - **Audit-on-trip emission.** Wiring the `AuditSigner` into the
 //!   reporter means another arg threading through `with_l7_egress`;
 //!   we'll fold it into the audit binding rework rather than ship a

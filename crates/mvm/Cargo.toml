@@ -15,8 +15,8 @@ mvm-guest.workspace = true
 mvm-build = { workspace = true, default-features = false }
 mvm-backend = { workspace = true, default-features = false }
 anyhow.workspace = true
-# Plan 60 Phase 7a — `OverlayManager` is an async trait carrying
-# chrono timestamps + thiserror'd typed errors.
+# `OverlayManager` is an async trait carrying chrono timestamps +
+# thiserror'd typed errors.
 async-trait = "0.1"
 thiserror = "1"
 base64.workspace = true
@@ -27,7 +27,7 @@ rand.workspace = true
 secrecy.workspace = true
 indicatif.workspace = true
 inquire.workspace = true
-# Plan 126 B2 — the lean S3 client (consolidated with mvm-storage; replaced the
+# The lean S3 client (consolidated with mvm-storage; replaced the
 # heavier `opendal` whose ~70-crate closure the dep budget rejects). `aws` gives
 # the S3 builder + its reqwest/rustls path; only `template-registry-s3` pulls it.
 object_store = { version = "0.11", optional = true, default-features = false, features = [

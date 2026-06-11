@@ -1,4 +1,4 @@
-//! Plan 113 / ADR-064 — Observer trait + Pipeline builder for the gateway
+//! Observer trait + Pipeline builder for the gateway
 //! audit substrate.
 //!
 //! Observers consume `&crate::supervisor::gateway_bridge::FlowEvent` references inside
@@ -11,26 +11,16 @@
 //! startup; tenant policy bundles reference observer names by string and
 //! the resolver refuses unknown names with `BuildError::NotAllowlisted`.
 //!
-//! Per ADR-064 §Decision 7.
-//!
-//! Task 1 lands the trait + builder + allowlist scaffolding in
-//! isolation; Task 3 wires `Observer` into `BridgeConfig.observers` +
-//! `signer_task`, at which point the module-level `#[allow(dead_code)]`
-//! drops (the Observer trait + Pipeline + ObserverAllowlist + MAX_OBSERVERS
-//! become reachable through `BridgeConfig`). Task 4 will wire
-//! `Pipeline::from_admitted` from `run_with_bridge`.
-//!
 //! ## Visibility
 //!
 //! Observer + the capability + builder types are `pub` (not `pub(crate)`)
-//! because Task 3 exposes them through `BridgeConfig.observers`, which is
+//! because they're exposed through `BridgeConfig.observers`, which is
 //! itself a `pub` field on a `pub` struct — the supervisor binary
-//! (`mvm-libkrun-supervisor`) constructs the literal with an empty
-//! `observers: vec![]` until Task 4 wires real resolution.
+//! (`mvm-libkrun-supervisor`) constructs the literal.
 //!
-//! `FlowEvent` in `gateway_bridge` is similarly `pub` (was `pub(crate)`
-//! in Plan 102 W6.A's original commit) so external observer impls can
-//! receive `&FlowEvent` references through the Observer trait.
+//! `FlowEvent` in `gateway_bridge` is similarly `pub` (not `pub(crate)`)
+//! so external observer impls can receive `&FlowEvent` references through
+//! the Observer trait.
 
 use crate::supervisor::audit::FlowDirection;
 use crate::supervisor::gateway_bridge::FlowEvent;
@@ -39,17 +29,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod flow_count;
-// Plan 141 / ADR-064 — backend-agnostic packet-observer core.
+// Backend-agnostic packet-observer core.
 pub mod flow_byte_log;
 pub mod latency;
 pub mod packet;
 pub mod pipeline;
-/// plan 123 A3 — Plan 129 substitution/scan egress-proxy seams.
+/// Substitution/scan egress-proxy seams.
 pub mod stages;
 
-/// Maximum number of observers per VM. ADR-064 §Decision: hard cap of 8
-/// (each observer is a synchronous callback in the signer task's hot path;
-/// per-VM bound keeps the hot path predictable).
+/// Maximum number of observers per VM. Hard cap of 8: each observer is a
+/// synchronous callback in the signer task's hot path, so a per-VM bound
+/// keeps the hot path predictable.
 pub const MAX_OBSERVERS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +71,7 @@ impl ProviderCapabilities {
     }
 }
 
-/// Per-direction registration filter (Plan 141 / ADR-064 Q9). An observer
+/// Per-direction registration filter. An observer
 /// that only inspects outbound traffic declares `Directions::Egress` so
 /// the runner never hands it inbound bytes — least-privilege blast-radius
 /// containment (claim 1), not just a perf win.
@@ -103,12 +93,12 @@ impl Directions {
     }
 }
 
-/// Verdict an observer returns from `on_packet` (Plan 141 / ADR-064).
-/// `Modify` carries the **new L4 payload** (not a raw frame); the bridge
+/// Verdict an observer returns from `on_packet`.
+/// `Modify` carries the new L4 payload (not a raw frame); the bridge
 /// rebuilds IP length + L4 checksum around it via
 /// `packet::rebuild_with_payload`. First `Drop` wins and kills the flow;
 /// any `Modify` the bridge cannot safely emit also kills the flow
-/// (fail-closed, Q8).
+/// (fail-closed).
 #[derive(Debug)]
 pub enum Verdict {
     Forward,
@@ -117,8 +107,8 @@ pub enum Verdict {
 }
 
 /// Context the bridge presents to `on_packet`. Borrowed; cheap to build
-/// per packet. `tenant` mirrors ADR-064 §Decision 9's single-tenant
-/// invariant (one guest = one workload).
+/// per packet. `tenant` reflects the single-tenant invariant
+/// (one guest = one workload).
 #[derive(Debug, Clone, Copy)]
 pub struct PacketCtx<'a> {
     pub vm_name: &'a str,
@@ -133,7 +123,7 @@ pub struct PacketCtx<'a> {
 /// (microseconds); expensive work should buffer + defer to a background
 /// task the observer owns.
 ///
-/// Visibility is `pub` because Task 3 exposes observer references through
+/// Visibility is `pub` because observer references are exposed through
 /// `BridgeConfig.observers` (a `pub` field on a `pub` struct), and
 /// external supervisor binaries (`mvm-libkrun-supervisor`) construct the
 /// literal at startup. `FlowEvent` is also `pub` in `gateway_bridge` for
@@ -143,13 +133,13 @@ pub trait Observer: Send + Sync {
     fn required_capabilities(&self) -> RequiredCapabilities;
     fn on_flow_event(&self, event: &FlowEvent);
 
-    /// Directions this observer wants `on_packet` for (Plan 141 Q9).
+    /// Directions this observer wants `on_packet` for.
     /// Default `Both` keeps flow-event-only observers untouched.
     fn directions(&self) -> Directions {
         Directions::Both
     }
 
-    /// Per-packet hook (Plan 141 / ADR-064). Default `Forward` so an
+    /// Per-packet hook. Default `Forward` so an
     /// observer that only implements `on_flow_event` is a pass-through on
     /// the payload path. MUST be cheap + MUST NOT block; a panic is caught
     /// by the runner and treated as `Forward` for this observer. Requires
@@ -422,7 +412,7 @@ impl ObserverAllowlist {
 ///
 /// The leaf capability is fixed at construction-time per backend:
 /// libkrun + Firecracker leaves report `payload_tap: true`; Vz drainer
-/// reports `payload_tap: false` (ADR-064 §Decision 8 / §Out of scope).
+/// reports `payload_tap: false`.
 ///
 /// `local-default` plan refs short-circuit to empty observers without
 /// consulting the allowlist, so callers can use `resolve_observer_chain_from_plan`
@@ -444,8 +434,8 @@ pub fn from_admitted(
     Ok(pipe.build_observers())
 }
 
-/// Plan 113 Task 4 (security follow-up) — validate that a policy-bundle
-/// path segment is safe to use as a filesystem component.
+/// Validate that a policy-bundle path segment is safe to use as a
+/// filesystem component.
 /// Allows only [A-Za-z0-9_-]+ (DNS-label-shape). Rejects empty,
 /// `.`, `..`, any non-ASCII, any path separator or shell meta.
 fn validate_policy_path_segment(segment: &str, kind: &str) -> Result<(), BuildError> {
@@ -481,10 +471,9 @@ fn validate_policy_path_segment(segment: &str, kind: &str) -> Result<(), BuildEr
 /// `mvm-supervisor` cannot depend on `mvm-cli` (would close a cycle:
 /// `mvm-cli → mvm-supervisor → mvm-cli`). Inline the same parse logic
 /// here: `"<tenant>:<workload>"` → `~/.mvm/policies/<tenant>/<workload>.toml`.
-/// Task 5 of Plan 113 adds `observers: Vec<String>` to
-/// `mvm_core::policy::NetworkPolicy`; this `BundleShim` reads the same field
-/// without requiring Task 5 to be done first. The shim stays private
-/// to this function so Task 5 can refactor cleanly to the real type.
+/// This `BundleShim` reads `network.observers` directly off the bundle
+/// without depending on `mvm_core::policy::NetworkPolicy`. The shim stays
+/// private to this function so it can later be swapped for the real type.
 ///
 /// `pub` (not `pub(crate)`) because `run_with_bridge` in the leaf bin
 /// crate `mvm-libkrun-supervisor` calls this to decide whether to
@@ -512,8 +501,8 @@ pub fn resolve_observer_chain_from_plan(
     validate_policy_path_segment(tenant, "tenant")?;
     validate_policy_path_segment(workload, "workload")?;
 
-    // Plan 113 Task 4 (security follow-up) — refuse cross-tenant policy
-    // bundle access. The plan envelope was already verified upstream;
+    // Refuse cross-tenant policy bundle access. The plan envelope was
+    // already verified upstream;
     // its declared tenant is authoritative. The ref's tenant segment
     // must agree.
     if tenant != plan.tenant.0 {
@@ -584,8 +573,8 @@ pub fn resolve_observer_chain_from_plan(
     let shim: BundleShim = match toml::from_str(&body) {
         Ok(s) => s,
         Err(e) => {
-            // Plan 113 Task 4 (security follow-up) — do NOT echo the
-            // parser error into BuildError; the parser's Display impl
+            // Do NOT echo the parser error into BuildError; the
+            // parser's Display impl
             // can include the offending line content, which leaks
             // bundle bytes. Log internally for debugging.
             tracing::warn!(
@@ -879,7 +868,7 @@ mod tests {
         }
     }
 
-    // Plan 113 §Task 4 — `from_admitted` + `resolve_observer_chain_from_plan`.
+    // `from_admitted` + `resolve_observer_chain_from_plan`.
 
     fn test_execution_plan_with_policy(policy_ref: &str) -> mvm_core::plan::ExecutionPlan {
         test_execution_plan_with_policy_and_tenant(policy_ref, "test")
@@ -970,8 +959,8 @@ mod tests {
         }
     }
 
-    // Plan 113 Task 4 (security follow-up) — three rejection tests
-    // backing the path-traversal, cross-tenant, and charset hardening.
+    // Three rejection tests backing the path-traversal, cross-tenant,
+    // and charset hardening.
 
     #[test]
     fn resolve_observer_chain_dotdot_in_segment_refused() {

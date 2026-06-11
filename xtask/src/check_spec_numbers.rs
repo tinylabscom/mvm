@@ -2,7 +2,7 @@
 //!
 //! ADR and plan filenames use a numeric prefix as their stable
 //! reference handle. Parallel PRs can race and pick the same prefix,
-//! leaving references like "Plan 74" ambiguous. This lint fails when
+//! leaving a numeric reference ambiguous. This lint fails when
 //! any prefix repeats within `specs/plans/` or within `specs/adrs/`.
 
 use anyhow::{Context, Result, bail};

@@ -44,8 +44,8 @@ use super::BuildMode;
 fn dev_override_flags(env: &dyn ShellEnvironment, mode: BuildMode) -> String {
     if !mode.injects_dev_override() {
         // Prod-shape build: produce sealed images with the prod
-        // guest agent. No override, no --impure. The W6.2 console
-        // gate will refuse attach against the resulting image.
+        // guest agent. No override, no --impure. The console gate
+        // will refuse attach against the resulting image.
         return String::new();
     }
 
@@ -278,9 +278,9 @@ pub fn dev_build(
     profile: Option<&str>,
     mode: BuildMode,
 ) -> Result<DevBuildResult> {
-    // Plan 68: `MVM_BUILD_STUB_OUTDIR` lets the live test suite
-    // skip the Nix build entirely and treat the env-var's value as
-    // the build output directory. The directory must contain
+    // `MVM_BUILD_STUB_OUTDIR` lets the live test suite skip the
+    // Nix build entirely and treat the env-var's value as the
+    // build output directory. The directory must contain
     // `vmlinux` + `rootfs.ext4`. Same env-var-escape-hatch shape
     // `MVM_DIRECT_BOOT` uses for `mvmctl up`. Logged loudly so a
     // production misconfiguration can't go silent.
@@ -440,11 +440,11 @@ fn dev_build_via_shell_env(
     // Step 5: Copy artifacts from Nix store to dev build directory
     copy_dev_artifacts(env, &nix_output_path, &build_dir)?;
 
-    // Step 5a: Emit the W7.x.1 sidecar manifest (`mvm-meta.json`)
+    // Step 5a: Emit the sidecar manifest (`mvm-meta.json`)
     // alongside the rootfs. Best-effort: a missing sidecar is fine
     // (consumer in `vm/runtime_meta.rs::from_sidecar` defaults to
     // accessible-by-default), but a present sidecar lights up the
-    // W6.2 console gate end-to-end. Failures here log + continue —
+    // console gate end-to-end. Failures here log + continue —
     // surfacing the gap without breaking the build.
     crate::builder_vm::emit_sidecar_via_passthru_query(
         env,
@@ -479,12 +479,12 @@ fn dev_build_via_builder_vm(
     profile: Option<&str>,
     mode: BuildMode,
 ) -> Result<DevBuildResult> {
-    // Plan 89 W3 part 7: when a persistent-builder session is
-    // alive AND the user hasn't opted out via
-    // `MVM_NO_PERSISTENT_BUILDER=1`, route through the persistent
-    // supervisor. Any error here (incl. supervisor crash mid-
-    // dispatch) falls back to single-shot silently with a warning
-    // — the single-shot path is the safety net.
+    // When a persistent-builder session is alive AND the user
+    // hasn't opted out via `MVM_NO_PERSISTENT_BUILDER=1`, route
+    // through the persistent supervisor. Any error here (incl.
+    // supervisor crash mid-dispatch) falls back to single-shot
+    // silently with a warning — the single-shot path is the
+    // safety net.
     if !persistent_dispatch_disabled()
         && let Some(record) = crate::persistent_builder::read_active_session()
     {
@@ -505,12 +505,11 @@ fn dev_build_via_builder_vm(
         }
     }
 
-    // Plan 166 Task 1.5: the single-shot path honours the builder-backend
-    // selection (`--builder` / `MVM_BUILDER_BACKEND` / auto-detect) instead of
+    // The single-shot path honours the builder-backend selection
+    // (`--builder` / `MVM_BUILDER_BACKEND` / auto-detect) instead of
     // hardcoding libkrun, so `mvmctl build` routes a steady-state build through
     // the chosen VMM (QEMU on `MVM_BUILDER_BACKEND=qemu`). Default stays libkrun
-    // on Linux + macOS 13-25; macOS 26 auto-detects Vz. (Plan 152 will fold this
-    // into a unified backend dispatch.)
+    // on Linux + macOS 13-25; macOS 26 auto-detects Vz.
     let builder = crate::builder_backend_select::resolve_builder_backend();
     dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
 }
@@ -527,7 +526,7 @@ fn persistent_dispatch_disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Plan 120 / ADR-046: resolve the in-repo mvm workspace to build a user
+/// Resolve the in-repo mvm workspace to build a user
 /// flake against, or `None` to keep the flake's own `mvm` pin.
 ///
 /// Returns the workspace root only when **both** hold:
@@ -581,7 +580,7 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         flake_ref.to_string()
     });
 
-    // Plan 120 / ADR-046 source-checkout invariant: a compiled flake pins
+    // Source-checkout invariant: a compiled flake pins
     // `mvm` to GitHub for portability, but when mvmctl runs from a source
     // checkout we must build the workload against the in-repo nix flake so
     // a contributor's changes are exercised without a release round-trip.
@@ -606,7 +605,7 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     let staging = unique_dev_staging_dir();
     std::fs::create_dir_all(&staging).with_context(|| format!("creating staging dir {staging}"))?;
 
-    // Plan 115 / ADR-065: dev_build_with_builder_vm is called for
+    // dev_build_with_builder_vm is called for
     // user-flake builds (mvmctl build / dev up against the user's flake).
     // User flakes do not embed host-vm binaries, so /mvm-bins is unused
     // here. A temp dir satisfies validate_mounts' directory-exists check.
@@ -959,7 +958,7 @@ pub fn ensure_guest_agent_if_needed(
     env: &dyn ShellEnvironment,
     build_result: &DevBuildResult,
 ) -> Result<()> {
-    // Plan 68: same stub-outdir escape-hatch as `dev_build`. When the
+    // Same stub-outdir escape-hatch as `dev_build`. When the
     // build itself was a stub, the rootfs is a placeholder file, not
     // an ext4 image — attempting to `sudo mount` it would prompt for
     // a password and hang the test. Skip injection in that mode.
@@ -1780,8 +1779,8 @@ mod tests {
 
     #[test]
     fn build_mode_prod_emits_no_dev_override() {
-        // The whole point of W6.2.2: production-shape commands
-        // must not inject the dev sibling-flake override.
+        // The whole point: production-shape commands must not
+        // inject the dev sibling-flake override.
         let env = TestEnv::new();
         let flags = dev_override_flags(&env, BuildMode::Prod);
         assert!(

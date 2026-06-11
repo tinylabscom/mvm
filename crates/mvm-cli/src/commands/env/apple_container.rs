@@ -74,10 +74,10 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
     // Ensure dev image exists (build if needed — this runs in the CLI process)
     let (kernel, rootfs) = ensure_dev_image()?;
 
-    // ADR-002 W1.5: lock ~/.mvm and ~/.cache/mvm to 0700 on every
-    // `dev up`. Idempotent — a fresh install creates them locked-
-    // down, and a host that pre-dates this change gets chmod'd on
-    // the first `dev up` after the upgrade.
+    // Lock ~/.mvm and ~/.cache/mvm to 0700 on every `dev up`.
+    // Idempotent — a fresh install creates them locked-down, and a host
+    // that pre-dates this change gets chmod'd on the first `dev up`
+    // after the upgrade.
     mvm_core::config::ensure_data_dir().with_context(|| "locking down data dir to mode 0700")?;
     mvm_core::config::ensure_cache_dir().with_context(|| "locking down cache dir to mode 0700")?;
 
@@ -92,9 +92,9 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
     // boundary — losing prior logs is fine; preserving them forever
     // is the wrong default.
     //
-    // ADR-002 W1.4: the daemon logs capture guest output the same way
-    // console.log does — they are mode 0600 so a same-host other user
-    // can't tail them. The truncate-on-each-up cadence is unchanged.
+    // The daemon logs capture guest output the same way console.log
+    // does — they are mode 0600 so a same-host other user can't tail
+    // them. The truncate-on-each-up cadence is unchanged.
     use std::os::unix::fs::OpenOptionsExt as _;
     for name in ["daemon-stdout.log", "daemon-stderr.log"] {
         let path = format!("{log_dir}/{name}");
@@ -461,7 +461,7 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
             mvm_guest::vsock::GUEST_AGENT_PORT,
         )
     {
-        // Plan 74 W2 / Plan 51 W6 — inbound vsock RPC audit.
+        // Inbound vsock RPC audit.
         super::super::shared::emit_vsock_rpc_audit(
             DEV_VM_NAME,
             &mvm_guest::vsock::GuestRequest::Exec {
@@ -470,7 +470,7 @@ pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
                 timeout_secs: Some(5),
             },
         );
-        // Best-effort kernel probe via streaming exec (Plan 159 WS-5 E).
+        // Best-effort kernel probe via streaming exec.
         let mut out_buf: Vec<u8> = Vec::new();
         if mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, Some(5), |event| {
             if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
@@ -776,13 +776,13 @@ fn prepare_dev_image_out_dir(out_dir: &str) -> Result<()> {
 /// Resolve the dev image (kernel + rootfs) to absolute paths.
 ///
 /// In a source checkout: uses the libkrun-backed builder VM
-/// (Plan 72 W4/W5 — `LibkrunBuilderVm` runs `nix build` against the
-/// dev-shell flake from inside a microVM with a persistent 64 GiB
-/// `/nix` store). Libkrun isn't installed → loud error pointing at
-/// the install command; **no libkrun fallback for the dev-shell
-/// image** (Plan 72 W5.C — the dev-shell rustc closure overflows
-/// libkrun's 4 GiB overlay anyway, so a fallback that would
-/// just disk-out is worse than an actionable error).
+/// (`LibkrunBuilderVm` runs `nix build` against the dev-shell flake
+/// from inside a microVM with a persistent 64 GiB `/nix` store).
+/// Libkrun isn't installed → loud error pointing at the install
+/// command; **no libkrun fallback for the dev-shell image** — the
+/// dev-shell rustc closure overflows libkrun's 4 GiB overlay anyway,
+/// so a fallback that would just disk-out is worse than an actionable
+/// error.
 ///
 /// Outside a source checkout: falls back to the GitHub-release
 /// download of a pre-built image.
@@ -791,7 +791,7 @@ fn prepare_dev_image_out_dir(out_dir: &str) -> Result<()> {
 /// substituted with the prebuilt, since the prebuilt would mask local
 /// rootfs changes.
 pub(super) fn ensure_dev_image() -> Result<(String, String)> {
-    // Plan 115 / ADR-065: source-checkout dispatch.
+    // Source-checkout dispatch.
     //
     // The dev-shell image now comes from `packages.<sys>.dev` in
     // `nix/images/builder-vm/flake.nix` (the same flake as the
@@ -949,8 +949,8 @@ pub(super) fn ensure_dev_image() -> Result<(String, String)> {
 ///   by `resolve_dev_status_image`. Present whenever `mvmctl dev up`
 ///   has succeeded at least once on this host; survives a manual
 ///   delete of `~/.cache/mvm/builder-vm/`. This is the load-bearing
-///   seed for Plan 77 Stage 0 — without it, a contributor who blew
-///   away the builder VM cache would have no path back.
+///   Stage 0 seed — without it, a contributor who blew away the
+///   builder VM cache would have no path back.
 /// - `~/.mvm/dev/prebuilt/v*/{vmlinux,rootfs.ext4}` — previously
 ///   downloaded prebuilts for earlier versions.
 /// - `~/.mvm/dev/builds/<hash>/{vmlinux,rootfs.ext4}` — historical
@@ -1177,7 +1177,7 @@ fn prune_old_prebuilts(prebuilt_root: &str, current_version: &str) {
 
 /// Download a pre-built dev image (kernel + rootfs) from GitHub releases.
 ///
-/// Plan 36 / ADR 005 trust chain:
+/// Trust chain:
 ///
 /// 1. Try the cosign-keyless-signed manifest first
 ///    (`dev-image-{arch}.manifest.json` + `.bundle`). If present,
@@ -1186,25 +1186,25 @@ fn prune_old_prebuilts(prebuilt_root: &str, current_version: &str) {
 ///    identity, parses the manifest, and we use *its* artifact
 ///    digests as the source of truth.
 ///
-/// 2. If the manifest is 404 (older release predating plan 36) or
-///    its companion bundle is missing, fall back to the W5.1
+/// 2. If the manifest is 404 (older release predating signing) or
+///    its companion bundle is missing, fall back to the
 ///    unsigned-checksum path with a loud deprecation warning. This
 ///    keeps mvmctl pointing at older releases working through the
 ///    rollout, and the deprecation banner sets the stage for making
 ///    the manifest mandatory in a future major version.
 ///
 /// 3. Either way, every downloaded artifact gets streaming SHA-256
-///    verification (W5.1) against the expected digest.
+///    verification against the expected digest.
 ///
 /// Escape hatches (both print loud warnings):
-///   - `MVM_SKIP_HASH_VERIFY=1` — skip SHA-256 step (existing W5.1).
+///   - `MVM_SKIP_HASH_VERIFY=1` — skip SHA-256 step.
 ///   - `MVM_SKIP_COSIGN_VERIFY=1` — skip cosign signature check on
 ///     the manifest body but still parse and use it. Only for
 ///     emergency Sigstore-side rotation; SHA-256 still applies.
 fn download_dev_image(kernel_path: &str, rootfs_path: &str) -> Result<(String, String)> {
     // Wrap the verification pipeline so every exit path — success or
     // failure — emits the verify_duration gauge and bumps the
-    // appropriate outcome counter. Plan 36 §Layer 4 step 11.
+    // appropriate outcome counter.
     let verify_start = std::time::Instant::now();
     let result = download_dev_image_inner(kernel_path, rootfs_path);
     let elapsed_ms = verify_start.elapsed().as_millis() as u64;
@@ -1241,9 +1241,8 @@ fn download_dev_image_inner(kernel_path: &str, rootfs_path: &str) -> Result<(Str
          Subsequent runs reuse the cached image and start in seconds."
     ));
 
-    // Plan 36 PR-C.2: prefer the cosign-signed manifest. Falls back
-    // to the W5.1 unsigned checksum file when the manifest is 404
-    // (older release).
+    // Prefer the cosign-signed manifest. Falls back to the unsigned
+    // checksum file when the manifest is 404 (older release).
     let expected = match try_fetch_signed_manifest(&base_url, version, arch, "dev")? {
         Some(manifest) => {
             ui::success(&format!(
@@ -1303,8 +1302,8 @@ fn download_dev_image_inner(kernel_path: &str, rootfs_path: &str) -> Result<(Str
 /// - `Ok(Some(manifest))` — manifest + bundle present, signature verified,
 ///   version pinned to runtime, max-age window not yet exceeded.
 /// - `Ok(None)` — manifest URL 404. This is the legacy fallback for
-///   older releases that predate plan 36; caller can fall back to the
-///   W5.1 unsigned-checksum path with a deprecation warning.
+///   older releases that predate signing; caller can fall back to the
+///   unsigned-checksum path with a deprecation warning.
 /// - `Err(_)` — manifest fetched but verification or parsing failed.
 ///   Hard error; never silently fall through. `MVM_SKIP_COSIGN_VERIFY=1`
 ///   downgrades signature failures to a parse-only path.
@@ -1321,7 +1320,7 @@ fn try_fetch_signed_manifest(
     let bundle_url = format!("{manifest_url}.bundle");
 
     // HEAD-probe the manifest URL. If absent (older release without
-    // plan-36 signing), fall back gracefully.
+    // signing), fall back gracefully.
     if !url_exists(&manifest_url)? {
         return Ok(None);
     }
@@ -1398,7 +1397,7 @@ fn try_fetch_signed_manifest(
     })?;
 
     // Enforce max-age (default 90d). mvmctl warns and proceeds; mvmd
-    // refuses (different risk tolerance — handled in mvmd plan 23).
+    // refuses (different risk tolerance — handled in mvmd).
     let now = chrono::Utc::now();
     if let Err(e) = image_verify::check_not_after(&manifest, now) {
         bump_verify_outcome("expired");
@@ -1409,8 +1408,8 @@ fn try_fetch_signed_manifest(
         ));
     }
 
-    // Plan 36 §Layer 4 step 4: consult the cosign-signed revocation
-    // list. Cached up to 24h; tolerated up to 7d offline. A signed
+    // Consult the cosign-signed revocation list. Cached up to 24h;
+    // tolerated up to 7d offline. A signed
     // image whose version is on the list hard-fails — recall is the
     // primary mechanism for "we know this build is bad."
     if let Some(revocations) = try_fetch_revocation_list()? {
@@ -1432,8 +1431,8 @@ fn try_fetch_signed_manifest(
 /// Fetch + verify the project's signed revocation list, caching it
 /// under `~/.cache/mvm/revocations/`.
 ///
-/// Plan 36 §Layer 4 step 4. The revocation list lives at a stable
-/// `revocations` release tag whose only assets are
+/// The revocation list lives at a stable `revocations` release tag
+/// whose only assets are
 /// `revoked-versions.json` and its cosign bundle. Append-only across
 /// releases; updated by cutting a new entry on that tag.
 ///
@@ -1573,9 +1572,9 @@ fn try_fetch_revocation_list() -> Result<Option<mvm_core::crypto::image_verify::
 
 /// `mvmctl dev import-image` — sideload a verified dev image from local files.
 ///
-/// Plan 36 PR-D.2 / §"Air-gapped install path". Runs the same
-/// cosign + SHA-256 + version-pin + max-age + revocation pipeline
-/// as `download_dev_image`, but against operator-provided local
+/// Runs the same cosign + SHA-256 + version-pin + max-age +
+/// revocation pipeline as `download_dev_image`, but against
+/// operator-provided local
 /// files instead of the GitHub Releases URL. On success the verified
 /// artifacts are copied into the version-namespaced cache so the next
 /// `mvmctl dev up` boots from them with no further verification or
@@ -1586,7 +1585,7 @@ fn try_fetch_revocation_list() -> Result<Option<mvm_core::crypto::image_verify::
 /// that legitimately wants the supply-chain check. Without this
 /// path the only option for these users was MVM_SKIP_HASH_VERIFY=1,
 /// which disables verification entirely — exactly the unsafe escape
-/// plan 36 exists to discourage.
+/// the signed-manifest path exists to discourage.
 pub fn cmd_dev_import_image(
     manifest_path: &str,
     bundle_path: &str,
@@ -1741,8 +1740,8 @@ pub fn cmd_dev_import_image(
 
 /// Locate the builder-VM flake at `nix/images/builder-vm/flake.nix`.
 ///
-/// Plan 115 / ADR-065: the consolidated flake produces both the
-/// headless builder VM (`packages.<sys>.default`) and the interactive
+/// The consolidated flake produces both the headless builder VM
+/// (`packages.<sys>.default`) and the interactive
 /// dev-shell image (`packages.<sys>.dev`). Used by `ensure_dev_image`
 /// to detect a source checkout, and by `bootstrap_builder_vm_image`
 /// to locate Layer 1. Returns `Err` when not in a source checkout,
@@ -1762,12 +1761,11 @@ fn find_builder_vm_flake() -> Result<String> {
     anyhow::bail!("Builder VM flake not found. Expected at nix/images/builder-vm/flake.nix.")
 }
 
-/// Plan 72 W5 — ensure `~/.cache/mvm/builder-vm/<arch>/` contains
-/// `vmlinux` + `rootfs.ext4` before launching the libkrun builder.
+/// Ensure `~/.cache/mvm/builder-vm/<arch>/` contains `vmlinux` +
+/// `rootfs.ext4` before launching the libkrun builder.
 ///
 /// `LibkrunBuilderVm::run_build` reads from this cache; this
-/// function is what fills it. The two-layer artifact rule from
-/// ADR-046 in action:
+/// function is what fills it. The two-layer artifact rule in action:
 ///
 /// - Layer 1 (this function): ensure the **builder VM image** is
 ///   available in the local cache.
@@ -1782,10 +1780,6 @@ fn find_builder_vm_flake() -> Result<String> {
 ///   artifact would hide local builder-image changes.
 /// - Installed binary: a cache hit is allowed; a cache miss may fetch
 ///   the published artifact for the running release version.
-///
-/// W5.B wired this into `ensure_dev_image`; Plan 72 W5's "Layer 1
-/// outside source checkout — download the published prebuilt"
-/// follow-up landed here.
 ///
 /// `allow(dead_code)`: same justification as
 /// [`find_builder_vm_flake`] — only called when
@@ -1827,8 +1821,8 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
                 "Builder VM image not in cache; building locally from {flake_dir}..."
             ));
 
-            // Plan 115 / ADR-065 / Plan 160: the nix-seed root-dir Stage 0 is
-            // the only bootstrap path. The dev-image Stage 0 path
+            // The nix-seed root-dir Stage 0 is the only bootstrap
+            // path. The dev-image Stage 0 path
             // (bootstrap_builder_vm_image_via_dev_image_stage0) has been
             // removed; `nix/images/builder/flake.nix` is deleted.
             #[cfg(feature = "builder-vm")]
@@ -1864,7 +1858,7 @@ fn builder_vm_host_arch() -> &'static str {
     }
 }
 
-/// Plan 77 W4: the only call site that can invoke the published-prebuilt
+/// The only call site that can invoke the published-prebuilt
 /// download path. Gated behind `release-artifact-bootstrap`. Contributor
 /// builds (the default) hit the `cfg(not(...))` arm and bail structurally
 /// — even if the resolver routed here, the function refuses to touch the
@@ -1921,7 +1915,7 @@ fn resolve_builder_vm_bootstrap_action(
 }
 
 /// Stage 0 bootstrap via libkrun's `krun_set_root` mode — extract the
-/// official Nix release tarball's `/nix/store` (hash-pinned, plan 160) into
+/// official Nix release tarball's `/nix/store` (hash-pinned) into
 /// a host directory, layer the embedded `stage0-init` PID 1 on as `/init`,
 /// and hand the directory to libkrun. libkrun mounts it as the guest root
 /// via virtiofs against libkrunfw's bundled TSI-patched kernel. `stage0-init`
@@ -1942,10 +1936,10 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
 ) -> Result<()> {
     let _stage0_guard = acquire_stage0_lock(out_dir)?;
 
-    // Plan 93 Phase 3: time each host-visible Stage 0 step and print a
-    // one-line `[mvm] <step> … <secs>s` so perceived speed matches the
-    // actual per-step wall-clock.
-    // Plan 160: the seed is the official Nix release tarball + the embedded
+    // Time each host-visible Stage 0 step and print a one-line
+    // `[mvm] <step> … <secs>s` so perceived speed matches the actual
+    // per-step wall-clock.
+    // The seed is the official Nix release tarball + the embedded
     // `stage0-init` PID 1 — one userland (busybox), no Alpine/apk/pgp.
     let fetch_started = std::time::Instant::now();
     let stage0_assets = mvm_build::stage0::assets_for_host_arch();
@@ -2014,8 +2008,8 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         flavor = STAGE0_FLAVOR_CURRENT,
     );
 
-    // ADR-065: extract the embedded host-vm binaries so the Stage 0 nix
-    // build can install them from /mvm-bins instead of building them with
+    // Extract the embedded host-vm binaries so the Stage 0 nix build
+    // can install them from /mvm-bins instead of building them with
     // the guest's nix. Same cache dir the steady-state job path uses.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
     let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
@@ -2337,8 +2331,8 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::write(staging_dir.join("stage0-build.conf"), conf)
         .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
 
-    // ADR-065: the Stage 0 nix build installs the embedded host-vm
-    // binaries from /mvm-bins rather than building them in-guest.
+    // The Stage 0 nix build installs the embedded host-vm binaries
+    // from /mvm-bins rather than building them in-guest.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
     let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
         std::path::Path::new(&host_bins_cache),
@@ -2428,7 +2422,7 @@ fn run_stage0_root_dir(
 ) -> std::result::Result<(), (Stage0FailureStage, anyhow::Error)> {
     use mvm_build::builder_backend_select::resolve_stage0_backend;
 
-    // ADR-068 + Plan 166: dispatch Stage 0 through the `BuilderVm` trait.
+    // Dispatch Stage 0 through the `BuilderVm` trait.
     // `resolve_stage0_backend` uses QEMU when explicitly chosen
     // (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including the
     // Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
@@ -2461,7 +2455,7 @@ fn run_stage0_root_dir(
     Ok(())
 }
 
-/// Plan 93 Phase 0: which Stage 0 bootstrap variant this build runs.
+/// Which Stage 0 bootstrap variant this build runs.
 ///
 /// The `flavor=` field on `Stage0Boot` / `Stage0CachePromoted` audit
 /// detail strings carries this value so a future per-variant identifier
@@ -2471,7 +2465,7 @@ fn run_stage0_root_dir(
 #[cfg(feature = "builder-vm")]
 const STAGE0_FLAVOR_CURRENT: &str = "current";
 
-/// Plan 77 W3: which phase of Stage 0 failed. Each variant maps to a
+/// Which phase of Stage 0 failed. Each variant maps to a
 /// `stage=...` value in the `Stage0Failed` audit detail so a dashboard
 /// can break down "Stage 0 reliability" by failure phase. String
 /// representations are stable wire format.
@@ -2504,9 +2498,9 @@ impl std::fmt::Display for Stage0FailureStage {
 /// compiled in (the default on macOS + Linux libkrun hosts) — without
 /// that feature the FFI is dead code and the caller falls back.
 ///
-/// Currently unused on the main path; reserved for the follow-up
-/// PR that wires the initramfs Stage 0 dispatch (the initramfs
-/// path needs a kernel and libkrunfw is where we get it).
+/// Currently unused on the main path; reserved for wiring the
+/// initramfs Stage 0 dispatch (the initramfs path needs a kernel and
+/// libkrunfw is where we get it).
 #[cfg(all(feature = "builder-vm", feature = "libkrun-sys"))]
 #[allow(dead_code)]
 fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
@@ -2532,7 +2526,7 @@ fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Plan 77 W3: short prefix of the source fingerprint for audit
+/// Short prefix of the source fingerprint for audit
 /// `fingerprint_prefix=` field. 8 hex chars are enough to disambiguate
 /// against unrelated `dev up` runs without exposing the full digest.
 #[cfg(feature = "builder-vm")]
@@ -2540,7 +2534,7 @@ fn stage0_fingerprint_prefix(source_fingerprint: &str) -> String {
     source_fingerprint.chars().take(8).collect::<String>()
 }
 
-/// Plan 77 W3: condense an `anyhow::Error` into the short single-line
+/// Condense an `anyhow::Error` into the short single-line
 /// `reason=` field for `Stage0Failed`. The full chain is on stderr
 /// already; the audit field is for "what broke at a glance". Capped
 /// at 160 chars and stripped of newlines / commas / spaces around
@@ -2564,7 +2558,7 @@ fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
     truncated
 }
 
-/// Plan 77 W2 — RAII advisory lock at
+/// RAII advisory lock at
 /// `~/.cache/mvm/builder-vm/stage0.lock` (one directory above the
 /// per-arch cache). `try_acquire` is non-blocking, so a concurrent
 /// invocation bails fast with a clear message instead of silently
@@ -2638,7 +2632,7 @@ fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Result<()> {
     })
 }
 
-/// Plan 77 W2 — outcome of [`sweep_orphaned_stage0_staging_dirs`]:
+/// Outcome of [`sweep_orphaned_stage0_staging_dirs`]:
 /// either the sweep ran (with counts) or the Stage 0 advisory lock was
 /// already held so the sweep was skipped to avoid racing a live
 /// bootstrap. The pruner uses the variant to decide what to print.
@@ -2647,7 +2641,7 @@ pub(in crate::commands) enum Stage0SweepOutcome {
     SkippedLockHeld,
 }
 
-/// Plan 77 W2 — remove staging directories from a crashed Stage 0
+/// Remove staging directories from a crashed Stage 0
 /// bootstrap. Only safe to run when no Stage 0 is currently in progress;
 /// the function tries the same advisory lock the live bootstrap uses
 /// and bails (returns `SkippedLockHeld`) on contention rather than
@@ -2659,7 +2653,7 @@ pub(in crate::commands) enum Stage0SweepOutcome {
 /// cache, so any staging dir on disk is by definition orphaned. Format
 /// matches [`unique_builder_vm_stage0_staging_dir`]
 /// (`.<arch>.stage0-<pid>-<nonce>`); we also recognise the legacy
-/// `<arch>-staging[-...]` shape from pre-W1 builds on the same host.
+/// `<arch>-staging[-...]` shape from older builds on the same host.
 pub(in crate::commands) fn sweep_orphaned_stage0_staging_dirs(
     dry_run: bool,
 ) -> Result<Stage0SweepOutcome> {
@@ -2743,7 +2737,7 @@ fn sweep_orphaned_stage0_staging_dirs_at(
     })
 }
 
-/// Plan 95 §FU-1 — outcome of [`reap_orphaned_vm_helpers`]. Counts
+/// Outcome of [`reap_orphaned_vm_helpers`]. Counts
 /// orphaned helper PIDs that were signalled and per-VM cache dirs
 /// removed, plus the bytes freed by removing those dirs. Pruner-side
 /// caller uses this to print a clean one-line summary.
@@ -2753,16 +2747,15 @@ pub(in crate::commands) struct ReapOutcome {
     pub freed_bytes: u64,
 }
 
-/// Plan 95 §FU-1 — reap orphaned per-VM helpers left behind by killed
+/// Reap orphaned per-VM helpers left behind by killed
 /// `mvmctl dev up` runs. Covers both backends: libkrun (`mvm-libkrun-
 /// supervisor` + `gvproxy`) and Vz (`mvm-vz-supervisor`).
 ///
 /// mvmctl spawns the active backend's supervisor binary, which in turn
 /// spawns its networking helper (gvproxy for libkrun). If mvmctl exits
 /// abnormally (^C, SIGKILL, crash), supervisor + helpers are reparented
-/// to launchd PID 1 and outlive mvmctl indefinitely (Plan 95 doc
-/// §Follow-ups FU-2/FU-3 cover the "prevent" side; this is the "clean
-/// up after the fact" side — FU-1).
+/// to launchd PID 1 and outlive mvmctl indefinitely. This is the
+/// "clean up after the fact" side, distinct from the prevention path.
 ///
 /// The dir traversal below is **prefix-agnostic**: it iterates every
 /// subdirectory of `~/.cache/mvm/builder-vm/vms/`, so both
@@ -2771,7 +2764,7 @@ pub(in crate::commands) struct ReapOutcome {
 /// names (`builder.pid` / `stage0.pid`) are shared across backends. The
 /// `reap_picks_up_orphaned_vz_builder_state_dir` test pins this — a
 /// future refactor that narrows the traversal or renames the sidecar
-/// must update that test. See Plan 97 Phase C and Plan 99 PR-1.
+/// must update that test.
 ///
 /// Two scans per VM dir:
 ///
@@ -2795,9 +2788,9 @@ pub(in crate::commands) struct ReapOutcome {
 /// - alive with launchd as parent → SIGTERM and count
 ///
 /// Then if no helper in the dir had a live non-launchd parent, the
-/// dir is removed. This avoids the over-aggressive `rm -rf $vm/`
-/// of the prototype `/tmp/plan95/reap.sh`, which during validation
-/// nuked a live mvmctl's state dir.
+/// dir is removed. This avoids the over-aggressive `rm -rf $vm/` of an
+/// earlier prototype, which during validation nuked a live mvmctl's
+/// state dir.
 pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<ReapOutcome> {
     reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
 }
@@ -3058,9 +3051,9 @@ fn dir_size_bytes(path: &std::path::Path) -> u64 {
 
 /// Predicate matching the staging-dir basenames left by Stage 0.
 /// Two shapes are recognised:
-/// - Current (W1+): `.<arch>.stage0-<pid>-<nonce>` (hidden, see
+/// - Current: `.<arch>.stage0-<pid>-<nonce>` (hidden, see
 ///   [`unique_builder_vm_stage0_staging_dir`]).
-/// - Legacy (pre-W1): `<arch>-staging` or `<arch>-staging-<suffix>`
+/// - Legacy: `<arch>-staging` or `<arch>-staging-<suffix>`
 ///   left behind by earlier Stage 0 prototypes that were observed on
 ///   contributor hosts; harmless when they exist but the pruner is
 ///   the obvious place to clean them up.
@@ -3128,8 +3121,8 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
 ///    rootfs at boot. The byte hash captures the bin source, the
 ///    `mvm-build` lib, its deps, AND the cross-compile toolchain in one
 ///    shot — strictly more than the per-crate `src/` hash this replaced
-///    (which also broke when Plan 121 folded the two former top-level
-///    `crates/<name>/` crates into `crates/mvm-build/src/bin/`).
+///    (which also broke when the two former top-level `crates/<name>/`
+///    crates were folded into `crates/mvm-build/src/bin/`).
 /// 4. The shared Nix library (`nix/lib`) the flake imports.
 ///
 /// Pre-2026-05 this function only hashed (1), so contributor edits to
@@ -3193,8 +3186,8 @@ fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<String> {
     // source, the `mvm-build` lib, its deps, AND the cross-compile
     // toolchain (a gnu→musl switch yields different bytes from identical
     // source) in one shot — strictly more than the per-crate `src/` hash
-    // this replaced, which also broke when Plan 121 folded the two former
-    // top-level `crates/<name>/` crates into `crates/mvm-build/src/bin/`.
+    // this replaced, which also broke when the two former top-level
+    // `crates/<name>/` crates were folded into `crates/mvm-build/src/bin/`.
     for bin in crate::host_binaries::embedded::EMBEDDED.iter() {
         fold_embedded_binary_identity(&mut hasher, bin.name, bin.sha256_hex);
     }
@@ -3581,17 +3574,17 @@ fn promote_builder_vm_stage0_cache(
 
 /// Download the per-arch Layer 1 builder VM artifacts published by the
 /// `builder-vm-image` release-workflow job into the local cache dir,
-/// SHA-256-verified per ADR-002 §W5.1.
+/// SHA-256-verified.
 ///
 /// Mirrors `download_dev_image_inner` for the dev-shell image, minus
-/// cosign signing (Plan 36 ADR-005 extends to builder-vm artifacts as
-/// a follow-up). The required artifacts are `vmlinux` + `rootfs.ext4`;
-/// `cmdline.txt` and `manifest.json` sidecars are best-effort
-/// downloads with a fallback at the `mvm-build` consumer
-/// (`ensure_builder_vm_image` uses the canonical Plan 72 §W2 cmdline
-/// when `cmdline.txt` is missing).
+/// cosign signing (the signed-manifest path extends to builder-vm
+/// artifacts as a follow-up). The required artifacts are `vmlinux` +
+/// `rootfs.ext4`; `cmdline.txt` and `manifest.json` sidecars are
+/// best-effort downloads with a fallback at the `mvm-build` consumer
+/// (`ensure_builder_vm_image` uses the canonical cmdline when
+/// `cmdline.txt` is missing).
 ///
-/// Plan 77 W4: gated behind `release-artifact-bootstrap`. Contributor
+/// Gated behind `release-artifact-bootstrap`. Contributor
 /// builds (default) never compile this in, so the "no flake + cache
 /// miss" branch in [`bootstrap_builder_vm_image`] has no escape hatch
 /// and surfaces a hard error. End-user-binary release builds opt in
@@ -3660,7 +3653,7 @@ fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<()> {
 /// `builder-vm-image` job uploads. Pure function — no I/O, no
 /// network — so the unit test can verify naming matches the
 /// release.yml side without touching the network. Gated together
-/// with [`download_builder_vm_image`] (Plan 77 W4).
+/// with [`download_builder_vm_image`].
 #[cfg(any(feature = "release-artifact-bootstrap", test))]
 struct BuilderVmArtifactNames {
     kernel: String,
@@ -3681,8 +3674,7 @@ fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
     }
 }
 
-/// Plan 72 W5.B — build the dev-shell image via the libkrun-backed
-/// builder VM.
+/// Build the dev-shell image via the libkrun-backed builder VM.
 ///
 /// Layer 1 (the builder VM image at `~/.cache/mvm/builder-vm/<arch>/`)
 /// is fetched via [`bootstrap_builder_vm_image`] on cache miss. The
@@ -3718,8 +3710,8 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     // three levels up. The consolidated flake reads `MVM_WORKSPACE_PATH=/work`
     // (set in the guest's `cmd.sh` by `LibkrunBuilderVm`) under
     // `--impure`, so the flake's `builtins.path` import lands on the
-    // mount rather than the store-copied flake dir. Plan 115 / ADR-065
-    // collapsed `nix/images/builder/` into `nix/images/builder-vm/`;
+    // mount rather than the store-copied flake dir.
+    // `nix/images/builder/` was collapsed into `nix/images/builder-vm/`;
     // the interactive dev-shell image is now `packages.<sys>.dev`.
     let builder_flake = find_builder_vm_flake().context(
         "builder-vm flake missing at nix/images/builder-vm/flake.nix; libkrun dispatch needs it as Layer 2 source",
@@ -3736,10 +3728,9 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     // perspective. `path:` forces Nix's filesystem flake fetcher (not
     // the git fetcher, which would discover `/work/.git` and trip on
     // worktree files whose `gitdir:` redirects point outside the
-    // mount). `packages.<sys>.dev` is the interactive (dev-shell) attr
-    // added by Plan 115 / ADR-065.
-    // Plan 115 / ADR-065: extract the embedded host-vm binaries to the
-    // host-bins cache dir and mount them at /mvm-bins inside the builder VM.
+    // mount). `packages.<sys>.dev` is the interactive (dev-shell) attr.
+    // Extract the embedded host-vm binaries to the host-bins cache dir
+    // and mount them at /mvm-bins inside the builder VM.
     // The builder-vm flake's cmd.sh reads MVM_HOST_BIN_DIR=/mvm-bins to
     // install the correct cross-compiled binaries into the rootfs.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
@@ -3765,8 +3756,8 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
         staged_user_flake: None,
     };
 
-    // Plan 97 / Plan 98: source-checkout dev-image builds route
-    // through the selected builder backend. When Vz was chosen only
+    // Source-checkout dev-image builds route through the selected
+    // builder backend. When Vz was chosen only
     // by auto-detect (no explicit `--builder` / env override), allow
     // a one-shot fallback to libkrun if Vz bring-up fails. This
     // keeps `mvmctl dev up` usable on hosts where the platform-level
@@ -3892,7 +3883,7 @@ mod builder_backend_attempt_order_tests {
 }
 
 /// Ensure the bundled default microVM image (kernel + rootfs) is in the cache,
-/// keyed on `BuildMode` (Plan 158). Used by any image-taking command when no
+/// keyed on `BuildMode`. Used by any image-taking command when no
 /// `--flake`/`--template`/`--image` was supplied. Returns `(kernel, rootfs)`;
 /// the verity + `mvm-meta.json` sidecars land alongside the rootfs.
 ///
@@ -3911,8 +3902,8 @@ pub(crate) fn ensure_default_microvm_image(
             std::fs::create_dir_all(&cache_dir)?;
             let kernel_path = format!("{cache_dir}/vmlinux");
             let rootfs_path = format!("{cache_dir}/rootfs.ext4");
-            // All five must be present before skipping the download — a cache
-            // that predates Plan 158 has only vmlinux + rootfs.ext4 and would
+            // All five must be present before skipping the download — an older
+            // cache has only vmlinux + rootfs.ext4 and would
             // fail admission (no overlay-aware sidecar, no verity).
             let required = [
                 kernel_path.clone(),
@@ -3960,7 +3951,7 @@ fn ensure_default_microvm_dev_image(_cache_dir: &str) -> Result<(String, String)
 /// Build the bundled **dev** default microVM image via the libkrun builder VM:
 /// `nix build nix/images/default-tenant#packages.<sys>.dev` inside the guest,
 /// extracting `vmlinux` + `rootfs.ext4` + `mvm-meta.json` to `out_dir`. Mirrors
-/// [`build_image_via_libkrun`] but targets the default-tenant flake. Plan 158.
+/// [`build_image_via_libkrun`] but targets the default-tenant flake.
 #[cfg(feature = "builder-vm")]
 fn build_default_microvm_dev_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     use mvm_build::builder_backend_select::{
@@ -4113,9 +4104,9 @@ mod default_microvm_tests {
 /// Download the pre-built **prod** default microVM image from the matching
 /// GitHub release: kernel + verity-sealed rootfs + the `rootfs.verity` /
 /// `rootfs.roothash` sidecars + the overlay-aware `mvm-meta.json`. Every file
-/// is SHA-256-verified against the release checksums manifest (ADR-002 §W5.1).
+/// is SHA-256-verified against the release checksums manifest.
 /// The sidecars land alongside the rootfs so the backend verity probe +
-/// `admit_overlay_aware` resolve them by path convention. Plan 158.
+/// `admit_overlay_aware` resolve them by path convention.
 fn download_default_microvm_image(
     cache_dir: &str,
     kernel_path: &str,
@@ -4387,7 +4378,7 @@ mod dev_status_image_tests {
         std::fs::write(dir.join("rootfs.ext4"), rootfs).unwrap();
     }
 
-    /// Plan 77 W1 — `~/.mvm/dev/current/` is the load-bearing seed for
+    /// `~/.mvm/dev/current/` is the load-bearing seed for
     /// Stage 0 when the builder VM cache is empty but a dev image was
     /// previously built on this host. Closes the gap where a contributor
     /// who deleted `~/.cache/mvm/builder-vm/<arch>/` got a hard error
@@ -4705,13 +4696,13 @@ mod reap_orphans_tests {
 
 #[cfg(test)]
 mod builder_vm_bootstrap_tests {
-    //! Plan 72 W5 — `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
+    //! `find_builder_vm_flake` + `bootstrap_builder_vm_image`.
     use super::*;
     use std::io::Write;
 
     #[test]
     fn find_builder_vm_flake_resolves_to_in_repo_path() {
-        // From a source checkout, the helper must find the W2
+        // From a source checkout, the helper must find the
         // flake at <workspace>/nix/images/builder-vm/flake.nix.
         // `env!("CARGO_MANIFEST_DIR")` is baked at compile time
         // and points at the workspace's mvm-cli crate dir, so
@@ -4788,7 +4779,7 @@ mod builder_vm_bootstrap_tests {
         assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
     }
 
-    /// Plan 77 W4: even when the resolver routes to `DownloadPublished`,
+    /// Even when the resolver routes to `DownloadPublished`,
     /// a contributor build (no `release-artifact-bootstrap` feature) must
     /// refuse to invoke the download path and surface a clear structural
     /// error. This locks the AGENTS.md / CLAUDE.md "no prebuilt builder
@@ -4844,7 +4835,7 @@ mod builder_vm_bootstrap_tests {
         write_builder_vm_source_cache_provenance(dir, fingerprint).expect("write provenance");
     }
 
-    /// Plan 77 W2 — `acquire_stage0_lock` is an advisory `flock(2)`
+    /// `acquire_stage0_lock` is an advisory `flock(2)`
     /// guard at `<cache_parent>/stage0.lock`. The first acquisition
     /// succeeds; a second concurrent attempt while the first guard is
     /// still in scope fails fast with a recognizable message; once the
@@ -4898,7 +4889,7 @@ mod builder_vm_bootstrap_tests {
         );
     }
 
-    /// Plan 77 W2 — name predicate must match both the current hidden
+    /// Name predicate must match both the current hidden
     /// `.<arch>.stage0-<pid>-<nonce>` form and the legacy
     /// `<arch>-staging[-...]` form, and reject everything else that
     /// lives alongside under `~/.cache/mvm/builder-vm/` (live cache
@@ -5016,7 +5007,7 @@ mod builder_vm_bootstrap_tests {
     // false positive). One acquire per test removes the self-race; the
     // unique tempdir per test keeps them independent.
 
-    /// Plan 77 W2 — the dry-run sweep is purely observational: it reports
+    /// The dry-run sweep is purely observational: it reports
     /// the orphan + byte count but mutates nothing.
     #[test]
     fn sweep_dry_run_reports_orphan_without_removing() {
@@ -5038,7 +5029,7 @@ mod builder_vm_bootstrap_tests {
         assert!(live_cache.is_dir(), "dry-run must not touch the live cache");
     }
 
-    /// Plan 77 W2 — the real sweep removes the orphan staging dir, reports
+    /// The real sweep removes the orphan staging dir, reports
     /// its byte count, and leaves the live cache and unrelated siblings
     /// intact.
     #[test]
@@ -5065,7 +5056,7 @@ mod builder_vm_bootstrap_tests {
         assert!(nix_store.is_file(), "nix-store image must be untouched");
     }
 
-    /// Plan 77 W2 — when a live Stage 0 is in progress and holds the
+    /// When a live Stage 0 is in progress and holds the
     /// advisory lock, the sweep must skip rather than race the
     /// staging dir the live run is about to promote.
     #[test]
@@ -5095,7 +5086,7 @@ mod builder_vm_bootstrap_tests {
         );
     }
 
-    /// Plan 77 W2 — sweep on a non-existent root is a no-op. Exercises
+    /// Sweep on a non-existent root is a no-op. Exercises
     /// the early-return for fresh hosts that have never run `dev up`.
     #[test]
     fn sweep_is_noop_when_root_missing() {
@@ -5118,8 +5109,8 @@ mod builder_vm_bootstrap_tests {
         }
     }
 
-    /// Plan 97 Phase C / Plan 99 PR-1 — pin that the orphan reaper
-    /// covers `mvm-builder-vz-<job_id>` dirs the same way it covers
+    /// Pin that the orphan reaper covers `mvm-builder-vz-<job_id>`
+    /// dirs the same way it covers
     /// `mvm-builder-vm-<job_id>`. The traversal in
     /// `reap_orphaned_vm_helpers_at` is prefix-agnostic and
     /// `VzBuilderVm` writes a `builder.pid` sidecar under the shared
@@ -5621,7 +5612,7 @@ mod builder_vm_bootstrap_tests {
     }
 
     // -------------------------------------------------------------------
-    // Plan 77 W3 — Stage 0 audit-emit helpers.
+    // Stage 0 audit-emit helpers.
     //
     // Tests below pin the *details* of the audit emits (which strings
     // the macro will write into `kind`, `detail`) so that the
@@ -5683,7 +5674,7 @@ mod builder_vm_bootstrap_tests {
 
     #[test]
     fn stage0_flavor_current_wire_format_is_stable() {
-        // Plan 93 Phase 0 — the `flavor=` value emitted on every
+        // The `flavor=` value emitted on every
         // `Stage0Boot` / `Stage0CachePromoted` audit line. Today there
         // is one variant (`"current"` — the nix-tarball seed); a future
         // change may introduce additional variants. Pinning the current

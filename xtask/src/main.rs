@@ -19,6 +19,7 @@ mod check_guest_agent_runtime_free;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_overclaim;
+mod check_no_spec_refs_in_comments;
 mod check_runtime_overlay_version;
 mod check_spec_numbers;
 mod gen_stubs;
@@ -84,6 +85,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_spec_numbers::run(&workspace)
         }
+        Some("check-no-spec-refs-in-comments") => {
+            let workspace = workspace_root();
+            check_no_spec_refs_in_comments::run(&workspace)
+        }
         Some("check-claim-catalog") => {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
@@ -110,7 +115,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-forbidden-deps, check-core-runtime-free, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-no-overclaim, check-spec-numbers, check-no-spec-refs-in-comments, check-claim-catalog, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -151,6 +156,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-spec-numbers                     Reject duplicate numeric prefixes in specs/plans and specs/adrs"
+            );
+            eprintln!(
+                "  check-no-spec-refs-in-comments         Reject plan/PR/ADR/sprint/workstream citations in source comments"
             );
             eprintln!(
                 "  check-claim-catalog                    Verify specs/claims/catalog.md witnesses still exist in the tree"

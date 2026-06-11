@@ -1,7 +1,7 @@
-//! Plan 118 WS-1 Layer 1a — prelaunched-supervisor attach verify+merge.
+//! Prelaunched-supervisor attach verify+merge.
 //!
 //! The cold/legacy supervisor path extracts the admitted plan without
-//! re-verifying (host-trusted private stdin pipe, ADR-002). The warm path's
+//! re-verifying (host-trusted private stdin pipe). The warm path's
 //! control UDS is **same-uid-reachable**, so it is NOT a trusted private
 //! channel — this module re-verifies the signed `ExecutionPlan` (Ed25519
 //! signature + G4 window + nonce-replay) before the caller may `start_enter`.

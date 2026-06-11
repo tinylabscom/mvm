@@ -56,11 +56,10 @@ pub(in crate::commands) struct Args {
     /// but didn't change other code; or someone manually deleted
     /// `~/.mvm/volumes/deps/<hash>/` and wants the cache index
     /// cleared to repopulate. Skips the rootfs `nix build`.
-    /// Plan 73 Followup C.
     #[arg(long)]
     pub deps: bool,
     /// Force single-shot builds even when a persistent-builder
-    /// session is active. Default behavior (Plan 89 W3): when
+    /// session is active. By default, when
     /// `mvmctl persistent-builder start` has been run and the
     /// supervisor is alive, builds route through the persistent
     /// VM, amortizing the per-job boot fan-out. This flag forces
@@ -74,7 +73,7 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    // Plan 89 W3 part 7: `--no-persistent-builder` flips the
+    // `--no-persistent-builder` flips the
     // env-var bridge that `mvm_build::pipeline::dev_build` reads.
     // Set once at the top so every subsequent dispatch (flake /
     // manifest / mvmfile) sees the same toggle. We deliberately
@@ -84,7 +83,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     if args.no_persistent_builder {
         unsafe { std::env::set_var("MVM_NO_PERSISTENT_BUILDER", "1") };
     }
-    // Plan 73 Followup C: `--deps` narrows the build to the deps
+    // `--deps` narrows the build to the deps
     // volume only. We invalidate the cache index entries pointing at
     // the project's lockfile and short-circuit before the rootfs
     // build. The next install-pipeline run (`mvmctl build` without
@@ -305,7 +304,7 @@ fn build_flake(
     let build_env = mvm::build_env::default_build_env();
     let env = build_env.as_ref();
 
-    // Plan 166 Task 1.5: a steady-state `mvmctl build` runs the user's nix build
+    // A steady-state `mvmctl build` runs the user's nix build
     // inside the builder VM, which needs the layer-1 builder image (vmlinux +
     // rootfs.ext4) in cache. `dev up` bootstraps it on macOS, but the native-
     // Linux dev path never does — so ensure it here (Stage 0 honours the
@@ -463,13 +462,13 @@ fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
     );
 }
 
-/// Plan 73 Followup C — `mvmctl build --deps` implementation.
+/// `mvmctl build --deps` implementation.
 ///
 /// Narrows the build to the deps volume by invalidating the cache
 /// index entries pointing at lockfiles under the project root. The
 /// next install-pipeline run rebuilds the volume from scratch. We
 /// deliberately do NOT spawn the builder VM here — that's the
-/// install pipeline's job (Followup B.2), kicked off by the
+/// install pipeline's job, kicked off by the
 /// orchestrator on the next `mvmctl build` / `mvmctl up`.
 ///
 /// Invalidation strategy: walk `<deps_volumes_dir>/index/`, read

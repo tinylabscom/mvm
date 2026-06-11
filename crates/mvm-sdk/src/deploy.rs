@@ -1,13 +1,12 @@
 //! Deploy-bundle assembly for mvmd-owned control-plane flows.
 //!
 //! v1 ships the stub end of the contract: build the archive, embed
-//! `mvmd-spec.json` per ADR-0020 (mvmd-side, see
-//! `../../../mvmd/specs/adrs/0020-mvmctl-deploy-bundle-contract.md`),
-//! and call `MvmdClient::ship(bundle)` which currently logs the bundle
-//! and exits 0. The real HTTP transport (with Ed25519 signature scope
-//! over the whole archive bytes, idempotency by `sha256(body)`,
-//! tenant scoping, and the rejection taxonomy) lands once mvmd's
-//! `POST /v1/workloads` endpoint is implemented per Plan 48.
+//! the mvmd-side `mvmd-spec.json`, and call `MvmdClient::ship(bundle)`
+//! which currently logs the bundle and exits 0. The real HTTP transport
+//! (with Ed25519 signature scope over the whole archive bytes,
+//! idempotency by `sha256(body)`, tenant scoping, and the rejection
+//! taxonomy) lands once mvmd's `POST /v1/workloads` endpoint is
+//! implemented.
 //!
 //! ## Archive layout
 //!
@@ -35,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use crate::compile::{CompileError, archive_dir, compile};
 
 /// The mvmd-bound payload embedded into the deploy archive as
-/// `mvmd-spec.json`. Mirrors the schema fixed in mvmd ADR-0020.
+/// `mvmd-spec.json`. Mirrors the schema fixed mvmd-side.
 ///
 /// `#[serde(deny_unknown_fields)]` is the version gate — adding a
 /// field on either side requires a coordinated `schema_version` bump
@@ -286,8 +285,7 @@ fn hook_phase_hash(cmds: &[crate::ir::HookCmd]) -> String {
 
 /// Stub shipping transport. Today it logs the bundle path and the
 /// mvmd-side fields and returns Ok. The real client lands once
-/// mvmd's `POST /v1/workloads` endpoint is implemented (Plan 48
-/// Phase 1090).
+/// mvmd's `POST /v1/workloads` endpoint is implemented.
 pub struct MvmdClient {
     /// Reserved for the real client — `tinylabscom://mvmd` URL or a
     /// per-tenant override. Stub ignores the value.
@@ -304,9 +302,9 @@ impl MvmdClient {
     }
 
     /// Ship the bundle. v1 stub: log the archive path + the embedded
-    /// mvmd-spec to stderr; exits Ok. The real client (Plan 48
-    /// Phase 1090+) will sign the archive bytes with the host signer,
-    /// `POST /v1/workloads`, and surface mvmd's rejection codes.
+    /// mvmd-spec to stderr; exits Ok. The real client will sign the
+    /// archive bytes with the host signer, `POST /v1/workloads`, and
+    /// surface mvmd's rejection codes.
     pub fn ship(&self, bundle: &DeployBundle) -> Result<(), DeployError> {
         let archive_size = std::fs::metadata(&bundle.archive_path)
             .map(|m| m.len())

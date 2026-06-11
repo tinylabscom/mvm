@@ -1,4 +1,4 @@
-//! Verity sidecar generation for an ext4 image, per ADR-050.
+//! Verity sidecar generation for an ext4 image.
 //!
 //! `veritysetup format` produces a separate "hash device" (the
 //! Merkle tree over the rootfs's data blocks) plus a root hash.
@@ -18,14 +18,14 @@
 //!   tree's internal node size.
 //! - `--salt=00…00` (64 hex zeros) — pinned for determinism.
 //!   Any non-zero salt would tie the root hash to the salt,
-//!   defeating the ADR-050 per-digest verity cache.
+//!   defeating the per-digest verity cache.
 //! - `sha256` hash algorithm — what `mvm-verity-init` expects.
 //!
 //! ## Determinism story
 //!
 //! Two `seal_with_verity` runs against byte-identical inputs
 //! produce byte-identical sidecars *and* identical root hashes.
-//! This is the load-bearing invariant for ADR-050's per-digest
+//! This is the load-bearing invariant for the per-digest
 //! verity cache. The integration tests assert it.
 //!
 //! ## Host support
@@ -34,8 +34,8 @@
 //! installed via the `e2fsprogs`-adjacent `cryptsetup-bin` package
 //! (Debian/Ubuntu) or the `cryptsetup` package (Alpine, Fedora,
 //! Arch). On macOS / Windows the function returns
-//! [`OciUnpackError::HostUnsupported`]; the W1.5 CLI orchestrator
-//! routes through the libkrun builder VM per ADR-050.
+//! [`OciUnpackError::HostUnsupported`]; the CLI orchestrator
+//! routes through the libkrun builder VM.
 
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::ext4::MaterializedRootfs;
@@ -67,15 +67,15 @@ pub const MVM_VERITY_HASH_ALGORITHM: &str = "sha256";
 /// two `seal_with_verity` runs against byte-identical inputs produce
 /// non-byte-identical sidecars (the root hash is still deterministic,
 /// but the per-digest verity cache compares sidecar bytes too).
-/// Pinning it preserves the ADR-050 invariant. The value is the same
+/// Pinning it preserves the determinism invariant. The value is the same
 /// shape as `Mke2fsOptions::default().uuid` so the two artifacts read
 /// together coherently in diagnostics.
 pub const MVM_VERITY_PINNED_UUID: &str = "00000000-0000-0000-0000-000000000003";
 
 /// Knobs for [`seal_with_verity`]. Defaults are pinned to the
 /// values `mvm-verity-init` expects at boot; callers can
-/// override for tests or future ADRs but production paths should
-/// use `Default::default()`.
+/// override for tests but production paths should use
+/// `Default::default()`.
 #[derive(Debug, Clone)]
 pub struct VeritysetupOptions {
     /// Data block size in bytes. See module docs for why this
@@ -146,9 +146,8 @@ pub struct VeritySealedRootfs {
 /// - `<rootfs-stem>.roothash` for the text-file root hash
 ///
 /// Linux-only at runtime; non-Linux hosts return
-/// [`OciUnpackError::HostUnsupported`]. The W1.5 CLI
-/// orchestrator routes the macOS path through the libkrun
-/// builder VM per ADR-050.
+/// [`OciUnpackError::HostUnsupported`]. The CLI orchestrator
+/// routes the macOS path through the libkrun builder VM.
 pub fn seal_with_verity(
     rootfs: &MaterializedRootfs,
     options: &VeritysetupOptions,

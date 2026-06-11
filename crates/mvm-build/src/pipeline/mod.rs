@@ -21,8 +21,8 @@ pub mod vsock_builder;
 ///   `nix/dev/` flake (dev guest agent with `do_exec`, accessible
 ///   image), passes `--impure` so the override resolves.
 /// - `Prod`: no overrides, no `--impure`, prod guest agent
-///   (lacks `do_exec` per CLAUDE.md security claim 4), sealed
-///   image (W6.2 console gate refuses).
+///   (lacks `do_exec` per security claim 4), sealed image (the
+///   console gate refuses interactive access).
 ///
 /// Mirrors the auto-memory rule "image composition is transparent
 /// to the user — mvm picks dev-rich vs prod-slim contents based

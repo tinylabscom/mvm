@@ -1,16 +1,15 @@
 //! Signed-image verification primitive.
 //!
-//! Plan 36 / ADR 005. Extends W5.1 (`apple_container.rs::verify_artifact_hash`)
-//! by elevating the trust anchor from "TLS-fetched checksum file" to
-//! "cosign-keyless-signed manifest." The `SignedManifest` schema records
-//! every artifact's SHA-256 plus the input closure (Nix store hash, source
-//! git SHA, flake lockfile content hashes) so the input bytes are
-//! recoverable from the signed manifest alone.
+//! Extends `apple_container.rs::verify_artifact_hash` by elevating the trust
+//! anchor from "TLS-fetched checksum file" to "cosign-keyless-signed
+//! manifest." The `SignedManifest` schema records every artifact's SHA-256
+//! plus the input closure (Nix store hash, source git SHA, flake lockfile
+//! content hashes) so the input bytes are recoverable from the signed
+//! manifest alone.
 //!
-//! This module is consumed by mvmctl on `dev up` (mvm plan 36) and by mvmd
-//! on pool image verification (mvmd plan 23). The typed `VerifyError`
-//! contract lets mvmd's reconciliation loop pattern-match outcomes
-//! instead of crash-looping on `anyhow::Error`.
+//! This module is consumed by mvmctl on `dev up` and by mvmd on pool image
+//! verification. The typed `VerifyError` contract lets mvmd's reconciliation
+//! loop pattern-match outcomes instead of crash-looping on `anyhow::Error`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -173,8 +172,8 @@ pub fn parse_manifest(bytes: &[u8]) -> VerifyResult<SignedManifest> {
 /// `cosign_bundle` is the modern Sigstore format produced by
 /// `cosign sign-blob --bundle`; the existing release workflow already
 /// uses this format for `mvmctl` tarballs and the SBOM
-/// (`release.yml::Sign release tarballs and SBOM`). Plan 36 reuses the
-/// same format for image manifests.
+/// (`release.yml::Sign release tarballs and SBOM`). Image manifests
+/// reuse the same format.
 ///
 /// `expected_identity` is the *exact* SAN that the signing certificate
 /// must carry — e.g.
@@ -223,11 +222,10 @@ pub fn verify_manifest(
     let policy = Identity::new(expected_identity, expected_issuer);
 
     // `offline = false` lets the verifier consult Rekor for the
-    // transparency log entry. Plan 36's "offline-bundle" path
+    // transparency log entry. The "offline-bundle" path
     // (`offline = true`) is reachable when the bundle already includes
     // the inclusion proof inline — wire that into mvmd's reconciliation
-    // loop in plan 23 Phase 1, where re-querying Rekor on every pool
-    // verify is too expensive.
+    // loop, where re-querying Rekor on every pool verify is too expensive.
     verifier
         .verify(manifest_bytes, bundle, &policy, false)
         .map_err(|e| VerifyError::SignatureInvalid {
@@ -244,9 +242,9 @@ pub fn verify_manifest(
 /// reuse the verifier for revocation lists, advisory feeds, or any
 /// other signed JSON the project publishes.
 ///
-/// Plan 36 PR-C.3 introduced this so `mvm-cli`'s revocation-list
-/// fetcher doesn't have to depend on the `sigstore` crate directly:
-/// the verification primitive stays inside `mvm-security`.
+/// This exists so `mvm-cli`'s revocation-list fetcher doesn't have to
+/// depend on the `sigstore` crate directly: the verification primitive
+/// stays inside this crate.
 #[cfg(feature = "manifest-verify")]
 pub fn verify_signed_payload(
     payload_bytes: &[u8],
@@ -311,9 +309,9 @@ pub fn verify_manifest(
 }
 
 /// Confirm a manifest's `version` field matches the runtime's expected
-/// version. Plan 36 pins `manifest.version == env!("CARGO_PKG_VERSION")`
-/// exactly — no "newer is fine," because every release has its own
-/// signed manifest and the trust chain is tag-bound.
+/// version. Pins `manifest.version == env!("CARGO_PKG_VERSION")` exactly
+/// — no "newer is fine," because every release has its own signed
+/// manifest and the trust chain is tag-bound.
 pub fn check_version_pin(manifest: &SignedManifest, runtime_version: &str) -> VerifyResult<()> {
     if manifest.version == runtime_version {
         Ok(())
@@ -356,8 +354,8 @@ pub fn check_revocation(
 
 /// Stream `path` through SHA-256 and compare to `expected.sha256`. On
 /// mismatch, delete the file and return `DigestMismatch`. The
-/// delete-on-mismatch behaviour matches W5.1
-/// (`apple_container.rs::verify_artifact_hash`).
+/// delete-on-mismatch behaviour matches
+/// `apple_container.rs::verify_artifact_hash`.
 ///
 /// Callers that want to keep the file for forensics should hash it
 /// directly with `sha256_file` and compare manually.

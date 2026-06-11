@@ -10,9 +10,8 @@
 //!    contributor environments that don't have `e2fsprogs`
 //!    installed shouldn't see false negatives.
 //! 3. The CI lane that runs them is the same Linux KVM lane that
-//!    already runs the Plan 72 W3 verity regression — the host
-//!    has `mke2fs` from `e2fsprogs` and the privilege bits
-//!    `mke2fs -d` needs.
+//!    already runs the verity regression — the host has `mke2fs`
+//!    from `e2fsprogs` and the privilege bits `mke2fs -d` needs.
 
 #![cfg(target_os = "linux")]
 
@@ -96,7 +95,7 @@ fn materialize_is_byte_deterministic_for_the_same_input() {
         return;
     }
 
-    // ADR-050's verity cache invariant: a single staging tree
+    // The verity cache invariant: a single staging tree
     // materialised twice must produce byte-identical ext4 output.
     //
     // We deliberately reuse one staging tree across the two
@@ -147,7 +146,7 @@ fn materialize_through_unpack_round_trip() {
     }
 
     // Build a tar in memory, unpack it via ImageStaging, then
-    // materialize. Covers the W1.3a → W1.3b boundary.
+    // materialize. Covers the unpack → materialize boundary.
     use tar::{Builder, Header};
     let mut b = Builder::new(Vec::new());
     let body = b"unpack-then-materialize\n";

@@ -1,10 +1,10 @@
-//! Plan 63 W4 — tenant secret storage.
+//! Tenant secret storage.
 //!
 //! Operators provision tenant-scoped secrets (API tokens, OAuth
 //! refresh tokens, webhook signing secrets, etc.) via `mvmctl
 //! secret put`. The supervisor surfaces them inside a workload's
-//! sandbox via `/run/mvm-secrets/<name>` at admission time (plan 37
-//! §12 / `mvm-supervisor::keystore::SecretGrant`).
+//! sandbox via `/run/mvm-secrets/<name>` at admission time (the
+//! `mvm-supervisor::keystore::SecretGrant`).
 //!
 //! ## Storage backends
 //!
@@ -40,9 +40,8 @@
 //! ## What this module does NOT do
 //!
 //! - **Inject secrets into VMs.** That's the supervisor's
-//!   `KeystoreReleaser` (plan-37 §12.2). This module is the
-//!   operator-facing CRUD surface; the supervisor pulls from it at
-//!   admission.
+//!   `KeystoreReleaser`. This module is the operator-facing CRUD
+//!   surface; the supervisor pulls from it at admission.
 //! - **Multi-host replication.** Single-host only; mvmd's secret
 //!   service handles fleets.
 
@@ -62,7 +61,7 @@ use crate::crypto::snapshot_crypto;
 
 /// Service name for OS-native keyring entries. Distinct from
 /// `crate::crypto::keystore::KEYRING_SERVICE` so per-tenant master
-/// keys (W3) and per-name tenant secrets (W4) don't collide.
+/// keys and per-name tenant secrets don't collide.
 pub const KEYRING_SERVICE: &str = "mvm-secrets";
 #[cfg(target_os = "macos")]
 const KEYRING_TARGET: &str = "mvm-tenant-secrets";
@@ -83,7 +82,7 @@ const FILE_STORE_KEYRING_USER: &str = "file-backend-key";
 
 /// Multi-key tenant-scoped secret store. Separate from
 /// [`crate::crypto::keystore::KeyProvider`] (which is single-key, tenant-
-/// scoped, used for the per-tenant *master DEK* — plan 63 W3).
+/// scoped, used for the per-tenant *master DEK*).
 pub trait SecretStore: Send + Sync {
     /// Store `value` under `(tenant, name)`. Overwrites any
     /// existing value silently — operators rotating a token want

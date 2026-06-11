@@ -1,5 +1,5 @@
-//! Plan 73 Followup D — fixture-sealer + gate-probe helper for the
-//! `app-deps-audit` CI smoke harness.
+//! Fixture-sealer + gate-probe helper for the `app-deps-audit` CI
+//! smoke harness.
 //!
 //! The harness needs to (a) seal realistic sealed-volume fixtures into
 //! a scratch deps-volumes cache, (b) drive the prod/dev gate against
@@ -7,8 +7,7 @@
 //! freshly sealed volume. None of (a)/(b)/(c) requires a builder VM —
 //! the wire shape is what `mvm_sdk::compile::deps_audit::seal_volume`
 //! produces, so re-using the same sealer here keeps the smoke aligned
-//! with the supervisor's verifier (Followup A) and the builder VM's
-//! emitter (Followup B.2).
+//! with the supervisor's verifier and the builder VM's emitter.
 //!
 //! This is **not** a library binary. It exists only so the shell-level
 //! CI smoke (`scripts/test-app-deps-ci-gate.sh`) can drive the same

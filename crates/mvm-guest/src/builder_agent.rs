@@ -20,22 +20,22 @@ pub enum HostVmRequest {
 /// Vsock port used by the builder agent.
 pub const BUILDER_AGENT_PORT: u32 = 21470;
 
-/// Vsock port used by Plan 89's persistent builder VM dispatch
-/// channel. Separate from [`BUILDER_AGENT_PORT`] (the legacy guest-
-/// listener used by [`HostVmRequest::Build`] / [`HostVmRequest::Ping`]
-/// above) because the Plan 89 wire (`mvm_build::builder_protocol`)
-/// is a different protocol with different semantics — the two
-/// channels coexist while the legacy path is in use elsewhere.
+/// Vsock port used by the persistent builder VM dispatch channel.
+/// Separate from [`BUILDER_AGENT_PORT`] (the legacy guest-listener
+/// used by [`HostVmRequest::Build`] / [`HostVmRequest::Ping`] above)
+/// because the dispatch wire (`mvm_build::builder_protocol`) is a
+/// different protocol with different semantics — the two channels
+/// coexist while the legacy path is in use elsewhere.
 ///
-/// W2 part 2: this port is added to the libkrun builder VM's vsock
-/// config; the host opens the corresponding Unix-socket-proxy at
+/// This port is added to the libkrun builder VM's vsock config; the
+/// host opens the corresponding Unix-socket-proxy at
 /// `<vm_state_dir>/vsock-21471.sock` to receive
 /// [`mvm_build::builder_protocol::HostVmResponse`] frames from the
-/// guest. The guest-side send code lands in W2 part 3.
+/// guest.
 pub const BUILDER_DISPATCH_PORT: u32 = 21471;
 
-/// Plan 107 A3 — AF_VSOCK port the in-host-VM workload forwarder
-/// listens on (the nesting hop). Registered on the persistent host
+/// AF_VSOCK port the in-host-VM workload forwarder listens on (the
+/// nesting hop). Registered on the persistent host
 /// VM's libkrun vsock config alongside [`BUILDER_DISPATCH_PORT`]; the
 /// host opens `<vm_state_dir>/vsock-21472.sock` and the forwarder
 /// multiplexes per workload (see
@@ -45,8 +45,8 @@ pub const BUILDER_DISPATCH_PORT: u32 = 21471;
 /// on each side catch divergence.
 pub const WORKLOAD_FORWARD_PORT: u32 = 21472;
 
-/// Plan 107 A3 — encode the workload-forward multiplex handshake the
-/// in-host-VM forwarder reads before splicing: a u32-BE length prefix
+/// Encode the workload-forward multiplex handshake the in-host-VM
+/// forwarder reads before splicing: a u32-BE length prefix
 /// followed by UTF-8 `"<workload_id> <port>"`. The host's
 /// `NestingHopTransport` writes this on connect; the guest side
 /// (`mvm_host_vm_init::workload_proxy::read_handshake`) parses it.

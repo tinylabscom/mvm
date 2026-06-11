@@ -1,11 +1,11 @@
-//! Rust-native Vz supervisor objc2 bridge (Plan 152 WS-B).
+//! Rust-native Vz supervisor objc2 bridge.
 //!
 //! Drives Apple's `Virtualization.framework` directly from Rust via the
 //! `objc2` stack — the replacement for the (removed) Swift supervisor.
 //! One guest per process; nothing depends on this as a library beyond the
 //! sibling `mvm-vz-supervisor` `[[bin]]`.
 //!
-//! **Threading (Plan 152 WS-B decision).** Every `VZVirtualMachine` call runs
+//! **Threading.** Every `VZVirtualMachine` call runs
 //! on a private serial dispatch queue — the model the Swift supervisor already
 //! shipped (`Supervisor.swift`), ported rather than swapped for a main-thread
 //! `CFRunLoop`. The non-`Send` objc2 handles live behind that queue; a small
@@ -21,7 +21,7 @@
 //! the in-process flow-audit `payload_tap` (claim 10); the control socket
 //! (STATUS/PAUSE/RESUME/BALLOON/SAVE) and `Restore` startup mode with the
 //! machine-id sidecar; and the workload-exit channel. Deferred (separate plans):
-//! WS-D nested-virt `/dev/kvm`; WS-C rootfs-provider/SLIRP notes.
+//! nested-virt `/dev/kvm`; rootfs-provider/SLIRP notes.
 
 use std::cell::Cell;
 use std::io;
@@ -657,8 +657,8 @@ impl VmConn {
     ///
     /// `saveMachineStateToURL` requires a paused VM (an unpaused one errors with
     /// `VZErrorDomain:3`), but the host sends `SAVE` on a running guest — so we
-    /// pause here, save, then resume: a consistent live checkpoint, the
-    /// `pause → save` order from the ADR-056 addendum. If the guest is already
+    /// pause here, save, then resume: a consistent live checkpoint in
+    /// `pause → save` order. If the guest is already
     /// paused (a caller pre-paused), we save in place and leave it paused.
     async fn save(&self, path: &str) -> Result<()> {
         // VZ refuses to overwrite an existing save file.
@@ -766,7 +766,7 @@ pub struct VzSupervisor {
     exit_task: Option<JoinHandle<()>>,
     /// Retains the exit-port `VZVirtioSocketListener` for the VM's lifetime.
     _exit_listener: Option<ExitListenerHandle>,
-    /// In-process flow-audited gvproxy bridge thread (Plan 152 WS-B slice 8).
+    /// In-process flow-audited gvproxy bridge thread.
     /// Held for its lifetime; process exit reaps it. `None` when no audit
     /// substrate (direct gvproxy attach) or no network.
     _bridge: Option<std::thread::JoinHandle<()>>,
@@ -1159,9 +1159,9 @@ async fn run_control_socket(conn: VmConn, listener: UnixListener) {
     }
 }
 
-/// Execute one control verb and format the single-line response. SAVE/RESTORE
-/// are deliberately refused — snapshot is a later WS-B slice, and RESTORE is a
-/// supervisor startup mode, not a runtime command (matches the Swift response).
+/// Execute one control verb and format the single-line response. RESTORE is
+/// deliberately refused — it is a supervisor startup mode, not a runtime
+/// command (matches the Swift response).
 async fn dispatch_control(conn: &VmConn, command: &str) -> String {
     let (verb, arg) = command
         .split_once(' ')
@@ -1222,7 +1222,7 @@ type BuiltConfig = (
     Option<PendingBridge>,
 );
 
-/// Plan 97 Security §8 / ADR-056 "Resource-cap parity" — refuse an over- or
+/// Resource-cap parity — refuse an over- or
 /// under-allocated request with a legible error rather than VZ's opaque
 /// `validateWithError`. Defense in depth: host admission already gates resources
 /// against the signed plan (claim 8), but an entitled hypervisor-driving process
@@ -1305,7 +1305,7 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     unsafe { vz_config.setPlatform(&platform) };
 
     // Disks → virtio-blk in declared order (rootfs /dev/vda, overlay, verity
-    // sidecar, app-deps volume …). Raw image format per Plan 97.
+    // sidecar, app-deps volume …). Raw image format.
     if !config.disks.is_empty() {
         let mut devices = Vec::with_capacity(config.disks.len());
         for disk in &config.disks {
@@ -1430,8 +1430,8 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
         unsafe { vz_config.setMemoryBalloonDevices(&array) };
     }
 
-    // Network (optional). gvproxy-backed virtio-net (ADR-055 — passt is
-    // Linux-only). The flow-audited path (events_ingest set) is the in-process
+    // Network (optional). gvproxy-backed virtio-net (passt is Linux-only).
+    // The flow-audited path (events_ingest set) is the in-process
     // payload_tap slice; until then it fails closed so claim-10 egress audit is
     // never silently bypassed.
     match &config.network {
@@ -1493,7 +1493,7 @@ fn load_machine_identifier(path: &str) -> Result<Retained<VZGenericMachineIdenti
 }
 
 /// The supervisor's half of the guest-NIC socketpair, handed to the in-process
-/// gvproxy bridge (Plan 152 WS-B slice 8). Carried out of `build_vz_config`
+/// gvproxy bridge. Carried out of `build_vz_config`
 /// because the bridge is spawned after the VM is created.
 struct PendingBridge {
     supervisor_fd: OwnedFd,
@@ -1577,7 +1577,7 @@ fn bump_socket_buffers(fd: std::os::fd::RawFd) {
 }
 
 /// Construct the gateway `BridgeConfig` from the config's audit substrate and
-/// spawn the in-process flow-audited gvproxy bridge (Plan 152 WS-B slice 8).
+/// spawn the in-process flow-audited gvproxy bridge.
 /// Mirrors the libkrun supervisor's `run_with_bridge`: decode the signed plan +
 /// bundle, open the chain `FileAuditSigner`, resolve the observer chain, then
 /// `spawn_bridge_thread(VzGvproxy)`. Fail-closed: a malformed substrate refuses

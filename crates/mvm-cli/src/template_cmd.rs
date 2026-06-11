@@ -9,13 +9,13 @@ fn now_iso() -> String {
 }
 
 /// Initialize a project: scaffold `mvm.toml` + `flake.nix` (+ NixOS
-/// config) in the given directory. Plan 38 §4 — called from the
-/// `mvmctl init <DIR>` smart-dispatch in `commands/env/init.rs`.
+/// config) in the given directory. Called from the `mvmctl init <DIR>`
+/// smart-dispatch in `commands/env/init.rs`.
 ///
 /// `local` is preserved for source compatibility with the CLI args
-/// shape; project-scaffold is always local in plan 38 (the legacy
-/// `--vm` mode that initialised a directory inside the Lima VM is
-/// gone with the rest of the `template *` namespace).
+/// shape; project-scaffold is always local now (the legacy `--vm` mode
+/// that initialised a directory inside the Lima VM is gone with the
+/// rest of the `template *` namespace).
 pub fn init(
     name: &str,
     local: bool,
@@ -31,10 +31,10 @@ pub fn init(
     let selected_preset = resolve_scaffold_preset(preset, prompt);
     let dir = std::path::Path::new(base_dir).join(name);
     scaffold_template_files(&dir, name, &selected_preset, prompt)?;
-    // Plan 74 W5: every scaffold must end with a runnable sample
-    // command AND a cleanup hint so the user has a complete loop
-    // before they leave the init prompt. The renderer is split
-    // out for testability — `next_steps_lines` is pure.
+    // Every scaffold must end with a runnable sample command AND a
+    // cleanup hint so the user has a complete loop before they leave
+    // the init prompt. The renderer is split out for testability —
+    // `next_steps_lines` is pure.
     for line in next_steps_lines(&dir, name) {
         crate::ui::info(&line);
     }
@@ -46,10 +46,9 @@ pub fn init(
 /// terminal `\n`); the caller pipes them through whichever
 /// renderer it uses. Pure — no I/O.
 ///
-/// Plan 74 W5: pairs `mvmctl doctor --workflow cli-run` with the
-/// build/boot command and a cleanup pair (stop the VM + remove
-/// the scaffold) so first-use feedback names exactly one next
-/// action per phase.
+/// Pairs `mvmctl doctor --workflow cli-run` with the build/boot
+/// command and a cleanup pair (stop the VM + remove the scaffold)
+/// so first-use feedback names exactly one next action per phase.
 fn next_steps_lines(dir: &std::path::Path, name: &str) -> Vec<String> {
     let dir_display = dir.display().to_string();
     vec![
@@ -67,12 +66,12 @@ fn next_steps_lines(dir: &std::path::Path, name: &str) -> Vec<String> {
     ]
 }
 
-// Plan 38 §4 (slice 7b): create_single, create_multi, list, info,
-// edit, delete, build, push, pull, verify, load_config,
-// local_templates were all removed with the `mvmctl template *`
-// namespace. Project scaffolding (`init` above) is the only public
-// entry point that remains in this file; everything below this line
-// is private scaffolding/LLM-planner support that `init` calls into.
+// create_single, create_multi, list, info, edit, delete, build, push,
+// pull, verify, load_config, local_templates were all removed with the
+// `mvmctl template *` namespace. Project scaffolding (`init` above) is
+// the only public entry point that remains in this file; everything
+// below this line is private scaffolding/LLM-planner support that
+// `init` calls into.
 
 fn flake_content_for_preset(preset: &str) -> Result<&'static str> {
     match preset {
@@ -1170,7 +1169,7 @@ mod tests {
         assert_eq!(validated.summary, "Python API with postgres");
     }
 
-    // ----- Local-LLM probe tests (Proposal C) ---------------------------
+    // ----- Local-LLM probe tests ---------------------------
     //
     // These tests mutate process-global env vars (MVM_TEMPLATE_*,
     // OPENAI_API_KEY) so they must serialize via probe_test_lock().
@@ -1351,7 +1350,7 @@ mod tests {
         clear_llm_env();
     }
 
-    // ---------------- next_steps_lines (plan 74 W5 slice 3) ----------------
+    // ---------------- next_steps_lines ----------------
 
     #[test]
     fn next_steps_lines_includes_doctor_workflow_preflight() {
@@ -1383,8 +1382,8 @@ mod tests {
     fn next_steps_lines_includes_cleanup_pair() {
         let lines = next_steps_lines(std::path::Path::new("/tmp/my-app"), "my-app");
         // Both halves of the cleanup pair (stop the VM AND remove the
-        // scaffold) must appear — plan 74 W5 asks for the full loop
-        // not just the build/boot half.
+        // scaffold) must appear — the scaffold owes the user the full
+        // loop, not just the build/boot half.
         assert!(
             lines.iter().any(|l| l.contains("mvmctl down")),
             "scaffold must include a VM-stop cleanup hint; got: {lines:?}"

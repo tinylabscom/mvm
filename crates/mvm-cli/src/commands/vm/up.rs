@@ -38,7 +38,7 @@ use mvm_core::policy::PolicyBundle;
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
 /// the workspace `clippy::too_many_arguments = "deny"` ceiling and so
-/// future callers (W5 policy slots) can extend the shape without
+/// future callers (policy slots) can extend the shape without
 /// churning every call site.
 /// In-memory `BundleResolver` scoped to a single admission. Used
 /// when `mvmctl up --bundle-pin <path>` already has the archive
@@ -66,7 +66,7 @@ use super::readiness::record_vm_readiness;
 
 /// Cadence at which the foreground `mvmctl up` Ctrl+C wait loop
 /// re-polls integration health to detect `Active` → `Error`
-/// regressions (ADR-053 §3 / plan 74 W2 "Degraded follow-up"). Set
+/// regressions (the "Degraded follow-up"). Set
 /// at 10 s — slow enough that the registry file isn't thrashed when
 /// services are stable, fast enough that an operator running
 /// `mvmctl ls --json` sees the new state within one breath of a
@@ -126,7 +126,7 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// Tests inject a tempdir; production passes `None`.
     pub audit_dir: Option<&'a std::path::Path>,
     /// Override for the policy-bundle root (`~/.mvm/policies/`). The
-    /// W5 resolver reads `<dir>/<tenant>/<workload>.toml` when a
+    /// resolver reads `<dir>/<tenant>/<workload>.toml` when a
     /// plan's policy refs name a tenant-scoped bundle; tests inject a
     /// tempdir so a bogus bundle can be staged without touching the
     /// real user's home.
@@ -138,10 +138,10 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// thread `args.bundle_pin`; tests pass `None`.
     pub bundle_pin: Option<&'a std::path::Path>,
     /// Optional deps-volume binding produced by `mvmctl up`'s
-    /// install pipeline (Plan 73 Followup B.3). When `Some`, the
+    /// install pipeline. When `Some`, the
     /// synthesised `ExecutionPlan` carries `deps_volume = Some(...)`,
-    /// and the supervisor's admission gate (Followup A) re-verifies
-    /// the on-disk sealed volume before launch — ADR-047 claim 9.
+    /// and the supervisor's admission gate re-verifies
+    /// the on-disk sealed volume before launch — claim 9.
     /// `None` preserves the claim-8 baseline (no deps gate).
     pub deps_volume: Option<mvm_core::plan::DepsVolumeBinding>,
     /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`) baked
@@ -213,7 +213,7 @@ impl std::fmt::Debug for AdmissionContext {
     }
 }
 
-/// Run plan-64 admission (`synthesize → sign → verify → check_window →
+/// Run admission (`synthesize → sign → verify → check_window →
 /// nonce`) right before a backend `start()`. Called from every
 /// `mvmctl up` call site that boots a VM: the main path, the
 /// `MVM_DIRECT_BOOT` launchd branch, and the `--watch` rebuild loop.
@@ -252,7 +252,7 @@ pub(super) fn admit_plan_for_boot(
         )
     })?;
 
-    // ADR-002 claim 9 — bundle pin (when supplied).
+    // Claim 9 — bundle pin (when supplied).
     //
     // Read the archive bytes, verify them against the local trust
     // store, then construct the `PlanArtifact` triple
@@ -448,7 +448,7 @@ fn build_policy_audit_emitter(
     }
 }
 
-/// Run the W5 policy resolver against the admitted plan and return the
+/// Run the policy resolver against the admitted plan and return the
 /// policy-derived audit configuration for emitter construction.
 ///
 /// `policy_dir` is the override for `~/.mvm/policies/`; production
@@ -589,7 +589,7 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
     }
 }
 
-/// Plan 73 Followup B.3 — resolve a deps-volume binding for the
+/// Resolve a deps-volume binding for the
 /// supplied Workload IR.
 ///
 /// When `workload_ir_path = None` the function returns `Ok(None)` and
@@ -599,7 +599,7 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 /// `Dependencies::Node` declaration, runs `install_app_deps` against
 /// the host cache (driver = `None`: cache-hit-only — `mvmctl up`
 /// does not spawn the builder VM today; `mvmctl deps build`
-/// (Followup C) is the verb that drives the cache-miss path) and
+/// is the verb that drives the cache-miss path) and
 /// then runs `apply_install_gate` on the resolved volume. On `--prod`
 /// any gate-error bubbles as `anyhow::Error`; on `--dev` warnings
 /// are logged and the function still returns the binding.
@@ -624,7 +624,7 @@ fn resolve_deps_volume_binding(
 /// IR by hand. It also closes a footgun: the secrets are lowered whenever the
 /// artifact declares them, so a forgotten flag can't silently boot a workload
 /// without the binding it needs. A remote/attr flake ref or a missing file
-/// yields `None` (a plain flake, no managed secrets). Plan 129 / ADR-067.
+/// yields `None` (a plain flake, no managed secrets).
 fn resolve_workload_ir_path(
     from_workload_ir: Option<&std::path::Path>,
     flake_ref: Option<&str>,
@@ -639,7 +639,7 @@ fn resolve_workload_ir_path(
 /// Whether `up` threads the signed plan + tenant (`populate_audit_substrate`)
 /// onto the backend `VmStartConfig`. Two independent consumers want it:
 ///
-/// - **QEMU substitution endpoint** (Plan 129 / ADR-067): spawned when the
+/// - **QEMU substitution endpoint**: spawned when the
 ///   admitted plan carries secrets — `QemuBackend::start` reads
 ///   `config.plan_json` + `tenant_id` to launch the per-VM moat. QEMU has **no**
 ///   gateway-bridge path, so threading the plan only enables the endpoint;
@@ -683,10 +683,10 @@ fn resolve_deps_volume_binding_with_cache(
     let workload: mvm_sdk::ir::Workload = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
 
-    // v1 surface: one app per workload. ADR-0009; the IR validator
+    // v1 surface: one app per workload. The IR validator
     // (`mvm validate`) rejects empty `apps`, so `[0]` is safe on a
     // validated IR. Multi-app workloads with mixed dep declarations
-    // are a future ADR — punt now.
+    // are a future concern — punt now.
     let Some(app) = workload.apps.first() else {
         anyhow::bail!(
             "workload IR at {} has no apps; --from-workload-ir requires at least one app",
@@ -728,9 +728,9 @@ fn resolve_deps_volume_binding_with_cache(
 
     // Driver = None: `mvmctl up` is the consumer of an already-built
     // deps volume. The cache-miss → builder-VM dispatch is the job of
-    // `mvmctl deps build` (Followup C). On a miss we surface the
+    // `mvmctl deps build`. On a miss we surface the
     // typed `DriverNotProvided` to the user with a pointer to that
-    // verb (lands in C).
+    // verb.
     let install = mvm_build::app_deps::install_app_deps(&spec, None).map_err(|e| match e {
         mvm_build::app_deps::InstallError::DriverNotProvided { .. } => anyhow::anyhow!(
             "no cached deps volume for this lockfile; run `mvmctl deps build \
@@ -758,10 +758,10 @@ fn resolve_deps_volume_binding_with_cache(
     Ok(Some(binding))
 }
 
-/// Plan 129 Stage 2 (S2.2) — stage the per-VM egress-TLS material for a
+/// Stage the per-VM egress-TLS material for a
 /// secret-bearing plan. Mints the name-constrained intermediate, pushes its
 /// **cert** onto the guest secrets drive (`secret_files`, so the guest can trust
-/// host-terminated bound-host TLS once the S2.3 boot step installs it), and
+/// host-terminated bound-host TLS once the boot step installs it), and
 /// persists the cert+**key** to a host-only `egress-intermediate.json`
 /// (mode 0600) in the VM state dir for `spawn_egress_endpoint` to hand the
 /// terminator endpoint. The key never enters `secret_files` / the guest.
@@ -802,7 +802,7 @@ fn stage_egress_tls_delivery(
     let refs: Vec<&str> = bound.iter().map(String::as_str).collect();
     let delivery = mvm_backend::build_egress_tls_delivery(&refs, &ca_dir)?;
 
-    // Guest trusts the cert (delivered via the secrets drive; S2.3 installs it).
+    // Guest trusts the cert (delivered via the secrets drive; the boot step installs it).
     secret_files.push(delivery.guest_cert.clone());
 
     // Host-only intermediate (cert+key) for the terminator endpoint — mode 0600
@@ -914,7 +914,7 @@ pub(in crate::commands) struct Args {
     /// Bind a Prometheus metrics endpoint on this port (0 = disabled)
     #[arg(long, default_value = "0")]
     pub metrics_port: u16,
-    /// Plan 118 WS-1 1b — keep this many prelaunched supervisor standbys warm so the next
+    /// Keep this many prelaunched supervisor standbys warm so the next
     /// auto-named `up` claims one instead of cold-booting. 0 (default) = feature off. Only
     /// the libkrun backend has a standby pool today; a claim uses the gateway-bridge path.
     #[arg(long, default_value = "0")]
@@ -929,7 +929,7 @@ pub(in crate::commands) struct Args {
     #[arg(short, long)]
     pub detach: bool,
     /// Block until the workload powers off, then exit with its code
-    /// (one-shot workloads). Plan 152 WS-A.
+    /// (one-shot workloads).
     #[arg(long, conflicts_with_all = ["detach", "up_json"])]
     pub wait: bool,
     /// Network preset (unrestricted, none, registries, dev)
@@ -940,8 +940,7 @@ pub(in crate::commands) struct Args {
     pub network_allow: Vec<String>,
     /// Seccomp profile tier (essential, minimal, standard, network, unrestricted).
     ///
-    /// Default: `standard`. `unrestricted` is opt-in only — see ADR-002
-    /// (`specs/adrs/002-microvm-security-posture.md`); the project's
+    /// Default: `standard`. `unrestricted` is opt-in only; the project's
     /// posture is "defaults must be safe."
     #[arg(long, default_value = "standard")]
     pub seccomp: String,
@@ -961,16 +960,16 @@ pub(in crate::commands) struct Args {
     /// Default behaviour resumes on connect.
     #[arg(long)]
     pub no_auto_resume: bool,
-    /// Tenant for the synthesized `ExecutionPlan` (plan 64). When
+    /// Tenant for the synthesized `ExecutionPlan`. When
     /// unset the value is resolved via the 4-level precedence chain
-    /// (ADR-064 §Decision 9 — built-in `"local"` →
+    /// (built-in `"local"` →
     /// `~/.mvm/config.toml` `[tenant] name` → `MVM_TENANT` env →
     /// `--tenant` flag). Identity / `mvmctl auth` is the subject of
-    /// a separate ADR + plan (Plan M); this flag is just the audit
+    /// a separate effort; this flag is just the audit
     /// chain string label.
     #[arg(long)]
     pub tenant: Option<String>,
-    /// Skip plan-64 admission (`synthesize → sign → verify → check_window
+    /// Skip admission (`synthesize → sign → verify → check_window
     /// → nonce`). One-release escape hatch; prints a deprecation warning
     /// when set. Will be removed once admission is the only path.
     #[arg(long)]
@@ -986,7 +985,7 @@ pub(in crate::commands) struct Args {
     #[arg(long, value_name = "PATH")]
     pub bundle_pin: Option<std::path::PathBuf>,
     /// Build-mode override flags (`--dev` / `--prod`). Default: `--prod`.
-    /// These also drive the Plan 73 Followup B.3 app-deps gate when
+    /// These also drive the app-deps gate when
     /// `--from-workload-ir` is set: `--prod` fails closed on missing
     /// SBOM / missing CVE scan / high or critical CVE findings;
     /// `--dev` warns and continues.
@@ -996,26 +995,26 @@ pub(in crate::commands) struct Args {
     /// When the IR carries `App.dependencies = Dependencies::Python
     /// | Dependencies::Node`, `mvmctl up` resolves the lockfile
     /// through `mvm_build::app_deps::install_app_deps` (cache-hit
-    /// only — Plan 73 Followup B.3 does not spawn the builder VM
-    /// from `mvmctl up`; the volume must already exist) and pins
+    /// only — `mvmctl up` does not spawn the builder VM
+    /// from this path; the volume must already exist) and pins
     /// the resulting `DepsVolumeBinding` into the synthesized
     /// `ExecutionPlan`. When omitted or when the IR carries
     /// `Dependencies::None`, the plan's `deps_volume` is `None`
-    /// (claim-8 preserved). ADR-047 claim 9.
+    /// (claim-8 preserved; claim 9).
     #[arg(long = "from-workload-ir", value_name = "PATH")]
     pub from_workload_ir: Option<std::path::PathBuf>,
-    /// Plan 76 Phase 7 — explicit operator acknowledgement that the
+    /// Explicit operator acknowledgement that the
     /// selected backend's isolation tier is acceptable for this launch.
     /// A non-Tier-1 backend (libkrun, qemu, Apple Container, vz) requires
     /// this flag. A future `--prod` mode will *block* rather than warn;
     /// today we surface the signal without changing default behaviour.
-    /// Plan 76 §"libkrun isolation is not Firecracker isolation".
+    /// libkrun isolation is not Firecracker isolation.
     #[arg(long)]
     pub accept_tier2_isolation: bool,
 
     /// Emit a one-line JSON envelope on stdout when the VM is up.
     /// Routes the friendly `[mvm]` chrome to stderr so the SDK
-    /// live-mode transport (Plan 73 Followup H-live) can parse a
+    /// live-mode transport can parse a
     /// single JSON document instead of teaching the SDK to scrape
     /// the human-formatted log.
     ///
@@ -1044,7 +1043,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
     super::super::env::apple_container::sweep_orphaned_vm_helpers_on_startup();
 
-    // Plan 76 Phase 7 — surface the backend's isolation tier
+    // Surface the backend's isolation tier
     // when it isn't Tier 1, unless the operator explicitly
     // acknowledged the downgrade. This is observational today;
     // a future `--prod` mode will hard-fail instead.
@@ -1072,7 +1071,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let effective_cpus = args.cpus.or(Some(cfg.default_cpus));
     let effective_memory = memory_mb.or(Some(cfg.default_memory_mib));
 
-    // Plan 38 §4: `--manifest <PATH>` accepts a manifest path or its
+    // `--manifest <PATH>` accepts a manifest path or its
     // directory in addition to legacy names. Resolve the arg up front
     // and substitute the slot hash for downstream lookups; the
     // dispatched variants in lifecycle.rs branch on
@@ -1086,12 +1085,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         None => None,
     };
 
-    // Plan 32 §D ergonomic follow-up: if neither --network-preset nor
+    // If neither --network-preset nor
     // --network-allow is supplied, consult the template's baked-in
     // `default_network_policy` (only legacy name-keyed templates carry
     // this field; manifest-keyed slots don't — runtime policy moves
-    // to `mvmctl up` flags / `~/.mvm/config.toml` / mvmd per plan 38
-    // §"Manifest scope"). Explicit CLI flags always win.
+    // to `mvmctl up` flags / `~/.mvm/config.toml` / mvmd). Explicit
+    // CLI flags always win.
     let explicit_cli_network = args.network_preset.is_some() || !args.network_allow.is_empty();
     let network_policy = if explicit_cli_network {
         resolve_network_policy(args.network_preset.as_deref(), &args.network_allow)?
@@ -1107,7 +1106,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         resolve_network_policy(None, &[])?
     };
 
-    // ADR-002 claim 10 — deny-by-default network. When the resolved
+    // Claim 10 — deny-by-default network. When the resolved
     // policy is `unrestricted`, the user (or a template they
     // selected) explicitly opted out of the safe default. Surface
     // that as a one-line warning so operators are never surprised
@@ -1137,7 +1136,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         args.seccomp.parse().context("Invalid --seccomp value")?;
     let plan_seccomp_tier = plan_seccomp_tier(seccomp_tier)?;
     // `--from-workload-ir`, or the `workload.json` a compiled `--flake`
-    // artifact carries (Plan 129 / ADR-067). Resolved once, used for both
+    // artifact carries. Resolved once, used for both
     // secret lowering and the deps-volume binding below.
     let effective_workload_ir =
         resolve_workload_ir_path(args.from_workload_ir.as_deref(), args.flake.as_deref());
@@ -1145,7 +1144,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         .map(|workload| lower_workload_secrets(&workload))
         .unwrap_or_default();
     let plan_secret_release = lowered_plan_secrets.secret_release;
-    // Sandbox metadata (W1 of the filesystem-volumes plan). Tag charset/length
+    // Sandbox metadata. Tag charset/length
     // validation happens in the security crate so audit-event emission
     // and webhook bodies see only validated input. TTL parsing rejects
     // out-of-range values (< 1s, > 30d) up front.
@@ -1176,8 +1175,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 
     // `--up-json` routes the friendly `[mvm]` chrome to stderr and
     // suppresses the auto-watch / auto-forward loops that would
-    // otherwise block forever — the SDK live-mode transport (Plan 73
-    // Followup H-live) drives subsequent `proc start`/`fs write`/
+    // otherwise block forever — the SDK live-mode transport
+    // drives subsequent `proc start`/`fs write`/
     // `down` calls from outside, so `mvmctl up` must return as soon
     // as the VM is up. We also imply `--detach` for the Apple
     // Container launchd path so the agent owns the VM lifecycle.
@@ -1202,14 +1201,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     let user_supplied_name = args.name.clone();
     let template_name_for_envelope = resolved_template_arg.clone();
 
-    // Plan 113 §Task 6 / ADR-064 §Decision 9 — 4-level tenant value
+    // 4-level tenant value
     // precedence: built-in `"local"` → `~/.mvm/config.toml`
     // `[tenant] name` → `MVM_TENANT` env → `--tenant` flag (highest).
-    // Identity / `mvmctl auth` is a separate ADR + plan (Plan M); this
+    // Identity / `mvmctl auth` is a separate effort; this
     // value is only the string label that names the audit chain file.
     let resolved_tenant = super::tenant_resolution::resolve_tenant(args.tenant.as_deref());
 
-    // Plan 129 E1: author the per-destination egress redaction policy from
+    // Author the per-destination egress redaction policy from
     // `--redact HOST[=audit]`. Empty → all-off (curated-only baseline).
     let redaction = super::redaction_flags::parse_redaction_flags(&args.redact)?;
 
@@ -1251,7 +1250,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         wait: args.wait,
     })?;
 
-    // Plan 73 Followup H-live: after a successful boot, emit a
+    // After a successful boot, emit a
     // one-line JSON envelope on stdout. The SDK live-mode transport
     // reads this envelope verbatim and threads `vm_id` + `build_mode`
     // through to subsequent `proc start` / `fs write` / `down`
@@ -1283,7 +1282,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 /// disk (no spec to read, treat as prod downstream). Tolerates I/O
 /// errors by returning `None` — the envelope's `build_mode` is a
 /// hint, not a security boundary (the agent's `do_exec` strip is
-/// the load-bearing W4.3 gate per ADR-002 §W4.3). Live-mode SDK
+/// the load-bearing gate). Live-mode SDK
 /// clients use it to reject `commands.start` against a prod
 /// template *before* any vsock round-trip; a missing / unreadable
 /// spec falls through to the agent's response (the agent still
@@ -1314,7 +1313,7 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) env_vars: &'a [String],
     pub(super) forward: bool,
     pub(super) metrics_port: u16,
-    /// Plan 118 WS-1 1b — `--warm-pool-size`; 0 = off.
+    /// `--warm-pool-size`; 0 = off.
     pub(super) warm_pool_size: u32,
     pub(super) watch_config: bool,
     pub(super) watch: bool,
@@ -1334,9 +1333,9 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) sandbox_ttl: Option<std::time::Duration>,
     /// `false` when `--no-auto-resume` is set.
     pub(super) auto_resume: bool,
-    /// Tenant string for plan-64 `ExecutionPlan` synthesis.
+    /// Tenant string for `ExecutionPlan` synthesis.
     pub(super) tenant: &'a str,
-    /// `true` when `--no-supervisor` is set — disables plan-64 admission.
+    /// `true` when `--no-supervisor` is set — disables admission.
     pub(super) no_supervisor: bool,
     /// Optional `.mvmpkg` archive path that admit_for_run re-verifies
     /// against the local trust store before backend dispatch.
@@ -1347,16 +1346,15 @@ pub(in crate::commands) struct RunParams<'a> {
     /// carries `App.dependencies = Dependencies::Python |
     /// Dependencies::Node`, the deps install pipeline runs +
     /// pins a `DepsVolumeBinding` into the synthesized plan.
-    /// Plan 73 Followup B.3.
     pub(super) workload_ir_path: Option<&'a std::path::Path>,
     /// When `true`, `cmd_run` emits a one-line JSON envelope on
-    /// stdout right before returning. Plan 73 Followup H-live: the
+    /// stdout right before returning. The
     /// SDK live-mode transport parses this envelope to thread the
     /// generated VM id + the template's `build_mode` through to
     /// subsequent `proc start` / `fs write` / `down` calls.
     pub(super) up_json: bool,
-    /// Resolved services-health wait timeout for ADR-053 §3 / plan 74
-    /// W2 (`InstanceReadiness::ServicesStarting` →
+    /// Resolved services-health wait timeout
+    /// (`InstanceReadiness::ServicesStarting` →
     /// `InstanceReadiness::ServicesReady`). Comes from
     /// `MvmConfig::effective_services_health_timeout_secs()` so an
     /// `MVM_SERVICES_HEALTH_TIMEOUT_SECS` env-var override or a
@@ -1366,7 +1364,7 @@ pub(in crate::commands) struct RunParams<'a> {
     pub(super) services_health_timeout_secs: u64,
     /// `true` when `--wait` was set. After the agent-ready check
     /// confirms the workload booted, block until it powers off and
-    /// propagate its exit code. Plan 152 WS-A.
+    /// propagate its exit code.
     pub(super) wait: bool,
 }
 
@@ -1428,11 +1426,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // matches the rest of the codebase: native KVM → Apple Container
     // (macOS 26+) → libkrun (typical macOS 13-25 contributor box with
     // the slp/krun Homebrew tap).
-    // Shared with `mvmctl pool` (Plan 118 WS-1 1b) so both agree on the effective backend.
+    // Shared with `mvmctl pool` so both agree on the effective backend.
     let effective_hypervisor_owned = super::super::shared::resolve_effective_hypervisor(hypervisor);
     let effective_hypervisor: &str = &effective_hypervisor_owned;
 
-    // Plan 152 WS-A: fail fast before boot so the user sees a clear
+    // Fail fast before boot so the user sees a clear
     // error instead of booting then hitting the generic backend bail.
     if wait && effective_hypervisor != "libkrun" {
         anyhow::bail!(
@@ -1441,8 +1439,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         );
     }
 
-    // Lima is gone (ADR-013); no upfront VM check needed. The
-    // libkrun-as-Linux-builder follow-up (W6.x) will reintroduce
+    // Lima is gone; no upfront VM check needed. The
+    // libkrun-as-Linux-builder follow-up will reintroduce
     // a builder-availability gate at this point when it lands.
     let _metrics_server = if metrics_port > 0 {
         Some(crate::metrics_server::MetricsServer::start(metrics_port)?)
@@ -1503,14 +1501,14 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let _ = registry.save(&registry_path);
     }
 
-    // Plan-64 admission ledger. One per `cmd_run`; the watch-mode loop
+    // Admission ledger. One per `cmd_run`; the watch-mode loop
     // reuses it across rebuilds so synthesized plans share a single
     // replay-window across the lifetime of the process.
     let admission_ledger = InMemoryNonceLedger::new();
 
-    // Plan 73 Followup B.3 — resolve the deps-volume binding once
+    // Resolve the deps-volume binding once
     // (cache-hit path only — `mvmctl up` does not spawn the builder
-    // VM today; that's `mvmctl deps build` in Followup C) and thread
+    // VM today; that's `mvmctl deps build`) and thread
     // it to every admit_plan_for_boot call site below. Returns
     // `Ok(None)` when `--from-workload-ir` is absent or the IR
     // carries no lockfile (claim-8 preserved).
@@ -1556,15 +1554,15 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             memory_mib: direct_mem,
             ..Default::default()
         };
-        // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
+        // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
         attach_runtime_overlay_if_cached(&mut start_config, effective_hypervisor);
-        // Plan 112 Phase 3c — when admission produced an AdmissionContext,
+        // When admission produced an AdmissionContext,
         // thread tenant_id / plan_json / bundle_json so libkrun/Vz take
         // the bridge-factory path. None keeps the legacy supervisor path
         // for no-admission flows.
         if let Some(ctx) = admission.as_ref() {
             populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
-            // Plan 113 §Task 13 — Firecracker bridge sidecar reads
+            // Firecracker bridge sidecar reads
             // plan.json + bundle.json from the per-VM state dir at
             // spawn time. Stash them now (mode 0600, tmp+rename).
             stash_plan_for_bridge(&start_config)?;
@@ -1579,8 +1577,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         emit_launched_if(&admission, effective_hypervisor);
         record_vm_readiness(&vm_name, InstanceReadiness::LaunchAccepted);
 
-        // Plan 37 §6 — match the main path's VmStart LocalAudit emit
-        // (line ~1114). Without this the launchd-spawned direct-boot
+        // Match the main path's VmStart LocalAudit emit.
+        // Without this the launchd-spawned direct-boot
         // surface skips the LocalAudit stream entirely, breaking the
         // "every state-changing CLI verb emits one record per attempt"
         // invariant for the only verb that runs under launchd. Also
@@ -1588,7 +1586,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // MVM_DIRECT_BOOT + `--hypervisor mock`.
         mvm_core::audit_emit!(VmStart, vm: &vm_name);
 
-        // ADR-053 §3 / plan 74 W2 (services-health): wait for the
+        // Services-health: wait for the
         // guest agent unconditionally, then poll integration health.
         // The wait was previously gated on `MVM_PORTS` because port
         // forwarding was the only existing reason to block here. The
@@ -1601,7 +1599,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let agent_ready = wait_for_guest_agent(&vm_name, 30);
         if agent_ready {
             record_vm_readiness(&vm_name, InstanceReadiness::AgentReady);
-            // Plan 74 W2 — agent ready means /init ran, which
+            // Agent ready means /init ran, which
             // means `mvm-guest-netinit` produced its report.
             // Parse the console log and emit
             // `NetworkMandatoryDeny` audit records. Best-effort:
@@ -1642,15 +1640,15 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // agent always passes `--detach` (it owns the VM lifecycle
         // and uses launchd's own restart/keepalive semantics — the
         // long-lived CLI process would be redundant). Same shape as
-        // the main path's detach branch at line ~1117.
+        // the main path's detach branch.
         if detach {
             return Ok(());
         }
 
         ui::info(&format!("VM '{}' running. Press Ctrl+C to stop.", vm_name));
 
-        // Block until signaled. ADR-053 §3 / plan 74 W2 "Degraded
-        // follow-up": every ~10 s while the foreground wait is
+        // Block until signaled. Degraded follow-up: every ~10 s
+        // while the foreground wait is
         // active, poll integration health and flip readiness to
         // `Degraded { unhealthy }` when an `Active` service flips to
         // `Error`. Recovers to `ServicesReady` automatically when the
@@ -1867,7 +1865,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         volume_cfg = rt_config.volumes.clone();
     };
 
-    // Plan 129 Stage 2 — if the plan carries secrets bound to egress hosts, mint
+    // If the plan carries secrets bound to egress hosts, mint
     // the per-VM name-constrained egress intermediate and stage it: cert → the
     // guest secrets drive (below), key → a host-only sidecar the terminator
     // endpoint reads. No-op when the plan has no secrets / no egress bindings.
@@ -1918,7 +1916,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         });
     }
 
-    // `mut` so a warm-pool claim can rebind it to the claimed standby-id (Plan 118 WS-1 1b).
+    // `mut` so a warm-pool claim can rebind it to the claimed standby-id.
     let mut vm_name_owned = vm_name.clone();
     let has_ports = !port_mappings.is_empty();
 
@@ -1928,7 +1926,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // worker threads; no other threads are reading env vars concurrently.
     unsafe { std::env::set_var("MVM_REEXEC_NAME", &vm_name) };
 
-    // Plan-64 admission for the regular boot path. Snapshot restore
+    // Admission for the regular boot path. Snapshot restore
     // and cold-boot both consume `rootfs_path` below, so admission
     // happens here before either branch moves the path. The launchd
     // detach-fork further down inside the else-branch boots through
@@ -1968,7 +1966,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         let slot = microvm::allocate_slot(&vm_name)?;
         // Probe for the verity sidecar alongside the rootfs so the
         // restored VM boots through dm-verity when the template was
-        // built with `verifiedBoot = true`. ADR-002 §W3.2.
+        // built with `verifiedBoot = true`.
         let (verity_path, roothash) = microvm::probe_verity_sidecar(&rootfs_path);
         let run_config = microvm::FlakeRunConfig {
             name: vm_name,
@@ -2037,9 +2035,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             warm_pool_size,
         }
         .into_start_config();
-        // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
+        // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
         attach_runtime_overlay_if_cached(&mut start_config, effective_hypervisor);
-        // Plan 112 Phase 3c — thread audit substrate from admission_main
+        // Thread audit substrate from admission_main
         // through to backend.start() so libkrun/Vz take the bridge-factory
         // path. None keeps the legacy supervisor path for no-admission flows.
         //
@@ -2050,8 +2048,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         // default routes `up --flake` through the proven legacy supervisor —
         // the same path the builder VM boots on, with the per-OS gateway.
         // Host-side admission (claim 8) above still applies. Re-enable with
-        // MVM_GATEWAY_BRIDGE=1 once the bridge gvproxy path is fixed
-        // (Plan 138 follow-up).
+        // MVM_GATEWAY_BRIDGE=1 once the bridge gvproxy path is fixed.
         let gateway_bridge_enabled = std::env::var("MVM_GATEWAY_BRIDGE")
             .map(|v| v == "1")
             .unwrap_or(false);
@@ -2059,7 +2056,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             && let Some(ctx) = admission_main.as_ref()
         {
             populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
-            // Plan 113 §Task 13 — stash plan.json + bundle.json for the
+            // Stash plan.json + bundle.json for the
             // Firecracker bridge sidecar to read at spawn time. Bridge-only:
             // the QEMU substitution endpoint reads the in-memory config, so it
             // needs no on-disk copy (and must not overwrite the persisted plan).
@@ -2106,7 +2103,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
-        // Plan 118 WS-1 1b — try a warm-pool claim first (auto-named + bridge-admitted
+        // Try a warm-pool claim first (auto-named + bridge-admitted
         // launches only; fail-open to cold boot). A claimed VM runs under its standby-id,
         // so rebind `vm_name_owned` for all downstream (agent wait, audit, readiness, stop).
         let claimed: Option<String> =
@@ -2153,7 +2150,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     // boot→ping proof is hollow (it only watches for this exact warning).
     // `--detach` opts out (fire-and-forget, like the apple-container
     // launchd path). apple-container keeps its own wait in its block.
-    // `--wait` (Plan 152 WS-A one-shot) skips this persistent-agent probe:
+    // `--wait` (one-shot) skips this persistent-agent probe:
     // the workload runs then `poweroff -f`s, so there is no agent to wait
     // for — we wait for the VM to power off in the `wait` block below and
     // read its captured exit code instead.
@@ -2187,7 +2184,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         }
     }
 
-    // Plan 152 WS-A — block until the workload powers off and propagate its
+    // Block until the workload powers off and propagate its
     // exit code. `--wait` is parse-time mutually exclusive with `--detach`
     // and `--up-json` (see Args); only the foreground libkrun path reaches here.
     if wait && effective_hypervisor == "libkrun" {
@@ -2209,7 +2206,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     // Apple Virtualization VMs live in-process — the process must stay alive.
     if effective_hypervisor == "apple-container" && !detach {
-        // ADR-053 §3 / plan 74 W2 (services-health): wait for the
+        // Services-health: wait for the
         // guest agent unconditionally (was previously gated on
         // `has_ports`), then poll integration health. Every Apple
         // Container up now records `AgentConnecting` / `AgentReady`
@@ -2226,7 +2223,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             // User volumes are mounted in-guest by mkGuest's /init from
             // the `mvm.uvols=` kernel cmdline (the backend attached each
             // as a virtio-fs tag) — no post-boot RPC needed here.
-            // Plan 74 W2 — same audit-emit as the FC path. Apple
+            // Same audit-emit as the FC path. Apple
             // Container backend captures the guest console to
             // the same `<vm_dir>/console.log` convention; the
             // emit_for_vm helper handles a missing log file by
@@ -2301,8 +2298,8 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             vm_name_owned
         ));
 
-        // Block until signaled (Ctrl+C or SIGTERM). ADR-053 §3 /
-        // plan 74 W2 "Degraded follow-up": same periodic
+        // Block until signaled (Ctrl+C or SIGTERM). Degraded
+        // follow-up: same periodic
         // integration-health poll as the direct-boot wait above —
         // every ~10 s, watch for `Active` → `Error` regressions and
         // flip readiness to `Degraded { unhealthy }`. The monitor
@@ -2432,7 +2429,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             } else {
                 w_volume_cfg = rt_cfg_watch.volumes.clone();
             }
-            // Plan 129 Stage 2 — same egress-TLS staging on the watch-mode
+            // Same egress-TLS staging on the watch-mode
             // rebuild path (cert → guest secrets drive, key → host sidecar).
             stage_egress_tls_delivery(&plan_secrets, tenant, &vm_name_owned, &mut w_secret_files)
                 .context("staging per-VM egress TLS material (watch rebuild)")?;
@@ -2444,7 +2441,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 w_config_files.push(f);
             }
             let (w_verity_path, w_roothash) = microvm::probe_verity_sidecar(&result.rootfs_path);
-            // Plan-64 admission for the watch-mode rebuild path. The
+            // Admission for the watch-mode rebuild path. The
             // shared `admission_ledger` provides replay protection across
             // rebuilds — a synthesized plan can only admit once even if
             // the same artifact hash recurs (nonce is fresh per call).
@@ -2497,9 +2494,9 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                 warm_pool_size: 0,
             }
             .into_start_config();
-            // Plan 124 C1 — attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
+            // Attach the verity-sealed runtime overlay (Firecracker only, non-fatal).
             attach_runtime_overlay_if_cached(&mut w_start_config, effective_hypervisor);
-            // Plan 112 Phase 3c — watch-loop re-boot uses its own fresh
+            // Watch-loop re-boot uses its own fresh
             // admission (watch_admission); same substrate threading as the
             // main path. None → legacy supervisor path.
             if let Some(ctx) = watch_admission.as_ref() {
@@ -2508,7 +2505,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                     &ctx.admitted,
                     ctx.policy_bundle.as_ref(),
                 )?;
-                // Plan 113 §Task 13 — re-stash plan.json + bundle.json
+                // Re-stash plan.json + bundle.json
                 // for the Firecracker bridge sidecar on every watch-loop
                 // re-boot; the prior admission's files are stale.
                 stash_plan_for_bridge(&w_start_config)?;
@@ -2532,7 +2529,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Plan 124 C1 / ADR-051 — attach the verity-sealed runtime overlay by
+/// Attach the verity-sealed runtime overlay by
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
 /// probe. **Firecracker-only**: it's the sole backend that attaches the
 /// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
@@ -2643,7 +2640,7 @@ mod runtime_overlay_attach_tests {
     }
 }
 
-// ── Plan 64 W3 admit_plan_for_boot tests ────────────────────────────
+// ── admit_plan_for_boot tests ────────────────────────────
 //
 // These tests stay scoped to the helper rather than `cmd_run` itself
 // because the dispatcher (`cmd_run`) calls into Lima/Firecracker
@@ -2951,7 +2948,7 @@ mod admit_plan_tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 3 follow-on — W5 resolver wired into admission
+    // Policy resolver wired into admission
     //
     // The default synthesized plan ships `local-default` policy refs,
     // so the happy-path admission must succeed and emit
@@ -3048,7 +3045,7 @@ chain_signing = true
         .unwrap();
 
         // Synthesize a default-refs plan, then rewrite the four
-        // policy fields to `acme:vm-live`. The W5 resolver requires
+        // policy fields to `acme:vm-live`. The resolver requires
         // all four to agree on the same ref.
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"live-payload");
@@ -3581,12 +3578,12 @@ port_hi  = 443
     }
 }
 
-// Plan 73 Followup B.3 — `resolve_deps_volume_binding` unit tests.
+// `resolve_deps_volume_binding` unit tests.
 //
-// These cover the new helper that turns a Workload IR + a build-mode
+// These cover the helper that turns a Workload IR + a build-mode
 // flag into an `Option<DepsVolumeBinding>` for plan synthesis. The
 // cache-miss path (which would dispatch the libkrun builder VM)
-// surfaces as `DriverNotProvided` per Followup B.3's policy ("mvmctl
+// surfaces as `DriverNotProvided` ("mvmctl
 // up consumes a cached volume; mvmctl deps build is the verb that
 // drives the cache-miss path"); cache-hit fixtures use the same
 // `seal_volume` primitives as `mvm-build/tests/app_deps_orchestrator.rs`
@@ -3775,7 +3772,7 @@ mod resolve_deps_volume_tests {
 
     #[test]
     fn workload_ir_with_python_lockfile_cache_hit_returns_binding() {
-        // Plan 73 Followup B.3 happy path: workload declares a
+        // Happy path: workload declares a
         // `Dependencies::Python` with a lockfile; the cache already
         // holds a sealed volume; resolve_deps_volume_binding produces
         // a `DepsVolumeBinding` whose hashes match the seal result.
@@ -3818,7 +3815,7 @@ mod resolve_deps_volume_tests {
     #[test]
     fn workload_ir_with_python_lockfile_cache_miss_surfaces_typed_error() {
         // Cache miss under `mvmctl up` is currently a hard error
-        // pointing at `mvmctl deps build` (Followup C). The error
+        // pointing at `mvmctl deps build`. The error
         // message must mention that verb so the user knows how to
         // proceed.
         let tmp = tempfile::tempdir().unwrap();
@@ -4017,7 +4014,7 @@ mod resolve_deps_volume_tests {
         );
     }
 
-    // ── Plan 129 Stage 2 (S2.2): egress-TLS staging splits cert ↔ key ──
+    // ── egress-TLS staging splits cert ↔ key ──
 
     #[test]
     fn stage_egress_tls_delivery_noop_without_secrets() {

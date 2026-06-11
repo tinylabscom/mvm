@@ -87,13 +87,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     if args.json {
         // JSON output augments the backend `VmInfo` with the metadata
-        // we just looked up, so SDK callers (Phase B1) get tags and
-        // expiry without a second registry round-trip.
-        // ADR-053 §3 / plan 74 W2: `readiness` and
+        // we just looked up, so SDK callers get tags and expiry
+        // without a second registry round-trip. `readiness` and
         // `last_readiness_change_at` thread through here from the
         // registry, populated by `mvmctl up`'s launch milestones.
-        // Legacy registry entries that pre-date W2 serialize as
-        // `null` for both fields.
+        // Legacy registry entries that pre-date the readiness fields
+        // serialize as `null` for both.
         #[derive(serde::Serialize)]
         struct LsRow<'a> {
             #[serde(flatten)]

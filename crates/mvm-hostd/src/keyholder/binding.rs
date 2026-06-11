@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §2 + §4 — local binding metadata for a named secret.
+//! Local binding metadata for a named secret.
 //!
 //! `mvmctl secret set --host --type` records, per (tenant, name), the
 //! auth-type and the destination allow-list: the operator's local
@@ -6,7 +6,7 @@
 //! itself lives in [`mvm_core::crypto::secret_store::SecretStore`]; this
 //! carries metadata only — **no secret bytes** — so `mvmctl secret ls`
 //! can show name/type/hosts without a `get`, and the keyholder
-//! (Phase C/D) can consult the binding it enforces against.
+//! can consult the binding it enforces against.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -37,7 +37,7 @@ pub struct SecretBindingMeta {
 pub trait BindingStore: Send + Sync {
     fn put(&self, tenant: &str, name: &str, meta: &SecretBindingMeta) -> Result<()>;
     /// `Ok(None)` when no binding is recorded — a secret stored via the
-    /// Plan 63 `put` path has a value but no egress binding.
+    /// value-store `put` path has a value but no egress binding.
     fn get(&self, tenant: &str, name: &str) -> Result<Option<SecretBindingMeta>>;
     /// Idempotent: removing an absent binding is not an error.
     fn delete(&self, tenant: &str, name: &str) -> Result<()>;

@@ -7,8 +7,8 @@
 //! between the old and new sealed forms. The volume's content,
 //! SBOM, and fetch.log are untouched, so the re-audit is cheap and
 //! shipps a fresh CVE verdict against the workload without
-//! rebuilding `content/`. This is the same incremental property
-//! ADR-047 §"Consequences" calls out for CI re-runs.
+//! rebuilding `content/`. The same incremental property holds for
+//! CI re-runs.
 //!
 //! ## Why the rename
 //!
@@ -16,7 +16,7 @@
 //! Re-audit changes `meta.json.last_audit_at` AND
 //! `meta.json.cve_sha256` (since `cve.json` was rewritten), so the
 //! canonical manifest bytes change, so the volume hash changes.
-//! The supervisor's admission gate (Followup A) pins the volume
+//! The supervisor's admission gate pins the volume
 //! hash, so any plan that bound the OLD hash will fail admission
 //! after a re-audit. That's intentional — a stale CVE verdict
 //! shouldn't admit silently — but we log the rename loudly so
@@ -361,7 +361,7 @@ fn audit_one(
             )
         })?;
         // Refresh the index pointer (lockfile_hash → volume_hash)
-        // when the volume's annotations recorded one. The B.1
+        // when the volume's annotations recorded one. The install
         // orchestrator writes this; an admin-authored volume may
         // not have it.
         if let Some(lockfile_hash) = manifest.annotations.get("lockfile_hash") {

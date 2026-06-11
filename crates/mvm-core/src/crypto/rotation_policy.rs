@@ -1,4 +1,4 @@
-//! Plan 122 B1 — when to roll the master KEK.
+//! When to roll the master KEK.
 //!
 //! [`key_rotation::rotate_master_key`](crate::crypto::key_rotation::rotate_master_key)
 //! performs a rotation; this module decides *whether* one is due. The age
@@ -41,8 +41,7 @@ fn active_entry(manifest: &MasterKeyManifest) -> Option<&MasterKeyRef> {
 ///
 /// No active key → not due: minting the first key is initial provisioning,
 /// not rotation. `now` is a parameter so the check never reads the wall
-/// clock — that keeps it a pure, freely-testable function (the plan's
-/// "time comes in as a parameter" rule).
+/// clock — that keeps it a pure, freely-testable function.
 pub fn rotation_due(manifest: &MasterKeyManifest, interval: Duration, now: DateTime<Utc>) -> bool {
     match active_entry(manifest) {
         Some(active) => now.signed_duration_since(active.created_at) >= interval,

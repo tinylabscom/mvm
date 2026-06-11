@@ -6,9 +6,9 @@
 //! path arguments. Each wrapper is one FFI call deep.
 //!
 //! `krun_start_enter` is not called from here — it blocks until the
-//! guest exits and is the W3+W4 lifecycle scope. The Plan 57 W1
-//! deliverable is the bindings + thin wrapper only; consumers exercise
-//! the configuration calls today and pick up boot in a later PR.
+//! guest exits and belongs to the boot lifecycle. This layer is the
+//! bindings + thin wrapper only; consumers exercise the configuration
+//! calls and pick up boot elsewhere.
 
 #![allow(
     non_upper_case_globals,
@@ -29,8 +29,8 @@ mod bindings {
     include!(concat!(env!("OUT_DIR"), "/libkrun_sys.rs"));
 }
 
-/// Plan 87: the `features` mask `krun_add_net_unixstream` expects for
-/// passt as the userspace network proxy. Mirrors the
+/// The `features` mask `krun_add_net_unixstream` expects for passt as
+/// the userspace network proxy. Mirrors the
 /// `COMPAT_NET_FEATURES` macro in libkrun.h:344 — a compound `|` of
 /// the NET_FEATURE_* constants that bindgen can't always fold into a
 /// single value. Re-deriving in Rust keeps the canonical mask close
@@ -42,13 +42,12 @@ pub const PASST_NET_FEATURES: u32 = (1 << 0)   // NET_FEATURE_CSUM
     | (1 << 11)  // NET_FEATURE_HOST_TSO4
     | (1 << 14); // NET_FEATURE_HOST_UFO
 
-/// Plan 88 W5 fix: `NET_FLAG_VFKIT` from `libkrun.h`. libkrun rejects
+/// `NET_FLAG_VFKIT` from `libkrun.h`. libkrun rejects
 /// `krun_add_net_unixgram(c_path, ...)` with -EINVAL unless this flag
 /// is set, because the unixgram backend needs to know whether to
 /// emit the vfkit magic-byte handshake gvproxy expects on
 /// `-listen-vfkit`. Without the flag libkrun assumes raw frames and
-/// fails closed at config time — that's the rc -22 the W5 smoke
-/// surfaced.
+/// fails closed at config time (rc -22).
 pub const NET_FLAG_VFKIT: u32 = 1 << 0;
 
 /// `NET_FLAG_DHCP_CLIENT` from `libkrun.h` (added in libkrun 1.18.0).
@@ -62,8 +61,8 @@ pub const NET_FLAG_VFKIT: u32 = 1 << 0;
 /// what makes the macOS smoke succeed end-to-end on libkrun 1.18.0+.
 pub const NET_FLAG_DHCP_CLIENT: u32 = 1 << 1;
 
-/// Plan 88 W5 diagnostic: enable libkrun's internal logger. Wrapper
-/// for `krun_init_log` (libkrun.h). Targets a file descriptor
+/// Enable libkrun's internal logger. Wrapper for `krun_init_log`
+/// (libkrun.h). Targets a file descriptor
 /// (`target_fd = 2` → stderr) at the given level. `style` and
 /// `options` follow the C signature; pass 0 / 0 unless you have a
 /// reason. Used by `mvm-libkrun-supervisor` when `MVM_KRUN_LOG` is
@@ -279,7 +278,7 @@ impl Context {
     }
 
     /// Add a virtio-net device backed by a unixstream userspace network
-    /// proxy (Plan 87 W1 — passt + virtio-net replacing TSI).
+    /// proxy (passt + virtio-net replacing TSI).
     ///
     /// `fd` is one end of an `AF_UNIX SOCK_STREAM` socketpair; the other
     /// end is handed to the network proxy (passt) at spawn. libkrun
@@ -324,8 +323,8 @@ impl Context {
     }
 
     /// Add a virtio-net device backed by a unixgram userspace network
-    /// proxy (Plan 88 W1 — gvproxy on macOS replacing passt). Mirror
-    /// of [`Self::add_net_unixstream_fd`] but uses libkrun's
+    /// proxy (gvproxy on macOS replacing passt). Mirror of
+    /// [`Self::add_net_unixstream_fd`] but uses libkrun's
     /// `krun_add_net_unixgram` which takes a *path* to a listening
     /// unix-domain socket rather than a pre-opened fd — gvproxy
     /// creates the listener itself when invoked with
@@ -372,10 +371,9 @@ impl Context {
 
     /// Block the calling thread, starting the guest. libkrun's
     /// `krun_start_enter` calls `exit()` on success with the guest's
-    /// status; on failure it returns a negative errno. Plan 57 W1
-    /// surfaces the wrapper but does not call it from `crate::start` —
-    /// that lands in W3 + W4 alongside the registry that owns the
-    /// blocking thread.
+    /// status; on failure it returns a negative errno. This wrapper is
+    /// not called from `crate::start` — boot lives alongside the
+    /// registry that owns the blocking thread.
     pub fn start_enter(&self) -> Result<std::convert::Infallible, Error> {
         let rc = unsafe { bindings::krun_start_enter(self.ctx_id) };
         // On success the call does not return; if we observe one, it's
@@ -397,7 +395,7 @@ impl Drop for Context {
     }
 }
 
-// libkrunfw's bundled kernel — Plan 86 / Plan 72 W5.D bullet 10.
+// libkrunfw's bundled kernel.
 //
 // libkrunfw ships a TSI-patched Linux kernel image inside its dynamic
 // library (`libkrunfw.5.dylib` on macOS, `libkrunfw.so.5` on Linux).
@@ -522,8 +520,8 @@ mod tests {
     #[test]
     fn create_and_drop_context() {
         // Smoke test: the FFI links cleanly and an empty context can be
-        // allocated + freed. Doesn't boot a VM (that's W3) — just proves
-        // the wrapper round-trips through libkrun.
+        // allocated + freed. Doesn't boot a VM — just proves the wrapper
+        // round-trips through libkrun.
         let ctx = Context::new().expect("libkrun ctx allocation succeeds on a host with libkrun");
         assert!(ctx.id() < u32::MAX);
         // Drop runs krun_free_ctx; assertion is the absence of a panic.

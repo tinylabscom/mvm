@@ -18,22 +18,22 @@ pub mod user_config;
 /// Cryptographic primitives — attestation, key rotation, keystore,
 /// secret store, snapshot encryption/HMAC, image (cosign) verification,
 /// seccomp, fs/mount/path/ttl policy. Folded in from the former
-/// `mvm-security` crate (plan 121 B3); named `crypto` to avoid clashing
+/// `mvm-security` crate; named `crypto` to avoid clashing
 /// with `policy::security` (the session-policy type). All sync; the
 /// only opt-in async surface is the off-by-default `manifest-verify`
 /// (sigstore) feature, so the default build stays runtime-free.
 pub mod crypto;
 pub mod domain;
 pub mod mvmd_iface;
-/// The typed, signed `ExecutionPlan` contract (plan 37 §3.3). Folded
-/// in from the former `mvm-plan` crate (plan 121 B1); it depended only
-/// on `mvm-core`, so the fold adds no async/runtime dep (just `tar`).
+/// The typed, signed `ExecutionPlan` contract. Folded in from the
+/// former `mvm-plan` crate; it depended only on `mvm-core`, so the
+/// fold adds no async/runtime dep (just `tar`).
 pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;
-/// Plan 129 / ADR-067 §1 — the guest↔host substitution-endpoint wire contract,
-/// shared so the in-guest client and the host server serialize identical bytes.
+/// The guest↔host substitution-endpoint wire contract, shared so the
+/// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;
 pub mod util;
 

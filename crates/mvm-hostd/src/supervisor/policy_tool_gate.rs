@@ -1,8 +1,6 @@
 //! `PolicyToolGate` — replaces `NoopToolGate` with a real
 //! allowlist check against `mvm-policy::ToolPolicy`.
 //!
-//! Plan 37 §2.2 / §15 (Wave 2.7 / Phase 1).
-//!
 //! ## Phase 1 scope (this module)
 //!
 //! - Pure policy-decision logic: take a tool name, look it up in
@@ -12,11 +10,11 @@
 //!   the visible allowlist entries (operator sees both what was
 //!   blocked AND what was permitted, in the same audit line).
 //! - [`ToolAuditSink`] trait + capturing/noop sinks, mirroring the
-//!   `EgressAuditSink` shape from Wave 2.6 so the supervisor's
-//!   audit fan-out stays uniform.
+//!   `EgressAuditSink` shape so the supervisor's audit fan-out
+//!   stays uniform.
 //! - `Supervisor::with_tool_gate` builder lands in `supervisor.rs`.
 //!
-//! ## Phase 2 (Wave 2.7b — separate PR)
+//! ## Phase 2
 //!
 //! - Vsock listener loop: the workload talks to the supervisor via
 //!   vsock RPC ("can I call tool `read_file`?"); the supervisor

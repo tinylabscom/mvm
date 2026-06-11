@@ -1,15 +1,14 @@
 //! Sub-policy types referenced by `PolicyBundle`.
 //!
-//! Plan 37 Wave 1.2 lands the *shape* of each sub-policy as a
-//! minimal placeholder. Real enforcement contracts arrive in later
-//! waves:
+//! Each sub-policy starts as a minimal shape placeholder; real
+//! enforcement contracts are filled in incrementally:
 //!
-//! - Wave 2 fills `EgressPolicy` (L7 rules), `PiiPolicy` (detect /
-//!   redact / refuse modes), and `ToolPolicy` (RPC allowlist).
-//! - Wave 3 fills `KeyPolicy` (per-run secret grants) and
-//!   `AuditPolicy` (chain signing, per-tenant streams).
-//! - Wave 4 fills `NetworkPolicy` (per-tenant netns) and
-//!   `ArtifactPolicy` retention sweeps.
+//! - `EgressPolicy` (L7 rules), `PiiPolicy` (detect / redact / refuse
+//!   modes), and `ToolPolicy` (RPC allowlist).
+//! - `KeyPolicy` (per-run secret grants) and `AuditPolicy` (chain
+//!   signing, per-tenant streams).
+//! - `NetworkPolicy` (per-tenant netns) and `ArtifactPolicy` retention
+//!   sweeps.
 //!
 //! Every type uses `#[serde(deny_unknown_fields)]` so a future
 //! field addition is a fail-closed schema bump for older verifiers,
@@ -19,16 +18,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Network policy. Plan 60 Phase 3 Slice B fills `l4` — the L4
-/// allow-list the supervisor's `L4Gate` consults at flow-establishment
-/// time. `preset` is the Wave-1 stub kept for forward compat with the
-/// `mvm-core::policy::network_policy` shape that older bundles may
-/// still carry.
+/// Network policy. `l4` is the L4 allow-list the supervisor's `L4Gate`
+/// consults at flow-establishment time. `preset` is a stub kept for
+/// forward compat with the `mvm-core::policy::network_policy` shape that
+/// older bundles may still carry.
 ///
-/// `l4` is `#[serde(default)]` so bundles authored before Slice B
-/// (no `[[network.l4]]` rows) continue to parse — they evaluate as
-/// **default-deny** at the gate, matching ADR-002's fail-closed
-/// posture. To allow outbound traffic, add explicit rows.
+/// `l4` is `#[serde(default)]` so bundles authored without
+/// `[[network.l4]]` rows continue to parse — they evaluate as
+/// **default-deny** at the gate, matching the fail-closed posture. To
+/// allow outbound traffic, add explicit rows.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
@@ -37,21 +35,20 @@ pub struct NetworkPolicy {
     pub preset: Option<String>,
     /// L4 allow-list (`proto`, `dst_cidr`, port range) evaluated by
     /// the supervisor's `L4Gate` at flow-establishment time. Empty =
-    /// default-deny. Plan 60 Phase 3 Slice B.
+    /// default-deny.
     #[serde(default)]
     pub l4: Vec<L4RuleSpec>,
-    /// Plan 113 / ADR-064 — observer chain. Each entry is a name
-    /// resolved against the host's `ObserverAllowlist`
-    /// (`~/.mvm/observers/allowlist.toml`). Empty Vec = no observers
-    /// (only the always-on chain signer fires).
+    /// Observer chain. Each entry is a name resolved against the host's
+    /// `ObserverAllowlist` (`~/.mvm/observers/allowlist.toml`). Empty Vec
+    /// = no observers (only the always-on chain signer fires).
     ///
     /// Default is empty for backward compatibility: claim-10 v1 bundles
-    /// that don't have this field still parse and behave identically to
-    /// pre-Plan-113 (no fan-out, chain entries unchanged).
+    /// that don't have this field still parse and behave identically
+    /// (no fan-out, chain entries unchanged).
     #[serde(default)]
     pub observers: Vec<String>,
-    /// Plan 141 / ADR-064 — opt-in per-VM flow-byte log. `None` (default)
-    /// = off. When set, the bridge appends length-prefixed payload records
+    /// Opt-in per-VM flow-byte log. `None` (default) = off. When set, the
+    /// bridge appends length-prefixed payload records
     /// to `~/.mvm/audit/flow-bytes/<tenant>/<vm>-<utc>.bin`; the signed
     /// chain references each record by `(file, record_id, sha256)` without
     /// inlining payload bytes.
@@ -59,7 +56,7 @@ pub struct NetworkPolicy {
     pub flow_byte_log: Option<FlowByteLogSpec>,
 }
 
-/// Retention + scope for the opt-in flow-byte log (Plan 141 / ADR-064).
+/// Retention + scope for the opt-in flow-byte log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowByteLogSpec {
@@ -118,8 +115,7 @@ pub struct L4RuleSpec {
     pub port_hi: u16,
 }
 
-/// L7 egress policy. Plan 37 §15 differentiator. Wave 2.6 fills the
-/// fields the `L7EgressProxy` actually consumes:
+/// L7 egress policy. The fields the `L7EgressProxy` consumes:
 /// - `allow_list` is the (host, port) destination policy.
 /// - `allow_plain_http` opens the plain-HTTP code path; **the
 ///   supervisor refuses to honour `true` for `Variant::Prod`** so
@@ -131,7 +127,7 @@ pub struct L4RuleSpec {
 ///   inspectors by name (e.g., disable `pii_redactor` for an
 ///   analytics workload that scrubs upstream).
 ///
-/// `mode` is retained for compatibility with Wave 1's stub; the
+/// `mode` is retained for compatibility with the earlier stub; the
 /// supervisor honours `mode = Some("open")` as a kill-switch that
 /// skips the proxy entirely. New fields are `#[serde(default)]` so
 /// older bundles continue to parse.
@@ -171,7 +167,7 @@ pub struct EgressPolicy {
 /// image uploads). Configurable per workload via the policy field.
 pub const DEFAULT_BODY_CAP_BYTES: u64 = 16 * 1024 * 1024;
 
-/// PII redaction policy. Plan 37 §15.1.
+/// PII redaction policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PiiPolicy {
@@ -183,8 +179,7 @@ pub struct PiiPolicy {
     pub categories: Vec<String>,
 }
 
-/// Tool-call allowlist. Plan 37 §2.2. Wave 2 wires the supervisor's
-/// vsock RPC `ToolGate`.
+/// Tool-call allowlist. Wires the supervisor's vsock RPC `ToolGate`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicy {
@@ -195,7 +190,7 @@ pub struct ToolPolicy {
 
 /// Artifact policy. Distinct from `mvm-plan::ArtifactPolicy` —
 /// the plan field is a per-run snapshot; this is the bundle-side
-/// source of truth that the supervisor's `ArtifactCollector` (Wave 3)
+/// source of truth that the supervisor's `ArtifactCollector`
 /// consults at workload exit.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -204,7 +199,7 @@ pub struct ArtifactPolicy {
     pub retention_days: u32,
 }
 
-/// Key policy. Plan 37 §12. Wave 3 wires `KeystoreReleaser`.
+/// Key policy. Wires `KeystoreReleaser`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct KeyPolicy {
@@ -212,8 +207,7 @@ pub struct KeyPolicy {
     pub rotation_interval_days: u32,
 }
 
-/// Audit policy. Plan 37 §22. Wave 3 wires chain signing + per-tenant
-/// streams.
+/// Audit policy. Wires chain signing + per-tenant streams.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AuditPolicy {
@@ -221,7 +215,7 @@ pub struct AuditPolicy {
     /// previous's hash for tamper-evidence.
     pub chain_signing: bool,
     /// Per-tenant audit-stream destinations. Resolved by
-    /// `AuditSigner` per Wave 3.
+    /// `AuditSigner`.
     pub stream_destinations: Vec<String>,
 }
 
@@ -250,8 +244,8 @@ preset = "deny-by-default"
 
     #[test]
     fn network_policy_backward_compat_with_v1_bundle() {
-        // A bundle file written before Plan 113 has no `observers`
-        // field; it must still parse and behave like an empty chain.
+        // A bundle file written before the observer chain existed has no
+        // `observers` field; it must still parse and behave like an empty chain.
         // L4RuleSpec uses `proto` / `dst_cidr` / `port_lo` / `port_hi`
         // (see definition above) — the v1 bundle row matches that
         // shape exactly.

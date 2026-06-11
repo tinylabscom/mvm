@@ -1,4 +1,4 @@
-//! Chain-signed file-backed [`AuditSigner`] — Plan 37 §22 Wave 3.
+//! Chain-signed file-backed [`AuditSigner`].
 //!
 //! Each emitted [`AuditEntry`] is wrapped in a [`SignedEnvelope`] that
 //! carries the SHA-256 hash of the previous envelope on disk plus an
@@ -131,7 +131,7 @@ impl AuditSigner for FileAuditSigner {
             .map(|p| format!("file:{}", p.display()))
             .unwrap_or_else(|| format!("tenant:{tenant}"));
 
-        // Plan 102 W6.A commit 2 — cross-process chain integrity.
+        // Cross-process chain integrity.
         //
         // The in-memory `cursors` HashMap only serializes writers
         // inside *this* process. Two `mvm-libkrun-supervisor`
@@ -186,10 +186,8 @@ impl AuditSigner for FileAuditSigner {
 }
 
 /// Take an exclusive advisory lock on `file`. Blocks until acquired.
-/// Released when the OwnedFd backing `file` is dropped.
-///
-/// Plan 102 W6.A commit 2: cross-process chain integrity for the
-/// per-tenant audit chain.
+/// Released when the OwnedFd backing `file` is dropped. This is what
+/// gives the per-tenant audit chain cross-process integrity.
 fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
     use rustix::fs::{FlockOperation, flock};
     use std::os::fd::AsFd;
@@ -357,7 +355,7 @@ mod tests {
         assert_eq!(count, 5);
     }
 
-    // ADR-070 — pin the wasm-clean `mvm-verify` re-implementation to the
+    // Pin the wasm-clean `mvm-verify` re-implementation to the
     // bytes this crate actually writes. If `AuditEntry`'s serde shape
     // drifts from `mvm_verify::MirrorEntry`, a genuine line stops
     // verifying and this fails here (loudly, in CI) rather than only in
@@ -545,7 +543,7 @@ mod tests {
         assert!(matches!(err, VerifyError::SignatureInvalid { line: 0 }));
     }
 
-    /// Plan 102 W6.A commit 2 — cross-instance race regression.
+    /// Cross-instance race regression.
     ///
     /// Simulates the "two `mvm-libkrun-supervisor` processes for the
     /// same tenant" race by constructing two independent

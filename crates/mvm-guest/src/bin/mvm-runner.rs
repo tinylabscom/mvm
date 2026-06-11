@@ -1,5 +1,5 @@
 //! `mvm-runtime` — in-guest entrypoint for function-call
-//! workloads. ADR-0009 / plan 0003 phase 4.
+//! workloads.
 //!
 //! The agent (mvm `RunEntrypoint`) execs this binary with stdin piped
 //! in. It loads `/etc/mvm/runtime.json`, applies prod hardening, then
@@ -161,7 +161,7 @@ fn populate_argv(cmd: &mut Command, kind: Language, fragment: &PathBuf) {
 fn emit_envelope(kind: ErrorKind, message: &'static str) {
     let envelope = ErrorEnvelope::new(kind, message);
     // Use direct writes to bypass any panic-on-stderr-broken-pipe
-    // behaviour. The agent captures stderr per ADR-007 §1.
+    // behaviour. The agent captures stderr.
     let line = envelope.to_jsonl();
     let _ = io::stderr().write_all(line.as_bytes());
 }

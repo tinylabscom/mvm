@@ -1,6 +1,6 @@
 //! Build-time gate for the [`crate::app_deps::InstallResult`] artifacts
-//! produced by the libkrun builder VM (Plan 73 Followup B.2). Inspects
-//! the sealed-volume sidecars on disk (`sbom.cdx.json`, `cve.json`)
+//! produced by the libkrun builder VM. Inspects the sealed-volume
+//! sidecars on disk (`sbom.cdx.json`, `cve.json`)
 //! and either:
 //!
 //! - **`GateLevel::Prod`** — fails closed (typed [`GateError`] variants)
@@ -10,9 +10,8 @@
 //!   `tracing::warn!` line; the install still succeeds and the
 //!   surrounding `mvmctl up` flow continues to admit the workload.
 //!
-//! ADR-047 §"Lifecycle gates" pins the contract; this module is the
-//! host-side enforcer. The matching builder-VM-side B.2 fallbacks
-//! emit:
+//! This module is the host-side enforcer. The matching
+//! builder-VM-side fallbacks emit:
 //!
 //! - `SBOM_EMPTY_STUB` =
 //!   `{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}`
@@ -24,9 +23,9 @@
 //! "zero findings" install (a real SBOM always has ≥1 component for
 //! a non-empty install; a real CVE scan emits at least the tool's
 //! schema marker even with no findings). The prod gate rejects both
-//! shapes; the dev gate logs and continues. The CI gate (Followup D)
-//! sits on top of the prod variant: stub-fallback is acceptable for
-//! local `--dev` iteration, never for the release path.
+//! shapes; the dev gate logs and continues. The CI gate sits on top
+//! of the prod variant: stub-fallback is acceptable for local `--dev`
+//! iteration, never for the release path.
 //!
 //! ### Why parse with `serde_json::Value`
 //!
@@ -47,13 +46,13 @@ use thiserror::Error;
 use crate::app_deps::{GateLevel, InstallResult};
 
 /// Typed gate failure surfaced under [`GateLevel::Prod`]. Each variant
-/// maps 1:1 to an ADR-047 §"Lifecycle gates" rejection condition; the
+/// maps 1:1 to a lifecycle-gate rejection condition; the
 /// caller (`mvmctl up`) bubbles these to the user with the underlying
 /// path so an operator can debug without reading mvm internals.
 #[derive(Debug, Error)]
 pub enum GateError {
-    /// `sbom.cdx.json` is missing entirely (B.2 always writes one, so
-    /// this only fires on a manually-tampered volume).
+    /// `sbom.cdx.json` is missing entirely (the install pipeline always
+    /// writes one, so this only fires on a manually-tampered volume).
     #[error("SBOM file missing at {path}; prod admission requires a CycloneDX 1.5 SBOM")]
     SbomMissingFile { path: String },
 
@@ -119,7 +118,7 @@ pub enum GateError {
     /// At least one CVE finding has a `severity` of `high` or
     /// `critical`. The first such finding wins so the operator sees a
     /// concrete name; remaining findings are not enumerated here but
-    /// remain available via `mvmctl deps inspect` (Followup C).
+    /// remain available via `mvmctl deps inspect`.
     #[error(
         "CVE scan at {path} reports a {severity} severity finding for {package}; \
          --prod refuses to admit"
@@ -576,7 +575,7 @@ mod tests {
     #[test]
     fn medium_and_low_severity_pass_prod() {
         // Only high / critical fail closed; "medium" and "low" are
-        // tolerated. This matches ADR-047 §"Lifecycle gates".
+        // tolerated.
         let cve = r#"{
             "dependencies":[
                 {"name":"foo","vulns":[

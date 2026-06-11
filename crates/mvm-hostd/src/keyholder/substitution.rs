@@ -1,6 +1,6 @@
-//! Plan 129 / ADR-067 §1 + §4 — the substitution registry + endpoint core.
+//! The substitution registry + endpoint core.
 //!
-//! ADR-067 §1: a guest routes a secret-bearing request to a host-local
+//! A guest routes a secret-bearing request to a host-local
 //! substitution endpoint carrying an opaque [`Placeholder`] where the
 //! secret goes. The endpoint resolves the placeholder to its `SecretRef`,
 //! binding-checks the destination (claim 12), and substitutes the real
@@ -10,7 +10,7 @@
 //! This module is the **dispatch core**: the per-session placeholder
 //! registry + the resolve→bind→inject decision. The vsock/UDS transport,
 //! the real-TLS forward, the signer-path endpoint shape, and the SDK
-//! client routing are the remaining Phase D legs (tracked in the plan).
+//! client routing are not yet wired here.
 
 use std::collections::HashMap;
 
@@ -24,16 +24,16 @@ use super::signer::{SignError, Signature, Signer, SigningInput};
 
 /// The host-owned namespace every minted [`Placeholder`] carries. This prefix
 /// is reserved: it must never appear in a workload's own egress, so the
-/// Phase E leak scan can drop any non-substitution egress that contains it
-/// (ADR-067 §1 backstop) — the legitimate substitution path routes the
-/// placeholder to the host-local endpoint, never out the raw egress wire.
+/// leak scan can drop any non-substitution egress that contains it — the
+/// legitimate substitution path routes the placeholder to the host-local
+/// endpoint, never out the raw egress wire.
 pub const PLACEHOLDER_PREFIX: &str = "mvm-secret-";
 
 /// An opaque, per-session placeholder standing in for a secret on the guest
 /// side. **Not** the secret name and **not** the value: a leaked
 /// placeholder reveals nothing and resolves to nothing outside the session
-/// registry that minted it (ADR-067 §4). Destination non-replay comes from
-/// the binding check at substitution time, not the token itself.
+/// registry that minted it. Destination non-replay comes from the binding
+/// check at substitution time, not the token itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Placeholder(String);
 
@@ -118,10 +118,9 @@ pub enum SubstituteError {
     Inject(#[from] InjectError),
 }
 
-/// The host substitution endpoint core (ADR-067 §1): resolve a guest's
-/// placeholder to its secret, then substitute the real credential toward a
-/// bound destination. Dispatch only — the transport + real-TLS forward are
-/// separate Phase D legs.
+/// The host substitution endpoint core: resolve a guest's placeholder to its
+/// secret, then substitute the real credential toward a bound destination.
+/// Dispatch only — the transport + real-TLS forward live elsewhere.
 pub struct SubstitutionEndpoint<'a> {
     registry: &'a SubstitutionRegistry,
     resolver: &'a dyn SecretResolver,
@@ -294,7 +293,7 @@ mod tests {
             &["example.amazonaws.com"],
         ));
         let endpoint = SubstitutionEndpoint::new(&reg, &spy);
-        // aws-sig-v4-test-suite `get-vanilla` — the oracle from the C1 signer.
+        // aws-sig-v4-test-suite `get-vanilla` — the signer's known-answer oracle.
         let input = SigningInput::SigV4(SigV4Input {
             canonical_request: "GET\n/\n\nhost:example.amazonaws.com\n\
                  x-amz-date:20150830T123600Z\n\nhost;x-amz-date\n\

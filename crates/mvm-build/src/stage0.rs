@@ -10,9 +10,9 @@
 //!
 //! **One userland — busybox, everywhere.** The seed carries nix + a static
 //! busybox (its closure's shell) + CA certs; there is no Alpine, no `apk`,
-//! no external dependency. (Plan 160 — replaced the former Alpine minirootfs
-//! seed, which existed only to `apk add nix` and pulled the heavy `pgp`
-//! crate for its release-key verification.)
+//! no external dependency. This replaced the former Alpine minirootfs seed,
+//! which existed only to `apk add nix` and pulled the heavy `pgp` crate for
+//! its release-key verification.
 //!
 //! Per-run, [`materialize_root_dir`] re-verifies the cached tarball
 //! (SHA-256) and extracts its `store/` into `<dest>/nix/store`, then writes
@@ -50,11 +50,11 @@ pub struct BootstrapAsset {
 }
 
 // ============================================================================
-// Plan 160 — nix-tarball seed (the busybox/static-Nix replacement for the
-// Alpine minirootfs seed). The official Nix release tarball is a
-// self-contained `/nix/store` (nix + bash + curl + xz + nss-cacert) — no
-// apk, no Alpine, no external busybox, **no PGP** (SHA-256 pin only; the
-// hash is the binding integrity check, same as the Alpine tarball's).
+// nix-tarball seed (the busybox/static-Nix replacement for the Alpine
+// minirootfs seed). The official Nix release tarball is a self-contained
+// `/nix/store` (nix + bash + curl + xz + nss-cacert) — no apk, no Alpine, no
+// external busybox, **no PGP** (SHA-256 pin only; the hash is the binding
+// integrity check, same as the Alpine tarball's).
 // ============================================================================
 
 /// Nix release we seed from. Bump in lockstep with the SHA-256 pins below.
@@ -139,8 +139,8 @@ pub fn prepare_assets(assets: &[&BootstrapAsset]) -> Result<Vec<VendorBlobReport
 /// Returns one [`VendorBlobReport`] per asset describing whether it
 /// was freshly fetched or revalidated from cache and its verified
 /// SHA-256. The host caller turns each into a
-/// `LocalAuditKind::VendorBlobFetched` audit entry (Plan 93 Phase 3)
-/// so every supply-chain trust decision is auditable. `mvm-build`
+/// `LocalAuditKind::VendorBlobFetched` audit entry so every
+/// supply-chain trust decision is auditable. `mvm-build`
 /// stays audit-free; the caller (in `mvm-cli`) owns the emit.
 pub fn prepare_assets_in(
     cache_dir: &Path,
@@ -198,7 +198,7 @@ impl VendorBlobOutcome {
 
 /// One vendored-blob supply-chain event, returned by
 /// [`prepare_assets`]. The host caller renders each into a
-/// `LocalAuditKind::VendorBlobFetched` audit entry (Plan 93 Phase 3).
+/// `LocalAuditKind::VendorBlobFetched` audit entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorBlobReport {
     pub url: &'static str,
@@ -235,8 +235,8 @@ impl VendorBlobReport {
     }
 }
 
-/// Materialize a Stage 0 guest root from the **nix tarball seed** (plan
-/// 160). Lays down the official Nix release tarball's `/nix/store` + the
+/// Materialize a Stage 0 guest root from the **nix tarball seed**. Lays
+/// down the official Nix release tarball's `/nix/store` + the
 /// embedded `stage0-init` binary as `/init` — no Alpine, no apk, no shell
 /// `init.sh`. The supervisor hands `dest` to libkrun via `krun_set_root`
 /// and `krun_set_exec` with `entry_path = "/init"`. `stage0_init` is the
@@ -469,7 +469,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // ---------------- VendorBlobReport (Plan 93 Phase 3) ----------------
+    // ---------------- VendorBlobReport ----------------
 
     #[test]
     fn vendor_blob_outcome_wire_strings() {
@@ -598,7 +598,7 @@ mod tests {
         }
     }
 
-    // ---------------- nix-tarball seed asset table (Plan 160) ----------------
+    // ---------------- nix-tarball seed asset table ----------------
 
     #[test]
     fn nix_seed_table_covers_both_supported_arches() {

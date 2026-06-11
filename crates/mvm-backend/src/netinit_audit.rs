@@ -1,4 +1,4 @@
-//! Plan 74 W2 — host-side audit emission for the guest-side
+//! Host-side audit emission for the guest-side
 //! `mvm-guest-netinit` defense layer.
 //!
 //! `mvm-guest-netinit` runs at boot inside every microVM,
@@ -14,7 +14,7 @@
 //!    cleanly, plus a fail-closed-class record if the install
 //!    had per-route failures.
 //!
-//! The detail format follows mvmd ADR 0022 §"Failure semantics":
+//! The detail format follows the shared failure-semantics convention:
 //! every audit record names `layer=guest_netinit`, the
 //! per-event `scope`, and an `effect` for the fail-closed case.
 //! That convention lets a future dashboard pivot on:
@@ -115,7 +115,6 @@ pub fn emit_netinit_audit(report: &Report, vm_name: &str) {
     // failed to install. `effect=continue` documents that
     // `/init` does NOT abort the boot today; the host-side
     // iptables (where it applies) is the primary layer.
-    // mvmd ADR 0022 §"Failure semantics" names the keys.
     if report.has_failures() {
         let failed_cidrs: Vec<String> = report.failed.iter().map(|r| r.cidr.to_string()).collect();
         // First-reason is representative; the full list lives

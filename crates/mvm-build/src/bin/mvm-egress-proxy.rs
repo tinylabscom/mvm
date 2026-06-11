@@ -1,7 +1,7 @@
 //! mvm-egress-proxy — Linux-only binary that fronts the builder
 //! VM's application-deps install with an HTTP CONNECT proxy.
 //!
-//! Plan 73 Followup B.2.x. The binary:
+//! The binary:
 //!
 //! 1. Builds an [`Allowlist`] (production hostnames by default;
 //!    `MVM_EGRESS_ALLOWLIST` env-var override gated behind the
@@ -78,7 +78,7 @@ mod linux {
         ExitCode::SUCCESS
     }
 
-    /// Resolve the allowlist. Production: the hard-coded ADR-047
+    /// Resolve the allowlist. Production: the hard-coded
     /// hostnames. Dev-shell feature: optional
     /// `MVM_EGRESS_ALLOWLIST=host1,host2,host3` override + optional
     /// `MVM_EGRESS_ALLOWLIST_PORT=443` override.

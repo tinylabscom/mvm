@@ -1,14 +1,14 @@
-//! Plan 60 Phase 6 — attestation surface.
+//! Attestation surface.
 //!
 //! Three layers:
 //!
 //! - [`identity`] — Ed25519 identity-key lifecycle (`load_or_init_at`,
-//!   refuse-on-loose-perms; mirrors plan-64 W2's host signer pattern).
+//!   refuse-on-loose-perms; mirrors the host signer pattern).
 //! - [`header`]   — `AttestationBody` + `AttestationReport`,
 //!   `sign_report` / `verify_report`.
 //! - [`provider`] — feature-gated TPM2 / SEV-SNP / TDX stubs behind a
-//!   `HwAttestationProvider` trait. Real hardware bring-up is
-//!   sequenced post-Phase-6.
+//!   `HwAttestationProvider` trait. Real hardware bring-up is not yet
+//!   sequenced.
 //!
 //! Re-exports below collapse the module path so callers can write
 //! `use crate::crypto::attestation::{IdentityKey, sign_report, ...}`.

@@ -1,10 +1,10 @@
-//! Plan 141 / ADR-064 — synchronous observer fan-out runner. Pure: takes
+//! Synchronous observer fan-out runner. Pure: takes
 //! a raw frame + the observer slice, returns a `PacketDecision`. Reuses
 //! the `catch_unwind` panic-isolation pattern from `signer_task`
 //! (`gateway_bridge::signer_task`): a panicking observer is logged and
 //! treated as `Forward`; siblings continue.
 //!
-//! Verdict semantics (Q8/Q9):
+//! Verdict semantics:
 //! - Observers run in policy order; `Modify` chains (observer N+1 sees N's
 //!   output); the first `Drop` wins and kills the flow.
 //! - Any `Modify` the bridge cannot safely emit (over-MTU, unserializable)
@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Why the runner forced a fail-closed flow kill (Plan 141 Q8). Maps to
+/// Why the runner forced a fail-closed flow kill. Maps to
 /// the `reason` label on the `gateway.flow_observer_fault` chain entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KillReason {
@@ -84,7 +84,7 @@ pub fn run_packet_pipeline<'a>(
     // `owned` holds the live frame once an observer has rebuilt it.
     let mut owned: Option<Vec<u8>> = None;
 
-    // Plan 129 egress stages (A3.2): outbound leak controls that run before the
+    // Egress stages: outbound leak controls that run before the
     // observer chain, so a substituted payload is what the observers + the wire
     // see. Egress only. Scan first — a drop short-circuits before rewrite work.
     if ctx.direction == FlowDirection::Egress {
@@ -470,7 +470,7 @@ mod tests {
         }
     }
 
-    // ---- plan 129 egress stages (A3.2) ----
+    // ---- egress stages ----
 
     struct SubstFn<F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>(F);
     impl<F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync> SubstitutionStage for SubstFn<F> {

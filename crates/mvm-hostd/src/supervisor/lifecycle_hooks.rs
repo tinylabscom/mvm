@@ -1,6 +1,6 @@
-//! Plan 60 Phase 4 wiring — `LifecycleHooks` convenience layer.
+//! `LifecycleHooks` convenience layer.
 //!
-//! Phase 4 ships three composable pieces: the unified audit
+//! Three composable pieces sit underneath: the unified audit
 //! [`Recorder`](crate::supervisor::Recorder), the per-category metrics on
 //! [`Metrics`](mvm_core::observability::metrics::Metrics), and the
 //! live [`EventBus`](crate::supervisor::EventBus). Each one stands on its own.
@@ -72,7 +72,7 @@ impl LifecycleHooks {
     /// All-`None` no-op handle. Helpers called on this value
     /// short-circuit without emitting anywhere. Useful as the
     /// default for legacy callers that haven't adopted the
-    /// Phase 4 substrate yet.
+    /// audit/event substrate yet.
     pub fn none() -> Self {
         Self {
             recorder: None,

@@ -1,18 +1,15 @@
 //! `xtask gen-stubs` and `xtask check-stubs`
 //!
-//! Plan 60 Phase 5 — codegen pipeline for the Python and TypeScript
+//! Codegen pipeline for the Python and TypeScript
 //! SDKs' lower-layer IR types. Single source of truth is the Rust
 //! `mvm-sdk` crate's `ir::Workload` struct (via `schemars`); the JSON
 //! Schema is emitted to `schema/workload-ir-v0.json` and downstream
 //! generators produce per-language dataclasses / interfaces.
 //!
-//! (Plan 121 folded the former `mvm-ir` crate into `mvm-sdk::ir`; the
-//! schema-emit bin moved with it — Plan 124 D fixed the stale `-p
-//! mvm-ir` invocation that left this pipeline unrunnable.)
+//! The schema-emit bin lives in `mvm-sdk` (the former `mvm-ir` crate
+//! folded into `mvm-sdk::ir`).
 //!
-//! Modeled on mvmforge's `just schema-gen` / `sdk-python-gen` /
-//! `sdk-ts-gen` recipes (`/Users/auser/work/tinylabs/mvmco/mvmforge/
-//! Justfile`). The xtask packages all three into one command so a dev
+//! The xtask packages all three steps into one command so a dev
 //! who edits the IR types runs `cargo xtask gen-stubs` and gets
 //! everything refreshed; CI runs `cargo xtask check-stubs` and fails
 //! on drift.
@@ -20,7 +17,7 @@
 //! Toolchain:
 //!
 //! * Rust schema emit: `cargo run -q -p mvm-sdk --bin
-//!   emit_workload_schema` (the binary lives in `mvm-sdk` post-121).
+//!   emit_workload_schema` (the binary lives in `mvm-sdk`).
 //! * Python: `uvx --from datamodel-code-generator==<PIN>
 //!   datamodel-codegen ...` — zero-install via `uv`. Devs don't need
 //!   to `uv sync` a Python env first.

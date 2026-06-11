@@ -1,4 +1,4 @@
-//! `host.audit.v1` — workload-emitted audit entries (Plan 104, ADR-062).
+//! `host.audit.v1` — workload-emitted audit entries.
 //!
 //! Workloads call `emit` or `emit_batch` over the broker's vsock UDS;
 //! this handler forwards each accepted entry to `mvm-audit-signer`
@@ -21,7 +21,7 @@
 //! - Unknown verb → `ServiceErrorCode::NotImplemented`.
 //! - Payload too large (single `emit`) → `ServiceErrorCode::BadRequest`
 //!   with an explicit `"record exceeds 4 KiB"` message (no payload
-//!   bytes embedded — Plan 104 §S9).
+//!   bytes embedded).
 //! - Batch oversize (count or total bytes) →
 //!   `ServiceErrorCode::BadRequest`.
 //! - Rate limit exceeded → `ServiceErrorCode::RateLimitExceeded`.
@@ -323,9 +323,9 @@ impl ServiceHandler for HostAuditV1Handler {
     }
 
     fn idempotency(&self) -> Idempotency {
-        // Each call mints a fresh entry. Per ADR-062 the workload's
-        // ergonomic for dedup is "supply a deterministic field in
-        // your payload"; the chain itself doesn't dedup.
+        // Each call mints a fresh entry. The workload's ergonomic for
+        // dedup is "supply a deterministic field in your payload"; the
+        // chain itself doesn't dedup.
         Idempotency::MintFresh
     }
 

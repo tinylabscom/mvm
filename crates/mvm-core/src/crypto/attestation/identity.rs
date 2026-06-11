@@ -1,4 +1,4 @@
-//! Plan 60 Phase 6 — host attestation identity key.
+//! Host attestation identity key.
 //!
 //! Stores an Ed25519 keypair under
 //! `~/.mvm/attestation/identity.{ed25519,pub}`:
@@ -6,15 +6,14 @@
 //! - `identity.ed25519` — 32-byte Ed25519 secret key, mode `0600`
 //! - `identity.pub`     — 32-byte Ed25519 public key, mode `0644`
 //!
-//! This is the *runtime* identity layer (plan 60 §"Attestation
-//! everywhere" tier 4): every attestation report the host emits is
-//! signed by this key, so verifiers can prove which host produced
-//! the boot/runtime measurements. The host signer at
-//! `~/.mvm/keys/host-signer.*` (plan 64 W2) is a *separate* identity
-//! used for signing `ExecutionPlan` envelopes — same crypto, different
-//! roles. Keeping them separate means a compromised plan-signer key
-//! does not implicitly reauthenticate previously emitted attestation
-//! reports, and vice versa.
+//! This is the *runtime* identity layer: every attestation report the
+//! host emits is signed by this key, so verifiers can prove which host
+//! produced the boot/runtime measurements. The host signer at
+//! `~/.mvm/keys/host-signer.*` is a *separate* identity used for
+//! signing `ExecutionPlan` envelopes — same crypto, different roles.
+//! Keeping them separate means a compromised plan-signer key does not
+//! implicitly reauthenticate previously emitted attestation reports,
+//! and vice versa.
 //!
 //! The lifecycle mirrors `mvm_cli::commands::vm::host_signer`
 //! verbatim — generate-on-first-use with `OsRng`, refuse to load if
@@ -28,9 +27,9 @@
 //! ## Refusal posture
 //!
 //! Loose perms on the secret half are a hard refusal, not a self-heal
-//! (same rationale as plan 64 W2 — the identity key is long-lived and
-//! every attestation chain trusts it; silently tightening perms hides
-//! a real misconfiguration). The error message names both the actual
+//! — the identity key is long-lived and every attestation chain trusts
+//! it; silently tightening perms hides a real misconfiguration. The
+//! error message names both the actual
 //! mode and the expected mode so the operator can `chmod 0600 <file>`
 //! and re-run, or rotate the keypair via `rm` + next CLI call.
 

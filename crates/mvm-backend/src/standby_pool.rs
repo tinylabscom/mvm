@@ -1,4 +1,4 @@
-//! Plan 118 WS-1 1b — the backend-agnostic supervisor standby pool registry.
+//! The backend-agnostic supervisor standby pool registry.
 //!
 //! Records each prelaunched standby as `<pool_root>/<id>/standby.json` (the control
 //! UDS lives alongside as `control-<nonce>.sock`, bound by the backend's spawn impl).
@@ -50,7 +50,7 @@ impl SupervisorStandbyPool {
     }
 
     /// All recorded handles (ignoring unreadable/garbage dirs — they get reaped by
-    /// [`reap_stale`](Self::reap_stale) in 1b-ii).
+    /// [`reap_stale`](Self::reap_stale)).
     pub fn list(&self) -> Result<Vec<StandbyHandle>> {
         let mut out = Vec::new();
         let rd = match std::fs::read_dir(&self.root) {
@@ -104,8 +104,8 @@ impl SupervisorStandbyPool {
 
     /// Reap standbys that are dead (pid gone) or expired (`now - spawned > ttl`). For a
     /// still-live expired standby, SIGTERM the supervisor first, then remove its dir.
-    /// Returns the reaped ids. Idle entitled processes must never accumulate (Plan 118
-    /// §"B-ii residual risk" item 3) — `cache prune` calls this on a timer.
+    /// Returns the reaped ids. Idle entitled processes must never accumulate —
+    /// `cache prune` calls this on a timer.
     pub fn reap_stale(&self, ttl: std::time::Duration, now: u64) -> Result<Vec<String>> {
         let ttl_secs = ttl.as_secs();
         let mut reaped = Vec::new();
@@ -135,7 +135,7 @@ pub fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// `kill(pid, 0)` liveness — 0 ⇒ the process exists (W1.2 reaper precedent).
+/// `kill(pid, 0)` liveness — 0 ⇒ the process exists.
 fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }

@@ -5,9 +5,9 @@
 # name set and install paths; CI enforces parity (see
 # xtask/src/check_mvm_host_binaries_sync.rs).
 #
-# Adding a binary here is part of the Plan 115 / ADR-065 contract;
-# new uses of rustPlatform.buildRustPackage in mvm's flakes are
-# forbidden (see ADR-065 §Principle).
+# New uses of rustPlatform.buildRustPackage in mvm's flakes are
+# forbidden; the host binaries embedded here are the only sanctioned
+# way to ship mvm-internal Linux executables into the VM rootfs.
 {
   mvm-host-vm-init = {
     install_path = "/sbin/mvm-host-vm-init";

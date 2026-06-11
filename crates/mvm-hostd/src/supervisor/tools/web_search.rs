@@ -1,7 +1,7 @@
 //! `mvm.web_search` — provider-fronted web search through a
 //! per-tenant provider allowlist.
 //!
-//! Plan 60 Phase 7. The agent passes a query string + (optionally) a
+//! The agent passes a query string + (optionally) a
 //! preferred provider; the supervisor:
 //!
 //! 1. Validates the query — non-empty, length-capped, no embedded
@@ -117,7 +117,7 @@ impl SearchProvider for NoopSearchProvider {
 /// API key. The agent never sees the key — it's pinned inside this
 /// struct at construction and consumed only by the HTTP send.
 ///
-/// ## W6 — credential lifetime hardening (plan 65)
+/// ## Credential lifetime hardening
 ///
 /// `api_key` is held as `SecretBox<String>` so the bytes zeroize
 /// on drop. The wrapper also refuses accidental `Debug`/`Display`
@@ -146,10 +146,10 @@ impl BraveSearchProvider {
     pub const DEFAULT_ENDPOINT: &'static str = "https://api.search.brave.com/res/v1/web/search";
 
     /// Build with the default endpoint + a hardened reqwest client
-    /// (plan 65 W1 no-auto-redirect + W2 SSRF-filtering resolver).
+    /// (no-auto-redirect + SSRF-filtering resolver).
     /// `api_key` is the operator's `X-Subscription-Token` value
-    /// wrapped in `SecretBox<String>` so it zeroizes on drop
-    /// (plan 65 W6). The constructor takes a `SecretBox` rather
+    /// wrapped in `SecretBox<String>` so it zeroizes on drop.
+    /// The constructor takes a `SecretBox` rather
     /// than `impl Into<String>` so the operator must explicitly
     /// commit to the secret-lifetime contract — accidental raw-
     /// string construction stops at the type system.
@@ -227,9 +227,9 @@ impl SearchProvider for BraveSearchProvider {
                 "Brave search returned status {status}"
             )));
         }
-        // Plan 65 follow-on — cap the response body before parsing so
-        // a malicious upstream (or compromised CDN) can't push
-        // gigabytes of JSON at the supervisor.
+        // Cap the response body before parsing so a malicious
+        // upstream (or compromised CDN) can't push gigabytes of
+        // JSON at the supervisor.
         let body = read_capped(response, DEFAULT_RESPONSE_BODY_CAP)
             .await
             .map_err(SearchError::Upstream)?;
@@ -428,7 +428,7 @@ impl HostMediatedTool for WebSearchTool {
 /// inside the JSON request body (`"api_key": "<key>"`), and the
 /// search itself is a POST (not a GET-with-query-string). Otherwise
 /// the abstraction matches — supervisor owns the key (held as
-/// `SecretBox<String>`; plan 65 W6), the agent never sees it.
+/// `SecretBox<String>`), the agent never sees it.
 ///
 /// Tavily is "search-for-LLMs" by design: each result row carries
 /// a `content` field that's an LLM-friendly snippet (often longer
@@ -450,8 +450,8 @@ impl TavilySearchProvider {
     const DEFAULT_TIMEOUT_SECS: u64 = 20;
 
     /// Build with the default endpoint + a hardened reqwest client
-    /// (plan 65 W1 + W2 + W6 — no auto-redirect, SSRF-filtering
-    /// resolver, zeroize-on-drop credential).
+    /// (no auto-redirect, SSRF-filtering resolver, zeroize-on-drop
+    /// credential).
     pub fn new(api_key: SecretBox<String>) -> Result<Self, SearchError> {
         let client = hardened_client_builder(Self::DEFAULT_TIMEOUT_SECS)
             .build()
@@ -545,7 +545,7 @@ impl SearchProvider for TavilySearchProvider {
 /// Google Custom Search API provider. Documented at
 /// <https://developers.google.com/custom-search/v1/overview>.
 ///
-/// ## W5 — API-key-in-URL hardening (plan 65)
+/// ## API-key-in-URL hardening
 ///
 /// Google's Custom Search v1 endpoint requires both an API key
 /// AND a Custom Search Engine (CSE) ID in the URL query string:
@@ -602,8 +602,8 @@ impl GoogleSearchProvider {
     /// `cse_id` (Custom Search Engine ID) are pinned inside the
     /// struct and consumed only by the HTTP send.
     pub fn new(api_key: SecretBox<String>, cse_id: SecretBox<String>) -> Result<Self, SearchError> {
-        // Plan 65 W1 + W2 + W6: hardened builder applies
-        // no-auto-redirect + SSRF-filtering DNS resolver; both
+        // Hardened builder applies no-auto-redirect +
+        // SSRF-filtering DNS resolver; both
         // credentials are held as `SecretBox<String>` so they
         // zeroize on drop. The reqwest client can't be poisoned
         // via DNS or chased to a non-Google host via 3xx, and the
@@ -626,13 +626,13 @@ impl GoogleSearchProvider {
         self
     }
 
-    /// W5 redaction helper. Replaces every occurrence of the API
+    /// Redaction helper. Replaces every occurrence of the API
     /// key + CSE ID in `message` with `<REDACTED>`. Public for
     /// tests that want to assert the same redaction shape; the
     /// production path uses it internally before every `SearchError`
     /// emission.
     ///
-    /// The credentials live behind `SecretBox<String>` (W6), so
+    /// The credentials live behind `SecretBox<String>`, so
     /// this method exposes them only for the duration of the
     /// `String::replace` call — the underlying bytes don't escape
     /// into a longer-lived borrow.
@@ -653,7 +653,7 @@ impl GoogleSearchProvider {
 }
 
 // Hand-written Debug redacts both credentials. Mirrors the
-// `HostSigner` pattern from plan 64 W2.
+// `HostSigner` pattern.
 //
 // allow(secret-debug): the Debug impl is the redaction, not a leak.
 impl std::fmt::Debug for GoogleSearchProvider {
@@ -862,8 +862,6 @@ mod tests {
 
     #[tokio::test]
     async fn allowlist_blocks_unconfigured_provider() {
-        // Exit-test target per plan 60 Phase 7:
-        // `crate::supervisor::tools::web_search::tests::allowlist_blocks_unconfigured_provider`.
         let tool = WebSearchTool::with_allowlist(["brave".to_string()], "brave".to_string());
         let err = tool
             .invoke(serde_json::json!({
@@ -1215,7 +1213,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // GoogleSearchProvider (plan 65 W5)
+    // GoogleSearchProvider
     // ──────────────────────────────────────────────────────────────
 
     #[test]

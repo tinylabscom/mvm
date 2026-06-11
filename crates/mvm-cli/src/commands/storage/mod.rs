@@ -1,10 +1,10 @@
-//! `mvmctl storage` — dm-thin pool inspection + GC. Plan 47.
+//! `mvmctl storage` — dm-thin pool inspection + GC.
 //!
-//! Phase 1 ships the read-only `info` verb and a `gc --dry-run` /
+//! Ships the read-only `info` verb and a `gc --dry-run` /
 //! `gc --apply` verb that operate against the storage abstraction in
 //! `mvm/src/storage/`. The MockBackend is the only impl that
 //! actually does anything today; the production DmsetupBackend lands
-//! its real `dmsetup` invocations in Phase 2 alongside the
+//! its real `dmsetup` invocations later alongside the
 //! instance-create migration in `vm/template/lifecycle.rs`.
 
 use anyhow::Result;

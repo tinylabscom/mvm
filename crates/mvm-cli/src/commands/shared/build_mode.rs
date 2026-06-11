@@ -9,7 +9,7 @@
 //! - `--dev` builds the dev variant (dev guest agent + accessible
 //!   image; `mvmctl console`/`exec` work against the resulting VM).
 //! - `--prod` builds the prod variant (no dev surface; sealed
-//!   image; W6.2 console gate refuses). Same as the default;
+//!   image; the console gate refuses). Same as the default;
 //!   useful for explicit intent in scripts/CI.
 //!
 //! The two are mutually exclusive (clap enforces).

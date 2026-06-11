@@ -1,10 +1,9 @@
 //! Session entity — opaque ID + persistent metadata for the
 //! `mvmctl session` verbs.
 //!
-//! Phase 3 of mvmforge's `specs/upstream-mvm-prompt.md` deliverable
-//! (D). A session is a microVM kept alive across multiple
+//! A session is a microVM kept alive across multiple
 //! `mvmctl invoke` calls. Today the warm-process pool already
-//! intercepts most `RunEntrypoint` requests (plan 43), but each
+//! intercepts most `RunEntrypoint` requests, but each
 //! `mvmctl invoke` call still boots+tears down the substrate VM —
 //! the session abstraction is what lets a long-running client
 //! (mvmforge SDK's `Session`) hold a VM open and run multiple
@@ -208,7 +207,7 @@ pub struct SessionRecord {
 
 /// Whether the session's wrapper is allowed to run ad-hoc code (dev)
 /// or strictly the baked entrypoint (prod). Mirrors the wrapper-side
-/// `mode` field at `/etc/mvm/wrapper.json` (mvmforge ADR-0009).
+/// `mode` field at `/etc/mvm/wrapper.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {

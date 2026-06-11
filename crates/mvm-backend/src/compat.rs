@@ -11,8 +11,8 @@
 //!   `crates/mvm-backend/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
 //! - **Vz**: `crates/mvm-backend/src/vz.rs` `DEFAULT_CMDLINE` + capabilities;
-//!   Plan 97 — macOS-only, aarch64-only in practice (Apple Silicon + HVF),
-//!   gvproxy networking (Plan 102 W6.A.5), snapshot-capable on macOS 14+
+//!   macOS-only, aarch64-only in practice (Apple Silicon + HVF),
+//!   gvproxy networking, snapshot-capable on macOS 14+
 //!   (capabilities() is host-probed; compat reports the nominal capability).
 //! - **AppleContainer**: `crates/mvm-backend/src/apple_container.rs`; macOS
 //!   26+ Apple Silicon only; vmnet networking; no snapshots or jailer.
@@ -74,7 +74,7 @@ pub struct BackendCompat {
     pub required_boot_args: &'static [&'static str],
     pub supports_snapshots: bool,
     /// Whether the backend supports running under a jailer/seccomp sandbox.
-    /// True only for Firecracker (ADR-002 W1.1 jailer path).
+    /// True only for Firecracker (the jailer path).
     pub supports_jailer: bool,
     pub networking: NetworkingModel,
 }
@@ -119,8 +119,7 @@ static FIRECRACKER: BackendCompat = BackendCompat {
 // Raw also has a constant but is undocumented for the builder path and intentionally
 // excluded here. Uncompressed Image and Pe have no KRUN_KERNEL_FORMAT constant
 // (to_krun_format returns Err for both) — excluded. Only the bundled kernel is
-// used today (Plan 86 / CLAUDE.md builder-vm note), but the full accepted-format
-// list reflects the actual FFI surface.
+// used today, but the full accepted-format list reflects the actual FFI surface.
 // gvproxy on macOS (CLAUDE.md host-deps); passt on Linux — model as Gvproxy
 // (the macOS default) since mvm's libkrun path is primarily macOS today.
 static LIBKRUN: BackendCompat = BackendCompat {
@@ -151,7 +150,7 @@ static LIBKRUN: BackendCompat = BackendCompat {
 // libkrun's bundled compressed variants are NOT needed here because Vz has its
 // own VMM. Snapshot capable on macOS 14+ (capabilities() is host-probed;
 // the static model reports true = backend supports it when OS meets requirement).
-// Plan 102 W6.A.5 — gvproxy for networking.
+// gvproxy for networking.
 static VZ: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Vz,
     guest_arches: &[Aarch64], // macOS on Apple Silicon only
@@ -167,7 +166,7 @@ static VZ: BackendCompat = BackendCompat {
     required_boot_args: &["console=hvc0"],
     supports_snapshots: true, // macOS 14+; host-checked at runtime in VzBackend::capabilities()
     supports_jailer: false,
-    networking: NetworkingModel::Gvproxy, // Plan 102 W6.A.5
+    networking: NetworkingModel::Gvproxy,
 };
 
 // AppleContainer: source — crates/mvm-backend/src/apple_container.rs.

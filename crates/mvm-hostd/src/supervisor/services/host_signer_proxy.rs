@@ -1,5 +1,4 @@
-//! Client for `mvm-host-signer` (the host signer subprocess; Plan 104
-//! §H-L1.1).
+//! Client for `mvm-host-signer` (the host signer subprocess).
 //!
 //! Two verb-specific methods (`sign_plan`, `sign_credential`) on top of
 //! the typed `SignRequest`/`SignResponse` envelope. Each method

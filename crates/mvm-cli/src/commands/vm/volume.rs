@@ -1,6 +1,5 @@
-//! `mvmctl volume` — virtio-fs volume mount lifecycle. Plan 45 §D5
-//! (Path C; renamed from the prior `share` subcommand without
-//! behavioural change).
+//! `mvmctl volume` — virtio-fs volume mount lifecycle (renamed from
+//! the prior `share` subcommand without behavioural change).
 //!
 //! This command owns two registries:
 //! - managed local encrypted volumes in `~/.mvm/volumes/registry.json`
@@ -19,12 +18,11 @@
 //!
 //! ## `--remote` mode (mvmd proxy)
 //!
-//! Per plan 45 §D5 (Path C), `--remote` routes operations through
-//! mvmd's REST API rather than executing locally. v1 stub only —
-//! the actual `mvmctl::mvmd_client` module ships in a follow-up
-//! once the mvmd-side bucket reconciliation lands (mvmd Sprint 137
-//! W2). Today `--remote` returns a clear "not yet implemented"
-//! error.
+//! `--remote` routes operations through mvmd's REST API rather than
+//! executing locally. v1 stub only — the actual `mvmctl::mvmd_client`
+//! module ships in a follow-up once the mvmd-side bucket
+//! reconciliation lands. Today `--remote` returns a clear "not yet
+//! implemented" error.
 
 use std::fs::{self, File};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -82,10 +80,10 @@ pub(in crate::commands) enum VolumeCmd {
     },
     /// Mount a virtio-fs volume into a VM.
     ///
-    /// Per plan 45 §D5 (Path C): operations against provider-backed
-    /// (S3 / Hetzner / R2 / GCS / Azure) volumes route through mvmd
-    /// via `--remote`. v1 mvm-side `mount` handles only local
-    /// volumes (host directory exposed via virtio-fs).
+    /// Operations against provider-backed (S3 / Hetzner / R2 / GCS /
+    /// Azure) volumes route through mvmd via `--remote`. v1 mvm-side
+    /// `mount` handles only local volumes (host directory exposed via
+    /// virtio-fs).
     Mount {
         /// Name of the VM
         #[arg(value_parser = clap_vm_name)]
@@ -108,7 +106,7 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         rw: bool,
         /// Route through mvmd REST instead of writing the local
-        /// registry. Stub in v1 — see plan 45 §D5.
+        /// registry. Stub in v1.
         #[arg(long)]
         remote: bool,
     },
@@ -119,7 +117,7 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         json: bool,
         /// Route through mvmd REST instead of reading the local
-        /// registry. Stub in v1 — see plan 45 §D5.
+        /// registry. Stub in v1.
         #[arg(long)]
         remote: bool,
     },
@@ -130,7 +128,7 @@ pub(in crate::commands) enum VolumeCmd {
         /// Guest mount path to detach.
         guest_path: String,
         /// Route through mvmd REST instead of editing the local
-        /// registry. Stub in v1 — see plan 45 §D5.
+        /// registry. Stub in v1.
         #[arg(long)]
         remote: bool,
     },
@@ -312,7 +310,7 @@ fn create_mvm_managed(volume_name: &str, root: Option<&str>) -> Result<()> {
     let (mut wrapped_key, dek) = generate_wrapped_volume_key()?;
     let scratch = tempfile::tempdir_in(&root).context("creating empty volume scratch dir")?;
     write_encrypted_volume_archive(scratch.path(), &ciphertext_path, dek.expose_secret())?;
-    // Plan 122 B2 — bind the DEK to the ciphertext archive it now protects.
+    // Bind the DEK to the ciphertext archive it now protects.
     wrapped_key.rebind_content(ciphertext_content_hash(&ciphertext_path)?);
 
     let mut catalog = LocalVolumeCatalog::load()?;
@@ -340,8 +338,8 @@ fn create_mvm_managed(volume_name: &str, root: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Plan 122 B1 — opportunistically roll the local master KEK when it is
-/// past its 90-day lifetime, re-wrapping the catalog's mvm-managed volume
+/// Opportunistically roll the local master KEK when it is past its
+/// 90-day lifetime, re-wrapping the catalog's mvm-managed volume
 /// keys onto the new KEK. Invoked whenever a managed volume key is minted —
 /// the closest thing to a periodic "on use" trigger the local CLI has.
 ///
@@ -432,7 +430,7 @@ fn generate_wrapped_volume_key() -> Result<(WrappedKey, secrecy::SecretBox<Vec<u
             wrapped,
             algorithm: WrapAlgorithm::Aes256Gcm,
             // Bound to the ciphertext archive once it exists (the caller sets
-            // this via `rebind_content` after writing the archive). Plan 122 B2.
+            // this via `rebind_content` after writing the archive).
             bound: None,
         },
         secrecy::SecretBox::new(Box::new(dek)),
@@ -440,7 +438,7 @@ fn generate_wrapped_volume_key() -> Result<(WrappedKey, secrecy::SecretBox<Vec<u
 }
 
 /// sha256-hex of a ciphertext archive — the per-volume content-hash a DEK
-/// binds to (plan 122 B2).
+/// binds to.
 fn ciphertext_content_hash(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing ciphertext archive {}", path.display()))
@@ -456,9 +454,9 @@ fn unwrap_volume_key(entry: &LocalVolumeEntry) -> Result<secrecy::SecretBox<Vec<
             )
         }
     };
-    // Plan 122 B2 — admit gate: refuse a DEK presented against a different
-    // ciphertext than it was bound to (a swapped archive). Unbound (pre-B2)
-    // keys pass. Runs before the master is even loaded.
+    // Admit gate: refuse a DEK presented against a different ciphertext
+    // than it was bound to (a swapped archive). Unbound keys pass. Runs
+    // before the master is even loaded.
     let actual = ciphertext_content_hash(Path::new(&enc.ciphertext_path))?;
     if !enc.wrapped_key.binding_matches_content(&actual) {
         bail!(
@@ -658,7 +656,7 @@ fn lock(volume_name: &str) -> Result<()> {
     fs::remove_dir_all(&host_path)
         .with_context(|| format!("removing plaintext volume dir {}", host_path.display()))?;
     // Re-sealing rewrote the ciphertext, so its hash changed — move the DEK
-    // binding to the new archive (plan 122 B2) before persisting.
+    // binding to the new archive before persisting.
     let new_hash = ciphertext_content_hash(&ciphertext_path)?;
     let entry = catalog
         .get_mut(volume_name)
@@ -944,9 +942,9 @@ mod tests {
         bytes[last] ^= 0xff;
         fs::write(&ciphertext, bytes).unwrap();
         let err = unlock("work").unwrap_err();
-        // Plan 122 B2: the DEK binding now catches a flipped byte at admit
-        // (the ciphertext hash no longer matches the bound artifact), before
-        // the archive is even decrypted. Either gate is a valid rejection.
+        // The DEK binding catches a flipped byte at admit (the ciphertext
+        // hash no longer matches the bound artifact), before the archive is
+        // even decrypted. Either gate is a valid rejection.
         assert!(
             err.to_string().contains("DEK binding mismatch")
                 || err.to_string().contains("decrypting volume archive")
@@ -958,7 +956,7 @@ mod tests {
     #[test]
     fn mvm_managed_unlock_rejects_dek_bound_to_different_artifact() {
         // A DEK whose recorded binding points at a different content_hash than
-        // the on-disk ciphertext is refused at admit (plan 122 B2 Step 1).
+        // the on-disk ciphertext is refused at admit.
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
         create("work", Some(root.to_str().unwrap()), false).unwrap();

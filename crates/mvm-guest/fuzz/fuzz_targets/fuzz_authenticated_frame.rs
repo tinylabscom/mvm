@@ -1,4 +1,4 @@
-// ADR-002 §W4.2 — fuzz the authenticated-frame envelope. The wrapper is
+// Fuzz the authenticated-frame envelope. The wrapper is
 // deserialized before any signature check runs, so a panic in the envelope
 // parser would let an unauthenticated attacker crash the agent. Inputs are
 // fed straight into `serde_json::from_slice::<AuthenticatedFrame>`; we are

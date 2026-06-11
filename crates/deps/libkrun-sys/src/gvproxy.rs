@@ -1,5 +1,4 @@
-//! Gvproxy-backed virtio-net supervisor (Plan 88 W2 / ADR-055
-//! cross-platform amendment).
+//! Gvproxy-backed virtio-net supervisor.
 //!
 //! `gvproxy` is a userspace network gateway (containers/gvisor-tap-vsock
 //! project, Apache-2.0, single statically-linked binary) that translates
@@ -7,7 +6,7 @@
 //! socket and AF_INET sockets on the host. The slp/krun Homebrew tap
 //! ships it as the canonical macOS networking backend for libkrun,
 //! filling the role passt fills on Linux (passt itself doesn't build on
-//! macOS — see ADR-055 §"Cross-platform backends").
+//! macOS).
 //!
 //! The integration model differs from passt:
 //!
@@ -160,10 +159,10 @@ pub fn locate_gvproxy() -> Option<PathBuf> {
 /// `krun_start_enter` `exit()`s on guest shutdown and skips
 /// `GvproxyHandle::Drop`, so daemons routinely outlive their VM) or
 /// a concurrent VM reusing the same scratch dir can't steal the
-/// port out from under us. Plan 88 W5's deterministic hash collided
-/// exactly this way — a re-run reusing `~/.mvm/vms/<name>/` derived
-/// the same port a still-bound leaked daemon already held, and
-/// gvproxy bailed with `bind: address already in use`.
+/// port out from under us. An earlier deterministic-hash scheme
+/// collided exactly this way — a re-run reusing `~/.mvm/vms/<name>/`
+/// derived the same port a still-bound leaked daemon already held,
+/// and gvproxy bailed with `bind: address already in use`.
 ///
 /// The bind→read→close → gvproxy-bind window is a microsecond-scale
 /// TOCTOU that another process could in principle race, but a closed

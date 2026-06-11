@@ -1,15 +1,15 @@
 //! `DestinationPolicy` — explicit `(host, port)` allowlist.
 //!
-//! Plan 37 §15 first-line defence: refuse outbound traffic to any
-//! destination not on the workload's allowlist. The allowlist is
-//! sourced from the workload's `EgressPolicy` (Wave 2.6 wires the
-//! resolver); for Wave 2.1 the policy is constructed directly from
-//! a list of (host, port) pairs.
+//! First-line defence: refuse outbound traffic to any destination
+//! not on the workload's allowlist. The allowlist is sourced from
+//! the workload's `EgressPolicy` once the resolver is wired; until
+//! then the policy is constructed directly from a list of
+//! (host, port) pairs.
 //!
 //! Match semantics:
-//! - Exact host match (no wildcards). Wave 2.5 introduces SNI-pin
-//!   semantics where the cert SAN is what we match — for now
-//!   `host` is the literal request host string.
+//! - Exact host match (no wildcards). SNI-pin semantics where the
+//!   cert SAN is what we match come later — for now `host` is the
+//!   literal request host string.
 //! - Port match exact. `0` in the allowlist means "any port for
 //!   this host", which the caller opts into per entry.
 //!
@@ -48,7 +48,7 @@ fn host_hash(host: &str) -> u64 {
 }
 
 /// Explicit (host, port) allowlist inspector. Constructed from the
-/// workload's `EgressPolicy.allow_list` (Wave 2.6 wires the resolver).
+/// workload's `EgressPolicy.allow_list` once the resolver is wired.
 pub struct DestinationPolicy {
     allowed: BTreeSet<Destination>,
     /// Parallel store of original host strings (case preserved) so

@@ -1,4 +1,4 @@
-//! Make a published x86_64 kernel Firecracker-loadable (#746).
+//! Make a published x86_64 kernel Firecracker-loadable.
 //!
 //! Firecracker's x86_64 boot loader needs an **uncompressed ELF `vmlinux`**, but
 //! the nixpkgs x86_64 kernel ships a **bzImage** (a self-decompressing wrapper),
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn ensure_fc_loadable_extracts_a_bzimage_to_a_cached_sibling() {
         let dir = tempfile::tempdir().unwrap();
-        let kpath = dir.path().join("vmlinux"); // misnamed bzImage (the #746 bug)
+        let kpath = dir.path().join("vmlinux"); // a bzImage misnamed as vmlinux
         let vmlinux = fake_vmlinux();
         std::fs::write(&kpath, fake_bzimage(&vmlinux)).unwrap();
 

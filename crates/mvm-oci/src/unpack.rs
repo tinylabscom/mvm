@@ -1,4 +1,4 @@
-//! Layer-to-tree unpacker — Plan 85 Phase A.
+//! Layer-to-tree unpacker.
 //!
 //! Materializes an OCI layer tarball (already digest-verified + cached
 //! by [`crate::layer`]) into a directory tree on the host filesystem,
@@ -7,7 +7,7 @@
 //! escape, hardlink-to-host, device-node planting, setuid surprise,
 //! xattr-based privilege carry).
 //!
-//! ## Scope through sub-phase A.6
+//! ## Scope
 //!
 //! The unpacker handles four tar entry kinds and two OCI-specific
 //! filename markers that ride inside regular-file tar entries:
@@ -32,7 +32,7 @@
 //!   (the path the symlink *file itself* occupies) is under
 //!   `output_root`; targets that point outside are not unpack-time
 //!   errors.
-//! - **OCI whiteouts (A.2)** — regular-file tar entries (typeflag
+//! - **OCI whiteouts** — regular-file tar entries (typeflag
 //!   `'0'`) whose *leaf filename* carries the OCI v1.1 whiteout
 //!   semantic. `.wh.<name>` removes the sibling `<name>` from the
 //!   assembled tree; `.wh..wh..opq` clears the parent directory's
@@ -40,13 +40,13 @@
 //!   marker files themselves are **not** materialized, and markers
 //!   apply only to prior/lower-layer state, never to entries from
 //!   the same layer. Both shapes
-//!   pass through every A.1 safety check on the marker's path
+//!   pass through every path safety check on the marker's path
 //!   before the whiteout helper runs — including
 //!   [`RefusalReason::SymlinkInParent`], so a `.wh.passwd` under a
 //!   symlinked `etc/` refuses the same way a regular-file write
 //!   would. Targets that don't exist are no-ops (the OCI spec is
 //!   declarative; single-layer apply is idempotent).
-//! - **Hardlinks (A.3)** — tar `LINK` entries are accepted only
+//! - **Hardlinks** — tar `LINK` entries are accepted only
 //!   when their link target resolves to an existing regular file
 //!   under `output_root`. If the target was written earlier in the
 //!   same layer, the entry is materialized as a real hardlink. If
@@ -56,19 +56,19 @@
 //!   pre-image state. A missing target refuses with
 //!   [`RefusalReason::HardlinkTargetMissing`] (CVE-2019-14271
 //!   mitigation).
-//! - **Extended attributes (A.4)** — `SCHILY.xattr.*` pax records
+//! - **Extended attributes** — `SCHILY.xattr.*` pax records
 //!   are filtered through [`UnpackOptions::xattr_policy`]. The
 //!   production default preserves only `user.*`, `security.capability`,
 //!   and `security.selinux`; all other xattrs are dropped and reported
 //!   in [`UnpackReport::xattr_warnings`]. The tar crate's implicit
 //!   xattr unpacking remains disabled so every attribute passes through
 //!   this allow-list before touching the host filesystem.
-//! - **Device nodes (A.5)** — tar character-device entries are
+//! - **Device nodes** — tar character-device entries are
 //!   materialized only when they are exactly `dev/null`, `dev/zero`,
 //!   `dev/random`, or `dev/urandom` with the Linux standard major/minor
 //!   numbers. Every other character or block device is refused with
 //!   [`RefusalReason::DeviceNodeRefused`].
-//! - **Setuid/setgid bits (A.6)** — regular-file mode bits `0o4000`
+//! - **Setuid/setgid bits** — regular-file mode bits `0o4000`
 //!   and `0o2000` are preserved by default with an audit annotation
 //!   in [`UnpackReport::setid_entries`]. Production callers that have
 //!   not verified the image with cosign set
@@ -81,7 +81,7 @@
 //! long-name continuations — is
 //! **refused** with [`RefusalReason::UnsupportedEntryType`].
 //!
-//! ## Safety properties enforced through A.6
+//! ## Safety properties
 //!
 //! 1. **No path escapes `output_root`.** Three checks layer on top of
 //!    each other for defense in depth:
@@ -144,11 +144,11 @@ const WHITEOUT_OPAQUE: &[u8] = b".wh..wh..opq";
 const PAX_XATTR_PREFIX: &[u8] = b"SCHILY.xattr.";
 
 /// Tar mode bits for setuid and setgid. Sticky (`0o1000`) remains
-/// stripped because Plan 85 A.6 only grants setuid/setgid passthrough.
+/// stripped because only setuid/setgid passthrough is granted.
 const SETID_MODE_BITS: u32 = 0o6000;
 
-/// Plan 85 A.5 character-device allow-list, expressed as tar-relative
-/// paths plus Linux major/minor pairs.
+/// Character-device allow-list, expressed as tar-relative paths plus
+/// Linux major/minor pairs.
 const ALLOWED_DEVICE_NODES: &[AllowedDeviceNode] = &[
     AllowedDeviceNode::new(b"dev/null", 1, 3),
     AllowedDeviceNode::new(b"dev/zero", 1, 5),
@@ -172,7 +172,7 @@ impl AllowedDeviceNode {
 /// How [`unpack_layer`] handles xattrs carried in pax headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XattrPolicy {
-    /// Preserve the Plan 85 allow-list and drop everything else with
+    /// Preserve the allow-list and drop everything else with
     /// a warning in [`UnpackReport::xattr_warnings`].
     PreserveAllowlisted,
     /// Drop every xattr with a warning. Useful for host filesystems
@@ -197,7 +197,7 @@ pub enum SetidPolicy {
 
 /// Caller-controlled knobs for [`unpack_layer`].
 ///
-/// Defaults match the Plan 85 local/dev unpack posture; production
+/// Defaults match the local/dev unpack posture; production
 /// callers tighten individual fields (notably `setid_policy`) without
 /// rebuilding the whole struct.
 #[derive(Debug, Clone)]
@@ -214,7 +214,7 @@ pub struct UnpackOptions {
     /// the tar header's `mtime` field is preserved. **Set to
     /// `false` only for debugging** — production unpacks
     /// uniformly strip timestamps so two pulls of the same layer
-    /// produce byte-identical trees (Plan 85 §"R2 Reproducibility").
+    /// produce byte-identical trees.
     pub strip_timestamps: bool,
 
     /// Extended-attribute policy for `SCHILY.xattr.*` pax records.
@@ -254,7 +254,7 @@ pub struct UnpackReport {
     /// Symlinks written.
     pub symlinks_written: u64,
     /// Hardlinks materialized as real hardlinks because the target
-    /// was written earlier in this same layer (Plan 85 Phase A.3).
+    /// was written earlier in this same layer.
     pub hardlinks_written: u64,
     /// Hardlink entries materialized as full file copies because
     /// the target existed only in lower/prior layer state. This is
@@ -265,8 +265,8 @@ pub struct UnpackReport {
     /// OCI `.wh.<name>` whiteout markers applied. A successful apply
     /// removes the sibling target if it exists; if the target is
     /// absent the apply is still counted because the marker was
-    /// consumed (single-layer apply is declarative — Plan 85
-    /// Phase A.2 footprint, OCI v1.1 §"Layer Filesystem Changeset").
+    /// consumed (single-layer apply is declarative — OCI v1.1
+    /// §"Layer Filesystem Changeset").
     pub whiteouts_applied: u64,
     /// OCI `.wh..wh..opq` opaque-directory markers applied. A
     /// successful apply clears the parent directory's prior-layer
@@ -291,7 +291,7 @@ pub struct UnpackReport {
     /// omitted.
     pub xattr_warnings: Vec<XattrWarning>,
     /// Setuid/setgid regular-file entries preserved by policy, in
-    /// stream order. This is the Phase A.6 audit annotation surface:
+    /// stream order. This is the setuid/setgid audit annotation surface:
     /// each record carries the raw path, preserved mode, and whether
     /// the caller represented the image as cosign-verified.
     pub setid_entries: Vec<SetidEntry>,
@@ -315,7 +315,7 @@ pub struct SetidEntry {
 }
 
 /// One xattr that was not preserved. Recorded as a warning instead
-/// of a refused entry because Plan 85 A.4 treats denied xattrs as
+/// of a refused entry because denied xattrs are treated as
 /// non-fatal metadata drops.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XattrWarning {
@@ -332,7 +332,7 @@ pub struct XattrWarning {
 pub enum XattrWarningReason {
     /// [`XattrPolicy::DropAll`] is active.
     PolicyDropAll,
-    /// The xattr name is outside the Plan 85 allow-list.
+    /// The xattr name is outside the allow-list.
     NotAllowlisted,
     /// The pax key did not contain a usable xattr name.
     MalformedName,
@@ -376,19 +376,18 @@ pub enum RefusalReason {
     /// materialize `bin/x` in a later entry that would `open(2)`
     /// `/tmp/x` instead of `<root>/bin/x`.
     SymlinkInParent,
-    /// Tar entry type is not supported in this sub-phase. Later
-    /// sub-phases narrow the refusal surface (A.2 adds whiteouts,
-    /// A.3 adds hardlinks, etc.); A.1 refuses everything except
-    /// regular files, directories, and in-root symlinks.
+    /// Tar entry type is not supported (FIFOs, named sockets, sparse
+    /// files, GNU long-name continuations). The supported kinds are
+    /// regular files, directories, in-root symlinks, hardlinks, the
+    /// allow-listed device nodes, and the OCI whiteout markers.
     UnsupportedEntryType,
     /// A tar hardlink entry referenced a target that does not exist
     /// in the already-assembled tree. Refusing missing targets is
-    /// the Plan 85 / CVE-2019-14271 guard: the unpacker never lets a
-    /// later path retroactively define what an earlier hardlink
-    /// points at.
+    /// the CVE-2019-14271 guard: the unpacker never lets a later path
+    /// retroactively define what an earlier hardlink points at.
     HardlinkTargetMissing,
-    /// A character or block special file did not match the Plan 85
-    /// A.5 allow-list. Only `dev/null`, `dev/zero`, `dev/random`, and
+    /// A character or block special file did not match the
+    /// device-node allow-list. Only `dev/null`, `dev/zero`, `dev/random`, and
     /// `dev/urandom` with their Linux standard major/minor pairs are
     /// materialized; everything else is refused closed.
     DeviceNodeRefused,
@@ -405,8 +404,8 @@ pub enum RefusalReason {
 
 impl RefusalReason {
     /// Stable wire string for audit logging — never localised, never
-    /// rewritten without an explicit Plan-85 sub-phase bump. Pairs
-    /// with [`RefusedEntry::raw_path`] to form the audit-entry tuple.
+    /// rewritten without bumping the wire contract. Pairs with
+    /// [`RefusedEntry::raw_path`] to form the audit-entry tuple.
     pub fn audit_tag(self) -> &'static str {
         match self {
             Self::AbsolutePath => "absolute_path",
@@ -442,8 +441,8 @@ pub enum UnpackError {
     #[error("output_root must be an absolute path; got {0:?}")]
     NonAbsoluteOutputRoot(PathBuf),
 
-    /// `output_root` does not exist or is not a directory. Phase A.1
-    /// requires the directory to exist before unpacking — callers
+    /// `output_root` does not exist or is not a directory. The
+    /// directory must exist before unpacking — callers
     /// `create_dir_all` it as part of their pull pipeline before
     /// invoking the unpacker. We refuse to silently create it to
     /// keep the unpacker's filesystem write surface a strict
@@ -453,13 +452,13 @@ pub enum UnpackError {
 }
 
 /// Unpack a single layer tarball under `output_root`, applying the
-/// Phase A.1 safety policies described at module level.
+/// safety policies described at module level.
 ///
 /// Caller's responsibilities:
 ///
 /// - Pre-create `output_root` (we refuse to silently `mkdir` it).
 /// - Decompress the layer **before** calling, if the layer
-///   `mediaType` is `tar+gzip` / `tar+zstd`. Phase A.1's unpacker
+///   `mediaType` is `tar+gzip` / `tar+zstd`. The unpacker
 ///   reads a *plain* tar stream; the decompression wrapping is
 ///   the integration layer's problem (and the integration layer
 ///   already knows the `mediaType` from the manifest descriptor).
@@ -581,11 +580,12 @@ pub fn unpack_layer<R: Read>(
             continue;
         }
 
-        // A.1+A.2 dispatch: regular files and directories and
-        // symlinks materialize; regular-file entries whose **leaf
-        // filename** matches the OCI whiteout pattern dispatch to
-        // the whiteout helpers instead of `write_regular_file`.
-        // Everything else refuses — A.3 onwards narrows this.
+        // Dispatch: regular files and directories and symlinks
+        // materialize; regular-file entries whose **leaf filename**
+        // matches the OCI whiteout pattern dispatch to the whiteout
+        // helpers instead of `write_regular_file`. Hardlinks and
+        // allow-listed device nodes materialize too; everything else
+        // refuses.
         let entry_xattrs = match collect_entry_xattrs(&mut entry, &raw_path, options, &mut report) {
             Ok(attrs) => attrs,
             Err(refuse) => {
@@ -1072,8 +1072,7 @@ fn create_directory(target: &Path) -> Result<bool, RefusalReason> {
 
 /// Write a symlink whose location is `target` and whose link-text is
 /// `link_target_bytes`. The link target is preserved verbatim — we
-/// do not interpret it at unpack time (Plan 85 §"Phase A.1 safety
-/// properties"). Refusal conditions:
+/// do not interpret it at unpack time. Refusal conditions:
 ///
 /// - Link target bytes empty.
 /// - Link target bytes contain a NUL.
@@ -1106,8 +1105,8 @@ enum HardlinkAction {
 
 /// Materialize a tar hardlink entry at `target`.
 ///
-/// Plan 85 Phase A.3 deliberately distinguishes same-layer and
-/// cross-layer hardlinks. Same-layer targets become true hardlinks
+/// Deliberately distinguishes same-layer and cross-layer
+/// hardlinks. Same-layer targets become true hardlinks
 /// because both paths belong to the layer currently being applied.
 /// Lower-layer targets become full copies because aliasing a new
 /// current-layer path to prior-layer inode state would make later
@@ -1769,7 +1768,7 @@ mod tests {
         // should have mtime 0 in both. We can't compare inode-level
         // equality across two trees, but mtime stripping is the
         // load-bearing property for the upstream `mkfs.ext4` step
-        // (Phase B) to produce byte-identical ext4 images.
+        // to produce byte-identical ext4 images.
         let tar_bytes = build_tar(|b| {
             add_file(b, "a", b"x");
             add_file(b, "b", b"y");
@@ -1799,8 +1798,8 @@ mod tests {
     #[test]
     fn refusal_audit_tags_are_stable_and_safe() {
         // Pin the wire format of `audit_tag` — these strings end
-        // up in audit chain entries (Plan 85 Phase E claim 10), so
-        // they must never contain spaces, equals signs, commas, or
+        // up in audit chain entries (claim 10), so they must never
+        // contain spaces, equals signs, commas, or
         // newlines (which would confuse the existing audit-emit
         // `key=value` parser).
         let all = [
@@ -1825,7 +1824,7 @@ mod tests {
         }
     }
 
-    // ── Phase A.6: policy-controlled setuid/setgid bits ───────────
+    // ── policy-controlled setuid/setgid bits ───────────
 
     #[test]
     fn default_setid_policy_preserves_setuid_file_with_audit_annotation() {
@@ -1953,7 +1952,7 @@ mod tests {
         assert!(report.refused.is_empty(), "{:?}", report.refused);
     }
 
-    // ── Phase A.4: allow-listed pax xattrs ───────────────────────
+    // ── allow-listed pax xattrs ───────────────────────
 
     #[test]
     fn xattr_policy_allowlist_accepts_only_plan85_names() {
@@ -2085,7 +2084,7 @@ mod tests {
         );
     }
 
-    // ── Phase A.5: allow-listed device nodes ───────────────────────
+    // ── allow-listed device nodes ───────────────────────
 
     #[test]
     fn device_node_allowlist_accepts_only_expected_char_devices() {
@@ -2216,7 +2215,7 @@ mod tests {
         assert!(meta.file_type().is_char_device());
     }
 
-    // ── Phase A.2: OCI whiteout + opaque marker semantics ────────
+    // ── OCI whiteout + opaque marker semantics ────────
 
     #[test]
     fn whiteout_removes_prior_layer_sibling_file() {
@@ -2504,7 +2503,7 @@ mod tests {
         assert!(tmp.path().join("a/.wh.x/y").is_file());
     }
 
-    // ── Phase A.3: hardlink semantics ────────────────────────────
+    // ── hardlink semantics ────────────────────────────
 
     #[test]
     fn hardlink_to_lower_layer_target_materializes_as_copy() {

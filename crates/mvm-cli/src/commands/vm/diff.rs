@@ -55,7 +55,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     Ok(())
 }
 
-/// Fetch the guest fs-diff over the backend-aware transport (Plan 169).
+/// Fetch the guest fs-diff over the backend-aware transport.
 /// Like `fs::fs_request`, the `--hypervisor mock` fast path stays ahead of
 /// the `vsock_transport::for_vm` probe — which resolves the right socket per
 /// VMM (Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU

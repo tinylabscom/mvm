@@ -1,7 +1,7 @@
-//! Plan 60 Phase 6 — on-disk TOML loader for `PolicyBundle`.
+//! On-disk TOML loader for `PolicyBundle`.
 //!
 //! Operators provision policy bundles as TOML at
-//! `~/.mvm/policies/<tenant>/<workload>.toml`. The plan-64 W5
+//! `~/.mvm/policies/<tenant>/<workload>.toml`. The policy
 //! resolver maps the four `PolicyRef`/`FsPolicyRef` fields on an
 //! `ExecutionPlan` onto a single bundle file: a workload's
 //! `(network_policy, fs_policy, egress_policy, tool_policy)` refs
@@ -59,11 +59,11 @@
 //!   suitable for `local` tenant; mvmd-signed bundles layer on
 //!   later via the same parse + then verify-against-trusted-keys.
 //! - **Construct concrete `EgressProxy` / `ToolGate` impls.** That
-//!   wiring is the consumer's job (plan 60 Phase 3 builds the
-//!   L4/L7 proxies; this loader returns the parsed bundle). Until
-//!   Phase 3 ships, the plan-64 W5 resolver returns Noops even
-//!   for parsed bundles — the goal here is to ship the file
-//!   format so operators can stage bundles ahead of the proxies.
+//!   wiring is the consumer's job (the L4/L7 proxies are built
+//!   elsewhere; this loader returns the parsed bundle). Until
+//!   those proxies ship, the resolver returns Noops even for
+//!   parsed bundles — the goal here is to ship the file format
+//!   so operators can stage bundles ahead of the proxies.
 
 use std::path::{Path, PathBuf};
 
@@ -238,10 +238,10 @@ stream_destinations = ["file:///var/log/mvm/audit.jsonl"]
 
     #[test]
     fn parse_bundle_round_trips_l4_rules() {
-        // Plan 60 Phase 3 Slice B — `[[network.l4]]` rows attach an
-        // allow-list to the bundle. The supervisor's L4Gate consumes
-        // these at flow-establishment time; here we just prove the
-        // schema accepts the rows and surfaces them on `bundle.network`.
+        // `[[network.l4]]` rows attach an allow-list to the bundle. The
+        // supervisor's L4Gate consumes these at flow-establishment time;
+        // here we just prove the schema accepts the rows and surfaces
+        // them on `bundle.network`.
         let text = format!(
             r#"
 schema_version = {SCHEMA_VERSION}
@@ -285,8 +285,8 @@ port_hi  = 0
     #[test]
     fn parse_bundle_treats_missing_l4_section_as_empty() {
         // `#[serde(default)]` on `NetworkPolicy::l4` means bundles
-        // authored before Slice B continue to parse — they evaluate
-        // as default-deny at the gate.
+        // authored before the l4 section existed continue to parse —
+        // they evaluate as default-deny at the gate.
         let bundle = parse_bundle(&minimal_bundle_toml()).unwrap();
         assert!(
             bundle.network.l4.is_empty(),

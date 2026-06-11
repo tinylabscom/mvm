@@ -88,7 +88,7 @@ pub(super) fn forward_ports(name: &str, port_specs: &[String]) -> Result<()> {
     ui::info("Press Ctrl-C to stop forwarding.");
 
     // socat proxy: the microVM is directly reachable on the host
-    // bridge. Lima's SSH-tunnel fallback is gone (ADR-013).
+    // bridge. Lima's SSH-tunnel fallback is gone.
     let mut children: Vec<std::process::Child> = Vec::new();
     for &(local_port, guest_port) in &parsed {
         let child = std::process::Command::new("socat")

@@ -1,5 +1,4 @@
-//! Per-VM volume mount registry — plan 45 §D5 (Path C; renamed from
-//! the prior `share_registry` without behavioural change).
+//! Per-VM volume mount registry.
 //!
 //! Tracks which virtio-fs volumes are currently attached to a VM
 //! so `mvmctl volume ls` / `rm` operate on a stable list rather

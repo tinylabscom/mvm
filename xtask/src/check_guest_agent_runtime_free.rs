@@ -1,13 +1,13 @@
 //! `xtask check-guest-agent-runtime-free`
 //!
-//! Plan 124 Phase A. Assert that `mvm-guest`'s non-dev closure pulls no
+//! Assert that `mvm-guest`'s non-dev closure pulls no
 //! async runtime — `tokio` — nor the async glue that drags it in
 //! (`async-trait`, and the async `rtnetlink`/`netlink-packet-route`
 //! netlink stack). The agent's request-serving path is synchronous
 //! `std::thread` + `Mutex`/`Condvar` (see `worker_pool.rs`, `vsock.rs`);
-//! the *only* async surface is `netinit`'s rtnetlink installer, which
-//! Phase A Task A3 replaces with synchronous raw netlink over
-//! `linux-raw-sys`. Once A3 lands, this set vanishes and the gate is the
+//! the *only* async surface is `netinit`'s rtnetlink installer, which a
+//! synchronous raw-netlink installer over `linux-raw-sys` replaces. Once
+//! that lands, this set vanishes and the gate is the
 //! regression backstop that keeps it gone.
 //!
 //! **Target matters.** `tokio`/`rtnetlink`/`netlink-packet-route` are
@@ -19,7 +19,7 @@
 //! `cargo tree` resolves a target's cfg graph without the rustup std
 //! target installed, so this is portable across contributor hosts and CI.
 //!
-//! Sibling of `check-core-runtime-free` (plan 126 B5) — same lockfile-vs-
+//! Sibling of `check-core-runtime-free` — same lockfile-vs-
 //! feature-resolution rationale: `tokio` is legitimately in `Cargo.lock`
 //! (mvm-hostd et al. pull it), so a name-based lockfile check can't
 //! express "not in *this crate's* tree". `cargo tree` can.
@@ -31,8 +31,8 @@ use std::process::Command;
 /// Heavy deps the lean guest agent's default closure must not carry.
 /// `tokio` is the async runtime; `async-trait` is the async-fn-in-trait
 /// glue the old `RouteInstaller` needed; `rtnetlink`/`netlink-packet-route`
-/// are the async netlink stack that pulled both in (Plan 124 A3).
-/// `schemars` is the protocol-schema-codegen dep (Plan 124 D1) — it's an
+/// are the async netlink stack that pulled both in.
+/// `schemars` is the protocol-schema-codegen dep — it's an
 /// optional, off-by-default `schema`-feature dep used only by the
 /// `emit_protocol_schema` bin at build time, and must never reach the
 /// runtime agent's default closure.
@@ -123,7 +123,8 @@ mod tests {
 
     #[test]
     fn tree_with_async_stack_is_flagged() {
-        // What the guest's Linux tree looks like today, pre-A3.
+        // What the guest's Linux tree looks like before the
+        // synchronous-netlink migration.
         let tree = "mvm-guest v0.15.2\nasync-trait v0.1.89 (proc-macro)\nrtnetlink v0.14.1\n\
                     netlink-packet-route v0.19.0\ntokio v1.49.0\ntokio v1.49.0 (*)\n";
         assert_eq!(

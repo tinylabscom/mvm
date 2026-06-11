@@ -1,5 +1,5 @@
-// Plan 118 WS-1 1a / ADR-055 §"New untrusted-input surfaces" — fuzz the
-// host-side `SupervisorAttachConfig` JSON parser.
+// Fuzz the host-side `SupervisorAttachConfig` JSON parser — a new
+// untrusted-input surface.
 //
 // The prelaunched `mvm-libkrun-supervisor` reads this struct off a same-uid
 // control UDS — the only attacker-reachable surface after spawn. Any panic

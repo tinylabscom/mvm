@@ -29,7 +29,7 @@ pub fn is_available() -> bool {
 /// boots the VM with the verity initramfs at `initrd_path`, which
 /// reads `mvm.roothash=` from the kernel cmdline, builds the
 /// device-mapper target via raw ioctls, and `switch_root`s to the
-/// real init. ADR-002 §W3.
+/// real init.
 ///
 /// All three fields must be present together — a verity sidecar
 /// without a root hash is unverifiable, a root hash without the
@@ -37,7 +37,7 @@ pub fn is_available() -> bool {
 /// no way to wire up the device-mapper target before the kernel
 /// commits to a root device. `None` means the backend boots the
 /// rootfs as `/dev/vda rw` with no integrity check (the dev-VM
-/// exemption from ADR-002 §W3.4).
+/// exemption from verified boot).
 #[derive(Debug, Clone)]
 pub struct VerityConfig<'a> {
     /// Path to `rootfs.verity` (the Merkle hash tree).
@@ -53,7 +53,7 @@ pub struct VerityConfig<'a> {
 ///
 /// Convenience wrapper around `start_with_verity` for callers that don't
 /// (yet) ship a verity sidecar — typically the dev VM, which is exempt
-/// from verified boot per ADR-002 §W3.4.
+/// from verified boot.
 pub fn start(
     id: &str,
     kernel_path: &str,
@@ -70,7 +70,7 @@ pub fn start(
 /// alongside `root=/dev/dm-0`, the rootfs.verity file is attached as
 /// a second VirtioBlk device, and the kernel constructs the verity
 /// target before init runs. A tampered ext4 fails verity setup and
-/// panics in early boot. ADR-002 §W3.2.
+/// panics in early boot.
 pub fn start_with_verity(
     id: &str,
     kernel_path: &str,
@@ -210,11 +210,11 @@ pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::Unix
     // 3. libkrun per-port socket. A dev VM booted via the libkrun backend
     //    exposes one socket *per port* at `~/.mvm/vms/<id>/vsock-<port>.sock`,
     //    so we connect directly — no port handshake. Without this branch a
-    //    healthy libkrun dev VM is misreported as "not running" (#582), which
-    //    is exactly what broke `dev up`'s console attach on macOS+libkrun.
+    //    healthy libkrun dev VM is misreported as "not running", which is
+    //    exactly what broke `dev up`'s console attach on macOS+libkrun.
     //    Path comes from `mvm_core::config` — the single source of truth the
     //    console transport (`mvm::vsock_transport::LibkrunTransport`) shares,
-    //    so the two resolvers can no longer drift (the #582 root cause).
+    //    so the two resolvers can no longer drift (the root cause).
     let libkrun = mvm_core::config::vm_vsock_port_socket(id, port);
     if libkrun.exists() {
         return std::os::unix::net::UnixStream::connect(&libkrun)
@@ -233,7 +233,7 @@ pub fn vsock_connect_any(id: &str, port: u32) -> Result<std::os::unix::net::Unix
 /// Duplicated here because `mvm-apple-container` is a leaf crate that
 /// can't depend on `mvm-guest`. See the doc comment on the canonical
 /// definition for why this lives at 5252 (>1023, so `bind(2)` succeeds
-/// under W4.5's reduced agent capability set).
+/// under the agent's reduced capability set).
 pub const GUEST_AGENT_PORT: u32 = 5252;
 
 /// List running VM IDs.
@@ -364,7 +364,7 @@ mod tests {
     fn test_vsock_proxy_path_matches_core_helper() {
         // The proxy path is the single source of truth in mvm-core::config;
         // both this provider and the connector must resolve to it identically
-        // (the #582 drift class). Assert equality rather than a $HOME-shaped
+        // (the drift class). Assert equality rather than a $HOME-shaped
         // suffix so the test honors MVM_DATA_DIR like production does.
         let path = vsock_proxy_path("some-vm");
         assert_eq!(path, mvm_core::config::vm_vsock_proxy_socket("some-vm"));
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn vsock_connect_any_consults_libkrun_socket() {
-        // #582 regression: a libkrun dev VM's per-port socket must be part of
+        // Regression: a libkrun dev VM's per-port socket must be part of
         // the resolution chain, so the "not running" error names it (a real
         // socket is connected — exercised end-to-end by core_demo_e2e).
         let err = vsock_connect_any("never-existed-vm-582", GUEST_AGENT_PORT)

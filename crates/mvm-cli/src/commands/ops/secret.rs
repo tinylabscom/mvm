@@ -1,4 +1,4 @@
-//! `mvmctl secret put/set/get/ls/rm` CLI surface (Plan 63 W4 + Plan 129 B2).
+//! `mvmctl secret put/set/get/ls/rm` CLI surface.
 //!
 //! Local CRUD for secret namespaces. Values never appear in
 //! logs, error chains, or process listings — `put`/`set` accept the
@@ -6,7 +6,7 @@
 //! `get` verifies that a secret exists but never prints the stored
 //! value.
 //!
-//! `set` (Plan 129 / ADR-067 §2) is `put` plus an egress binding: it
+//! `set` is `put` plus an egress binding: it
 //! records, in a parallel [`mvm_hostd::keyholder::FileBindingStore`], the
 //! auth-type and destination allow-list for a secret whose value the host
 //! egress proxy substitutes toward bound destinations only (never the
@@ -88,9 +88,9 @@ pub(in crate::commands) enum SecretAction {
         tenant: String,
     },
 
-    /// Define a local secret with its egress binding (Plan 129 /
-    /// ADR-067 §2): store the value *and* record where the substituted
-    /// credential may go and how it authenticates. The value never
+    /// Define a local secret with its egress binding: store the value
+    /// *and* record where the substituted credential may go and how it
+    /// authenticates. The value never
     /// enters the guest — the host egress proxy substitutes it toward a
     /// bound destination only. Value source as for `put` (interactive
     /// prompt / piped stdin / `--value -` / `--value-file`); never pass
@@ -404,12 +404,12 @@ const STORAGE_SECURITY_AUDIT_VALUE: &str = "encrypted_at_rest";
 /// rather than failing the whole command — secret CRUD should keep
 /// working even when the audit destination is unreachable.
 ///
-/// Phase 4 (plan 60) dual-emit: when a [`Recorder`] is wired (via
+/// Dual-emit: when a [`Recorder`] is wired (via
 /// [`AuditLog::with_optional_recorder`]), every successful action
 /// also emits a chain-signed `secret.<verb>` entry through the
-/// plan-64 audit stream. The original JSONL stream stays — operators
-/// reading `~/.mvm/audit/secrets.jsonl` see the same shape they did
-/// before plan 60; the Recorder is purely additive.
+/// chain-signed audit stream. The original JSONL stream stays — operators
+/// reading `~/.mvm/audit/secrets.jsonl` see the same shape; the Recorder
+/// is purely additive.
 pub(crate) struct AuditLog {
     path: Option<PathBuf>,
     recorder: Option<Recorder>,
@@ -513,7 +513,7 @@ impl AuditLog {
             f.write_all(&line)
                 .with_context(|| format!("writing audit entry to {}", path.display()))?;
         }
-        // Phase 4 dual-emit through Recorder. Audit-side failures are
+        // Dual-emit through Recorder. Audit-side failures are
         // surfaced as warnings, not propagated — operator-secret CRUD
         // must not fail because the chain-signed stream is unreachable
         // (matches `audit_chain::AuditEmitter`'s posture).
@@ -734,7 +734,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 129 B2 — `secret set` (value + egress binding) and `ls`
+    // `secret set` (value + egress binding) and `ls`
     // ──────────────────────────────────────────────────────────────
 
     fn set(
@@ -859,9 +859,9 @@ mod tests {
 
     #[test]
     fn cmd_put_with_unsafe_tenant_id_records_audit_failure() {
-        // Plan 63 W4 exit test: `mvmctl secret put --tenant ../etc`
-        // must be rejected by validate_shell_id before the secret
-        // hits disk, AND the audit log must capture the rejection.
+        // `mvmctl secret put --tenant ../etc` must be rejected by
+        // validate_shell_id before the secret hits disk, AND the
+        // audit log must capture the rejection.
         let tmp_store = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp_store.path());
         let (_audit_dir, audit) = temp_audit();
@@ -884,7 +884,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Plan 60 Phase 4 — Recorder dual-emit
+    // Recorder dual-emit
     //
     // When a Recorder is wired, AuditLog::record additionally emits
     // a chain-signed `secret.<verb>` entry through the unified
@@ -919,14 +919,14 @@ mod tests {
         let res: Result<()> = Ok(());
         audit.record("put", "acme", "api_token", &res).unwrap();
 
-        // JSONL (plan-63 W4 stream) — preserved verbatim.
+        // JSONL stream — preserved verbatim.
         let log = read_audit(&audit);
         assert!(log.contains("\"action\":\"put\""), "got: {log}");
         assert!(log.contains("\"tenant\":\"acme\""));
         assert!(log.contains("\"secret_visibility\":\"write_only\""));
         assert!(log.contains("\"storage_security\":\"encrypted_at_rest\""));
 
-        // Recorder (plan-60 Phase 4 stream) — entry carries the
+        // Recorder stream — entry carries the
         // canonical `secret.put` event name and per-action tenant
         // in labels (the entry's `tenant` field is the recorder's
         // default).

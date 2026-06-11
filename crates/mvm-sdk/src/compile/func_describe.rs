@@ -1,24 +1,22 @@
 //! Function-presence + arity introspection from source via tree-sitter.
 //!
-//! ADR-0015 Phase 2: extend the tree-sitter substrate from
-//! reachability (PR #25) to a second job — confirming that the
-//! `module:function` pair declared in `Entrypoint::Function` actually
-//! resolves to a top-level function in the bundled source. Catches
-//! typos at `mvmforge compile` time rather than runtime.
+//! Confirms that the `module:function` pair declared in
+//! `Entrypoint::Function` actually resolves to a top-level function in
+//! the bundled source. Catches typos at compile time rather than
+//! runtime.
 //!
-//! Per the ADR's layering: this module handles **syntax-level**
-//! introspection only. Semantic checks (type-hint → JSON Schema
-//! generation, generic resolution) stay in the per-SDK runtime layer.
-//! What we capture per function:
+//! This module handles **syntax-level** introspection only. Semantic
+//! checks (type-hint → JSON Schema generation, generic resolution) stay
+//! in the per-SDK runtime layer. What we capture per function:
 //!
 //!   - whether the named function is declared at module scope
 //!   - whether it's `async`
 //!   - parameter count: `min` (required) and `max` (`usize::MAX` if
 //!     the function takes `*args`/`**kwargs`/rest params)
 //!
-//! Today this is used only for presence checks. Phase 2.5 will gate
-//! arity against an `args_schema`'s expected shape; the signature is
-//! already captured for that purpose.
+//! Today this is used only for presence checks. Arity-against-schema
+//! gating is future work; the signature is already captured for that
+//! purpose.
 
 use std::path::Path;
 
@@ -38,8 +36,8 @@ pub struct FunctionSignature {
     pub max_params: usize,
     /// Names of declared positional / keyword parameters, in source
     /// order. Excludes `*args`, `**kwargs`, JS rest patterns, and
-    /// PEP-570 separators. Phase 2.5: cross-checked against
-    /// `args_schema.required[]` to surface mismatches at compile time.
+    /// PEP-570 separators. Cross-checked against `args_schema.required[]`
+    /// to surface mismatches at compile time.
     pub param_names: Vec<String>,
     /// True if the function accepts arbitrary named arguments —
     /// Python `**kwargs` (specifically the `dictionary_splat_pattern`).
@@ -455,9 +453,8 @@ fn is_node_module_scope(fn_node: tree_sitter::Node) -> bool {
     // Walk up: fn_node may be inside an export_statement, a
     // lexical_declaration / variable_declarator, or transparently
     // wrapped by a call expression (the curried `func({...})(fn)`
-    // form from ADR-0014 / Plan-0010). Climb until we hit the
-    // program root or a container that disqualifies it (function
-    // body, class body, etc.).
+    // authoring form). Climb until we hit the program root or a
+    // container that disqualifies it (function body, class body, etc.).
     let mut node = fn_node;
     while let Some(parent) = node.parent() {
         match parent.kind() {
@@ -731,10 +728,9 @@ mod tests {
 
     #[test]
     fn ts_finds_curried_func_form() {
-        // ADR-0014 / Plan-0010 canonical authoring shape:
-        // `func({...})(fn)` wraps the user's callable. The
-        // entrypoint name lives on the variable; the params live
-        // on the inner function.
+        // Canonical authoring shape: `func({...})(fn)` wraps the
+        // user's callable. The entrypoint name lives on the variable;
+        // the params live on the inner function.
         let src = r#"
 import { func } from "mvm-sdk";
 export const add = func({ name: "x" })(
@@ -791,7 +787,7 @@ export const greet = func({ name: "g" })((name: string) => `hi ${name}`);
         assert_eq!(sig.min_params, 2);
     }
 
-    // ---------- Phase 2.5: parameter-name extraction --------------------
+    // ---------- parameter-name extraction --------------------
 
     #[test]
     fn python_extracts_param_names_simple() {

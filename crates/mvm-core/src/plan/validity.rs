@@ -1,6 +1,6 @@
 //! Plan-validity checks: time window + nonce de-duplication.
 //!
-//! Plan 37 Addendum G4. Without these checks an old signed plan
+//! Without these checks an old signed plan
 //! is replayable indefinitely. The supervisor calls `check_window`
 //! at admission and inserts the plan's `nonce` into a `NonceStore`
 //! keyed by the signing-key id; the store self-prunes nonces past

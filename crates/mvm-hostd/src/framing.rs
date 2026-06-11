@@ -1,21 +1,20 @@
 //! mvm_hostd::framing — length-prefixed message framing.
 //!
-//! Was `mvm_core::framing` (plan 121 B4); relocated here (plan 126 B5)
-//! because its only callers are mvm-hostd's same-uid UDS channels, and
-//! the move drops `tokio` from `mvm-core`'s default dependency closure.
+//! Was `mvm_core::framing`; relocated here because its only callers are
+//! mvm-hostd's same-uid UDS channels, and the move drops `tokio` from
+//! `mvm-core`'s default dependency closure.
 //!
 //! Wire format: a 4-byte big-endian length prefix followed by the body.
-//! The cap is enforced on read **before** allocating the body buffer —
-//! the Plan 104 §"Capability gating" gate-1 invariant: a corrupt or
-//! hostile peer setting `length_prefix = u32::MAX` must be rejected
-//! without a multi-gigabyte allocation.
+//! The cap is enforced on read **before** allocating the body buffer:
+//! a corrupt or hostile peer setting `length_prefix = u32::MAX` must be
+//! rejected without a multi-gigabyte allocation.
 //!
 //! Generic over the async stream (`S: AsyncRead + AsyncWrite`) so the
 //! same framing serves any `UnixStream` / vsock / pipe. Today every
 //! caller frames JSON, so the entry points are `read_json_frame` /
 //! `write_json_frame`.
 //!
-//! ## Auth + encryption (ADR-066 §5) — designed-for, not shipped
+//! ## Auth + encryption — designed-for, not shipped
 //!
 //! This is the no-auth length-prefixed transport: correct for the
 //! same-uid UDS channels (the supervisor proxies + their broker /
@@ -24,16 +23,16 @@
 //! Ed25519-signed `AuthenticatedFrame` (session-id + sequence replay
 //! protection, separately fuzzed) until a pluggable [`AuthStage`] +
 //! optional encryption stage retrofit lands behind a real cargo-fuzz +
-//! live-boot validation pass (plan 121 B4 Option B). The seam below is
-//! the shape that retrofit slots into; `NoAuth` is the only impl today.
+//! live-boot validation pass. The seam below is the shape that retrofit
+//! slots into; `NoAuth` is the only impl today.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Width of the big-endian length prefix.
 pub const FRAME_LEN_BYTES: usize = 4;
 
-/// Default max frame size for the same-uid UDS control channels (Plan
-/// 104). Builder and host↔guest channels carry their own (larger) caps.
+/// Default max frame size for the same-uid UDS control channels.
+/// Builder and host↔guest channels carry their own (larger) caps.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 65_536;
 
 /// Errors from the framing layer. Callers map this onto their own error
@@ -101,7 +100,7 @@ where
 }
 
 // NB: the *sync* length-prefixed framing the libkrun supervisor control channel uses
-// (Plan 118 WS-1 1a/1b) lives in `libkrun_sys::framing` — colocated with the
+// lives in `libkrun_sys::framing` — colocated with the
 // `Supervisor*Config` wire types it frames, and reachable by the `mvm-backend` writer
 // (`claim_standby`) which cannot depend on `mvm-hostd` (cycle). This module keeps the
 // async tokio variants its own same-uid channels use.

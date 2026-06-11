@@ -1,22 +1,22 @@
 //! `StorageProvider` — host-side volume *lifecycle* (provision / attach /
-//! detach; `snapshot` lands with plan 123 B3), distinct from the data-plane
+//! detach; `snapshot` lands later), distinct from the data-plane
 //! [`VolumeBackend`](crate::VolumeBackend).
 //!
 //! `VolumeBackend` moves bytes in and out of a volume's namespace.
 //! `StorageProvider` owns the volume as a *host* resource: it creates the
 //! backing store, makes it attachable (a host path `VmBackend` virtio-fs /
 //! virtio-blk-exports into a guest), and tears it down. The encrypted arm
-//! (B2) and the content-addressed / snapshot arms (B3) implement this same
+//! and the content-addressed / snapshot arms implement this same
 //! trait. mvmd's object-store / encrypted *data-plane* backends are a
-//! separate layer and stay in mvmd (plan 45 §D5) — this trait does not
+//! separate layer and stay in mvmd — this trait does not
 //! re-home them.
 
 use std::path::{Path, PathBuf};
 
 use mvm_core::volume::{VolumeError, VolumeName};
 
-/// Declarative request to provision a volume. Grows per task: B2 adds an
-/// encryption arm, B3 adds content-addressing / COW. B1 needs only identity.
+/// Declarative request to provision a volume. Grows over time: a later
+/// encryption arm, then content-addressing / COW. Today it needs only identity.
 #[derive(Debug, Clone)]
 pub struct VolumeSpec {
     name: VolumeName,
@@ -52,7 +52,7 @@ impl VolumeSpec {
 
 /// Persistent identity of a provisioned volume, stable across attach/detach
 /// cycles. `backing` is the host path of the backing store — a directory for
-/// [`LocalStorage`], a LUKS2 image for the encrypted arm (B2).
+/// [`LocalStorage`], a LUKS2 image for the encrypted arm.
 #[derive(Debug, Clone)]
 pub struct VolumeHandle {
     name: VolumeName,
@@ -119,7 +119,7 @@ pub trait StorageProvider: Send + Sync {
 
 /// Plain-directory `StorageProvider`. Each volume is a subdirectory under
 /// `root`; attach hands back that directory (virtiofs exports it). No at-rest
-/// encryption — that's the B2 encrypted arm.
+/// encryption — that's the encrypted arm.
 pub struct LocalStorage {
     root: PathBuf,
 }
@@ -151,7 +151,7 @@ impl StorageProvider for LocalStorage {
     fn detach(&self, _attached: AttachedVolume) -> Result<(), VolumeError> {
         // A local volume's backing dir is just a directory — nothing to
         // unmount. Dropping `attached` is the whole teardown. (The encrypted
-        // arm closes its cryptsetup mapper here — B2.)
+        // arm closes its cryptsetup mapper here.)
         Ok(())
     }
 }

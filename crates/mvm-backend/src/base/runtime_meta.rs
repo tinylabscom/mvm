@@ -11,8 +11,8 @@
 //! ```
 //!
 //! Older single-field shape (`{"mode": "..."}`) is parsed with
-//! `accessible: true` as a backward-compat default — pre-W6.2 VMs were
-//! all dev-style accessible images.
+//! `accessible: true` as a backward-compat default — VMs predating the
+//! accessible flag were all dev-style accessible images.
 //!
 //! ## Failure mode
 //!
@@ -40,7 +40,7 @@ pub static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmRuntimeMeta {
     /// Caller's start-mode intent. Written by libkrun's
-    /// `start_with_mode`; consumed by the W7 handle registry for
+    /// `start_with_mode`; consumed by the handle registry for
     /// signal forwarding.
     pub mode: StartModeKind,
 
@@ -49,7 +49,7 @@ pub struct VmRuntimeMeta {
     /// Mirrors `passthru.mvm.accessible` from the Nix-built image.
     /// Sealed (production) images set `false`; dev images set `true`.
     /// Older mode.json files without this field are read as `true`
-    /// (pre-W6.2 VMs were all accessible).
+    /// (VMs predating the flag were all accessible).
     #[serde(default = "default_accessible")]
     pub accessible: bool,
 }
@@ -108,8 +108,9 @@ fn meta_path(name: &str) -> Result<PathBuf> {
 ///   degraded UX, not a security boundary failure.
 ///
 /// **Security trust note**: the accessible-vs-sealed gate in
-/// `mvmctl console` is the *runtime* enforcement of ADR-002 claim 4.
-/// It depends on this file being written. If you're tightening the
+/// `mvmctl console` is the *runtime* enforcement of the no-interactive-
+/// access-to-a-sealed-image claim. It depends on this file being
+/// written. If you're tightening the
 /// security posture in the future and want the gate to fail closed
 /// when this write doesn't land, you'd flip both this function's
 /// return shape and the gate's read-fail handling at the same time.
@@ -154,12 +155,12 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
     }
 }
 
-/// Build a `VmRuntimeMeta` from the `mvm-meta.json` sidecar that
-/// the build pipeline emits next to a rootfs (W7.x.1
-/// `GuestSidecar`). When the sidecar is absent or unreadable,
-/// fall back to `accessible: true` to preserve backward-compatible
-/// behavior for pre-W7.x.1 artifacts. Failures only surface when
-/// the sidecar exists and is malformed.
+/// Build a `VmRuntimeMeta` from the `mvm-meta.json` `GuestSidecar`
+/// that the build pipeline emits next to a rootfs. When the sidecar
+/// is absent or unreadable, fall back to `accessible: true` to
+/// preserve backward-compatible behavior for artifacts predating the
+/// sidecar. Failures only surface when the sidecar exists and is
+/// malformed.
 pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmRuntimeMeta> {
     let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(rootfs_dir)
         .with_context(|| format!("reading mvm-meta.json sidecar in {}", rootfs_dir.display()))?;
@@ -176,8 +177,9 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
 /// `~/.mvm/vms/<name>/mode.json`.
 ///
 /// Cross-backend: call this from any `VmBackend::start_with_mode`
-/// or `VmBackend::start` impl so `mvmctl console`'s W6.2 gate
-/// works consistently regardless of which hypervisor is active.
+/// or `VmBackend::start` impl so `mvmctl console`'s accessible-vs-
+/// sealed gate works consistently regardless of which hypervisor is
+/// active.
 /// Errors propagate when the sidecar exists but is malformed (a
 /// build pipeline bug worth surfacing); the underlying `write`
 /// step is best-effort and only logs warnings.
@@ -256,7 +258,7 @@ mod tests {
 
     #[test]
     fn legacy_shape_parses_as_accessible() {
-        // Pre-W6.2 VMs wrote only `{"mode":"attached"}`; we treat them
+        // Older VMs wrote only `{"mode":"attached"}`; we treat them
         // as accessible by default to preserve historical behavior.
         with_home_temp(|home| {
             let dir = home.join(".mvm").join("vms").join("legacy");

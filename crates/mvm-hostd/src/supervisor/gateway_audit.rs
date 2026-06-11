@@ -1,7 +1,7 @@
-//! Per-VM Unix-socket fan-out for gateway flow events
-//! ([Plan 102 W6.A] / [ADR-058] claim 10 leg 2).
+//! Per-VM Unix-socket fan-out for gateway flow events — claim 10 leg 2
+//! (the bytes-leaving-trust-boundary observability path).
 //!
-//! The gateway bridge ([`crate::supervisor::gateway_bridge`], lands in commit 5)
+//! The gateway bridge ([`crate::supervisor::gateway_bridge`])
 //! emits each `FlowEvent` twice: once to the signer mpsc (chain of
 //! truth — `~/.mvm/audit/<tenant>.jsonl`), once to this sink's
 //! bounded broadcast for live subscribers. Subscribers attach via
@@ -21,9 +21,6 @@
 //! - `exit()` skips Drop; the socket file is pre-unlinked on
 //!   [`Self::bind`] so a fresh boot rebinds cleanly even after an
 //!   ungraceful supervisor exit.
-//!
-//! [Plan 102 W6.A]: ../../../specs/plans/103-w6a-implementation-tracker.md
-//! [ADR-058]: ../../../specs/adrs/058-claim-10-bytes-leaving-trust-boundary.md
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;

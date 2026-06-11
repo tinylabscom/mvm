@@ -1,9 +1,9 @@
-//! Plan 122 C — content-addressed, Ed25519-signed snapshots.
+//! Content-addressed, Ed25519-signed snapshots.
 //!
 //! [`snapshot_hmac`](crate::crypto::snapshot_hmac) gives a snapshot a
 //! host-local HMAC tag: that is *integrity* (the bytes didn't change) but
 //! not *authentication* — anyone holding the symmetric HMAC key can forge
-//! a fresh-looking envelope. ADR-066 §7 wants snapshots treated like signed
+//! a fresh-looking envelope. Snapshots are instead treated like signed
 //! bundles (claim 9): content-addressed (sha256 over the bytes) and
 //! Ed25519-signed, so only the holder of the host's private key can vouch
 //! for a snapshot and a single flipped byte breaks the content-address.

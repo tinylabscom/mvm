@@ -1,4 +1,4 @@
-//! Plan 129 / ADR-067 §4 — admission-time substitution registry assembly.
+//! Admission-time substitution registry assembly.
 //!
 //! At admission the host turns the plan's secret bindings into a
 //! [`SubstitutionRegistry`]: one opaque placeholder per egress secret, minted
