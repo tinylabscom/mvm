@@ -661,6 +661,7 @@ mod tests {
                     },
                     auth_type: crate::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             },
         );
@@ -713,6 +714,7 @@ mod tests {
                     },
                     auth_type: crate::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             },
         );
@@ -751,6 +753,7 @@ mod tests {
                         },
                         auth_type: crate::ir::AuthType::Bearer,
                         allowed_hosts: vec!["api.openai.com".into()],
+                        sigv4: None,
                     },
                 },
             );

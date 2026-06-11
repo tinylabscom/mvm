@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use mvm_core::config::mvm_data_dir_strict;
 use mvm_core::crypto::keystore::validate_shell_id;
-use mvm_sdk::ir::AuthType;
+use mvm_sdk::ir::{AuthType, Sigv4Params};
 use serde::{Deserialize, Serialize};
 
 /// Per-(tenant, name) binding metadata. No secret bytes — safe to print.
@@ -30,6 +30,12 @@ pub struct SecretBindingMeta {
     /// Destinations the substituted credential may reach (claim 12).
     /// `*.` subdomain wildcards per [`mvm_sdk::ir::host_matches`].
     pub allowed_hosts: Vec<String>,
+    /// Non-secret SigV4 params (access-key id + credential scope), set only for
+    /// `auth_type = Sigv4`. The secret-access-key (the signing key) stays in the
+    /// value store; these are reconstructed onto the `SecretRef` at admission so
+    /// the forward-path signer can name the credential scope. `None` otherwise.
+    #[serde(default)]
+    pub sigv4: Option<Sigv4Params>,
 }
 
 /// Storage for [`SecretBindingMeta`], keyed by (tenant, name). Parallel
@@ -128,7 +134,25 @@ mod tests {
         SecretBindingMeta {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into()],
+            sigv4: None,
         }
+    }
+
+    #[test]
+    fn sigv4_binding_roundtrips_with_params() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        let m = SecretBindingMeta {
+            auth_type: AuthType::Sigv4,
+            allowed_hosts: vec!["s3.us-east-1.amazonaws.com".into()],
+            sigv4: Some(Sigv4Params {
+                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                region: "us-east-1".into(),
+                service: "s3".into(),
+            }),
+        };
+        store.put("local", "aws", &m).unwrap();
+        assert_eq!(store.get("local", "aws").unwrap(), Some(m));
     }
 
     #[test]

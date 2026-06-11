@@ -145,6 +145,14 @@ impl<'a> SubstitutionEndpoint<'a> {
             .map(|r| (r.name.clone(), r.auth_type))
     }
 
+    /// The full [`SecretRef`] a placeholder resolves to (binding metadata only —
+    /// name, auth-type, allowed_hosts, sigv4 scope; never the value). The
+    /// forward path reads it to branch inject-vs-sign and to name the SigV4
+    /// credential scope. `None` for an unknown placeholder.
+    pub fn resolve_ref(&self, placeholder: &str) -> Option<&SecretRef> {
+        self.registry.resolve(placeholder)
+    }
+
     /// Substitute `placeholder` in `request_text` with the real credential
     /// for `destination`. Returns the rewritten request `Zeroizing` (it now
     /// carries the raw credential). Refuses — without decrypting — when the
@@ -256,6 +264,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
         }
     }
 
@@ -279,6 +288,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type: auth,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
         }
     }
 
@@ -303,6 +313,7 @@ mod tests {
             date_stamp: "20150830".into(),
             region: "us-east-1".into(),
             service: "service".into(),
+            signed_headers: "host;x-amz-date".into(),
         });
         let sig = endpoint
             .sign(ph.as_str(), "example.amazonaws.com", &input)

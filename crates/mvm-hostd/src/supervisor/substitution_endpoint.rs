@@ -120,6 +120,23 @@ pub fn parse(bytes: &[u8]) -> Result<EndpointConfig, serde_json::Error> {
     serde_json::from_slice(bytes)
 }
 
+/// Resolve the effective `(secret store dir, binding store dir)` for a config,
+/// applying the same override-or-default rule [`assemble`] uses. The bin reuses
+/// this to build the Landlock confinement spec, so the dirs it grants read on
+/// are exactly the dirs the resolver opens per request — no drift between the
+/// confinement policy and the runtime behaviour.
+pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let secret_dir = match &cfg.secret_store_dir {
+        Some(dir) => dir.clone(),
+        None => default_secrets_dir()?,
+    };
+    let binding_dir = match &cfg.binding_store_dir {
+        Some(dir) => dir.clone(),
+        None => mvm_core::config::mvm_data_dir_strict()?.join("secret-bindings"),
+    };
+    Ok((secret_dir, binding_dir))
+}
+
 /// Open the host's secret + binding stores and build the per-VM
 /// [`SubstitutionService`] from the config's bindings. Returns the service
 /// plus the `(guest var, placeholder)` pairs the backend hands the guest as
@@ -183,6 +200,31 @@ mod tests {
             terminator_listen: None,
             tls_intermediate: None,
         }
+    }
+
+    #[test]
+    fn resolve_store_dirs_uses_overrides_when_set() {
+        let cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        let (secret, binding) = resolve_store_dirs(&cfg).unwrap();
+        assert_eq!(secret, std::path::Path::new("/tmp/x/secrets"));
+        assert_eq!(binding, std::path::Path::new("/tmp/x/bindings"));
+    }
+
+    #[test]
+    fn resolve_store_dirs_falls_back_to_default_store_layout() {
+        // With overrides cleared, the resolver must land on the default
+        // `~/.mvm` store layout (the dirs the confinement spec grants read on).
+        // Assert the trailing components rather than the absolute base so the
+        // test stays independent of the host's MVM_DATA_DIR / HOME (no env
+        // mutation → no race with parallel readers).
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.secret_store_dir = None;
+        cfg.binding_store_dir = None;
+        let (secret, binding) = resolve_store_dirs(&cfg).unwrap();
+        assert_eq!(secret.file_name().unwrap(), "secrets");
+        assert_eq!(binding.file_name().unwrap(), "secret-bindings");
+        // Both resolve under the same data-dir base.
+        assert_eq!(secret.parent(), binding.parent());
     }
 
     #[test]
@@ -276,6 +318,7 @@ mod tests {
                 &SecretBindingMeta {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             )
             .unwrap();
@@ -378,6 +421,7 @@ mod tests {
                 &SecretBindingMeta {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             )
             .unwrap();

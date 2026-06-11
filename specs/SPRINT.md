@@ -2158,6 +2158,24 @@ console mode lockdown, VM identifier handling, supervisor as a security
 boundary, crash diagnostics, MDM detection) covered in Plan 97
 §"Security considerations" — checkboxes tracked in the plan file.
 
+### Live Vz validation — unblocked 2026-06-11
+
+Sealed-workload `/init` on Vz now detaches stdin from the input-less
+console (`< /dev/null`), closing the foot-gun where a workload's PID 1
+hit EOF ~5 s after boot and triggered a kernel reboot. `examples/sleeper`
+is the designated long-lived fixture for live Vz round-trip validation.
+
+The first live bringup attempt (2026-06-11) hit a different, pre-existing
+wall before boot: the builder VM's boot-time egress lockdown (OUTPUT DROP,
+proxy-uid-only — active since iptables-legacy landed on 2026-06-05) drops
+every nix fetch, so any cold or new-dep flake build on macOS fails with
+"Could not resolve host". Diagnosed end-to-end (Stage 0 fetches fine; the
+builder VM on the same host cannot resolve) and opened as **Plan 183**
+(`specs/plans/183-builder-vm-egress-posture-and-dns.md`): scope the
+lockdown to the install arm, add a static-gvproxy fallback for the Vz
+builder's DHCP no-lease, make resolv.conf writable. Live bringup + fork
+semantic-A spike resume as Plan 183 WS-D.
+
 ### Sprint 55 success criteria
 
 - Phase A acceptance: `mvm-vz-supervisor` boots the dev-shell image
