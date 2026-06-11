@@ -205,9 +205,6 @@ colored = "3"
 indicatif = "0.17"
 inquire = "0.7"
 
-# Object storage abstraction (used for dev template registry)
-opendal = { version = "0.50", features = ["services-s3"] }
-
 # HTTP client (for CLI upgrade)
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 

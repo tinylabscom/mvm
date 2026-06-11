@@ -169,11 +169,15 @@ PLAN 175 — Firecracker live-memory warm-start    🔴 NOT STARTED (live-KVM-ga
   [ ] T4 FirecrackerBackend::warm_start override + mvmctl verb + agent_ping e2e
   (Vz=152 WS-C; libkrun disk-only done #741; reflink clone = 123 C4 follow-up)
 
-PLAN 126 — Dependency reduction                 🔴 ~10%
+PLAN 126 — Dependency reduction                 🟡 ~25%
   [x] A1 re-baseline
   [x] B5 drop tokio from mvm-core (PR-1)
-  [ ] B1/B2/B4 prune sigstore/opendal/aws-lc
-  [ ] C1/D1 unify + lock gate
+  [x] B2 opendal → object_store (mvm template registry); opendal GONE,
+      lockfile 689→678 (−11)
+  [ ] B1 sigstore — already off default; needs cross-repo mvmd decision (relocate cosign-verify)
+  [ ] B3 pgp (168) — SUPERSEDED by plan 160 (drop Alpine seed); security decision
+  [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
+  [ ] C1/D1 unify reqwest majors + lock gate
 
 PLAN 153 — CLI directory split                  🔴 NOT STARTED
 ```
