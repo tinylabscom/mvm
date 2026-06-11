@@ -313,7 +313,7 @@ discipline applies: when these land, their witnesses are named in
 | P2 | Shell-surface shrink (§2) | declarative file-materialization lowering; until then, b64-`STANDARD`-alphabet pin test |
 | P3 | Trace integrity (§2) | content-hash verified at `compile_recording()` entry; 0600 storage under the config-dir helpers |
 | P4 | Divergence gate (§2) | unacknowledged divergence blocks admission (test) |
-| P5 | Projection consistency (§3) | property-based cross-projection witness; rebinding/mandatory-deny negative fixture; clamp (intersection) test |
+| P5 | Projection consistency (§3) | `cross_projection_consistency_property` + `clamp_never_widens_property` + `rebinding_pin_into_metadata_range_refuses` (mvm-core `policy::projection`) — landed by Plan 184. Remaining for P5 close-out: wire `LiveL4Gate`/`PlanFlowPolicy` to consume `CanonicalEgress` (kernel-side), and the WASI-context mapping (runner plan). |
 | P6 | Component digest carry (§4) | preview-fetched artifacts enter the IR as digests; mutable ref under `--prod` refused before fetch (test) |
 | P7 | Secret-scan admission (§5) | trace+IR scan refuses embedded secrets (test); paste-time detector in the preview input path |
 | P8 | Relay session binding (§1) | wrong-token refusal + second-client refusal tests; fuel/memory/wall-clock caps present in the wasmtime `Config` |

@@ -26,6 +26,10 @@ pub use policies::{
     ArtifactPolicy, AuditPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy, FlowByteLogDirections,
     FlowByteLogSpec, KeyPolicy, L4RuleSpec, NetworkPolicy, PiiPolicy, ToolPolicy,
 };
+pub use projection::{
+    CanonicalEgress, CanonicalRule, ProjectionError, Proto, WasiEgress, WasiOutboundGrant,
+    WasiTarget, canonicalize_effective, clamp, to_wasi_grants, wasi_allows,
+};
 pub use redaction::{
     EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile, SecretAction,
 };

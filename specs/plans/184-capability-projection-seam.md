@@ -1,6 +1,6 @@
 # Plan 184 — Capability projection seam (ADR-080 P5) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** One resolved policy, two enforcement projections that provably agree — the canonical egress grant set (CIDR-keyed, feeds the existing kernel layer) and the WASI outbound grant set (hostname-keyed, feeds the future wasmtime runner) — with the ADR-080 §8 P5 witnesses: a property-based cross-projection consistency test, a DNS-rebinding/mandatory-deny negative fixture, and a clamp (intersection-only) test.
 
@@ -120,12 +120,12 @@ Add to `crates/mvm-core/src/policy/mod.rs` (alongside the existing `pub mod` lin
 pub mod projection;
 ```
 
-- [ ] **Step 2: Run tests to verify they fail to compile**
+- [x] **Step 2: Run tests to verify they fail to compile**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: compile error — `CanonicalRule`, `Proto`, `ProjectionError` not found.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Add above the test module in `projection.rs`:
 
@@ -188,12 +188,12 @@ pub enum ProjectionError {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 4 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs crates/mvm-core/src/policy/mod.rs
@@ -207,7 +207,7 @@ git commit -m "feat(policy): canonical egress rule atom for the projection seam 
 **Files:**
 - Modify: `crates/mvm-core/src/policy/projection.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module:
 
@@ -267,12 +267,12 @@ Add to the `tests` module:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: compile error — `CanonicalEgress` not found.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `projection.rs` (after `CanonicalRule`):
 
@@ -304,12 +304,12 @@ impl CanonicalEgress {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 9 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -323,7 +323,7 @@ git commit -m "feat(policy): CanonicalEgress decision set with unconditional man
 **Files:**
 - Modify: `crates/mvm-core/src/policy/projection.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module (note the imports the fixtures need):
 
@@ -396,12 +396,12 @@ Add to the `tests` module (note the imports the fixtures need):
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: compile error — `canonicalize_effective`, `ProjectionError::BadCidr` not found.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `projection.rs`:
 
@@ -476,12 +476,12 @@ Extend `ProjectionError`:
     },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 15 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -495,7 +495,7 @@ git commit -m "feat(policy): canonicalize_effective lowers L4 rules to the canon
 **Files:**
 - Modify: `crates/mvm-core/src/policy/projection.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module:
 
@@ -588,12 +588,12 @@ Add to the `tests` module:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: new tests FAIL — `unimplemented!` panic from `pinned_allow_list_rules`, plus missing `MissingPin`/`ExpiredPin`/`EmptyPin` variants (compile error first).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Replace the `pinned_allow_list_rules` stub:
 
@@ -656,12 +656,12 @@ Extend `ProjectionError`:
     EmptyPin { host: String },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 21 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -675,7 +675,7 @@ git commit -m "feat(policy): allow-list hosts lower through admission-time DNS p
 **Files:**
 - Modify: `crates/mvm-core/src/policy/projection.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module:
 
@@ -733,12 +733,12 @@ Add to the `tests` module:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: compile error (`MandatoryDenyOverlap` not found), then after adding the variant alone the new tests FAIL (projection currently admits).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add the helper + wire it into both legs:
 
@@ -787,12 +787,12 @@ In `pinned_allow_list_rules`, inside the `for pinned in &pin.ips` loop (before p
     MandatoryDenyOverlap { dest: String, range: IpNet },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 26 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -810,7 +810,7 @@ The point of a *second* walk over the same inputs (instead of deriving from
 `CanonicalEgress`) is that the consistency witness in Task 8 compares two
 independent code paths — drift between them is exactly what it must catch.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module:
 
@@ -869,12 +869,12 @@ Add to the `tests` module:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: compile error — `to_wasi_grants`, `wasi_allows`, `WasiEgress` not found.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `projection.rs`:
 
@@ -990,12 +990,12 @@ pub fn wasi_allows(egress: &WasiEgress, proto: &Proto, ip_addr: IpAddr, port: u1
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 31 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -1009,7 +1009,7 @@ git commit -m "feat(policy): WASI-facing egress projection with pinned-host targ
 **Files:**
 - Modify: `crates/mvm-core/src/policy/projection.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module:
 
@@ -1084,12 +1084,12 @@ Add to the `tests` module:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: compile error — `clamp` not found.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `projection.rs`:
 
@@ -1123,12 +1123,12 @@ pub fn clamp(requested: &CanonicalEgress, resolved: &CanonicalEgress) -> Canonic
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 36 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -1148,7 +1148,7 @@ boundaries (inside each granted net/port, just outside, plus the
 mandatory-deny ranges) so the comparison exercises the decision edges, not
 just random space.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add a sibling test module at the bottom of `projection.rs`:
 
@@ -1336,17 +1336,17 @@ level already from Task 2). Generated nets/pins can land in mandatory-deny
 ranges by chance — that is the `(Err, Err)` branch doing its job: both
 projections must refuse identically.
 
-- [ ] **Step 2: Run the property tests**
+- [x] **Step 2: Run the property tests**
 
 Run: `cargo nextest run -p mvm-core projection::property`
 Expected: both tests PASS in well under a second. If `cross_projection_consistency_property` fails its generator-sanity floor (`policies_checked > 200`), the generator is producing too many refusals — lower the chance a random net overlaps a deny range by retrying generation, do **not** lower the floor.
 
-- [ ] **Step 3: Run the full module suite**
+- [x] **Step 3: Run the full module suite**
 
 Run: `cargo nextest run -p mvm-core projection`
 Expected: 38 tests PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
@@ -1363,7 +1363,7 @@ git commit -m "test(policy): cross-projection consistency + clamp-never-widens p
 - Modify: `specs/REFACTOR-STATUS.md`
 - Modify: `specs/plans/184-capability-projection-seam.md` (tick boxes)
 
-- [ ] **Step 1: Re-export the public surface**
+- [x] **Step 1: Re-export the public surface**
 
 In `crates/mvm-core/src/policy/mod.rs`, alongside the module's existing re-exports, add:
 
@@ -1376,7 +1376,7 @@ pub use projection::{
 
 (Match the file's existing `pub use` style — if it re-exports selectively rather than broadly, follow that pattern and re-export at minimum `canonicalize_effective`, `clamp`, `CanonicalEgress`, `WasiEgress`.)
 
-- [ ] **Step 2: Run the full verification gates**
+- [x] **Step 2: Run the full verification gates**
 
 ```bash
 cargo fmt --all -- --check          # --all matters; CI checks the whole workspace
@@ -1389,7 +1389,7 @@ cargo run -p xtask -- check-spec-numbers   # plan-184 number collision guard
 
 Expected: all green. (Local macOS caveat: `mvm-backend` test binaries can be SIGKILL'd by codesign — if that fires, rerun with `-E 'not package(mvm-backend)'`; it is environmental, not a regression.) If fmt complains, run `rustup run nightly cargo fmt --all` — CI's Lint job uses nightly rustfmt.
 
-- [ ] **Step 3: Update ADR-080 §8 P5 row with the real witness names**
+- [x] **Step 3: Update ADR-080 §8 P5 row with the real witness names**
 
 In `specs/adrs/080-wasm-preview-promotion-and-capability-policy.md`, edit the P5 row of the §8 table:
 
@@ -1397,12 +1397,12 @@ In `specs/adrs/080-wasm-preview-promotion-and-capability-policy.md`, edit the P5
 | P5 | Projection consistency (§3) | `cross_projection_consistency_property` + `clamp_never_widens_property` + `rebinding_pin_into_metadata_range_refuses` (mvm-core `policy::projection`) — landed by Plan 184. Remaining for P5 close-out: wire `LiveL4Gate`/`PlanFlowPolicy` to consume `CanonicalEgress` (kernel-side), and the `WasiCtxBuilder` mapping (runner plan). |
 ```
 
-- [ ] **Step 4: Update the rollup + tick this plan's boxes**
+- [x] **Step 4: Update the rollup + tick this plan's boxes**
 
 - `specs/REFACTOR-STATUS.md`: add a Plan 184 line under the in-flight plans with the workstream state (seam + witnesses landed; enforcement wiring deferred to the kernel-wiring and wasm-runner plans), bump "Last updated".
 - This file: tick every completed checkbox in the same commit.
 
-- [ ] **Step 5: Final commit**
+- [x] **Step 5: Final commit**
 
 ```bash
 git add crates/mvm-core/src/policy/mod.rs specs/adrs/080-wasm-preview-promotion-and-capability-policy.md specs/REFACTOR-STATUS.md specs/plans/184-capability-projection-seam.md
