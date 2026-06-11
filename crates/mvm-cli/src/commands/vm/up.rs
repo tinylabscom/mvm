@@ -32,7 +32,8 @@ use super::shared::{
     VmStartParams, VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
     env_vars_to_drive_file, materialize_disk_volume, merge_volume_specs, parse_port_specs,
     parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files, request_port_forward,
-    resolve_flake_ref, resolve_network_policy, vm_volume_from_spec_validated, wait_for_guest_agent,
+    resolve_flake_ref, resolve_network_policy, start_port_proxy, vm_volume_from_spec_validated,
+    wait_for_guest_agent,
 };
 use mvm_core::policy::PolicyBundle;
 
@@ -1630,7 +1631,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                     && let (Ok(h), Ok(g)) = (host.parse::<u16>(), guest.parse::<u16>())
                 {
                     let _ = request_port_forward(&vm_name, g);
-                    mvm_backend::providers::apple_container::start_port_proxy(&vm_name, h, g);
+                    start_port_proxy(&vm_name, h, g);
                     ui::info(&format!("Forwarding localhost:{h} → guest tcp/{g} (vsock)"));
                 }
             }
@@ -2281,7 +2282,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
             // Start host-side proxies
             for pm in &pm_list {
-                mvm_backend::providers::apple_container::start_port_proxy(
+                start_port_proxy(
                     &vm_name_owned,
                     pm.host,
                     pm.guest,
