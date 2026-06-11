@@ -2071,7 +2071,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         if detach && effective_hypervisor == "apple-container" {
             // Sign the binary before installing the launchd agent so the
             // daemon process launches with the entitlement already in place.
-            mvm_backend::providers::apple_container::ensure_signed();
+            mvm_backend::codesign::ensure_signed();
 
             // Build is already done — install launchd agent with the
             // resolved kernel/rootfs paths (no rebuild in the daemon).
