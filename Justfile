@@ -232,12 +232,11 @@ docs-build:
 
 # ── VMM setup ────────────────────────────────────────────────────────────
 
-# Install both libkrun and cloud-hypervisor (the two VMMs mvm targets)
-setup: setup-libkrun setup-cloud-hypervisor
+# Install libkrun (the macOS VMM mvm targets)
+setup: setup-libkrun
     @echo
-    @echo "Both VMMs installed. Validate with:"
+    @echo "libkrun installed. Validate with:"
     @echo "  cargo run --example libkrun-bootcheck --features libkrun-sys   (macOS)"
-    @echo "  cargo run --example ch-bootcheck                              (Linux)"
 
 # Install libkrun (macOS via slp/krun tap; Linux via apt/dnf/pacman)
 setup-libkrun:
@@ -314,67 +313,6 @@ setup-libkrun:
     done
     echo "  ! libkrun shared library not found at the standard locations." >&2
     exit 1
-
-# Install cloud-hypervisor (apt/dnf on Linux; upstream static binary fallback)
-setup-cloud-hypervisor:
-    #!/usr/bin/env bash
-    # Linux:   apt install cloud-hypervisor    (Debian 13+ / Ubuntu 24.04+)
-    #          dnf install cloud-hypervisor    (Fedora/RHEL)
-    # Fallback: download the upstream static binary from the GitHub
-    #          releases — works on any Linux with curl + sudo.
-    # macOS:   cloud-hypervisor has experimental macOS support (HVF) but
-    #          mvm targets libkrun for the macOS lane; skip CH on Darwin.
-    set -euo pipefail
-    if command -v cloud-hypervisor >/dev/null; then
-        ver="$(cloud-hypervisor --version 2>/dev/null | head -1 || true)"
-        echo "cloud-hypervisor already on PATH — skipping. ($ver)"
-        exit 0
-    fi
-    case "$(uname -s)" in
-        Darwin)
-            echo "skip: macOS uses libkrun, not cloud-hypervisor. (run \`just setup-libkrun\`)"
-            exit 0
-            ;;
-        Linux)
-            if command -v apt-get >/dev/null && apt-cache show cloud-hypervisor >/dev/null 2>&1; then
-                echo "→ apt install cloud-hypervisor"
-                sudo apt-get update
-                sudo apt-get install -y cloud-hypervisor
-            elif command -v dnf >/dev/null && dnf info cloud-hypervisor >/dev/null 2>&1; then
-                echo "→ dnf install cloud-hypervisor"
-                sudo dnf install -y cloud-hypervisor
-            else
-                # Upstream static binary fallback. Pin to a known version
-                # — auto-tracking `latest` is how CI flakes manifest.
-                CH_VERSION="${CH_VERSION:-v40.0}"
-                arch="$(uname -m)"
-                case "$arch" in
-                    x86_64)   asset="cloud-hypervisor-static" ;;
-                    aarch64)  asset="cloud-hypervisor-static-aarch64" ;;
-                    *)        echo "error: no upstream CH static binary for arch $arch" >&2; exit 1 ;;
-                esac
-                url="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/${asset}"
-                echo "→ curl $url"
-                tmp="$(mktemp)"
-                curl -fL -o "$tmp" "$url"
-                chmod +x "$tmp"
-                sudo install -m 0755 "$tmp" /usr/local/bin/cloud-hypervisor
-                rm -f "$tmp"
-            fi
-            ;;
-        *)
-            echo "error: cloud-hypervisor is not supported on $(uname -s)." >&2
-            exit 1
-            ;;
-    esac
-    echo "Verifying install…"
-    if command -v cloud-hypervisor >/dev/null; then
-        echo "  ✓ $(command -v cloud-hypervisor)"
-        cloud-hypervisor --version | head -1
-    else
-        echo "  ! cloud-hypervisor not on PATH after install." >&2
-        exit 1
-    fi
 
 # ── Utilities ────────────────────────────────────────────────────────────
 
