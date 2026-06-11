@@ -17,7 +17,7 @@ PLAN 169 — Backend-agnostic agent RPC           ✅ DONE
 PLAN 166 — QEMU Linux dev/test backend          ✅ DONE (Phase 2)
 PLAN 165 — Sealed-prod interactivity (claim 15) ✅ DONE
 
-PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + undeclared redaction (box-validated); SDK-free terminator core (#735) + FC wiring (#744) landed; live FC e2e deferred to a bringup/debug session
+PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (box-validated on QEMU); SDK-free http terminator (#735/#744) + Stage 2 https/name-constrained-CA (#761) landed; FC kernel blocker fixed (#763); live FC https e2e gated only on agent bringup
   [x] keyholder, resolver, binding store, `secret set`
   [x] host substitution endpoint (UDS + AF_VSOCK)
   [x] SigV4 canonical-request builder
@@ -41,10 +41,18 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared substitution + u
   [x] FC wiring: EgressRedirect (nft TAP redirect) + wire_egress_substitution + stop_vm reap — Task 5 — PR #744 (merged)
       (mechanism corrected: FC=TAP+nft NAT, not passt/skuid; passt path deferred to libkrun)
   [ ] live SDK-free FC box e2e — Task 6 — DEFERRED to a bringup/debug session
-      (prompt: specs/prompts/129-fc-bringup-debug.md). Gated on: published default
-      x86_64 kernel is bzImage not ELF vmlinux (#746); FC guest-agent reachability;
-      the local secret-launch glue below
-  [ ] Stage 2: name-constrained CA + https termination     — ADR-006; TDD plan: specs/notes/plan-129-stage2-https-ca-tdd-plan.md
+      (prompt: specs/prompts/129-fc-bringup-debug.md). Kernel blocker (published
+      x86_64 bzImage→ELF vmlinux, #746) FIXED — PR #763 (mvm_build::fc_kernel
+      auto-extracts at boot); local secret-launch glue DONE (#745). Remaining
+      gate: FC guest-agent reachability (live-debug on the dev-kvm box)
+  [x] Stage 2 S2.1–S2.6: name-constrained per-VM CA (crypto::egress_ca) + host
+      cert/key split + kernel-cmdline cert + placeholder-env delivery (mvm.egress_ca /
+      mvm.secret_env) + SNI-gated TLS terminator (terminate bound / splice unbound,
+      reqwest re-origination) + :443 nft redirect + ADR-006 Accepted / ADR-067
+      proxy-native-primary — PR #761; TDD plan: specs/notes/plan-129-stage2-https-ca-tdd-plan.md
+  [ ] Stage 2 S2.7: live SDK-free https FC box e2e — gated on the FC bringup above
+      (agent reachability) + a placeholder-env-at-boot path (resolved by Approach A
+      in #761; box-validation pending)
   [x] Python `mvm.secret(type=,hosts=)` egress surface + retire `_runtime.py` — PR #722
   [x] TS `secret()` egress + retire `runtime.ts` + docs .mdx  — PR #723
   [x] secret-egress example workload (examples/python/secret-egress)
