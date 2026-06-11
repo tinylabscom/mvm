@@ -31,6 +31,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
+- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🔴 diagnosed + plan landed; blocks every cold/new-dep macOS flake build
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 
 ## Plan details
@@ -214,6 +215,24 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
+  [ ] live Vz WS-2 round-trip validation + fork semantic-A spike — BLOCKED on
+      Plan 183 (builder-VM egress lockdown breaks every uncached flake build)
+
+PLAN 183 — Builder-VM egress posture + net boot 🔴 diagnosed; plan landed
+  Diagnosis proven 2026-06-11 (controlled A/B in one dev-up run: Stage 0
+  fetched the full closure; the builder VM minutes later could not resolve):
+  boot-time install_egress_lockdown (OUTPUT DROP, proxy-uid-only) applies to
+  the whole builder VM and drops every nix fetch — active since iptables-legacy
+  landed (f184b17d, 2026-06-05); the dev-tier skip is QEMU-only. Plus: Vz
+  builder gets no DHCP lease (eth0 unconfigured), and /etc/resolv.conf is a
+  read-only baked file so leased DNS never lands.
+  [ ] WS-A egress posture per arm (boot open; install-arm locked, fail-closed;
+      per-job posture in persistent dispatch; drop QEMU-only boot skip)
+  [ ] WS-B Vz DHCP no-lease: static gvproxy fallback (shared stage0 ioctl
+      helpers) + time-boxed datagram-path root cause
+  [ ] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
+  [ ] WS-D cold E2E proof on macOS + claim-11 install gate still locked +
+      resume Plan 159 live Vz validation
 
 PLAN 124 — Lean guest agent                     🟡 ~65%
   [x] A1/A3 drop tokio+rtnetlink (-27 crates)
