@@ -134,9 +134,12 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
         square/shopify/digitalocean/vault/postman/linear/figma/google-oauth/
         slack-webhook) in SecretsScanner DEFAULT_RULES — anchored prefixes, low-FP,
         masked on ALL egress by default (no flag). JWT deliberately excluded (legit bearer).
-    [ ] remaining: IR/SDK developer-declared authoring (the only open variant; mvmd
-        can author via bundle), terminator-path redaction, live PII spans.
-        See plan §"Deferred follow-ups".
+    [x] terminator-path redaction + fail-closed + audit (typed TerminatorError;
+        both :80/:443 cores; adversarial fail-closed tests + security review)
+    [x] live PII spans for name co-occurrence: PiiRedactor::match_spans threaded
+        into NameScanner on the live redact_bytes_for path (names run pre-PII-mask)
+    [ ] remaining: IR/SDK developer-declared authoring (descoped — CLI --redact +
+        mvmd bundle cover it). See plan §"Deferred follow-ups".
   [x] Phase F: egress no-secret-to-guest leak-gate (claim-12/13 backstop) —
       canary tests (handed_placeholders_never_contain_the_secret_value /
       substitution_endpoint_refuses_unbound_destination /
