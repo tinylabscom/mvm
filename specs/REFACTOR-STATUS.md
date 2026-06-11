@@ -183,6 +183,16 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
   [ ] C1/D1 unify reqwest majors + lock gate
 
 PLAN 153 — CLI directory split                  🔴 NOT STARTED
+
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
+  [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
+  [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
+  [x] Phase 1 fold microvm_nix → qemu
+  [x] Phase 1 prune dead CI lane + Justfile setup recipe
+  [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
+      4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
+  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
+      onto supervisor vz + shared console transport + drop apple-container
 ```
 
 ## Security claims
