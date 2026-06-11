@@ -80,6 +80,10 @@ pub fn assemble_registry(
             },
             auth_type: meta.auth_type,
             allowed_hosts: meta.allowed_hosts,
+            // Non-secret SigV4 scope from the operator-set binding; the
+            // forward-path signer reads it to name the credential. None for
+            // every non-SigV4 secret.
+            sigv4: meta.sigv4,
         };
         let placeholder = registry.mint(secret_ref);
         handed.push((b.name.clone(), placeholder));
@@ -114,6 +118,7 @@ mod tests {
                 &SecretBindingMeta {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
                 },
             )
             .unwrap();
@@ -139,6 +144,40 @@ mod tests {
         assert_eq!(env[0].0, "OPENAI_API_KEY");
         assert_eq!(env[0].1, placeholder.as_str());
         assert!(env[0].1.starts_with("mvm-secret-"));
+    }
+
+    #[test]
+    fn reconstructs_sigv4_params_onto_the_secret_ref() {
+        use mvm_sdk::ir::Sigv4Params;
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "aws",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Sigv4,
+                    allowed_hosts: vec!["s3.us-east-1.amazonaws.com".into()],
+                    sigv4: Some(Sigv4Params {
+                        access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                        region: "us-east-1".into(),
+                        service: "s3".into(),
+                    }),
+                },
+            )
+            .unwrap();
+
+        let plan = [keystore_binding("AWS_SIG", "aws")];
+        let (registry, handed) = assemble_registry(&plan, "local", &store).unwrap();
+        let secret_ref = registry.resolve(handed[0].1.as_str()).unwrap();
+        assert_eq!(secret_ref.auth_type, AuthType::Sigv4);
+        let params = secret_ref
+            .sigv4
+            .as_ref()
+            .expect("sigv4 params reconstructed");
+        assert_eq!(params.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(params.region, "us-east-1");
+        assert_eq!(params.service, "s3");
     }
 
     #[test]

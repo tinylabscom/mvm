@@ -118,6 +118,7 @@ mod tests {
                 mount: SecretMount::Env { var: var.into() },
                 auth_type: mvm_sdk::ir::AuthType::Bearer,
                 allowed_hosts: vec!["api.example.com".into()],
+                sigv4: None,
             },
         }
     }

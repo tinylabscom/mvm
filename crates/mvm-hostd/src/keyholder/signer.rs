@@ -59,6 +59,10 @@ pub struct SigV4Input {
     pub date_stamp: String,
     pub region: String,
     pub service: String,
+    /// The `;`-joined, lowercased, sorted header names that were signed —
+    /// the `SignedHeaders=` field of the `Authorization` header. Request
+    /// metadata, not key material, so Debug can't leak a secret.
+    pub signed_headers: String,
 }
 
 impl SigV4Input {
@@ -175,6 +179,7 @@ mod tests {
             mount: SecretMount::Env { var: "K".into() },
             auth_type,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            sigv4: None,
         }
     }
 
@@ -210,6 +215,7 @@ mod tests {
             date_stamp: "20150830".into(),
             region: "us-east-1".into(),
             service: "service".into(),
+            signed_headers: "host;x-amz-date".into(),
         };
         let sig = signer
             .sign_sigv4(
@@ -246,6 +252,7 @@ mod tests {
             date_stamp: "20150830".into(),
             region: "us-east-1".into(),
             service: "service".into(),
+            signed_headers: String::new(),
         };
         let err = signer
             .sign_sigv4(
