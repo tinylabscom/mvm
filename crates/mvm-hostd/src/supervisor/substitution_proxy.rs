@@ -34,7 +34,9 @@ use crate::keyholder::{
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
-use crate::supervisor::secret_audit::{emit_secret_redacted, emit_secret_substituted};
+use crate::supervisor::secret_audit::{
+    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_substituted,
+};
 use crate::supervisor::tools::http_hardening::{
     hardened_client_builder_no_dns, resolve_ssrf_safe_ips,
 };
@@ -646,6 +648,12 @@ impl SubstitutionService {
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        // Whether the request smuggled a host placeholder at all — decides if a
+        // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
+        let carried_placeholder = req
+            .headers
+            .iter()
+            .any(|(_, v)| find_placeholder(v).is_some());
         // Phase E: scrub undeclared secret-shaped / PII content before any
         // substitution. Runs first so a declared placeholder (not secret-shaped,
         // host-reserved) survives to be substituted, while an undeclared secret
@@ -655,6 +663,12 @@ impl SubstitutionService {
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
+                // A placeholder-bearing request refused before forwarding is a
+                // claim-12 drop — audit it (metadata only). A refusal with no
+                // placeholder is a plain bad request and not secret-relevant.
+                if carried_placeholder {
+                    self.audit_placeholder_dropped(destination.as_deref()).await;
+                }
                 return WireResponse::Refused {
                     message: e.to_string(),
                 };
@@ -742,6 +756,19 @@ impl SubstitutionService {
             if let Err(e) = emit_secret_substituted(recorder, name, dest, *auth_type).await {
                 tracing::warn!(error = %e, secret = %name, "secret.substituted audit emit failed");
             }
+        }
+    }
+
+    /// Emit one `secret.placeholder_dropped { destination }` when the endpoint
+    /// refuses a placeholder-bearing request bound for a destination the secret
+    /// isn't allowed to reach (claim 12 — metadata only, never the value or the
+    /// secret name). Best-effort; no-op without a recorder or a destination.
+    async fn audit_placeholder_dropped(&self, destination: Option<&str>) {
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        if let Err(e) = emit_secret_placeholder_dropped(recorder, dest).await {
+            tracing::warn!(error = %e, "secret.placeholder_dropped audit emit failed");
         }
     }
 }
@@ -1382,6 +1409,75 @@ mod server_tests {
         assert!(logged.contains("openai"));
         assert!(logged.contains("api.openai.com"));
         // claim 13: the value never reaches the audit chain.
+        assert!(
+            !logged.contains("sk-live-zzz"),
+            "audit chain must not carry the secret value: {logged}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn emits_placeholder_dropped_audit_on_unbound_refusal() {
+        use crate::supervisor::audit_file::FileAuditSigner;
+        use crate::supervisor::audit_recorder::Recorder;
+        use ed25519_dalek::SigningKey;
+        use mvm_core::plan::TenantId;
+
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        // Placeholder bound to api.openai.com only.
+        let ph = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+
+        let chain = dir.path().join("audit.jsonl");
+        let signer =
+            FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
+        let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
+
+        let service = Arc::new(
+            SubstitutionService::new(Arc::new(reg), resolver, Arc::clone(&forwarder) as _)
+                .with_recorder(recorder),
+        );
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        // Bound placeholder, but pointed at an unbound destination (claim 12).
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://evil.example.com/x".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: String::new(),
+        };
+        write_json_frame(&mut client, &wire).await.unwrap();
+        let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+        assert!(matches!(resp, WireResponse::Refused { .. }));
+        // claim 12: the unbound destination never reached the forward leg.
+        assert!(forwarder.seen.lock().unwrap().is_none());
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(
+            logged.contains("secret.placeholder_dropped"),
+            "got: {logged}"
+        );
+        assert!(logged.contains("evil.example.com"), "got: {logged}");
+        // claim 13: neither the value nor the secret name leaks into the chain.
         assert!(
             !logged.contains("sk-live-zzz"),
             "audit chain must not carry the secret value: {logged}"

@@ -18,6 +18,7 @@ use mvm_backend::checkpoint::{
 };
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
 use mvm_core::config::vm_state_dir;
+use mvm_hostd::audit::bind::class_str;
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -309,25 +310,8 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
             return;
         }
     };
-    let content_sha = meta
-        .content
-        .first()
-        .map(|b| b.sha256.as_str())
-        .unwrap_or("");
-    let class = checkpoint_class_str(meta.class);
-    if let Err(e) =
-        emitter.emit_checkpoint_created(&plan, meta.id.as_str(), class, content_sha, name)
-    {
+    if let Err(e) = mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, meta) {
         tracing::warn!(error = %e, "audit emit_checkpoint_created failed (non-fatal)");
-    }
-}
-
-/// Stable on-the-wire string for a checkpoint class, used as the `class` audit
-/// label so a vm_full capture isn't mislabeled fs_quick.
-fn checkpoint_class_str(class: CheckpointClass) -> &'static str {
-    match class {
-        CheckpointClass::FsQuick => "fs_quick",
-        CheckpointClass::VmFull => "vm_full",
     }
 }
 
@@ -335,7 +319,7 @@ fn checkpoint_class_str(class: CheckpointClass) -> &'static str {
 /// `checkpoint.restored` into the chain-signed audit log. Non-fatal —
 /// a restored checkpoint is already live; missing plan/signer/emitter
 /// is warned and skipped.
-pub(crate) fn bind_checkpoint_restored(vm_name: &str, checkpoint_id: &str) {
+pub(crate) fn bind_checkpoint_restored(vm_name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {
     let plan = match super::plan_persist::read_plan(vm_name) {
         Ok(p) => p,
         Err(e) => {
@@ -358,7 +342,7 @@ pub(crate) fn bind_checkpoint_restored(vm_name: &str, checkpoint_id: &str) {
             return;
         }
     };
-    if let Err(e) = emitter.emit_checkpoint_restored(&plan, checkpoint_id, vm_name) {
+    if let Err(e) = mvm_hostd::audit::bind::bind_checkpoint_restored(&emitter, &plan, meta) {
         tracing::warn!(error = %e, "audit emit_checkpoint_restored failed (non-fatal)");
     }
 }
@@ -378,10 +362,7 @@ fn ls(json: bool) -> Result<()> {
         "ID", "CLASS", "VM", "TAG"
     );
     for m in &metas {
-        let class = match m.class {
-            mvm_core::checkpoint::CheckpointClass::FsQuick => "fs_quick",
-            mvm_core::checkpoint::CheckpointClass::VmFull => "vm_full",
-        };
+        let class = class_str(m.class);
         println!(
             "{:<32} {:<10} {:<20} {:<8} {}",
             m.id.as_str(),
@@ -420,7 +401,7 @@ fn restore(id: &str) -> Result<()> {
     )
     .with_context(|| format!("restoring checkpoint {id:?}"))?;
 
-    bind_checkpoint_restored(&meta.vm_name, checkpoint.as_str());
+    bind_checkpoint_restored(&meta.vm_name, &meta);
     ui::success(&format!(
         "restored {} into vm '{}'",
         checkpoint.as_str(),
@@ -546,8 +527,7 @@ pub(crate) fn bind_checkpoint_forked(
     };
     let emitter = super::audit_chain::AuditEmitter::new(signer.signing)
         .context("refusing an unaudited fork: audit emitter unavailable")?;
-    emitter
-        .emit_checkpoint_forked(&plan, parent.as_str(), child.id.as_str(), child_vm_name)
+    mvm_hostd::audit::bind::bind_checkpoint_forked(&emitter, &plan, parent, child, child_vm_name)
         .context("refusing an unaudited fork")?;
     Ok(())
 }

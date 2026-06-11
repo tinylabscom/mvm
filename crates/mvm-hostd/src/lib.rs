@@ -16,6 +16,7 @@
 //!   helper, applied in-process by each role before it touches keys or
 //!   untrusted input.
 
+pub mod audit;
 pub mod audit_signer;
 pub mod broker;
 /// Length-prefixed message framing (4-byte BE length + body,

@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-10**
+**Last updated: 2026-06-11**
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -25,7 +25,7 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
   [x] guest↔host vsock transport, both directions   — PR #708/#709
   [x] workload env injection via RunEntrypoint proto — PR #711
   [x] e2e substitution over AF_VSOCK loopback        — PR #710
-  [x] claim-13 audit (secret.substituted)
+  [x] claim-13 audit (secret.substituted + secret.placeholder_dropped on endpoint refusal)
   [x] retire dead in-guest ADR-049 scaffolding       — PR #713
   [x] per-VM substitution-endpoint moat (mvm-hostd)  — PR #715
   [x] QEMU spawns endpoint at boot, fail-closed      — PR #717
@@ -131,6 +131,8 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       vm_full memory save/restore (saveMachineStateToURL) + vm_full fork arm +
       restore_checkpoint + retire snapshot save/restore. cache GC.
       Remaining: checkpoint diff + pause/resume wiring (PR3)
+  [x] AuditEmitter + host_keypair + plan_persist + pure checkpoint bind helpers
+      hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
   [ ] signed delta-image distribution (unowned — needs a home)
 
@@ -200,7 +202,7 @@ PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 
   [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
       onto supervisor vz + shared console transport + drop apple-container
 
-PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
+PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
   [x] vm group (14 single-VM verbs)
   [x] ops group (metrics/bench/config/mcp)
