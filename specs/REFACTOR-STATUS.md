@@ -138,12 +138,13 @@ PLAN 159 — vz-inspired macOS VZ DX               🟡 152-independent slice sh
       (exit 7; up.rs "bridge broken" comment stale). Follow-ups (non-blocking,
       SPRINT.md): multi-kernel keying; pool-status liveness filter;
       home_mvm_keys_dir MVM_DATA_DIR; committed bench delta
-  [~] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (PR2): mvmctl checkpoint
+  [x] WS-2 checkpoint+fork — fs_quick (#762) + vm_full (#770): mvmctl checkpoint
       create/ls/rm/fork + APFS-CoW capture + integrity-checked fork + lineage +
       checkpoint.created/forked/restored audit + fs_quick+vm_full capability +
       vm_full memory save/restore (saveMachineStateToURL) + vm_full fork arm +
       restore_checkpoint + retire snapshot save/restore. cache GC.
-      Remaining: checkpoint diff + pause/resume wiring (PR3)
+      PR3 (#780): checkpoint diff <a> <b> (metadata+manifest compare) + Vz
+      pause/resume (native vCPU quiesce). WS-2 COMPLETE.
   [x] AuditEmitter + host_keypair + plan_persist + pure checkpoint bind helpers
       hoisted to mvm_hostd::audit (mvmd-reachable library API); mvm-cli shimmed
   [ ] WS-5 D verb renames; curl|sh installer; --json remainder
