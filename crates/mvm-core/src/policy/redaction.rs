@@ -38,6 +38,7 @@ pub enum NameMode {
 
 /// Curated `SecretsScanner` disposition. Default Block — a known secret prefix
 /// on egress is always a fail.
+// allow(secret-debug): data-free disposition enum (audit/redact/block); carries no key material
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretAction {
