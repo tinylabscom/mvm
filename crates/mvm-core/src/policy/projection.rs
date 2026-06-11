@@ -332,6 +332,34 @@ pub fn to_wasi_grants(
     Ok(WasiEgress::Grants(grants))
 }
 
+/// True when `covering` admits every probe `covered` admits:
+/// same proto, supernet-or-equal, port-range superset.
+fn covers(covering: &CanonicalRule, covered: &CanonicalRule) -> bool {
+    covering.proto == covered.proto
+        && covering.net.contains(&covered.net)
+        && covering.port_lo <= covered.port_lo
+        && covered.port_hi <= covering.port_hi
+}
+
+/// Intersection-only merge of a *requested* grant set against the
+/// *resolved* (authoritative) one. The request can attenuate,
+/// never widen: a requested rule survives only when some resolved
+/// rule fully covers it; partial overlaps drop whole (fail-closed,
+/// no rule splitting). `Unrestricted` on the request side grants
+/// exactly the resolved set.
+pub fn clamp(requested: &CanonicalEgress, resolved: &CanonicalEgress) -> CanonicalEgress {
+    match (requested, resolved) {
+        (CanonicalEgress::Unrestricted, _) => resolved.clone(),
+        (CanonicalEgress::Rules(_), CanonicalEgress::Unrestricted) => requested.clone(),
+        (CanonicalEgress::Rules(req), CanonicalEgress::Rules(res)) => CanonicalEgress::Rules(
+            req.iter()
+                .filter(|r| res.iter().any(|s| covers(s, r)))
+                .cloned()
+                .collect(),
+        ),
+    }
+}
+
 /// The WASI-side decision function. Must agree with
 /// [`CanonicalEgress::permits`] for every probe — that agreement
 /// is the cross-projection witness.
@@ -809,5 +837,85 @@ mod tests {
             to_wasi_grants(&eff, &pins, NOW).unwrap_err(),
             ProjectionError::MandatoryDenyOverlap { .. }
         ));
+    }
+
+    // ─────────────────────────────────────────────────
+    // clamp — intersection-only merge
+    // ─────────────────────────────────────────────────
+
+    fn rule(proto: Proto, cidr: &str, lo: u16, hi: u16) -> CanonicalRule {
+        CanonicalRule {
+            proto,
+            net: net(cidr),
+            port_lo: lo,
+            port_hi: hi,
+        }
+    }
+
+    #[test]
+    fn clamp_request_wider_than_resolved_yields_intersection() {
+        // A requested grant can attenuate the resolved one, never
+        // widen it.
+        let requested = CanonicalEgress::Rules(vec![
+            rule(Proto::Tcp, "93.184.216.34/32", 443, 443), // covered → kept
+            rule(Proto::Tcp, "203.0.113.0/24", 0, 65535),   // not granted → dropped
+        ]);
+        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.0/24", 443, 443)]);
+        let granted = clamp(&requested, &resolved);
+        assert!(granted.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
+        assert!(!granted.permits(&Proto::Tcp, ip("203.0.113.7"), 443));
+    }
+
+    #[test]
+    fn clamp_unrestricted_request_cannot_widen() {
+        let requested = CanonicalEgress::Unrestricted;
+        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 443, 443)]);
+        let granted = clamp(&requested, &resolved);
+        assert_eq!(granted, resolved);
+    }
+
+    #[test]
+    fn clamp_request_can_attenuate_unrestricted() {
+        let requested =
+            CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 443, 443)]);
+        let resolved = CanonicalEgress::Unrestricted;
+        let granted = clamp(&requested, &resolved);
+        assert_eq!(granted, requested);
+    }
+
+    #[test]
+    fn clamp_partial_port_overlap_drops_fail_closed() {
+        // Conservative intersection: a requested rule only
+        // partially covered by the resolved grant is dropped
+        // whole, not split.
+        let requested =
+            CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 80, 8080)]);
+        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 443, 443)]);
+        let granted = clamp(&requested, &resolved);
+        assert_eq!(granted, CanonicalEgress::Rules(vec![]));
+    }
+
+    #[test]
+    fn clamp_is_never_wider_than_resolved_pointwise() {
+        let requested = CanonicalEgress::Rules(vec![
+            rule(Proto::Tcp, "10.0.0.0/8", 0, 65535),
+            rule(Proto::Udp, "8.8.8.8/32", 53, 53),
+        ]);
+        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Udp, "8.8.8.0/24", 53, 53)]);
+        let granted = clamp(&requested, &resolved);
+        for (proto, addr, port) in [
+            (Proto::Tcp, "10.1.2.3", 443u16),
+            (Proto::Udp, "8.8.8.8", 53),
+            (Proto::Udp, "8.8.8.9", 53),
+        ] {
+            if granted.permits(&proto, ip(addr), port) {
+                assert!(
+                    resolved.permits(&proto, ip(addr), port),
+                    "clamp widened: {proto:?} {addr}:{port}"
+                );
+            }
+        }
+        // And the covered request survives.
+        assert!(granted.permits(&Proto::Udp, ip("8.8.8.8"), 53));
     }
 }
