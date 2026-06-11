@@ -43,8 +43,6 @@ use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
 use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
 
-use crate::commands::image::OciProvenance;
-
 /// Resolve the default audit-chain directory: `~/.mvm/audit/`.
 pub fn default_audit_dir() -> Result<PathBuf> {
     Ok(mvm_core::config::mvm_data_dir_strict()?.join("audit"))
@@ -203,16 +201,15 @@ impl AuditEmitter {
         self.emit(plan, "plan.shares_admitted", labels)
     }
 
-    /// Emit `plan.oci_provenance` — binds an OCI image admission to
-    /// the same plan id as the launch decision. The labels are
-    /// intentionally digest-oriented; raw registry credentials and
-    /// Docker config state are never recorded.
+    /// Emit `plan.oci_provenance` — binds an OCI image admission to the same
+    /// plan id as the launch decision. The caller supplies the digest-oriented
+    /// labels; raw registry credentials are never recorded.
     pub fn emit_oci_provenance(
         &self,
         plan: &ExecutionPlan,
-        provenance: &OciProvenance,
+        labels: Vec<(String, String)>,
     ) -> Result<()> {
-        self.emit(plan, "plan.oci_provenance", provenance.audit_labels())
+        self.emit(plan, "plan.oci_provenance", labels)
     }
 
     /// Record that a VM's filesystem state was frozen into an fs_quick
@@ -325,6 +322,7 @@ impl AuditEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::image::OciProvenance;
     use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
@@ -455,7 +453,9 @@ mod tests {
             verification_status: "digest-verified-signature-not-configured".to_string(),
         };
 
-        emitter.emit_oci_provenance(&plan, &provenance).unwrap();
+        emitter
+            .emit_oci_provenance(&plan, provenance.audit_labels())
+            .unwrap();
 
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).expect("audit file exists");
