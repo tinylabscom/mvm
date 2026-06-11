@@ -105,6 +105,11 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
         consume per-dest pii/secrets disposition (no longer RESERVED)
     [x] CLI authoring: `mvmctl up --redact HOST[=audit]` parses a per-destination
         RedactionPolicy → SynthesisInput → synthesize_plan sets ExecutionPlan.redaction
+    [x] enriched always-on default secret list: +17 high-precision vendor token
+        shapes (gitlab/fine-grained-PAT/stripe-test+restricted/sendgrid/npm/pypi/
+        square/shopify/digitalocean/vault/postman/linear/figma/google-oauth/
+        slack-webhook) in SecretsScanner DEFAULT_RULES — anchored prefixes, low-FP,
+        masked on ALL egress by default (no flag). JWT deliberately excluded (legit bearer).
     [ ] remaining: IR/SDK developer-declared authoring (the only open variant; mvmd
         can author via bundle), terminator-path redaction, live PII spans.
         See plan §"Deferred follow-ups".
