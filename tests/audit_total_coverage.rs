@@ -177,6 +177,7 @@ const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("CheckpointCreated")),
     ("restore", AuditPosture::Emits("CheckpointRestored")),
     ("fork", AuditPosture::Emits("CheckpointForked")),
+    ("diff", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::ReadOnly),
 ];
