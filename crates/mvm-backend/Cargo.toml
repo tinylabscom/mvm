@@ -19,14 +19,11 @@ authors.workspace = true
 #
 # Lives here:
 #   - apple_container.rs   (macOS 26+ Apple Virtualization.framework)
-#   - cloud_hypervisor.rs  (Tier 1 KVM peer of Firecracker; opt-in)
-#   - docker.rs            (Tier 3 fallback)
 #   - libkrun.rs           (raw libkrun shim — Linux KVM / macOS HVF)
 #
 # Stays in `mvm` (W8 will move):
 #   - firecracker.rs (Lima-era installer helpers)
 #   - microvm.rs (Firecracker lifecycle via `run_in_vm`)
-#   - microvm_nix.rs (Firecracker via microvm.nix runner)
 #   - vm/backend.rs (`AnyBackend` dispatch + `FirecrackerBackend`)
 #
 # `mvm`'s `vm::backend.rs` imports the alt backends from this

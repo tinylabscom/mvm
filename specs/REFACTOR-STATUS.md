@@ -85,8 +85,11 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
   [x] SSRF resolver port-443 bug FIXED → PR #755: forwarder resolves+SSRF-filters
       itself, pins the safe IPs on the URL's real port (resolve_to_addrs). This
       closed the e2e (http forwards no longer hit :443). web_fetch/MCP unaffected
-  [ ] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
-      + endpoint) — deferred follow-up
+  [~] ephemeral serverless `invoke <artifact>` (boot_session_vm through admission
+      + endpoint) — HOST SIDE DONE: `invoke --from-workload-ir <ir>` lowers the
+      workload's secrets + admits a plan inside boot_session_vm (closure seam) so
+      the backend spawns the substitution endpoint; QEMU reads plan_json directly.
+      Box e2e + FC plan.json stash are the remaining (box-gated) follow-ups
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [ ] forward-path signing integration (SigV4)        — DEFERRED (user)
 
@@ -181,7 +184,34 @@ PLAN 126 — Dependency reduction                 🟡 ~25%
   [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
   [ ] C1/D1 unify reqwest majors + lock gate
 
-PLAN 153 — CLI directory split                  🔴 NOT STARTED
+PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
+  [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)
+
+PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 gated  (ADR-076)
+  [x] Phase 1 delete docker (+ dead Tier-3 banner subsystem)
+  [x] Phase 1 delete cloud_hypervisor (+ ch_runtime, ch-bootcheck)
+  [x] Phase 1 fold microvm_nix → qemu
+  [x] Phase 1 prune dead CI lane + Justfile setup recipe
+  [x] Phase 1 verify: doctor lists {firecracker,libkrun,vz,qemu,apple-container,mock};
+      4837/4837 workspace tests (excl mvm-backend SIGKILL bin); clippy/fmt clean
+  [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
+      onto supervisor vz + shared console transport + drop apple-container
+
+PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
+  [x] lock tree (D1–D6) + hide internal subprocess commands
+  [x] vm group (14 single-VM verbs)
+  [x] ops group (metrics/bench/config/mcp)
+  [x] build group (image/compile/validate/kernel; kernel.rs→build/)
+  [x] env group (bootstrap/cleanup/uninstall/update/sign)
+  [x] trust group (attest/receipt/audit folded into publisher trust)
+  [x] image.rs/catalog.rs dir split (Plan 153)
+  [x] docs: cli-commands.md + CLAUDE.md grouped forms
+  [x] run-family merge (Task 7): exec→run (run was a strict superset via
+      RunArgs::into_exec_args); `up` + `invoke` kept distinct (admission /
+      no-shell entrypoint). `run --profile dev` covers exec.
+  NOTE: audit taxonomy preserved across all groups (vm pause→cmd.pause,
+  trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
+  Deferred dir-purity: dev/doctor/init modules still live in env/.
 ```
 
 ## Security claims

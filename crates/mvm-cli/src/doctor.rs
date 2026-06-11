@@ -126,7 +126,7 @@ fn builder_tool_skipped(name: &'static str, category: &'static str) -> Check {
 /// surfaced under `security_posture` in `mvmctl doctor --json`.
 #[derive(Debug, Serialize)]
 struct SecurityPostureReport {
-    /// Backend name (e.g. "firecracker", "docker").
+    /// Backend name (e.g. "firecracker", "libkrun").
     backend: String,
     /// Tier label: "Tier 1", "Tier 2", "Tier 3".
     tier: &'static str,
@@ -336,7 +336,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
     checks.push(network_backend_check(plat));
-    checks.push(docker_check(plat));
     checks.push(ts_runner_check());
     checks.push(stage0_status_check());
     checks.push(builder_store_check());
@@ -485,14 +484,7 @@ fn collect_balloon_support() -> BTreeMap<String, bool> {
     // list is hand-maintained because there's no general "iterate
     // every backend" helper today; adding a new backend means
     // adding it here so doctor surfaces it without lying.
-    let names = [
-        "firecracker",
-        "cloud-hypervisor",
-        "apple-container",
-        "docker",
-        "libkrun",
-        "qemu",
-    ];
+    let names = ["firecracker", "apple-container", "libkrun", "qemu"];
     let mut out = BTreeMap::new();
     for name in names {
         let backend = AnyBackend::from_hypervisor(name);
@@ -528,15 +520,7 @@ fn render_balloon_support(support: &BTreeMap<String, bool>) {
 fn collect_warm_start_support() -> WarmStartReport {
     // Mirrors `collect_balloon_support`'s hand-maintained list; `vz` is added
     // because save/restore is a warm-start tier worth surfacing.
-    let names = [
-        "firecracker",
-        "cloud-hypervisor",
-        "apple-container",
-        "docker",
-        "libkrun",
-        "qemu",
-        "vz",
-    ];
+    let names = ["firecracker", "apple-container", "libkrun", "qemu", "vz"];
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
     for name in names {
@@ -692,8 +676,8 @@ const fn claim_status_label(s: ClaimStatus) -> &'static str {
 /// Render the per-backend security posture in `mvmctl doctor` text mode.
 ///
 /// Always prints the active backend, tier, layer coverage, and per-claim
-/// status. When the backend is not a microVM tier (Docker today), prints
-/// a loud warning banner with the recent container-escape CVEs.
+/// status. Warns if the active backend is not a hardware-isolated microVM
+/// tier.
 fn render_security_posture(p: &SecurityPostureReport) {
     let title = "Security posture (active backend)";
     println!("\n{}", title);
@@ -738,11 +722,7 @@ fn render_security_posture(p: &SecurityPostureReport) {
         ui::warn(
             "\n  ⚠ This backend is not a hardware-isolated microVM. The L1-L3\n   \
              layers collapse to the host kernel; ADR-002 claims 1, 2, 3 do NOT\n   \
-             hold. Recent container-escape CVEs (2024-2025): CVE-2024-21626,\n   \
-             CVE-2024-1753, CVE-2025-9074, CVE-2025-23266, CVE-2025-31133,\n   \
-             CVE-2025-52565. Set MVM_ACK_DOCKER_TIER=1 (or [security]\n   \
-             ack_docker_tier = true in ~/.mvm/config.toml) to suppress the\n   \
-             per-run banner. See https://docs.mvm.dev/security/matryoshka.",
+             hold. See https://docs.mvm.dev/security/matryoshka.",
         );
     }
 }
@@ -1180,24 +1160,6 @@ fn vz_runtime_probe(supervisor_path: &std::path::Path) -> Option<VzProbeResult> 
 /// drive it without invoking the supervisor.
 fn parse_vz_probe_output(stdout: &[u8]) -> Option<VzProbeResult> {
     serde_json::from_slice::<VzProbeResult>(stdout).ok()
-}
-
-fn docker_check(plat: Platform) -> Check {
-    if plat.has_docker() {
-        Check {
-            name: "docker",
-            category: "platform",
-            ok: true,
-            info: "available".to_string(),
-        }
-    } else {
-        Check {
-            name: "docker",
-            category: "platform",
-            ok: true, // Not a failure — just unavailable
-            info: "not available (install Docker Desktop or Docker Engine)".to_string(),
-        }
-    }
 }
 
 /// Userspace network-gateway host-side availability — Plan 87 W5 +
@@ -2772,15 +2734,13 @@ mod tests {
     }
 
     #[test]
-    fn collect_balloon_support_advertises_fc_and_ch() {
+    fn collect_balloon_support_advertises_firecracker() {
         let support = collect_balloon_support();
         // The hand-maintained list in collect_balloon_support must
-        // include both rust-vmm backends. If a future refactor drops
-        // one, this fails loudly.
+        // include Firecracker. If a future refactor drops it, this
+        // fails loudly.
         assert_eq!(support.get("firecracker"), Some(&true));
-        assert_eq!(support.get("cloud-hypervisor"), Some(&true));
         // And honestly-`false` backends should not be silently dropped.
-        assert_eq!(support.get("docker"), Some(&false));
         assert_eq!(support.get("apple-container"), Some(&false));
     }
 
@@ -2792,7 +2752,7 @@ mod tests {
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
         // A backend with no warm-start support must not be silently dropped.
-        assert_eq!(r.backends.get("docker"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
     }
 
     #[test]
@@ -2802,7 +2762,7 @@ mod tests {
         // report honest `false` and must not be silently dropped.
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
         assert_eq!(r.standby_pool.get("apple-container"), Some(&false));
-        assert_eq!(r.standby_pool.get("docker"), Some(&false));
+        assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 
     #[test]

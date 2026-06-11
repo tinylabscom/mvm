@@ -454,7 +454,7 @@ impl ExecDispatcher {
         // cost of an extra VM start in pathological cases.
         let prefix = format!("mcp-session-{}", short_id(session_id));
         let booted =
-            crate::exec::boot_session_vm(env, &prefix, DEFAULT_VM_CPUS, DEFAULT_VM_MEM_MIB)
+            crate::exec::boot_session_vm(env, &prefix, DEFAULT_VM_CPUS, DEFAULT_VM_MEM_MIB, None)
                 .with_context(|| format!("booting warm VM for session '{session_id}'"))?;
         let booted_name = booted.vm_name.clone();
         let handle = Arc::new(Mutex::new(booted));
