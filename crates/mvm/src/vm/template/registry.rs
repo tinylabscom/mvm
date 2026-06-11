@@ -3,13 +3,19 @@ use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
 
 #[cfg(feature = "template-registry-s3")]
-use opendal::Operator;
+use object_store::ObjectStore;
 #[cfg(feature = "template-registry-s3")]
-use opendal::services::S3;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
+#[cfg(feature = "template-registry-s3")]
+use object_store::path::Path as ObjPath;
 
 #[cfg(feature = "template-registry-s3")]
 pub struct TemplateRegistry {
-    op: opendal::BlockingOperator,
+    store: AmazonS3,
+    // object_store is async; this registry's API is sync, so it owns a
+    // current-thread runtime to drive the get/put calls (mirrors
+    // `mvm_storage::s3::S3MountProvider`).
+    rt: tokio::runtime::Runtime,
     prefix: String,
 }
 
@@ -55,21 +61,27 @@ impl TemplateRegistry {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "us-east-1".to_string());
 
-        // NOTE: OpenDAL's service builders use a consuming builder pattern (method calls take and
-        // return `Self`), so keep this as a chained expression.
-        //
-        // MinIO commonly uses path-style requests; OpenDAL's S3 service defaults are compatible
-        // as long as the endpoint points at your MinIO/S3-compatible gateway.
-        let builder = S3::default()
-            .endpoint(&endpoint)
-            .bucket(bucket.trim())
-            .region(region.trim())
-            .access_key_id(access_key.trim())
-            .secret_access_key(secret_key.trim());
+        // The endpoint is always a custom S3-compatible gateway (MinIO/etc., it's
+        // required above), so use path-style requests. `with_allow_http` permits
+        // http:// only when the operator opted in via MVM_TEMPLATE_REGISTRY_INSECURE
+        // (already validated above).
+        let store = AmazonS3Builder::new()
+            .with_endpoint(&endpoint)
+            .with_bucket_name(bucket.trim())
+            .with_region(region.trim())
+            .with_access_key_id(access_key.trim())
+            .with_secret_access_key(secret_key.trim())
+            .with_virtual_hosted_style_request(false)
+            .with_allow_http(insecure)
+            .build()
+            .context("building the S3 client for the template registry")?;
 
-        let op = Operator::new(builder)?.finish().blocking();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building the runtime for the template registry")?;
 
-        Ok(Some(Self { op, prefix }))
+        Ok(Some(Self { store, rt, prefix }))
     }
 
     pub fn key_current(&self, template_id: &str) -> String {
@@ -94,20 +106,23 @@ impl TemplateRegistry {
     }
 
     pub fn put_bytes(&self, key: &str, data: Vec<u8>) -> Result<()> {
-        self.op
-            .write(key, data)
+        self.rt
+            .block_on(self.store.put(&ObjPath::from(key), data.into()))
             .map_err(anyhow::Error::new)
             .with_context(|| format!("Failed to write object {}", key))?;
         Ok(())
     }
 
     pub fn get_bytes(&self, key: &str) -> Result<Vec<u8>> {
-        let data = self
-            .op
-            .read(key)
+        let bytes = self
+            .rt
+            .block_on(async {
+                let resp = self.store.get(&ObjPath::from(key)).await?;
+                resp.bytes().await
+            })
             .map_err(anyhow::Error::new)
             .with_context(|| format!("Failed to read object {}", key))?;
-        Ok(data.to_vec())
+        Ok(bytes.to_vec())
     }
 
     pub fn put_text(&self, key: &str, text: &str) -> Result<()> {
