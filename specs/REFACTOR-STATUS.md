@@ -237,6 +237,23 @@ PLAN 180 — Strip spec refs from code comments    🔴 NOT STARTED
   [ ] fan-out sweep (~2,531 comment hits)
   [ ] verify just ci green, comment-only diff
   [ ] check-no-spec-refs-in-comments lint gate
+
+PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; mvm primitive ↔ mvmd product per ADR-070)
+  [ ] WS-A preview ingress: published-ports model (signed in plan) + per-port
+      routing label at gateway seam + wake-on-access VmBackend hook + local
+      single-machine dev ingress (s-<id>-<port>.preview.localhost)
+  [ ] WS-B lifecycle verbs: vm stop (free RAM, wake-on-access) / rm (keep
+      workspace) / purge (delete workspace) / keepalive (extend idle TTL);
+      workspace-data lifecycle in mvm_core::config; distinct cmd.* audit events
+  [ ] WS-C task/files protocol: async streamable task over agent-RPC (169) reusing
+      ExecEvent (172) + SSE-ready event shape + Files API parity on fs RPC + thin
+      mvmctl verbs (agent-agnostic; mvmd owns HTTP/SSE transport)
+  [ ] WS-D install DX: curl|sh installer (folds Plan 159 WS-5 D) + "next steps"
+      output (endpoint + preview URLs + runnable cmds) + graduated env uninstall
+      (--images/--data/--all; keep-workspaces default)
+  NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
+  socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
+  baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
 ```
 
 ## Security claims
