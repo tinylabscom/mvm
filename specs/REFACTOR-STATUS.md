@@ -197,7 +197,7 @@ PLAN 177 — Backend consolidation (8→4)           🟡 Phase 1 DONE; Phase 2 
   [ ] Phase 2 (GATED on Plan 152 WS-B + save/pause merge): AVF convergence
       onto supervisor vz + shared console transport + drop apple-container
 
-PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-family deferred  (ADR-077)
+PLAN 178 — CLI surface consolidation (~56→~28)   ✅ DONE (dir-purity deferred)  (ADR-077)
   [x] lock tree (D1–D6) + hide internal subprocess commands
   [x] vm group (14 single-VM verbs)
   [x] ops group (metrics/bench/config/mcp)
