@@ -25,7 +25,7 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
   [x] guest↔host vsock transport, both directions   — PR #708/#709
   [x] workload env injection via RunEntrypoint proto — PR #711
   [x] e2e substitution over AF_VSOCK loopback        — PR #710
-  [x] claim-13 audit (secret.substituted)
+  [x] claim-13 audit (secret.substituted + secret.placeholder_dropped on endpoint refusal)
   [x] retire dead in-guest ADR-049 scaffolding       — PR #713
   [x] per-VM substitution-endpoint moat (mvm-hostd)  — PR #715
   [x] QEMU spawns endpoint at boot, fail-closed      — PR #717
