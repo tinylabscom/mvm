@@ -678,7 +678,16 @@ impl SubstitutionService {
                 .headers
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"));
-            if compressed || req.body.len() as u64 > mvm_core::policy::DEFAULT_BODY_CAP_BYTES {
+            let oversize = req.body.len() as u64 > mvm_core::policy::DEFAULT_BODY_CAP_BYTES;
+            if compressed || oversize {
+                // Distinct reasons so the audit names which condition fired;
+                // compressed wins when both hold (it's the harder bypass).
+                let reason = if compressed {
+                    "fail_closed_compressed"
+                } else {
+                    "fail_closed_oversize"
+                };
+                self.audit_fail_closed(destination.as_deref(), reason).await;
                 return WireResponse::Refused {
                     message: "egress redaction enabled for destination but body is \
                               compressed or over the scan cap; refusing (fail-closed)"
@@ -817,6 +826,18 @@ impl SubstitutionService {
         };
         if let Err(e) = emit_secret_placeholder_dropped(recorder, dest).await {
             tracing::warn!(error = %e, "secret.placeholder_dropped audit emit failed");
+        }
+    }
+
+    /// Emit one audit entry when a request to a redaction-opted-in destination
+    /// is refused fail-closed (compressed or over-cap body we can't scan in
+    /// cleartext). Metadata only — the reason + destination, never the body.
+    async fn audit_fail_closed(&self, destination: Option<&str>, reason: &str) {
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        if let Err(e) = emit_secret_redacted(recorder, dest, reason).await {
+            tracing::warn!(error = %e, "fail-closed audit emit failed");
         }
     }
 }
@@ -1457,6 +1478,103 @@ mod server_tests {
         );
         // The unscannable request never reached the forward leg.
         assert!(forwarder.seen.lock().unwrap().is_none());
+        server.abort();
+    }
+
+    /// A fail-closed refusal (compressed/over-cap body to a redaction-opted-in
+    /// destination) is observable: it lands one metadata-only audit entry naming
+    /// the destination, and never the body bytes.
+    #[tokio::test]
+    async fn fail_closed_refusal_is_audited() {
+        use crate::supervisor::audit_file::FileAuditSigner;
+        use crate::supervisor::audit_recorder::Recorder;
+        use ed25519_dalek::SigningKey;
+        use mvm_core::plan::TenantId;
+        use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
+
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+
+        let policy = RedactionPolicy {
+            default: RedactionAction::default(),
+            profiles: vec![RedactionProfile {
+                host: "api.openai.com".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+        };
+
+        let chain = dir.path().join("audit.jsonl");
+        let signer =
+            FileAuditSigner::open_file(SigningKey::from_bytes(&[9u8; 32]), &chain).unwrap();
+        let recorder = Recorder::new(Arc::new(signer), TenantId("local".into()));
+
+        let service = Arc::new(
+            SubstitutionService::new(Arc::new(reg), resolver, Arc::clone(&forwarder) as _)
+                .with_redaction_policy(policy)
+                .with_recorder(recorder),
+        );
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(Arc::clone(&service).serve(listener));
+
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        // A magic body string we can grep for: it must never reach the chain.
+        let secret_body = b"SUPERSECRETBODY compressed bytes";
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![
+                ("content-encoding".into(), "gzip".into()),
+                ("authorization".into(), format!("Bearer {ph}")),
+            ],
+            body_b64: B64.encode(secret_body),
+        };
+        write_json_frame(&mut client, &wire).await.unwrap();
+        let resp: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES).await.unwrap();
+        assert!(
+            matches!(resp, WireResponse::Refused { .. }),
+            "compressed body must fail closed: {resp:?}"
+        );
+        // The unscannable request never reached the forward leg.
+        assert!(forwarder.seen.lock().unwrap().is_none());
+
+        let logged = std::fs::read_to_string(&chain).unwrap();
+        assert!(
+            logged.contains("api.openai.com"),
+            "fail-closed refusal must be audited with the destination: {logged}"
+        );
+        assert!(
+            logged.contains("fail_closed"),
+            "fail-closed refusal must record a fail-closed marker: {logged}"
+        );
+        // The body bytes never reach the audit chain.
+        assert!(
+            !logged.contains("SUPERSECRETBODY"),
+            "audit chain must not carry the body bytes: {logged}"
+        );
         server.abort();
     }
 

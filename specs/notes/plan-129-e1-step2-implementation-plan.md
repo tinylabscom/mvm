@@ -1102,6 +1102,10 @@ the new main.
   per-destination resolve ✅ slice 4 (types in mvm-core, resolver in mvm-hostd —
   the host_matches dependency-direction fix). Wiring + fail-closed + audit ✅
   slice 5. No `core::redact` move; no ML/heavy dep (gazetteer is static data).
+  Fail-closed refusals (compressed / over-cap body to a redaction-opted-in
+  destination) emit a metadata-only audit entry naming the destination and the
+  `fail_closed_compressed` / `fail_closed_oversize` reason — matching the
+  design's "blocked + audited" posture, never the body bytes.
 - **Deferred (note in the design's Out-of-scope, carry forward):** full PII
   match-span plumbing into `NameScanner` co-occurrence on the live path (slice 5
   passes `&[]` spans, so labeled + gazetteer name signals fire but live
