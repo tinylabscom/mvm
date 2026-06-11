@@ -338,7 +338,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
     ("run", AuditPosture::InteractiveOrControl),
-    ("exec", AuditPosture::InteractiveOrControl),
     ("invoke", AuditPosture::Emits("plan.admitted+plan.launched")),
     // Plan 178 — single-VM operational verbs grouped under `vm <sub>`.
     ("vm", AuditPosture::DelegatesToSub(VM_SUB)),

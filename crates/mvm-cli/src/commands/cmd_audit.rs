@@ -191,7 +191,6 @@ impl Commands {
             Commands::Reconcile(_) => "reconcile",
             Commands::Init(_) => "init",
             Commands::Run(_) => "run",
-            Commands::Exec(_) => "exec",
             Commands::Invoke(_) => "invoke",
             // `vm <sub>` delegates to the per-op verb so the audit taxonomy
             // (cmd.pause.*, cmd.cp.*, cmd.checkpoint.*, …) is unchanged by

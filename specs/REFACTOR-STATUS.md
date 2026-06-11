@@ -201,8 +201,9 @@ PLAN 178 — CLI surface consolidation (~56→~28)   🟢 groups done; run-famil
   [x] trust group (attest/receipt/audit folded into publisher trust)
   [x] image.rs/catalog.rs dir split (Plan 153)
   [x] docs: cli-commands.md + CLAUDE.md grouped forms
-  [ ] run-family merge (up/run/exec/invoke) — CONFIRMED-INTENDED, deferred
-      to Task 7 (read each impl first); tracked, do not drop
+  [x] run-family merge (Task 7): exec→run (run was a strict superset via
+      RunArgs::into_exec_args); `up` + `invoke` kept distinct (admission /
+      no-shell entrypoint). `run --profile dev` covers exec.
   NOTE: audit taxonomy preserved across all groups (vm pause→cmd.pause,
   trust audit→cmd.audit, …) so claims 8/12/13 event names unchanged.
   Deferred dir-purity: dev/doctor/init modules still live in env/.

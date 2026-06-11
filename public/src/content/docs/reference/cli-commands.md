@@ -22,7 +22,7 @@ verification under `trust`. Domains that already own their own subcommands
 
 | Group / top-level | Commands |
 |--------|----------|
-| Daily drivers (top-level) | `up`, `run`, `exec`, `invoke`, `ls`, `console`, `down`, `logs`, `dev`, `doctor`, `init` |
+| Daily drivers (top-level) | `up`, `run`, `invoke`, `ls`, `console`, `down`, `logs`, `dev`, `doctor`, `init` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel` |
 | `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
@@ -135,7 +135,7 @@ verification under `trust`. Domains that already own their own subcommands
 
 ### Running (top-level — already manifest-aware)
 
-`mvmctl up [PATH]` and `mvmctl exec [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build image`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-exec) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
+`mvmctl up [PATH]` and `mvmctl run [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl build image`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
 
 ### Inspection / registry (`mvmctl manifest *`)
 
@@ -269,13 +269,16 @@ never the token value.
 | `mvmctl console <name>` | Interactive PTY shell into a running VM (vsock, no SSH) |
 | `mvmctl console <name> --command <cmd>` | Run a one-shot command in the VM |
 
-## One-shot Exec
+## One-shot Run (transient runner)
 
-`mvmctl run` is the default one-shot sandbox UX. It boots a fresh transient
-microVM, runs one command, and tears the VM down on exit. `mvmctl exec` remains
-available as the lower-level/dev-compatible spelling for the same cold execution
-machinery. Like `exec`, arbitrary command dispatch currently requires a
-dev-feature guest agent; production guests should use `mvmctl invoke`.
+`mvmctl run` is the one-shot sandbox UX: it boots a fresh transient microVM,
+runs one command, and tears the VM down on exit — like `docker run --rm` but
+with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
+`mvmctl exec` into `run` (it was already a strict superset); `run` adds a
+security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
+and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
+requires a dev-feature guest agent (the `do_exec` handler is `dev-shell`-gated,
+claim 4); production guests should use `mvmctl invoke` (no shell).
 
 | Command | Description |
 |---------|-------------|
@@ -357,31 +360,15 @@ paths and file contents are not written to audit logs; successful copies emit
 name, guest path, copied byte count, and effective copy options, but not the
 host endpoint.
 
-`mvmctl exec` boots a fresh transient microVM, runs a single command, and tears it
-down on exit — like an external sandbox-wrapper CLI or `docker run --rm`, but with a Firecracker microVM
-as the sandbox. **Dev-mode only**: the guest agent's Exec handler is compiled in
-only when the `dev-shell` Cargo feature is enabled. Production guest builds omit
-the feature, so the handler is not present in the binary at all.
-
-| Command | Description |
-|---------|-------------|
-| `mvmctl exec -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
-| `mvmctl exec --manifest <name> -- <cmd>...` | Boot a registered template instead of the default |
-| `mvmctl exec --launch-plan <path> ` | Run the entrypoint from a `launch.json` artifact (top-level `entrypoint`) or a Workload IR manifest (top-level `apps[]`). See the [mvmforge migration guide](/guides/mvmforge-migration/) for the historical origin. Mutually exclusive with trailing argv |
-| `mvmctl exec --add-dir HOST:GUEST[:MODE] -- <cmd>` | Mount a host directory inside the guest. `MODE` is `ro` (default — writes discarded) or `rw` (writes rsynced back to the host after the command exits — see [ADR-002](/contributing/adr/002-writable-add-dir/)). Repeatable |
-| `mvmctl exec --env KEY=VAL -- <cmd>` | Inject an environment variable. Repeatable. Overrides any env vars carried by `--launch-plan` |
-| `mvmctl exec --cpus <n>` / `--memory <size>` | Resize the transient VM (defaults: 2 vCPUs, 512 MiB) |
-| `mvmctl exec --timeout <secs>` | Per-command timeout (default: 60s) |
-
-Examples:
+### Run examples
 
 ```bash
-mvmctl exec -- uname -a                                # default image
-mvmctl exec --manifest minimal -- /bin/true            # named template
-mvmctl exec --add-dir .:/work -- ls /work              # share current dir, RO
-mvmctl exec --add-dir .:/work:rw -- touch /work/x      # writable, rsynced back
-mvmctl exec -e DEBUG=1 -- env | grep DEBUG             # env var injection
-mvmctl exec --launch-plan ./launch.json                # launch-plan entrypoint
+mvmctl run -- uname -a                                # default image
+mvmctl run --manifest minimal -- /bin/true            # named template
+mvmctl run --add-dir .:/work -- ls /work              # share current dir, RO
+mvmctl run --add-dir .:/work:rw -- touch /work/x      # writable, rsynced back
+mvmctl run -e DEBUG=1 -- env | grep DEBUG             # env var injection
+mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
 ```
 
 ### Launch-plan shape
@@ -427,13 +414,13 @@ is the canonical producer today.
 ```
 
 Multi-app IR manifests are rejected — that's an orchestration concern
-that belongs in `mvmd`, not in `mvmctl exec`. Env precedence (lowest →
+that belongs in `mvmd`, not in `mvmctl run`. Env precedence (lowest →
 highest): top-level/app `env` → `entrypoint.env` → CLI `--env`.
 
 ### Snapshot restore
 
 When the request boots a registered template (`--manifest <name>`) and
-that template has a captured snapshot, `mvmctl exec` restores from the
+that template has a captured snapshot, `mvmctl run` restores from the
 snapshot instead of cold-booting — typically sub-second on Linux/KVM.
 
 The snapshot path activates only when *all* of the following hold:
@@ -486,7 +473,7 @@ When an image-taking command is invoked without `--flake` or `--manifest`,
 `mvmctl` falls back to a bundled minimal image (busybox + the guest agent).
 This applies to:
 
-- `mvmctl exec -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
+- `mvmctl run -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
 - `mvmctl up` — boots a long-running microVM with the same image
 
 The image is the bundled default — a minimal `mkGuest` rootfs shipped

@@ -2097,13 +2097,13 @@ fn up_rejects_removed_secret_flag() {
     );
 }
 
-// --- Exec CLI tests ---
+// --- Run (transient runner; absorbed the former exec) CLI tests ---
 
 #[test]
-fn exec_default_manifest_argv_only() {
-    let cli = Cli::try_parse_from(["mvmctl", "exec", "--", "uname", "-a"]).expect("parse");
+fn run_transient_default_manifest_argv_only() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--", "uname", "-a"]).expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             manifest,
             cpus,
             memory,
@@ -2112,6 +2112,7 @@ fn exec_default_manifest_argv_only() {
             timeout,
             launch_plan,
             argv,
+            ..
         }) => {
             assert!(manifest.is_none(), "manifest should default to None");
             assert_eq!(cpus, 2);
@@ -2125,19 +2126,19 @@ fn exec_default_manifest_argv_only() {
             assert!(launch_plan.is_none(), "launch_plan should default to None");
             assert_eq!(argv, vec!["uname".to_string(), "-a".to_string()]);
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_timeout_parses_to_some() {
-    let cli = Cli::try_parse_from(["mvmctl", "exec", "--timeout", "5", "--", "sleep", "10"])
+fn run_transient_timeout_parses_to_some() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--timeout", "5", "--", "sleep", "10"])
         .expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args { timeout, .. }) => {
+        Commands::Run(exec::RunArgs { timeout, .. }) => {
             assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
@@ -2554,25 +2555,25 @@ fn cp_guest_to_host_defaults_parse() {
 }
 
 #[test]
-fn exec_with_launch_plan_no_argv() {
+fn run_transient_with_launch_plan_no_argv() {
     let cli =
-        Cli::try_parse_from(["mvmctl", "exec", "--launch-plan", "./plan.json"]).expect("parse");
+        Cli::try_parse_from(["mvmctl", "run", "--launch-plan", "./plan.json"]).expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             launch_plan, argv, ..
         }) => {
             assert_eq!(launch_plan.as_deref(), Some("./plan.json"));
             assert!(argv.is_empty());
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_launch_plan_conflicts_with_argv() {
+fn run_transient_launch_plan_conflicts_with_argv() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "exec",
+        "run",
         "--launch-plan",
         "./plan.json",
         "--",
@@ -2586,10 +2587,10 @@ fn exec_launch_plan_conflicts_with_argv() {
 }
 
 #[test]
-fn exec_with_manifest_and_resources() {
+fn run_transient_with_manifest_and_resources() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "exec",
+        "run",
         "--manifest",
         "my-tpl",
         "--cpus",
@@ -2601,7 +2602,7 @@ fn exec_with_manifest_and_resources() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             manifest,
             cpus,
             memory,
@@ -2613,15 +2614,15 @@ fn exec_with_manifest_and_resources() {
             assert_eq!(memory, "1G");
             assert_eq!(argv, vec!["/bin/true".to_string()]);
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_with_add_dir_and_env() {
+fn run_transient_with_add_dir_and_env() {
     let cli = Cli::try_parse_from([
         "mvmctl",
-        "exec",
+        "run",
         "--add-dir",
         "/tmp:/work",
         "--add-dir",
@@ -2636,7 +2637,7 @@ fn exec_with_add_dir_and_env() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Exec(exec::Args {
+        Commands::Run(exec::RunArgs {
             add_dir, env, argv, ..
         }) => {
             assert_eq!(
@@ -2646,14 +2647,14 @@ fn exec_with_add_dir_and_env() {
             assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
             assert_eq!(argv, vec!["ls".to_string(), "/work".to_string()]);
         }
-        _ => panic!("Expected Exec command"),
+        _ => panic!("Expected Run command"),
     }
 }
 
 #[test]
-fn exec_requires_argv() {
+fn run_transient_requires_argv() {
     // Without trailing argv, Clap should reject because `argv` is required.
-    let cli = Cli::try_parse_from(["mvmctl", "exec"]);
+    let cli = Cli::try_parse_from(["mvmctl", "run"]);
     assert!(cli.is_err());
 }
 

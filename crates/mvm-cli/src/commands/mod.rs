@@ -110,10 +110,8 @@ pub(in crate::commands) enum Commands {
     Reconcile(ops::reconcile::Args),
     /// Scaffold a new project
     Init(env::init::Args),
-    /// Run one command in a transient microVM
+    /// Run a command in a transient microVM (absorbed the former `exec`)
     Run(vm::exec::RunArgs),
-    /// Run one dev command in a transient microVM
-    Exec(vm::exec::Args),
     /// Call a VM's baked entrypoint
     Invoke(vm::invoke::Args),
     /// Operate on a running VM (pause, snapshot, checkpoint, cp, fs, …)
@@ -284,7 +282,6 @@ pub fn run() -> Result<()> {
         Commands::Reconcile(a) => ops::reconcile::run(&cli, a, &cfg),
         Commands::Init(a) => env::init::run(&cli, a, &cfg),
         Commands::Run(a) => vm::exec::run_secure(&cli, a, &cfg),
-        Commands::Exec(a) => vm::exec::run(&cli, a, &cfg),
         Commands::Invoke(a) => vm::invoke::run(&cli, a, &cfg),
         Commands::Vm(a) => vm::group::run(&cli, a, &cfg),
         Commands::Secret(a) => ops::secret::run(&cli, a, &cfg),
