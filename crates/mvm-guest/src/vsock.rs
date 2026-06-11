@@ -1886,7 +1886,13 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
     let timeout = Duration::from_secs(timeout_secs);
 
     // Pre-flight: verify the socket file exists and is actually a socket.
-    match std::fs::symlink_metadata(uds_path) {
+    // Follow symlinks (`metadata`, not `symlink_metadata`): both the
+    // Firecracker default-image and template launch paths expose the vsock
+    // UDS at `<dir>/runtime/v.sock` as a symlink to the socket Firecracker
+    // actually binds, so the pre-flight must resolve through it — otherwise
+    // it sees the symlink's own file type and wrongly rejects a connectable
+    // socket.
+    match std::fs::metadata(uds_path) {
         Err(e) => bail!("Vsock socket not found at {}: {}", uds_path, e),
         Ok(m) if !m.file_type().is_socket() => {
             bail!(
