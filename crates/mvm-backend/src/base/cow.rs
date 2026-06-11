@@ -13,7 +13,7 @@
 //! the clone's blocks and never touch the template.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -186,6 +186,50 @@ fn libc_eopnotsupp() -> i32 {
     libc::ENOTSUP
 }
 
+/// Per-instance rootfs path for `vm_name`: `<vm_state_dir>/rootfs.ext4`. Each
+/// running VM owns its own writable copy so the hypervisor can attach it
+/// writable without conflicting with sibling instances, and the source template
+/// stays pristine. Shared by every backend that needs per-instance ownership
+/// (Plan 53 Plan D / Plan 177 AVF convergence).
+pub fn instance_rootfs_path(vm_name: &str) -> Result<PathBuf> {
+    Ok(mvm_core::config::vm_state_dir(vm_name).join("rootfs.ext4"))
+}
+
+/// Materialize the per-instance rootfs for `vm_name` from `source_rootfs` and
+/// return its absolute path. No-op if the source is already the per-instance
+/// path (a re-start). Otherwise removes any stale per-instance file from a prior
+/// failed run, then CoW-clones the source via [`clone_rootfs_for_instance`].
+pub fn prepare_instance_rootfs(vm_name: &str, source_rootfs: &str) -> Result<PathBuf> {
+    let instance_path = instance_rootfs_path(vm_name)?;
+    prepare_instance_rootfs_inner(&instance_path, source_rootfs)
+}
+
+/// Inner implementation that takes the instance path directly, so tests don't
+/// mutate `HOME` / `MVM_DATA_DIR`.
+pub fn prepare_instance_rootfs_inner(instance_path: &Path, source_rootfs: &str) -> Result<PathBuf> {
+    let source_path = Path::new(source_rootfs);
+    if source_path == instance_path {
+        // Already the per-instance copy — nothing to clone.
+        return Ok(instance_path.to_path_buf());
+    }
+    if instance_path.exists() {
+        std::fs::remove_file(instance_path).with_context(|| {
+            format!(
+                "removing stale per-instance rootfs at {}",
+                instance_path.display()
+            )
+        })?;
+    }
+    let strategy = clone_rootfs_for_instance(source_path, instance_path)?;
+    tracing::info!(
+        ?strategy,
+        source = %source_path.display(),
+        instance = %instance_path.display(),
+        "prepared per-instance rootfs",
+    );
+    Ok(instance_path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +246,29 @@ mod tests {
         assert!(is_unsupported(&einval));
         assert!(is_unsupported(&enotty));
         assert!(!is_unsupported(&other));
+    }
+
+    #[test]
+    fn prepare_instance_rootfs_inner_clones_into_the_per_instance_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("golden.ext4");
+        std::fs::write(&src, b"golden").unwrap();
+        let instance = dir.path().join("inst").join("rootfs.ext4");
+        let out = prepare_instance_rootfs_inner(&instance, src.to_str().unwrap()).expect("clone");
+        assert_eq!(out, instance);
+        assert!(instance.exists());
+        // Writing the per-instance clone must not tamper the source template.
+        std::fs::write(&instance, b"changed").unwrap();
+        assert_eq!(std::fs::read(&src).unwrap(), b"golden");
+    }
+
+    #[test]
+    fn prepare_instance_rootfs_inner_is_noop_when_source_is_the_instance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inst = dir.path().join("rootfs.ext4");
+        std::fs::write(&inst, b"x").unwrap();
+        let out = prepare_instance_rootfs_inner(&inst, inst.to_str().unwrap()).expect("noop");
+        assert_eq!(out, inst);
     }
 
     /// On macOS with an APFS-backed `TMPDIR` (the default), `clonefile`

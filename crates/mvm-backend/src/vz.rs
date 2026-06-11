@@ -224,21 +224,44 @@ impl VmBackend for VzBackend {
         // Record runtime metadata so `mvmctl console` / status RPCs
         // can find the artifacts after start. Matches the libkrun path
         // line-for-line.
+        // The admission gate + runtime_meta read the *source* (golden) rootfs
+        // sidecar; the per-instance clone below is a CoW copy under a different
+        // name, so its sidecar lives next to the source.
         let rootfs = Path::new(&config.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
         crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
 
-        // Spawn host-side gvproxy so the Swift supervisor has something
-        // to connect to. VzBackend is stateless; the child is detached
+        // Per-instance rootfs (Plan 53 Plan D / Plan 177 AVF convergence). A
+        // non-verity image gets a CoW clone so each VM owns a *writable* root —
+        // pristine template, multi-instance isolation, and the foundation the
+        // checkpoint/fork/warm-pool features build on. A verity/sealed image
+        // stays the read-only golden rootfs (dm-verity requires an immutable,
+        // read-only backing). APFS CoW makes the clone O(1).
+        let sealed = config.verity_path.is_some();
+        let mut launch_config = config.clone();
+        if !sealed {
+            launch_config.rootfs_path =
+                crate::base::cow::prepare_instance_rootfs(&config.name, &config.rootfs_path)?
+                    .to_string_lossy()
+                    .into_owned();
+        }
+
+        // Plan 102 W6.A.5 — spawn host-side gvproxy so the supervisor has
+        // something to connect to. VzBackend is stateless; the child is detached
         // (PID file under state dir lets `stop()` find it later).
         let gvproxy_info = host_gvproxy::spawn_detached(&state_dir)
             .map_err(|e| anyhow!("spawn host-side gvproxy for Vz VM '{}': {e}", config.name))?;
 
         // Vz config build. The `?` propagates allowlist failures from
         // `audit_substrate::compute_audit_substrate` (unsafe tenant_id
-        // / vm_name).
-        let cfg = build_supervisor_config(config, kernel, &state_dir, &gvproxy_info)?;
+        // / vm_name) — see Plan 112 Phase 3c.
+        let mut cfg = build_supervisor_config(&launch_config, kernel, &state_dir, &gvproxy_info)?;
+        // Attach the rootfs writable for the per-instance clone; verity/sealed
+        // stays read-only (the builder defaults read-only).
+        if !sealed && let Some(disk) = cfg.disks.iter_mut().find(|d| d.id == "rootfs") {
+            disk.read_only = false;
+        }
 
         // Spawn the `mvm-vz-drainer` sibling between gvproxy and the Vz
         // VM boot. Closes the Vz audit carve-out: the drainer binds
@@ -378,6 +401,7 @@ impl VmBackend for VzBackend {
                 id.0
             ));
             let _ = std::fs::remove_file(&pid_path);
+            remove_instance_rootfs(&id.0);
             return Ok(());
         }
 
@@ -402,6 +426,7 @@ impl VmBackend for VzBackend {
         }
 
         let _ = std::fs::remove_file(&pid_path);
+        remove_instance_rootfs(&id.0);
 
         // Tear down the host-side gvproxy spawned by `start()`.
         // Best-effort: the supervisor stop
@@ -1173,6 +1198,22 @@ fn vz_cmdline_with_user_volumes(config: &VmStartConfig) -> String {
         cmdline.push_str(&uvols);
     }
     cmdline
+}
+
+/// Best-effort removal of the per-instance rootfs clone on teardown. A verity
+/// VM never created one (it ran the read-only golden), so a missing file is
+/// normal. Mirrors the Apple-container path's cleanup (Plan 53 Plan D).
+fn remove_instance_rootfs(vm_name: &str) {
+    if let Ok(path) = crate::base::cow::instance_rootfs_path(vm_name)
+        && path.exists()
+        && let Err(e) = std::fs::remove_file(&path)
+    {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to remove per-instance rootfs clone"
+        );
+    }
 }
 
 fn build_supervisor_config(
