@@ -42,3 +42,13 @@ path = "fuzz_targets/fuzz_supervisor_config.rs"
 test = false
 doc = false
 bench = false
+
+# Plan 118 WS-1 1a — fuzz the `SupervisorAttachConfig` decoder, the only
+# attacker-reachable-post-spawn surface (the prelaunched supervisor reads it
+# off a same-uid control UDS). Goal: never panic on any input.
+[[bin]]
+name = "fuzz_attach_message"
+path = "fuzz_targets/fuzz_attach_message.rs"
+test = false
+doc = false
+bench = false

@@ -31,7 +31,10 @@ authors.workspace = true
 # `mvm` → `mvm-backend` — is the post-W7 invariant; the
 # previous `mvm-backend` → `mvm` re-export façade is gone.
 [dependencies]
-mvm-core.workspace = true
+# `egress-ca`: Plan 129 Stage 2 — `substitution_spawn::build_egress_tls_delivery`
+# mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
+# guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
+mvm-core = { workspace = true, features = ["egress-ca"] }
 # plan 123 A1 step 2 — the NetworkProvider seam this crate implements
 # (BridgeTapNetworkProvider). Acyclic: mvm-network deps only mvm-core + mvm-sdk.
 mvm-network.workspace = true

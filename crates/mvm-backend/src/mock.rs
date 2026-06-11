@@ -97,6 +97,7 @@ impl VmBackend for MockBackend {
             vsock: false,
             tap_networking: false,
             balloon: false,
+            fs_quick_checkpoint: false,
         }
     }
 
@@ -343,6 +344,7 @@ mod tests {
             tenant_id: None,
             plan_json: None,
             bundle_json: None,
+            warm_pool_size: 0,
         }
     }
 

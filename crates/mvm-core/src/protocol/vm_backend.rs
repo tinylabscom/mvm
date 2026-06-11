@@ -121,6 +121,11 @@ pub struct VmStartConfig {
     /// has no `.mvmpkg` pin (the common case). Same "do not log"
     /// rule as `plan_json`.
     pub bundle_json: Option<String>,
+    /// Plan 118 WS-1 1b — target warm-pool size. `0` (default) = feature off: no
+    /// standbys, no idle RAM, no control UDS, no behaviour change. A future
+    /// Firecracker standby reads the same field (it's why this lives on the
+    /// backend-agnostic config, not a libkrun-specific knob).
+    pub warm_pool_size: u32,
 }
 
 /// A host:guest port mapping, backend-agnostic.
@@ -195,6 +200,48 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
         entries.push(format!("uvol{idx}:{hexpath}:{mode}:{kind}"));
     }
     Some(format!("mvm.uvols={}", entries.join(";")))
+}
+
+/// Plan 129 Stage 2 — encode the per-VM egress intermediate **cert** (PEM) as a
+/// single `mvm.egress_ca=<hex>` kernel-cmdline token, mirroring `mvm.uvols`.
+/// `/init` decodes it, writes the cert to tmpfs (`/run/mvm/egress-ca.crt`), and
+/// points the guest's TLS trust at a combined bundle so a workload trusts
+/// host-terminated bound-host TLS. The fresh FC boot attaches no secrets drive,
+/// so the cmdline is the only per-VM channel to a sealed guest. Cert-only —
+/// never the key (host-side). `None` for an empty cert (no https leg).
+///
+/// Hex keeps the value a single space/newline-free token the kernel cmdline and
+/// `/proc/cmdline` round-trip. ~1.3 KB for a P-256 intermediate — well within
+/// the kernel `COMMAND_LINE_SIZE`, but kept compact deliberately.
+pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
+    if cert_pem.is_empty() {
+        return None;
+    }
+    let hex: String = cert_pem.bytes().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.egress_ca={hex}"))
+}
+
+/// Plan 129 Stage 2 — encode the per-run secret **placeholder** env as a single
+/// `mvm.secret_env=<hex>` kernel-cmdline token: a newline-joined
+/// `VAR=placeholder` blob, hex-encoded so it survives `/proc/cmdline` as one
+/// space-free token. `/init` decodes it and `export`s each `VAR=placeholder`
+/// into the sealed entrypoint's environment, so an SDK-free workload reads its
+/// opaque placeholder from `$VAR` and the host substitutes the real credential
+/// at egress. **Never a value** — only the `mvm-secret-…` placeholder (claim 13).
+/// `None` for no secrets. The cmdline is the only per-VM channel a *fresh* FC
+/// boot has to a sealed guest (no secrets drive attached), and the placeholder
+/// must be minted **before** boot so it can ride here.
+pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let blob = pairs
+        .iter()
+        .map(|(var, ph)| format!("{var}={ph}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hex: String = blob.bytes().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.secret_env={hex}"))
 }
 
 /// A file to inject into the guest (config or secret).
@@ -406,6 +453,10 @@ pub struct VmCapabilities {
     /// without rebooting the VM. cgroup-style memory limiting (Docker)
     /// is **not** a balloon and stays `false`.
     pub balloon: bool,
+    /// Can freeze a quiesced rootfs into an fs-quick checkpoint via filesystem
+    /// copy-on-write (APFS `clonefile` on macOS). Independent of `snapshots`,
+    /// which is the memory-state save/restore capability.
+    pub fs_quick_checkpoint: bool,
 }
 
 /// How thoroughly a backend can warm-start a VM from a snapshot. Distinct
@@ -491,6 +542,119 @@ impl fmt::Display for WarmStartError {
 }
 
 impl std::error::Error for WarmStartError {}
+
+// ---------------------------------------------------------------------------
+// Supervisor standby pool — Plan 118 WS-1 1b
+// ---------------------------------------------------------------------------
+
+/// How a prelaunched standby is to be set up (Plan 118 WS-1 1b). Backend-agnostic:
+/// the caller (the launch path) fills this in; the backend's [`VmBackend::spawn_standby`]
+/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`).
+#[derive(Debug, Clone)]
+pub struct StandbySpec {
+    /// Stable id for this standby (also the `~/.mvm/pool/<id>/` dir name).
+    pub id: String,
+    /// Kernel image path the standby pre-loads.
+    pub kernel_path: String,
+    /// Lowercase-hex sha256 of the kernel image — part of the base-compat key.
+    pub kernel_sha256: String,
+    /// vCPU count fixed at spawn (libkrun `set_vm_config` runs from the base
+    /// KrunContext, before attach — so a launch needing a different count cold-boots).
+    pub vcpus: u8,
+    /// Guest memory (MiB) fixed at spawn — same reasoning as `vcpus`.
+    pub mem_mib: u32,
+    /// Host-signer key path (claim 8) the standby re-verifies the attach plan against.
+    pub signing_key_path: std::path::PathBuf,
+    /// Expected envelope signer id (`host:{hostname}`) — the attach plan must match it.
+    pub signer_id: String,
+    /// Per-spawn binding nonce (hex of 32 random bytes); the attach must echo it.
+    pub binding_nonce: String,
+    /// Control UDS the standby binds and blocks on (0700 in a 0700 dir, nonce in path).
+    pub control_socket: std::path::PathBuf,
+    /// Per-VM state dir the standby writes its pid into.
+    pub vm_state_dir: String,
+}
+
+/// The base-compat key — everything a libkrun standby fixes at spawn and therefore must
+/// match the workload exactly, else the launch cold-boots. v1 is default-kernel +
+/// default-resources only; multi-kernel/multi-shape keying is deferred (SPRINT.md). The
+/// "no extra volumes" half of compat is enforced at the launch path (a standby declares
+/// none), not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandbyCompat {
+    pub kernel_sha256: String,
+    pub vcpus: u8,
+    pub mem_mib: u32,
+}
+
+/// A recorded, live standby (persisted as `~/.mvm/pool/<id>/standby.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandbyHandle {
+    pub id: String,
+    pub control_socket: std::path::PathBuf,
+    pub pid: u32,
+    pub kernel_sha256: String,
+    pub vcpus: u8,
+    pub mem_mib: u32,
+    pub binding_nonce: String,
+    pub spawned_unix_secs: u64,
+    pub state: StandbyState,
+}
+
+impl StandbyHandle {
+    /// The base-compat key this standby was spawned with.
+    pub fn compat(&self) -> StandbyCompat {
+        StandbyCompat {
+            kernel_sha256: self.kernel_sha256.clone(),
+            vcpus: self.vcpus,
+            mem_mib: self.mem_mib,
+        }
+    }
+
+    /// A launch may claim this standby only if its kernel **and** fixed resources match
+    /// exactly — no silent wrong-kernel or wrong-size boot.
+    pub fn is_compatible(&self, want: &StandbyCompat) -> bool {
+        &self.compat() == want
+    }
+}
+
+/// Lifecycle state of a recorded standby.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandbyState {
+    /// Spawned, blocked on its control UDS, not yet claimed.
+    Idle,
+    /// An attach was sent; the standby is booting or has booted.
+    Claimed,
+}
+
+/// What to attach to a claimed standby — the workload-specific half (the admitted,
+/// signed plan + rootfs + audit substrate). Backend-agnostic.
+#[derive(Debug, Clone)]
+pub struct StandbyClaim {
+    /// Workload rootfs ext4.
+    pub rootfs_path: String,
+    pub tenant_id: String,
+    pub audit_dir: std::path::PathBuf,
+    pub gateway_audit_socket: std::path::PathBuf,
+    pub gateway_events_socket: Option<std::path::PathBuf>,
+    /// JSON-encoded signed `ExecutionPlan` envelope (claim 8).
+    pub plan_json: String,
+    /// JSON-encoded `PolicyBundle`, if any.
+    pub bundle_json: Option<String>,
+}
+
+/// Why a standby spawn/claim failed. Fail-closed: every variant means the caller must
+/// fall back to a cold boot, never silently proceed without the workload.
+#[derive(Debug, thiserror::Error)]
+pub enum StandbyError {
+    #[error("{backend}: standby pool is not supported by this backend")]
+    Unsupported { backend: String },
+    #[error("spawn standby: {0}")]
+    SpawnFailed(String),
+    #[error("claim standby: {0}")]
+    ClaimFailed(String),
+}
 
 /// Snapshot of a VM's virtio-balloon state, returned by
 /// [`VmBackend::balloon_state`].
@@ -727,6 +891,42 @@ pub trait VmBackend: Send + Sync {
         )))
     }
 
+    /// Does this backend support a prelaunched-supervisor standby pool (Plan 118
+    /// WS-1 1b)? Opt-in, default `false` — orthogonal to [`snapshot_capability`]
+    /// (snapshot = restore a booted VM; standby = pre-pay spawn/setup latency).
+    ///
+    /// [`snapshot_capability`]: Self::snapshot_capability
+    fn supports_standby_pool(&self) -> bool {
+        false
+    }
+
+    /// Spawn a prelaunched standby per `spec`, detached, blocked on its control UDS
+    /// before any boot. Returns a [`StandbyHandle`] the pool records. Fail-closed:
+    /// the default refuses so a backend opts in explicitly (mirrors [`warm_start`]).
+    ///
+    /// [`warm_start`]: Self::warm_start
+    fn spawn_standby(
+        &self,
+        _spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
+    /// Claim an idle standby: send its one-shot attach (the admitted signed plan +
+    /// rootfs + audit substrate), which the supervisor re-verifies before boot.
+    /// Returns the booted VM's [`VmId`]. Fail-closed default.
+    fn claim_standby(
+        &self,
+        _handle: &StandbyHandle,
+        _claim: &StandbyClaim,
+    ) -> std::result::Result<VmId, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
     /// Start a new VM from the given configuration.
     ///
     /// Returns the [`VmId`] assigned to the running VM.
@@ -903,6 +1103,112 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standby_handle_serde_roundtrip_and_compat_match() {
+        let h = StandbyHandle {
+            id: "standby-abc".into(),
+            control_socket: "/p/standby-abc/control-deadbeef.sock".into(),
+            pid: 4242,
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "deadbeef".repeat(8),
+            spawned_unix_secs: 1_700_000_000,
+            state: StandbyState::Idle,
+        };
+        let json = serde_json::to_string(&h).unwrap();
+        let back: StandbyHandle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "standby-abc");
+        assert_eq!(back.state, StandbyState::Idle);
+        let want = StandbyCompat {
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+        };
+        assert!(back.is_compatible(&want));
+        // wrong kernel, wrong cpus, and wrong mem each break compat.
+        assert!(!back.is_compatible(&StandbyCompat {
+            kernel_sha256: "b".repeat(64),
+            ..want.clone()
+        }));
+        assert!(!back.is_compatible(&StandbyCompat {
+            vcpus: 4,
+            ..want.clone()
+        }));
+        assert!(!back.is_compatible(&StandbyCompat {
+            mem_mib: 2048,
+            ..want
+        }));
+    }
+
+    #[test]
+    fn standby_error_is_std_error() {
+        fn assert_err<E: std::error::Error>(_: &E) {}
+        assert_err(&StandbyError::Unsupported {
+            backend: "x".into(),
+        });
+    }
+
+    fn sample_standby_spec() -> StandbySpec {
+        StandbySpec {
+            id: "standby-x".into(),
+            kernel_path: "/k/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "ab".repeat(32),
+            control_socket: "/p/standby-x/control.sock".into(),
+            vm_state_dir: "/p/standby-x".into(),
+        }
+    }
+
+    fn sample_standby_claim() -> StandbyClaim {
+        StandbyClaim {
+            rootfs_path: "/vol/rootfs.ext4".into(),
+            tenant_id: "tenant-a".into(),
+            audit_dir: "/audit".into(),
+            gateway_audit_socket: "/audit/g.sock".into(),
+            gateway_events_socket: None,
+            plan_json: "{}".into(),
+            bundle_json: None,
+        }
+    }
+
+    #[test]
+    fn standby_pool_defaults_are_fail_closed() {
+        // TierOnlyBackend opts into no standby pool — the trait defaults must refuse.
+        let b = TierOnlyBackend(SnapshotCapability::DiskOnly);
+        assert!(!b.supports_standby_pool());
+        match b.spawn_standby(&sample_standby_spec()) {
+            Err(StandbyError::Unsupported { backend }) => assert_eq!(backend, "tier-only"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        match b.claim_standby(
+            &StandbyHandle {
+                id: "s".into(),
+                control_socket: "/p/s.sock".into(),
+                pid: 1,
+                kernel_sha256: "a".repeat(64),
+                vcpus: 2,
+                mem_mib: 1024,
+                binding_nonce: "ab".repeat(32),
+                spawned_unix_secs: 1,
+                state: StandbyState::Idle,
+            },
+            &sample_standby_claim(),
+        ) {
+            Err(StandbyError::Unsupported { backend }) => assert_eq!(backend, "tier-only"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn warm_pool_size_defaults_to_zero() {
+        assert_eq!(VmStartConfig::default().warm_pool_size, 0);
+    }
+
+    #[test]
     fn snapshot_capability_defaults_to_unsupported() {
         // The trait method defaults to this, so a backend that forgets to opt
         // in fails closed (no silent live-memory claim).
@@ -1035,6 +1341,54 @@ mod tests {
     #[test]
     fn encode_user_volumes_cmdline_empty_is_none() {
         assert!(encode_user_volumes_cmdline(&[]).is_none());
+    }
+
+    #[test]
+    fn encode_egress_ca_cmdline_empty_is_none() {
+        assert!(encode_egress_ca_cmdline("").is_none());
+    }
+
+    #[test]
+    fn encode_secret_env_cmdline_empty_is_none() {
+        assert!(encode_secret_env_cmdline(&[]).is_none());
+    }
+
+    #[test]
+    fn encode_secret_env_cmdline_round_trips_pairs_as_single_token() {
+        let pairs = vec![
+            ("API_KEY".to_string(), "mvm-secret-abc123".to_string()),
+            ("DB_TOKEN".to_string(), "mvm-secret-def456".to_string()),
+        ];
+        let got = encode_secret_env_cmdline(&pairs).unwrap();
+        assert!(got.starts_with("mvm.secret_env="));
+        // Single cmdline token — no spaces/newlines survive.
+        assert!(!got.contains(' ') && !got.contains('\n'));
+        // The hex decodes back to the newline-joined `VAR=placeholder` blob.
+        let hex = got.strip_prefix("mvm.secret_env=").unwrap();
+        let decoded: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "API_KEY=mvm-secret-abc123\nDB_TOKEN=mvm-secret-def456"
+        );
+    }
+
+    #[test]
+    fn encode_egress_ca_cmdline_hex_encodes_pem_as_single_token() {
+        let pem = "-----BEGIN CERTIFICATE-----\nAB\n-----END CERTIFICATE-----\n";
+        let got = encode_egress_ca_cmdline(pem).unwrap();
+        assert!(got.starts_with("mvm.egress_ca="));
+        // Single cmdline token — no spaces/newlines survive the hex encoding.
+        assert!(!got.contains(' ') && !got.contains('\n'));
+        // Round-trips: the hex decodes back to the exact PEM bytes.
+        let hex = got.strip_prefix("mvm.egress_ca=").unwrap();
+        let decoded: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(decoded, pem.as_bytes());
     }
 
     #[test]

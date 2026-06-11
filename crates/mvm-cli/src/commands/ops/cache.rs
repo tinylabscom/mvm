@@ -45,6 +45,18 @@ pub(in crate::commands) enum CacheAction {
         #[arg(long)]
         json: bool,
     },
+    /// Repair a degraded builder VM store (#640). Clears
+    /// `~/.cache/mvm/builder-vm/` so the next `dev up`/`build` cold-rebuilds it.
+    /// Use this when `dev up` keeps failing with a dangling-store error
+    /// (`error: path '/nix/store/…-source/flake.nix' does not exist`).
+    Repair {
+        /// Print what would be freed without removing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Structured output for `cache info --json`.
@@ -108,6 +120,39 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // and the last Stage 0 source fingerprint.
             for line in &info.detail_lines {
                 println!("{line}");
+            }
+            Ok(())
+        }
+        CacheAction::Repair { dry_run, json } => {
+            let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
+                .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?;
+            if json {
+                crate::json_out::emit_json(&repair)?;
+                return Ok(());
+            }
+            if !repair.existed {
+                ui::info(&format!(
+                    "Builder store {} is already absent — nothing to repair.",
+                    repair.path
+                ));
+            } else if dry_run {
+                ui::info(&format!(
+                    "Would clear builder store {} ({}). Re-run without --dry-run to repair.",
+                    repair.path,
+                    human_bytes(repair.bytes_freed)
+                ));
+            } else {
+                mvm_core::audit_emit!(
+                    CachePrune,
+                    "op=builder_store_repair freed_bytes={} cache_dir={}",
+                    repair.bytes_freed,
+                    repair.path
+                );
+                ui::success(&format!(
+                    "Cleared builder store {} ({} freed). The next `mvmctl dev up` rebuilds it.",
+                    repair.path,
+                    human_bytes(repair.bytes_freed)
+                ));
             }
             Ok(())
         }
@@ -232,6 +277,53 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Plan 118 WS-1 1b — reap stale supervisor standbys under `~/.mvm/pool/`.
+            // The TTL guards a fresh pool (only dead-pid or expired standbys go); a
+            // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
+            // dropped, so idle entitled processes never accumulate (B-ii residual risk 3).
+            const STANDBY_POOL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            if dry_run {
+                if let Ok(pool) = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+                    && let Ok(n) = pool.list().map(|v| v.len())
+                    && n > 0
+                {
+                    ui::info(&format!(
+                        "(dry-run) Would reap stale entries among {n} standby(s)."
+                    ));
+                }
+            } else {
+                match mvm_backend::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
+                    pool.reap_stale(STANDBY_POOL_TTL, mvm_backend::standby_pool::now_unix_secs())
+                }) {
+                    Ok(reaped) if !reaped.is_empty() => {
+                        removed += reaped.len() as u64;
+                        ui::info(&format!("Reaped {} stale standby(s).", reaped.len()));
+                    }
+                    Ok(_) => {}
+                    Err(e) => ui::warn(&format!("standby pool reap failed: {e}")),
+                }
+            }
+
+            // Untagged-checkpoint GC: tagged checkpoints are user-pinned; untagged
+            // ones follow cache retention. One corrupt meta.json makes list() fail,
+            // which logs a warning and skips the sweep — acceptable for a prune pass.
+            const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+            let ckpt_store = mvm_backend::checkpoint::CheckpointStore::open();
+            if dry_run {
+                if !ckpt_store.list().unwrap_or_default().is_empty() {
+                    ui::info("(dry-run) Would sweep expired untagged checkpoints.");
+                }
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                match sweep_untagged_checkpoints(&ckpt_store, now, CHECKPOINT_MAX_AGE_SECS) {
+                    Ok(n) => removed += n as u64,
+                    Err(e) => ui::warn(&format!("checkpoint sweep failed: {e}")),
+                }
+            }
+
             for entry in walkdir(path)? {
                 let entry_path = entry.path();
                 // Remove temp files (mvm-lima-*, .tmp)
@@ -288,6 +380,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             Ok(())
         }
     }
+}
+
+/// Remove untagged checkpoints older than `max_age_secs`. Tagged checkpoints
+/// are user-pinned and never swept. Returns the count removed.
+pub(super) fn sweep_untagged_checkpoints(
+    store: &mvm_backend::checkpoint::CheckpointStore,
+    now_unix: u64,
+    max_age_secs: u64,
+) -> anyhow::Result<usize> {
+    let mut removed = 0;
+    for m in store.list()? {
+        if m.tag.is_some() {
+            continue;
+        }
+        if now_unix.saturating_sub(m.created_unix) > max_age_secs {
+            store.remove(&m.id)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Whole-second age of a file from its mtime, or `None` if it can't be
@@ -525,6 +637,33 @@ fn walkdir(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_removes_untagged_keeps_tagged() {
+        use mvm_backend::checkpoint::CheckpointStore;
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let mk = |id: &str, tag: Option<&str>, age: u64| {
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
+                .tag(tag.map(String::from))
+                .content_sha256("h")
+                .supervisor_config_digest("d")
+                .created_unix(age)
+                .build()
+        };
+        store.write_meta(&mk("old-untagged", None, 0)).unwrap();
+        store
+            .write_meta(&mk("old-tagged", Some("gold"), 0))
+            .unwrap();
+
+        let now = 10_000_000u64;
+        let removed = super::sweep_untagged_checkpoints(&store, now, 1).unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.read_meta(&CheckpointId::new("old-tagged")).is_ok());
+        assert!(store.read_meta(&CheckpointId::new("old-untagged")).is_err());
+    }
 
     #[test]
     fn flow_byte_log_sweep_targets_audit_flow_bytes_dir() {

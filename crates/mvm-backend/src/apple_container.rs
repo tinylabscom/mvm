@@ -72,6 +72,8 @@ impl VmBackend for AppleContainerBackend {
             // an in-guest device. Declared `false` so the host-side
             // reclaim controller skips this backend cleanly.
             balloon: false,
+            // Apple Container runs on macOS with APFS, so clonefile is available.
+            fs_quick_checkpoint: cfg!(target_os = "macos"),
         }
     }
 

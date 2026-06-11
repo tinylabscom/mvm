@@ -92,14 +92,15 @@ pub fn admit_probe_plan(
 #[cfg(feature = "libkrun-live")]
 use crate::commands::ops::bench::BootMarks;
 
-/// Per-VM state dir the libkrun backend writes the supervisor PID file
-/// and host-side vsock socket into (`~/.mvm/vms/<name>`). Mirrors the
-/// backend's private `vm_state_dir`; kept in lockstep with it.
+/// Per-VM state dir the libkrun backend writes the supervisor PID file and host-side
+/// vsock socket into (`~/.mvm/vms/<name>`). Plan 118 WS-1 1b fix: delegate to the
+/// canonical `mvm_core::config::vm_state_dir` the backend itself uses, instead of building
+/// the path from `mvm_state_dir()` — that's the **XDG** state dir (`~/.local/state/mvm`),
+/// which the supervisor never writes to, so the `start_to_pid` mark never resolved and the
+/// probe timed out on every dev-host run.
 #[cfg(feature = "libkrun-live")]
 fn probe_state_dir(vm_name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_core::config::mvm_state_dir())
-        .join("vms")
-        .join(vm_name)
+    mvm_core::config::vm_state_dir(vm_name)
 }
 
 /// Boot the canonical default-microvm image once through real
@@ -209,6 +210,25 @@ fn wait_for_ready(vm_name: &str) -> Result<(std::time::Instant, std::time::Insta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Plan 118 WS-1 1b — the probe pid path must resolve under the backend's data dir
+    // (`~/.mvm`, honouring MVM_DATA_DIR), NOT the XDG state dir the supervisor never
+    // writes to. Regression guard for the `start_to_pid` timeout this fix closed.
+    #[cfg(feature = "libkrun-live")]
+    #[test]
+    fn probe_state_dir_resolves_under_mvm_data_dir_not_xdg_state() {
+        // SAFETY: single-threaded test process; we set then restore the override.
+        let prev = std::env::var("MVM_DATA_DIR").ok();
+        unsafe { std::env::set_var("MVM_DATA_DIR", "/tmp/mvm-bench-probe-test/.mvm") };
+        let dir = probe_state_dir("vm-x");
+        assert_eq!(dir, mvm_core::config::vm_state_dir("vm-x"));
+        assert!(dir.starts_with("/tmp/mvm-bench-probe-test/.mvm"));
+        assert!(!dir.to_string_lossy().contains(".local/state"));
+        match prev {
+            Some(v) => unsafe { std::env::set_var("MVM_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("MVM_DATA_DIR") },
+        }
+    }
 
     #[test]
     #[ignore = "touches ~/.cache/mvm; run on a host with the image cached"]

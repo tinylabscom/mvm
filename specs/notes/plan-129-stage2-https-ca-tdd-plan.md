@@ -23,59 +23,120 @@
 
 ---
 
-## Task S2.1 — per-VM name-constrained CA module
+## Task S2.1 — per-VM name-constrained CA module ✅ DONE (commit e2ff6b02)
 
-**Files:** Create `crates/mvm-core/src/crypto/egress_ca.rs` (+ `pub mod egress_ca;` in `crypto/mod.rs`). Add `rcgen` to `crates/mvm-core/Cargo.toml`. Tests in-file.
+**Files:** Created `crates/mvm-core/src/crypto/egress_ca.rs` (+ feature-gated `pub mod egress_ca;` in `crypto/mod.rs`). Added `rcgen` (workspace + mvm-core, behind `egress-ca`). Tests in-file.
 
-- [ ] **Step 0:** Confirm the chosen `rcgen` (≥0.13) exposes name constraints (`CertificateParams.name_constraints` / `NameConstraints { permitted_subtrees, excluded_subtrees }`). Pin the version; note the API in a comment. (mvm-core's default build is runtime-free — `rcgen` pulls `ring`/`yasna`, no tokio; keep it out of the `xtask check-core-runtime-free` violation set, or gate the module behind a feature if it drags async — verify with `cargo tree -p mvm-core -e no-dev`.)
-- [ ] **Step 1: Failing tests:**
-  - `host_ca_is_self_signed_ca_true` — `EgressCa::load_or_init_at(dir)` mints/loads a long-lived host CA at `<dir>/ca.crt` + `ca.key` (key mode 0400); cert is `CA:TRUE`.
-  - `intermediate_is_name_constrained_to_bound_hosts` — `ca.mint_vm_intermediate(&["api.openai.com"])` yields a `CA:TRUE, pathlen:0` intermediate whose `nameConstraints permitted` contains exactly `api.openai.com` (DNS).
-  - `intermediate_refuses_to_sign_a_leaf_for_an_unbound_host` — minting/validating a leaf for `evil.example.com` under that intermediate fails name-constraint validation (assert via a verifier, e.g. webpki/rustls path check, not just by inspecting fields).
-  - `vm_intermediate_keypair_is_zeroized_on_drop` (if the type holds the key in memory) — reuse the redacted-`Debug`/zeroize pattern from `host_signer` (`xtask check-no-display-on-secret-types` must still pass).
-- [ ] **Step 2: Run (fail).**
-- [ ] **Step 3: Implement** `EgressCa { load_or_init_at, mint_vm_intermediate(bound_hosts) -> VmIntermediate { cert_pem, key } , mint_leaf(sni) }`. Host CA persisted under `~/.mvm/egress/` (use `mvm_core::config` helpers — never inline `$HOME/.mvm`). The per-VM intermediate is minted at admission/boot; only its **cert** ever leaves the host process.
-- [ ] **Step 4: Run (pass). Step 5: Commit** — `feat(egress-ca): name-constrained per-VM CA (plan 129 stage 2)`.
+- [x] **Step 0:** `rcgen` pinned at **0.14** (not 0.13 — 0.13.2's `Issuer` is private; 0.14 exposes `Issuer::from_ca_cert_pem`, gated behind `pem`+`x509-parser`). `ring` backend, no aws-lc-rs/cmake. Gated behind mvm-core's new **`egress-ca`** feature so the runtime-free default build pulls no rcgen — `xtask check-core-runtime-free` still clean (verified).
+- [x] **Step 1–4: Tests + impl (all green):**
+  - `host_ca_is_self_signed_ca_true` ✓ (+ deterministic reload).
+  - `ca_key_is_mode_0400` ✓.
+  - `intermediate_is_name_constrained_to_bound_hosts` ✓ (nameConstraints permitted = exactly the bound host).
+  - `intermediate_refuses_to_sign_a_leaf_for_an_unbound_host` ✓ — asserted via a **real rustls/webpki path verifier** (bad SNI rejected, bound SNI accepted), not field inspection.
+  - `EgressCa { load_or_init_at, mint_vm_intermediate, cert_pem }` + `VmIntermediate { cert_pem, key_pem, mint_leaf }` + `Leaf`. Every key-carrying type has a **redacted `Debug`** (`check-no-display-on-secret-types` clean); only certs leave the host process.
+  - **Deferred:** explicit zeroize-on-drop of the in-memory `KeyPair` — `rcgen::KeyPair` doesn't expose its key buffer for zeroization; redacted `Debug` covers the accidental-log risk. Note for hardening.
+  - `load_or_init_at(dir)` takes the dir as a param (test-friendly); the `~/.mvm/egress/` config-helper wiring lands with the caller in S2.2.
+- [x] **Step 5: Commit** — `feat(egress-ca): name-constrained per-VM CA (plan 129 stage 2)` (e2ff6b02).
 
-## Task S2.2 — per-run cert delivery to the guest
+## Task S2.2 — per-run cert delivery to the guest ✅ DONE
 
-**Files:** `crates/mvm-backend/src/microvm.rs` (thread the per-VM intermediate cert into the FC guest via the existing secrets-drive channel — `config.secret_files` / `create_dev_secrets_drive`); `crates/mvm-backend/src/substitution_spawn.rs` / `wire_egress_substitution` (mint the intermediate when the plan has secrets, hand the cert to the guest + the intermediate key to the terminator endpoint config).
+**Implemented shape (differs slightly from the original sketch — boot ordering forced the split across crates):** the FC secrets drive is sealed *before* `wire_egress_substitution` runs, so the mint+cert-push happens in `mvmctl up` (`mvm-cli`, where `secret_files` is assembled), not in `wire_egress_substitution`. The key flows forward to the endpoint via a host-only sidecar.
 
-- [ ] **Step 1: Failing test** — given a secret-bearing plan, `wire_egress_substitution` (unit-extractable helper) produces a `DriveFile` carrying the per-VM intermediate **cert** at a fixed guest path (e.g. `/etc/ssl/certs/mvm-egress-<vm>.crt`) and the endpoint config carries the intermediate **key** (terminator side) — assert the key is NOT in the guest-delivered set (only the cert reaches the guest). Reuse the claim-13-style "no key to guest" assertion shape.
-- [ ] **Step 2: Run (fail). Step 3: Implement** — mint intermediate (S2.1), add its cert to `config.secret_files` (so `create_dev_secrets_drive` injects it), pass the key + cert to the `EndpointConfig` (new `tls_intermediate: Option<{cert_pem, key_pem}>` field, `#[serde(default)]`, redacted `Debug`). Gate on `!plan_secrets.is_empty()` (same gate as the redirect).
-- [ ] **Step 4: pass. Step 5: Commit** — `feat(terminator): deliver per-VM egress cert to guest, key to endpoint (plan 129 stage 2)`.
+- [x] **Bound-host provenance (resolved, no fork):** `SecretBinding` is only `{name, source}`; the egress allow-list (`allowed_hosts`) lives in the host **binding store** (`mvm_hostd::keyholder::FileBindingStore`). `stage_egress_tls_delivery` resolves the name-constraint set as the **union of every plan secret's `allowed_hosts`** — the SAME claim-12 allow-list, so the intermediate's `nameConstraints` can never exceed it. Reuse, not a new traversal.
+- [x] **`build_egress_tls_delivery(bound_hosts, ca_dir)`** (`mvm-backend::substitution_spawn`, re-exported): mints under the host CA (`mvm_core::config::egress_ca_dir()`), returns `EgressTlsDelivery { guest_cert: DriveFile, endpoint_cert_pem, endpoint_key_pem }` (redacted `Debug`). Tests: cert-to-guest/key-to-endpoint split + no key in the guest file + redacted Debug.
+- [x] **`mvmctl up` → `stage_egress_tls_delivery`** (both the main + watch-rebuild `secret_files` paths): pushes the cert (`mvm-egress.crt`, mode 0444) onto the guest secrets drive and persists the cert+key to host-only `<vm_state_dir>/egress-intermediate.json` (mode 0600, atomic tmp+rename). No-op without secrets/bindings. Test asserts the cert lands in `secret_files` (no key) and the 0600 sidecar holds the key.
+- [x] **`EndpointConfig.tls_intermediate: Option<TlsIntermediate{cert_pem,key_pem}>`** (`#[serde(default)]`, redacted `Debug`); `spawn_substitution_endpoint` gained a `tls_intermediate` arg → cfg JSON; `wire_egress_substitution` reads the sidecar (`read_egress_intermediate`, Linux) and hands the **key** to the endpoint — never the guest. Tests: serde roundtrip + default-None + Debug-redacts-key.
+- [x] Gates clean: clippy, fmt, `check-core-runtime-free`, `check-no-display-on-secret-types`; 2911 + egress tests green.
+- [x] **Commit** — `feat(terminator): deliver per-VM egress cert to guest, key to endpoint (plan 129 stage 2)`.
 
-## Task S2.3 — guest trust install
+## Task S2.3 — guest trust install ✅ IMPLEMENTED via kernel-cmdline (channel decided)
 
-**Files:** `nix/lib/mk-guest.nix` (a boot step that appends any `/etc/ssl/certs/mvm-egress-*.crt` to the trust bundle before the entrypoint) + matching guest `/init` wiring. Honest caveat documented inline.
+**Channel decided + confirmed by code:** the fresh FC boot (`configure_microvm` / `configure_flake_microvm_with_drives_dir`) attaches **only the rootfs drive** — the config/secrets `.ext4` are attached **only on snapshot-restore** (`restore_from_template_snapshot`). So a fresh sealed boot's *only* per-VM channel is the **kernel cmdline** (rootfs is verity-sealed). Cert is 648 B PEM / 1296 hex — fits comfortably.
+
+Implemented:
+- [x] **Host encoder** (`mvm_core::vm_backend::encode_egress_ca_cmdline`, `1296`-hex `mvm.egress_ca=<hex(PEM)>`, mirrors `mvm.uvols`) + round-trip test.
+- [x] **Backend wiring** — `egress_ca_cmdline_token(vm_name)` reads the cert from the S2.2 `egress-intermediate.json` sidecar; appended to `configure_flake_microvm_with_drives_dir`'s `boot_args` (cert only — key stays host-side). Verified host build + Linux cross-build.
+- [x] **mkGuest `/init` Stage 2.46** — decode `mvm.egress_ca=` (same hex+sed+printf as uvols) → tmpfs `/run/mvm/egress-ca.crt` → combined bundle (`cat ca-bundle.crt egress-ca.crt`) → export `SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` (bundle) + `NODE_EXTRA_CA_CERTS` (cert). Tmpfs = writable under dm-verity; export reaches the entrypoint (setpriv preserves env). Inline ADR-006 nameConstraints caveat. **Box-validated only** (guest shell; not runnable on a macOS dev host) — proven by S2.7.
+- [x] **Commit** — `feat(guest): trust per-VM egress cert at boot via kernel cmdline (plan 129 stage 2 S2.3)`.
+
+> ### ✅ RESOLVED (Approach A) — placeholder-env-at-boot ordering
+> S2.7's `curl -H "Authorization: Bearer $TOKEN"` needs `$TOKEN` = the per-run
+> **placeholder** in the sealed entrypoint's env, but the placeholder is minted by
+> the endpoint at spawn. **Approach A (chosen + implemented):** spawn the
+> substitution endpoint **before** `boot_args` is built, so the `(var→placeholder)`
+> pairs it mints (already written to `vm_substitution_env_path`) ride the cmdline.
+> - `run_from_build` now calls **`spawn_egress_endpoint`** (mint + bind listener)
+>   *before* `configure_flake_microvm`, guarded by an **`EndpointGuard`** (reaps on
+>   early-return); the nft REDIRECT splits into **`install_egress_redirect`** at the
+>   old post-boot site (the TAP must exist by then). `decode_plan_secrets` is the
+>   shared no-op-without-secrets gate. (`wire_egress_substitution` is gone.)
+> - `mvm_core::vm_backend::encode_secret_env_cmdline` (`mvm.secret_env=<hex(VAR=ph…)>`,
+>   placeholders only) + `secret_env_cmdline_token` reads the handshake JSON
+>   (`Vec<(String,String)>` — same type both ends) and appends to `boot_args`.
+> - mkGuest `/init` Stage 2.47 decodes + exports each `$VAR=placeholder`
+>   (redirect-from-tmpfs `while`, not a pipe). Endpoint stays the **sole minter**.
+> - Verified host build + Linux cross-build (`cargo-zigbuild`); encoder round-trip
+>   tested. Box-validated end-to-end by S2.7 (still gated on FC bringup #746).
+
+---
+### Original blocker note (superseded by the channel decision above)
+
+> **⚠️ BLOCKED — channel assumption is wrong (found while scoping S2.3, 2026-06-10).**
+> The original sketch ("the secrets drive mounts the cert; the boot step concats
+> it") does **not** hold for the sealed-FC workload path:
+> - `nix/lib/mk-guest.nix`'s `/init` mounts **neither** the `mvm-secrets` nor the
+>   `mvm-config` drive — `grep -ni secret nix/lib/mk-guest.nix` is empty; the only
+>   per-VM mounts are `mvm.uvols` user volumes (kernel cmdline).
+> - The per-VM **runtime overlay** (`/mvm/runtime`, ADR-051) is **verity-sealed**
+>   (build-time roothash via `mvm-verity-init`), so a boot-minted cert can't ride
+>   it either.
+> - The proven per-VM placeholder-env channel is **`invoke.rs`** (the invoke
+>   dispatch injects `HTTP_PROXY` + placeholder vars into the agent-run call) —
+>   **not** the sealed *entrypoint* path that S2.7's generic `curl https://` uses.
+>   No entrypoint-env injection of placeholders for the FC sealed path exists yet
+>   (`rg` for it is empty).
+>
+> **Implication:** S2.2's cert-via-`secret_files` (secrets drive) is **inert on
+> sealed FC** until a real per-VM guest channel exists. The host-side split
+> (key→endpoint) S2.2 landed is still correct; only the guest-delivery leg is
+> affected.
+>
+> **Recommended S2.3 redesign (sealed-rootfs-safe):** deliver the per-VM cert
+> over the **same per-VM channel that carries the entrypoint placeholder env**
+> (to be established — likely a small `/init` step that reads a per-VM mutable
+> source the host writes: kernel cmdline blob, an `/init`-mounted config drive,
+> or an agent/vsock fetch), then write it to a **tmpfs** path (`/run/mvm/
+> egress-ca.crt`) and export `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
+> `NODE_EXTRA_CA_CERTS` pointing at `cat ca-bundle.crt egress-ca.crt`. Tmpfs keeps
+> it writable under dm-verity. **Decide the channel before coding S2.3/S2.7.**
+
+**Files (original sketch — revisit per the block above):** `nix/lib/mk-guest.nix` (a boot step that appends any `/etc/ssl/certs/mvm-egress-*.crt` to the trust bundle before the entrypoint) + matching guest `/init` wiring. Honest caveat documented inline.
 
 - [ ] **Step 1:** Decide the install mechanism (append to `ca-bundle.crt` at boot vs `update-ca-certificates`-style) — the secrets drive mounts the cert; the boot step concatenates it into the trusted bundle the guest's TLS stack reads (`/etc/ssl/certs/ca-bundle.crt`, baked by mkGuest at `mk-guest.nix:809`). Test: a mkGuest fixture / boot-script unit asserts the concat step runs before the entrypoint and only for present `mvm-egress-*.crt`.
 - [ ] **Step 2–4:** Implement + the inline caveat comment (Python/older-Node don't enforce nameConstraints → host allow-list is the boundary). **Commit** — `feat(guest): trust per-VM egress cert at boot (plan 129 stage 2)`.
 
-## Task S2.4 — TLS termination + SNI-gated splice in the terminator
+## Task S2.4 — TLS termination + SNI-gated splice in the terminator ✅ DONE (4 slices)
 
-**Files:** Create `crates/mvm-hostd/src/supervisor/terminator/tls.rs`; modify `listener.rs`/`serve_terminator` to branch http(:80)→Stage-1b path vs https(:443)→TLS path. Add `rustls` as a direct dep of `mvm-hostd`.
+**Files:** `crates/mvm-hostd/src/supervisor/terminator/tls.rs` (new); `substitution_proxy.rs` accept loop branches `:80`→Stage-1b vs `:443`→`handle_https_terminator`. `rustls` + `rustls-pemfile` added as direct mvm-hostd deps.
 
-- [ ] **Step 1: Failing tests** (loopback, no VM):
-  - `peek_sni_extracts_servername_from_clienthello` — a helper reads the SNI from the buffered ClientHello without consuming the stream (peek/replay).
-  - `bound_sni_terminates_substitutes_and_reoriginates` — drive a loopback TLS client trusting a test intermediate at a bound SNI through the terminator with a mock upstream; assert the upstream saw the **real** credential (placeholder substituted) and the client got the response. Reuse `handle_request` for the substitution core (assert on the forwarded `PreparedRequest`).
-  - `unbound_sni_is_spliced_without_termination` — an unbound SNI is byte-spliced both ways; assert the terminator never decrypts (no leaf minted, bytes pass through verbatim).
-  - `upstream_tls_validates_against_system_roots` — re-origination rejects an upstream with an untrusted cert (no blind trust on the forward leg).
-- [ ] **Step 2: Run (fail). Step 3: Implement** — `tls.rs`: buffer+peek ClientHello → SNI; if bound (per the endpoint's binding set), build a `rustls::ServerConfig` resolving a freshly-minted leaf (S2.1 `mint_leaf(sni)`) under the per-VM intermediate, accept, read the decrypted HTTP request (reuse `read::read_http_request` semantics over the TLS stream), `handle_request` to substitute, then forward over a **real** upstream TLS (rustls client w/ system roots; reuse the hardened-client posture from `ReqwestForwarder` where practical), stream the response back; if unbound, `splice_bidirectional` (the existing helper in `qemu.rs` — lift it to a shared util) with no decryption. Per-connection errors logged, fail-closed (a bound SNI whose substitution refuses → drop, never forward — same claim-12 invariant as Stage 1b).
-- [ ] **Step 4: pass. Step 5: Commit** — `feat(terminator): SNI-gated TLS termination + substitution, splice unbound (plan 129 stage 2)`.
+Landed in four committed slices, each TDD'd:
+- [x] **S2.4a** (`76344771`) — `parse_sni`/`peek_sni`: pure, total ClientHello SNI parser (bounds-checked, never panics on hostile/truncated input). Tested vs real rustls ClientHellos + every truncation prefix + garbage.
+- [x] **S2.4b** (`b7b1791a`) — `server_config_for_sni` (mint leaf under intermediate, present `[leaf, intermediate]`) + `terminate_and_substitute` (rustls handshake → decrypt → `prepare_request` substitute, claim-12 fail-closed → forward closure → write back). `VmIntermediate::from_pem` reconstructor; `read_http_request` generic over `Read`; `proxy_request_from_origin_form_https`. **Headline test `bound_sni_terminates_substitutes_and_reoriginates`**: real rustls client trusting the intermediate completes the handshake against the minted leaf; mock upstream sees the **real** credential over `https://`.
+- [x] **S2.4c** (`4f9deaf5`) — `splice_unbound` + `unbound_sni_is_spliced_without_termination`: unbound SNI byte-spliced both ways, never decrypted, no leaf minted.
+- [x] **S2.4d** (`8e442395`) — accept-loop wiring: branch on `orig_dst.port()`; `handle_https_terminator` peeks SNI → `host_is_bound` gate → terminate (reqwest upstream, audited) or splice. Threads `tls_intermediate` through `assemble`→`from_plan`→service. Verified host (1994 tests) + Linux cross-build (`cargo-zigbuild aarch64-unknown-linux-gnu`).
+- [x] **`upstream_tls_validates_against_system_roots`** — satisfied **by reuse**, not a new test: the upstream re-origination leg is the existing hardened `ReqwestForwarder` (`hardened_client_builder_no_dns`, TLS 1.3 min, **no** `accept_invalid_certs` anywhere), which validates against the default root store by construction (covered by `hardened_client_builds_successfully` / `w7_min_tls_version_is_pinned_at_1_3` + the box e2e). A loopback negative test is precluded — the forwarder's own SSRF filter blocks loopback *before* the TLS leg — and a badssl.com test would be non-hermetic/flaky.
 
 ## Task S2.5 — extend the redirect to `:443`
 
 **Files:** `crates/mvm-backend/src/egress_redirect.rs` (add a `:443` rule alongside `:80`; `nft_rule_argv` currently hardcodes `"80"` — parameterize the dport or emit both rules into the per-VM table); `wire_egress_substitution` unchanged except both ports now steer to the terminator.
 
-- [ ] **Step 1: Failing test** — `EgressRedirect::install` emits redirect rules for **both** 80 and 443 to the terminator port (assert both `nft_rule_argv(..,80)` and `..443)` token vectors are produced). Keep the pure-function test shape from Stage 1b.
-- [ ] **Step 2–4:** Implement (idempotent table holds both rules; Drop/teardown_by_name unchanged — whole-table delete already covers both). **Commit** — `feat(terminator): redirect guest :443 to the terminator (plan 129 stage 2)`.
+- [x] **DONE** (`1e50e4b1`) — `nft_rule_argv` gains a `dport` param; `REDIRECTED_DPORTS = [80, 443]`; `install` emits one rule per port into the per-VM table (terminator demuxes via `SO_ORIGINAL_DST`). Drop/teardown unchanged. Test `install_redirects_both_80_and_443_to_the_terminator`.
 
 ## Task S2.6 — ADR updates
 
 **Files:** `specs/adrs/006-name-constrained-egress-ca.md` (status Proposed → Accepted; record the implemented shape: per-VM intermediate, SNI-gated termination, unbound-splice, the zero-added-visibility argument, and the Python/Node nameConstraints caveat); `specs/adrs/067-secrets-subsystem-egress-substitution.md` (make **proxy-native primary / SDK optional**).
 
-- [ ] Amend both ADRs; cross-link to this plan + #735/#744. Note that scoped name-constrained termination ≠ the rejected blanket MITM. **Commit** — `docs(adr): accept ADR-006; ADR-067 proxy-native primary (plan 129 stage 2)`.
+- [x] **DONE** — ADR-006 status Proposed → **Accepted** with an as-implemented section (per-VM intermediate, SNI-gated termination, unbound-splice, zero-added-visibility argument, Python/Node nameConstraints caveat) cross-linking plan 129 + ADR-067. ADR-067 §1 retitled "proxy-native transparent substitution (SDK optional)" with an update block flipping primary↔SDK and superseding the coverage caveat for bound hosts; the "TLS MITM of all egress" rejected-alternative now distinguishes the scoped name-constrained terminator. **Commit** — `docs(adr): accept ADR-006; ADR-067 proxy-native primary (plan 129 stage 2)`.
 
 ## Task S2.7 — box e2e (`https`, SDK-free) — the headline acceptance
 

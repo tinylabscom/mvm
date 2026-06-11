@@ -290,6 +290,7 @@ mod tests {
                 vsock: false,
                 tap_networking: false,
                 balloon: self.balloon_supported,
+                fs_quick_checkpoint: false,
             }
         }
         fn start_with_mode(

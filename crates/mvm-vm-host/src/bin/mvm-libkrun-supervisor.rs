@@ -42,22 +42,57 @@
 //! keeps resolving it.
 
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use libkrun_sys::{
-    BridgeFds, LogLevel, SupervisorConfig, init_log, run_supervisor, run_supervisor_with_bridge,
-    set_log_level,
+    BridgeFds, LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor,
+    run_supervisor_with_bridge, set_log_level,
 };
-use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
+use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 use mvm_hostd::supervisor::gateway_bridge::{
     AllowAll, BridgeConfig, BridgeEndpoints, spawn_bridge_thread,
 };
+
+/// Per-connection attach timeout. An abandoned connect must not wedge the
+/// standby (1a; pool size bounds the blast radius in 1b).
+// A prelaunched **pool** standby legitimately blocks a long time waiting to be claimed —
+// it's the warm pool's whole point. Its lifetime is bounded by the pool reaper TTL
+// (`mvmctl cache prune`, ~30 min), NOT a short self-timeout; a 30s value (Plan 118 WS-1 1a)
+// made standbys self-exit before a later `up` could claim them. The per-conn read timeout
+// (set on the accepted stream) still caps a connected-but-silent peer, so DoS protection is
+// unaffected. Keep this aligned with the reaper TTL.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Cap on the attach frame — workload config is small; reject hostile prefixes.
+const MAX_ATTACH_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Stdin dispatch (Plan 118 WS-1 1a). The prelaunched producer wraps the base
+/// config under a unique `prelaunch_base` key; legacy callers emit a bare
+/// `SupervisorConfig` (no wrapper) and are byte-for-byte unchanged. Probed
+/// wrapper-first: a legacy config has no such key, so it falls through to the
+/// unchanged whole-config path. `deny_unknown_fields` + the disjoint required
+/// fields (`base_and_whole_configs_are_serde_disjoint` test in libkrun-sys)
+/// make this unambiguous — a botched prelaunch can never silently boot via the
+/// legacy arm (its `krun` is nested under `prelaunch_base`, so the bare-config
+/// fallback fails its required `krun` field too).
+///
+/// NB: a serde-tagged enum is deliberately avoided — `deny_unknown_fields` is
+/// unsupported on internally-tagged enums, and an `#[serde(untagged)]` fallback
+/// would silently route a malformed prelaunch to the permissive legacy arm.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrelaunchEnvelope {
+    prelaunch_base: SupervisorBaseConfig,
+}
 
 fn main() -> ExitCode {
     // macOS Hypervisor.framework rejects any process without
@@ -103,6 +138,13 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // Prelaunch (warm-pool standby, Plan 118 WS-1 1a) vs legacy/cold (bare
+    // SupervisorConfig). The prelaunch producer wraps the base under a unique
+    // `prelaunch_base` key; legacy callers emit a bare config and route below
+    // unchanged.
+    if let Ok(env) = serde_json::from_str::<PrelaunchEnvelope>(&json) {
+        return run_prelaunched(env.prelaunch_base);
+    }
     let cfg: SupervisorConfig = match serde_json::from_str(&json) {
         Ok(c) => c,
         Err(e) => {
@@ -110,7 +152,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    dispatch_config(cfg)
+}
 
+/// Shared tail: given a finalized `SupervisorConfig` (from the legacy stdin
+/// decode OR a verified prelaunch attach), bind the workload-exit control
+/// listener and route to the bridge/legacy boot path. Extracted so both
+/// entrypoints run identical post-config logic.
+fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
     // Plan 152 WS-A: bind the workload-exit control listener and capture
     // the guest's exit code on a background thread. Must bind BEFORE the
     // run dispatch (libkrun's listen=false proxy needs a live socket
@@ -126,7 +175,7 @@ fn main() -> ExitCode {
             .krun
             .vsock_socket_path(mvm_guest::vsock::WORKLOAD_EXIT_PORT);
         let _ = std::fs::remove_file(&control_sock);
-        match std::os::unix::net::UnixListener::bind(&control_sock) {
+        match UnixListener::bind(&control_sock) {
             Ok(listener) => {
                 std::thread::spawn(move || {
                     if let Err(e) = mvm_vm_host::exit_capture::capture_once(&listener, &state_dir) {
@@ -155,6 +204,113 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("supervisor failed: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Prelaunched-standby flow (Plan 118 WS-1 1a). `ensure_signed()` + the libkrun
+/// dylib are already warm (done in `main`). Bind the control UDS, accept ONE
+/// connection (per-conn timeout), read the attach frame, re-verify+merge, then
+/// hand the whole config to the existing bridge path. One-shot: any failure or
+/// timeout exits non-zero WITHOUT `start_enter`.
+fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
+    let sock_path = base.control_socket_path.clone();
+    let listener = match bind_control_socket(&sock_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!(
+                "prelaunch: bind control socket {}: {e}",
+                sock_path.display()
+            );
+            return ExitCode::from(3);
+        }
+    };
+    let mut stream = match accept_one_with_timeout(&listener, ATTACH_TIMEOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("prelaunch: attach accept failed: {e}");
+            return ExitCode::from(4);
+        }
+    };
+    // Best-effort cleanup of the control socket — the workload-exit socket the
+    // bridge path binds is a different path under the state dir.
+    let _ = std::fs::remove_file(&sock_path);
+
+    // Read the length-prefixed attach frame, then re-encode to bytes for the
+    // pure verifier (which owns the deny_unknown_fields decode + plan verify).
+    let attach_value: serde_json::Value =
+        match libkrun_sys::framing::read_json_frame_sync(&mut stream, MAX_ATTACH_BYTES) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("prelaunch: read attach frame: {e}");
+                return ExitCode::from(5);
+            }
+        };
+    let attach_bytes = match serde_json::to_vec(&attach_value) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("prelaunch: re-encode attach: {e}");
+            return ExitCode::from(5);
+        }
+    };
+
+    let mut nonce_store = NonceStore::new();
+    let cfg = match mvm_vm_host::prelaunch::verify_and_merge_attach(
+        base,
+        &attach_bytes,
+        Utc::now(),
+        &mut nonce_store,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            // SECURITY: refused — never start_enter.
+            eprintln!("prelaunch: attach refused: {e}");
+            return ExitCode::from(6);
+        }
+    };
+    dispatch_config(cfg)
+}
+
+/// Bind the control UDS at `path` with mode 0700, inside a 0700 parent dir.
+/// Mirrors the W1.2 vsock-proxy posture: same-uid only.
+fn bind_control_socket(path: &std::path::Path) -> std::io::Result<UnixListener> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let _ = std::fs::remove_file(path); // clear a stale socket
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(listener)
+}
+
+/// Accept exactly one connection within `timeout`, else error. Sets a read
+/// timeout on the accepted stream too, so a connected-but-silent peer can't
+/// wedge the standby.
+fn accept_one_with_timeout(
+    listener: &UnixListener,
+    timeout: Duration,
+) -> std::io::Result<UnixStream> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                stream.set_read_timeout(Some(remaining.max(Duration::from_millis(1))))?;
+                return Ok(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "attach timeout",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
         }
     }
 }

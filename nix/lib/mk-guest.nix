@@ -398,6 +398,74 @@ let
       "$MVM_NETINIT_BIN" || echo "mvm-init: netinit exited nonzero; continuing without guest-side defense"
     fi
 
+    # Stage 2.46 — Plan 129 Stage 2 — trust the per-VM egress CA (https
+    # substitution). A fresh FC boot attaches no secrets drive, so the host
+    # delivers the per-VM name-constrained intermediate CERT on the kernel
+    # cmdline as `mvm.egress_ca=<hex(PEM)>` (cert only — the key stays host-side
+    # in the terminator). We decode it to a tmpfs file (writable under the
+    # dm-verity-sealed rootfs) and point the common TLS-trust env vars at a
+    # bundle = baked roots + this cert, so a workload trusts host-terminated
+    # bound-host TLS. The export reaches the entrypoint (setpriv preserves env).
+    #
+    # Honest caveat (ADR-006): Python `ssl` and older Node do NOT enforce X.509
+    # nameConstraints client-side, so this trust is a courtesy — the real egress
+    # boundary is the host-side allow-list check (claim 12), not this cert.
+    #
+    # Same hex+sed+printf decode as `mvm.uvols`. Absent token ⇒ whole block is a
+    # no-op (no-secret guests boot byte-identically).
+    MVM_EGRESS_CA_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_EGRESS_CA_HEX" ]; then
+      /bin/busybox mkdir -p /run/mvm
+      printf '%b' "$(echo "$MVM_EGRESS_CA_HEX" | /bin/busybox sed 's/../\\x&/g')" \
+        > /run/mvm/egress-ca.crt
+      # Combined bundle so the per-VM cert is trusted ALONGSIDE the baked roots
+      # (a workload still reaches cache.nixos.org/api.github.com etc.).
+      if cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt \
+          > /run/mvm/ca-bundle.crt 2>/dev/null; then
+        :
+      else
+        /bin/busybox cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt
+      fi
+      # OpenSSL (curl/most), curl, python-requests → the combined bundle;
+      # Node appends just the extra cert.
+      export SSL_CERT_FILE=/run/mvm/ca-bundle.crt
+      export CURL_CA_BUNDLE=/run/mvm/ca-bundle.crt
+      export REQUESTS_CA_BUNDLE=/run/mvm/ca-bundle.crt
+      export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt
+      echo "mvm-init: installed per-VM egress CA (https substitution trust)"
+    fi
+
+    # Stage 2.47 — Plan 129 Stage 2 — inject the per-run secret PLACEHOLDER env.
+    # The host minted the workload's placeholders BEFORE boot (so they can ride
+    # the cmdline — a fresh FC boot has no secrets drive) and passed them as
+    # `mvm.secret_env=<hex(VAR=placeholder\n…)>`. NEVER a value — only the opaque
+    # `mvm-secret-…` placeholder (claim 13); the host substitutes the real
+    # credential at egress. We decode + export each so an SDK-free workload reads
+    # `$VAR`. Absent token ⇒ no-op (no-secret guests boot byte-identically).
+    #
+    # We redirect a tmpfs file into the `while` (NOT a `... | while` pipe), so the
+    # `export`s land in THIS shell — a pipe would run the loop in a subshell and
+    # the env would never reach the entrypoint.
+    MVM_SECRET_ENV_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.secret_env=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_SECRET_ENV_HEX" ]; then
+      /bin/busybox mkdir -p /run/mvm
+      printf '%b' "$(echo "$MVM_SECRET_ENV_HEX" | /bin/busybox sed 's/../\\x&/g')" \
+        > /run/mvm/secret-env
+      while IFS= read -r mvm_kv; do
+        [ -n "$mvm_kv" ] || continue
+        mvm_k=''${mvm_kv%%=*}
+        mvm_v=''${mvm_kv#*=}
+        # Reject a non-identifier name so a malformed token can't smuggle a shell
+        # construct into `export`.
+        case "$mvm_k" in
+          ""|*[!A-Za-z0-9_]*) echo "mvm-init: skipping malformed secret env name"; continue ;;
+        esac
+        export "$mvm_k=$mvm_v"
+      done < /run/mvm/secret-env
+      /bin/busybox rm -f /run/mvm/secret-env
+      echo "mvm-init: injected per-run secret placeholder env"
+    fi
+
     # Stage 2.48 — local addon DNS bootstrap.
     #
     # The "always-install + no-op when zone empty" pattern from

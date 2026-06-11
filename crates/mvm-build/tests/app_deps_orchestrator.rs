@@ -445,6 +445,15 @@ fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
             requested: requested.clone(),
             reason: reason.clone(),
         },
+        BuilderVmError::DegradedBuilderStore {
+            cache_dir,
+            log_path,
+            detail,
+        } => BuilderVmError::DegradedBuilderStore {
+            cache_dir: cache_dir.clone(),
+            log_path: log_path.clone(),
+            detail: detail.clone(),
+        },
     }
 }
 

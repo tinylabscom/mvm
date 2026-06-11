@@ -14,7 +14,9 @@ use super::env::{cleanup, dev, init, uninstall};
 use super::image;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
-use super::vm::{console, cp, down, exec, forward, pause, sandbox, session, up, volume};
+use super::vm::{
+    checkpoint, console, cp, down, exec, forward, pause, sandbox, session, up, volume,
+};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -1685,6 +1687,60 @@ fn test_snapshot_ls_json_parses() {
     ));
 }
 
+// --- Checkpoint CLI tests ---
+
+#[test]
+fn test_checkpoint_create_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "checkpoint", "create", "myvm", "--tag", "gold"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Checkpoint(checkpoint::CheckpointArgs {
+            command: checkpoint::CheckpointCmd::Create { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_checkpoint_fork_parses() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "checkpoint",
+            "fork",
+            "ckpt-abc",
+            "--new-id",
+            "child"
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn test_checkpoint_fork_rejects_traversal_new_id() {
+    // --new-id must not allow a path component that escapes the VM state dir.
+    let r = Cli::try_parse_from([
+        "mvmctl",
+        "checkpoint",
+        "fork",
+        "ckpt-abc",
+        "--new-id",
+        "../escape",
+    ]);
+    assert!(r.is_err());
+}
+
+#[test]
+fn test_checkpoint_ls_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "checkpoint", "ls", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Checkpoint(checkpoint::CheckpointArgs {
+            command: checkpoint::CheckpointCmd::Ls { json: true }
+        })
+    ));
+}
+
 // --- Catalog CLI tests (plan 40 replaced `mvmctl image *`) ---
 
 #[test]
@@ -2417,6 +2473,30 @@ fn test_cache_info() {
 fn test_cache_prune() {
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune"]);
     assert!(cli.is_ok());
+}
+
+#[test]
+fn test_pool_warm_parses_optional_count() {
+    // Plan 118 WS-1 1b — `mvmctl pool warm` (default count) and `pool warm N`.
+    assert!(Cli::try_parse_from(["mvmctl", "pool", "warm"]).is_ok());
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "3"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action: pool::PoolAction::Warm { count },
+        }) => assert_eq!(count, Some(3)),
+        _ => panic!("Expected Pool Warm command"),
+    }
+}
+
+#[test]
+fn test_pool_status_parses_json_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "status", "--json"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action: pool::PoolAction::Status { json },
+        }) => assert!(json),
+        _ => panic!("Expected Pool Status command"),
+    }
 }
 
 #[test]

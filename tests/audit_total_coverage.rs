@@ -114,6 +114,23 @@ const NETWORK_SUB: &[(&str, AuditPosture)] = &[
 const CACHE_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("prune", AuditPosture::Emits("CachePrune")),
+    // #640 — clears a degraded builder store; emits CachePrune on the real run
+    // (op=builder_store_repair). A `--dry-run` is read-only, but the posture
+    // tracks the acting path.
+    ("repair", AuditPosture::Emits("CachePrune")),
+];
+
+// Plan 118 WS-1 1b — `mvmctl pool`.
+const POOL_SUB: &[(&str, AuditPosture)] = &[
+    ("warm", AuditPosture::Emits("PoolWarm")),
+    ("status", AuditPosture::ReadOnly),
+];
+
+const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
+    ("create", AuditPosture::Emits("CheckpointCreated")),
+    ("fork", AuditPosture::Emits("CheckpointForked")),
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::ReadOnly),
 ];
 
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
@@ -294,6 +311,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("pause", AuditPosture::Emits("VmStop")),
     ("resume", AuditPosture::Emits("VmStart")),
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
+    ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
     ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
     // Build / artifact / registry.
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
@@ -319,6 +337,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("audit", AuditPosture::ReadOnly),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
+    ("pool", AuditPosture::DelegatesToSub(POOL_SUB)),
     // Plan 170 WS-A — reconcile-on-entry convergence. The non-dry-run
     // path emits one `RegistryReconcile` per healed drift item.
     ("reconcile", AuditPosture::Emits("RegistryReconcile")),
@@ -492,8 +511,11 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ManifestAliasSet",
         "ManifestTagAdd",
         "ManifestTagRemove",
+        "CheckpointCreated",
+        "CheckpointForked",
         "NetworkCreate",
         "NetworkRemove",
+        "PoolWarm",
         "RegistryReconcile",
         "SecretGet",
         "SecretPut",

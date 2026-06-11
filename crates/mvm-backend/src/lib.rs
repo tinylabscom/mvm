@@ -32,6 +32,7 @@ pub mod apple_container;
 pub mod artifacts;
 pub mod audit_substrate;
 pub mod backend;
+pub mod checkpoint;
 // Shared host-side substrate (config + shell + linux_env + ui +
 // runtime_meta + cow + snapshot_integrity) — folded in from the
 // former Lima-era `mvm-base` crate (plan 121 A2). It lives here, not
@@ -65,6 +66,9 @@ pub mod network_provider;
 pub mod providers;
 /// Plan 166 Phase 2 / ADR-072 — QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Plan 118 WS-1 1b — backend-agnostic supervisor standby pool registry
+/// (`~/.mvm/pool/` state-dir; record/select-idle-by-kernel/remove/reap).
+pub mod standby_pool;
 /// Plan 129 — shared per-VM substitution-endpoint spawn/reap helpers used by
 /// the QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
@@ -82,6 +86,14 @@ pub use libkrun::LibkrunBackend;
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
 pub use vz::VzBackend;
+
+/// Plan 129 Stage 2 — the per-VM egress-TLS cert/key split helper. `mvmctl up`
+/// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
+/// pushed onto the drive, the key is persisted host-side for the terminator
+/// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
+pub use substitution_spawn::{
+    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, build_egress_tls_delivery,
+};
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from
