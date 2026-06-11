@@ -153,6 +153,11 @@ PLAN 129 — Secrets / SigV4 substitution         🟢 declared + undeclared (bo
       egress_secret_leak_gate.rs + claim doc claim-egress-no-secret-to-guest.md +
       catalog.md row 16 witnesses (Preview), gated on every PR (Test lane +
       check-claim-catalog)
+  [x] substitution-endpoint jailer wrap: self-applied Landlock + seccomp-BPF
+      (ConfinementSpec::substitution_endpoint — store dirs + TLS/DNS read-only,
+      BRIDGE_SYSCALLS + tokio/rustls additions), fail-closed before serving the
+      first guest byte; macOS stub no-op. Allowlist completeness box-validated
+      (Linux runtime check) like the firecracker-bridge confinement
   [ ] forward proxy https/CONNECT (only http/absolute-form works today) — deferred
   [x] forward-path signing integration (SigV4 + HMAC)  — prepare_request branches
       on the resolved auth_type, routes SigV4/HMAC through the bind-checked
