@@ -35,6 +35,10 @@ pub(in crate::commands) fn scan_recording_for_secrets(
 ) -> Vec<SecretFinding> {
     let mut out = Vec::new();
     scan_env(scanner, "create", &rec.create.env, &mut out);
+    // create.tags is intentionally not scanned: tags are best-effort
+    // metadata that the lowering never carries into the Workload (env,
+    // entrypoint, hooks) or the guest, so a value there cannot reach a
+    // running workload.
     for (idx, op) in rec.ops.iter().enumerate() {
         match op {
             RecordedOp::CommandStart { argv, env } => {
