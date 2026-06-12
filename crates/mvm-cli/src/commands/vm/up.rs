@@ -1952,6 +1952,11 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         redaction: redaction.clone(),
     })?;
 
+    // Vz-family backends need a real kernel file; mkGuest workload images ship
+    // none (libkrun self-materializes its bundled kernel). Resolve the fallback
+    // before either the snapshot-restore or cold-boot arm consumes vmlinux_path.
+    let vmlinux_path = resolve_vz_workload_kernel(&vmlinux_path, effective_hypervisor)?;
+
     // If a template snapshot exists AND the backend supports snapshots,
     // restore from it instead of cold-booting.
     let backend = AnyBackend::from_hypervisor(effective_hypervisor);
@@ -2571,6 +2576,37 @@ fn attach_runtime_overlay(
     }
 }
 
+/// Kernel-less images (mkGuest ships no kernel) boot fine on libkrun,
+/// which materializes its own bundled kernel and ignores this path. The
+/// VZ-family backends need a real kernel file; fall back to the cached
+/// builder-VM kernel (an ARM64 boot Image, the same kernel the Vz builder
+/// and dev VMs boot) rather than handing VZ a missing path.
+fn resolve_vz_workload_kernel(vmlinux_path: &str, hypervisor: &str) -> anyhow::Result<String> {
+    if std::path::Path::new(vmlinux_path).exists() {
+        return Ok(vmlinux_path.to_string());
+    }
+    if !matches!(hypervisor, "vz" | "apple-container") {
+        return Ok(vmlinux_path.to_string());
+    }
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let fallback = format!(
+        "{}/builder-vm/{arch}/vmlinux",
+        mvm_core::config::mvm_cache_dir()
+    );
+    if std::path::Path::new(&fallback).exists() {
+        return Ok(fallback);
+    }
+    anyhow::bail!(
+        "image has no kernel ({vmlinux_path} missing) and the {hypervisor} backend \
+         needs one; the builder-VM kernel fallback at {fallback} is also absent — \
+         run `mvmctl dev up` once to bootstrap it"
+    )
+}
+
 /// Production wrapper: build the resolver from the mvm cache dir + the
 /// running mvmctl version, then attach for `hypervisor`. Called at each
 /// workload-boot `VmStartConfig` construction in [`run`].
@@ -2651,6 +2687,63 @@ mod runtime_overlay_attach_tests {
             sc.runtime_overlay_path.is_none(),
             "cold cache must not attach (legacy boot)"
         );
+    }
+}
+
+#[cfg(test)]
+mod resolve_vz_workload_kernel_tests {
+    use super::*;
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn existing_path_passes_through_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vmlinux = tmp.path().join("vmlinux");
+        std::fs::write(&vmlinux, b"kernel").unwrap();
+        let result = resolve_vz_workload_kernel(vmlinux.to_str().unwrap(), "vz").unwrap();
+        assert_eq!(result, vmlinux.to_str().unwrap());
+    }
+
+    #[test]
+    fn non_vz_hypervisor_passes_through_even_when_missing() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_CACHE_DIR", tmp.path()) };
+        let result = resolve_vz_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
+        assert_eq!(result, "/nonexistent/vmlinux");
+        unsafe { std::env::remove_var("MVM_CACHE_DIR") };
+    }
+
+    #[test]
+    fn vz_missing_kernel_falls_back_to_builder_vm_cache() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        let fallback_dir = tmp.path().join("builder-vm").join(arch);
+        std::fs::create_dir_all(&fallback_dir).unwrap();
+        let fallback = fallback_dir.join("vmlinux");
+        std::fs::write(&fallback, b"builder-kernel").unwrap();
+        unsafe { std::env::set_var("MVM_CACHE_DIR", tmp.path()) };
+        let result = resolve_vz_workload_kernel("/nonexistent/vmlinux", "vz").unwrap();
+        assert_eq!(result, fallback.to_str().unwrap());
+        unsafe { std::env::remove_var("MVM_CACHE_DIR") };
+    }
+
+    #[test]
+    fn vz_both_missing_returns_error_mentioning_dev_up() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_CACHE_DIR", tmp.path()) };
+        let err = resolve_vz_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
+        assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
+        unsafe { std::env::remove_var("MVM_CACHE_DIR") };
     }
 }
 
