@@ -31,7 +31,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 126** — Dependency reduction · 🟡 ~25%; sigstore/aws-lc/lock-gate remain
 - [ ] **PLAN 177** — Backend consolidation (8→4) · 🟡 Phase 1 done; Phase 2 (AVF convergence) in progress
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
-- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A landed; WS-B/C/D remain
+- [ ] **PLAN 183** — Builder-VM egress posture + network bootstrap · 🟡 WS-A/B/C landed; WS-D (E2E proof) remains
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 
 ## Plan details
@@ -235,9 +235,9 @@ PLAN 183 — Builder-VM egress posture + net boot 🟡 WS-A landed
   read-only baked file so leased DNS never lands.
   [x] WS-A egress posture per arm (boot open; install-arm locked, fail-closed;
       per-job posture in persistent dispatch; drop QEMU-only boot skip) — landed
-  [ ] WS-B Vz DHCP no-lease: static gvproxy fallback (shared stage0 ioctl
-      helpers) + time-boxed datagram-path root cause
-  [ ] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
+  [x] WS-B static gvproxy fallback when DHCP yields no lease — static fallback
+      landed; shared guest_net module; DHCP root cause deferred to WS-D
+  [x] WS-C writable /run-bind-mounted resolv.conf seeded with gateway resolver
   [ ] WS-D cold E2E proof on macOS + claim-11 install gate still locked +
       resume Plan 159 live Vz validation
 
