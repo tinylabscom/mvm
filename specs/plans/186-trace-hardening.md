@@ -26,7 +26,7 @@
 **Files:**
 - Modify: `crates/mvm-sdk/src/runtime.rs`
 
-- [ ] **Step 1: Write the failing tests** (add to runtime.rs's existing test module; reuse its existing fixture helpers if present — read the test module first and adapt fixture construction to what's there):
+- [x] **Step 1: Write the failing tests** (add to runtime.rs's existing test module; reuse its existing fixture helpers if present — read the test module first and adapt fixture construction to what's there):
 
 ```rust
     fn start_op(argv: &[&str]) -> RecordedOp {
@@ -96,11 +96,11 @@
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo nextest run -p mvm-sdk runtime` — compile error (`MAX_RECORDED_OPS`, new variants not found).
 
-- [ ] **Step 3: Implement.** Module-level constants + a validation pass at the top of `compile_recording`, size check at the existing decode site:
+- [x] **Step 3: Implement.** Module-level constants + a validation pass at the top of `compile_recording`, size check at the existing decode site:
 
 ```rust
 /// Hard cap on ops per recording. A hand-authored script never
@@ -165,9 +165,9 @@ At the existing `FilesWrite` decode site, capture the decoded bytes (currently d
                 }
 ```
 
-- [ ] **Step 4: Verify pass**: `cargo nextest run -p mvm-sdk runtime` — prior tests + 4 new green.
+- [x] **Step 4: Verify pass**: `cargo nextest run -p mvm-sdk runtime` — prior tests + 4 new green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-sdk/src/runtime.rs
@@ -181,7 +181,7 @@ git commit -m "feat(sdk): structural limits + duplicate-path refusal on runtime 
 **Files:**
 - Modify: `crates/mvm-sdk/src/runtime.rs` (tests only — no production change expected; if a test FAILS, that's a real injection bug: fix production code and report)
 
-- [ ] **Step 1: Add the tests:**
+- [x] **Step 1: Add the tests:**
 
 ```rust
     #[test]
@@ -240,9 +240,9 @@ git commit -m "feat(sdk): structural limits + duplicate-path refusal on runtime 
 
 (Adjust `HookCmd` import if the test module doesn't already have it: `use crate::ir::hooks::HookCmd;` — match the module's existing import paths.)
 
-- [ ] **Step 2: Run.** `cargo nextest run -p mvm-sdk runtime` — all three should PASS against current code (they are pins). If any fails, STOP: that is a live injection bug — fix production, report prominently.
+- [x] **Step 2: Run.** `cargo nextest run -p mvm-sdk runtime` — all three should PASS against current code (they are pins). If any fails, STOP: that is a live injection bug — fix production, report prominently.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/mvm-sdk/src/runtime.rs
@@ -257,7 +257,7 @@ git commit -m "test(sdk): pin FilesWrite b64 alphabet + shell-quoting against in
 - Modify: `crates/mvm-sdk/src/runtime.rs`
 - Modify: `crates/mvm-sdk/src/lib.rs` (export `Divergence`, `compile_recording_with_findings` alongside the existing runtime exports — read the existing export line at lib.rs:104 and extend it)
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
 
 ```rust
     #[test]
@@ -306,7 +306,7 @@ git commit -m "test(sdk): pin FilesWrite b64 alphabet + shell-quoting against in
     }
 ```
 
-- [ ] **Step 2: Verify compile failure. Step 3: Implement:**
+- [x] **Step 2: Verify compile failure. Step 3: Implement:**
 
 ```rust
 /// One place the trace replay knowingly differs from what the
@@ -372,7 +372,7 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
 }
 ```
 
-- [ ] **Step 4: Verify pass** (`cargo nextest run -p mvm-sdk runtime`), then **Step 5: Commit**
+- [x] **Step 4: Verify pass** (`cargo nextest run -p mvm-sdk runtime`), then **Step 5: Commit**
 
 ```bash
 git add crates/mvm-sdk/src/runtime.rs crates/mvm-sdk/src/lib.rs
@@ -386,7 +386,7 @@ git commit -m "feat(sdk): divergence findings on recording lowering (plan 186 P4
 **Files:**
 - Modify: `crates/mvm-sdk/src/runtime.rs` (verify `sha2` is in `crates/mvm-sdk/Cargo.toml` — it should be, via the compile/addon machinery; if missing add `sha2.workspace = true`)
 
-- [ ] **Step 1: Failing tests:**
+- [x] **Step 1: Failing tests:**
 
 ```rust
     #[test]
@@ -414,7 +414,7 @@ git commit -m "feat(sdk): divergence findings on recording lowering (plan 186 P4
     }
 ```
 
-- [ ] **Step 2: Verify failure. Step 3: Implement:**
+- [x] **Step 2: Verify failure. Step 3: Implement:**
 
 ```rust
 /// SHA-256 of the raw recording bytes, lowercase hex. Captured the
@@ -455,7 +455,7 @@ New `LowerError` variant:
     DigestMismatch { expected: String, actual: String },
 ```
 
-- [ ] **Step 4: Verify pass. Step 5: Commit**
+- [x] **Step 4: Verify pass. Step 5: Commit**
 
 ```bash
 git add crates/mvm-sdk/src/runtime.rs crates/mvm-sdk/Cargo.toml
@@ -475,7 +475,7 @@ git commit -m "feat(sdk): recording content-digest capture + verification (plan 
 
 This task is integration-shaped; exact code must adapt to the real clap structs. The contract to implement:
 
-- [ ] **Step 1: `sandbox_record.rs`.** Add a byte cap and a richer return type:
+- [x] **Step 1: `sandbox_record.rs`.** Add a byte cap and a richer return type:
 
 ```rust
 /// Hard cap on recording bytes read from disk — guards the JSON
@@ -501,7 +501,7 @@ Rework `load_recording(path)` → `load_recording(path: &Path, expected_sha256: 
 
 `auto_exec_record_script` returns `Result<LoadedRecording>` (it captures at the freshest possible moment — right after the subprocess exits — so its digest is the trusted baseline; pass `None` for expected). Update its doc comment to say the digest is captured here for downstream audit/verification.
 
-- [ ] **Step 2: `compile.rs`.** Add to the args struct (match existing clap style):
+- [x] **Step 2: `compile.rs`.** Add to the args struct (match existing clap style):
 
 ```rust
     /// Expected SHA-256 (hex) of the recording file. Refuses a
@@ -513,7 +513,7 @@ Rework `load_recording(path)` → `load_recording(path: &Path, expected_sha256: 
 
 Thread it into the `load_recording` call. After loading, print each finding as a warning (`eprintln!("divergence: {finding}")`) — compile is the dev verb, warn-only. Fix the other `load_recording`/`auto_exec_record_script` call sites to use `.workload` and print findings the same way.
 
-- [ ] **Step 3: `run_plan.rs` — the admission gate.** Add to `RunArgs` (in `exec.rs`):
+- [x] **Step 3: `run_plan.rs` — the admission gate.** Add to `RunArgs` (in `exec.rs`):
 
 ```rust
     /// Acknowledge a divergence class on the plan-mode admission
@@ -564,11 +564,11 @@ fn require_acknowledged(
 
 Unit tests (same file's test module): `gate_passes_with_no_findings`, `gate_refuses_unacknowledged`, `gate_passes_when_all_kinds_acked`, `gate_refuses_partial_acks` — construct findings directly (`Divergence::KillDropped { op_index: 0 }` etc.).
 
-- [ ] **Step 4: help-text tests.** In `crates/mvm-cli/tests/cli.rs`, following the file's existing assertion pattern, assert `mvmctl run --help` contains `--ack-divergence` and `mvmctl compile --help`'s relevant subcommand help contains `--recording-sha256`. (Find the compile verb's actual full path in the CLI tree first — it may be `mvmctl build compile` per Plan 178's verb regrouping; read `cli.rs`'s existing compile-help test to confirm.)
+- [x] **Step 4: help-text tests.** In `crates/mvm-cli/tests/cli.rs`, following the file's existing assertion pattern, assert `mvmctl run --help` contains `--ack-divergence` and `mvmctl compile --help`'s relevant subcommand help contains `--recording-sha256`. (Find the compile verb's actual full path in the CLI tree first — it may be `mvmctl build compile` per Plan 178's verb regrouping; read `cli.rs`'s existing compile-help test to confirm.)
 
-- [ ] **Step 5: Verify**: `cargo nextest run -p mvm-cli` (full crate — RunArgs construction sites and help tests live here), plus `cargo nextest run -p mvm-sdk`. Fix any missed `RunArgs {` constructor.
+- [x] **Step 5: Verify**: `cargo nextest run -p mvm-cli` (full crate — RunArgs construction sites and help tests live here), plus `cargo nextest run -p mvm-sdk`. Fix any missed `RunArgs {` constructor.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mvm-cli/src/commands crates/mvm-cli/tests/cli.rs
@@ -585,7 +585,7 @@ git commit -m "feat(cli): recording digest + size cap; divergence gate on plan-m
 - Modify: root `Cargo.toml` (`exclude` list — add `"crates/mvm-sdk/fuzz"` with a one-line comment matching the neighbors)
 - Modify: `.github/workflows/security.yml` (new step in the `fuzz` job + the corpus-upload path list)
 
-- [ ] **Step 1: the fuzz crate.** `crates/mvm-sdk/fuzz/Cargo.toml`:
+- [x] **Step 1: the fuzz crate.** `crates/mvm-sdk/fuzz/Cargo.toml`:
 
 ```toml
 [package]
@@ -647,9 +647,9 @@ fuzz_target!(|data: &[u8]| {
 });
 ```
 
-- [ ] **Step 2: seed corpus.** Create `crates/mvm-sdk/fuzz/corpus/fuzz_runtime_recording/seed-minimal.json` containing one valid recording (template `minimal`, one `CommandStart`, one `FilesWrite`, one `Kill`) so the fuzzer starts from structure, not noise. Generate it by serializing a `RuntimeRecording` in a quick `cargo test`-side snippet or by hand — it must parse cleanly (verify with a one-off `serde_json::from_str` test you then delete, or just feed it through `mvmctl compile --from-recording` mentally — simplest is hand-writing JSON matching the serde shape: `{"workload_id":"seed","create":{"template":"minimal"},"ops":[{"kind":"files_write","path":"/app/a.txt","bytes_b64":"aGk="},{"kind":"command_start","argv":["/bin/true"]},{"kind":"kill"}]}`).
+- [x] **Step 2: seed corpus.** Create `crates/mvm-sdk/fuzz/corpus/fuzz_runtime_recording/seed-minimal.json` containing one valid recording (template `minimal`, one `CommandStart`, one `FilesWrite`, one `Kill`) so the fuzzer starts from structure, not noise. Generate it by serializing a `RuntimeRecording` in a quick `cargo test`-side snippet or by hand — it must parse cleanly (verify with a one-off `serde_json::from_str` test you then delete, or just feed it through `mvmctl compile --from-recording` mentally — simplest is hand-writing JSON matching the serde shape: `{"workload_id":"seed","create":{"template":"minimal"},"ops":[{"kind":"files_write","path":"/app/a.txt","bytes_b64":"aGk="},{"kind":"command_start","argv":["/bin/true"]},{"kind":"kill"}]}`).
 
-- [ ] **Step 3: workspace exclude + CI.** Root `Cargo.toml` exclude list gains `"crates/mvm-sdk/fuzz"` (comment: trace-parser harness, same libfuzzer-sys constraint). In `.github/workflows/security.yml`'s `fuzz` job, add a step after the existing SupervisorConfig ones, matching their exact shape:
+- [x] **Step 3: workspace exclude + CI.** Root `Cargo.toml` exclude list gains `"crates/mvm-sdk/fuzz"` (comment: trace-parser harness, same libfuzzer-sys constraint). In `.github/workflows/security.yml`'s `fuzz` job, add a step after the existing SupervisorConfig ones, matching their exact shape:
 
 ```yaml
       - name: Fuzz runtime recording (SDK trace)
@@ -666,9 +666,9 @@ fuzz_target!(|data: &[u8]| {
 
 and add `crates/mvm-sdk/fuzz/corpus/` + `crates/mvm-sdk/fuzz/artifacts/` to the corpus-upload artifact path list.
 
-- [ ] **Step 4: local verification.** If `cargo fuzz` is installed (check `cargo fuzz --version`): `cd crates/mvm-sdk && RUSTUP_TOOLCHAIN=nightly cargo fuzz run fuzz_runtime_recording -- -max_total_time=30 -runs=200000` and report findings. If not installed, at minimum `RUSTUP_TOOLCHAIN=nightly cargo check` inside the fuzz dir must pass; report which level of verification ran. Also `cargo build --workspace` must still succeed (proves the exclude entry is right).
+- [x] **Step 4: local verification.** If `cargo fuzz` is installed (check `cargo fuzz --version`): `cd crates/mvm-sdk && RUSTUP_TOOLCHAIN=nightly cargo fuzz run fuzz_runtime_recording -- -max_total_time=30 -runs=200000` and report findings. If not installed, at minimum `RUSTUP_TOOLCHAIN=nightly cargo check` inside the fuzz dir must pass; report which level of verification ran. Also `cargo build --workspace` must still succeed (proves the exclude entry is right).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-sdk/fuzz Cargo.toml .github/workflows/security.yml
@@ -684,7 +684,7 @@ git commit -m "feat(fuzz): runtime-recording trace parser + lowering harness (pl
 - Modify: `specs/REFACTOR-STATUS.md`
 - Modify: `specs/plans/186-trace-hardening.md` (tick boxes)
 
-- [ ] **Step 1: gates** (in order; environmental caveats as in plan 184: mvm-backend codesign SIGKILL, embedded-binary ELF test under skip-embed):
+- [x] **Step 1: gates** (in order; environmental caveats as in plan 184: mvm-backend codesign SIGKILL, embedded-binary ELF test under skip-embed):
 
 ```bash
 cargo fmt --all -- --check || rustup run nightly cargo fmt --all
@@ -694,7 +694,7 @@ MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace -- -D warnings 2>&1 | tail -5
 cargo run -p xtask -- check-spec-numbers
 ```
 
-- [ ] **Step 2: ADR-080 §8 row updates.** Replace the P1, P3, P4 rows (keep P2's row but append a note):
+- [x] **Step 2: ADR-080 §8 row updates.** Replace the P1, P3, P4 rows (keep P2's row but append a note):
 
 ```markdown
 | P1 | Trace parser hardening (§2) | `fuzz_runtime_recording` in `security.yml` (crates/mvm-sdk/fuzz); `too_many_ops_refuses` + `files_write_oversize_refuses` + `duplicate_files_write_path_refuses` (mvm-sdk runtime) — landed by Plan 186. |
@@ -705,9 +705,9 @@ cargo run -p xtask -- check-spec-numbers
 
 (Adapt the exact table formatting to the file as it stands on this branch.)
 
-- [ ] **Step 3: REFACTOR-STATUS** — add Plan 186 to the glance list + a detail block (landed: P1/P3/P4 + interim P2 pin; open: full P2, P6–P8); bump "Last updated".
+- [x] **Step 3: REFACTOR-STATUS** — add Plan 186 to the glance list + a detail block (landed: P1/P3/P4 + interim P2 pin; open: full P2, P6–P8); bump "Last updated".
 
-- [ ] **Step 4: tick every checkbox in this plan doc. Step 5: Commit**
+- [x] **Step 4: tick every checkbox in this plan doc. Step 5: Commit**
 
 ```bash
 git add specs/

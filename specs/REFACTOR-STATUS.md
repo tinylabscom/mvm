@@ -1,6 +1,6 @@
 # Refactor status — rollup checklist
 
-**Last updated: 2026-06-11** (Plan 184 seam landed)
+**Last updated: 2026-06-11** (Plan 186 trace-hardening landed)
 
 > MAINTENANCE: keep this file current. Whenever you land, merge, or descope a
 > workstream in any plan below, tick/strike the matching box here in the SAME
@@ -33,6 +33,7 @@ details** below for the workstream-level state.
 - [ ] **PLAN 175** — Firecracker live-memory warm-start · 🔴 not started (live-KVM-gated)
 - [x] **PLAN 180** — Strip spec refs from code comments · ✅ (lint-gated, #786)
 - [ ] **PLAN 184** — Capability projection seam (ADR-080 P5) · 🟢 seam + witnesses landed; kernel-side wiring + WASI-context mapping deferred
+- [ ] **PLAN 186** — Trace hardening (ADR-080 P1/P3/P4 + interim P2 pin) · 🟢 P1/P3/P4 done + P2 interim pin hardened (live injection fix); full P2 + P6–P8 open
 
 ## Plan details
 
@@ -328,6 +329,30 @@ PLAN 181 — App-builder product surface           🔴 NOT STARTED  (ADR-079; m
   NOTE: deliberately rejects the sibling app-builder's isolation model — no Docker
   socket, no host-path mounts into a workload, no auth-off/caps-off defaults, no
   baked-in agents, no multi-tenant HTTP/auth in mvm (mvmd per ADR-070 §5/Plan 33).
+
+PLAN 186 — Trace hardening (ADR-080 P1/P3/P4)       🟢 P1/P3/P4 DONE; P2 interim pin DONE+HARDENED; full P2/P6–P8 open
+  [x] P1: MAX_RECORDED_OPS (1024) + MAX_FILES_WRITE_DECODED_BYTES (8 MiB) limits
+  [x] P1: DuplicateFilesWritePath refusal at compile_recording entry
+  [x] P1: fuzz_runtime_recording in security.yml (crates/mvm-sdk/fuzz)
+  [x] P2 interim: b64-STANDARD-alphabet pin + shell-quote regression tests
+  [x] P2 HARDENED: path itself base64-encoded into hook (was single-quote-interpolated)
+      — caught + fixed a LIVE shell-injection in the FilesWrite lowering
+      — verified injection-safe by executing generated hooks against /bin/sh
+      — witnesses: files_write_root_level_path_materializes,
+        files_write_slashless_nested_path_materializes
+  [x] P3: recording_sha256_hex + verify_recording_digest (mvm-sdk runtime)
+  [x] P3: 64 MiB byte cap before JSON parse in load_recording
+  [x] P3: --recording-sha256 flag on compile --from-recording
+  [x] P4: Divergence vocabulary (KillDropped, FilesWriteAfterEntrypoint) in mvm_sdk::runtime
+  [x] P4: compile_recording_with_findings + require_acknowledged in mvm-cli
+  [x] P4: --ack-divergence <kind> on run --mode plan admission path
+  [ ] P2 full: declarative IR file-materialization field (replace shell hook) — own plan
+  [ ] P6: preview-fetched component digests carried into IR; mutable ref refused --prod
+  [ ] P7: trace+IR secret-scan admission; paste-time detector in preview input
+  [ ] P8: relay session binding (wrong-token refusal, second-client refusal, fuel/mem/wall-clock caps)
+  NOTE: P2 fix is stronger than the plan anticipated — the pin exposed a real injection
+  surface (path metacharacters in the single-quoted shell template). Path b64 is the fix;
+  the declarative-lowering plan will delete the shell surface entirely.
 
 PLAN 184 — Capability projection seam (ADR-080 P5)  🟢 seam + witnesses LANDED; enforcement wiring deferred
   [x] Proto + CanonicalRule atom (projection seam module created)
