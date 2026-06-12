@@ -63,20 +63,20 @@ fn recording_json_round_trips_through_compile_pipeline() {
         }
         other => panic!("expected Command entrypoint, got {other:?}"),
     }
-    // FilesWrite → before_start shell hook. The path is base64-encoded
-    // in the hook so shell metacharacters in user-supplied paths can't
-    // escape the generated line — no raw path bytes appear in the shell.
-    assert_eq!(app.hooks.before_start.len(), 1);
-    match &app.hooks.before_start[0] {
-        mvm_sdk::ir::HookCmd::Shell { line } => {
-            use base64::Engine;
-            let path_b64 = base64::engine::general_purpose::STANDARD.encode(b"/app/note.txt");
-            assert!(
-                line.contains(&path_b64) && line.contains("base64 -d"),
-                "got: {line}"
-            );
-        }
-        other => panic!("expected Shell hook, got {other:?}"),
+    // FilesWrite → App.files entry (baked at build time, not a shell hook).
+    assert!(
+        app.hooks.before_start.is_empty(),
+        "FilesWrite must not produce a before_start hook"
+    );
+    assert_eq!(app.files.len(), 1);
+    assert_eq!(app.files[0].path, "/app/note.txt");
+    {
+        use base64::Engine;
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode(b"hi\n");
+        assert_eq!(
+            app.files[0].bytes_b64, expected_b64,
+            "bytes_b64 must match base64 of 'hi\\n'"
+        );
     }
 
     // Compile the lowered workload into a flake-bundled directory.
