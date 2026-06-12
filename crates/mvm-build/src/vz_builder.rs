@@ -1909,6 +1909,9 @@ mod tests {
         //      configured dev box we trip this branch instead)
         // Any of those is a valid pre-cutover state.
         let scratch = tempfile::TempDir::new().unwrap();
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        process_env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
         let flake = scratch.path().join("flake");
         std::fs::create_dir(&flake).unwrap();
         let host_bins = scratch.path().join("host-bins");

@@ -642,13 +642,7 @@ fn parent_vm_name_hint(parent: &CheckpointId) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    // Env-var mutation is process-wide; serialize tests that set MVM_DATA_DIR
-    // so they don't race each other.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validated_checkpoint_id_accepts_normal() {
@@ -671,22 +665,21 @@ mod tests {
     /// A VM with no PID files is stopped → quiesced regardless of markers.
     #[test]
     fn stopped_vm_is_quiesced() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
         assert!(
             vm_is_quiesced("no-such-vm-stopped"),
             "stopped VM must be quiesced"
         );
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     /// Running VM + matching `vz.paused` marker (pid matches `vz.pid`) → quiesced.
     #[test]
     fn running_with_matching_marker_is_quiesced() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
 
         let state_dir = mvm_core::config::vm_state_dir("pausedvm");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -700,16 +693,14 @@ mod tests {
             vm_is_quiesced("pausedvm"),
             "running VM with matching pause marker must be quiesced"
         );
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     /// Running VM + no `vz.paused` marker → not quiesced.
     #[test]
     fn running_without_marker_is_not_quiesced() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
 
         let state_dir = mvm_core::config::vm_state_dir("livevm");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -721,17 +712,15 @@ mod tests {
             !vm_is_quiesced("livevm"),
             "running VM with no pause marker must not be quiesced"
         );
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     /// Stale marker: `vz.paused` contains a pid that differs from `vz.pid`
     /// (left behind by a crash or a re-launched supervisor) → not quiesced.
     #[test]
     fn running_with_stale_marker_is_not_quiesced() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
 
         let state_dir = mvm_core::config::vm_state_dir("relaunchedvm");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -745,8 +734,6 @@ mod tests {
             !vm_is_quiesced("relaunchedvm"),
             "running VM with a stale pause marker (pid mismatch) must not be quiesced"
         );
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     // ── resolve_quiesced_vm_rootfs: missing-rootfs error ─────────────────
@@ -756,12 +743,10 @@ mod tests {
     /// pause-based workflow rather than cryptically failing on the path.
     #[test]
     fn missing_rootfs_produces_actionable_error() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", tmp.path());
-            std::env::set_var("MVM_SHARE_DIR", tmp.path());
-        }
+        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_SHARE_DIR", tmp.path());
 
         let state_dir = mvm_core::config::vm_state_dir("gone-vm");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -817,10 +802,5 @@ mod tests {
             msg.contains("vm-full") || msg.contains("vm_full"),
             "error should mention vm-full alternative: {msg}"
         );
-
-        unsafe {
-            std::env::remove_var("MVM_DATA_DIR");
-            std::env::remove_var("MVM_SHARE_DIR");
-        }
     }
 }

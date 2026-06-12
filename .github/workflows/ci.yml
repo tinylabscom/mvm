@@ -7,7 +7,10 @@ on:
   # OCI ratification, security, Windows, and release artifact jobs live
   # in release/manual workflows.
   push:
-    branches: ["**"]
+    # Exclude the merge-queue transient branches — covered by merge_group below.
+    branches: ["**", "!gh-readonly-queue/**"]
+  # Required for the merge queue: checks must run against the merge_group event.
+  merge_group:
   workflow_dispatch:
 
 concurrency:

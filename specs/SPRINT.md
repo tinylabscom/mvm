@@ -23,16 +23,24 @@ technical, verifiable, and stated explicitly.
 ADR-002 captures the threat model and the seventeen surfaces audited;
 plan 25 sequences the work into six independently-shippable workstreams.
 
-## Current Status (v0.13.0, sprint open)
+## Current Status (v0.16.1)
 
-| Metric           | Value                    |
-| ---------------- | ------------------------ |
-| Workspace crates | 7 + root facade + xtask  |
-| Total tests      | 1 068                    |
-| Clippy warnings  | 0                        |
-| Edition          | 2024 (Rust 1.85+)        |
-| MSRV             | 1.85                     |
-| Binary           | `mvmctl`                 |
+> This file is a **cumulative multi-sprint log** — it opened at Sprint 42
+> (immediately below) and has grown through **Sprint 62**. Recent active work:
+> Sprint 60 (core demo green, in flight), Sprint 61 (app-builder surface,
+> proposed), Sprint 62 (ADR-080 wasm preview → microVM ship, in flight). Read a
+> given sprint's own section for its live status; the table below is the current
+> workspace snapshot, not Sprint 42's.
+
+| Metric           | Value                                  |
+| ---------------- | -------------------------------------- |
+| Version          | v0.16.1                                |
+| Workspace crates | 15 (ADR-066 §1; Plan 121 folded 32→15) |
+| Total tests      | ~4,350 (`cargo nextest`)               |
+| Clippy warnings  | 0                                      |
+| Edition          | 2024 (Rust 1.85+)                      |
+| MSRV             | 1.85                                   |
+| Binary           | `mvmctl`                               |
 
 ## Planning updates
 
@@ -42,6 +50,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
 - [x] Added [`plans/185-idiomatic-rust-hygiene.md`](plans/185-idiomatic-rust-hygiene.md), a bounded cleanup plan for project-wide Rust idioms: shared test env guards, poisoned-lock policy, clearer internal names, typed selectors at module boundaries, params structs/builders, function splits only where they add testable structure, unsafe/platform/feature-boundary audits, error-shape cleanup, fixture consolidation, secret/debug exposure checks, and Rustdoc verification.
 - [x] Started Plan 185 implementation: added `mvm_core::util::test_env::TestEnv` behind `cfg(test)` / `mvm-core/test-support`, covered restore behavior with unit tests, and migrated `mvm-core` keystore env tests away from direct process-global env mutation. Verified with `cargo test -p mvm-core test_env`, `cargo test -p mvm-core keystore`, and `cargo clippy -p mvm-core --all-targets -- -D warnings`.
 - [x] Advanced Plan 185 into `mvm-backend`: backend selector/started-VM marker tests now use `TestEnv` and `tempfile::TempDir` instead of manual `HOME`/`MVM_DATA_DIR` save-restore blocks, while keeping the legacy backend env lock until the rest of that crate migrates. Verified with `cargo test -p mvm-backend backend` and `cargo clippy -p mvm-core -p mvm-backend --all-targets -- -D warnings`.
+- [x] Advanced Plan 185 test isolation into `mvm-cli` and `mvm-build`: checkpoint/console and dev/Vz builder tests now use `TestEnv`-scoped process env, lifecycle-hook tests use deterministic runner fakes instead of shell timing, and the entrypoint stdout-cap test no longer asserts a host-load-sensitive wall-clock bound. Also fixed detached direct-boot mock `up` to skip the 30s guest-agent wait when no `MVM_PORTS` forwarding is requested. Verified with `cargo test -p mvm-cli --lib direct_boot`, `cargo nextest run --workspace --test audit_emissions_live`, `cargo clippy -p mvm-cli --lib -- -D warnings`, and serial escalated reruns of `mvm-guest` process-heavy targets.
 - [x] Started Plan 182 implementation: `mvm_core::time::{Clock, SystemClock}` now owns the shared wall-clock seam, replacing the duplicate local `Clock` traits in `mvm-hostd` supervisor aggregate/circuit-breaker code and `mvm-cli` plan admission. Verified with `cargo test -p mvm-core time`, `cargo test -p mvm-hostd circuit_breaker`, `cargo test -p mvm-hostd launch_rejects_expired_plan`, `cargo test -p mvm-cli plan_admission`, and `cargo clippy -p mvm-core -p mvm-hostd -p mvm-cli --all-targets -- -D warnings`.
 - [x] Landed Plan 182 Task 2: removed the dead duplicate runtime `KeyProvider` module (`crates/mvm/src/security/keystore.rs`), kept `mvm_core::crypto::keystore` as the sole key-provider surface, and updated the stale overlay docs to point at the core trait. Verified with `cargo test -p mvm-core keystore`, `cargo test -p mvm --no-run`, and `cargo clippy -p mvm-core -p mvm --all-targets -- -D warnings`.
 - [x] Advanced Plan 182 backend-catalog wiring: added `crates/mvm-backend/src/catalog.rs` with one `backend_catalog!` metadata table, preserved legacy started-VM marker probe order explicitly, moved `AnyBackend::{from_hypervisor,for_started_vm,tier,list_all}` and doctor's balloon/warm-start backend sets onto that catalog, and froze the visible backend matrix/order with backend + doctor tests. Verified with `cargo test -p mvm-backend backend`, `cargo test -p mvm-cli doctor`, and `cargo clippy -p mvm-backend -p mvm-cli --all-targets -- -D warnings`.

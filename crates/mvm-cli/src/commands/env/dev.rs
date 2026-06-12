@@ -217,7 +217,11 @@ pub(in crate::commands) enum DevAction {
         project: Option<String>,
     },
     /// Show dev environment status.
-    Status,
+    Status {
+        /// Emit a machine-readable JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect dev caches without rebuilding or booting.
     Cache {
         #[command(subcommand)]
@@ -441,7 +445,7 @@ fn cmd_dev_libkrun_down() -> Result<()> {
     LibkrunBackend.stop(&id)
 }
 
-fn cmd_dev_libkrun_status() -> Result<()> {
+fn cmd_dev_libkrun_status(json: bool) -> Result<()> {
     let id = VmId(dev_vz::DEV_VM_NAME.to_string());
     let status = LibkrunBackend.status(&id)?;
     let state = match status {
@@ -451,6 +455,11 @@ fn cmd_dev_libkrun_status() -> Result<()> {
         VmStatus::Paused => "paused",
         VmStatus::Failed { .. } => "failed",
     };
+    if json {
+        // libkrun has no in-guest kernel probe here; the dev-image +
+        // builder caches are backend-agnostic, so report them too.
+        return crate::json_out::emit_json(&dev_vz::build_dev_status_json("libkrun", state, None));
+    }
     ui::info("Backend:  libkrun (Hypervisor.framework)");
     ui::info(&format!("VM:       {}", dev_vz::DEV_VM_NAME));
     ui::info(&format!("Status:   {state}"));
@@ -596,11 +605,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_shell(),
             DevBackend::Unsupported => bail_no_dev_backend(),
         },
-        DevAction::Status => match backend {
-            DevBackend::Libkrun => cmd_dev_libkrun_status(),
-            DevBackend::Vz => dev_vz::cmd_dev_vz_status(),
-            DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_status(),
+        DevAction::Status { json } => match backend {
+            DevBackend::Libkrun => cmd_dev_libkrun_status(json),
+            DevBackend::Vz => dev_vz::cmd_dev_vz_status(json),
+            DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_status(json),
             DevBackend::Unsupported => {
+                if json {
+                    return crate::json_out::emit_json(&dev_vz::build_dev_status_json_vmless(
+                        "unsupported",
+                        "unsupported",
+                    ));
+                }
                 ui::info(
                     "Dev environment: not configured on this host (Vz dev VM \
                      unavailable and native /dev/kvm missing). WSL2 nested KVM and \
