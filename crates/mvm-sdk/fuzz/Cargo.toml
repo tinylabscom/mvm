@@ -1,0 +1,36 @@
+[package]
+name = "mvm-sdk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detach from the parent workspace — `crates/mvm-sdk/fuzz` is listed
+# under `workspace.exclude` in the repo root Cargo.toml because
+# `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper (which
+# injects sanitizer + linker flags). An empty `[workspace]` table
+# self-identifies this manifest as standalone.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.mvm-sdk]
+path = ".."
+
+# Fuzz the runtime-recording parse + lowering.
+# The recording JSON is the Tier-0 promotion input: user-spawned code
+# writes it to a tmpfile the CLI reads back. `serde`'s
+# `deny_unknown_fields` must fail closed on garbage, and every
+# lowering refusal (op limits, duplicate paths, oversize or malformed
+# FilesWrite b64, missing entrypoint) must surface as Err, not a panic
+# (claim 5 / ADR-002 §"Parser hardening").
+[[bin]]
+name = "fuzz_runtime_recording"
+path = "fuzz_targets/fuzz_runtime_recording.rs"
+test = false
+doc = false
+bench = false

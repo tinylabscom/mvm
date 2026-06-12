@@ -370,6 +370,20 @@ jobs:
         # path, not a panic).
         run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
 
+      - name: Fuzz runtime recording (SDK trace)
+        working-directory: crates/mvm-sdk
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly
+        # Plan 186 — the recording JSON is the Tier-0 promotion input:
+        # user-spawned code writes it to a tmpfile the CLI reads back.
+        # `deny_unknown_fields` must fail closed on garbage, and every
+        # lowering refusal (op limits, duplicate paths, oversize or
+        # malformed FilesWrite b64, missing entrypoint) must surface as
+        # Err, not a panic. Same "never panic on any input" contract as
+        # the other config-parser targets.
+        run: cargo fuzz run fuzz_runtime_recording -- -max_total_time="$DURATION"
+
       - name: Upload corpus on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -386,6 +400,8 @@ jobs:
             crates/mvm-oci/fuzz/artifacts/
             crates/mvm-vm-host/fuzz/corpus/
             crates/mvm-vm-host/fuzz/artifacts/
+            crates/mvm-sdk/fuzz/corpus/
+            crates/mvm-sdk/fuzz/artifacts/
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-002 §W5.1 — the unit tests that exercise the
