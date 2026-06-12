@@ -1,14 +1,14 @@
 //! Environment lifecycle commands — bootstrap, setup, dev, and friends.
 //!
 //! These commands provision, inspect, and tear down the host-side
-//! development environment (Apple Container, Firecracker binary,
-//! shell init, default network).
+//! development environment (Vz dev VM, Firecracker binary, shell init,
+//! default network).
 
-pub(super) mod apple_container;
 pub(super) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(super) mod cleanup;
 pub(super) mod dev;
+pub(super) mod dev_vz;
 pub(super) mod doctor;
 pub(super) mod group;
 pub(super) mod init;

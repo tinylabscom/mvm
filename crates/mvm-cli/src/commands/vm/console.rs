@@ -10,7 +10,7 @@ use mvm::vsock_transport::{FirecrackerTransport, LibkrunTransport, VsockTranspor
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
-use super::super::env::apple_container::dev_vsock_proxy_path;
+use super::super::env::dev_vz::dev_vsock_proxy_path;
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;

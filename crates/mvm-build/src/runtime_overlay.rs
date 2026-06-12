@@ -937,7 +937,7 @@ fn verify_file_sha256(
 
 /// Shell out to `curl -fSL` to download `url` to `dest`. Mirrors
 /// the existing `download_file` helper in
-/// `mvm-cli::commands::env::apple_container` so operator
+/// `mvm-cli::commands::env::artifact_verify` so operator
 /// expectations stay uniform across the three downloaders
 /// (dev image, builder VM image, runtime overlay).
 fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {

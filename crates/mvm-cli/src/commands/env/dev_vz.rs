@@ -1,7 +1,9 @@
-//! Apple Container dev environment + bundled image fetching.
+//! Vz dev environment + bundled image fetching.
 //!
-//! Extracted from `commands/mod.rs` as a pure mechanical refactor —
-//! no behavior changes.
+//! The dev VM is a long-lived Vz builder guest (`/dev/vdb` nix-store
+//! overlay + `/work` share wired internally) that runs `nix build`.
+//! Both the auto-detect macOS tier and an explicit `--builder vz`
+//! route here.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -80,7 +82,7 @@ fn dev_vm_guest_agent_connect() -> Result<std::os::unix::net::UnixStream> {
 /// booting, in which case other-process RPCs fail. Requiring the
 /// guest-agent socket to connect keeps `dev status` honest with what
 /// `dev shell` actually sees.
-pub(in crate::commands) fn is_apple_container_dev_running() -> bool {
+pub(in crate::commands) fn is_vz_dev_running() -> bool {
     #[cfg(feature = "builder-vm")]
     {
         let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
@@ -98,10 +100,10 @@ pub(in crate::commands) fn is_apple_container_dev_running() -> bool {
 /// Boot the dev VM via the Vz supervisor, optionally opening an
 /// interactive console.
 #[cfg(feature = "builder-vm")]
-pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
+pub(super) fn cmd_dev_vz(cpus: u32, memory_gib: u32, open_shell: bool) -> Result<()> {
     ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
 
-    if is_apple_container_dev_running() {
+    if is_vz_dev_running() {
         if open_shell {
             ui::progress("Dev VM already running. Opening shell...");
             return console_interactive(DEV_VM_NAME);
@@ -184,11 +186,7 @@ pub(super) fn cmd_dev_apple_container(cpus: u32, memory_gib: u32, open_shell: bo
 }
 
 #[cfg(not(feature = "builder-vm"))]
-pub(super) fn cmd_dev_apple_container(
-    _cpus: u32,
-    _memory_gib: u32,
-    _open_shell: bool,
-) -> Result<()> {
+pub(super) fn cmd_dev_vz(_cpus: u32, _memory_gib: u32, _open_shell: bool) -> Result<()> {
     anyhow::bail!(
         "the dev VM is built locally via the builder VM, but this mvmctl was \
          compiled without the `builder-vm` feature."
@@ -218,7 +216,7 @@ pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
 
 /// Stop the dev VM by reaping its detached Vz supervisor via the PID
 /// file under the stable state dir.
-pub(super) fn cmd_dev_apple_container_down() -> Result<()> {
+pub(super) fn cmd_dev_vz_down() -> Result<()> {
     #[cfg(feature = "builder-vm")]
     {
         let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
@@ -241,8 +239,8 @@ pub(super) fn cmd_dev_apple_container_down() -> Result<()> {
 }
 
 /// Show dev VM status.
-pub(super) fn cmd_dev_apple_container_status() -> Result<()> {
-    let running = is_apple_container_dev_running();
+pub(super) fn cmd_dev_vz_status() -> Result<()> {
+    let running = is_vz_dev_running();
     ui::info("Backend:  Vz (Apple Virtualization.framework)");
     ui::info(&format!("Dev VM:   {DEV_VM_NAME}"));
     ui::info(&format!(
