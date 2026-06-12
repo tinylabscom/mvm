@@ -2094,22 +2094,24 @@ mod linux {
     }
 
     fn setup_network() -> Result<(), String> {
-        // Seed /run/resolv.conf from the fallback before
-        // udhcpc runs. /etc/resolv.conf is a symlink into /run, so
-        // libc resolvers have a usable nameserver list from boot 1
-        // even if DHCP fails (TSI mode, or passt mid-handoff).
-        // Failure here is non-fatal — the symlink might not exist
-        // on an older guest, in which case udhcpc's
-        // own write to /etc/resolv.conf (if -s is set) is the
-        // only path.
-        let fallback = std::path::Path::new("/etc/resolv.conf.fallback");
-        if fallback.is_file() {
-            if let Err(e) = std::fs::copy(fallback, "/run/resolv.conf") {
-                eprintln!(
-                    "mvm-host-vm-init: copy /etc/resolv.conf.fallback -> \
-                     /run/resolv.conf: {e} (continuing — udhcpc may fix it)"
-                );
-            }
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+
+        // The rootfs mounts ro and /etc/resolv.conf is a baked regular file,
+        // not a /run symlink. busybox's DHCP script writes /etc/resolv.conf
+        // directly and gets EROFS, so leased DNS never lands. Mount a tmpfs-
+        // backed copy over /etc/resolv.conf before udhcpc runs so the script's
+        // write goes to tmpfs. The seed chooses the gateway resolver for the
+        // active VMM's virtual network: gvproxy backends (libkrun, Vz) serve
+        // DNS at 192.168.127.1; QEMU slirp at 10.0.2.3. Both do host-side
+        // resolution and work on any network; baked public resolvers don't.
+        // Seeding before udhcpc also means the bind-mount is in place on the
+        // Vz path where DHCP fails — the static fallback below gives the IP
+        // and the seed covers DNS.
+        // Non-fatal: a failed seed/bind-mount degrades DNS to the baked
+        // resolvers but must not block the iface-up + DHCP below — a
+        // leased-but-degraded guest beats one with no IP at all.
+        if let Err(e) = seed_resolv_conf(&cmdline) {
+            eprintln!("mvm-host-vm-init: resolv.conf seed skipped: {e} (continuing)");
         }
 
         // busybox 1.36.x udhcpc binds a PF_PACKET raw socket to
@@ -2132,13 +2134,6 @@ mod linux {
             );
         }
 
-        // When /etc/udhcpc/default.script exists (passt
-        // path), use it so the DHCP lease
-        // writes /run/resolv.conf with the leased DNS. Older rootfs
-        // builds without the script keep the legacy `-i eth0 -n -q`
-        // shape — udhcpc still sets the IP but resolv.conf stays at
-        // the fallback content.
-        //
         // `/bin/udhcpc` — udhcpc is a busybox applet, and mkGuest
         // installs busybox applet symlinks under `/bin/<applet>`,
         // not `/sbin/`. (Prior `/sbin/udhcpc` hardcoding ENOENTed at
@@ -2154,42 +2149,87 @@ mod linux {
         let status = cmd
             .status()
             .map_err(|e| format!("spawn /bin/udhcpc: {e}"))?;
-        if !status.success() {
+        if dhcp_fallback_applies(&cmdline, status.success()) {
+            // gvproxy's virtual subnet is fixed (192.168.127.0/24, gateway+DNS
+            // at .1, first DHCP client at .3). Each builder VM gets its own
+            // gvproxy instance, so the static address cannot collide.
+            eprintln!(
+                "mvm-host-vm-init: udhcpc exit {} — falling back to static \
+                 gvproxy addressing",
+                status.code().unwrap_or(-1)
+            );
+            mvm_build::guest_net::configure_static(
+                "eth0",
+                "192.168.127.3",
+                "255.255.255.0",
+                "192.168.127.1",
+            )?;
+        } else if !status.success() {
             return Err(format!("udhcpc exit {}", status.code().unwrap_or(-1)));
         }
         Ok(())
     }
 
-    /// Encode a Linux interface name into the fixed-size `ifr_name`
-    /// byte array used by SIOCG/SIOCSIFFLAGS. Linux caps interface
-    /// names at `IFNAMSIZ` (16) bytes including the NUL terminator,
-    /// so the longest valid input is 15 bytes. Split out from
-    /// [`bring_iface_up`] so the bounds check is unit-testable
-    /// without making a real syscall.
-    fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], String> {
-        let bytes = iface.as_bytes();
-        if bytes.len() >= libc::IFNAMSIZ {
+    /// True when a DHCP failure should trigger the static gvproxy fallback.
+    ///
+    /// The QEMU/slirp backend uses a different subnet (10.0.2.x) with its
+    /// own `ip=` autoconfig; applying the gvproxy address there would give
+    /// the wrong gateway and break connectivity. A success exit never needs
+    /// the fallback regardless of backend.
+    fn dhcp_fallback_applies(cmdline: &str, udhcpc_success: bool) -> bool {
+        if udhcpc_success {
+            return false;
+        }
+        !cmdline.split_whitespace().any(|t| t == "mvm.backend=qemu")
+    }
+
+    /// The gateway-local resolver for the active VMM's virtual network.
+    ///
+    /// QEMU user-mode networking serves DNS at 10.0.2.3; the gvproxy
+    /// backends (libkrun, Vz) at 192.168.127.1. Host-side resolution
+    /// through the gateway works on any network — baked public resolvers
+    /// only work where the local network permits direct external UDP/53.
+    fn resolver_seed(cmdline: &str) -> &'static [u8] {
+        if cmdline.split_whitespace().any(|t| t == "mvm.backend=qemu") {
+            b"nameserver 10.0.2.3\n"
+        } else {
+            b"nameserver 192.168.127.1\n"
+        }
+    }
+
+    /// Stage the gateway-resolver seed on tmpfs and bind-mount it over
+    /// the baked read-only `/etc/resolv.conf` so udhcpc's script (and
+    /// the lease it carries) can write DNS config through the mount.
+    fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
+        std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
+        std::fs::write("/run/mvm/resolv.conf", resolver_seed(cmdline))
+            .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
+        let st = Command::new("/bin/busybox")
+            .args([
+                "mount",
+                "--bind",
+                "/run/mvm/resolv.conf",
+                "/etc/resolv.conf",
+            ])
+            .status()
+            .map_err(|e| format!("spawn mount --bind resolv.conf: {e}"))?;
+        if !st.success() {
             return Err(format!(
-                "interface name '{iface}' is {} bytes; Linux IFNAMSIZ caps it at {}",
-                bytes.len(),
-                libc::IFNAMSIZ - 1,
+                "bind-mount resolv.conf exit {}",
+                st.code().unwrap_or(-1)
             ));
         }
-        let mut buf = [0 as libc::c_char; libc::IFNAMSIZ];
-        for (i, &b) in bytes.iter().enumerate() {
-            buf[i] = b as libc::c_char;
-        }
-        Ok(buf)
+        Ok(())
     }
 
     /// Bring a network interface administratively up via
     /// `ioctl(SIOCSIFFLAGS, IFF_UP)`. Equivalent to
     /// `ip link set dev <iface> up`, but issued directly so we
-    /// don't pin a new path-dependency in the ur-seed rootfs and
+    /// don't pin a new path-dependency in the builder rootfs and
     /// the error message names the failing ioctl. Called before
     /// `udhcpc` in [`setup_network`].
     fn bring_iface_up(iface: &str) -> Result<(), String> {
-        let name = encode_iface_name(iface)?;
+        let name = mvm_build::guest_net::encode_iface_name(iface)?;
 
         // SAFETY: socket(2) returns -1 on error (checked) or a
         // valid fd. We close it on every return path below.
@@ -2890,33 +2930,66 @@ mod linux {
         }
 
         #[test]
-        fn encode_iface_name_eth0_pads_with_nul() {
-            let buf = encode_iface_name("eth0").expect("eth0 fits");
-            assert_eq!(buf[0] as u8, b'e');
-            assert_eq!(buf[1] as u8, b't');
-            assert_eq!(buf[2] as u8, b'h');
-            assert_eq!(buf[3] as u8, b'0');
-            assert_eq!(buf[4] as u8, 0, "remainder NUL-padded");
-            assert_eq!(buf[libc::IFNAMSIZ - 1] as u8, 0);
+        fn dhcp_fallback_applies_non_qemu_failure() {
+            assert!(dhcp_fallback_applies(
+                "console=hvc0 root=/dev/vda rw",
+                false
+            ));
         }
 
         #[test]
-        fn encode_iface_name_max_length_succeeds() {
-            // 15 bytes + 1 NUL = exactly IFNAMSIZ.
-            let max = "a".repeat(libc::IFNAMSIZ - 1);
-            let buf = encode_iface_name(&max).expect("15-byte name fits");
-            for byte in buf.iter().take(libc::IFNAMSIZ - 1) {
-                assert_eq!(*byte as u8, b'a');
-            }
-            assert_eq!(buf[libc::IFNAMSIZ - 1] as u8, 0, "NUL terminator");
+        fn dhcp_fallback_applies_qemu_no_fallback() {
+            // QEMU uses a different subnet; the static gvproxy address must not
+            // be applied there.
+            assert!(!dhcp_fallback_applies(
+                "console=hvc0 mvm.backend=qemu root=/dev/vda",
+                false
+            ));
         }
 
         #[test]
-        fn encode_iface_name_too_long_errors() {
-            let over = "a".repeat(libc::IFNAMSIZ);
-            let err = encode_iface_name(&over).expect_err("IFNAMSIZ-byte name rejected");
-            assert!(err.contains("IFNAMSIZ"), "err mentions limit: {err}");
-            assert!(err.contains(&over), "err includes the offending name");
+        fn dhcp_fallback_applies_success_no_fallback() {
+            assert!(!dhcp_fallback_applies(
+                "console=hvc0 root=/dev/vda rw",
+                true
+            ));
+        }
+
+        #[test]
+        fn dhcp_fallback_applies_qemu_prefix_not_matched() {
+            // A token that merely starts with "mvm.backend=qemu" must not
+            // match — whole-word only.
+            assert!(dhcp_fallback_applies(
+                "console=hvc0 mvm.backend=qemux root=/dev/vda",
+                false
+            ));
+        }
+
+        #[test]
+        fn resolver_seed_gvproxy_backend() {
+            assert_eq!(
+                resolver_seed("console=hvc0 root=/dev/vda rw"),
+                b"nameserver 192.168.127.1\n"
+            );
+        }
+
+        #[test]
+        fn resolver_seed_qemu_backend() {
+            assert_eq!(
+                resolver_seed("console=hvc0 mvm.backend=qemu root=/dev/vda"),
+                b"nameserver 10.0.2.3\n"
+            );
+        }
+
+        #[test]
+        fn resolver_seed_qemu_token_must_be_whole_word() {
+            // A token that starts with "mvm.backend=qemu" but has trailing
+            // characters is not a match — the seed must stay at gvproxy's
+            // gateway resolver.
+            assert_eq!(
+                resolver_seed("console=hvc0 mvm.backend=qemux root=/dev/vda"),
+                b"nameserver 192.168.127.1\n"
+            );
         }
 
         /// `run_job_streaming` calls the

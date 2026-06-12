@@ -151,14 +151,14 @@ Per-arm posture keeps the lockdown exactly where the threat is.
 - Modify: `crates/mvm-build/src/bin/stage0-init.rs` (:178-260 — re-export/reuse)
 - Modify: `crates/mvm-build/src/bin/mvm-host-vm-init.rs` (`setup_network` :2185)
 
-- [ ] **B1: lift stage0's static-config ioctls into a shared module.** Move
+- [x] **B1: lift stage0's static-config ioctls into a shared module.** Move
   `configure_network_qemu`'s `ifreq_for` / `SIOCSIFADDR` / `SIOCSIFNETMASK` /
   `SIOCADDRT` plumbing (`stage0-init.rs:178-260`) into
   `mvm_build::guest_net::configure_static(iface, addr, netmask, gateway)`
   (cfg-gated linux like the bins). stage0-init's QEMU arm calls it with
   `10.0.2.15/24 via 10.0.2.2`; no behavior change there. Unit-test the pure parts
   (address parsing/encoding) on the host.
-- [ ] **B2: static fallback in `setup_network`.** When udhcpc exits nonzero on a
+- [x] **B2: static fallback in `setup_network`.** When udhcpc exits nonzero on a
   gvproxy backend, fall back instead of warning-and-continuing:
 
   ```rust
@@ -186,7 +186,7 @@ Per-arm posture keeps the lockdown exactly where the threat is.
   gvproxy's lease table. Outcome: either a fix in `vz_builder.rs` /
   `mvm-vz-supervisor`, or a documented defer with the static fallback as the
   steady-state (record under "deferred follow-ups" below).
-- [ ] **B4: gates + commit** `fix(builder-vm): static gvproxy fallback when DHCP
+- [x] **B4: gates + commit** `fix(builder-vm): static gvproxy fallback when DHCP
   yields no lease`.
 
 ## WS-C — writable resolv.conf seeded with the gateway resolver
@@ -194,37 +194,18 @@ Per-arm posture keeps the lockdown exactly where the threat is.
 **Files:**
 - Modify: `crates/mvm-build/src/bin/mvm-host-vm-init.rs` (`setup_network` :2185)
 
-- [ ] **C1: bind-mount a `/run`-backed resolv.conf before udhcpc.** Replace the
+- [x] **C1: bind-mount a `/run`-backed resolv.conf before udhcpc.** Replace the
   no-op fallback copy (the image bakes no `/etc/resolv.conf.fallback`; the file is
-  a read-only regular file, not a `/run` symlink — both comments are wrong) with:
-
-  ```rust
-  // The rootfs is ro and /etc/resolv.conf is a baked file, so leased
-  // DNS can never land there. Seed a tmpfs copy with the gateway
-  // resolver (gvproxy answers DNS on the virtual gateway address and
-  // forwards via the host's resolver chain — environment-independent,
-  // unlike baked public resolvers) and bind-mount it over /etc so
-  // udhcpc's script and the lease can update it.
-  std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
-  std::fs::write("/run/mvm/resolv.conf", b"nameserver 192.168.127.1\n")
-      .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
-  let st = Command::new("/bin/busybox")
-      .args(["mount", "--bind", "/run/mvm/resolv.conf", "/etc/resolv.conf"])
-      .status()
-      .map_err(|e| format!("spawn mount --bind resolv.conf: {e}"))?;
-  if !st.success() {
-      return Err(format!("bind-mount resolv.conf exit {}", st.code().unwrap_or(-1)));
-  }
-  ```
-
-  Run this before `bring_iface_up`/udhcpc so the DHCP script's
-  `> /etc/resolv.conf` writes through the bind-mount onto tmpfs (this also makes
-  the passt path's leased DNS effective on Linux, where the same ro-write failure
-  exists). The QEMU builder arm is untouched (Debian initramfs `ip=` autoconfig).
-- [ ] **C2: delete the stale fallback-copy block + wrong comments** (the
+  a read-only regular file, not a `/run` symlink — both comments are wrong) with a
+  `resolver_seed(cmdline)`-seeded write + busybox bind-mount. *(Deviation from
+  plan text: `resolver_seed` is per-backend — QEMU gets `10.0.2.3`, gvproxy gets
+  `192.168.127.1` — superseding the "QEMU builder arm untouched" clause; the
+  per-backend seed matches stage0's proven values and gives the QEMU builder the
+  correct DNS too.)*
+- [x] **C2: delete the stale fallback-copy block + wrong comments** (the
   `/etc/resolv.conf.fallback` seed at :2194-2203 and the "symlink into /run" /
   "udhcpc still sets the IP" prose).
-- [ ] **C3: gates + commit** `fix(builder-vm): writable gateway-resolver
+- [x] **C3: gates + commit** `fix(builder-vm): writable gateway-resolver
   resolv.conf via /run bind-mount`.
 
 ## WS-D — verification + resume the live Vz validation
