@@ -21,6 +21,12 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 toml = "0.8"
+# rcgen (pulled in transitively via mvm-vm-host's bound-host TLS path) carries
+# a blanket `impl<T: Into<String>> From<T>` that collides with an impl
+# `time` 0.3.48 added, breaking the build with E0119. There is no committed
+# lock here (cargo-fuzz gitignores it), so the bound lives in the manifest —
+# drop it once rcgen or time resolves the coherence clash.
+time = ">=0.3, <0.3.48"
 
 [dependencies.mvm-vm-host]
 path = ".."
