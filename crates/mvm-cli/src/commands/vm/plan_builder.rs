@@ -38,10 +38,11 @@
 use anyhow::Result;
 use chrono::{Duration, Utc};
 use mvm_core::plan::{
-    AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditTaxonomy,
-    DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId, PlanSeccompTier,
-    PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding,
-    SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
+    AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
+    AuditTaxonomy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId,
+    PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION,
+    SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
+    WorkloadIntent,
 };
 use rand::RngCore;
 use std::collections::BTreeMap;
@@ -146,6 +147,14 @@ pub struct SynthesisInput<'a> {
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
+    /// Caller-supplied audit labels merged into the synthesized plan's
+    /// `audit_labels`. They serialize inside the signed payload and are
+    /// inherited by every chain-signed audit entry. The profile-derived keys
+    /// (intent / admission_profile / seccomp_tier) take precedence — caller
+    /// labels cannot override them. Key format is caller-defined
+    /// (unconstrained); supervisor-injected per-event extras are applied
+    /// separately at audit-emit time and do not modify the plan's stored labels.
+    pub audit_labels: AuditLabels,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -190,7 +199,11 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         &egress_policy,
         &tool_policy,
     );
-    let audit_labels = audit_labels_for_profile(&admission_profile);
+    let mut audit_labels = audit_labels_for_profile(&admission_profile);
+    // Caller labels fill additional keys; profile-derived keys stay authoritative.
+    for (k, v) in &input.audit_labels {
+        audit_labels.entry(k.clone()).or_insert_with(|| v.clone());
+    }
 
     let resources = Resources {
         cpus: input.cpus.max(1),
@@ -356,6 +369,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            audit_labels: Default::default(),
         }
     }
 
@@ -621,5 +635,26 @@ mod tests {
         let json = serde_json::to_string(&plan).expect("plan serializes");
         let parsed: ExecutionPlan = serde_json::from_str(&json).expect("plan parses");
         assert_eq!(parsed.deps_volume, Some(binding));
+    }
+
+    #[test]
+    fn caller_audit_labels_merge_into_signed_plan() {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("origin.descriptor".to_string(), "blake3:abc".to_string());
+        // A reserved profile key the caller must NOT be able to override.
+        labels.insert("intent".to_string(), "spoofed".to_string());
+        let mut inp = input("vm");
+        inp.audit_labels = labels;
+        let plan = synthesize_plan(&inp).unwrap();
+        assert_eq!(plan.audit_labels["origin.descriptor"], "blake3:abc");
+        // Profile-derived key wins over the caller's attempt.
+        assert_ne!(plan.audit_labels["intent"], "spoofed");
+
+        // The label survives the sign -> verify round-trip inside the signed bytes.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let signed = mvm_core::plan::sign_plan(&plan, &key, "host:test");
+        let recovered =
+            mvm_core::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())]).unwrap();
+        assert_eq!(recovered.audit_labels["origin.descriptor"], "blake3:abc");
     }
 }

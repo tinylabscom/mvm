@@ -15,7 +15,7 @@ mod qemu_bridge;
 mod shared;
 mod storage;
 mod trust;
-mod vm;
+pub(crate) mod vm;
 
 #[cfg(test)]
 mod tests;
