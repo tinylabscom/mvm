@@ -303,13 +303,15 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
                         max: MAX_FILES_WRITE_DECODED_BYTES,
                     });
                 }
-                // Emit a shell hook that pipes the base64 string
-                // through `base64 -d` into the destination. Single
-                // quotes around the b64 token are safe — the
-                // standard alphabet contains no `'` characters.
+                // Emit a shell hook that materializes the file. Both
+                // the destination path and the payload are delivered
+                // via `base64 -d` so the shell line contains no
+                // raw user-controlled bytes — only STANDARD-alphabet
+                // base64 tokens, which contain no shell metacharacters.
+                let path_b64 = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
                 let line = format!(
-                    "mkdir -p \"$(dirname {path})\" && printf '%s' '{b64}' | base64 -d > {path}",
-                    path = shell_single_quote(path),
+                    "p=$(printf '%s' '{path_b64}' | base64 -d) && mkdir -p \"${{p%/*}}\" && printf '%s' '{b64}' | base64 -d > \"$p\"",
+                    path_b64 = path_b64,
                     b64 = bytes_b64,
                 );
                 before_start.push(HookCmd::Shell { line });
@@ -358,26 +360,6 @@ pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError>
         volumes: Vec::new(),
         extensions: BTreeMap::new(),
     })
-}
-
-/// Wrap `s` in single quotes for shell-safe interpolation, escaping
-/// any single quotes inside. Use only when emitting shell lines for
-/// `HookCmd::Shell` — argv hooks don't need it.
-fn shell_single_quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 #[cfg(test)]
@@ -484,7 +466,12 @@ mod tests {
         match &app.hooks.before_start[0] {
             HookCmd::Shell { line } => {
                 assert!(line.contains("base64 -d"), "got: {line}");
-                assert!(line.contains("/app/config.json"), "got: {line}");
+                // Path is base64-encoded in the line (injection hardening):
+                // the literal path does not appear as raw bytes.
+                assert!(
+                    line.contains(&b64(b"/app/config.json")),
+                    "path b64 missing: {line}"
+                );
                 assert!(
                     line.contains(&b64(b"{\"hello\":\"world\"}\n")),
                     "got: {line}"
@@ -616,13 +603,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shell_single_quote_escapes_apostrophes() {
-        assert_eq!(shell_single_quote("hello"), "'hello'");
-        assert_eq!(shell_single_quote(""), "''");
-        assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
-    }
-
     fn start_op(argv: &[&str]) -> RecordedOp {
         RecordedOp::CommandStart {
             argv: argv.iter().map(|s| s.to_string()).collect(),
@@ -685,6 +665,70 @@ mod tests {
         assert!(
             matches!(err, LowerError::DuplicateFilesWritePath { .. }),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn files_write_b64_with_single_quote_refuses() {
+        // The lowering interpolates the b64 token inside single
+        // quotes in a shell line; the STANDARD alphabet containing
+        // no quote character is the property that makes that safe.
+        // A decoder/alphabet change that lets a quote through is an
+        // injection primitive — this pin must fail loudly first.
+        let ops = vec![
+            RecordedOp::FilesWrite {
+                path: "/app/x".to_string(),
+                bytes_b64: "ab'c=".to_string(),
+            },
+            start_op(&["/bin/true"]),
+        ];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::InvalidFilesWriteB64 { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn files_write_b64_url_safe_alphabet_refuses() {
+        // URL_SAFE uses `-` and `_`; the lowering is pinned to
+        // STANDARD. Accepting both alphabets silently would widen
+        // the interpolation surface.
+        let ops = vec![
+            RecordedOp::FilesWrite {
+                path: "/app/x".to_string(),
+                bytes_b64: "a-b_".to_string(),
+            },
+            start_op(&["/bin/true"]),
+        ];
+        let err = compile_recording(&rec_with_ops(ops)).unwrap_err();
+        assert!(
+            matches!(err, LowerError::InvalidFilesWriteB64 { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn files_write_hostile_path_is_single_quoted_in_hook() {
+        // The path delivery mechanism is base64-encoding: the
+        // generated shell line carries only STANDARD-alphabet tokens,
+        // which contain no shell metacharacters. Verify that the
+        // hostile path's raw bytes do not appear in the line and
+        // that no injection breakout sequence survives.
+        let hostile = "/app/x'; rm -rf /tmp/pwn; echo '";
+        let ops = vec![write_op(hostile, b"x"), start_op(&["/bin/true"])];
+        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        let hooks = &wl.apps[0].hooks.before_start;
+        let HookCmd::Shell { line } = &hooks[0] else {
+            panic!("FilesWrite must lower to a Shell hook, got {hooks:?}");
+        };
+        // The path must be delivered via its base64 form — raw bytes absent.
+        let path_b64 = base64::engine::general_purpose::STANDARD.encode(hostile.as_bytes());
+        assert!(line.contains(&path_b64), "path b64 missing: {line}");
+        assert!(!line.contains("'; rm -rf"), "unescaped breakout: {line}");
+        assert!(
+            !line.contains("; rm -rf"),
+            "bare metacharacter in line: {line}"
         );
     }
 
