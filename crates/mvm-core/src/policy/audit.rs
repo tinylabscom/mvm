@@ -360,7 +360,7 @@ pub enum LocalAuditKind {
     //   - additional key=value pairs comma-separated, no spaces.
     //
     /// L4 allow decision: a flow matched a policy rule and was
-    /// permitted. Fired from `L4Policy::evaluate` and from the
+    /// permitted. Fired from `CanonicalEgress::permits` and from the
     /// iptables FORWARD accept path (when wired). Detail format:
     ///   `proto=<tcp|udp>,dst=<ip:port>,rule=<host:port-or-cidr>`
     NetworkPolicyAllow,

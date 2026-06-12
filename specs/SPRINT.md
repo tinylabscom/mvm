@@ -2607,10 +2607,11 @@ each has a witness. The sprint lands those preconditions incrementally.
 - **P7 — secret-scan admission** ✅ LANDED (Plan 187, #811): `scan_recording_for_secrets`
   (env/argv/decoded-file payloads via the Plan 129 `SecretsScanner`) hard-refuses
   `run --mode plan` on embedded raw secrets; `SecretRef` skipped; compile warns.
-- **P5 kernel close-out** 🔴 spec'd (Plan 190): kernel L4 egress decision converges on
-  `CanonicalEgress::permits` via a lenient `canonicalize_l4`, deleting the `L4Policy`
-  duplicate, with **zero claim-10 behaviour change** (whole-policy-fail-closed variant
-  rejected).
+- **P5 kernel close-out** ✅ LANDED (Plan 190): kernel L4 egress decision converges on
+  `CanonicalEgress::permits` via `canonicalize_l4` (lenient — mandatory-deny-overlap
+  allowed at construction; runtime `permits()` + `MandatoryDenyEgressScan` enforce it);
+  `L4Policy`/`LiveL4Gate` duplicate deleted; claim-10 witnesses migrated; zero behaviour
+  change; equivalence witness `kernel_egress_canonical_permits_agrees_with_hand_written_oracle`.
 - **ADR-002 Tier-0 note** ✅ LANDED (#816): records the `wasm-sandbox` backend off the
   isolation scale + the Tier-0 single-principal threat-model framing.
 

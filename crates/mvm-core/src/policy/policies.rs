@@ -77,8 +77,8 @@ pub enum FlowByteLogDirections {
 }
 
 /// Wire-format L4 rule row inside `[[network.l4]]`. The supervisor's
-/// `LiveL4Gate::from_specs` parses `dst_cidr` via `ipnet::IpNet` and
-/// folds the rows into a concrete `mvm_hostd::supervisor::L4Policy`; this
+/// `canonicalize_l4` (in `mvm_core::policy`) parses `dst_cidr` via
+/// `ipnet::IpNet` and lowers the rows into a `CanonicalEgress`; this
 /// crate stays free of `ipnet` so the policy schema doesn't take a
 /// hard dep on the address-family crate.
 ///
@@ -100,9 +100,9 @@ pub enum FlowByteLogDirections {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct L4RuleSpec {
-    /// `"tcp"` or `"udp"`. The supervisor's `LiveL4Gate::from_specs`
-    /// refuses unknown protocols at translate time (loud failure at
-    /// admission, not silent drop at runtime).
+    /// `"tcp"` or `"udp"`. `canonicalize_l4` refuses unknown protocols
+    /// at translate time (loud failure at admission, not silent drop at
+    /// runtime).
     pub proto: String,
     /// Destination CIDR — parsed by `ipnet::IpNet`; both v4 and v6
     /// supported. The supervisor refuses unparseable CIDRs at

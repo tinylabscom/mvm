@@ -67,7 +67,6 @@ use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
 use crate::supervisor::network::stages::{
     RedactingSubstitution, ScanStage, SubstitutionStage, build_egress_scan,
 };
-use crate::supervisor::proxy::l4::LiveL4Gate;
 use std::collections::HashSet;
 
 // ============================================================================
@@ -544,9 +543,9 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                     chrono::Utc::now(),
                     &EmergencyDeny::default(),
                 );
-                let l4 = LiveL4Gate::from_specs(&eff.network.l4)
-                    .map(|gate| gate.policy)
-                    .unwrap_or_else(|_| crate::supervisor::proxy::l4::L4Policy::deny_all());
+                let l4 = mvm_core::policy::canonicalize_l4(&eff.network.l4).unwrap_or_else(|_| {
+                    mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new())
+                });
                 // DNS hostname gating from the egress allow-list's hosts — unless
                 // egress is "open" (no host restriction). An empty list adds no
                 // sink-hole (build_egress_scan), so "open"/unset stays ungated.
@@ -1774,8 +1773,9 @@ mod tests {
     // The live default scan is MandatoryDenyEgressScan; the bridge tests want a
     // pass-through default, so wiring_with keeps NoopScan (test-scoped import).
     use crate::supervisor::network::stages::{NoopScan, NoopSubstitution};
-    use crate::supervisor::proxy::l4::{L4Policy, LiveL4Gate};
     use mvm_core::policy::L4RuleSpec;
+    use mvm_core::policy::canonicalize_l4;
+    use mvm_core::policy::projection::CanonicalEgress;
 
     // -----------------------------------------------------------------
     // FlowPolicy
@@ -2577,7 +2577,10 @@ mod tests {
 
     /// A bridge `ObserverWiring` whose egress scan is the real production scan for
     /// `l4` + `dns_allow` (mandatory-deny + L4 + DNS sink-hole), no observers.
-    fn wiring_with_egress_scan(l4: Option<L4Policy>, dns_allow: Vec<String>) -> ObserverWiring {
+    fn wiring_with_egress_scan(
+        l4: Option<CanonicalEgress>,
+        dns_allow: Vec<String>,
+    ) -> ObserverWiring {
         ObserverWiring {
             observers: vec![],
             latency: Arc::new(ObserverLatency::new("vm-test", "t")),
@@ -2619,7 +2622,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
         let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
-        // deny_all L4 policy → the egress frame to 93.184.216.34:443 has no
+        // deny_all egress → the egress frame to 93.184.216.34:443 has no
         // matching rule → L4PolicyScan drops it at the chokepoint.
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
             gvproxy_path.clone(),
@@ -2628,7 +2631,7 @@ mod tests {
             "t".to_string(),
             policy,
             tx,
-            wiring_with_egress_scan(Some(L4Policy::deny_all()), vec![]),
+            wiring_with_egress_scan(Some(CanonicalEgress::Rules(vec![])), vec![]),
         ));
 
         let libkrun = connect_libkrun(&sup_listen).await;
@@ -2678,14 +2681,13 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
         let policy: Arc<dyn FlowPolicy> = Arc::new(AllowAll);
         // Allow tcp to exactly 93.184.216.34:443 — the frame's destination.
-        let allow = LiveL4Gate::from_specs(&[L4RuleSpec {
+        let allow = canonicalize_l4(&[L4RuleSpec {
             proto: "tcp".into(),
             dst_cidr: "93.184.216.34/32".into(),
             port_lo: 443,
             port_hi: 443,
         }])
-        .unwrap()
-        .policy;
+        .unwrap();
         let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),

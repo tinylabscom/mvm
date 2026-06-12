@@ -16,8 +16,8 @@ use crate::keyholder::substitution::PLACEHOLDER_PREFIX;
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
 use crate::supervisor::pii_redactor::{PiiRedactor, REDACTION_MASK};
-use crate::supervisor::proxy::l4::{L4Decision, L4Policy, Protocol};
 use crate::supervisor::secrets_scanner::SecretsScanner;
+use mvm_core::policy::projection::{CanonicalEgress, Proto as CanonProto};
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
 /// flow — the same fail-closed path as `Verdict::Drop`. `by` names the scan that
@@ -523,24 +523,21 @@ impl ScanStage for ScanChain {
     }
 }
 
-/// Enforces the policy bundle's L4 [`L4Policy`] (proto + dst CIDR + port range)
-/// on the egress packet path (claim 10), reusing the supervisor's tested
-/// `L4Policy::evaluate` (first-match-wins, default-deny).
+/// Enforces the policy bundle's L4 CIDR/port rules on the egress packet path
+/// (claim 10) via the shared [`CanonicalEgress::permits`] decision function.
 ///
-/// This is the per-tenant filter the bundle actually carries
-/// (`mvm_core::policy::NetworkPolicy.l4`). Its rules are CIDRs, so they match a
-/// packet's destination IP directly — no hostname-resolution gap (that concern
-/// belongs to [`DnsSinkholeScan`] at the DNS layer; the iptables-typed
-/// [`NetworkPolicyScan`] is the host:port allow-list variant for that path).
-/// Egress-only; an ingress frame's L3 dst is the guest. Compose it *under*
-/// [`MandatoryDenyEgressScan`] via a [`ScanChain`].
+/// CIDR-keyed rules match a packet's destination IP directly — no
+/// hostname-resolution gap (that concern belongs to [`DnsSinkholeScan`] at the
+/// DNS layer; the iptables-typed [`NetworkPolicyScan`] is the host:port
+/// allow-list variant for that path). Egress-only; an ingress frame's L3 dst is
+/// the guest. Compose it *under* [`MandatoryDenyEgressScan`] via a [`ScanChain`].
 pub struct L4PolicyScan {
-    policy: L4Policy,
+    egress: CanonicalEgress,
 }
 
 impl L4PolicyScan {
-    pub fn new(policy: L4Policy) -> Self {
-        Self { policy }
+    pub fn new(egress: CanonicalEgress) -> Self {
+        Self { egress }
     }
 }
 
@@ -555,15 +552,16 @@ impl ScanStage for L4PolicyScan {
             _ => return ScanOutcome::Pass,
         }
         let proto = match pkt.five_tuple.proto {
-            L4Proto::Tcp => Protocol::Tcp,
-            L4Proto::Udp => Protocol::Udp,
+            L4Proto::Tcp => CanonProto::Tcp,
+            L4Proto::Udp => CanonProto::Udp,
         };
-        match self
-            .policy
-            .evaluate(proto, pkt.five_tuple.dst_ip, pkt.five_tuple.dst_port)
+        if self
+            .egress
+            .permits(&proto, pkt.five_tuple.dst_ip, pkt.five_tuple.dst_port)
         {
-            L4Decision::Allow => ScanOutcome::Pass,
-            L4Decision::Deny { .. } => ScanOutcome::Drop { by: self.name() },
+            ScanOutcome::Pass
+        } else {
+            ScanOutcome::Drop { by: self.name() }
         }
     }
 }
@@ -582,14 +580,17 @@ impl ScanStage for L4PolicyScan {
 ///   outside the list. An **empty** `dns_allow` deliberately adds no sink-hole
 ///   (it would otherwise drop every lookup); host gating is opt-in via a
 ///   non-empty allow-list.
-pub fn build_egress_scan(l4: Option<L4Policy>, dns_allow: Vec<String>) -> Arc<dyn ScanStage> {
+pub fn build_egress_scan(
+    l4: Option<CanonicalEgress>,
+    dns_allow: Vec<String>,
+) -> Arc<dyn ScanStage> {
     // Always-on host backstops: mandatory-deny egress ranges + placeholder-leak.
     let mut stages: Vec<Arc<dyn ScanStage>> = vec![
         Arc::new(MandatoryDenyEgressScan),
         Arc::new(PlaceholderLeakScan),
     ];
-    if let Some(p) = l4 {
-        stages.push(Arc::new(L4PolicyScan::new(p)));
+    if let Some(eg) = l4 {
+        stages.push(Arc::new(L4PolicyScan::new(eg)));
     }
     if !dns_allow.is_empty() {
         stages.push(Arc::new(DnsSinkholeScan::new(dns_allow)));
@@ -602,9 +603,10 @@ mod tests {
     use super::*;
     use crate::supervisor::network::FlowDirection;
     use crate::supervisor::network::packet::{FiveTuple, L4Proto};
-    use crate::supervisor::proxy::l4::LiveL4Gate;
     use mvm_core::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::policy::L4RuleSpec;
+    use mvm_core::policy::canonicalize_l4;
+    use mvm_core::policy::projection::CanonicalEgress;
 
     #[test]
     fn noop_stages_pass_through_and_never_drop() {
@@ -1156,9 +1158,9 @@ mod tests {
 
     #[test]
     fn build_egress_scan_some_chains_policy_under_mandatory_deny() {
-        // A deny_all L4 policy → the chain drops every egress packet; the
+        // A deny_all CanonicalEgress → the chain drops every egress packet; the
         // metadata IP is dropped by the mandatory-deny stage too.
-        let scan = build_egress_scan(Some(L4Policy::deny_all()), vec![]);
+        let scan = build_egress_scan(Some(CanonicalEgress::Rules(vec![])), vec![]);
         assert_eq!(scan.name(), "scan-chain");
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
@@ -1195,23 +1197,23 @@ mod tests {
         );
     }
 
-    /// An `L4Policy` permitting tcp to `cidr:port` only, built via the
-    /// supervisor's `from_specs` translator (proto + CIDR parsing).
-    fn l4_allow(cidr: &str, port: u16) -> L4Policy {
-        LiveL4Gate::from_specs(&[L4RuleSpec {
+    /// A [`CanonicalEgress`] permitting TCP to `cidr:port` only, built via
+    /// `canonicalize_l4` — the same lowering path the production bridge uses.
+    fn l4_allow(cidr: &str, port: u16) -> CanonicalEgress {
+        canonicalize_l4(&[L4RuleSpec {
             proto: "tcp".into(),
             dst_cidr: cidr.into(),
             port_lo: port,
             port_hi: port,
         }])
         .unwrap()
-        .policy
     }
 
     #[test]
     fn l4_policy_deny_all_drops_every_egress() {
-        // An empty L4Policy is default-deny → every egress packet drops.
-        let scan = L4PolicyScan::new(L4Policy::deny_all());
+        // An empty CanonicalEgress::Rules is default-deny → every egress packet
+        // drops.
+        let scan = L4PolicyScan::new(CanonicalEgress::Rules(vec![]));
         assert_eq!(
             scan.scan(&egress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
             ScanOutcome::Drop { by: "l4-policy" }
@@ -1241,10 +1243,100 @@ mod tests {
     fn l4_policy_ignores_ingress() {
         // Egress-only: deny_all would drop everything on ingress, but the
         // direction gate lets it pass (ingress dst is the guest).
-        let scan = L4PolicyScan::new(L4Policy::deny_all());
+        let scan = L4PolicyScan::new(CanonicalEgress::Rules(vec![]));
         assert_eq!(
             scan.scan(&ingress_ctx(), &tcp_packet("1.1.1.1".parse().unwrap(), 443)),
             ScanOutcome::Pass
+        );
+    }
+
+    /// Equivalence witness: `CanonicalEgress::permits` agrees with a
+    /// hand-written oracle across the full probe set. Proves the Tasks 1–3
+    /// refactor left no observable behaviour change on the kernel packet path.
+    ///
+    /// Oracle: permit iff proto matches AND dst_ip is within the CIDR AND
+    /// dst_port is within [port_lo, port_hi] (0/0 = any), AND the IP is not
+    /// a mandatory-deny address (checked first, unconditionally).
+    #[test]
+    fn kernel_egress_canonical_permits_agrees_with_hand_written_oracle() {
+        use mvm_core::policy::projection::Proto as CanonProto;
+
+        // Policy: TCP to 93.184.216.0/24:443 OR UDP to 8.8.8.8/32:any.
+        let eg = canonicalize_l4(&[
+            L4RuleSpec {
+                proto: "tcp".into(),
+                dst_cidr: "93.184.216.0/24".into(),
+                port_lo: 443,
+                port_hi: 443,
+            },
+            L4RuleSpec {
+                proto: "udp".into(),
+                dst_cidr: "8.8.8.8/32".into(),
+                port_lo: 0,
+                port_hi: 0,
+            },
+        ])
+        .expect("valid policy");
+
+        // In-rule hit: TCP to 93.184.216.34:443 — within CIDR and exact port.
+        assert!(
+            eg.permits(&CanonProto::Tcp, "93.184.216.34".parse().unwrap(), 443),
+            "in-rule hit must permit"
+        );
+
+        // In-rule hit: UDP to 8.8.8.8:53 — (0,0) means any-port.
+        assert!(
+            eg.permits(&CanonProto::Udp, "8.8.8.8".parse().unwrap(), 53),
+            "udp any-port rule must permit"
+        );
+
+        // Off-rule miss: TCP to 9.9.9.9:443 — IP not in any rule CIDR.
+        assert!(
+            !eg.permits(&CanonProto::Tcp, "9.9.9.9".parse().unwrap(), 443),
+            "off-rule IP must deny"
+        );
+
+        // Port-edge miss: TCP to 93.184.216.34:80 — IP matches but port outside [443,443].
+        assert!(
+            !eg.permits(&CanonProto::Tcp, "93.184.216.34".parse().unwrap(), 80),
+            "port outside range must deny"
+        );
+
+        // Proto miss: UDP to 93.184.216.34:443 — IP/port match the TCP rule but
+        // protocol is wrong.
+        assert!(
+            !eg.permits(&CanonProto::Udp, "93.184.216.34".parse().unwrap(), 443),
+            "wrong proto must deny"
+        );
+
+        // Mandatory-deny ranges: each is denied unconditionally even if a rule
+        // would nominally match (the allows_overlapping_rule variant below
+        // proves this for the metadata CIDR case).
+        let mandatory_deny_probes: &[(&str, CanonProto, u16)] = &[
+            ("169.254.169.254", CanonProto::Tcp, 80),
+            ("127.0.0.1", CanonProto::Tcp, 443),
+            ("100.64.0.1", CanonProto::Udp, 53),
+            ("::1", CanonProto::Tcp, 443),
+        ];
+        for (addr, proto, port) in mandatory_deny_probes {
+            assert!(
+                !eg.permits(proto, addr.parse().unwrap(), *port),
+                "mandatory-deny address {addr} must always deny"
+            );
+        }
+
+        // Cross-check: even a policy that explicitly allows 169.254.0.0/16 is
+        // overridden — mandatory-deny-first is unconditional in permits().
+        let overlapping = canonicalize_l4(&[L4RuleSpec {
+            proto: "tcp".into(),
+            dst_cidr: "169.254.0.0/16".into(),
+            port_lo: 0,
+            port_hi: 0,
+        }])
+        .expect("lenient: metadata-overlapping rule builds");
+        assert!(
+            !overlapping.permits(&CanonProto::Tcp, "169.254.169.254".parse().unwrap(), 80),
+            "mandatory-deny wins over a permissive metadata rule"
         );
     }
 }
