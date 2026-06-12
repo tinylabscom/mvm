@@ -32,7 +32,8 @@ use super::shared::{
     VmStartParams, VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
     env_vars_to_drive_file, materialize_disk_volume, merge_volume_specs, parse_port_specs,
     parse_volume_spec, ports_to_drive_file, read_dir_to_drive_files, request_port_forward,
-    resolve_flake_ref, resolve_network_policy, vm_volume_from_spec_validated, wait_for_guest_agent,
+    resolve_flake_ref, resolve_network_policy, start_port_proxy, vm_volume_from_spec_validated,
+    wait_for_guest_agent,
 };
 use mvm_core::policy::PolicyBundle;
 
@@ -899,7 +900,7 @@ pub(in crate::commands) struct Args {
     /// under /data, /work, or /mnt (system mounts are read-only).
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
-    /// Hypervisor backend (firecracker, libkrun, qemu, apple-container, vz). Default: auto-detect per host
+    /// Hypervisor backend (firecracker, libkrun, qemu, vz). Default: auto-detect per host
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
     /// Port mapping (format: HOST:GUEST or PORT). Repeatable
@@ -1630,7 +1631,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
                     && let (Ok(h), Ok(g)) = (host.parse::<u16>(), guest.parse::<u16>())
                 {
                     let _ = request_port_forward(&vm_name, g);
-                    mvm_backend::providers::apple_container::start_port_proxy(&vm_name, h, g);
+                    start_port_proxy(&vm_name, h, g);
                     ui::info(&format!("Forwarding localhost:{h} → guest tcp/{g} (vsock)"));
                 }
             }
@@ -1784,7 +1785,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
     };
 
     let backend_label = match effective_hypervisor {
-        "apple-container" => "Apple Container",
+        "vz" => "Apple Virtualization",
         "qemu" => "QEMU (microvm.nix)",
         _ => "Firecracker VM",
     };
@@ -2065,42 +2066,12 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
             }
         }
 
-        // Apple Container with -d: install a launchd agent instead of
-        // starting the VM in this process. The agent runs as a proper
-        // macOS service with its own RunLoop.
-        if detach && effective_hypervisor == "apple-container" {
-            // Sign the binary before installing the launchd agent so the
-            // daemon process launches with the entitlement already in place.
-            mvm_backend::providers::apple_container::ensure_signed();
-
-            // Build is already done — install launchd agent with the
-            // resolved kernel/rootfs paths (no rebuild in the daemon).
-            // Serialize port mappings for the daemon
-            let port_specs: Vec<String> = parse_port_specs(ports)
-                .unwrap_or_default()
-                .iter()
-                .map(|p| format!("{}:{}", p.host, p.guest))
-                .collect();
-
-            if let Err(e) = mvm_backend::providers::apple_container::install_launchd_direct(
-                &start_config.name,
-                start_config.kernel_path.as_deref().unwrap_or(""),
-                &start_config.rootfs_path,
-                start_config.cpus,
-                start_config.memory_mib as u64,
-                &port_specs,
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            {
-                emit_failed_if(&admission_main, "launchd-install", &e);
-                return Err(e);
-            }
-            // The launchd agent is the actual VM owner now; treat
-            // install success as launch success for audit purposes.
-            emit_launched_if(&admission_main, effective_hypervisor);
-            println!("{vm_name_owned}");
-            return Ok(());
-        }
+        // The Vz supervisor detaches on its own — `backend.start()`
+        // spawns a background child that writes a PID file under the
+        // per-VM state dir and outlives this process, reaped later by
+        // `down`. So `up -d` on Vz needs no separate daemon machinery;
+        // it falls through to the normal start path below and returns
+        // (the persistent-agent wait further down is skipped for `detach`).
 
         enforce_shares_if(&admission_main, &start_config.volumes)?;
         // The Firecracker egress moat (substitution endpoint + nft TAP
@@ -2155,20 +2126,26 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 
     mvm_core::audit_emit!(VmStart, vm: &vm_name_owned);
 
-    // libkrun / firecracker launch a detached supervisor daemon, so `up`
-    // returns after launch (unlike apple-container below, which blocks
-    // in-process). Verify the guest agent here anyway: without it, `up
-    // --hypervisor libkrun` exits 0 the instant the daemon spawns — never
+    // Vz with -d: the supervisor already detached during `start()`, so
+    // there is nothing to keep alive in this process. Print the name
+    // (scripting contract) and return without the agent-wait below.
+    if detach && effective_hypervisor == "vz" {
+        println!("{vm_name_owned}");
+        return Ok(());
+    }
+
+    // libkrun / firecracker / vz all launch a detached supervisor daemon,
+    // so `up` returns after launch. Verify the guest agent here anyway:
+    // without it, `up` exits 0 the instant the daemon spawns — never
     // checking that the guest actually booted and the agent answered —
     // so a real boot failure passes silently and `core_demo_e2e`'s
     // boot→ping proof is hollow (it only watches for this exact warning).
-    // `--detach` opts out (fire-and-forget, like the apple-container
-    // launchd path). apple-container keeps its own wait in its block.
-    // `--wait` (one-shot) skips this persistent-agent probe:
-    // the workload runs then `poweroff -f`s, so there is no agent to wait
-    // for — we wait for the VM to power off in the `wait` block below and
-    // read its captured exit code instead.
-    if matches!(effective_hypervisor, "libkrun" | "firecracker") && !detach && !wait {
+    // `--detach` opted out above (fire-and-forget). `--wait` (one-shot)
+    // skips this persistent-agent probe: the workload runs then
+    // `poweroff -f`s, so there is no agent to wait for — we wait for the
+    // VM to power off in the `wait` block below and read its captured exit
+    // code instead.
+    if matches!(effective_hypervisor, "libkrun" | "firecracker" | "vz") && !detach && !wait {
         ui::info("Waiting for guest agent...");
         record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
         if wait_for_guest_agent(&vm_name_owned, 30) {
@@ -2215,134 +2192,6 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
         if code != 0 {
             std::process::exit(code);
         }
-        return Ok(());
-    }
-
-    // Apple Virtualization VMs live in-process — the process must stay alive.
-    if effective_hypervisor == "apple-container" && !detach {
-        // Services-health: wait for the
-        // guest agent unconditionally (was previously gated on
-        // `has_ports`), then poll integration health. Every Apple
-        // Container up now records `AgentConnecting` / `AgentReady`
-        // / `ServicesStarting` / `ServicesReady`, so `mvmctl ls
-        // --json` shows a useful wait reason for every VM.
-        ui::info("Waiting for guest agent...");
-        record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentConnecting);
-        // (netinit audit emission below this site, after the
-        // wait_for_guest_agent call succeeds — see the matching
-        // FC path for the same wiring.)
-        let agent_ready = wait_for_guest_agent(&vm_name_owned, 30);
-        if agent_ready {
-            record_vm_readiness(&vm_name_owned, InstanceReadiness::AgentReady);
-            // User volumes are mounted in-guest by mkGuest's /init from
-            // the `mvm.uvols=` kernel cmdline (the backend attached each
-            // as a virtio-fs tag) — no post-boot RPC needed here.
-            // Same audit-emit as the FC path. Apple
-            // Container backend captures the guest console to
-            // the same `<vm_dir>/console.log` convention; the
-            // emit_for_vm helper handles a missing log file by
-            // returning Ok(None).
-            if let Err(e) = mvm_backend::netinit_audit::emit_for_vm(&vm_name_owned) {
-                tracing::debug!(
-                    vm = %vm_name_owned,
-                    error = %e,
-                    "netinit audit emit skipped (best-effort)"
-                );
-            }
-            let timeout = std::time::Duration::from_secs(services_health_timeout_secs);
-            super::readiness::wait_for_services_ready(&vm_name_owned, timeout);
-        } else {
-            ui::warn("Guest agent not reachable.");
-        }
-
-        // Set up port forwarding via vsock (no guest IP needed) —
-        // requires the agent, so only when the wait above succeeded
-        // AND there are ports to forward.
-        if agent_ready && has_ports {
-            let pm_list = parse_port_specs(ports).unwrap_or_default();
-
-            // Tell guest agent to start vsock forwarders
-            for pm in &pm_list {
-                match request_port_forward(&vm_name_owned, pm.guest) {
-                    Ok(vsock_port) => {
-                        ui::info(&format!(
-                            "Guest forwarding vsock:{vsock_port} → tcp/{}",
-                            pm.guest
-                        ));
-                    }
-                    Err(e) => {
-                        ui::warn(&format!(
-                            "Failed to set up guest forwarder for port {}: {e}",
-                            pm.guest
-                        ));
-                    }
-                }
-            }
-
-            // Start host-side proxies
-            for pm in &pm_list {
-                mvm_backend::providers::apple_container::start_port_proxy(
-                    &vm_name_owned,
-                    pm.host,
-                    pm.guest,
-                );
-                ui::info(&format!(
-                    "Forwarding localhost:{} → guest tcp/{} (vsock)",
-                    pm.host, pm.guest
-                ));
-            }
-
-            // Persist port mappings so `ps` can display them
-            let ports_str: Vec<String> = pm_list
-                .iter()
-                .map(|p| format!("{}:{}", p.host, p.guest))
-                .collect();
-            let ports_file = format!(
-                "{}/.mvm/vms/{}/ports",
-                std::env::var("HOME").unwrap_or_default(),
-                vm_name_owned
-            );
-            let _ = std::fs::write(&ports_file, ports_str.join(","));
-        } else if !agent_ready && has_ports {
-            ui::warn("Port forwarding unavailable — guest agent not reachable.");
-        }
-
-        ui::info(&format!(
-            "VM '{}' running. Press Ctrl+C to stop.",
-            vm_name_owned
-        ));
-
-        // Block until signaled (Ctrl+C or SIGTERM). Degraded
-        // follow-up: same periodic
-        // integration-health poll as the direct-boot wait above —
-        // every ~10 s, watch for `Active` → `Error` regressions and
-        // flip readiness to `Degraded { unhealthy }`. The monitor
-        // dedupes; identical snapshots don't thrash the registry.
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let pair2 = pair.clone();
-        let _ = ctrlc::set_handler(move || {
-            let (lock, cvar) = &*pair2;
-            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
-            cvar.notify_all();
-        });
-
-        let (lock, cvar) = &*pair;
-        let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut monitor = super::readiness::ServicesHealthMonitor::new();
-        let mut next_health_poll = std::time::Instant::now() + DEGRADED_POLL_INTERVAL;
-        while !*stopped {
-            stopped = cvar
-                .wait_timeout(stopped, std::time::Duration::from_secs(1))
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-            if !*stopped && std::time::Instant::now() >= next_health_poll {
-                let _ = monitor.observe_and_record(&vm_name_owned);
-                next_health_poll = std::time::Instant::now() + DEGRADED_POLL_INTERVAL;
-            }
-        }
-
-        ui::info(&format!("Stopping VM '{}'...", vm_name_owned));
-        let _ = backend.stop(&mvm_core::vm_backend::VmId(vm_name_owned.clone()));
         return Ok(());
     }
 
@@ -2547,7 +2396,7 @@ pub(super) fn cmd_run(params: RunParams<'_>) -> Result<()> {
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
 /// probe. **Firecracker-only**: it's the sole backend that attaches the
 /// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
-/// libkrun/Vz/apple-container ignore the fields, so we skip them.
+/// libkrun/Vz ignore the fields, so we skip them.
 /// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
 /// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
 /// — no build, no download, no `nix` — so this is safe on every host.

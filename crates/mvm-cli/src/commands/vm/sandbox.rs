@@ -176,7 +176,7 @@ fn emit_gc_summary(summary: &GcSummary, json: bool) -> Result<()> {
 
 fn collect_live_vm_names() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    for hypervisor in ["apple-container", "firecracker"] {
+    for hypervisor in ["vz", "firecracker"] {
         let backend = AnyBackend::from_hypervisor(hypervisor);
         let Ok(vms) = backend.list() else { continue };
         for vm in vms {

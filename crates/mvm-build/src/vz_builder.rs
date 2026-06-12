@@ -980,6 +980,17 @@ pub struct VzPersistentBuilderVm {
     /// Host directory bound at `/work` in the guest. Bound at VM
     /// start, not per-dispatch.
     workspace_root: PathBuf,
+    /// Caller-chosen session id. `None` mints a random one per start
+    /// (the warm-pool default). A stable id gives a stable state dir
+    /// so a *separate* process — `mvmctl dev down` — can find the PID
+    /// file and reap the supervisor without holding the in-memory
+    /// handle.
+    session_id: Option<String>,
+    /// Also open the guest-agent vsock port (5252) alongside the
+    /// builder-dispatch port. The warm-pool path only needs dispatch;
+    /// the long-lived dev VM additionally serves `mvmctl dev shell` /
+    /// `console` / `status` over the guest agent.
+    expose_guest_agent: bool,
 }
 
 impl VzPersistentBuilderVm {
@@ -995,6 +1006,8 @@ impl VzPersistentBuilderVm {
             image_override: None,
             supervisor_path_override: None,
             workspace_root: workspace_root.into(),
+            session_id: None,
+            expose_guest_agent: false,
         }
     }
 
@@ -1020,6 +1033,24 @@ impl VzPersistentBuilderVm {
 
     pub fn with_supervisor_path_override(mut self, path: PathBuf) -> Self {
         self.supervisor_path_override = Some(path);
+        self
+    }
+
+    /// Pin the session id so the per-VM state dir is stable across
+    /// processes. Callers that need cross-process reap (the dev VM)
+    /// pass a fixed value; everything else lets `start` mint a random
+    /// one. The id flows straight into the `mvm-persistent-builder-vz-<id>`
+    /// state-dir name — keep it filesystem-safe.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Open the guest-agent vsock port (5252) in addition to the
+    /// builder-dispatch port, so the guest agent is reachable for
+    /// interactive `dev shell` / `console` / `status`.
+    pub fn with_guest_agent_port(mut self, expose: bool) -> Self {
+        self.expose_guest_agent = expose;
         self
     }
 
@@ -1084,7 +1115,7 @@ impl VzPersistentBuilderVm {
             u64::from(self.nix_store_mib),
         )?;
 
-        let session_id = unique_job_id();
+        let session_id = self.session_id.clone().unwrap_or_else(unique_job_id);
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
         stage_persistent_vz_job_dir(&job_dir)?;
 
@@ -1102,16 +1133,17 @@ impl VzPersistentBuilderVm {
             ))
         })?;
 
-        let cfg = build_vz_persistent_supervisor_config(
-            &vm_name,
-            &vm_state_dir,
-            &image,
-            &self.workspace_root,
-            &job_dir,
-            nix_store_lock.path(),
-            self.vcpus,
-            self.memory_mib,
-        )?;
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: &vm_name,
+            vm_state_dir: &vm_state_dir,
+            image: &image,
+            workspace_root: &self.workspace_root,
+            job_dir: &job_dir,
+            nix_store_img: nix_store_lock.path(),
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            expose_guest_agent: self.expose_guest_agent,
+        })?;
 
         let child = spawn_vz_supervisor_in_background(&supervisor_path, &cfg)?;
 
@@ -1147,6 +1179,23 @@ fn stage_persistent_vz_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
     Ok(())
 }
 
+/// Inputs to [`build_vz_persistent_supervisor_config`]. A struct
+/// rather than a long positional arg list — the fields carry distinct
+/// borrow lifetimes and one optional toggle.
+#[derive(Clone, Copy)]
+struct VzPersistentConfigParams<'a> {
+    vm_name: &'a str,
+    vm_state_dir: &'a Path,
+    image: &'a BuilderVmImage,
+    workspace_root: &'a Path,
+    job_dir: &'a Path,
+    nix_store_img: &'a Path,
+    vcpus: u8,
+    memory_mib: u32,
+    /// Open the guest-agent port (5252) alongside the dispatch port.
+    expose_guest_agent: bool,
+}
+
 /// Build a [`crate::vz::SupervisorConfig`] for the persistent VM.
 /// Distinct from [`build_vz_supervisor_config`] because the
 /// persistent path doesn't come through the
@@ -1154,17 +1203,20 @@ fn stage_persistent_vz_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
 /// a one-shot mounts/disks shape that doesn't carry the dispatch
 /// port. Lifted out so unit tests can exercise the mapping without
 /// spawning a supervisor.
-#[allow(clippy::too_many_arguments)] // distinct lifetimes; refactor into a params struct is a follow-up
 fn build_vz_persistent_supervisor_config(
-    vm_name: &str,
-    vm_state_dir: &Path,
-    image: &BuilderVmImage,
-    workspace_root: &Path,
-    job_dir: &Path,
-    nix_store_img: &Path,
-    vcpus: u8,
-    memory_mib: u32,
+    params: VzPersistentConfigParams<'_>,
 ) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
+    let VzPersistentConfigParams {
+        vm_name,
+        vm_state_dir,
+        image,
+        workspace_root,
+        job_dir,
+        nix_store_img,
+        vcpus,
+        memory_mib,
+        expose_guest_agent,
+    } = params;
     let BuilderVmImage::Rootfs {
         kernel_path,
         rootfs_path,
@@ -1251,7 +1303,16 @@ fn build_vz_persistent_supervisor_config(
             },
         ],
         vsock: crate::vz::VsockConfig {
-            ports: vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT],
+            ports: {
+                let mut ports = vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT];
+                // The long-lived dev VM additionally serves the guest
+                // agent so `dev shell` / `console` / `status` can reach
+                // it; the warm-pool builder leaves it closed.
+                if expose_guest_agent {
+                    ports.push(mvm_guest::vsock::GUEST_AGENT_PORT);
+                }
+                ports
+            },
             socket_dir: vsock_dir,
         },
         console_output_path: Some(console_log),
@@ -1356,6 +1417,14 @@ impl VzPersistentVmHandle {
             ))
     }
 
+    /// Directory the Vz supervisor exposes per-port vsock sockets in
+    /// (`<vm_state_dir>/vsock/`). Pair with
+    /// [`mvm_core::config::vsock_socket_filename`] to reach a specific
+    /// port — the dev VM connects the guest agent here.
+    pub fn vsock_dir(&self) -> PathBuf {
+        self.vm_state_dir.join("vsock")
+    }
+
     /// Per-VM job directory bound at `/job` (and `/out`) inside the
     /// guest. Hosts stage per-dispatch artifacts here before
     /// sending the matching `HostVmRequest::Run`.
@@ -1399,6 +1468,82 @@ impl VzPersistentVmHandle {
         }
         Ok(())
     }
+}
+
+/// PID-file name the persistent Vz supervisor writes inside its state
+/// dir (mirrors the value passed in [`build_vz_persistent_supervisor_config`]).
+const PERSISTENT_VZ_PID_FILE: &str = "builder.pid";
+
+/// State dir for a [`VzPersistentBuilderVm`] booted with a known
+/// `session_id`. Same layout `start` derives, lifted out so a separate
+/// process (e.g. `mvmctl dev down`) can locate the VM without the
+/// in-memory handle.
+pub fn persistent_vz_state_dir(session_id: &str) -> PathBuf {
+    builder_vm_cache_dir()
+        .join("vms")
+        .join(format!("mvm-persistent-builder-vz-{session_id}"))
+}
+
+/// Vsock socket dir for a persistent Vz VM started with `session_id`.
+/// Pair with [`mvm_core::config::vsock_socket_filename`] to reach a
+/// specific guest port.
+pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
+    persistent_vz_state_dir(session_id).join("vsock")
+}
+
+/// Read the supervisor PID file under `state_dir` and SIGTERM the
+/// process, escalating to SIGKILL after [`PERSISTENT_VZ_STOP_TIMEOUT`].
+/// Idempotent: a missing PID file or an already-dead process is a
+/// clean no-op (the file is unlinked either way). Returns whether a
+/// live supervisor was actually signalled. Mirrors the
+/// `VzBackend::stop` reap ladder without depending on its private
+/// helpers across the crate boundary.
+pub fn stop_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
+    let pid_path = state_dir.join(PERSISTENT_VZ_PID_FILE);
+    let Some(pid) = read_pid_file(&pid_path) else {
+        return false;
+    };
+    if !pid_alive(pid) {
+        let _ = std::fs::remove_file(&pid_path);
+        return false;
+    }
+    // SAFETY: pid was just probed alive; a SIGTERM that races a natural
+    // exit returns ESRCH, which is benign.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let deadline = std::time::Instant::now() + PERSISTENT_VZ_STOP_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if pid_alive(pid) {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let _ = std::fs::remove_file(&pid_path);
+    true
+}
+
+/// Whether a persistent Vz VM's supervisor PID file points at a live
+/// process. Cheap liveness probe for `dev status` / re-entrant
+/// `dev up`.
+pub fn persistent_vz_supervisor_alive(state_dir: &Path) -> bool {
+    read_pid_file(&state_dir.join(PERSISTENT_VZ_PID_FILE)).is_some_and(pid_alive)
+}
+
+const PERSISTENT_VZ_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn read_pid_file(pid_path: &Path) -> Option<i32> {
+    std::fs::read_to_string(pid_path)
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()
+}
+
+fn pid_alive(pid: i32) -> bool {
+    // kill(pid, 0) probes existence without delivering a signal.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 #[cfg(test)]
@@ -1940,16 +2085,17 @@ mod tests {
         let workspace = scratch.path().join("work");
         let job_dir = scratch.path().join("job");
         let nix_store = scratch.path().join("nix-store.img");
-        let err = build_vz_persistent_supervisor_config(
-            "mvm-persistent-builder-vz-abc",
-            &vm_state_dir,
-            &rundir_image(),
-            &workspace,
-            &job_dir,
-            &nix_store,
-            VZ_BUILDER_DEFAULT_VCPUS,
-            VZ_BUILDER_DEFAULT_MEMORY_MIB,
-        )
+        let err = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-vz-abc",
+            vm_state_dir: &vm_state_dir,
+            image: &rundir_image(),
+            workspace_root: &workspace,
+            job_dir: &job_dir,
+            nix_store_img: &nix_store,
+            vcpus: VZ_BUILDER_DEFAULT_VCPUS,
+            memory_mib: VZ_BUILDER_DEFAULT_MEMORY_MIB,
+            expose_guest_agent: false,
+        })
         .expect_err("non-Rootfs image must reject");
         assert!(format!("{err}").contains("non-Rootfs image"), "got: {err}");
     }
@@ -1962,16 +2108,17 @@ mod tests {
         let workspace = scratch.path().join("work");
         let job_dir = scratch.path().join("job");
         let nix_store = scratch.path().join("nix-store.img");
-        let cfg = build_vz_persistent_supervisor_config(
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
             vm_name,
-            &vm_state_dir,
-            &rootfs_image(),
-            &workspace,
-            &job_dir,
-            &nix_store,
-            4,
-            8192,
-        )
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &workspace,
+            job_dir: &job_dir,
+            nix_store_img: &nix_store,
+            vcpus: 4,
+            memory_mib: 8192,
+            expose_guest_agent: false,
+        })
         .expect("config builds");
 
         assert_eq!(cfg.name, vm_name);
@@ -2019,16 +2166,17 @@ mod tests {
             rootfs_path: PathBuf::from("/tmp/rootfs.ext4"),
             cmdline: String::new(),
         };
-        let cfg = build_vz_persistent_supervisor_config(
-            "vm",
-            &scratch.path().join("state"),
-            &image,
-            &scratch.path().join("work"),
-            &scratch.path().join("job"),
-            &scratch.path().join("nix-store.img"),
-            2,
-            1024,
-        )
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: "vm",
+            vm_state_dir: &scratch.path().join("state"),
+            image: &image,
+            workspace_root: &scratch.path().join("work"),
+            job_dir: &scratch.path().join("job"),
+            nix_store_img: &scratch.path().join("nix-store.img"),
+            vcpus: 2,
+            memory_mib: 1024,
+            expose_guest_agent: false,
+        })
         .expect("config builds");
         assert_eq!(cfg.kernel.cmdline, DEFAULT_VZ_BUILDER_CMDLINE);
     }
@@ -2040,16 +2188,17 @@ mod tests {
             .path()
             .join("vms")
             .join("mvm-persistent-builder-vz-abc");
-        let cfg = build_vz_persistent_supervisor_config(
-            "mvm-persistent-builder-vz-abc",
-            &vm_state_dir,
-            &rootfs_image(),
-            &scratch.path().join("work"),
-            &scratch.path().join("job"),
-            &scratch.path().join("nix-store.img"),
-            2,
-            1024,
-        )
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-vz-abc",
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &scratch.path().join("work"),
+            job_dir: &scratch.path().join("job"),
+            nix_store_img: &scratch.path().join("nix-store.img"),
+            vcpus: 2,
+            memory_mib: 1024,
+            expose_guest_agent: false,
+        })
         .expect("config builds");
         let console = cfg.console_output_path.expect("console path set");
         assert!(
@@ -2075,16 +2224,17 @@ mod tests {
             .path()
             .join("vms")
             .join("mvm-persistent-builder-vz-test");
-        let cfg = build_vz_persistent_supervisor_config(
-            "mvm-persistent-builder-vz-test",
-            &vm_state_dir,
-            &rootfs_image(),
-            &scratch.path().join("work"),
-            &scratch.path().join("job"),
-            &scratch.path().join("nix-store.img"),
-            2,
-            1024,
-        )
+        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-vz-test",
+            vm_state_dir: &vm_state_dir,
+            image: &rootfs_image(),
+            workspace_root: &scratch.path().join("work"),
+            job_dir: &scratch.path().join("job"),
+            nix_store_img: &scratch.path().join("nix-store.img"),
+            vcpus: 2,
+            memory_mib: 1024,
+            expose_guest_agent: false,
+        })
         .expect("config builds");
         let socket_dir = std::path::Path::new(&cfg.vsock.socket_dir);
         // The handle joins `vsock-<port>.sock` onto this dir; both
@@ -2094,5 +2244,65 @@ mod tests {
             vm_state_dir.join("vsock"),
             "vsock socket_dir must equal <vm_state_dir>/vsock for handle.dispatch_socket_path() to find the socket"
         );
+    }
+
+    #[test]
+    fn guest_agent_port_opens_only_when_requested() {
+        let scratch = tempfile::tempdir().unwrap();
+        let base = VzPersistentConfigParams {
+            vm_name: "vm",
+            vm_state_dir: &scratch.path().join("state"),
+            image: &rootfs_image(),
+            workspace_root: &scratch.path().join("work"),
+            job_dir: &scratch.path().join("job"),
+            nix_store_img: &scratch.path().join("nix-store.img"),
+            vcpus: 2,
+            memory_mib: 1024,
+            expose_guest_agent: false,
+        };
+        let dispatch_only = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            expose_guest_agent: false,
+            ..base
+        })
+        .expect("config builds");
+        assert_eq!(
+            dispatch_only.vsock.ports,
+            vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT]
+        );
+
+        let with_agent = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+            expose_guest_agent: true,
+            ..base
+        })
+        .expect("config builds");
+        assert_eq!(
+            with_agent.vsock.ports,
+            vec![
+                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+                mvm_guest::vsock::GUEST_AGENT_PORT,
+            ]
+        );
+    }
+
+    #[test]
+    fn persistent_vz_paths_derive_from_session_id() {
+        let state = persistent_vz_state_dir("dev");
+        assert!(state.ends_with("mvm-persistent-builder-vz-dev"));
+        assert_eq!(persistent_vz_vsock_dir("dev"), state.join("vsock"));
+    }
+
+    #[test]
+    fn stop_by_pid_file_is_noop_when_missing_or_dead() {
+        let scratch = tempfile::tempdir().unwrap();
+        // No PID file at all.
+        assert!(!stop_persistent_vz_by_pid_file(scratch.path()));
+        assert!(!persistent_vz_supervisor_alive(scratch.path()));
+
+        // A PID file pointing at a definitely-dead process. PID 2^31-1
+        // is outside any live range on the platforms we run on.
+        std::fs::write(scratch.path().join(PERSISTENT_VZ_PID_FILE), "2147483647").unwrap();
+        assert!(!stop_persistent_vz_by_pid_file(scratch.path()));
+        // The stale file is unlinked on the dead-pid path.
+        assert!(!scratch.path().join(PERSISTENT_VZ_PID_FILE).exists());
     }
 }

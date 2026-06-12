@@ -83,10 +83,9 @@ tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
-# Apple Virtualization.framework bindings (objc2 + Swift bridge) for the
-# `providers::apple_container` interface — folded in with the former
-# mvm-providers crate. macOS-only; the workspace lock already carries
-# these (no new third-party dep).
+# Apple Virtualization.framework bindings (objc2) for the providers
+# interface — folded in with the former mvm-providers crate. macOS-only;
+# the workspace lock already carries these (no new third-party dep).
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = "0.3"

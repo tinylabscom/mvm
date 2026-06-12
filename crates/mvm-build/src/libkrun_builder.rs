@@ -1228,7 +1228,7 @@ pub(crate) fn stage0_nix_store_image_name() -> String {
 /// produces exactly the `vmlinux` / `rootfs.ext4` / `cmdline.txt`
 /// files this loads. The build-or-download step populates this
 /// cache; today it errors when missing with an actionable hint.
-pub(crate) fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
+pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
     let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
     let kernel_path = arch_dir.join("vmlinux");
     let rootfs_path = arch_dir.join("rootfs.ext4");

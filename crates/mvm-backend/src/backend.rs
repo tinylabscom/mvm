@@ -7,7 +7,6 @@ use mvm_core::vm_backend::{
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `mvm-base`.
-use crate::apple_container::AppleContainerBackend;
 use crate::base::config::{PortMapping, VMS_DIR};
 use crate::base::shell::run_in_vm_stdout;
 use crate::image::RuntimeVolume;
@@ -327,14 +326,12 @@ impl BackendTier {
 /// backend is active. Each variant delegates to its inner implementation.
 pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
-    AppleContainer(AppleContainerBackend),
     /// libkrun — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
-    /// Vz (Apple Virtualization.framework). Direct host-level Vz
-    /// integration on macOS 13+; collapses the nested
-    /// macOS → libkrun → Firecracker workload-microVM path. Opt-in via
-    /// `--backend vz` / `MVM_BACKEND=vz`; `auto_select` keeps libkrun
-    /// as the macOS default.
+    /// Vz — the one Apple Virtualization.framework backend (per-VM Rust
+    /// objc2 supervisor: snapshot/restore, pause/resume, flow-audited
+    /// networking). The macOS-26 auto-default; opt-in elsewhere via
+    /// `--hypervisor vz` / `MVM_BACKEND=vz`.
     Vz(VzBackend),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
@@ -371,11 +368,10 @@ impl AnyBackend {
     /// Select backend by hypervisor name.
     ///
     /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
-    /// `"apple-container"` (macOS 26+), `"libkrun"` (Linux KVM / macOS
-    /// HVF). Unknown names fall back to Firecracker.
+    /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
+    /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
         match name {
-            "apple-container" => Self::AppleContainer(AppleContainerBackend),
             "libkrun" | "krun" => Self::Libkrun(LibkrunBackend),
             "vz" | "virtualization" => Self::Vz(VzBackend),
             // `"qemu"` is the Linux dev/test backend (KVM where
@@ -397,7 +393,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. Apple Container (macOS 26+)
+    /// 2. Vz — Apple Virtualization.framework (macOS 13+)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -414,9 +410,9 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ → Apple Virtualization.framework.
-        if plat.has_apple_containers() {
-            return Self::AppleContainer(AppleContainerBackend);
+        // 2. macOS 26+ → Apple Virtualization.framework via the vz supervisor.
+        if plat.is_vz_default_tier() {
+            return Self::Vz(VzBackend);
         }
 
         // 3. libkrun installed → use the raw libkrun shim.
@@ -466,7 +462,7 @@ impl AnyBackend {
             Self::Qemu(QemuBackend),
             Self::Libkrun(LibkrunBackend),
             Self::Firecracker(FirecrackerBackend),
-            Self::AppleContainer(AppleContainerBackend),
+            Self::Vz(VzBackend),
         ] {
             if let Ok(found) = backend.list() {
                 vms.extend(found);
@@ -500,9 +496,7 @@ impl AnyBackend {
             // mode is a runtime Tier-3 degradation surfaced by the QEMU
             // backend's `start` banner + doctor, not by this compile-time
             // classification.
-            Self::Libkrun(_) | Self::AppleContainer(_) | Self::Vz(_) | Self::Qemu(_) => {
-                BackendTier::Tier2
-            }
+            Self::Libkrun(_) | Self::Vz(_) | Self::Qemu(_) => BackendTier::Tier2,
 
             // Tier 3: test-only. Mock is in-memory.
             Self::Mock(_) => BackendTier::Tier3,
@@ -513,7 +507,6 @@ impl AnyBackend {
     fn inner(&self) -> &dyn VmBackend {
         match self {
             Self::Firecracker(b) => b,
-            Self::AppleContainer(b) => b,
             Self::Libkrun(b) => b,
             Self::Vz(b) => b,
             Self::Qemu(b) => b,
@@ -793,53 +786,6 @@ mod tests {
     }
 
     #[test]
-    fn test_any_backend_from_hypervisor_apple_container() {
-        let backend = AnyBackend::from_hypervisor("apple-container");
-        assert_eq!(backend.name(), "apple-container");
-    }
-
-    #[test]
-    fn test_apple_container_via_any_backend_capabilities() {
-        let backend = AnyBackend::from_hypervisor("apple-container");
-        let caps = backend.capabilities();
-        assert!(caps.vsock);
-        assert!(!caps.snapshots);
-        assert!(!caps.tap_networking);
-        assert!(!caps.pause_resume);
-    }
-
-    #[test]
-    fn test_apple_container_via_any_backend_list_empty() {
-        // Isolate HOME so the persisted ~/.mvm/vms registry doesn't bleed
-        // into this assertion when the developer's real dev VM is running.
-        let temp = std::path::PathBuf::from(format!(
-            "/tmp/mvmac-anybe-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&temp).expect("create temp HOME");
-        let saved = std::env::var("HOME").ok();
-        // SAFETY: list() is the only HOME consumer in this test; no other
-        // threads in this test process race with it.
-        unsafe { std::env::set_var("HOME", &temp) };
-
-        let backend = AnyBackend::from_hypervisor("apple-container");
-        let vms = backend.list().unwrap();
-        assert!(vms.is_empty());
-
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
     fn for_started_vm_resolves_owning_backend_by_marker() {
         // A started VM's owning backend is resolved from its state-dir pid
         // marker so `down`/`status`/`ls` dispatch to the right VMM.
@@ -920,7 +866,7 @@ mod tests {
         let name = backend.name();
         assert!(
             // The full set of legitimate auto_select returns is:
-            matches!(name, "firecracker" | "apple-container" | "libkrun"),
+            matches!(name, "firecracker" | "vz" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
         );
     }
@@ -963,14 +909,6 @@ mod tests {
     #[test]
     fn pause_resume_unsupported_on_qemu() {
         assert_unsupported_pause_resume(AnyBackend::from_hypervisor("qemu"), "qemu");
-    }
-
-    #[test]
-    fn pause_resume_unsupported_on_apple_container() {
-        assert_unsupported_pause_resume(
-            AnyBackend::from_hypervisor("apple-container"),
-            "apple-container",
-        );
     }
 
     #[test]
@@ -1051,7 +989,7 @@ mod tests {
         // live VM, but we can check that the bail (if any) for a
         // missing VM does NOT claim the backend itself is unsupported
         // when the capability says it is.
-        let unsupported: &[&str] = &["libkrun", "qemu", "apple-container"];
+        let unsupported: &[&str] = &["libkrun", "qemu"];
         for &name in unsupported {
             let b = AnyBackend::from_hypervisor(name);
             assert!(
@@ -1078,7 +1016,7 @@ mod tests {
         let cases: &[(&str, BackendTier)] = &[
             ("firecracker", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
-            ("apple-container", BackendTier::Tier2),
+            ("vz", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
             ("mock", BackendTier::Tier3),
         ];
@@ -1095,7 +1033,7 @@ mod tests {
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
         // is the closed-enum view of the same fact. Bumping one without
         // the other is a regression — keep them wired.
-        let names = ["firecracker", "libkrun", "apple-container", "qemu", "mock"];
+        let names = ["firecracker", "libkrun", "vz", "qemu", "mock"];
         for name in names {
             let b = AnyBackend::from_hypervisor(name);
             let enum_tier = b.tier();
