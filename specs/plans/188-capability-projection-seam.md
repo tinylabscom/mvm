@@ -1,4 +1,4 @@
-# Plan 184 — Capability projection seam (ADR-080 P5) Implementation Plan
+# Plan 188 — Capability projection seam (ADR-080 P5) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
@@ -197,7 +197,7 @@ Expected: 4 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs crates/mvm-core/src/policy/mod.rs
-git commit -m "feat(policy): canonical egress rule atom for the projection seam (plan 184)"
+git commit -m "feat(policy): canonical egress rule atom for the projection seam (plan 188)"
 ```
 
 ---
@@ -313,7 +313,7 @@ Expected: 9 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "feat(policy): CanonicalEgress decision set with unconditional mandatory-deny (plan 184)"
+git commit -m "feat(policy): CanonicalEgress decision set with unconditional mandatory-deny (plan 188)"
 ```
 
 ---
@@ -462,7 +462,7 @@ fn pinned_allow_list_rules(
     if eff.egress.allow_list.is_empty() {
         return Ok(Vec::new());
     }
-    unimplemented!("allow-list pinning lands in the next task of plan 184")
+    unimplemented!("allow-list pinning lands in the next task of plan 188")
 }
 ```
 
@@ -485,7 +485,7 @@ Expected: 15 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "feat(policy): canonicalize_effective lowers L4 rules to the canonical grant set (plan 184)"
+git commit -m "feat(policy): canonicalize_effective lowers L4 rules to the canonical grant set (plan 188)"
 ```
 
 ---
@@ -665,7 +665,7 @@ Expected: 21 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "feat(policy): allow-list hosts lower through admission-time DNS pins (plan 184)"
+git commit -m "feat(policy): allow-list hosts lower through admission-time DNS pins (plan 188)"
 ```
 
 ---
@@ -796,7 +796,7 @@ Expected: 26 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "feat(policy): refuse mandatory-deny overlap at projection time, incl. rebinding pins (plan 184)"
+git commit -m "feat(policy): refuse mandatory-deny overlap at projection time, incl. rebinding pins (plan 188)"
 ```
 
 ---
@@ -999,7 +999,7 @@ Expected: 31 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "feat(policy): WASI-facing egress projection with pinned-host targets (plan 184)"
+git commit -m "feat(policy): WASI-facing egress projection with pinned-host targets (plan 188)"
 ```
 
 ---
@@ -1132,7 +1132,7 @@ Expected: 36 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "feat(policy): clamp — intersection-only merge, requests attenuate never widen (plan 184)"
+git commit -m "feat(policy): clamp — intersection-only merge, requests attenuate never widen (plan 188)"
 ```
 
 ---
@@ -1350,7 +1350,7 @@ Expected: 38 tests PASS.
 
 ```bash
 git add crates/mvm-core/src/policy/projection.rs
-git commit -m "test(policy): cross-projection consistency + clamp-never-widens property witnesses (plan 184)"
+git commit -m "test(policy): cross-projection consistency + clamp-never-widens property witnesses (plan 188)"
 ```
 
 ---
@@ -1361,7 +1361,7 @@ git commit -m "test(policy): cross-projection consistency + clamp-never-widens p
 - Modify: `crates/mvm-core/src/policy/mod.rs`
 - Modify: `specs/adrs/080-wasm-preview-promotion-and-capability-policy.md` (§8 table, P5 row)
 - Modify: `specs/REFACTOR-STATUS.md`
-- Modify: `specs/plans/184-capability-projection-seam.md` (tick boxes)
+- Modify: `specs/plans/188-capability-projection-seam.md` (tick boxes)
 
 - [x] **Step 1: Re-export the public surface**
 
@@ -1394,19 +1394,19 @@ Expected: all green. (Local macOS caveat: `mvm-backend` test binaries can be SIG
 In `specs/adrs/080-wasm-preview-promotion-and-capability-policy.md`, edit the P5 row of the §8 table:
 
 ```markdown
-| P5 | Projection consistency (§3) | `cross_projection_consistency_property` + `clamp_never_widens_property` + `rebinding_pin_into_metadata_range_refuses` (mvm-core `policy::projection`) — landed by Plan 184. Remaining for P5 close-out: wire `LiveL4Gate`/`PlanFlowPolicy` to consume `CanonicalEgress` (kernel-side), and the `WasiCtxBuilder` mapping (runner plan). |
+| P5 | Projection consistency (§3) | `cross_projection_consistency_property` + `clamp_never_widens_property` + `rebinding_pin_into_metadata_range_refuses` (mvm-core `policy::projection`) — landed by Plan 188. Remaining for P5 close-out: wire `LiveL4Gate`/`PlanFlowPolicy` to consume `CanonicalEgress` (kernel-side), and the `WasiCtxBuilder` mapping (runner plan). |
 ```
 
 - [x] **Step 4: Update the rollup + tick this plan's boxes**
 
-- `specs/REFACTOR-STATUS.md`: add a Plan 184 line under the in-flight plans with the workstream state (seam + witnesses landed; enforcement wiring deferred to the kernel-wiring and wasm-runner plans), bump "Last updated".
+- `specs/REFACTOR-STATUS.md`: add a Plan 188 line under the in-flight plans with the workstream state (seam + witnesses landed; enforcement wiring deferred to the kernel-wiring and wasm-runner plans), bump "Last updated".
 - This file: tick every completed checkbox in the same commit.
 
 - [x] **Step 5: Final commit**
 
 ```bash
-git add crates/mvm-core/src/policy/mod.rs specs/adrs/080-wasm-preview-promotion-and-capability-policy.md specs/REFACTOR-STATUS.md specs/plans/184-capability-projection-seam.md
-git commit -m "feat(policy): export projection seam; record P5 witnesses in ADR-080 (plan 184)"
+git add crates/mvm-core/src/policy/mod.rs specs/adrs/080-wasm-preview-promotion-and-capability-policy.md specs/REFACTOR-STATUS.md specs/plans/188-capability-projection-seam.md
+git commit -m "feat(policy): export projection seam; record P5 witnesses in ADR-080 (plan 188)"
 ```
 
 ---
